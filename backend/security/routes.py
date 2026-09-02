@@ -12,11 +12,21 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
+from backend.security.models import (
+    BootstrapStatusResult,
+    BulkUsersResult,
+    LoginResult,
+    OkResult,
+    UpdateOwnNameResult,
+    UpsertUserSettingsResult,
+    UserListResult,
+    WhoAmIResult,
+)
 
 router = APIRouter()
 
 
-@router.post("/security/login")
+@router.post("/security/login", response_model=LoginResult)
 def security_login(request: Request, body: dict = Body(default={})):
     """Authenticate against user_security. Never exposes the hash. Throttled
     per (username, client IP) to slow brute-force attempts (see
@@ -33,12 +43,12 @@ def security_login(request: Request, body: dict = Body(default={})):
     return result
 
 
-@router.get("/security/bootstrap-status")
+@router.get("/security/bootstrap-status", response_model=BootstrapStatusResult)
 def security_bootstrap_status():
     return {"admin_exists": auth.admin_exists()}
 
 
-@router.get("/security/me")
+@router.get("/security/me", response_model=WhoAmIResult)
 def security_me(request: Request):
     """Live identity + effective admin status for the caller. Ungated on purpose
     (like /security/bootstrap-status): the frontend calls it to reconcile the
@@ -48,7 +58,7 @@ def security_me(request: Request):
     return auth.whoami(request)
 
 
-@router.patch("/security/me")
+@router.patch("/security/me", response_model=UpdateOwnNameResult)
 def security_update_me(request: Request, body: dict = Body(default={})):
     """Self-service: update the CALLER's own first/last name only. Ungated
     (like GET /security/me) — identity comes from the header, and
@@ -63,7 +73,7 @@ def security_update_me(request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.patch("/security/me/settings")
+@router.patch("/security/me/settings", response_model=UpsertUserSettingsResult)
 def security_update_my_settings(request: Request, body: dict = Body(default={})):
     """Self-service: shallow-merge a PARTIAL settings patch into the CALLER's own
     user_settings blob. Ungated (like PATCH /security/me) — identity comes from
@@ -80,7 +90,7 @@ def security_update_my_settings(request: Request, body: dict = Body(default={}))
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.patch("/security/me/password")
+@router.patch("/security/me/password", response_model=OkResult)
 def security_change_my_password(request: Request, body: dict = Body(default={})):
     """Self-service: change the CALLER's own password. Requires the correct
     current password (see auth.change_own_password) since identity here comes
@@ -95,7 +105,7 @@ def security_change_my_password(request: Request, body: dict = Body(default={}))
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.get("/security/users", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.get("/security/users", response_model=UserListResult, dependencies=[Depends(require_api_key), Depends(require_admin)])
 def security_list_users(
         limit: int | None = Query(default=None, ge=1, le=100000,
             description="Max users to return. Omit for the full list."),
@@ -107,7 +117,7 @@ def security_list_users(
     return auth.list_users(limit=limit, offset=offset, search=search)
 
 
-@router.post("/security/users/bulk", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/security/users/bulk", response_model=BulkUsersResult, dependencies=[Depends(require_api_key), Depends(require_admin)])
 def security_bulk_users(request: Request, body: dict = Body(default={})):
     """Apply user upserts/deletes (username + role only — never touches passwords).
     Payload: { upserts: [{username, role}], deletes: [{username}] }"""
@@ -121,7 +131,7 @@ def security_bulk_users(request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/security/users/{username}/reset-password", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/security/users/{username}/reset-password", response_model=OkResult, dependencies=[Depends(require_api_key), Depends(require_admin)])
 def security_reset_password(username: str, request: Request, body: dict = Body(default={})):
     """Set/replace a user's password. Hashed before storage; never retrievable afterward."""
     try:

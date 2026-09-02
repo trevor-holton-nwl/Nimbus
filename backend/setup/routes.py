@@ -23,6 +23,7 @@ import backend.setup.data as setup_data
 from backend.admin_ops.logbuffer import _current_rid, _set_admin_log_details
 from backend.security import auth
 from backend.security.auth import require_api_key
+from backend.setup.models import PlantSetupActiveResult, SetupEnvelope, SetupLineCompatibilityResult
 
 router = APIRouter()
 require_admin = auth.require_admin
@@ -61,7 +62,8 @@ def _setup_observed_at(value) -> datetime:
         raise ValueError("observed_at is required as an ISO datetime") from exc
 
 
-@router.put("/setup/{plant}/active", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+@router.put("/setup/{plant}/active", response_model=SetupEnvelope,
+           dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                  Depends(require_admin)])
 def set_setup_active(plant: str, request: Request, body: dict = Body(default={}),
                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
@@ -85,7 +87,7 @@ def set_setup_active(plant: str, request: Request, body: dict = Body(default={})
     return _setup_freshness(result)
 
 
-@router.get("/setup/{plant}", dependencies=[Depends(auth.require_authenticated)])
+@router.get("/setup/{plant}", response_model=SetupEnvelope, dependencies=[Depends(auth.require_authenticated)])
 def get_setup(plant: str, request: Request,
               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Return one authorized plant's complete setup snapshot, never a cross-plant aggregate."""
@@ -104,7 +106,8 @@ def get_setup(plant: str, request: Request,
         raise _setup_error(exc) from exc
 
 
-@router.put("/plant/{plant}/setup-active", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.put("/plant/{plant}/setup-active", response_model=PlantSetupActiveResult,
+           dependencies=[Depends(require_api_key), Depends(require_admin)])
 def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body(default={}),
                                   actor: str = Depends(auth.require_authenticated)):
     """Persist the plant-level "include setup times in optimizer" flag.
@@ -141,7 +144,7 @@ def _setup_coverage_payload(result: dict, *, machine: str | None = None, offset:
     return _setup_freshness(payload)
 
 
-@router.get("/setup/{plant}/coverage", dependencies=[Depends(auth.require_authenticated)])
+@router.get("/setup/{plant}/coverage", response_model=SetupEnvelope, dependencies=[Depends(auth.require_authenticated)])
 def get_setup_coverage(plant: str, machine: str | None = Query(default=None), offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=100, ge=1, le=500),
                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
@@ -153,7 +156,7 @@ def get_setup_coverage(plant: str, machine: str | None = Query(default=None), of
         raise _setup_error(exc) from exc
 
 
-@router.get("/setup/{plant}/matrix-rows", dependencies=[Depends(auth.require_authenticated)])
+@router.get("/setup/{plant}/matrix-rows", response_model=SetupEnvelope, dependencies=[Depends(auth.require_authenticated)])
 def get_setup_matrix_rows(plant: str, machine: str = Query(default=""), from_key: str | None = Query(default=None),
                           offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
@@ -202,7 +205,8 @@ def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed")
     return Response(content=output.getvalue(), media_type="text/csv", headers=headers)
 
 
-@router.put("/setup/{plant}/definition", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+@router.put("/setup/{plant}/definition", response_model=SetupEnvelope,
+           dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                      Depends(require_admin)])
 def save_setup_definition(plant: str, request: Request, body: dict = Body(default={}),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
@@ -222,7 +226,8 @@ def save_setup_definition(plant: str, request: Request, body: dict = Body(defaul
     return _setup_freshness(result)
 
 
-@router.post("/setup/{plant}/matrix/import", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+@router.post("/setup/{plant}/matrix/import", response_model=SetupEnvelope,
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                          Depends(require_admin)])
 def import_setup_matrix(plant: str, request: Request, body: dict = Body(default={}),
                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
@@ -243,7 +248,8 @@ def import_setup_matrix(plant: str, request: Request, body: dict = Body(default=
     return _setup_freshness(result)
 
 
-@router.delete("/setup/{plant}/matrix", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+@router.delete("/setup/{plant}/matrix", response_model=SetupEnvelope,
+              dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                      Depends(require_admin)])
 def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(default={}),
                              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
@@ -271,7 +277,8 @@ def delete_setup_matrix_rows(plant: str, request: Request, body: dict = Body(def
     return _setup_freshness(result)
 
 
-@router.put("/setup/{plant}/lines/{machine}/state", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+@router.put("/setup/{plant}/lines/{machine}/state", response_model=SetupEnvelope,
+           dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
 def save_setup_line_state(plant: str, machine: str, request: Request, body: dict = Body(default={}),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                           actor: str = Depends(auth.require_setup_scheduler)):
@@ -290,7 +297,8 @@ def save_setup_line_state(plant: str, machine: str, request: Request, body: dict
     return _setup_freshness(result)
 
 
-@router.put("/setup/{plant}/lines/{machine}/compatibility", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+@router.put("/setup/{plant}/lines/{machine}/compatibility", response_model=SetupLineCompatibilityResult,
+           dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                                       Depends(require_admin)])
 def save_setup_line_compatibility(plant: str, machine: str, request: Request, body: dict = Body(default={}),
                                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
@@ -306,7 +314,8 @@ def save_setup_line_compatibility(plant: str, machine: str, request: Request, bo
     return result
 
 
-@router.get("/setup/{plant}/lines/{machine}/compatibility", dependencies=[Depends(auth.require_authenticated)])
+@router.get("/setup/{plant}/lines/{machine}/compatibility", response_model=SetupLineCompatibilityResult,
+           dependencies=[Depends(auth.require_authenticated)])
 def get_setup_line_compatibility(plant: str, machine: str,
                                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     _setup_plant_guard(plant, allowed_plants)
@@ -317,7 +326,8 @@ def get_setup_line_compatibility(plant: str, machine: str,
     return result
 
 
-@router.post("/setup/{plant}/overrides", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+@router.post("/setup/{plant}/overrides", response_model=SetupEnvelope,
+            dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
 def create_setup_override(plant: str, request: Request, body: dict = Body(default={}),
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                           actor: str = Depends(auth.require_setup_scheduler)):
@@ -340,7 +350,8 @@ def create_setup_override(plant: str, request: Request, body: dict = Body(defaul
     return _setup_freshness(result)
 
 
-@router.put("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+@router.put("/setup/{plant}/overrides/{override_id}", response_model=SetupEnvelope,
+           dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
 def save_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                         actor: str = Depends(auth.require_setup_scheduler)):
@@ -360,7 +371,8 @@ def save_setup_override(plant: str, override_id: int, request: Request, body: di
     return _setup_freshness(result)
 
 
-@router.delete("/setup/{plant}/overrides/{override_id}", dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
+@router.delete("/setup/{plant}/overrides/{override_id}", response_model=SetupEnvelope,
+              dependencies=[Depends(require_api_key), Depends(auth.require_setup_scheduler)])
 def clear_setup_override(plant: str, override_id: int, request: Request, body: dict = Body(default={}),
                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                          actor: str = Depends(auth.require_setup_scheduler)):

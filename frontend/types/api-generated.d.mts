@@ -4,112 +4,6 @@
  */
 
 export interface paths {
-    "/diagnostics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Diagnostics
-         * @description Return diagnostics: base metadata merged with live DB counts (stateless).
-         */
-        get: operations["get_diagnostics_diagnostics_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/health": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Health
-         * @description Fast DB ping + system snapshot. Polled every 30 s by the Admin Cockpit.
-         */
-        get: operations["get_health_health_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/livez": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Livez
-         * @description Liveness probe: a process-up check ONLY — never touches Postgres or the
-         *     filesystem. Point the Container Apps *liveness* probe here; readiness and the
-         *     Admin Cockpit keep using /health (which pings the DB). Keeping liveness DB-free
-         *     means a slow or briefly-unreachable database can't trigger needless restarts.
-         */
-        get: operations["livez_livez_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/diagnostics/deep": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Diagnostics Deep
-         * @description Full pipeline breakdown: DB stats + color-wheel analysis + current DIAGNOSTICS.
-         */
-        get: operations["get_diagnostics_deep_diagnostics_deep_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/reload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reload Data
-         * @description Refresh the in-process priority-list cache from Postgres. In stateless mode
-         *     orders are never cached, so there is nothing to re-read for them — this is
-         *     the cross-replica hook to pick up a newly uploaded/resynced priority list
-         *     without a restart.
-         */
-        post: operations["reload_data_reload_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/tasks": {
         parameters: {
             query?: never;
@@ -254,6 +148,12 @@ export interface paths {
          *     overwrite its stale copies — no links, no color merge.
          *     Payload: { ids: [str] }
          *     Response: { data: [{ id, start_date, end_date, row_version }] }
+         *
+         *     Rows outside `allowed_plants` (None for an unrestricted/admin caller) are
+         *     silently dropped rather than 403'd — matching GET /tasks's silent-bound
+         *     behavior for unscoped pulls. `plant` is only used for this server-side
+         *     filter and is stripped before the response leaves — it isn't part of the
+         *     TaskVersionRow wire contract.
          */
         post: operations["tasks_refresh_tasks_refresh_post"];
         delete?: never;
@@ -457,6 +357,207 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/master-data/material-plants/attributes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Material Plant Attributes
+         * @description Update the planner-editable material_plants attributes (prt_01, prt_02,
+         *     color, default_machine) for one plant. Deliberately NOT admin-gated —
+         *     this is the Master Data tab's Material Plant grid save, and planners (not
+         *     just admins) are its users. The write surface is a hard server-side
+         *     allowlist (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
+         *     default_production_version and the lot sizes are unreachable from here
+         *     regardless of what the client sends. Rows must already exist — this never
+         *     inserts.
+         *
+         *     Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color?, default_machine? }] }
+         */
+        post: operations["md_set_material_plant_attributes_master_data_material_plants_attributes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/resync-order-attributes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resync Order Attributes
+         * @description Re-stamp one plant's orders.{color,prt_01,prt_02,production_version} from
+         *     material_plants NOW, via seam 2 (db._stamp_order_attributes). This is the
+         *     REAL mechanism — the batch-scoped ingest-time stamp is convenience only
+         *     (R3 in docs/scheduling_priority.md, the inverse-ledger-trap risk). Call
+         *     this after adding/fixing material_plants rows for a plant so its orders
+         *     pick up the new values without waiting for a re-upload.
+         *
+         *     WARNING: this bumps orders.xmin for every matched row, which IS the
+         *     optimistic-concurrency base_version (db.py ROW_VERSION). Any planner's
+         *     unsaved edit to an affected order is discarded on their next save
+         *     (last-writer-loses reconciliation, R2) — run this at a quiet moment, not
+         *     mid-shift. Admin-gated AND role_plants-scoped (_assert_plant_allowed below)
+         *     for exactly that reason.
+         *
+         *     Payload: { plant: str }
+         *     Response: { status, plant, unmatched_pairs, unmatched_orders, exceptions }
+         *     (same exception shape as GET /upload/{batch_id}/missing-master-data — a
+         *     resync has no batch_id, so its unmatched pairs are returned here directly
+         *     rather than persisted to upload_audit.)
+         */
+        post: operations["resync_order_attributes_master_data_resync_order_attributes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sap/interface/objects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Sap Objects
+         * @description List the SAP-syncable objects with their config + last/next run summary.
+         */
+        get: operations["sap_objects_sap_interface_objects_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sap/interface/mappings/{object}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Sap Get Mappings
+         * @description Return the field-map rows (including inactive) for one SAP object.
+         */
+        get: operations["sap_get_mappings_sap_interface_mappings__object__get"];
+        put?: never;
+        /**
+         * Sap Set Mappings
+         * @description Replace the field map for one SAP object. Payload: { mappings: [...] }
+         */
+        post: operations["sap_set_mappings_sap_interface_mappings__object__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sap/interface/config/{object}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Sap Get Config
+         * @description Return one SAP object's config. Secret source_params keys are stripped —
+         *     only non-secret keys are returned, plus has_secret:bool.
+         */
+        get: operations["sap_get_config_sap_interface_config__object__get"];
+        put?: never;
+        /**
+         * Sap Set Config
+         * @description Update one SAP object's config. Payload: { enabled?, transport?, schedule_cron?,
+         *     source_params? }. source_params is MERGED into the stored params (omitted keys are
+         *     never wiped). transport and cron are validated.
+         */
+        post: operations["sap_set_config_sap_interface_config__object__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sap/interface/test-connection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sap Test Connection
+         * @description Test connectivity for a transport + source_params combo. Payload: { transport,
+         *     source_params }. Connectors are stubs in this skeleton, so this returns the
+         *     stub's {ok:false, detail:...} unless a real transport is configured.
+         */
+        post: operations["sap_test_connection_sap_interface_test_connection_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sap/interface/sync/{object}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sap Sync Now
+         * @description Run a sync for one SAP object on demand. Payload: { dry_run? }. Offloaded to
+         *     the threadpool (the sync is blocking + does DB I/O).
+         */
+        post: operations["sap_sync_now_sap_interface_sync__object__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sap/interface/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Sap Runs
+         * @description Return recent SAP sync runs, newest first, optionally scoped to one object.
+         */
+        get: operations["sap_runs_sap_interface_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/priority-fields": {
         parameters: {
             query?: never;
@@ -490,13 +591,13 @@ export interface paths {
         /**
          * Get Priority Rank Maps
          * @description In-memory rank-map read for the optimizer's hot path (Stage 3) — the
-         *     rank data itself is a zero-DB-hit read of brain.PLANT_LISTS (already kept
-         *     current by every priority-list upload/delete (Stage 2) and POST /reload);
-         *     the plant-authorization gate below does its own one-row user_security
-         *     lookup when an identity header is present, same as every sibling in this
-         *     block. Shape: {machine_or_empty: {field_key: {VALUE: RANK}}} — the exact
-         *     native shape of PLANT_LISTS, no reshaping, since this runs on every
-         *     optimize call and every alert auto-fix.
+         *     rank data itself is a zero-DB-hit read of the priority-lists cache
+         *     (already kept current by every priority-list upload/delete (Stage 2) and
+         *     POST /reload); the plant-authorization gate below does its own one-row
+         *     user_security lookup when an identity header is present, same as every
+         *     sibling in this block. Shape: {machine_or_empty: {field_key: {VALUE: RANK}}}
+         *     — the exact native shape of the cache, no reshaping, since this runs on
+         *     every optimize call and every alert auto-fix.
          *
          *     Plant-scoped like every sibling in this block (/priority-lists,
          *     /priority-list/{plant}/{field_key}, GET /tasks), so it carries the same
@@ -1180,6 +1281,13 @@ export interface paths {
          *     Per-user plant scope (role_plants) is enforced for tables in
          *     md.PLANT_SCOPED_TABLES: an explicit ?plant= outside the caller's allowed
          *     set 403s; otherwise the row set is silently bounded to the allowed set.
+         *
+         *     require_authenticated (not require_admin): any known user, not just an
+         *     admin, can read master data — this route previously required zero
+         *     identity at all, so an anonymous request resolved to allowed_plants=None
+         *     (unrestricted) and could enumerate every plant's rows. Frontend callers
+         *     now all route through Util.fetchTraced (2026-09 fetch migration), which
+         *     auto-attaches the identity header this depends on.
          */
         get: operations["md_list_master_data__table__get"];
         put?: never;
@@ -1374,8 +1482,8 @@ export interface paths {
         put?: never;
         /**
          * Md Set Plant Visibility Horizon
-         * @description Persist the C1 plant visibility-horizon setting (how far into the future
-         *     a planner can see on the Gantt/Orders tab).
+         * @description Persist the C1 plant visibility-horizon setting (how far into the
+         *     future a planner can see on the Gantt/Orders tab).
          *
          *     Payload: { subnetwork?, visibility_horizon_days: int|null, horizon_roll_hour_utc: int }.
          *     Both fields are saved together — see master_data.set_plant_visibility_horizon.
@@ -1434,105 +1542,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/system-settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get System Settings
-         * @description Return the global system-settings blob (currently just orderFields —
-         *     which optional Orders fields show by default in the AG Grid / Inspector).
-         *     Unauthenticated: every user's boot needs this, same as color-wheel reads.
-         *     Response body IS the settings content directly, no wrapper envelope.
-         */
-        get: operations["get_system_settings_system_settings_get"];
-        put?: never;
-        /**
-         * Post System Settings
-         * @description Persist a shallow-merge patch into the global system-settings blob.
-         *
-         *     Payload: { orderFields?: { <FIELD_KEY>: { grid: bool, inspector: bool } } }
-         *     The 'orderFields' key is replaced wholesale by whatever is sent — callers
-         *     must POST the complete map, not a per-field diff. Response body is the
-         *     full post-merge settings blob, same unwrapped shape as the GET above.
-         */
-        post: operations["post_system_settings_system_settings_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/master-data/material-plants/attributes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Md Set Material Plant Attributes
-         * @description Update the planner-editable material_plants attributes (prt_01, prt_02,
-         *     color, default_machine) for one plant. Deliberately NOT admin-gated —
-         *     this is the Master Data tab's Material Plant grid save, and planners (not
-         *     just admins) are its users. The write surface is a hard server-side
-         *     allowlist (md.EDITABLE_MATERIAL_PLANT_ATTRS); keys, status_pl,
-         *     default_production_version and the lot sizes are unreachable from here
-         *     regardless of what the client sends. Rows must already exist — this never
-         *     inserts.
-         *
-         *     Payload: { plant: str, updates: [{ material_id, prt_01?, prt_02?, color?, default_machine? }] }
-         */
-        post: operations["md_set_material_plant_attributes_master_data_material_plants_attributes_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/master-data/resync-order-attributes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Resync Order Attributes
-         * @description Re-stamp one plant's orders.{color,prt_01,prt_02,production_version} from
-         *     material_plants NOW, via seam 2 (db._stamp_order_attributes). This is the
-         *     REAL mechanism — the batch-scoped ingest-time stamp is convenience only
-         *     (R3 in docs/scheduling_priority.md, the inverse-ledger-trap risk). Call
-         *     this after adding/fixing material_plants rows for a plant so its orders
-         *     pick up the new values without waiting for a re-upload.
-         *
-         *     WARNING: this bumps orders.xmin for every matched row, which IS the
-         *     optimistic-concurrency base_version (db.py ROW_VERSION). Any planner's
-         *     unsaved edit to an affected order is discarded on their next save
-         *     (last-writer-loses reconciliation, R2) — run this at a quiet moment, not
-         *     mid-shift. Admin-gated AND role_plants-scoped (_assert_plant_allowed below)
-         *     for exactly that reason.
-         *
-         *     Payload: { plant: str }
-         *     Response: { status, plant, unmatched_pairs, unmatched_orders, exceptions }
-         *     (same exception shape as GET /upload/{batch_id}/missing-master-data — a
-         *     resync has no batch_id, so its unmatched pairs are returned here directly
-         *     rather than persisted to upload_audit.)
-         */
-        post: operations["resync_order_attributes_master_data_resync_order_attributes_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/security/login": {
         parameters: {
             query?: never;
@@ -1544,7 +1553,10 @@ export interface paths {
         put?: never;
         /**
          * Security Login
-         * @description Authenticate against user_security. Never exposes the hash.
+         * @description Authenticate against user_security. Never exposes the hash. Throttled
+         *     per (username, client IP) to slow brute-force attempts (see
+         *     auth._check_login_throttle) — in-process only, appropriate for this
+         *     single-container pilot.
          */
         post: operations["security_login_security_login_post"];
         delete?: never;
@@ -1708,140 +1720,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/sap/interface/objects": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Sap Objects
-         * @description List the SAP-syncable objects with their config + last/next run summary.
-         */
-        get: operations["sap_objects_sap_interface_objects_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sap/interface/mappings/{object}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Sap Get Mappings
-         * @description Return the field-map rows (including inactive) for one SAP object.
-         */
-        get: operations["sap_get_mappings_sap_interface_mappings__object__get"];
-        put?: never;
-        /**
-         * Sap Set Mappings
-         * @description Replace the field map for one SAP object. Payload: { mappings: [...] }
-         */
-        post: operations["sap_set_mappings_sap_interface_mappings__object__post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sap/interface/config/{object}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Sap Get Config
-         * @description Return one SAP object's config. Secret source_params keys are stripped —
-         *     only non-secret keys are returned, plus has_secret:bool.
-         */
-        get: operations["sap_get_config_sap_interface_config__object__get"];
-        put?: never;
-        /**
-         * Sap Set Config
-         * @description Update one SAP object's config. Payload: { enabled?, transport?, schedule_cron?,
-         *     source_params? }. source_params is MERGED into the stored params (omitted keys are
-         *     never wiped). transport and cron are validated.
-         */
-        post: operations["sap_set_config_sap_interface_config__object__post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sap/interface/test-connection": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Sap Test Connection
-         * @description Test connectivity for a transport + source_params combo. Payload: { transport,
-         *     source_params }. Connectors are stubs in this skeleton, so this returns the
-         *     stub's {ok:false, detail:...} unless a real transport is configured.
-         */
-        post: operations["sap_test_connection_sap_interface_test_connection_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sap/interface/sync/{object}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Sap Sync Now
-         * @description Run a sync for one SAP object on demand. Payload: { dry_run? }. Offloaded to
-         *     the threadpool (the sync is blocking + does DB I/O).
-         */
-        post: operations["sap_sync_now_sap_interface_sync__object__post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sap/interface/runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Sap Runs
-         * @description Return recent SAP sync runs, newest first, optionally scoped to one object.
-         */
-        get: operations["sap_runs_sap_interface_runs_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/labor-plan": {
         parameters: {
             query?: never;
@@ -1996,6 +1874,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Diagnostics
+         * @description Return diagnostics: base metadata merged with live DB counts (stateless).
+         */
+        get: operations["get_diagnostics_diagnostics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Health
+         * @description Fast DB ping + system snapshot. Polled every 30 s by the Admin Cockpit.
+         */
+        get: operations["get_health_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Livez
+         * @description Liveness probe: a process-up check ONLY — never touches Postgres or the
+         *     filesystem. Point the Container Apps *liveness* probe here; readiness and the
+         *     Admin Cockpit keep using /health (which pings the DB). Keeping liveness DB-free
+         *     means a slow or briefly-unreachable database can't trigger needless restarts.
+         */
+        get: operations["livez_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/diagnostics/deep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Diagnostics Deep
+         * @description Full pipeline breakdown: DB stats + color-wheel analysis + current DIAGNOSTICS.
+         */
+        get: operations["get_diagnostics_deep_diagnostics_deep_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reload Data
+         * @description Refresh the in-process priority-list cache from Postgres. In stateless mode
+         *     orders are never cached, so there is nothing to re-read for them.
+         *
+         *     Single-replica caveat: this only refreshes the process that handles THIS
+         *     request. On a multi-replica deployment it is not a cross-replica hook —
+         *     every other replica keeps serving its own last-loaded PLANT_LISTS until it
+         *     independently receives its own /reload call or restarts. Fine for the
+         *     current single-replica pilot; would need a shared cache or a fan-out call
+         *     to every replica before this claim would be true at scale.
+         */
+        post: operations["reload_data_reload_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get System Settings
+         * @description Return the global system-settings blob (currently just orderFields —
+         *     which optional Orders fields show by default in the AG Grid / Inspector).
+         *     Unauthenticated: every user's boot needs this, same as color-wheel reads.
+         *     Response body IS the settings content directly, no wrapper envelope.
+         */
+        get: operations["get_system_settings_system_settings_get"];
+        put?: never;
+        /**
+         * Post System Settings
+         * @description Persist a shallow-merge patch into the global system-settings blob.
+         *
+         *     Payload: { orderFields?: { <FIELD_KEY>: { grid: bool, inspector: bool } } }
+         *     The 'orderFields' key is replaced wholesale by whatever is sent — callers
+         *     must POST the complete map, not a per-field diff. Response body is the
+         *     full post-merge settings blob, same unwrapped shape as the GET above.
+         */
+        post: operations["post_system_settings_system_settings_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/diagnostics/db": {
         parameters: {
             query?: never;
@@ -2136,6 +2157,116 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AddColumnResult */
+        AddColumnResult: {
+            /** Status */
+            status: string;
+            /** Column Name */
+            column_name: string;
+        };
+        /**
+         * AdminTableColumnInfo
+         * @description One entry of GET /admin/tables/{table}'s "columns" list -- shape per
+         *     admin_table_rows's own docstring.
+         */
+        AdminTableColumnInfo: {
+            /** Name */
+            name: string;
+            /** Sql Type */
+            sql_type?: string | null;
+            /** Is Nullable */
+            is_nullable?: boolean | null;
+            /** Ordinal Position */
+            ordinal_position?: number | null;
+            /** Is Pk */
+            is_pk?: boolean | null;
+            /** Is Fk */
+            is_fk?: boolean | null;
+            /** Ref Table */
+            ref_table?: string | null;
+            /** Ref Column */
+            ref_column?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** AdminTableFkColumn */
+        AdminTableFkColumn: {
+            /** Column */
+            column: string;
+            /** Ref Table */
+            ref_table: string;
+            /** Ref Column */
+            ref_column: string;
+        };
+        /**
+         * AdminTableInfo
+         * @description One entry of GET /admin/tables' "tables" list -- shape per admin_list_tables's
+         *     own docstring, verified against admin_tables.list_tables().
+         */
+        AdminTableInfo: {
+            /** Table */
+            table: string;
+            /** Approx Row Count */
+            approx_row_count?: number | null;
+            /** Internal */
+            internal: boolean;
+            /**
+             * Pk Columns
+             * @default []
+             */
+            pk_columns: string[];
+            /**
+             * Fk Columns
+             * @default []
+             */
+            fk_columns: components["schemas"]["AdminTableFkColumn"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** AdminTableRowsMeta */
+        AdminTableRowsMeta: {
+            /** Total */
+            total: number;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+        };
+        /**
+         * AdminTableRowsResult
+         * @description GET /admin/tables/{table} -- rows are genuinely per-table dynamic
+         *     ({col: value} for whatever `table` turned out to be), so left as
+         *     dict[str, Any] rather than a closed schema.
+         */
+        AdminTableRowsResult: {
+            /** Columns */
+            columns: components["schemas"]["AdminTableColumnInfo"][];
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+            meta: components["schemas"]["AdminTableRowsMeta"];
+        };
+        /** AdminTablesListResult */
+        AdminTablesListResult: {
+            /** Tables */
+            tables: components["schemas"]["AdminTableInfo"][];
+        };
+        /**
+         * AuditLogEntry
+         * @description One backend/priority_lists/audit_log.py JSONL entry (GET /audit/log).
+         *     Free-form beyond what's guaranteed (frontend-authored via POST /audit/log,
+         *     e.g. optimization_run events) -- extra="allow" lets whatever fields a
+         *     given entry carries pass through untyped.
+         */
+        AuditLogEntry: {
+            [key: string]: unknown;
+        };
+        /** AuditLogResult */
+        AuditLogResult: {
+            /** Entries */
+            entries: components["schemas"]["AuditLogEntry"][];
+        };
         /**
          * BaselineCorrectResult
          * @description Response for POST /tasks/baseline-correct — db.correct_due_date_baselines'
@@ -2191,6 +2322,23 @@ export interface components {
             /** Rank Column */
             rank_column?: string | null;
         };
+        /** BootstrapStatusResult */
+        BootstrapStatusResult: {
+            /** Admin Exists */
+            admin_exists: boolean;
+        };
+        /**
+         * BulkApplyResult
+         * @description master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk).
+         */
+        BulkApplyResult: {
+            /** Inserted */
+            inserted: number;
+            /** Updated */
+            updated: number;
+            /** Deleted */
+            deleted: number;
+        };
         /**
          * BulkUpdateResult
          * @description Shared response shape for POST /tasks/update and POST /tasks/bulk_update.
@@ -2227,6 +2375,36 @@ export interface components {
             cause?: string | null;
         };
         /**
+         * BulkUsersResult
+         * @description auth.bulk_upsert_users()'s shape (POST /security/users/bulk).
+         */
+        BulkUsersResult: {
+            /** Inserted */
+            inserted: number;
+            /** Updated */
+            updated: number;
+            /** Deleted */
+            deleted: number;
+        };
+        /**
+         * CascadePreviewResult
+         * @description master_data.cascade_preview()'s shape -- always seeds all five keys to
+         *     0 so the delete-confirmation UI has a stable shape to render, per its own
+         *     docstring; verified by direct read of the seed dict.
+         */
+        CascadePreviewResult: {
+            /** Plants */
+            plants: number;
+            /** Machine */
+            machine: number;
+            /** Material Plants */
+            material_plants: number;
+            /** Bom Items */
+            bom_items: number;
+            /** Role Plants */
+            role_plants: number;
+        };
+        /**
          * DueDateCorrection
          * @description One order's due-date-baseline correction, computed client-side by
          *     Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
@@ -2254,6 +2432,33 @@ export interface components {
              */
             corrections: components["schemas"]["DueDateCorrection"][];
         };
+        /**
+         * GridResult
+         * @description Shared shape for GET /master-data/{table}, GET /master-data/_material-grid,
+         *     and GET /master-data/_material-plant-grid (master_data.list_rows/
+         *     material_grid/material_plant_grid) -- all three return the same
+         *     {columns, rows, meta} envelope over a column_metadata-driven, per-table-
+         *     dynamic column set (Add-Column-wizard-extensible), so `columns`/`rows`
+         *     stay loosely typed rather than a closed per-table schema. `meta` carries
+         *     at least `total`; material_grid/material_plant_grid also add `plant`
+         *     (extra="allow" covers that without a second model).
+         */
+        GridResult: {
+            /** Columns */
+            columns: {
+                [key: string]: unknown;
+            }[];
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+            /** Meta */
+            meta: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -2272,6 +2477,148 @@ export interface components {
             target: string;
             /** Type */
             type: string;
+        };
+        /**
+         * LoginResult
+         * @description auth.authenticate()'s success shape (POST /security/login).
+         *     auth.py's authenticate() itself does not attach a "settings"/"role_settings"
+         *     pair -- that's whoami()'s shape (WhoAmIResult), not this one.
+         */
+        LoginResult: {
+            /** Username */
+            username: string;
+            /** Role */
+            role?: string | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Allowed Plants */
+            allowed_plants?: string[] | null;
+        };
+        /**
+         * MasterDataAuditEntry
+         * @description One master_data.list_audit() row (GET /master-data/_audit).
+         */
+        MasterDataAuditEntry: {
+            /** Id */
+            id: number;
+            /** Table Name */
+            table_name: string;
+            /** Action */
+            action: string;
+            /** Column Name */
+            column_name?: string | null;
+            /** Details */
+            details?: unknown;
+            /** User Email */
+            user_email?: string | null;
+            /** Occurred At */
+            occurred_at?: string | null;
+        };
+        /** MasterDataAuditResult */
+        MasterDataAuditResult: {
+            /** Entries */
+            entries: components["schemas"]["MasterDataAuditEntry"][];
+        };
+        /**
+         * OkResult
+         * @description auth.set_user_password()'s shape -- shared by PATCH /security/me/password
+         *     (via change_own_password, which returns set_user_password's own result) and
+         *     POST /security/users/{username}/reset-password.
+         */
+        OkResult: {
+            /** Ok */
+            ok: boolean;
+        };
+        /**
+         * PlantConstraintsResult
+         * @description master_data.set_plant_constraints()'s shape. `constraints` is the
+         *     normalized Stage-3 priority tree (recursive {key, enabled, order,
+         *     children?} nodes) -- left as list[dict[str, Any]] rather than a
+         *     recursive Pydantic model, since routes.py itself treats it as an opaque
+         *     JSON blob it never inspects.
+         */
+        PlantConstraintsResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Constraints */
+            constraints: {
+                [key: string]: unknown;
+            }[];
+        };
+        /** PlantFrozenHorizonDaysResult */
+        PlantFrozenHorizonDaysResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Frozen Horizon Days */
+            frozen_horizon_days?: number | null;
+        };
+        /** PlantMaxPullForwardDaysResult */
+        PlantMaxPullForwardDaysResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Max Pull Forward Days */
+            max_pull_forward_days?: number | null;
+        };
+        /** PlantMinProductiveSegmentMinutesResult */
+        PlantMinProductiveSegmentMinutesResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Min Productive Segment Minutes */
+            min_productive_segment_minutes: number;
+        };
+        /**
+         * PlantSetupActiveResult
+         * @description master_data.set_plant_setup_active()'s shape (PUT /plant/{plant}/setup-active).
+         *     Not a _setup_freshness() envelope -- this route returns md.*'s dict directly.
+         */
+        PlantSetupActiveResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Setup Active */
+            setup_active: boolean;
+        };
+        /** PlantSplitOrderPolicyResult */
+        PlantSplitOrderPolicyResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Split Order Policy */
+            split_order_policy: string;
+        };
+        /** PlantVisibilityHorizonResult */
+        PlantVisibilityHorizonResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Visibility Horizon Days */
+            visibility_horizon_days?: number | null;
+            /** Horizon Roll Hour Utc */
+            horizon_roll_hour_utc: number;
+        };
+        /** RolePageAccessResult */
+        RolePageAccessResult: {
+            /** Status */
+            status: string;
+            /** Role */
+            role: string;
+            /** Pages */
+            pages: {
+                [key: string]: boolean;
+            };
         };
         /**
          * ScheduleSegmentDTO
@@ -2298,13 +2645,59 @@ export interface components {
             /** End Date */
             end_date: string;
         };
+        /** SchemaExportResult */
+        SchemaExportResult: {
+            /** Sql */
+            sql: string;
+        };
+        /**
+         * SetupEnvelope
+         * @description Base for every route that goes through routes.py's _setup_freshness().
+         */
+        SetupEnvelope: {
+            freshness: components["schemas"]["SetupFreshness"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** SetupFreshness */
+        SetupFreshness: {
+            /** Signature Version */
+            signature_version?: number | null;
+            /** Request Id */
+            request_id?: string | null;
+        };
+        /**
+         * SetupLineCompatibilityResult
+         * @description master_data.set_setup_line_compatibility()/get_setup_line_compatibility()'s
+         *     shared shape (PUT|GET /setup/{plant}/lines/{machine}/compatibility). Neither
+         *     route goes through _setup_freshness() -- both return md.*'s dict directly.
+         */
+        SetupLineCompatibilityResult: {
+            /** Plant */
+            plant: string;
+            /** Machine */
+            machine: string;
+            /** Setup Compatible */
+            setup_compatible: boolean;
+            /** Setup Compatibility Reason */
+            setup_compatibility_reason?: string | null;
+        };
+        /**
+         * StatusOkResult
+         * @description Shared shape for drop_column/rename_label/append_audit_log/clear_audit_log
+         *     -- every write that has nothing else useful to report but success.
+         */
+        StatusOkResult: {
+            /** Status */
+            status: string;
+        };
         /**
          * TaskDTO
          * @description One row of GET /tasks's `data` array. Field set mirrors the dict literal
-         *     built in get_tasks (brain.py, the `data.append({...})` block) verbatim —
-         *     see docs/archive/typescript_migration.md §F/§C. Optional fields are exactly the
-         *     ones read via `row.get(...)` with no coercing default (i.e. can be None
-         *     from a NaN source row); non-optional fields either have a code-level
+         *     built in get_tasks (backend/scheduling/routes.py, the `data.append({...})` block)
+         *     verbatim — see docs/archive/typescript_migration.md §F/§C. Optional fields are
+         *     exactly the ones read via `row.get(...)` with no coercing default (i.e. can be
+         *     None from a NaN source row); non-optional fields either have a code-level
          *     default (e.g. `text`, `ecc_firmed`, `user_scheduled`) or come from a groupby
          *     key that can't be null.
          */
@@ -2476,7 +2869,8 @@ export interface components {
         /**
          * TasksResponse
          * @description GET /tasks's full envelope. `meta` stays a loose dict: it's `DIAGNOSTICS`
-         *     merged with per-request color-merge stats (brain.py's `meta = dict(DIAGNOSTICS, **cm_stats)`),
+         *     merged with per-request color-merge stats (backend/scheduling/routes.py's
+         *     `meta = dict(DIAGNOSTICS, **cm_stats)`),
          *     a large, evolving diagnostics bag with no single fixed schema — modeling every
          *     key precisely is out of scope for this phase and would need to track
          *     DIAGNOSTICS's shape by hand forever. The empty-result path also returns a
@@ -2507,6 +2901,67 @@ export interface components {
              */
             tasks: components["schemas"]["TaskDateUpdate"][];
         };
+        /**
+         * UpdateOwnNameResult
+         * @description auth.update_own_name()'s shape (PATCH /security/me).
+         */
+        UpdateOwnNameResult: {
+            /** Username */
+            username: string;
+            /** Role */
+            role?: string | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+        };
+        /**
+         * UpsertUserSettingsResult
+         * @description auth.upsert_user_settings()'s shape (PATCH /security/me/settings).
+         */
+        UpsertUserSettingsResult: {
+            /** Username */
+            username: string;
+            /** Settings */
+            settings: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * UserListEntry
+         * @description One row of auth.list_users()'s "users" list. last_login is left as `Any`
+         *     (not `datetime`) since it comes straight off a psycopg cursor and this file
+         *     doesn't otherwise touch datetime (de)serialization conventions -- avoids
+         *     introducing a new one just for this field.
+         */
+        UserListEntry: {
+            /** Username */
+            username: string;
+            /** Role */
+            role?: string | null;
+            /** Has Password */
+            has_password: boolean;
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Last Login */
+            last_login?: unknown;
+        };
+        /** UserListMeta */
+        UserListMeta: {
+            /** Total */
+            total: number;
+        };
+        /**
+         * UserListResult
+         * @description auth.list_users()'s shape (GET /security/users).
+         */
+        UserListResult: {
+            /** Users */
+            users: components["schemas"]["UserListEntry"][];
+            meta: components["schemas"]["UserListMeta"];
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -2520,6 +2975,38 @@ export interface components {
             /** Context */
             ctx?: Record<string, never>;
         };
+        /**
+         * WhoAmIResult
+         * @description auth.whoami()'s shape (GET /security/me).
+         */
+        WhoAmIResult: {
+            /** Username */
+            username?: string | null;
+            /** Role */
+            role?: string | null;
+            /** Is Admin */
+            is_admin: boolean;
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Allowed Plants */
+            allowed_plants?: string[] | null;
+            /**
+             * Settings
+             * @default {}
+             */
+            settings: {
+                [key: string]: unknown;
+            };
+            /**
+             * Role Settings
+             * @default {}
+             */
+            role_settings: {
+                [key: string]: unknown;
+            };
+        };
     };
     responses: never;
     parameters: never;
@@ -2529,117 +3016,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    get_diagnostics_diagnostics_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_health_health_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    livez_livez_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_diagnostics_deep_diagnostics_deep_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    reload_data_reload_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     get_tasks_tasks_get: {
         parameters: {
             query?: {
@@ -3083,6 +3459,109 @@ export interface operations {
     clear_upload_audit_upload_audit_clear_post: {
         parameters: {
             query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_material_plant_attributes_master_data_material_plants_attributes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resync_order_attributes_master_data_resync_order_attributes_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_objects_sap_interface_objects_get: {
+        parameters: {
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
@@ -3096,6 +3575,254 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    sap_get_mappings_sap_interface_mappings__object__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                object: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_set_mappings_sap_interface_mappings__object__post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                object: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_get_config_sap_interface_config__object__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                object: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_set_config_sap_interface_config__object__post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                object: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_test_connection_sap_interface_test_connection_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_sync_now_sap_interface_sync__object__post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                object: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sap_runs_sap_interface_runs_get: {
+        parameters: {
+            query?: {
+                object?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3450,7 +4177,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3481,7 +4208,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3520,7 +4247,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantSetupActiveResult"];
                 };
             };
             /** @description Validation Error */
@@ -3555,7 +4282,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3591,7 +4318,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3666,7 +4393,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3705,7 +4432,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3744,7 +4471,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3784,7 +4511,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3816,7 +4543,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupLineCompatibilityResult"];
                 };
             };
             /** @description Validation Error */
@@ -3856,7 +4583,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupLineCompatibilityResult"];
                 };
             };
             /** @description Validation Error */
@@ -3895,7 +4622,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3935,7 +4662,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -3975,7 +4702,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SetupEnvelope"];
                 };
             };
             /** @description Validation Error */
@@ -4006,7 +4733,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AuditLogResult"];
                 };
             };
             /** @description Validation Error */
@@ -4041,7 +4768,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["StatusOkResult"];
                 };
             };
             /** @description Validation Error */
@@ -4058,7 +4785,9 @@ export interface operations {
     clear_audit_log_audit_log_clear_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4070,7 +4799,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["StatusOkResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4092,7 +4830,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["MasterDataAuditResult"];
                 };
             };
             /** @description Validation Error */
@@ -4109,7 +4847,9 @@ export interface operations {
     md_schema_export_master_data__schema_export_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4121,7 +4861,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SchemaExportResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4129,7 +4878,9 @@ export interface operations {
     admin_list_tables_admin_tables_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4141,7 +4892,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AdminTablesListResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4152,7 +4912,9 @@ export interface operations {
                 limit?: number;
                 offset?: number;
             };
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path: {
                 table: string;
             };
@@ -4166,7 +4928,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AdminTableRowsResult"];
                 };
             };
             /** @description Validation Error */
@@ -4185,7 +4947,9 @@ export interface operations {
             query?: {
                 offset?: number;
             };
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path: {
                 table: string;
             };
@@ -4233,7 +4997,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["GridResult"];
                 };
             };
             /** @description Validation Error */
@@ -4267,7 +5031,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["GridResult"];
                 };
             };
             /** @description Validation Error */
@@ -4307,7 +5071,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["GridResult"];
                 };
             };
             /** @description Validation Error */
@@ -4344,7 +5108,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CascadePreviewResult"];
                 };
             };
             /** @description Validation Error */
@@ -4383,7 +5147,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BulkApplyResult"];
                 };
             };
             /** @description Validation Error */
@@ -4422,7 +5186,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AddColumnResult"];
                 };
             };
             /** @description Validation Error */
@@ -4456,7 +5220,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["StatusOkResult"];
                 };
             };
             /** @description Validation Error */
@@ -4496,7 +5260,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["StatusOkResult"];
                 };
             };
             /** @description Validation Error */
@@ -4535,7 +5299,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantConstraintsResult"];
                 };
             };
             /** @description Validation Error */
@@ -4574,7 +5338,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantSplitOrderPolicyResult"];
                 };
             };
             /** @description Validation Error */
@@ -4613,7 +5377,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantMaxPullForwardDaysResult"];
                 };
             };
             /** @description Validation Error */
@@ -4652,7 +5416,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantMinProductiveSegmentMinutesResult"];
                 };
             };
             /** @description Validation Error */
@@ -4691,7 +5455,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantVisibilityHorizonResult"];
                 };
             };
             /** @description Validation Error */
@@ -4730,7 +5494,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PlantFrozenHorizonDaysResult"];
                 };
             };
             /** @description Validation Error */
@@ -4769,136 +5533,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_system_settings_system_settings_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    post_system_settings_system_settings_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    md_set_material_plant_attributes_master_data_material_plants_attributes_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    resync_order_attributes_master_data_resync_order_attributes_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RolePageAccessResult"];
                 };
             };
             /** @description Validation Error */
@@ -4933,7 +5568,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LoginResult"];
                 };
             };
             /** @description Validation Error */
@@ -4962,7 +5597,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BootstrapStatusResult"];
                 };
             };
         };
@@ -4982,7 +5617,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WhoAmIResult"];
                 };
             };
         };
@@ -5008,7 +5643,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["UpdateOwnNameResult"];
                 };
             };
             /** @description Validation Error */
@@ -5043,7 +5678,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["UpsertUserSettingsResult"];
                 };
             };
             /** @description Validation Error */
@@ -5078,7 +5713,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkResult"];
                 };
             };
             /** @description Validation Error */
@@ -5116,7 +5751,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["UserListResult"];
                 };
             };
             /** @description Validation Error */
@@ -5153,7 +5788,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BulkUsersResult"];
                 };
             };
             /** @description Validation Error */
@@ -5192,275 +5827,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_objects_sap_interface_objects_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    sap_get_mappings_sap_interface_mappings__object__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                object: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_set_mappings_sap_interface_mappings__object__post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path: {
-                object: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_get_config_sap_interface_config__object__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                object: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_set_config_sap_interface_config__object__post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path: {
-                object: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_test_connection_sap_interface_test_connection_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_sync_now_sap_interface_sync__object__post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path: {
-                object: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sap_runs_sap_interface_runs_get: {
-        parameters: {
-            query?: {
-                object?: string | null;
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["OkResult"];
                 };
             };
             /** @description Validation Error */
@@ -5643,7 +6010,9 @@ export interface operations {
     plant_calendar_plant_hours_post_plant_calendar_plant_hours_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5678,7 +6047,9 @@ export interface operations {
     plant_calendar_line_hours_post_plant_calendar_line_hours_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5713,7 +6084,9 @@ export interface operations {
     plant_calendar_line_blackouts_post_plant_calendar_line_blackouts_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5748,7 +6121,177 @@ export interface operations {
     plant_calendar_plant_blackouts_post_plant_calendar_plant_blackouts_post: {
         parameters: {
             query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_diagnostics_diagnostics_get: {
+        parameters: {
+            query?: never;
             header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    livez_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_diagnostics_deep_diagnostics_deep_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    reload_data_reload_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_system_settings_system_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    post_system_settings_system_settings_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5783,7 +6326,9 @@ export interface operations {
     get_diagnostics_db_diagnostics_db_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5796,6 +6341,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -5887,7 +6441,9 @@ export interface operations {
                 outcome?: string | null;
                 event?: string | null;
             };
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };

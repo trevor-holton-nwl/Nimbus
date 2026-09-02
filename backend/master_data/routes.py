@@ -28,6 +28,25 @@ import db
 import master_data as md
 from backend.admin_ops.logbuffer import _current_rid, _log_event, _set_admin_log_details
 from backend.master_data import browser as admin_tables
+from backend.master_data.models import (
+    AddColumnResult,
+    AdminTableRowsResult,
+    AdminTablesListResult,
+    AuditLogResult,
+    BulkApplyResult,
+    CascadePreviewResult,
+    GridResult,
+    MasterDataAuditResult,
+    PlantConstraintsResult,
+    PlantFrozenHorizonDaysResult,
+    PlantMaxPullForwardDaysResult,
+    PlantMinProductiveSegmentMinutesResult,
+    PlantSplitOrderPolicyResult,
+    PlantVisibilityHorizonResult,
+    RolePageAccessResult,
+    SchemaExportResult,
+    StatusOkResult,
+)
 from backend.priority_lists.audit_log import _cw_append_audit, _cw_audit_path
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
@@ -39,7 +58,7 @@ router = APIRouter()
 # AUDIT LOG ENDPOINTS
 # =========================
 
-@router.get("/audit/log", dependencies=[Depends(require_admin)])
+@router.get("/audit/log", response_model=AuditLogResult, dependencies=[Depends(require_admin)])
 def get_audit_log(limit: int = 200):
     """Return the most recent N audit log entries, newest first."""
     log = []
@@ -55,7 +74,7 @@ def get_audit_log(limit: int = 200):
     return {"entries": list(reversed(log[-limit:]))}
 
 
-@router.post("/audit/log", dependencies=[Depends(auth.require_authenticated)])
+@router.post("/audit/log", response_model=StatusOkResult, dependencies=[Depends(auth.require_authenticated)])
 def append_audit_log(entry: dict, request: Request):
     """Frontend-triggered audit entry (e.g. optimization_run events)."""
     entry.setdefault("ts", datetime.utcnow().isoformat() + "Z")
@@ -64,7 +83,7 @@ def append_audit_log(entry: dict, request: Request):
     return {"status": "ok"}
 
 
-@router.post("/audit/log/clear", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/audit/log/clear", response_model=StatusOkResult, dependencies=[Depends(require_api_key), Depends(require_admin)])
 def clear_audit_log():
     """Wipe the full audit log."""
     try:
@@ -91,13 +110,14 @@ def clear_audit_log():
 # `str` path converter behind {table} excludes "/", so it can never be
 # captured by {table} regardless of registration order. Only single-segment
 # literals need to precede it.)
-@router.get("/master-data/_audit", dependencies=[Depends(require_admin)])
+@router.get("/master-data/_audit", response_model=MasterDataAuditResult, dependencies=[Depends(require_admin)])
 def md_audit(limit: int = 100):
     """Return the most recent N master-data change audit entries."""
     return {"entries": md.list_audit(limit)}
 
 
-@router.get("/master-data/_schema-export", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.get("/master-data/_schema-export", response_model=SchemaExportResult,
+           dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_schema_export():
     """
     Read-only: dump every column currently registered (via column_metadata)
@@ -146,7 +166,8 @@ def _admin_tables_query_filters(request: Request) -> dict[str, list[str]]:
     return filters
 
 
-@router.get("/admin/tables", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.get("/admin/tables", response_model=AdminTablesListResult,
+           dependencies=[Depends(require_api_key), Depends(require_admin)])
 def admin_list_tables():
     """Catalog listing of every table in the `public` schema, discovered
     fresh on this request (see admin_tables.list_tables — no process-level
@@ -158,7 +179,8 @@ def admin_list_tables():
     return {"tables": admin_tables.list_tables()}
 
 
-@router.get("/admin/tables/{table}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.get("/admin/tables/{table}", response_model=AdminTableRowsResult,
+           dependencies=[Depends(require_api_key), Depends(require_admin)])
 def admin_table_rows(table: str, request: Request,
                       limit: int = Query(default=100, ge=1, le=1000),
                       offset: int = Query(default=0, ge=0)):
@@ -210,7 +232,7 @@ def admin_table_export_csv(table: str, request: Request, offset: int = Query(def
     )
 
 
-@router.get("/master-data/_material-grid")
+@router.get("/master-data/_material-grid", response_model=GridResult)
 def md_material_grid(
         plant: str = Query(..., min_length=1,
             description="Required. Materials are returned only if they have a "
@@ -235,7 +257,7 @@ def md_material_grid(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.get("/master-data/_material-plant-grid")
+@router.get("/master-data/_material-plant-grid", response_model=GridResult)
 def md_material_plant_grid(
         plant: str = Query(..., min_length=1,
             description="Required. Returns material_plants rows for this plant, "
@@ -255,7 +277,7 @@ def md_material_plant_grid(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.get("/master-data/{table}", dependencies=[Depends(auth.require_authenticated)])
+@router.get("/master-data/{table}", response_model=GridResult, dependencies=[Depends(auth.require_authenticated)])
 def md_list(table: str,
             limit: int | None = Query(default=None, ge=1, le=100000,
                 description="Max rows to return. Omit for the full table."),
@@ -292,7 +314,7 @@ def md_list(table: str,
                          allowed_plants=allowed_plants, material_id=material_id)
 
 
-@router.post("/master-data/{table}/cascade-preview", dependencies=[Depends(require_admin)])
+@router.post("/master-data/{table}/cascade-preview", response_model=CascadePreviewResult, dependencies=[Depends(require_admin)])
 def md_cascade_preview(table: str, body: dict = Body(default={})):
     """Preview cascading deletes before committing. Payload: { deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
@@ -300,7 +322,8 @@ def md_cascade_preview(table: str, body: dict = Body(default={})):
     return md.cascade_preview(table, body.get("deletes", []))
 
 
-@router.post("/master-data/{table}/bulk", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/{table}/bulk", response_model=BulkApplyResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_bulk(table: str, request: Request, body: dict = Body(default={})):
     """Apply upserts and deletes in one transaction. Payload: { upserts: row[], deletes: key[] }"""
     if table not in md.ALLOWED_TABLES:
@@ -337,7 +360,8 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/{table}/columns", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/{table}/columns", response_model=AddColumnResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_add_column(table: str, request: Request, body: dict = Body(default={})):
     """Add a new user-defined column to a master-data table. Payload: { column_name, sql_type, length?, nullable?, default?, display_label? }"""
     if table not in md.ALLOWED_TABLES:
@@ -357,7 +381,8 @@ def md_add_column(table: str, request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.delete("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.delete("/master-data/{table}/columns/{column}", response_model=StatusOkResult,
+              dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_drop_column(table: str, column: str, request: Request):
     """Drop a user-defined column from a master-data table (system columns are protected)."""
     if table not in md.ALLOWED_TABLES:
@@ -368,7 +393,8 @@ def md_drop_column(table: str, column: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.patch("/master-data/{table}/columns/{column}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.patch("/master-data/{table}/columns/{column}", response_model=StatusOkResult,
+             dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_rename_label(table: str, column: str, request: Request, body: dict = Body(default={})):
     """Update the display_label of an existing column. Payload: { display_label: str }"""
     if table not in md.ALLOWED_TABLES:
@@ -383,7 +409,8 @@ def md_rename_label(table: str, column: str, request: Request, body: dict = Body
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/plants/{plant}/constraints", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/plants/{plant}/constraints", response_model=PlantConstraintsResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(default={})):
     """Persist a plant's switchable-constraint config (ordered list).
 
@@ -401,7 +428,8 @@ def md_set_plant_constraints(plant: str, request: Request, body: dict = Body(def
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/plants/{plant}/split-order-policy", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/plants/{plant}/split-order-policy", response_model=PlantSplitOrderPolicyResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_split_order_policy(plant: str, request: Request, body: dict = Body(default={})):
     """Persist one validated plant-level split-order allocation policy.
 
@@ -419,7 +447,8 @@ def md_set_plant_split_order_policy(plant: str, request: Request, body: dict = B
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/plants/{plant}/max-pull-forward-days", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/plants/{plant}/max-pull-forward-days", response_model=PlantMaxPullForwardDaysResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_max_pull_forward_days(plant: str, request: Request, body: dict = Body(default={})):
     """Persist a nullable, non-negative whole-calendar-day scheduling floor."""
     try:
@@ -433,7 +462,8 @@ def md_set_plant_max_pull_forward_days(plant: str, request: Request, body: dict 
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/plants/{plant}/min-productive-segment-minutes", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/plants/{plant}/min-productive-segment-minutes", response_model=PlantMinProductiveSegmentMinutesResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_min_productive_segment_minutes(plant: str, request: Request, body: dict = Body(default={})):
     """Persist the B3 plant productive-segment floor: a required positive
     integer minute count (the column is NOT NULL DEFAULT 30 — pass 30 to
@@ -449,7 +479,8 @@ def md_set_plant_min_productive_segment_minutes(plant: str, request: Request, bo
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/plants/{plant}/visibility-horizon", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/plants/{plant}/visibility-horizon", response_model=PlantVisibilityHorizonResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_visibility_horizon(plant: str, request: Request, body: dict = Body(default={})):
     """Persist the C1 plant visibility-horizon setting (how far into the
     future a planner can see on the Gantt/Orders tab).
@@ -469,7 +500,8 @@ def md_set_plant_visibility_horizon(plant: str, request: Request, body: dict = B
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/plants/{plant}/frozen-horizon-days", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/plants/{plant}/frozen-horizon-days", response_model=PlantFrozenHorizonDaysResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_plant_frozen_horizon_days(plant: str, request: Request, body: dict = Body(default={})):
     """Persist the C2 plant frozen-horizon setting: a nullable whole-calendar-day
     window (NULL or 0 = off, unlike C1's visibility_horizon_days) inside which
@@ -485,7 +517,8 @@ def md_set_plant_frozen_horizon_days(plant: str, request: Request, body: dict = 
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/master-data/roles/{role}/page-access", dependencies=[Depends(require_api_key), Depends(require_admin)])
+@router.post("/master-data/roles/{role}/page-access", response_model=RolePageAccessResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_set_role_page_access(role: str, request: Request, body: dict = Body(default={})):
     """Persist a role's per-page UI-visibility toggles (Dashboard/Scheduling
     Board/Labor Plan/Master Data/Admin Cockpit).
