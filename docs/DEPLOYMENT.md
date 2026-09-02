@@ -99,6 +99,24 @@ To close that gap after the fact: hit `GET /master-data/_schema-export` (or clic
 
 There's no automatic trigger for step 1 — the Add/Drop Column success toast includes a one-line reminder, but someone still has to remember to run the export periodically.
 
+## Schema bootstrap smoke check
+
+A fresh `psql -f schema.sql` bootstrap failed for a while (`column "plant" does not exist` — an index on `orders.plant` fired before the `ALTER TABLE orders ADD COLUMN plant` that ran later in the same file). Fixed by moving the column-add immediately after `CREATE TABLE orders`, plus a new `migrations/2026-09-02-orders-plant-column.sql` so the ledger-only deploy path also carries it. `scripts/schema_bootstrap_smoke.py` automates the regression check: it (1) applies `schema.sql` fresh to an empty scratch DB, (2) applies `schema.sql` then the full `migrations/*.sql` ledger (filename-sorted) to a second scratch DB — mirroring Azure's real history of "load schema once, then apply migrations" — and (3) diffs the two `orders` table shapes via `information_schema.columns`.
+
+Run locally (never against the Azure pilot — it CREATEs/DROPs scratch databases):
+```powershell
+$env:PGPASSWORD = '<local postgres password>'
+.\.venv\Scripts\python.exe scripts\schema_bootstrap_smoke.py --host localhost --port 5432 --user postgres
+```
+Or the two manual one-liners it automates, if you just want to eyeball it:
+```powershell
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -c 'DROP DATABASE IF EXISTS nimbus_bootstrap_test;'
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -c 'CREATE DATABASE nimbus_bootstrap_test;'
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -d nimbus_bootstrap_test -v ON_ERROR_STOP=1 -f schema.sql
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -d nimbus_bootstrap_test -c "\d orders"
+```
+**Not run as part of this change** — no local Postgres was reachable in the environment this was written in (`psql -h localhost` hangs waiting on a connection). A human with local Postgres needs to run this to confirm it actually passes; it is not wired into `npm run test`/CI yet (no existing `tests/*.py` convention shells out to `psql` with an environment-conditional skip, so this stays a standalone `scripts/` entry point rather than a new pytest pattern).
+
 ## Gotchas (learned the hard way)
 - **Permissions:** subscription-level actions (e.g. `az provider register`) fail for an RG-scoped account — harmless if the providers are already registered. You need **Contributor on `rg-nimbus-dev`** to create resources.
 - **`az containerapp logs show` fails behind a corporate proxy** (`SSL: CERTIFICATE_VERIFY_FAILED`, self-signed cert in chain). Read backend errors from the app's own endpoint instead: `GET https://<fqdn>/logs/backend` (PowerShell `Invoke-RestMethod` trusts the proxy CA via the Windows cert store).
