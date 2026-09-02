@@ -481,24 +481,61 @@
     }
 
     /* 3. BLACKOUT VIOLATION */
+    // Bucket parsedBlocks by line (with globalLine fallback) and parsedPlantBlocks by plant
+    // (with globalPlant fallback) once, up front, so lookups are O(1) per task instead of O(all blocks).
+    const _blackoutLineBlocks = new Map(), _blackoutGlobalLine = [];
+    for (const b of parsedBlocks) {
+      const rec = { s: b.s, e: b.e, plant: b.plant || null };
+      if (b.line) { let a = _blackoutLineBlocks.get(b.line); if (!a) _blackoutLineBlocks.set(b.line, a = []); a.push(rec); }
+      else _blackoutGlobalLine.push(rec);
+    }
+    const _blackoutPlantBlocks = new Map(), _blackoutGlobalPlant = [];
+    for (const b of parsedPlantBlocks) {
+      if (b.plant) { let a = _blackoutPlantBlocks.get(b.plant); if (!a) _blackoutPlantBlocks.set(b.plant, a = []); a.push({ s: b.s, e: b.e }); }
+      else _blackoutGlobalPlant.push({ s: b.s, e: b.e });
+    }
     for (const t of activeTasks) {
       const line  = t.MACHINE || 'Unknown';
       const plant = plantOf(line);
       let conflict = false;
       let conflictTime = t.start_date;
       for (const interval of scheduleIntervals(t)) {
-        for (const b of parsedBlocks) {
-          if (b.plant && b.plant !== plant) continue;
-          if (b.line && b.line !== line) continue;
-          if (interval.start < b.e && interval.end > b.s) {
-            conflict = true; conflictTime = interval.start; break;
+        // Check line-specific blocks for this line, scoped by plant
+        const lineBlocksForLine = _blackoutLineBlocks.get(line);
+        if (lineBlocksForLine) {
+          for (const b of lineBlocksForLine) {
+            if (b.plant && b.plant !== plant) continue;
+            if (interval.start < b.e && interval.end > b.s) {
+              conflict = true; conflictTime = interval.start; break;
+            }
           }
         }
-        if (conflict) break;
-        for (const b of parsedPlantBlocks) {
-          if (b.plant && b.plant !== plant) continue;
-          if (interval.start < b.e && interval.end > b.s) {
-            conflict = true; conflictTime = interval.start; break;
+        if (!conflict) {
+          // Check global line blocks, scoped by plant
+          for (const b of _blackoutGlobalLine) {
+            if (b.plant && b.plant !== plant) continue;
+            if (interval.start < b.e && interval.end > b.s) {
+              conflict = true; conflictTime = interval.start; break;
+            }
+          }
+        }
+        if (!conflict) {
+          // Check plant blocks for this plant
+          const plantBlocksForPlant = _blackoutPlantBlocks.get(plant);
+          if (plantBlocksForPlant) {
+            for (const b of plantBlocksForPlant) {
+              if (interval.start < b.e && interval.end > b.s) {
+                conflict = true; conflictTime = interval.start; break;
+              }
+            }
+          }
+        }
+        if (!conflict) {
+          // Check global plant blocks
+          for (const b of _blackoutGlobalPlant) {
+            if (interval.start < b.e && interval.end > b.s) {
+              conflict = true; conflictTime = interval.start; break;
+            }
           }
         }
         if (conflict) break;
@@ -706,16 +743,23 @@
         for (const interval of intervals) {
           const intervalStartMs = interval.start.getTime();
           const intervalEndMs = interval.end.getTime();
-          for (const key of Object.keys(lineRows)) {
+          // Optimize: only iterate days this interval actually spans, not all days in the horizon.
+          const dayStart = startOfDay(new Date(intervalStartMs));
+          const dayEnd = startOfDay(new Date(intervalEndMs));
+          let currentDay = new Date(dayStart);
+          while (currentDay <= dayEnd) {
+            const key = dayKey(currentDay);
             const row = lineRows[key];
-            const dayStartMs = row.date.getTime();
-            const dayEndMs = dayStartMs + MS_DAY;
-            if (intervalEndMs <= dayStartMs || intervalStartMs >= dayEndMs) continue;
-            const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
-            if (contribution > 0) {
-              row.scheduled += contribution;
-              if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
+            if (row) {
+              const dayStartMs = row.date.getTime();
+              const dayEndMs = dayStartMs + MS_DAY;
+              const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
+              if (contribution > 0) {
+                row.scheduled += contribution;
+                if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
+              }
             }
+            currentDay = new Date(currentDay.getTime() + MS_DAY);
           }
         }
         continue;
@@ -738,18 +782,28 @@
       const totalTaskMs = tEndMs - tStartMs;
 
       const lineRows = matrix[line];
-      for (const key of Object.keys(lineRows)) {
-        const row      = lineRows[key];
-        const dayStartMs = row.date.getTime();
-        const dayEndMs   = dayStartMs + MS_DAY;
-        if (tEndMs <= dayStartMs || tStartMs >= dayEndMs) continue;
-        if (!workWindow(line, row.date, calendars, plants, lineSettings, masterData)) continue;
-        const overlapMs    = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
-        const contribution = taskRunHrs * (overlapMs / totalTaskMs);
-        if (contribution > 0) {
-          row.scheduled += contribution;
-          row.tasks.push(t.id);
+      // Optimize: only iterate days this task actually spans, not all days in the horizon.
+      const dayStart = startOfDay(new Date(tStartMs));
+      const dayEnd = startOfDay(new Date(tEndMs));
+      let currentDay = new Date(dayStart);
+      while (currentDay <= dayEnd) {
+        const key = dayKey(currentDay);
+        const row = lineRows[key];
+        if (row) {
+          if (!workWindow(line, row.date, calendars, plants, lineSettings, masterData)) {
+            currentDay = new Date(currentDay.getTime() + MS_DAY);
+            continue;
+          }
+          const dayStartMs = row.date.getTime();
+          const dayEndMs   = dayStartMs + MS_DAY;
+          const overlapMs    = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
+          const contribution = taskRunHrs * (overlapMs / totalTaskMs);
+          if (contribution > 0) {
+            row.scheduled += contribution;
+            row.tasks.push(t.id);
+          }
         }
+        currentDay = new Date(currentDay.getTime() + MS_DAY);
       }
     }
 
@@ -761,16 +815,23 @@
       if (!lineRows) continue;
       const intervalStartMs = interval.start.getTime();
       const intervalEndMs = interval.end.getTime();
-      for (const key of Object.keys(lineRows)) {
+      // Optimize: only iterate days this interval actually spans, not all days in the horizon.
+      const dayStart = startOfDay(new Date(intervalStartMs));
+      const dayEnd = startOfDay(new Date(intervalEndMs));
+      let currentDay = new Date(dayStart);
+      while (currentDay <= dayEnd) {
+        const key = dayKey(currentDay);
         const row = lineRows[key];
-        const dayStartMs = row.date.getTime();
-        const dayEndMs = dayStartMs + MS_DAY;
-        if (intervalEndMs <= dayStartMs || intervalStartMs >= dayEndMs) continue;
-        const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
-        if (contribution > 0) {
-          row.scheduled += contribution;
-          if (interval.successorOrderId && !row.tasks.includes(interval.successorOrderId)) row.tasks.push(interval.successorOrderId);
+        if (row) {
+          const dayStartMs = row.date.getTime();
+          const dayEndMs = dayStartMs + MS_DAY;
+          const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
+          if (contribution > 0) {
+            row.scheduled += contribution;
+            if (interval.successorOrderId && !row.tasks.includes(interval.successorOrderId)) row.tasks.push(interval.successorOrderId);
+          }
         }
+        currentDay = new Date(currentDay.getTime() + MS_DAY);
       }
     }
 

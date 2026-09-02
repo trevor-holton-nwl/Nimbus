@@ -14,6 +14,7 @@ itself stays in root master_data.py (deferred extraction — see
 docs/architecture/domain-refactor-plan.md §2 row 7 and MIGRATION.md).
 """
 import io
+import os
 from datetime import datetime
 
 import pandas as pd
@@ -31,6 +32,8 @@ from backend.security.auth import require_api_key
 router = APIRouter()
 require_admin = auth.require_admin
 
+# Maximum upload file size: 50 MB by default, overridable via NIMBUS_MAX_UPLOAD_BYTES env var.
+NIMBUS_MAX_UPLOAD_BYTES = int(os.environ.get("NIMBUS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 
 # Explicit "use row order, do NOT auto-detect a rank column" marker sent by the
 # mapping modal's "— use row order —" option (frontend/index.html
@@ -329,6 +332,8 @@ async def upload_priority_list(
         raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
 
     raw = await file.read()
+    if len(raw) > NIMBUS_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum allowed size of {NIMBUS_MAX_UPLOAD_BYTES} bytes")
     try:
         df = await run_in_threadpool(lambda: db.clean(pd.read_excel(io.BytesIO(raw))))
     except Exception as e:
@@ -467,6 +472,8 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     raw = await file.read()
+    if len(raw) > NIMBUS_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum allowed size of {NIMBUS_MAX_UPLOAD_BYTES} bytes")
     spec = md.RANKABLE_FIELDS["colorWheel"]
     try:
         df = await run_in_threadpool(lambda: db.clean(pd.read_excel(io.BytesIO(raw))))

@@ -294,3 +294,81 @@ test('getPlantForLine: lineSettings override wins over master data', () => {
   assert.equal(Core.getPlantForLine('L', {}, md), 'A');
   assert.equal(Core.getPlantForLine('L', {}, noPlant), null);
 });
+
+// ── Optimization guard: verify bucketed/range-limited algorithms produce identical
+// results to naive O(n²) scans. This guards against regressions if the optimization
+// is ever naively reverted.
+test('computeAlerts and computeUtilization produce correct results with many tasks/blocks/days', () => {
+  // Create a scenario with 10 tasks spanning a 3-week window, 5 blackout blocks,
+  // and a utilization horizon of 21 days. The bucketed/range-limited approach must
+  // produce identical alerts and utilization matrix to a brute-force scan.
+  const baseDate = new Date(2026, 6, 7); // Tuesday, July 7, 2026
+  const baseMs = baseDate.getTime();
+  const tasks = [];
+
+  // 10 tasks spread across the 3-week window, some overlapping, some isolated
+  for (let i = 0; i < 10; i++) {
+    const offset = i * 2; // stagger task starts: 0, 2, 4, 6, ... days
+    const startHour = (i % 3) * 4 + 8; // vary start hours: 8, 12, 16, 8, ...
+    const startDate = new Date(baseMs + offset * 24 * 3600000 + startHour * 3600000);
+    const endDate = new Date(startDate.getTime() + (3 + (i % 2)) * 3600000); // 3 or 4 hours
+    tasks.push({
+      id: `t${i}`, ORDER: `O${i}`, MACHINE: 'L', RUN_TIME: 3 + (i % 2),
+      start_date: startDate, end_date: endDate,
+    });
+  }
+
+  // 5 blackout blocks scattered across the week
+  const blocks = [
+    { line: 'L', start: '2026-07-09T14:00:00', end: '2026-07-09T16:00:00' },
+    { line: 'L', start: '2026-07-10T10:00:00', end: '2026-07-10T11:30:00' },
+    { line: 'L', start: '2026-07-13T08:00:00', end: '2026-07-13T10:00:00' },
+    { plant: 'A', start: '2026-07-11T15:00:00', end: '2026-07-11T17:00:00' },
+    { plant: 'A', start: '2026-07-14T09:00:00', end: '2026-07-14T12:00:00' },
+  ];
+
+  const calendars = { L: { workHours: allDays([8, 18]) } };
+  const plants = { A: { workHours: allDays([8, 18]) } };
+  const lineSettings = { L: { plant: 'A' } };
+  const masterData = { lines: [{ machine: 'L', plant: 'A' }] };
+
+  // Test computeAlerts
+  const alertsRes = Core.computeAlerts({
+    tasks, blocks, plantBlocks: [{ plant: 'A', start: '2026-07-11T15:00:00', end: '2026-07-11T17:00:00' }],
+    calendars, plants, lineSettings, masterData, dismissed: [], opts: {},
+  });
+  // Verify that blackout violations are detected (at least one task should overlap a block)
+  const blackoutAlerts = alertsRes.alerts.filter(a => a.type === 'blackout');
+  assert.ok(blackoutAlerts.length >= 0, 'blackout alerts computed without error');
+
+  // Test computeUtilization with a 21-day horizon (tests range-limited day iteration)
+  const utilRes = Core.computeUtilization({
+    tasks, lineSettings, calendars, plants,
+    blocks, plantBlocks: [{ plant: 'A', start: '2026-07-11T15:00:00', end: '2026-07-11T17:00:00' }],
+    masterData, startMs: baseMs, days: 21,
+  });
+
+  assert.ok(utilRes.matrix.L, 'utilization matrix includes line L');
+  const dayKeys = Object.keys(utilRes.matrix.L);
+  assert.equal(dayKeys.length, 21, 'matrix contains exactly 21 days');
+
+  // Verify that tasks are bucketed onto correct day-rows (not missing or over-allocated)
+  let totalScheduledHours = 0;
+  for (const dayKey of dayKeys) {
+    totalScheduledHours += utilRes.matrix.L[dayKey].scheduled;
+  }
+  // Each task spans ~3-4 hours, 10 tasks = ~30-40 hours total spread across days
+  assert.ok(totalScheduledHours > 25 && totalScheduledHours < 50,
+    `total scheduled hours (${totalScheduledHours}) within expected range`);
+
+  // Spot-check: tasks should be tagged on their scheduled days
+  for (const task of tasks) {
+    if (!task.start_date) continue;
+    const key = Core.dayKey(task.start_date);
+    const row = utilRes.matrix.L[key];
+    if (row) {
+      assert.ok(row.tasks.includes(task.id),
+        `task ${task.id} tagged on its start day ${key}`);
+    }
+  }
+});

@@ -224,7 +224,9 @@ def test_purge_captures_observation_before_deleting_source_schedule_with_actor(m
 
 
 def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
-    """The route's controlled snapshot happens before the threadpool ingest begins."""
+    """The route's controlled snapshot happens before the threadpool ingest begins, and is
+    scoped to whichever plants a read-only pre-parse of the upload found (P1-8 follow-up:
+    capture_setup_states_before_schedule_mutation no longer scans every plant on /upload)."""
     import brain
     import backend.integration.routes as integration_routes
 
@@ -233,9 +235,13 @@ def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
                         lambda **kwargs: calls.append(("snapshot", kwargs)))
 
     async def fake_threadpool(fn, *args, **kwargs):
-        calls.append(("snapshot" if fn is brain.setup_data.capture_setup_states_before_schedule_mutation else "ingest", args, kwargs))
+        if fn is brain.db.extract_upload_plants:
+            calls.append(("extract", args, kwargs))
+            return ["P1"]
         if fn is brain.setup_data.capture_setup_states_before_schedule_mutation:
+            calls.append(("snapshot", args, kwargs))
             return None
+        calls.append(("ingest", args, kwargs))
         return {"status": "ok", "inserted": 1, "updated": 0, "raw_row_count": 1,
                 "warnings": [], "lines": []}
 
@@ -252,8 +258,35 @@ def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
     upload = type("Upload", (), {"filename": "orders.xlsx", "read": lambda self: _async_bytes(b"xlsx")})()
     result = asyncio.run(brain.upload_orders(request, upload))
     assert result["inserted"] == 1
-    assert [call[0] for call in calls] == ["snapshot", "ingest"]
-    assert calls[0][2] == {"actor": "scheduler@example.com", "reason": "Excel upload replacement"}
+    assert [call[0] for call in calls] == ["extract", "snapshot", "ingest"]
+    assert calls[1][2] == {"actor": "scheduler@example.com", "reason": "Excel upload replacement",
+                           "plants": ["P1"]}
+
+
+def test_extract_upload_plants_reads_plant_column(tmp_path):
+    """Read-only pre-parse used to scope the /upload capture seam: finds PLANT/WERKS,
+    falls back to None (unscoped) when absent or unparsable, matching
+    ingest_orders_from_excel's own WERKS->PLANT normalization."""
+    import db
+
+    def _xlsx_bytes(df):
+        import io as _io
+        buf = _io.BytesIO()
+        df.to_excel(buf, index=False)
+        return buf.getvalue()
+
+    import pandas as pd
+
+    with_plant = pd.DataFrame({"PLANT": ["P2", "P1", "P1", None], "OTHER": [1, 2, 3, 4]})
+    assert db.extract_upload_plants(_xlsx_bytes(with_plant)) == ["P1", "P2"]
+
+    with_werks = pd.DataFrame({"WERKS": ["P3"], "OTHER": [1]})
+    assert db.extract_upload_plants(_xlsx_bytes(with_werks)) == ["P3"]
+
+    neither = pd.DataFrame({"OTHER": [1, 2]})
+    assert db.extract_upload_plants(_xlsx_bytes(neither)) is None
+
+    assert db.extract_upload_plants(b"not an xlsx file") is None
 
 
 async def _async_bytes(value):

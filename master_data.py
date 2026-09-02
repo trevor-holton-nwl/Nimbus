@@ -2467,13 +2467,22 @@ def known_line_codes_for_plant(plant: str) -> set[str]:
         return {r[0] for r in cur.fetchall()}
 
 
-def known_material_plant_pairs() -> set[tuple[str, str]]:
+def known_material_plant_pairs(plants: list[str] | None = None) -> set[tuple[str, str]]:
     """Return every (material_id, plant) pair currently in material_plants, for
     validating a BOM upload — both the parent material and the component of
     every bom_items row must already exist at that plant (bom_items' two FKs
-    both reference material_plants(material_id, plant))."""
+    both reference material_plants(material_id, plant)).
+
+    When ``plants`` is provided, scopes the query to just those plants, avoiding
+    an all-table scan when only a subset of plants are present in the upload.
+    ``None`` preserves the original unscoped, all-table behavior byte-for-byte."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT material_id, plant FROM material_plants")
+        query = "SELECT material_id, plant FROM material_plants"
+        params: list = []
+        if plants is not None:
+            query += " WHERE plant = ANY(%s)"
+            params.append(plants)
+        cur.execute(query, params)
         return {(r[0], r[1]) for r in cur.fetchall()}
 
 
@@ -2521,7 +2530,8 @@ def ingest_bom_from_excel(file_bytes: bytes, filename: str, user_email: str | No
         if num_col in df.columns:
             df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
 
-    known_pairs = known_material_plant_pairs()
+    upload_plants = sorted({_str_id(p) for p in df["PLANT"].dropna().unique() if _str_id(p)})
+    known_pairs = known_material_plant_pairs(plants=upload_plants or None)
     warnings: list[dict] = []
     valid_rows: list[dict] = []
     rejected = 0

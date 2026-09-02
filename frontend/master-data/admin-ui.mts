@@ -3089,6 +3089,11 @@ export const MasterData = (() => {
   // table's cached view corrupting the other's.
   const _bomComponentOptionsCache: Record<string, string[]> = {};
 
+  // Per-plant memoized machine table state, used only by syncLineSettings.
+  // Deliberately separate from _cache['machine'] (which is global/unscoped)
+  // to avoid plant-to-plant cache collisions when syncing line settings.
+  const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineRow>> = {};
+
   function _bomComponentSelect(plant: string | null, value: unknown, rowKey: string): HTMLSelectElement {
     const sel = document.createElement('select');
     sel.className = 'input md-fk-select';
@@ -3679,20 +3684,23 @@ export const MasterData = (() => {
   }
 
   async function syncLineSettings(line: string, patch: Partial<NimbusLineSetting>): Promise<void> {
-    if (!_cache['machine']) {
+    const plant = Store.getPlantForLine(line);
+    if (!plant) return;
+
+    if (!_lineSyncMachineCache[plant]) {
       try {
-        const data = await fetch(`${API}/master-data/machine`).then((r) => {
+        const data = await fetch(`${API}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json() as Promise<MasterDataResponse<ProductionLineRow>>;
         });
-        _cache['machine'] = {
+        _lineSyncMachineCache[plant] = {
           columns: data.columns, rows: data.rows,
           dirty: new Map(), deleted: new Set(), added: [],
         };
       } catch { return; }
     }
 
-    const state = _cache['machine']! as MasterDataTableState<ProductionLineRow>;
+    const state = _lineSyncMachineCache[plant]!;
     const rowIdx = state.rows.findIndex((r) => r.machine === line);
     if (rowIdx < 0) return;
 

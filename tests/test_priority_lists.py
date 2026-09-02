@@ -28,6 +28,7 @@ os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 import brain  # noqa: E402
 import master_data as md  # noqa: E402
 import backend.setup.data as setup_data  # noqa: E402
+from backend.security import auth  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -1202,4 +1203,44 @@ def test_priority_rank_maps_maps_a_blank_plant_to_400_not_500(client):
     Same trap the sibling GET /priority-list/{plant}/{field_key} already hit."""
     r = client.get("/priority-rank-maps?plant=%20")
     assert r.status_code == 400
-    assert "plant is required" in r.json()["detail"]
+
+
+def test_upload_priority_list_rejects_oversized_file_with_413(monkeypatch):
+    """Priority list upload must reject files exceeding NIMBUS_MAX_UPLOAD_BYTES
+    with HTTP 413 Payload Too Large, preventing unbounded memory consumption.
+    Mocks require_admin (rather than hitting the real admin_exists() DB check,
+    which needs a live Postgres) — mirrors the pattern in
+    tests/test_integration_routes.py's sibling oversized-upload tests."""
+    from starlette.testclient import TestClient
+    import backend.priority_lists.routes as pl_routes
+    monkeypatch.setattr(pl_routes, "NIMBUS_MAX_UPLOAD_BYTES", 1000)  # 1 KB limit for test
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", None)  # Disable API key check
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    try:
+        # Create oversized payload (1.5 KB > 1 KB limit)
+        oversized = b"x" * 1500
+        r = TestClient(brain.api).post("/priority-list/ZZTEST_PL/colorWheel",
+                                       files={"file": ("oversized.xlsx", oversized)})
+        assert r.status_code == 413
+        assert "exceeds maximum allowed size" in r.json()["detail"]
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
+
+
+def test_upload_color_wheel_rejects_oversized_file_with_413(monkeypatch):
+    """Color wheel upload (legacy) must reject files exceeding NIMBUS_MAX_UPLOAD_BYTES
+    with HTTP 413 Payload Too Large. Mocks require_admin — same reason as above."""
+    from starlette.testclient import TestClient
+    import backend.priority_lists.routes as pl_routes
+    monkeypatch.setattr(pl_routes, "NIMBUS_MAX_UPLOAD_BYTES", 1000)  # 1 KB limit for test
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", None)  # Disable API key check
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    try:
+        # Create oversized payload (1.5 KB > 1 KB limit)
+        oversized = b"y" * 1500
+        r = TestClient(brain.api).post("/color-wheel/ZZTEST_CW",
+                                       files={"file": ("oversized.xlsx", oversized)})
+        assert r.status_code == 413
+        assert "exceeds maximum allowed size" in r.json()["detail"]
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)

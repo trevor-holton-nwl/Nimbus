@@ -2161,6 +2161,32 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     }
 
 
+def extract_upload_plants(file_bytes: bytes) -> list[str] | None:
+    """Best-effort, read-only peek at an uploaded orders file's PLANT column,
+    for scoping the Stage 0 setup-state capture seam (see
+    capture_setup_states_before_schedule_mutation) to just the plants an
+    upload will actually touch, instead of scanning every plant in the
+    system. Mirrors ingest_orders_from_excel's own WERKS->PLANT normalization
+    just enough to find the column; does none of that function's date
+    hygiene, upsert, or validation work.
+
+    Returns None (meaning "scope unknown, caller should fall back to an
+    unscoped/all-plants capture") whenever the file can't be parsed, or has
+    neither a PLANT nor WERKS column — the same case ingest_orders_from_excel
+    itself handles by deriving plant from machine after upsert.
+    """
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception:
+        return None
+    if "WERKS" in df.columns and "PLANT" not in df.columns:
+        df = df.rename(columns={"WERKS": "PLANT"})
+    if "PLANT" not in df.columns:
+        return None
+    plants = sorted({str(p).strip() for p in df["PLANT"].dropna().unique() if str(p).strip()})
+    return plants or None
+
+
 def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     """
     Parse an uploaded sequence_testing-shaped xlsx, normalize/clean,

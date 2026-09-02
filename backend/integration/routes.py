@@ -19,6 +19,7 @@ fix, not a functional change.
 """
 import csv
 import io
+import os
 from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
@@ -35,6 +36,9 @@ from backend.security.auth import require_admin, require_api_key
 
 router = APIRouter()
 
+# Maximum upload file size: 50 MB by default, overridable via NIMBUS_MAX_UPLOAD_BYTES env var.
+NIMBUS_MAX_UPLOAD_BYTES = int(os.environ.get("NIMBUS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+
 
 @router.post("/upload", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def upload_orders(request: Request, file: UploadFile = File(...)):
@@ -45,12 +49,20 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     offloaded to a worker thread so it doesn't block the event loop.
     """
     raw = await file.read()
+    if len(raw) > NIMBUS_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum allowed size of {NIMBUS_MAX_UPLOAD_BYTES} bytes")
     # Stage 0 observation seam: capture only already-completed planned work
     # before ingest can replace its source rows.  This never changes orders,
-    # dates, capacity, alerts, or optimizer behavior.
+    # dates, capacity, alerts, or optimizer behavior. Scoped to the plants this
+    # file actually touches (a read-only peek at the PLANT/WERKS column, done
+    # before the real parse) so a single-plant upload doesn't scan every
+    # plant/machine in the system; falls back to an unscoped capture (plants=None)
+    # when the file's plant can't be determined up front — same as before this change.
+    upload_plants = await run_in_threadpool(db.extract_upload_plants, raw)
     await run_in_threadpool(
         setup_data.capture_setup_states_before_schedule_mutation,
-        actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement"
+        actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement",
+        plants=upload_plants,
     )
     result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
                                      file.filename or "upload.xlsx")
@@ -95,6 +107,8 @@ async def upload_bom(request: Request, file: UploadFile = File(...)):
     thread so it doesn't block the event loop.
     """
     raw = await file.read()
+    if len(raw) > NIMBUS_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum allowed size of {NIMBUS_MAX_UPLOAD_BYTES} bytes")
     result = await run_in_threadpool(md.ingest_bom_from_excel, raw,
                                      file.filename or "bom_upload.xlsx",
                                      request.headers.get("x-user-email"))
