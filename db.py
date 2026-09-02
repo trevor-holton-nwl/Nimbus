@@ -1264,7 +1264,7 @@ def get_db_deep_stats() -> dict:
 
     NOTE (machine-domain rename): the returned dict keys `null_line`/`by_line`
     stay as-is deliberately — they're consumed by
-    web/plant-and-administration.mjs (AdminCockpit diagnostics panel), which
+    frontend/plant-and-administration.mjs (AdminCockpit diagnostics panel), which
     is out of scope for this pass. Only the underlying SQL column reference
     (orders.machine) changed."""
     try:

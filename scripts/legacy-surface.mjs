@@ -18,7 +18,7 @@ export const ROOT = resolve(__dirname, '..');
 const CONTRACT_PATH = resolve(ROOT, 'tests/contracts/cq1-legacy-surface.json');
 
 // ---------------------------------------------------------------------------
-// Discover every `.mjs` file under web/ (the CQ-1 module-extraction targets —
+// Discover every `.mjs` file under frontend/ (the CQ-1 module-extraction targets —
 // application-foundation.mjs, schedule-state.mjs, app-entry.mjs today, and
 // whatever Phase 2+ adds: schedule-services.mjs, schedule-data.mjs, etc.).
 // Scanned the same way app.js is scanned (§1 below) so text moving out of
@@ -27,7 +27,7 @@ const CONTRACT_PATH = resolve(ROOT, 'tests/contracts/cq1-legacy-surface.json');
 // exactly 3 sources and never looked at these files at all.
 // ---------------------------------------------------------------------------
 export function discoverModuleSources(root = ROOT) {
-  const webDir = resolve(root, 'web');
+  const webDir = resolve(root, 'frontend');
   return readdirSync(webDir, { recursive: true })
     .filter(f => f.endsWith('.mjs'))
     .map(f => f.split(sep).join('/'))
@@ -157,9 +157,9 @@ function diff(label, current, saved) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const htmlSource = readFileSync(resolve(ROOT, 'web/index.html'), 'utf8');
-  const intelligenceSource = readFileSync(resolve(ROOT, 'web/nimbus-intelligence.js'), 'utf8');
-  const appSource = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
+  const htmlSource = readFileSync(resolve(ROOT, 'frontend/index.html'), 'utf8');
+  const intelligenceSource = readFileSync(resolve(ROOT, 'frontend/nimbus-intelligence.js'), 'utf8');
+  const appSource = readFileSync(resolve(ROOT, 'frontend/app.js'), 'utf8');
   const moduleSources = discoverModuleSources(ROOT);
 
   const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource, moduleSources });

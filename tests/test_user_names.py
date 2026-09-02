@@ -6,7 +6,7 @@ endpoint.
 from fastapi import HTTPException
 import pytest
 
-import server.security.auth as auth
+import backend.security.auth as auth
 
 
 @pytest.mark.pg
@@ -192,7 +192,7 @@ def test_patch_security_me_endpoint(client, pg):
 
 def test_new_name_keys_present_in_all_locales():
     import os
-    locales_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "locales")
+    locales_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "locales")
     required = ["sec.first_name", "sec.last_name", "sec.first_name_ph", "sec.last_name_ph"]
     for fname in ["en.js", "de.js", "es.js", "fr.js", "pt.js"]:
         path = os.path.join(locales_dir, fname)

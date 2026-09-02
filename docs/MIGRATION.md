@@ -1175,25 +1175,25 @@ in that fix wave — recorded here so they aren't silently forgotten.
 
 The domain refactor plan (`docs/architecture/domain-refactor-plan.md`, v2) deliberately scopes the
 backend phase to a **routes-only split**: `brain.py` becomes a thin assembly over nine
-`server/<domain>/routes.py` routers, four whole modules move (`setup_data.py`, `auth.py`,
+`backend/<domain>/routes.py` routers, four whole modules move (`setup_data.py`, `auth.py`,
 `admin_tables.py`, `sap_sync.py`), and the `PLANT_LISTS` cache + `_BACKEND_LOG` ring buffer are
 extracted behind narrow accessors. The following were **deferred, not abandoned** — pick them up only
 when a real need arrives (they were cut to keep the refactor executable in ~13–16h instead of ~30h):
 
 - **`db.py` / `master_data.py` domain split.** The line-range carve-up of both files into
-  `server/<domain>/data.py` modules (scheduling data + segments, integration ingest/upsert/stamping,
+  `backend/<domain>/data.py` modules (scheduling data + segments, integration ingest/upsert/stamping,
   priority-list stores, master-data tables/policies, labor, calendars, security DDL, admin-ops
   diagnostics). Costs when executed: rewrite of every bare `import db` / `import master_data as md`
-  across ~24 test files, pyproject ruff per-file-ignore key moves, and either a `server/core/db.py`
+  across ~24 test files, pyproject ruff per-file-ignore key moves, and either a `backend/core/db.py`
   (pool, `clean`/`_str_id`, `make_id`, `translate_db_error`) or `_pool`/`_str_id` compatibility aliases
   for the five modules importing those private names. The v1 plan's §4 table (in git history of the
   plan doc) carries the verified line ranges as of 2026-08-31 — re-derive them at execution time.
-- **`server/core/` package.** Only exists as part of the split above; do not create it independently.
+- **`backend/core/` package.** Only exists as part of the split above; do not create it independently.
 - **Field-registry extraction.** Moving `RANKABLE_FIELDS`/`CONFIGURABLE_PRIORITY_FIELDS`
-  (`master_data.py:94–154` as of 2026-08-31) to `server/priority_lists/fields.py`, which would also
+  (`master_data.py:94–154` as of 2026-08-31) to `backend/priority_lists/fields.py`, which would also
   remove the `setup_data → master_data` import edge. Until then the registry stays in `master_data.py`
-  and `server/priority_lists/CLAUDE.md` points at it.
+  and `backend/priority_lists/CLAUDE.md` points at it.
 - **Finer intra-domain frontend splits.** The refactor lands one file per domain per source
-  mega-module (e.g. Timeline+Interaction+Hierarchy together in `web/scheduling/gantt.mts`). Splitting
+  mega-module (e.g. Timeline+Interaction+Hierarchy together in `frontend/scheduling/gantt.mts`). Splitting
   further is a within-folder edit with no cross-domain seams — cheap to do later if a file grows
   painful, and not worth pre-paying.

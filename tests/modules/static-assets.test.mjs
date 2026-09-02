@@ -1,5 +1,5 @@
 // Static-asset boundary tests (CQ-1 Phase 0 Task 4). Pins two things: the
-// legacy frontend entry files exist under the dedicated web/ directory, and
+// legacy frontend entry files exist under the dedicated frontend/ directory, and
 // the import-closure checker used by `npm run check:static-assets` correctly
 // walks local relative imports while rejecting escapes/missing targets.
 import { test } from 'node:test';
@@ -23,13 +23,13 @@ const REQUIRED_ASSETS = [
   'Images/user.png',
 ];
 
-test('expected legacy entry assets exist under web/', () => {
+test('expected legacy entry assets exist under frontend/', () => {
   for (const rel of REQUIRED_ASSETS) {
-    assert.ok(existsSync(resolve(WEB_DIR, rel)), `missing web/${rel}`);
+    assert.ok(existsSync(resolve(WEB_DIR, rel)), `missing frontend/${rel}`);
   }
 });
 
-test('no backend source or config file appears under web/', () => {
+test('no backend source or config file appears under frontend/', () => {
   assert.deepEqual(findForbiddenFiles(WEB_DIR), []);
 });
 

@@ -1,13 +1,13 @@
-// Tests for web/master-data/admin-ui.mjs (Plant, ProdLines, MasterData).
+// Tests for frontend/master-data/admin-ui.mjs (Plant, ProdLines, MasterData).
 // Split from tests/modules/plant-and-administration.test.mjs in Phase P2 of
 // docs/architecture/domain-refactor-plan.md (plant-and-administration.mts
 // was split into 9 domain files; this mirrors that split).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { Plant, ProdLines, MasterData } from '../../../web/master-data/admin-ui.mjs';
-import { CalendarSync } from '../../../web/calendar/calendar-sync.mjs';
-import { Store } from '../../../web/platform/store.mjs';
+import { Plant, ProdLines, MasterData } from '../../../frontend/master-data/admin-ui.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
 
 test('Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof Plant.init, 'function');
@@ -32,7 +32,7 @@ test('Plant Settings pane exposes tree-rendering internals', () => {
 });
 
 test('Plant Settings pane omits the redundant title and introductory copy', () => {
-  const source = readFileSync(new URL('../../../web/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   const renderer = source.slice(source.indexOf('_renderSettingsPane(): void {'), source.indexOf('  },\n};', source.indexOf('_renderSettingsPane(): void {')));
   assert.doesNotMatch(renderer, /ui\.system_settings_title/);
   assert.doesNotMatch(renderer, /ui\.system_settings_sub/);
@@ -45,7 +45,7 @@ test('Plant Settings pane has one fixed strip plus a scrollable body', () => {
   // tests/modules/setup/setup-admin.test.mjs, since Plant and SetupAdmin
   // split into different files in Phase P2 of
   // docs/architecture/domain-refactor-plan.md.)
-  const source = readFileSync(new URL('../../../web/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   assert.match(source, /<div class="settings-content-scroll">/);
   assert.match(source, /<nav class="admin-subtabs settings-inner-tabs"/);
 });

@@ -1,16 +1,16 @@
-// Tests for web/scheduling/orders.mts (Table, Inspector, ContextMenu,
+// Tests for frontend/scheduling/orders.mts (Table, Inspector, ContextMenu,
 // Printer). Split from tests/modules/schedule-workbench.test.mjs (Phase P3 of
 // docs/architecture/domain-refactor-plan.md, which split that mega-module
 // into 6 domain files) to mirror the new file layout.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Table, Inspector, ContextMenu, Printer } from '../../../web/scheduling/orders.mjs';
-import { Timeline } from '../../../web/scheduling/gantt.mjs';
-import { Store } from '../../../web/platform/store.mjs';
-import { Util } from '../../../web/platform/foundation.mjs';
-import { Alerts } from '../../../web/insights/services.mjs';
-import { Engine } from '../../../web/optimization/engine.mjs';
+import { Table, Inspector, ContextMenu, Printer } from '../../../frontend/scheduling/orders.mjs';
+import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Engine } from '../../../frontend/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -138,7 +138,7 @@ test('Task 6 (B3b): Inspector._setupDetailForTask, called with its default (real
   const priorSetup = Store.setupSnapshot;
   const priorGetElementById = globalThis.document.getElementById;
 
-  globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot({
     plant,
@@ -200,7 +200,7 @@ test('Fix 2: Inspector renders no missingDetail for a genuine setup-no-change di
   const priorTasks = structuredClone(Store.tasksArr);
   const priorSetup = Store.setupSnapshot;
 
-  globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot({
     plant,

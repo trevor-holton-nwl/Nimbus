@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-import server.setup.data as setup_data
+import backend.setup.data as setup_data
 
 
 DEFINITION = {

@@ -1,4 +1,4 @@
-// Tests for web/priority-lists/viewers.mts (ColorWheelViewer,
+// Tests for frontend/priority-lists/viewers.mts (ColorWheelViewer,
 // PriorityListViewer). Split from tests/modules/schedule-workbench.test.mjs
 // (Phase P3 of docs/architecture/domain-refactor-plan.md, which split that
 // mega-module into 6 domain files) to mirror the new file layout. The
@@ -8,7 +8,7 @@
 // across four different new files.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ColorWheelViewer, PriorityListViewer } from '../../../web/priority-lists/viewers.mjs';
+import { ColorWheelViewer, PriorityListViewer } from '../../../frontend/priority-lists/viewers.mjs';
 
 test('ColorWheelViewer exposes the documented public API', () => {
   assert.equal(typeof ColorWheelViewer.open, 'function');

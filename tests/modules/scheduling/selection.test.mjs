@@ -4,8 +4,8 @@
 // optimization/sandbox.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../../../web/platform/store.mjs';
-import { Selection } from '../../../web/scheduling/selection.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Selection } from '../../../frontend/scheduling/selection.mjs';
 
 test('Selection tracks ids and selectedRefs() resolves plant per id', () => {
   Store.setTasks([{ id: 'sel1', plant: '5512', MACHINE: 'L1', RUN_TIME: '1' }], 'unit-test');

@@ -1,4 +1,4 @@
-// Tests for web/optimization/engine.mjs, split from
+// Tests for frontend/optimization/engine.mjs, split from
 // tests/modules/schedule-services.test.mjs (Phase P4 of
 // docs/architecture/domain-refactor-plan.md, which split schedule-services.mts
 // into 4 domain files: optimization/scheduler-contract.mjs,
@@ -19,8 +19,8 @@
 // identical bootstrap. Two tests spawn a child Node process running an
 // inline module script (`spawnSync` below) to probe optimizer behavior in a
 // clean module cache; that child script's own `import()` calls were updated
-// to the new file paths (./web/platform/store.mjs,
-// ./web/optimization/engine.mjs) — a plain string inside a template
+// to the new file paths (./frontend/platform/store.mjs,
+// ./frontend/optimization/engine.mjs) — a plain string inside a template
 // literal, not a static import, so `npm run build` cannot catch a stale path
 // there; only a whole-tree text grep for the old filenames would.
 import { test } from 'node:test';
@@ -30,12 +30,12 @@ import { createRequire } from 'node:module';
 import {
   Engine, snapshotSchedule, deriveSetupObservation,
   MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
-} from '../../../web/optimization/engine.mjs';
-import { Store } from '../../../web/platform/store.mjs';
-import { Toast, Util, Config } from '../../../web/platform/foundation.mjs';
+} from '../../../frontend/optimization/engine.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
 
 const require = createRequire(import.meta.url);
-globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
 // Engine.runAndApply's early-return guards (no tasks / no plant selected) call
 // Toast.show(Util.t(...)) — platform/foundation.mjs's Toast/Util reference
@@ -429,11 +429,11 @@ test('changeover advances to a future order pull-forward floor instead of stalli
   const child = String.raw`
     import { createRequire } from 'node:module';
     const require = createRequire(import.meta.url);
-    globalThis.NimbusComputeCore = require('./web/nimbus-compute-core.js');
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
     globalThis.window = {};
     globalThis.document = { getElementById: () => null };
-    const { Store } = await import('./web/platform/store.mjs');
-    const { Engine, snapshotSchedule } = await import('./web/optimization/engine.mjs');
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./frontend/optimization/engine.mjs');
     const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 18]]));
     const now = new Date('2035-08-06T08:00:00');
     Store.setMasterData({
@@ -496,11 +496,11 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
   const child = String.raw`
     import { createRequire } from 'node:module';
     const require = createRequire(import.meta.url);
-    globalThis.NimbusComputeCore = require('./web/nimbus-compute-core.js');
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
     globalThis.window = {};
     globalThis.document = { getElementById: () => null };
-    const { Store } = await import('./web/platform/store.mjs');
-    const { Engine, snapshotSchedule } = await import('./web/optimization/engine.mjs');
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./frontend/optimization/engine.mjs');
     const closed = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, null]));
     const now = new Date('2035-08-06T08:00:00');
     Store.setMasterData({
@@ -1341,7 +1341,7 @@ test('Engine.runAndApply respects explicit respectFirmed/respectCalendar options
 //
 // NOTE on `Store.setMasterData(...)` vs. the plan's illustrative
 // `Store.masterData = {...}`: `masterData` is a getter-ONLY accessor on Store
-// (web/platform/store.mts) — a bare assignment throws "Cannot set property
+// (frontend/platform/store.mts) — a bare assignment throws "Cannot set property
 // masterData of #<Object> which has only a getter" under ESM strict mode.
 // `setMasterData` is the real public setter (and the one Persistence itself
 // uses), so these tests go through it. Appended at the END of the file on
@@ -1376,7 +1376,7 @@ test('flattenConstraints falls back to CONSTRAINT_CATALOG order when plant has n
 // Scheduling Constraints UI made nesting reachable, because a nested key fell
 // through to the `key === 'colorWheel'` default. Its one real consumer is
 // OptimizeDialog's pre-run "no color wheel configured" confirm
-// (web/schedule-workbench.mts) — a UI nag, never a sequencing decision
+// (frontend/schedule-workbench.mts) — a UI nag, never a sequencing decision
 // (_sortTerms goes through flattenConstraints, which has always walked the
 // tree). Semantics must stay identical to flattenConstraints': a disabled node
 // takes its whole subtree with it, and any reachable enabled occurrence counts.

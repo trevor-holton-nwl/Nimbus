@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSetup, buildSetupResolutionIndex } from '../../web/setup/setup-domain.mjs';
+import { resolveSetup, buildSetupResolutionIndex } from '../../frontend/setup/setup-domain.mjs';
 
 // ---------------------------------------------------------------------------
 // Seeded deterministic PRNG (mulberry32) — no Math.random flakiness.

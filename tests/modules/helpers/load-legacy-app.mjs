@@ -6,50 +6,50 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
 import { createRequire } from 'node:module';
-import * as foundation from '../../../web/platform/foundation.mjs';
+import * as foundation from '../../../frontend/platform/foundation.mjs';
 // schedule-state.mjs, schedule-services.mjs, and schedule-data.mjs were split
 // in Phase P4 of docs/architecture/domain-refactor-plan.md into 10 domain
 // files — reconstruct the same __NIMBUS_STATE/__NIMBUS_SERVICES/
 // __NIMBUS_DATA bridge shapes app-entry.mjs builds, so this VM harness stays
 // a faithful mirror of the real boot path (same pattern already used below
 // for __NIMBUS_WORKBENCH/__NIMBUS_PLANT_ADMIN, Phases P2/P3).
-import { Store, UndoStack } from '../../../web/platform/store.mjs';
-import { Selection } from '../../../web/scheduling/selection.mjs';
-import { Sandbox } from '../../../web/optimization/sandbox.mjs';
-import { Calendar, candidateDefaultWorkHours } from '../../../web/calendar/calendar-engine.mjs';
-import { Compute, Alerts, scheduleAlertsForPatches, Utilization } from '../../../web/insights/services.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
+import { Selection } from '../../../frontend/scheduling/selection.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { Calendar, candidateDefaultWorkHours } from '../../../frontend/calendar/calendar-engine.mjs';
+import { Compute, Alerts, scheduleAlertsForPatches, Utilization } from '../../../frontend/insights/services.mjs';
 import {
   Engine, snapshotSchedule, applySchedulePatches, effectiveFirmedIdSet,
   deriveSetupObservation, SETUP_AWARE_DEADLINE_MS, MIN_PRODUCTIVE_SEGMENT_MINUTES,
-} from '../../../web/optimization/engine.mjs';
-import { Persistence } from '../../../web/scheduling/persistence.mjs';
-import { CalendarSync } from '../../../web/calendar/calendar-sync.mjs';
-import { Session } from '../../../web/security/session.mjs';
+} from '../../../frontend/optimization/engine.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
 // schedule-workbench.mjs was split in Phase P3 of
 // docs/architecture/domain-refactor-plan.md into 6 domain files — reconstruct
 // the same __NIMBUS_WORKBENCH bridge shape app-entry.mjs builds, so this VM
 // harness stays a faithful mirror of the real boot path.
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../web/scheduling/gantt.mjs';
-import { Table, Inspector, ContextMenu, Printer } from '../../../web/scheduling/orders.mjs';
-import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../web/optimization/optimize-ui.mjs';
-import { Dashboard, AlertsUIAdapter } from '../../../web/insights/insights-ui.mjs';
-import { ColorWheelViewer, PriorityListViewer } from '../../../web/priority-lists/viewers.mjs';
-import { EditCalendar } from '../../../web/calendar/edit-calendar.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../frontend/scheduling/gantt.mjs';
+import { Table, Inspector, ContextMenu, Printer } from '../../../frontend/scheduling/orders.mjs';
+import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../frontend/optimization/optimize-ui.mjs';
+import { Dashboard, AlertsUIAdapter } from '../../../frontend/insights/insights-ui.mjs';
+import { ColorWheelViewer, PriorityListViewer } from '../../../frontend/priority-lists/viewers.mjs';
+import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
 // plant-and-administration.mjs was split in Phase P2 of
 // docs/architecture/domain-refactor-plan.md into 9 domain files — reconstruct
 // the same __NIMBUS_PLANT_ADMIN bridge shape app-entry.mjs builds, so this VM
 // harness stays a faithful mirror of the real boot path.
-import { SetupAdmin } from '../../../web/setup/setup-admin.mjs';
-import { CalendarUI } from '../../../web/calendar/calendar-admin.mjs';
-import { Plant, ProdLines, MasterData } from '../../../web/master-data/admin-ui.mjs';
-import { PriorityListMapping } from '../../../web/priority-lists/mapping.mjs';
-import { LaborPlanning } from '../../../web/labor/labor-planning.mjs';
-import { AdminCockpit, SystemConfig } from '../../../web/admin-ops/admin-ui.mjs';
-import { Interface } from '../../../web/integration/sap-interface-ui.mjs';
-import { Security } from '../../../web/security/security-admin.mjs';
-import { setActiveTabResolvers } from '../../../web/shell/tab-resolvers.mjs';
-import * as shell from '../../../web/shell/application-shell.mjs';
-import * as materialGrids from '../../../web/master-data/material-grids.mjs';
+import { SetupAdmin } from '../../../frontend/setup/setup-admin.mjs';
+import { CalendarUI } from '../../../frontend/calendar/calendar-admin.mjs';
+import { Plant, ProdLines, MasterData } from '../../../frontend/master-data/admin-ui.mjs';
+import { PriorityListMapping } from '../../../frontend/priority-lists/mapping.mjs';
+import { LaborPlanning } from '../../../frontend/labor/labor-planning.mjs';
+import { AdminCockpit, SystemConfig } from '../../../frontend/admin-ops/admin-ui.mjs';
+import { Interface } from '../../../frontend/integration/sap-interface-ui.mjs';
+import { Security } from '../../../frontend/security/security-admin.mjs';
+import { setActiveTabResolvers } from '../../../frontend/shell/tab-resolvers.mjs';
+import * as shell from '../../../frontend/shell/application-shell.mjs';
+import * as materialGrids from '../../../frontend/master-data/material-grids.mjs';
 
 const plantAdmin = { SetupAdmin, CalendarUI, Plant, ProdLines, MasterData, PriorityListMapping, LaborPlanning, AdminCockpit, SystemConfig, Interface, Security, setActiveTabResolvers };
 const workbench = { Timeline, TimelineNav, DependencyOverlay, Table, Inspector, ContextMenu, Hierarchy, GanttFilter, Dashboard, Interaction, OptimizeDialog, OptimizerPreview, EditCalendar, ColorWheelViewer, PriorityListViewer, Printer, SandboxAdapter, AlertsUIAdapter };
@@ -111,8 +111,8 @@ function makeNodeList(items) {
  *             fetchCalls: Array, workerMessages: Array }}
  */
 export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {} } = {}) {
-  const appSrc  = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
-  const corePath = resolve(ROOT, 'web/nimbus-compute-core.js');
+  const appSrc  = readFileSync(resolve(ROOT, 'frontend/app.js'), 'utf8');
+  const corePath = resolve(ROOT, 'frontend/nimbus-compute-core.js');
   const NimbusComputeCore = _require(corePath);
 
   let domReadyFn  = null;
@@ -258,7 +258,7 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
 
   // app.js now throws unless the foundation/state/services/data/workbench/
   // plant-admin/shell/material-grids bridges are populated before it runs (see
-  // web/app-entry.mjs) — pre-populate them here just like a real page load.
+  // frontend/app-entry.mjs) — pre-populate them here just like a real page load.
   sandbox.window.__NIMBUS_FOUNDATION = foundation;
   sandbox.window.__NIMBUS_STATE = { Store, UndoStack, Selection, Sandbox };
   sandbox.window.__NIMBUS_SERVICES = {

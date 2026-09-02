@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const LOCALES_DIR = join(__dirname, '..', '..', 'web', 'locales');
+const LOCALES_DIR = join(__dirname, '..', '..', 'frontend', 'locales');
 const LOCALES = ['en', 'de', 'es', 'fr', 'pt'];
 // Locale entries are usually one per line, but valid object literals may keep
 // several short translations together; key discovery must not mistake that

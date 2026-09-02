@@ -1,11 +1,11 @@
-// Tests for web/setup/setup-admin.mjs (SetupAdmin).
+// Tests for frontend/setup/setup-admin.mjs (SetupAdmin).
 // Split from tests/modules/plant-and-administration.test.mjs in Phase P2 of
 // docs/architecture/domain-refactor-plan.md (plant-and-administration.mts
 // was split into 9 domain files; this mirrors that split).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SetupAdmin } from '../../../web/setup/setup-admin.mjs';
+import { SetupAdmin } from '../../../frontend/setup/setup-admin.mjs';
 
 test('SetupAdmin keeps read, copy, and export available to non-writers', () => {
   // Regression target: hiding the entire matrix UI from a scheduler/preview
@@ -41,7 +41,7 @@ test('setup signature editor exposes accessible removal and a version suffix sta
   // tests/modules/master-data/admin-ui.test.mjs, since Plant and SetupAdmin
   // split into different files in Phase P2 of
   // docs/architecture/domain-refactor-plan.md.)
-  const source = readFileSync(new URL('../../../web/setup/setup-admin.mts', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8');
   assert.match(source, /data-setup-field-remove=.*aria-label=/);
   assert.match(source, /data-setup-field-remove=.*definitionFields\.length === 1 \? 'disabled' : ''/);
   assert.doesNotMatch(source, /data-setup-signature-edit[^>]*>[^<]*v\$\{version/);

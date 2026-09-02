@@ -71,9 +71,9 @@ module.exports = [
     ],
   },
   {
-    // Frontend scripts + locale string maps (live under web/ — the dedicated static
+    // Frontend scripts + locale string maps (live under frontend/ — the dedicated static
     // asset directory served by brain.py's StaticFiles mount, see CQ-1 Phase 0 Task 4).
-    files: ['web/app.js', 'web/nimbus-intelligence.js', 'web/locales/*.js'],
+    files: ['frontend/app.js', 'frontend/nimbus-intelligence.js', 'frontend/locales/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -92,7 +92,7 @@ module.exports = [
     // know about `declare global` ambient types (e.g. NimbusComputeCore from
     // nimbus-compute-core.d.ts) and would false-positive on them — tsc's own `typecheck`
     // script already covers undefined-variable detection with full ambient-type awareness.
-    files: ['web/nimbus-worker.ts'],
+    files: ['frontend/nimbus-worker.ts'],
     languageOptions: {
       parser: tseslint.parser,
       ecmaVersion: 2023,
@@ -110,7 +110,7 @@ module.exports = [
   {
     // TypeScript ambient declaration files (.d.ts) — pure type information, never emitted
     // as JS. sourceType 'module' since they use `export {}` to allow `declare global`.
-    files: ['web/**/*.d.ts'],
+    files: ['frontend/**/*.d.ts'],
     languageOptions: {
       parser: tseslint.parser,
       ecmaVersion: 2023,
@@ -127,7 +127,7 @@ module.exports = [
   {
     // Shared compute core (UMD): loaded in the worker (self/importScripts), the browser
     // (window), and Node tests (module.exports) — so it needs worker + `module` globals.
-    files: ['web/nimbus-compute-core.js'],
+    files: ['frontend/nimbus-compute-core.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'script',
@@ -156,9 +156,9 @@ module.exports = [
     rules: SHARED_RULES,
   },
   {
-    // Browser ESM modules under web/ — browser environment. Also covers the Phase 0
-    // fixture web/_static-delivery-check.mjs; Phase 1+ will add real module entries here.
-    files: ['web/**/*.mjs'],
+    // Browser ESM modules under frontend/ — browser environment. Also covers the Phase 0
+    // fixture frontend/_static-delivery-check.mjs; Phase 1+ will add real module entries here.
+    files: ['frontend/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
@@ -167,11 +167,11 @@ module.exports = [
     rules: SHARED_RULES,
   },
   {
-    // Browser TypeScript modules under web/ (docs/archive/typescript_migration.md Phase 1+ —
+    // Browser TypeScript modules under frontend/ (docs/archive/typescript_migration.md Phase 1+ —
     // no real files yet as of Phase 0; this block is ready for schedule-state.mts etc.
     // as each phase converts a module). Same reasoning as the nimbus-worker.ts block
     // above for the no-undef/no-unused-vars swap.
-    files: ['web/**/*.mts'],
+    files: ['frontend/**/*.mts'],
     languageOptions: {
       parser: tseslint.parser,
       ecmaVersion: 2023,

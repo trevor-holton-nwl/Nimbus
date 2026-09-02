@@ -1,12 +1,12 @@
-// Tests for web/security/session.mjs, split from
+// Tests for frontend/security/session.mjs, split from
 // tests/modules/schedule-data.test.mjs (Phase P4 of
 // docs/architecture/domain-refactor-plan.md, which split schedule-data.mts
 // into 3 domain files: scheduling/persistence.mjs, calendar/calendar-sync.mjs,
 // security/session.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Session } from '../../../web/security/session.mjs';
-import { Store } from '../../../web/platform/store.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {

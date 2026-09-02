@@ -4,8 +4,8 @@
 // scheduling/selection.mjs, optimization/sandbox.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store, UndoStack } from '../../../web/platform/store.mjs';
-import { Selection } from '../../../web/scheduling/selection.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
+import { Selection } from '../../../frontend/scheduling/selection.mjs';
 
 test('Store.rev() starts at 0 and increments on every mutation', () => {
   const before = Store.rev();

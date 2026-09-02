@@ -1,4 +1,4 @@
-// Tests for web/insights/services.mjs (Compute, Alerts, Utilization,
+// Tests for frontend/insights/services.mjs (Compute, Alerts, Utilization,
 // scheduleAlertsForPatches), split from tests/modules/schedule-services.test.mjs
 // (Phase P4 of docs/architecture/domain-refactor-plan.md, which split
 // schedule-services.mts into 4 domain files: optimization/scheduler-contract.mjs,
@@ -23,12 +23,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Compute, Alerts, Utilization, scheduleAlertsForPatches } from '../../../web/insights/services.mjs';
-import { Engine } from '../../../web/optimization/engine.mjs';
-import { Store } from '../../../web/platform/store.mjs';
+import { Compute, Alerts, Utilization, scheduleAlertsForPatches } from '../../../frontend/insights/services.mjs';
+import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
 
 const require = createRequire(import.meta.url);
-globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
 // Engine.autoReflow/runAndApply's early-return guards call Toast.show(Util.t(...)) —
 // platform/foundation.mjs's Toast/Util reference bare `window`/`document`, same

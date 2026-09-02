@@ -26,7 +26,7 @@ os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import brain  # noqa: E402
 import master_data as md  # noqa: E402
-import server.setup.data as setup_data  # noqa: E402
+import backend.setup.data as setup_data  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +155,8 @@ def test_row_order_sentinel_forces_row_order_over_an_auto_detectable_column():
 
 def test_row_order_sentinel_value_matches_the_frontend_option():
     """Must stay in sync with ROW_ORDER_SENTINEL in
-    web/plant-and-administration.mts and the static <option value> in
-    web/index.html's #pl-mapping-rank-col."""
+    frontend/plant-and-administration.mts and the static <option value> in
+    frontend/index.html's #pl-mapping-rank-col."""
     assert brain.ROW_ORDER_SENTINEL == "__row_order__"
 
 
@@ -1092,7 +1092,7 @@ def test_priority_rank_maps_endpoint_empty_for_unknown_plant(client):
 
 def test_priority_rank_maps_rejects_a_plant_outside_the_users_scope(client, monkeypatch):
     """403, not a silent 200 with another plant's tooling ranks."""
-    import server.security.auth as auth
+    import backend.security.auth as auth
     monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["1006"])
     monkeypatch.setitem(brain.PLANT_LISTS, "5512", {"": {"colorWheel": {"RED": 1.0}}})
     r = client.get("/priority-rank-maps?plant=5512",
@@ -1107,7 +1107,7 @@ def test_priority_rank_maps_allows_a_plant_inside_the_users_scope(client, monkey
     coupled frontend change: Persistence.loadPriorityRankMaps had to move from a
     bare fetch() to Util.fetchTraced so the x-user-email header this reads is
     actually sent. Without that, this path 403s for every scoped user."""
-    import server.security.auth as auth
+    import backend.security.auth as auth
     monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["5512", "1006"])
     monkeypatch.setitem(brain.PLANT_LISTS, "5512", {"": {"colorWheel": {"RED": 1.0}}})
     r = client.get("/priority-rank-maps?plant=5512",

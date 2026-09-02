@@ -1,4 +1,4 @@
-// Tests for web/admin-tables.mjs — Workstream E's universal table browser.
+// Tests for frontend/admin-tables.mjs — Workstream E's universal table browser.
 //
 // Only the two pure helpers are exercised here (paste-splitting and
 // query-param construction) — everything else in the module is DOM-driven
@@ -10,7 +10,7 @@
 // touches document/window).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AdminTables, parseFilterPasteText, buildTableQueryParams } from '../../web/master-data/admin-tables.mjs';
+import { AdminTables, parseFilterPasteText, buildTableQueryParams } from '../../frontend/master-data/admin-tables.mjs';
 
 test('parseFilterPasteText splits on newline, comma, and tab', () => {
   assert.deepEqual(parseFilterPasteText('A\nB\tC,D'), ['A', 'B', 'C', 'D']);

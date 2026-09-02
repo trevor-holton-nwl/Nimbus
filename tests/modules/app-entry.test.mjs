@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bootEntry, runCacheBustGuard } from '../../web/app-entry.mjs';
+import { bootEntry, runCacheBustGuard } from '../../frontend/app-entry.mjs';
 
 function makeStorage(seed = {}) {
   const store = { ...seed };

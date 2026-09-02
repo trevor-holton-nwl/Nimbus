@@ -15,9 +15,9 @@ import { scanLegacySurface, discoverModuleSources } from '../../scripts/legacy-s
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '../..');
 
-const htmlSource = readFileSync(resolve(ROOT, 'web/index.html'), 'utf8');
-const intelligenceSource = readFileSync(resolve(ROOT, 'web/nimbus-intelligence.js'), 'utf8');
-const appSource = readFileSync(resolve(ROOT, 'web/app.js'), 'utf8');
+const htmlSource = readFileSync(resolve(ROOT, 'frontend/index.html'), 'utf8');
+const intelligenceSource = readFileSync(resolve(ROOT, 'frontend/nimbus-intelligence.js'), 'utf8');
+const appSource = readFileSync(resolve(ROOT, 'frontend/app.js'), 'utf8');
 const moduleSources = discoverModuleSources(ROOT);
 
 const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource, moduleSources });

@@ -1,14 +1,14 @@
 // CQ-1 static asset boundary checker.
 //
-// Guards two invariants for the dedicated web/ frontend source directory:
-//   1. Every local relative import reachable from any .mjs file under web/
-//      resolves to an existing file that itself stays inside web/ (no escape
+// Guards two invariants for the dedicated frontend/ frontend source directory:
+//   1. Every local relative import reachable from any .mjs file under frontend/
+//      resolves to an existing file that itself stays inside frontend/ (no escape
 //      to the repo root where brain.py/db.py/schema.sql live).
-//   2. No backend source/config filename appears anywhere under web/.
+//   2. No backend source/config filename appears anywhere under frontend/.
 //
 // Usage:
 //   import { collectStaticImportClosure, findForbiddenFiles } from './scripts/check-static-assets.mjs';
-//   node scripts/check-static-assets.mjs   # CLI: checks the real web/ tree, exit 1 on any violation
+//   node scripts/check-static-assets.mjs   # CLI: checks the real frontend/ tree, exit 1 on any violation
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname, extname, relative, sep } from 'node:path';
@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(__dirname, '..');
-export const WEB_DIR = resolve(ROOT, 'web');
+export const WEB_DIR = resolve(ROOT, 'frontend');
 
 // Local relative specifiers only — `from './x'` / `from '../x'`, side-effect
 // `import '...'`, and dynamic `import('...')`. Bare specifiers (npm packages)
@@ -44,7 +44,7 @@ function localSpecifiers(source) {
 
 /**
  * Walk the local-import graph starting at entryPath, requiring every reachable
- * file to exist and stay inside `root` (defaults to the real web/ directory).
+ * file to exist and stay inside `root` (defaults to the real frontend/ directory).
  *
  * @param {string} entryPath
  * @param {{ root?: string }} [opts]
@@ -84,7 +84,7 @@ const FORBIDDEN_BASENAMES = new Set([
 ]);
 
 // ...and by extension, as defense-in-depth: the Dockerfile now ships everything
-// under web/ verbatim (COPY --from=webbuild /build/web/ /app/web/, no per-file
+// under frontend/ verbatim (COPY --from=frontendbuild /build/frontend/ /app/frontend/, no per-file
 // allowlist), so a stray non-frontend file that doesn't match FORBIDDEN_BASENAMES
 // exactly — a renamed backend copy (db_old.py), a scratch script, a data dump —
 // would otherwise ship to the public mount undetected. Extending this list is a
@@ -92,7 +92,7 @@ const FORBIDDEN_BASENAMES = new Set([
 //
 // .ts/.mts: TypeScript source (docs/archive/typescript_migration.md) compiles in place next
 // to its own .js/.mjs output, so both the source and the compiled file legitimately
-// coexist under web/ and both ship in the image — this is an internal single-container
+// coexist under frontend/ and both ship in the image — this is an internal single-container
 // tool, not a public artifact, so shipping readable source alongside its own compiled
 // output is a non-issue.
 const ALLOWED_EXTENSIONS = new Set([
@@ -116,7 +116,7 @@ export function findForbiddenFiles(dir) {
     }
     const ext = extname(entry.name).toLowerCase();
     // .md is not in ALLOWED_EXTENSIONS (broad .md would leak arbitrary docs
-    // placed anywhere under web/) — but a future per-domain web/<domain>/CLAUDE.md
+    // placed anywhere under frontend/) — but a future per-domain frontend/<domain>/CLAUDE.md
     // (P6; Claude Code's ancestor-directory doc auto-load) is allowed by exact
     // basename only. brain.py's block_markdown_mw still 404s any *.md request
     // at the HTTP layer regardless, so this carve-out never actually serves it.
@@ -155,7 +155,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
 
   for (const rel of REQUIRED_ASSETS) {
     if (!existsSync(resolve(WEB_DIR, rel))) {
-      console.error(`Missing expected static asset: web/${rel}`);
+      console.error(`Missing expected static asset: frontend/${rel}`);
       ok = false;
     }
   }

@@ -1,16 +1,16 @@
-// Tests for web/optimization/optimize-ui.mts (OptimizeDialog, OptimizerPreview,
+// Tests for frontend/optimization/optimize-ui.mts (OptimizeDialog, OptimizerPreview,
 // SandboxAdapter). Split from tests/modules/schedule-workbench.test.mjs (Phase
 // P3 of docs/architecture/domain-refactor-plan.md, which split that
 // mega-module into 6 domain files) to mirror the new file layout.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../web/optimization/optimize-ui.mjs';
-import { Timeline } from '../../../web/scheduling/gantt.mjs';
-import { Store } from '../../../web/platform/store.mjs';
-import { Util, ErrorLog } from '../../../web/platform/foundation.mjs';
-import { Alerts, Utilization } from '../../../web/insights/services.mjs';
-import { Persistence } from '../../../web/scheduling/persistence.mjs';
+import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../frontend/optimization/optimize-ui.mjs';
+import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Util, ErrorLog } from '../../../frontend/platform/foundation.mjs';
+import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -42,8 +42,8 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
 
 test('combined is no longer an optimizer strategy users can select', () => {
   const { readFileSync } = require('node:fs');
-  const types = readFileSync(new URL('../../../web/platform/types.mts', import.meta.url), 'utf8');
-  const dialogMarkup = readFileSync(new URL('../../../web/index.html', import.meta.url), 'utf8');
+  const types = readFileSync(new URL('../../../frontend/platform/types.mts', import.meta.url), 'utf8');
+  const dialogMarkup = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
 
   assert.doesNotMatch(types, /'combined'/,
     'the public optimizer-mode type must not expose the retired strategy');
@@ -226,7 +226,7 @@ test('OptimizerPreview computes KPI utilization against detached calendar and pl
     return 1;
   };
   globalThis.NIMBUS = {};
-  globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
   Alerts.scheduleRecompute = () => {};
   Util.setUtilizationResolver((from, days, tasks, snapshot) =>
     Utilization.computeMatrix(from, days, tasks, snapshot));

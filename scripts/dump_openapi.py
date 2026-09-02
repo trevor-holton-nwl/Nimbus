@@ -1,7 +1,7 @@
 """Dump brain.py's live FastAPI OpenAPI schema to stdout as JSON.
 
 Feeds `npm run generate:api-types` (see package.json), which pipes this into
-`openapi-typescript` to produce web/types/api-generated.d.mts.
+`openapi-typescript` to produce frontend/types/api-generated.d.mts.
 
 Sets NIMBUS_PG_POOL_MIN=0 BEFORE importing brain/db — the same guard
 tests/conftest.py uses — so this runs on a machine with no Postgres running.

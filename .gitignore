@@ -10,45 +10,45 @@ node_modules/
 
 # TypeScript compiled output — compiled in place next to its .ts/.mts source
 # (see docs/archive/typescript_migration.md). Listed by specific filename, not a blanket
-# *.js/*.mjs glob, so hand-written fixtures like web/_static-delivery-check.mjs
+# *.js/*.mjs glob, so hand-written fixtures like frontend/_static-delivery-check.mjs
 # are never accidentally ignored.
-web/nimbus-worker.js
-web/platform/types.mjs
-web/platform/foundation.mjs
-web/platform/store.mjs
-web/scheduling/selection.mjs
-web/optimization/sandbox.mjs
-web/optimization/scheduler-contract.mjs
-web/optimization/engine.mjs
-web/calendar/calendar-engine.mjs
-web/insights/services.mjs
-web/scheduling/persistence.mjs
-web/calendar/calendar-sync.mjs
-web/security/session.mjs
-web/scheduling/gantt.mjs
-web/scheduling/orders.mjs
-web/optimization/optimize-ui.mjs
-web/insights/insights-ui.mjs
-web/priority-lists/viewers.mjs
-web/calendar/edit-calendar.mjs
-web/shell/application-shell.mjs
-web/master-data/material-grids.mjs
-web/setup/setup-domain.mjs
-web/optimization/setup-scheduler.mjs
-web/master-data/admin-tables.mjs
-web/shell/tab-resolvers.mjs
-web/setup/setup-admin.mjs
-web/calendar/calendar-admin.mjs
-web/master-data/admin-ui.mjs
-web/priority-lists/mapping.mjs
-web/labor/labor-planning.mjs
-web/admin-ops/admin-ui.mjs
-web/integration/sap-interface-ui.mjs
-web/security/security-admin.mjs
+frontend/nimbus-worker.js
+frontend/platform/types.mjs
+frontend/platform/foundation.mjs
+frontend/platform/store.mjs
+frontend/scheduling/selection.mjs
+frontend/optimization/sandbox.mjs
+frontend/optimization/scheduler-contract.mjs
+frontend/optimization/engine.mjs
+frontend/calendar/calendar-engine.mjs
+frontend/insights/services.mjs
+frontend/scheduling/persistence.mjs
+frontend/calendar/calendar-sync.mjs
+frontend/security/session.mjs
+frontend/scheduling/gantt.mjs
+frontend/scheduling/orders.mjs
+frontend/optimization/optimize-ui.mjs
+frontend/insights/insights-ui.mjs
+frontend/priority-lists/viewers.mjs
+frontend/calendar/edit-calendar.mjs
+frontend/shell/application-shell.mjs
+frontend/master-data/material-grids.mjs
+frontend/setup/setup-domain.mjs
+frontend/optimization/setup-scheduler.mjs
+frontend/master-data/admin-tables.mjs
+frontend/shell/tab-resolvers.mjs
+frontend/setup/setup-admin.mjs
+frontend/calendar/calendar-admin.mjs
+frontend/master-data/admin-ui.mjs
+frontend/priority-lists/mapping.mjs
+frontend/labor/labor-planning.mjs
+frontend/admin-ops/admin-ui.mjs
+frontend/integration/sap-interface-ui.mjs
+frontend/security/security-admin.mjs
 
 # Intermediate OpenAPI JSON dump (regenerated every `npm run generate:api-types`
-# run) — the generated web/types/api-generated.d.mts it feeds IS committed.
-web/types/.openapi-schema.json
+# run) — the generated frontend/types/api-generated.d.mts it feeds IS committed.
+frontend/types/.openapi-schema.json
 
 # Python
 __pycache__/

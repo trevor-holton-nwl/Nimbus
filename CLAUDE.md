@@ -8,25 +8,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Domain Directory
 
-The codebase is organized into `web/<domain>/` (frontend) and `server/<domain>/` (backend routers) folders. Each domain has a `CLAUDE.md` on both sides — substantive on whichever side carries the load-bearing invariants (both sides for scheduling and setup), a 3-line pointer on the other. `brain.py` is now a ~700-line thin assembly — middleware, lifespan, `api.include_router(...)` for nine domain routers, then the `StaticFiles` mount last. `db.py`/`master_data.py` stay unsplit at repo root; see "Deferred" below.
+The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<domain>/` (backend routers) folders. Each domain has a `CLAUDE.md` on both sides — substantive on whichever side carries the load-bearing invariants (both sides for scheduling and setup), a 3-line pointer on the other. `frontend/CLAUDE.md` and `backend/CLAUDE.md` sit one level above the domain files and hold side-wide conventions (build model, cross-cutting hazards, back-compat re-exports) that don't belong to any one domain. `brain.py` is now a ~700-line thin assembly — middleware, lifespan, `api.include_router(...)` for nine domain routers, then the `StaticFiles` mount last. `db.py`/`master_data.py` stay unsplit at repo root; see "Deferred" below.
 
 | Domain | Folder(s) | Covers | Substantive side |
 |---|---|---|---|
-| Platform | `web/platform/` | `Config`/`Util`/`Toast`/`Modal`/`ErrorLog` + `Store`, the reactive source of truth every domain subscribes to | `web/platform/` |
-| Scheduling | `web/scheduling/` + `server/scheduling/` | Gantt, orders grid, drag/keyboard interaction, explicit save; `/tasks` + the `xmin`/`base_version` concurrency contract | both sides |
-| Optimization | `web/optimization/` | `Engine.runAndApply` dispatch, setup-aware evaluator, Optimize dialog/preview, Sandbox what-if | `web/optimization/` |
-| Setup | `web/setup/` + `server/setup/` | Changeover signatures, matrices, machine states, overrides (observation-only); Setup Matrix admin | both sides |
-| Calendar | `web/calendar/` + `server/calendars/` | Working hours, blackouts, capacity-math engine (mirrored in `nimbus-compute-core.js`) | `web/calendar/` |
-| Insights | `web/insights/` | Alerts, Utilization matrix, Dashboard KPIs, the off-thread `Compute` worker client | `web/insights/` |
-| Priority Lists | `web/priority-lists/` + `server/priority_lists/` | Per-plant rankable lists (color, PRT tooling, production version) feeding optimizer sort terms | `server/priority_lists/` |
-| Master Data | `web/master-data/` + `server/master_data/` | CRUD/DDL for the nine `ALLOWED_TABLES`, cascade preview, schema export, table browser | `server/master_data/` |
-| Labor | `web/labor/` + `server/labor/` | Aggregate and line-level available-labor-hours planning | `server/labor/` |
-| Security | `web/security/` + `server/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `server/security/` |
-| Integration | `web/integration/` + `server/integration/` | Excel order/BOM ingest, purge, upload audit, missing-master-data reports, SAP sync skeleton | `server/integration/` |
-| Admin Ops | `web/admin-ops/` + `server/admin_ops/` | Diagnostics, DB maintenance, `_BACKEND_LOG` ring buffer, System Configuration | `server/admin_ops/` |
-| Shell | `web/shell/` | Boot, tab chrome, login screen, the intelligence layer, and the root-pinned classic scripts (`app.js`, `index.html`, `locales/`) | `web/shell/` |
+| Platform | `frontend/platform/` | `Config`/`Util`/`Toast`/`Modal`/`ErrorLog` + `Store`, the reactive source of truth every domain subscribes to | `frontend/platform/` |
+| Scheduling | `frontend/scheduling/` + `backend/scheduling/` | Gantt, orders grid, drag/keyboard interaction, explicit save; `/tasks` + the `xmin`/`base_version` concurrency contract | both sides |
+| Optimization | `frontend/optimization/` | `Engine.runAndApply` dispatch, setup-aware evaluator, Optimize dialog/preview, Sandbox what-if | `frontend/optimization/` |
+| Setup | `frontend/setup/` + `backend/setup/` | Changeover signatures, matrices, machine states, overrides (observation-only); Setup Matrix admin | both sides |
+| Calendar | `frontend/calendar/` + `backend/calendars/` | Working hours, blackouts, capacity-math engine (mirrored in `nimbus-compute-core.js`) | `frontend/calendar/` |
+| Insights | `frontend/insights/` | Alerts, Utilization matrix, Dashboard KPIs, the off-thread `Compute` worker client | `frontend/insights/` |
+| Priority Lists | `frontend/priority-lists/` + `backend/priority_lists/` | Per-plant rankable lists (color, PRT tooling, production version) feeding optimizer sort terms | `backend/priority_lists/` |
+| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the nine `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
+| Labor | `frontend/labor/` + `backend/labor/` | Aggregate and line-level available-labor-hours planning | `backend/labor/` |
+| Security | `frontend/security/` + `backend/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `backend/security/` |
+| Integration | `frontend/integration/` + `backend/integration/` | Excel order/BOM ingest, purge, upload audit, missing-master-data reports, SAP sync skeleton | `backend/integration/` |
+| Admin Ops | `frontend/admin-ops/` + `backend/admin_ops/` | Diagnostics, DB maintenance, `_BACKEND_LOG` ring buffer, System Configuration | `backend/admin_ops/` |
+| Shell | `frontend/shell/` | Boot, tab chrome, login screen, the intelligence layer, and the root-pinned classic scripts (`app.js`, `index.html`, `locales/`) | `frontend/shell/` |
 
-> **Compiled output is gitignored, not committed.** Each `.mts` file compiles to a `.mjs` twin next to it — `.gitignore` lists every compiled path and `git ls-files` confirms none are tracked. `npm run build` compiles fresh locally; the Dockerfile's `webbuild` stage compiles fresh before copying into the image. Nothing depends on a committed compiled artifact.
+> **Compiled output is gitignored, not committed.** Each `.mts` file compiles to a `.mjs` twin next to it — `.gitignore` lists every compiled path and `git ls-files` confirms none are tracked. `npm run build` compiles fresh locally; the Dockerfile's `frontendbuild` stage compiles fresh before copying into the image. Nothing depends on a committed compiled artifact.
 
 ## Git Branch Conventions
 
@@ -76,9 +76,9 @@ npm run typecheck      # both tsc projects, --noEmit
 npm run lint           # ESLint over app.js, intelligence, compute-core, locales, *.mjs/*.mts, scripts, tests
 npm run test           # pretest runs build; then test:legacy (tests/js) + test:modules (tests/modules)
 node --test tests/modules/setup-scheduler.test.mjs   # single JS test file
-npm run check:static-assets   # local imports from a web/ .mjs must resolve inside web/
+npm run check:static-assets   # local imports from a frontend/ .mjs must resolve inside frontend/
 npm run check:legacy-surface  # pins the app.js legacy compatibility surface
-npm run generate:api-types    # OpenAPI dump -> web/types/api-generated.d.mts
+npm run generate:api-types    # OpenAPI dump -> frontend/types/api-generated.d.mts
 
 python -m pytest tests/ -q                         # Python suite
 python -m pytest tests/test_setup_data.py::test_x  # single Python test (drop ::test_x for the file)
@@ -104,6 +104,6 @@ Postgres must be running locally. `schema.sql` is **safe to re-apply** — one-t
 - **Hosted on Azure (single-container pilot, live since 2026-06-30)** — one container on **Azure Container Apps**; FastAPI serves API and static UI from the same origin against Azure Database for PostgreSQL. Live URL: `https://ca-nimbus-dev.delightfulwater-7252cdf0.eastus2.azurecontainerapps.io/`. Resources (RG `rg-nimbus-dev`, `eastus2`): ACR `acrnimbusdev` (image `nimbus:vN`), Container App `ca-nimbus-dev`, Postgres `pgdb-nimbus-dev`/`nimbus`. **Deploy via the `promote-azure` skill** — it builds/rolls the image and applies pending `migrations/` through the ledger, never `schema.sql`. Runbook + gotchas in **`docs/DEPLOYMENT.md`**; remaining hardening in **`docs/MIGRATION.md`**. Single-replica pilot; CORS is vestigial since the UI is same-origin.
 - **When verifying a deploy, cache-bust the request** (random query param + `no-cache` header) — the corporate proxy caches keyed on URL and will serve a pre-roll response, faking a failed deploy.
 
-**Deferred:** `db.py`/`master_data.py` are intentionally not split into `server/<domain>/` — every router still imports them whole from repo root, and each affected domain's `CLAUDE.md` references them by current line range. See `docs/MIGRATION.md` → "Domain refactor — deferred backend data-layer split."
+**Deferred:** `db.py`/`master_data.py` are intentionally not split into `backend/<domain>/` — every router still imports them whole from repo root, and each affected domain's `CLAUDE.md` references them by current line range. See `docs/MIGRATION.md` → "Domain refactor — deferred backend data-layer split."
 
 > **Doc staleness is real and recurring** — several planning docs track progress with checkboxes never updated after the work shipped, and past audit reports list findings already fixed. **Verify any doc claim against live code and git log before acting on it**; this refactor's own execution hit that warning repeatedly, surfacing staleness the source plan itself didn't know about.

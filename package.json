@@ -4,9 +4,9 @@
   "private": true,
   "description": "NIMBUS — Newell Integrated Batch & Unified Scheduling. Static frontend with no runtime bundler; this package.json backs the ESLint static-analysis gate and a per-file (non-bundling) TypeScript build for modules that have been migrated — see docs/archive/typescript_migration.md.",
   "scripts": {
-    "lint": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js web/locales \"web/**/*.mjs\" \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts scripts tests/modules",
-    "lint:errors": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js web/locales \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts --quiet",
-    "lint:ci": "eslint --no-error-on-unmatched-pattern web/app.js web/nimbus-intelligence.js web/nimbus-compute-core.js \"web/**/*.mjs\" \"web/**/*.mts\" \"web/**/*.d.ts\" web/nimbus-worker.ts scripts tests/modules --quiet",
+    "lint": "eslint --no-error-on-unmatched-pattern frontend/app.js frontend/nimbus-intelligence.js frontend/nimbus-compute-core.js frontend/locales \"frontend/**/*.mjs\" \"frontend/**/*.mts\" \"frontend/**/*.d.ts\" frontend/nimbus-worker.ts scripts tests/modules",
+    "lint:errors": "eslint --no-error-on-unmatched-pattern frontend/app.js frontend/nimbus-intelligence.js frontend/nimbus-compute-core.js frontend/locales \"frontend/**/*.mts\" \"frontend/**/*.d.ts\" frontend/nimbus-worker.ts --quiet",
+    "lint:ci": "eslint --no-error-on-unmatched-pattern frontend/app.js frontend/nimbus-intelligence.js frontend/nimbus-compute-core.js \"frontend/**/*.mjs\" \"frontend/**/*.mts\" \"frontend/**/*.d.ts\" frontend/nimbus-worker.ts scripts tests/modules --quiet",
     "typecheck": "tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.worker.json && tsc -p tsconfig.json",
     "build:watch": "tsc -p tsconfig.worker.json --watch",
@@ -16,7 +16,7 @@
     "test": "npm run test:legacy && npm run test:modules",
     "check:legacy-surface": "node scripts/legacy-surface.mjs",
     "check:static-assets": "node scripts/check-static-assets.mjs",
-    "generate:api-types": "python scripts/dump_openapi.py > web/types/.openapi-schema.json && openapi-typescript web/types/.openapi-schema.json -o web/types/api-generated.d.mts"
+    "generate:api-types": "python scripts/dump_openapi.py > frontend/types/.openapi-schema.json && openapi-typescript frontend/types/.openapi-schema.json -o frontend/types/api-generated.d.mts"
   },
   "devDependencies": {
     "eslint": "^9.0.0",

@@ -1,4 +1,4 @@
-// Tests for web/scheduling/persistence.mjs, split from
+// Tests for frontend/scheduling/persistence.mjs, split from
 // tests/modules/schedule-data.test.mjs (Phase P4 of
 // docs/architecture/domain-refactor-plan.md, which split schedule-data.mts
 // into 3 domain files: scheduling/persistence.mjs, calendar/calendar-sync.mjs,
@@ -11,9 +11,9 @@
 // defined".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Persistence } from '../../../web/scheduling/persistence.mjs';
-import { Store } from '../../../web/platform/store.mjs';
-import { Config } from '../../../web/platform/foundation.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Config } from '../../../frontend/platform/foundation.mjs';
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {

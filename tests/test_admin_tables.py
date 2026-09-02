@@ -27,7 +27,7 @@ if ROOT not in sys.path:
 
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
-import server.master_data.browser as at  # noqa: E402
+import backend.master_data.browser as at  # noqa: E402
 import brain  # noqa: E402
 
 

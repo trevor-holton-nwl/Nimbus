@@ -3,15 +3,15 @@
 # frontend (same origin). Build in the cloud with:  az acr build -r <ACR> -t nimbus:v1 .
 
 # Frontend build stage: compiles the TypeScript modules tracked in
-# docs/archive/typescript_migration.md (web/*.ts, web/*.mts) to their in-place .js/.mjs
-# output. COPY web ./web happens right before RUN npm run build so Docker's layer
-# cache invalidates correctly whenever any file under web/ changes — no risk of a
+# docs/archive/typescript_migration.md (frontend/*.ts, frontend/*.mts) to their in-place .js/.mjs
+# output. COPY frontend ./frontend happens right before RUN npm run build so Docker's layer
+# cache invalidates correctly whenever any file under frontend/ changes — no risk of a
 # stale compiled-output layer surviving a source edit.
-FROM node:20-slim AS webbuild
+FROM node:20-slim AS frontendbuild
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsconfig.worker.json ./
 RUN npm ci
-COPY web ./web
+COPY frontend ./frontend
 RUN npm run build
 
 FROM python:3.12-slim
@@ -33,13 +33,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Backend code + everything else (schema.sql kept for reference; it is NOT served).
 COPY . .
 
-# The frontend now lives under web/ in the repo, so a single directory copy is
-# the whole isolation boundary: the public ingress serves ONLY /app/web, which
-# never contains brain.py / db.py / master_data.py / server/ / schema.sql. Add
-# a new frontend file under web/ and it's picked up automatically — no list to maintain.
-# Copied from the webbuild stage (not this stage's own COPY . .) so the served
+# The frontend now lives under frontend/ in the repo, so a single directory copy is
+# the whole isolation boundary: the public ingress serves ONLY /app/frontend, which
+# never contains brain.py / db.py / master_data.py / backend/ / schema.sql. Add
+# a new frontend file under frontend/ and it's picked up automatically — no list to maintain.
+# Copied from the frontendbuild stage (not this stage's own COPY . .) so the served
 # tree includes tsc's compiled output, not just the checked-in .ts/.mts sources.
-COPY --from=webbuild /build/web/ /app/web/
+COPY --from=frontendbuild /build/frontend/ /app/frontend/
 
 # Run as a non-root user; it owns the app dir and the writable color-wheel dir.
 RUN useradd --create-home --uid 10001 nimbus \

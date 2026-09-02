@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-import server.setup.data as setup_data
+import backend.setup.data as setup_data
 
 
 def test_canonical_state_key_preserves_registered_definition_order_and_values():
@@ -226,7 +226,7 @@ def test_purge_captures_observation_before_deleting_source_schedule_with_actor(m
 def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
     """The route's controlled snapshot happens before the threadpool ingest begins."""
     import brain
-    import server.integration.routes as integration_routes
+    import backend.integration.routes as integration_routes
 
     calls = []
     monkeypatch.setattr(brain.setup_data, "capture_setup_states_before_schedule_mutation",
@@ -239,7 +239,7 @@ def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
         return {"status": "ok", "inserted": 1, "updated": 0, "raw_row_count": 1,
                 "warnings": [], "lines": []}
 
-    # P5 note: upload_orders now lives in server/integration/routes.py, which
+    # P5 note: upload_orders now lives in backend/integration/routes.py, which
     # resolves its own bare `run_in_threadpool` name from ITS module globals
     # (a separate `from fastapi.concurrency import run_in_threadpool`), not
     # brain's — so the patch target moved with the function.
@@ -262,7 +262,7 @@ async def _async_bytes(value):
 
 def test_sap_sync_captures_observation_before_upserting_orders(monkeypatch):
     """SAP replacement shares the exact controlled snapshot boundary as Excel ingest."""
-    import server.integration.sap_sync as sap_sync
+    import backend.integration.sap_sync as sap_sync
 
     calls = []
     monkeypatch.setattr(sap_sync.setup_data, "capture_setup_states_before_schedule_mutation",

@@ -1,4 +1,4 @@
-// Tests for web/scheduling/gantt.mts (Timeline, TimelineNav, DependencyOverlay,
+// Tests for frontend/scheduling/gantt.mts (Timeline, TimelineNav, DependencyOverlay,
 // Hierarchy, GanttFilter, Interaction). Split from
 // tests/modules/schedule-workbench.test.mjs (Phase P3 of
 // docs/architecture/domain-refactor-plan.md, which split that mega-module
@@ -7,12 +7,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../web/scheduling/gantt.mjs';
-import { Store } from '../../../web/platform/store.mjs';
-import { Selection } from '../../../web/scheduling/selection.mjs';
-import { Util } from '../../../web/platform/foundation.mjs';
-import { Alerts } from '../../../web/insights/services.mjs';
-import { Engine } from '../../../web/optimization/engine.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../frontend/scheduling/gantt.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Selection } from '../../../frontend/scheduling/selection.mjs';
+import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Engine } from '../../../frontend/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -169,7 +169,7 @@ test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancel
     update(items) { for (const item of items) records.set(item.id, { ...records.get(item.id), ...item }); },
     remove(ids) { for (const id of ids) records.delete(String(id)); },
   };
-  globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot({
     plant,
@@ -326,7 +326,7 @@ test('Task 6 (B3b): Timeline renders a real setup-missing marker end-to-end from
   const priorTasks = structuredClone(Store.tasksArr);
   const priorSetup = Store.setupSnapshot;
 
-  globalThis.NimbusComputeCore = require('../../../web/nimbus-compute-core.js');
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot({
     plant,
@@ -378,14 +378,14 @@ test('missing setup marker is pinned to the center of a narrow setup bar', () =>
   // moved from the marker itself (absolute + translate(-50%,-50%)) to a flex
   // rule on its containing `.vis-item-content`, so the marker no longer needs
   // (or has) explicit positioning of its own.
-  const css = readFileSync(new URL('../../../web/styles.css', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
   assert.match(css, /\.vis-item\.setup-item\.setup-missing\s*\{[^}]*overflow:\s*hidden/s,
     'the setup-missing bar itself still clips overflow');
   assert.match(css, /\.vis-item\.setup-item\.setup-missing \.vis-item-content\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*justify-content:\s*center[^}]*\}/s,
     'the setup-missing item content must flex-center its children');
   assert.match(css, /\.setup-missing-marker\s*\{[^}]*position:\s*static[^}]*transform:\s*none/s,
     'the marker itself must no longer carry its own absolute/translate centring');
-  const locale = readFileSync(new URL('../../../web/locales/en.js', import.meta.url), 'utf8');
+  const locale = readFileSync(new URL('../../../frontend/locales/en.js', import.meta.url), 'utf8');
   assert.match(locale, /'ui\.setup_missing':\s*'Missing setup matrix data'/);
 });
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { App, PlantSelector, EmptyState, SessionUIAdapter, showLoginScreen, Settings } from '../../web/shell/application-shell.mjs';
+import { App, PlantSelector, EmptyState, SessionUIAdapter, showLoginScreen, Settings } from '../../frontend/shell/application-shell.mjs';
 
 test('application-shell exposes the documented public API', () => {
   assert.equal(typeof App.goto, 'function');

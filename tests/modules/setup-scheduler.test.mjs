@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { evaluateSchedule } from '../../web/optimization/engine.mjs';
-import * as SetupScheduler from '../../web/optimization/setup-scheduler.mjs';
-import { ErrorLog } from '../../web/platform/foundation.mjs';
-import { Store } from '../../web/platform/store.mjs';
-import { Engine } from '../../web/optimization/engine.mjs';
+import { evaluateSchedule } from '../../frontend/optimization/engine.mjs';
+import * as SetupScheduler from '../../frontend/optimization/setup-scheduler.mjs';
+import { ErrorLog } from '../../frontend/platform/foundation.mjs';
+import { Store } from '../../frontend/platform/store.mjs';
+import { Engine } from '../../frontend/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
-globalThis.NimbusComputeCore = require('../../web/nimbus-compute-core.js');
+globalThis.NimbusComputeCore = require('../../frontend/nimbus-compute-core.js');
 
 function task(id, runHours) {
   return {
@@ -3210,7 +3210,7 @@ test('evaluateDueDateFirst aggregates by severity: an earlier line\'s genuine \'
 
 // ---------------------------------------------------------------------------
 // Workstream B — Task 7 (B4): parity pin between Engine.flattenConstraints
-// (web/schedule-services.mts:2484, Store-coupled, drives _sortTerms/'spt') and
+// (frontend/schedule-services.mts:2484, Store-coupled, drives _sortTerms/'spt') and
 // this module's own activePriorityKeys (:641, snapshot-pure, drives
 // policyKeyForTask/'changeover'). docs/architecture/optimizer-dispatch.md's
 // "Setup-aware dispatch" section documents these as a DELIBERATE pair of

@@ -106,7 +106,7 @@ EDITABLE_MATERIAL_PLANT_ATTRS = frozenset({'prt_01', 'prt_02', 'color', 'default
 #
 # To add a rankable field: one entry here + one `orders` column
 # (schema.sql + a migration) + one line in db._stamp_order_attributes'
-# hand-written UPDATE + one web/order-field-catalog.mjs entry. No other
+# hand-written UPDATE + one frontend/order-field-catalog.mjs entry. No other
 # frontend change required — Stage 3's Scheduling Constraints UI renders from
 # GET /priority-fields, not a hardcoded list.
 #
@@ -1564,8 +1564,8 @@ def get_plant_setup_active(plant: str) -> bool:
 
 
 # Top-level pages a role's access can be toggled for. Must mirror the frontend
-# TopLevelTab union (web/types.mts) and Session.DEFAULT_PAGE_ACCESS
-# (web/security/session.mts) — keep the three in sync.
+# TopLevelTab union (frontend/types.mts) and Session.DEFAULT_PAGE_ACCESS
+# (frontend/security/session.mts) — keep the three in sync.
 PAGE_ACCESS_KEYS = ('home', 'gantt', 'labor', 'masterdata', 'admin')
 
 

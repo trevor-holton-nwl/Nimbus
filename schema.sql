@@ -165,7 +165,7 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER;
 -- non-setup-aware split allocator (Calendar.allocateRuntime) and the
 -- setup-aware placeWithSetup primitive enforce — "no split piece shorter
 -- than this, except one complete unsplit order below the boundary". Was a
--- fixed system-wide 30 in code (web/schedule-services.mjs's
+-- fixed system-wide 30 in code (frontend/schedule-services.mjs's
 -- MIN_PRODUCTIVE_SEGMENT_MINUTES); NOT NULL DEFAULT 30 here preserves that
 -- exact behavior for every existing plant until an admin opts into a
 -- different floor via the validated
@@ -1096,7 +1096,7 @@ CREATE TABLE IF NOT EXISTS priority_list (
 -- moves from a single TEXT value to a production-version-keyed table (see
 -- docs/scheduling_priority.md's "PRT_02" decision) — materializing it now
 -- costs nothing and the column name already exists as a dead entry in
--- web/order-field-catalog.mjs, so this is fixing pre-existing drift, not
+-- frontend/order-field-catalog.mjs, so this is fixing pre-existing drift, not
 -- adding new.
 -- ----------------------------------------------------------------------------
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS prt_01             TEXT;
@@ -1105,7 +1105,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS production_version TEXT;
 
 -- ----------------------------------------------------------------------------
 -- 9 SAP COOIS extract fields, upload-sourced (no post-upsert stamping like
--- prt_01/prt_02 above). Hidden by default in web/order-field-catalog.mjs;
+-- prt_01/prt_02 above). Hidden by default in frontend/order-field-catalog.mjs;
 -- an admin opts them into the grid/Inspector via System Configuration.
 -- ----------------------------------------------------------------------------
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS planned_order_initial_quantity NUMERIC;

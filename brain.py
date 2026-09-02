@@ -21,17 +21,17 @@ computed in db.make_id(). The frontend keys every drag/edit operation on these I
 Per-plant/per-line priority lists (color today; PRT_01/PRT_02/production_version
 materialized but not yet ranked — docs/scheduling_priority.md Stage 1) persist in
 the Postgres `priority_list` table and are loaded into a small in-process cache
-owned by server/priority_lists/cache.py; POST /reload refreshes that cache. There
+owned by backend/priority_lists/cache.py; POST /reload refreshes that cache. There
 is no more global fallback wheel — COLOR_FILE/GLOBAL_CW are retired.
 
 P5 (docs/architecture/domain-refactor-plan.md) reorganized this file from
 ~4,074 lines holding all 103 routes down to this thin app-assembly file: app
 construction, middleware, exception handlers, lifespan bootstrap,
 `include_router` calls for the nine domain routers, and the StaticFiles mount
-(kept last). Routes themselves now live in `server/<domain>/routes.py`; four
-whole modules moved to `server/`: `auth.py` -> `server/security/auth.py`,
-`setup_data.py` -> `server/setup/data.py`, `admin_tables.py` ->
-`server/master_data/browser.py`, `sap_sync.py` -> `server/integration/sap_sync.py`.
+(kept last). Routes themselves now live in `backend/<domain>/routes.py`; four
+whole modules moved to `backend/`: `auth.py` -> `backend/security/auth.py`,
+`setup_data.py` -> `backend/setup/data.py`, `admin_tables.py` ->
+`backend/master_data/browser.py`, `sap_sync.py` -> `backend/integration/sap_sync.py`.
 `db.py` and `master_data.py` are UNCHANGED and stay at repo root — every
 router imports them exactly as this file always did. A handful of names below
 are imported purely so `brain.<name>` keeps resolving for existing tests that
@@ -58,35 +58,35 @@ from pathlib import Path
 
 import db
 import master_data as md
-import server.integration.sap_sync as sap_sync
-import server.security.auth as auth
-import server.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
-from server.priority_lists.audit_log import COLOR_WHEEL_DIR, _migrate_audit_log
-from server.security.auth import require_admin, require_api_key  # noqa: F401 — back-compat, see below
+import backend.integration.sap_sync as sap_sync
+import backend.security.auth as auth
+import backend.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
+from backend.priority_lists.audit_log import COLOR_WHEEL_DIR, _migrate_audit_log
+from backend.security.auth import require_admin, require_api_key  # noqa: F401 — back-compat, see below
 
 # The event-log ring buffer + structured _log_event/_log_admin_action helpers,
 # the per-request-id contextvar, and the DIAGNOSTICS load-metadata bag are all
-# module state extracted in P5 to server/admin_ops/ (see that package's
+# module state extracted in P5 to backend/admin_ops/ (see that package's
 # logbuffer.py / diagnostics_state.py docstrings for why). brain.py imports
 # them directly here because its own middleware/lifespan/exception handlers
 # use them, same as before the split.
-from server.admin_ops.diagnostics_state import DIAGNOSTICS
-from server.admin_ops.logbuffer import _BACKEND_LOG, _log_admin_action, _log_event, _RID_CTX  # noqa: F401 — _BACKEND_LOG: back-compat, see below
-from server.priority_lists import cache as plcache
+from backend.admin_ops.diagnostics_state import DIAGNOSTICS
+from backend.admin_ops.logbuffer import _BACKEND_LOG, _log_admin_action, _log_event, _RID_CTX  # noqa: F401 — _BACKEND_LOG: back-compat, see below
+from backend.priority_lists import cache as plcache
 
 # Nine domain-scoped routers (docs/architecture/domain-refactor-plan.md §4).
 # Safe to import here, ahead of `api = FastAPI(...)` below — none of them (or
 # anything they import) ever imports `brain`, so there is no ordering hazard;
 # `api.include_router(...)` for each happens later, once `api` exists.
-import server.admin_ops.routes as admin_ops_routes
-import server.calendars.routes as calendars_routes
-import server.integration.routes as integration_routes
-import server.labor.routes as labor_routes
-import server.master_data.routes as master_data_routes
-import server.priority_lists.routes as priority_lists_routes
-import server.scheduling.routes as scheduling_routes
-import server.security.routes as security_routes
-import server.setup.routes as setup_routes
+import backend.admin_ops.routes as admin_ops_routes
+import backend.calendars.routes as calendars_routes
+import backend.integration.routes as integration_routes
+import backend.labor.routes as labor_routes
+import backend.master_data.routes as master_data_routes
+import backend.priority_lists.routes as priority_lists_routes
+import backend.scheduling.routes as scheduling_routes
+import backend.security.routes as security_routes
+import backend.setup.routes as setup_routes
 
 
 # =========================
@@ -133,13 +133,13 @@ _configure_logging()
 # COLOR WHEEL STORAGE — PLANT-SPECIFIC FILES
 # =============================================================================
 # Per-plant color wheels are uploaded through the Plant tab UI and stored in
-# COLOR_WHEEL_DIR (now owned by server/priority_lists/audit_log.py — see that
+# COLOR_WHEEL_DIR (now owned by backend/priority_lists/audit_log.py — see that
 # module's docstring; imported above). The disk->DB one-time backfill below is
 # lifespan-only legacy machinery kept here rather than in a domain routes.py
 # because no route calls it — only NIMBUS_CW_BACKFILL-gated startup does.
 #
 # ► IF YOU MOVE THIS APP TO A NEW MACHINE, change COLOR_WHEEL_DIR (in
-#   server/priority_lists/audit_log.py) to any folder you have read/write
+#   backend/priority_lists/audit_log.py) to any folder you have read/write
 #   access to. The folder is created automatically on startup if it does not
 #   already exist. Nothing else needs to change.
 # =============================================================================
@@ -153,18 +153,18 @@ _configure_logging()
 CW_BACKFILL_FROM_DISK = os.getenv("NIMBUS_CW_BACKFILL", "").strip().lower() in ("1", "true", "yes")
 
 # Directory holding the frontend served by the StaticFiles mount at the bottom of
-# this file. Defaults to the "web" directory next to this file — not the process's
+# this file. Defaults to the "frontend" directory next to this file — not the process's
 # current working directory — so `uvicorn brain:api` always serves the dedicated
 # frontend tree (never brain.py/db.py/schema.sql alongside it) regardless of where
 # it's launched from. NIMBUS_STATIC_DIR can still override this for the container.
-STATIC_DIR = os.getenv("NIMBUS_STATIC_DIR") or str(Path(__file__).resolve().parent / "web")
+STATIC_DIR = os.getenv("NIMBUS_STATIC_DIR") or str(Path(__file__).resolve().parent / "frontend")
 
 
 def _cw_safe_name(plant: str) -> str:
     """Sanitize a plant code to a safe filename component (uppercase alphanumeric
     + underscore). Kept only for the legacy-compat /color-wheel/* file-era disk
     helpers below — the live lookup path uses the RAW plant name instead (see
-    server/priority_lists/cache.py's PLANT_LISTS comment)."""
+    backend/priority_lists/cache.py's PLANT_LISTS comment)."""
     return re.sub(r'[^\w]', '_', plant.strip().upper())
 
 
@@ -432,9 +432,9 @@ async def request_id_mw(request: Request, call_next):
 # GET /setup/{plant} and GET /master-data/{table} are bare 2-path-segment API
 # routes with an unconstrained string parameter, registered (like every API
 # route) before the StaticFiles mount. The frontend domain reorganization
-# (Phase P1) put real static files directly inside web/setup/ and
-# web/master-data/ (e.g. web/setup/setup-domain.mjs,
-# web/master-data/admin-tables.mjs) — a request for one of those has the same
+# (Phase P1) put real static files directly inside frontend/setup/ and
+# frontend/master-data/ (e.g. frontend/setup/setup-domain.mjs,
+# frontend/master-data/admin-tables.mjs) — a request for one of those has the same
 # 2-segment shape, so Starlette's router matches it against the API route
 # first (plant="setup-domain.mjs" / table="admin-tables.mjs") and the static
 # file is never reached. A `Path(..., pattern=...)` constraint on the route
@@ -502,7 +502,7 @@ async def static_mjs_no_cache_mw(request: Request, call_next):
     return response
 
 
-# Future domain phases (P6) place a CLAUDE.md inside each web/<domain>/ folder
+# Future domain phases (P6) place a CLAUDE.md inside each frontend/<domain>/ folder
 # so Claude Code's ancestor-directory doc auto-load picks it up while editing
 # that domain's source. Those files must never be reachable through the public
 # StaticFiles mount on the live Azure pilot — this is a security boundary, so
@@ -667,15 +667,15 @@ api.include_router(admin_ops_routes.router)
 # file's `import brain` usage stays as-is, which means brain.py must keep
 # resolving these names. Each import below is otherwise unused by brain.py's
 # OWN logic; the real owner is named in the comment.
-from server.integration.routes import purge_orders, upload_orders  # noqa: E402,F401
-from server.priority_lists.cache import apply_priority_merge  # noqa: E402,F401
-from server.priority_lists.routes import ROW_ORDER_SENTINEL, _resolve_priority_list_columns  # noqa: E402,F401
-from server.scheduling.models import BulkUpdateResult, TaskDateUpdate, TaskDTO  # noqa: E402,F401
-from server.scheduling.routes import _apply_task_date_updates, _to_pydt  # noqa: E402,F401
+from backend.integration.routes import purge_orders, upload_orders  # noqa: E402,F401
+from backend.priority_lists.cache import apply_priority_merge  # noqa: E402,F401
+from backend.priority_lists.routes import ROW_ORDER_SENTINEL, _resolve_priority_list_columns  # noqa: E402,F401
+from backend.scheduling.models import BulkUpdateResult, TaskDateUpdate, TaskDTO  # noqa: E402,F401
+from backend.scheduling.routes import _apply_task_date_updates, _to_pydt  # noqa: E402,F401
 
 # `PLANT_LISTS` is NOT re-exported as a static `PLANT_LISTS = plcache.PLANT_LISTS`
 # binding here — unlike _BACKEND_LOG/DIAGNOSTICS (mutated in place, never
-# rebound), server/priority_lists/cache.py's load_priority_lists() DOES
+# rebound), backend/priority_lists/cache.py's load_priority_lists() DOES
 # reassign PLANT_LISTS wholesale (`global PLANT_LISTS; PLANT_LISTS = ...`) on
 # every /reload and at every app startup. A one-time `brain.PLANT_LISTS =
 # plcache.PLANT_LISTS` snapshot taken at import time would go stale the
@@ -692,8 +692,8 @@ def __getattr__(name: str):
 
 # `setup_data` as a bare module reference: brain.setup_data.<fn> calls and
 # monkeypatch.setattr(brain.setup_data, ...) both resolve to the SAME module
-# object as server/setup/routes.py's and server/integration/routes.py's own
-# `import server.setup.data as setup_data` (Python caches modules by name in
+# object as backend/setup/routes.py's and backend/integration/routes.py's own
+# `import backend.setup.data as setup_data` (Python caches modules by name in
 # sys.modules), so a monkeypatch made via brain.setup_data is visible to the
 # real route handlers too.
 _FE_MAX_MSG = admin_ops_routes._FE_MAX_MSG

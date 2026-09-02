@@ -1,12 +1,12 @@
-// Tests for web/calendar/calendar-sync.mjs, split from
+// Tests for frontend/calendar/calendar-sync.mjs, split from
 // tests/modules/schedule-data.test.mjs (Phase P4 of
 // docs/architecture/domain-refactor-plan.md, which split schedule-data.mts
 // into 3 domain files: scheduling/persistence.mjs, calendar/calendar-sync.mjs,
 // security/session.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CalendarSync } from '../../../web/calendar/calendar-sync.mjs';
-import { Store } from '../../../web/platform/store.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
 
 test('CalendarSync is exported alongside Persistence with its documented public API', () => {
   assert.equal(typeof CalendarSync.fetchPlantConfig, 'function');

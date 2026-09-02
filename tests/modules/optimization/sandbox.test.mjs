@@ -4,8 +4,8 @@
 // optimization/sandbox.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store, UndoStack } from '../../../web/platform/store.mjs';
-import { Sandbox } from '../../../web/optimization/sandbox.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 test('Sandbox.enter snapshots current state and flips active/mode', () => {
   Store.setTasks([{ id: 'sb1', RUN_TIME: '1' }], 'unit-test');
@@ -44,7 +44,7 @@ test('Sandbox.exit(false) emits one *:replace event per restored field, pinned s
   // Each Store.replaceX() call fires its own '<field>:replace' event, distinct
   // from the '<field>:change' events that field's normal mutators fire — see
   // docs/architecture/cq1-compatibility-inventory.md §6. Nothing subscribes to
-  // the *:replace variants today (a grep across web/ confirms it), so the extra
+  // the *:replace variants today (a grep across frontend/ confirms it), so the extra
   // events are inert — but a future consumer of 'blocks:change'/'calendar:change'/
   // etc. must also handle the '*:replace' counterpart, or it will silently miss
   // updates made during a What-If discard. This test exists so a change to that

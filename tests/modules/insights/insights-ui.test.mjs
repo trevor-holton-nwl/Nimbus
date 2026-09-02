@@ -1,13 +1,13 @@
-// Tests for web/insights/insights-ui.mts (Dashboard, AlertsUIAdapter). Split
+// Tests for frontend/insights/insights-ui.mts (Dashboard, AlertsUIAdapter). Split
 // from tests/modules/schedule-workbench.test.mjs (Phase P3 of
 // docs/architecture/domain-refactor-plan.md, which split that mega-module
 // into 6 domain files) to mirror the new file layout.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Dashboard, AlertsUIAdapter } from '../../../web/insights/insights-ui.mjs';
-import { Table } from '../../../web/scheduling/orders.mjs';
-import { Store } from '../../../web/platform/store.mjs';
-import { Alerts } from '../../../web/insights/services.mjs';
+import { Dashboard, AlertsUIAdapter } from '../../../frontend/insights/insights-ui.mjs';
+import { Table } from '../../../frontend/scheduling/orders.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Alerts } from '../../../frontend/insights/services.mjs';
 
 // Same split-realm/no-DOM situation documented in
 // tests/modules/optimization/engine.test.mjs and

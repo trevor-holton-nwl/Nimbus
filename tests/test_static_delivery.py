@@ -1,11 +1,11 @@
 """
 Static-delivery contract tests for the CQ-1 static asset boundary (Phase 0 Task 4).
 
-Frontend assets are served from a dedicated `web/` directory via the StaticFiles
+Frontend assets are served from a dedicated `frontend/` directory via the StaticFiles
 mount registered last in brain.py, independent of the process's current working
 directory. These tests pin: the UI loads at "/", `.mjs` responses carry
 `Cache-Control: no-cache`, and backend source/config are never reachable through
-the mount (they live outside `web/`, so the mount can't see them regardless of
+the mount (they live outside `frontend/`, so the mount can't see them regardless of
 where the process is launched from).
 """
 import pytest
@@ -51,7 +51,7 @@ def test_markdown_files_are_never_served(client):
 
 # GET /setup/{plant} and GET /master-data/{table} are bare 2-path-segment API
 # routes, the same shape as a request for a static file directly inside
-# web/setup/ or web/master-data/ (e.g. web/setup/setup-domain.mjs from the
+# frontend/setup/ or frontend/master-data/ (e.g. frontend/setup/setup-domain.mjs from the
 # frontend domain reorganization). Without domain_static_asset_mw in brain.py,
 # Starlette's router matches those API routes first and the static file is
 # never reached. These pin that fix using hand-written fixtures (not the
