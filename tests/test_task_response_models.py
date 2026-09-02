@@ -86,7 +86,7 @@ def test_bulk_update_result_round_trips_db_shape():
 def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch):
     captured = {}
 
-    def fake_update(items):
+    def fake_update(items, allowed_plants=None):
         captured["items"] = items
         return {
             "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
@@ -121,7 +121,7 @@ def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch)
 def test_split_schedule_update_is_forwarded_as_an_explicit_aggregate(monkeypatch):
     captured = {}
 
-    def fake_update(items):
+    def fake_update(items, allowed_plants=None):
         captured["items"] = items
         return {
             "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,

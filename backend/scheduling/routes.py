@@ -245,7 +245,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     return {"data": data, "links": links, "meta": meta}
 
 
-def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
+def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None) -> dict:
     """
     Normalize schedule/attribute edits and persist them write-through to Postgres
     in a single transaction (db.update_task_dates_bulk). No in-memory frame to
@@ -256,6 +256,11 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     counted as `invalid`; unknown ids are counted as `not_found`. Edits whose
     `base_version` no longer matches the row (a concurrent write landed first) are
     rejected and reported in `stale` unless `force` is set.
+
+    `allowed_plants` (None for an unrestricted/admin caller) is threaded through
+    to db.update_task_dates_bulk, which treats an out-of-scope row identically
+    to a nonexistent one (folded into not_found_ids) rather than leaking plant
+    membership via a distinct rejection reason.
 
     Returns { applied, persisted, failed, invalid, not_found, invalid_ids,
               not_found_ids, stale, versions }. invalid_ids/not_found_ids carry
@@ -322,7 +327,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
                 "stale": [], "versions": {}}
 
     try:
-        res = db.update_task_dates_bulk(norm)
+        res = db.update_task_dates_bulk(norm, allowed_plants=allowed_plants)
     except Exception as e:
         error_code = (db.translate_db_error(e).get("error_code")
                       if isinstance(e, psycopg.Error) else "db.error")
@@ -341,8 +346,10 @@ def _apply_task_date_updates(items: list[TaskDateUpdate]) -> dict:
     return res
 
 
-@router.post("/task/update", response_model=TaskUpdateResult)
-def update_task(task: TaskDateUpdate):
+@router.post("/task/update", response_model=TaskUpdateResult,
+             dependencies=[Depends(auth.require_authenticated)])
+def update_task(task: TaskDateUpdate,
+                 allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Update a single task's schedule/priority attributes and persist to DB.
     Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
@@ -351,7 +358,7 @@ def update_task(task: TaskDateUpdate):
     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
     client can refetch and warn uniformly with the bulk path.
     """
-    res = _apply_task_date_updates([task])
+    res = _apply_task_date_updates([task], allowed_plants=allowed_plants)
     if res.get("not_found"):
         raise HTTPException(status_code=404, detail="Task not found")
     if res.get("invalid"):
@@ -360,8 +367,9 @@ def update_task(task: TaskDateUpdate):
             "stale": res.get("stale", []), "versions": res.get("versions", {})}
 
 
-@router.post("/task/note")
-def update_task_note(payload: dict):
+@router.post("/task/note", dependencies=[Depends(auth.require_authenticated)])
+def update_task_note(payload: dict,
+                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Persist a free-text note for a single task (max 500 chars).
     Payload: { id: str, notes: str }
@@ -372,6 +380,9 @@ def update_task_note(payload: dict):
         raise HTTPException(status_code=400, detail="id required")
     if notes and len(notes) > 500:
         raise HTTPException(status_code=400, detail="Note exceeds 500 character limit")
+    plant = db.get_order_plant(task_id)
+    if plant is None or (allowed_plants is not None and plant not in allowed_plants):
+        raise HTTPException(status_code=404, detail="Task not found")
     try:
         return db.update_task_note(task_id, notes)
     except Exception as e:
@@ -383,8 +394,10 @@ def update_task_note(payload: dict):
 # Frontend calls /tasks/update (plural) with {tasks, blocks, calendars}; keep
 # /tasks/bulk_update as a flat-list alias for external tooling. Both are
 # best-effort and report per-row counts in the body (no whole-batch 4xx).
-@router.post("/tasks/update", response_model=BulkUpdateResult)
-def tasks_update(payload: TasksUpdatePayload):
+@router.post("/tasks/update", response_model=BulkUpdateResult,
+             dependencies=[Depends(auth.require_authenticated)])
+def tasks_update(payload: TasksUpdatePayload,
+                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Bulk-update task dates/priority attributes and persist to DB (one transaction).
     Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
@@ -393,7 +406,7 @@ def tasks_update(payload: TasksUpdatePayload):
     Response: { status, updated, persisted, failed, invalid, not_found,
                 invalid_ids, not_found_ids, stale, versions }
     """
-    res = _apply_task_date_updates(payload.tasks)
+    res = _apply_task_date_updates(payload.tasks, allowed_plants=allowed_plants)
     total = len(payload.tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:
@@ -421,15 +434,17 @@ def tasks_update(payload: TasksUpdatePayload):
     return out
 
 
-@router.post("/tasks/bulk_update", response_model=BulkUpdateResult)
-def bulk_update(tasks: list[TaskDateUpdate]):
+@router.post("/tasks/bulk_update", response_model=BulkUpdateResult,
+             dependencies=[Depends(auth.require_authenticated)])
+def bulk_update(tasks: list[TaskDateUpdate],
+                 allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
     Payload: [{ id, start_date?, end_date?, base_version?, force? }]
     Response: { status, updated, persisted, failed, invalid, not_found,
                 invalid_ids, not_found_ids, stale, versions }
     """
-    res = _apply_task_date_updates(tasks)
+    res = _apply_task_date_updates(tasks, allowed_plants=allowed_plants)
     total = len(tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:
@@ -455,23 +470,36 @@ def bulk_update(tasks: list[TaskDateUpdate]):
     return out
 
 
-@router.post("/tasks/refresh", response_model=TasksRefreshResponse)
-def tasks_refresh(payload: TaskRefreshPayload):
+@router.post("/tasks/refresh", response_model=TasksRefreshResponse,
+             dependencies=[Depends(auth.require_authenticated)])
+def tasks_refresh(payload: TaskRefreshPayload,
+                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Lean refetch of specific orders' current dates + row_version, for optimistic-
     concurrency conflict reconciliation. Returns only what the client needs to
     overwrite its stale copies — no links, no color merge.
     Payload: { ids: [str] }
     Response: { data: [{ id, start_date, end_date, row_version }] }
+
+    Rows outside `allowed_plants` (None for an unrestricted/admin caller) are
+    silently dropped rather than 403'd — matching GET /tasks's silent-bound
+    behavior for unscoped pulls. `plant` is only used for this server-side
+    filter and is stripped before the response leaves — it isn't part of the
+    TaskVersionRow wire contract.
     """
     rows = db.get_task_versions(payload.ids)
+    if allowed_plants is not None:
+        rows = [r for r in rows if r.get("plant") in allowed_plants]
     for row in rows:
+        row.pop("plant", None)
         row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
     return {"data": rows}
 
 
-@router.post("/tasks/baseline-correct", response_model=BaselineCorrectResult)
-def baseline_correct(payload: DueDateCorrectionPayload):
+@router.post("/tasks/baseline-correct", response_model=BaselineCorrectResult,
+             dependencies=[Depends(auth.require_authenticated)])
+def baseline_correct(payload: DueDateCorrectionPayload,
+                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Persist due-date-baseline (basic_finish_date) corrections found by the
     frontend's Persistence._snapToWorkingHours. Fire-and-forget from the
@@ -493,7 +521,7 @@ def baseline_correct(payload: DueDateCorrectionPayload):
         if c.id and c.basic_finish_date and c.base_version is not None
     ]
     try:
-        res = db.correct_due_date_baselines(items)
+        res = db.correct_due_date_baselines(items, allowed_plants=allowed_plants)
     except Exception as e:
         error_code = (db.translate_db_error(e).get("error_code")
                       if isinstance(e, psycopg.Error) else "db.error")

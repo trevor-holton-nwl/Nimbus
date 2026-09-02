@@ -750,6 +750,11 @@ def get_task_versions(ids: list[str]) -> list[dict]:
     dates + xmin row version for specific order ids only. No color-merge / link
     machinery — the client uses this to overwrite the stale copies a concurrent edit
     changed underneath it.
+
+    Also selects o.plant so callers can apply server-side plant scoping. The
+    `plant` key is for that filtering only — it is not part of the
+    TaskVersionRow wire contract and callers must strip it before returning
+    the row to a client.
     """
     if not ids:
         return []
@@ -759,7 +764,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) AS eff_end,
                o.xmin::text::bigint AS row_version,
                seg.schedule_segments,
-               {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch
+               {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
+               o.plant
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -775,6 +781,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "row_version": int(r[3]) if r[3] is not None else None,
             "schedule_segments": r[4] or [],
             "runtime_schedule_mismatch": bool(r[5]),
+            "plant": r[6],
         }
         for r in rows
     ]
@@ -846,7 +853,7 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
     return {"status": "ok", "updated": updated}
 
 
-def update_task_dates_bulk(items: list[dict]) -> dict:
+def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None) -> dict:
     """
     Persist parent schedule aggregates and allowlisted order attributes in one
     transaction.  A schedule_segments field is an all-or-nothing replacement
@@ -856,6 +863,11 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
     Inverted ranges are rejected by validating each edit against the row's
     *effective* current dates (so updating only start still checks against the
     existing end). Unknown ids are reported, not written.
+
+    `allowed_plants` (None for an unrestricted/admin caller) scopes writes to
+    the caller's assigned plants: a row whose plant falls outside the set is
+    treated identically to a nonexistent id (folded into not_found_ids) so a
+    caller can't distinguish "not found" from "not yours" via the response.
 
     Optimistic concurrency: each item may carry `base_version` (the xmin the client
     last saw) and `force`. Under the FOR UPDATE lock we read each row's current xmin;
@@ -934,6 +946,9 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
                 not_found_ids.append(tid)
                 continue
             current = eff[tid]
+            if allowed_plants is not None and current["plant"] not in allowed_plants:
+                not_found_ids.append(tid)   # out-of-scope looks identical to nonexistent
+                continue
             cur_start, cur_end, cur_ver = current["start"], current["end"], current["row_version"]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
@@ -1061,7 +1076,7 @@ def update_task_dates_bulk(items: list[dict]) -> dict:
             "stale": stale, "versions": versions}
 
 
-def correct_due_date_baselines(corrections: list[dict]) -> dict:
+def correct_due_date_baselines(corrections: list[dict], allowed_plants: list[str] | None = None) -> dict:
     """
     One-time-per-order backfill of the due-date baseline (`basic_finish_date`),
     computed client-side by Persistence._snapToWorkingHours's due-date-baseline
@@ -1112,6 +1127,12 @@ def correct_due_date_baselines(corrections: list[dict]) -> dict:
     re-stamp the frontend's cached row_version — otherwise every corrected
     order would false-conflict on its next unrelated scheduling save this
     session.
+
+    `allowed_plants` (None for an unrestricted/admin caller) scopes the UPDATE
+    to the caller's assigned plants via the WHERE clause. This function has no
+    per-row prefetch to piggyback a plant check on (unlike update_task_dates_bulk)
+    — an out-of-scope row simply fails to match the WHERE clause and lands in
+    the existing `not_matched` count, with no separate response field needed.
     """
     versions: dict[str, int] = {}
     if not corrections:
@@ -1141,6 +1162,11 @@ def correct_due_date_baselines(corrections: list[dict]) -> dict:
             # the /tasks read path and update_task_dates_bulk.
             placeholders = ", ".join(["(%s::text, %s::timestamp, %s::bigint)"] * len(rows))
             params = [v for row in rows for v in row]
+            # allowed_plants is referenced twice in the WHERE clause below
+            # (once for the NULL/unrestricted check, once for the ANY() match) —
+            # this function uses positional %s placeholders throughout, so the
+            # same value is bound twice rather than switching to named params.
+            params.extend([allowed_plants, allowed_plants])
             sql = f"""
                 UPDATE orders o
                 SET basic_finish_date = v.new_finish,
@@ -1148,6 +1174,7 @@ def correct_due_date_baselines(corrections: list[dict]) -> dict:
                 FROM (VALUES {placeholders}) AS v(id, new_finish, base_version)
                 WHERE o.id = v.id
                   AND o.xmin::text::bigint = v.base_version
+                  AND (%s::text[] IS NULL OR o.plant = ANY(%s::text[]))
                   AND (
                         o.basic_finish_date IS NULL
                      OR o.basic_finish_date = o.basic_start_date
@@ -1182,14 +1209,34 @@ def correct_due_date_baselines(corrections: list[dict]) -> dict:
             "not_matched": not_matched, "versions": versions}
 
 
+def get_order_plant(task_id: str) -> str | None:
+    """Return a single order's plant, or None if the row doesn't exist.
+    Standalone lookup for routes that need a plant-scoping check before a
+    write that itself has no per-row prefetch (e.g. /task/note)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT plant FROM orders WHERE id = %s", (task_id,))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def update_task_note(task_id: str, notes) -> dict:
-    """Persist a user-written note for an order. Pass None to clear."""
-    sql = "UPDATE orders SET notes = %s, updated_at = NOW() WHERE id = %s"
+    """Persist a user-written note for an order. Pass None to clear.
+
+    RETURNING the post-write xmin (B1 fix, 2026-09-01): this UPDATE bumps
+    orders.xmin like any other, so without surfacing the new version here the
+    client's cached row_version goes stale and its next real scheduling save
+    spuriously lands in `stale` — same versions-map shape as
+    update_task_dates_bulk so the frontend can re-stamp uniformly.
+    """
+    sql = ("UPDATE orders SET notes = %s, updated_at = NOW() WHERE id = %s "
+           "RETURNING id, xmin::text::bigint AS new_version")
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql, (notes or None, task_id))
+        row = cur.fetchone()
         updated = cur.rowcount
         conn.commit()
-    return {"status": "ok", "updated": updated}
+    versions = {row[0]: int(row[1])} if row else {}
+    return {"status": "ok", "updated": updated, "versions": versions}
 
 
 def purge_orders_by_date(start, end) -> dict:
