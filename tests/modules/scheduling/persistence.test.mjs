@@ -52,7 +52,7 @@ test('Persistence.setCalendarService is settable and Persistence works with a st
   assert.doesNotThrow(() => Persistence._snapToWorkingHours(tasks, '5512'));
 });
 
-test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', () => {
+test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', async () => {
   Store.setTasks([{
     id: 'pd1', MACHINE: 'L1', RUN_TIME: '1',
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
@@ -84,12 +84,18 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
     assert.equal(t.PRT_01, 'MOLD-A');
     assert.equal(t.PRT_02, 'MOLD-B');
     assert.equal(t.PRODUCTION_VERSION, '0001');
+    // Flush the fetch → r.json() → result-handler → finally() microtask chain so
+    // saveAll()'s _saveInFlight re-entrancy lock is guaranteed clear before the
+    // next test's saveAll() call runs (setTimeout is a macrotask boundary, so it
+    // forces a full microtask drain first — same pattern used below for the
+    // terminally-rejected-ids test).
+    await new Promise(res => setTimeout(res, 0));
   } finally {
     globalThis.fetch = origFetch;
   }
 });
 
-test('Persistence.saveAll sends the full split aggregate in naive-local form', () => {
+test('Persistence.saveAll sends the full split aggregate in naive-local form', async () => {
   Store.setTasks([{
     id: 'split-save', MACHINE: 'L1', RUN_TIME: '10',
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-04T10:00:00'),
@@ -116,6 +122,8 @@ test('Persistence.saveAll sends the full split aggregate in naive-local form', (
       { sequence: 1, start_date: '2026-08-03T08:00:00', end_date: '2026-08-03T16:00:00' },
       { sequence: 2, start_date: '2026-08-04T08:00:00', end_date: '2026-08-04T10:00:00' },
     ]);
+    // See the flush comment in the payload-shape test above — same reason.
+    await new Promise(res => setTimeout(res, 0));
   } finally {
     globalThis.fetch = origFetch;
   }

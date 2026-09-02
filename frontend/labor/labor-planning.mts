@@ -120,6 +120,12 @@ export const LaborPlanning = (() => {
   let _fpHorizon: NimbusVendor.FlatpickrInstance | null      = null; // Flatpickr instance for the date-jump input
   let _cellGrid: LaborCellGrid | null       = null; // [r][c] -> <td> cache for the Aggregate grid (built per render)
   let _selTds: Set<HTMLTableCellElement>        = new Set(); // currently-highlighted <td>s, for incremental lasso diffing
+  // Generation counter to suppress stale responses on rapid plant switching: capture
+  // the current generation before any async fetch, then after the response resolves,
+  // check whether a newer render has since started for a different plant; if so,
+  // discard the stale response instead of applying it. Mirrors persistence.mts's
+  // pattern for setup snapshots (see that module's _setupSnapshotGeneration).
+  let _plantSwitchGeneration = 0;
 
   // ── Date helpers ─────────────────────────────────────────────────────────
   function _isoWeek(date: Date): string {
@@ -414,9 +420,12 @@ export const LaborPlanning = (() => {
       .catch(() => Toast.show('Copy failed — check clipboard permissions', 'error'));
   }
 
-  async function _renderAggregate(plant: string): Promise<void> {
+  async function _renderAggregate(plant: string, renderGen: number): Promise<void> {
     const grid = document.getElementById('labor-grid') as LaborGridElement | null; if (!grid) return;
     const planMap = await _fetchAggregate(plant);
+    // Stale-response guard: if a newer render (plant switch) has started since
+    // this async fetch was initiated, discard this response and return early.
+    if (renderGen !== _plantSwitchGeneration) return;
     _displayGroups = _selectedGroups.size ? _groups.filter((g) => _selectedGroups.has(g)) : _groups;
     const totals: Record<string, number> = {}; _weeks.forEach((w) => { totals[w.key] = 0; });
     const groupRows = _displayGroups.map((grp) => {
@@ -583,7 +592,7 @@ export const LaborPlanning = (() => {
   }
 
   // ── Line Plan sub-tab ────────────────────────────────────────────────────
-  async function _renderLinePlan(plant: string): Promise<void> {
+  async function _renderLinePlan(plant: string, renderGen: number): Promise<void> {
     const grid = document.getElementById('labor-line-grid') as HTMLElement | null; if (!grid) return;
     // Show all groups unless user has filtered to specific ones
     const visibleGroups = _displayGroups.length ? _displayGroups : _groups;
@@ -601,6 +610,9 @@ export const LaborPlanning = (() => {
       grid.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_machine_plant')}</div>`; return;
     }
     await _fetchLines(plant, fetchGroup);
+    // Stale-response guard: if a newer render (plant switch) has started since
+    // this async fetch was initiated, discard this response and return early.
+    if (renderGen !== _plantSwitchGeneration) return;
 
     // Build day columns
     const days: Array<{ date: Date; dayKey: string; weekKey: string }> = [];
@@ -736,10 +748,13 @@ export const LaborPlanning = (() => {
   }
 
   // ── Capacity sub-tab ─────────────────────────────────────────────────────
-  async function _renderCapacity(plant: string): Promise<void> {
+  async function _renderCapacity(plant: string, renderGen: number): Promise<void> {
     const container = document.getElementById('labor-capacity-grid'); if (!container) return;
     const scopeGroup = _selectedGroups.size === 1 ? [..._selectedGroups][0] : null;
     await _fetchLines(plant, scopeGroup);
+    // Stale-response guard: if a newer render (plant switch) has started since
+    // this async fetch was initiated, discard this response and return early.
+    if (renderGen !== _plantSwitchGeneration) return;
     const lineSel = Store.selectedLines;
     const lines = Store.masterLinesForPlant(plant)
       .filter((l) => (!scopeGroup || l.wc_group === scopeGroup) && (lineSel.size === 0 || lineSel.has(l.machine)))
@@ -801,9 +816,12 @@ export const LaborPlanning = (() => {
   }
 
   // ── Exceptions sub-tab ───────────────────────────────────────────────────
-  async function _renderExceptions(plant: string): Promise<void> {
+  async function _renderExceptions(plant: string, renderGen: number): Promise<void> {
     const container = document.getElementById('labor-exceptions-list'); if (!container) return;
     await _fetchLines(plant, null);
+    // Stale-response guard: if a newer render (plant switch) has started since
+    // this async fetch was initiated, discard this response and return early.
+    if (renderGen !== _plantSwitchGeneration) return;
     const lineSel = Store.selectedLines;
     const lines = (Store._state.masterData?.lines || [])
       .filter((l) => l.plant === plant && (lineSel.size === 0 || lineSel.has(l.machine)))
@@ -939,6 +957,11 @@ export const LaborPlanning = (() => {
 
   // ── Main render ──────────────────────────────────────────────────────────
   async function render(): Promise<void> {
+    // Increment generation counter on each render (plant switch) so stale async
+    // responses from the previous plant can be detected and discarded.
+    _plantSwitchGeneration++;
+    const renderGen = _plantSwitchGeneration;
+
     _weeks = _computeWeeks();
     const plant = Store.selectedPlant;
     if (!plant) {
@@ -963,10 +986,10 @@ export const LaborPlanning = (() => {
     _renderToolbar(plant);
     _renderKPIs(plant);
     const sub = getActiveTabResolvers().laborSub() || 'aggregate';
-    if (sub === 'aggregate')   await _renderAggregate(plant);
-    else if (sub === 'line-plan')  await _renderLinePlan(plant);
-    else if (sub === 'capacity')   await _renderCapacity(plant);
-    else if (sub === 'exceptions') await _renderExceptions(plant);
+    if (sub === 'aggregate')   await _renderAggregate(plant, renderGen);
+    else if (sub === 'line-plan')  await _renderLinePlan(plant, renderGen);
+    else if (sub === 'capacity')   await _renderCapacity(plant, renderGen);
+    else if (sub === 'exceptions') await _renderExceptions(plant, renderGen);
     else if (sub === 'inputs')     _renderInputs();
   }
 
@@ -975,11 +998,13 @@ export const LaborPlanning = (() => {
   // of which needs a full render() (KPI strip / horizon / groups unchanged).
   function _rerenderActiveSub(): void {
     const plant = Store.selectedPlant; if (!plant) return;
+    // Capture generation to suppress stale responses (same pattern as render()).
+    const renderGen = _plantSwitchGeneration;
     const sub = getActiveTabResolvers().laborSub();
-    if (sub === 'aggregate')       _renderAggregate(plant);
-    else if (sub === 'line-plan')  _renderLinePlan(plant);
-    else if (sub === 'capacity')   _renderCapacity(plant);
-    else if (sub === 'exceptions') _renderExceptions(plant);
+    if (sub === 'aggregate')       _renderAggregate(plant, renderGen);
+    else if (sub === 'line-plan')  _renderLinePlan(plant, renderGen);
+    else if (sub === 'capacity')   _renderCapacity(plant, renderGen);
+    else if (sub === 'exceptions') _renderExceptions(plant, renderGen);
   }
 
   function _onLPKeyDown(e: KeyboardEvent): void {

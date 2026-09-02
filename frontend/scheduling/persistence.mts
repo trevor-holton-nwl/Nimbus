@@ -150,6 +150,14 @@ export const Persistence = {
   // The request counter suppresses a late prior-plant response after a switch.
   _setupSnapshotPlant: null as string | null,
   _setupSnapshotRequest: 0,
+  // Generation counter guarding Persistence.load() itself against a plant-switch race:
+  // a slow-resolving /tasks response for an OUTGOING plant must not overwrite a
+  // faster-resolving load() for a plant the user has since switched to (and must not
+  // reset _currentLoadedPlant back to the stale plant). Same idiom as
+  // _setupSnapshotRequest/loadSetupSnapshot below — incremented once per load() call,
+  // captured before the async work starts, and compared after each response resolves;
+  // a mismatch means a newer load() has since started and this response is discarded.
+  _loadRequest: 0,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // dirty ids written by an authoritative bulk op (optimize) —
                               // these skip the optimistic-concurrency version check on save
@@ -161,6 +169,13 @@ export const Persistence = {
   _cacheDegraded: false,
   _autosaveDisabled: false,
   _lastQuarantineKey: null as string | null,
+  // Re-entrancy guard for saveAll(): a second call while a save is already in
+  // flight would build a NEW payload from current (possibly further-edited) Store
+  // state while the FIRST request is still outbound, and either request's response
+  // handler could then race the other's dirty-id bookkeeping. Simple flag, checked
+  // at the top of saveAll() — matches this file's existing convention of a single
+  // boolean latch (e.g. _autosaveDisabled) rather than a queue/promise chain.
+  _saveInFlight: false,
   // Stats captured on every load, exposed via NIMBUS.Persistence.stats()
   _lastLoad: {
     source: null,          // 'backend' | 'cache' | 'demo'
@@ -201,6 +216,11 @@ export const Persistence = {
   stats(): LoadStats { return { ...Persistence._lastLoad }; },
 
   load({ force = false, plant = null }: { force?: boolean; plant?: string | null } = {}): Promise<void> {
+    // Captured before any async work starts; every continuation below that would
+    // otherwise mutate Store/_currentLoadedPlant checks this against the live
+    // counter and discards itself if a newer load() has since started. See the
+    // _loadRequest field comment above for why this mirrors _setupSnapshotRequest.
+    const loadGeneration = ++Persistence._loadRequest;
     const stats: LoadStats = Persistence._lastLoad = {
       source: null, ts: new Date().toISOString(), plant: plant ?? null,
       raw_received: 0, backend_meta: null,
@@ -270,6 +290,16 @@ export const Persistence = {
         return r.json() as Promise<TasksResponse>;
       })
       .then(payload => {
+        // Plant-switch race guard: if a newer load() has started since this fetch
+        // was issued, this response belongs to a plant the user has already
+        // navigated away from. Applying it now would overwrite the newer plant's
+        // already-loaded board and reset _currentLoadedPlant back to the stale
+        // plant — discard it instead and let the newer load()'s own response win.
+        if (loadGeneration !== Persistence._loadRequest) {
+          ErrorLog.info('persistence',
+            `Discarding stale /tasks response for plant=${plant ?? 'all'} (superseded by a newer load)`);
+          return;
+        }
         // A successful HTTP 200 is authoritative — after this point we
         // refuse to silently fall back to cache even if downstream throws.
         stats.source = 'backend';
@@ -475,6 +505,10 @@ export const Persistence = {
       .catch(err => {
         stats.errors++;
         ErrorLog.error('persistence', `Backend fetch failed: ${err.message}`);
+        // Same plant-switch race guard as the success path above: a failed fetch
+        // for a plant the user has since switched away from must not fall back to
+        // cache/demo and clobber the newer load()'s already-rendered board.
+        if (loadGeneration !== Persistence._loadRequest) return;
         // Only fall back to cache / demo if we never got a successful response.
         if (stats.source !== 'backend') {
           if (Persistence._loadCache()) {
@@ -1088,11 +1122,48 @@ export const Persistence = {
     Toast.show(Util.t('toast.demo_mode', { count: tasks.length }), 'info');
   },
 
+  /** Fields saveAll() actually writes for one task, in wire shape (post
+   *  toLocalSeconds date conversion) — deliberately excludes id/base_version/force
+   *  (identity + concurrency metadata, not edit content). Used both to build
+   *  taskPayload entries and, at response time, to snapshot the task's CURRENT
+   *  live value for the "does this id's dirty flag still describe what we sent"
+   *  compare in saveAll()'s success handler — keeping both call sites on this one
+   *  function guarantees the two snapshots are comparable. */
+  _taskEditSnapshot(t: NimbusTask): Record<string, unknown> {
+    return {
+      start_date: Util.toLocalSeconds(t.start_date) as NaiveLocalTs,
+      end_date:   Util.toLocalSeconds(t.end_date) as NaiveLocalTs,
+      PRT_01:       t.PRT_01,
+      PRT_02:       t.PRT_02,
+      PRODUCTION_VERSION: t.PRODUCTION_VERSION,
+      RUN_TIME:      t.RUN_TIME,
+      schedule_segments: (t.scheduleSegments || []).map(segment => ({
+        sequence: segment.sequence,
+        start_date: Util.toLocalSeconds(segment.startDate) as NaiveLocalTs,
+        end_date: Util.toLocalSeconds(segment.endDate) as NaiveLocalTs,
+      })),
+    };
+  },
+
   saveAll(): void {
     // In sandbox, promote-then-save runs through Sandbox.exit(true), which itself
     // calls saveAll() after teardown — so return here to avoid a double POST (the
     // re-entrant call below does the single persist).
     if (Sandbox.active) { Sandbox.exit(true); return; }
+    // A second saveAll() while one is already outbound would snapshot a NEW
+    // payload from whatever Store state exists right now — including edits made
+    // after the FIRST request already captured its own snapshot — and the two
+    // requests' success handlers could then race each other's _dirtyIds cleanup.
+    // No-op (with a warning) rather than queue: the in-flight save will itself
+    // pick up any edit that lands before it snapshots, and any edit that lands
+    // after is caught by _saveInFlight's caller (autosave/explicit save) retrying
+    // on its own next tick — dirty ids are never cleared for anything this call
+    // didn't actually send (see the per-id snapshot compare below).
+    if (Persistence._saveInFlight) {
+      ErrorLog.warn('persistence', 'saveAll() called while a save is already in flight — skipping');
+      return;
+    }
+    Persistence._saveInFlight = true;
     Persistence._saveCache();
 
     // Only send tasks that changed since the last successful save. The backend
@@ -1105,27 +1176,25 @@ export const Persistence = {
     // Send only the fields the backend consumes, plus the optimistic-concurrency
     // token (row_version → base_version). Optimize-dirtied ids carry force=true so an
     // authoritative reschedule never false-conflicts with a concurrent editor.
+    // toLocalSeconds, not a raw Date: JSON.stringify would call Date.toISOString()
+    // (UTC), but the orders read path emits bare naive strftime (no Z) which new
+    // Date() parses as LOCAL — so a raw Date here round-trips shifted by the
+    // client's UTC offset for any non-UTC user. Mirrors _relayDueDateCorrections;
+    // see Util.toLocalSeconds and _taskEditSnapshot above.
     const taskPayload = dirtyTasks.map(t => ({
-      id:           t.id,
-      // toLocalSeconds, not the raw Date: JSON.stringify would call
-      // Date.toISOString() (UTC), but the orders read path emits bare naive
-      // strftime (no Z) which new Date() parses as LOCAL — so a raw Date here
-      // round-trips shifted by the client's UTC offset for any non-UTC user.
-      // Mirrors _relayDueDateCorrections; see Util.toLocalSeconds.
-      start_date:   Util.toLocalSeconds(t.start_date) as NaiveLocalTs,
-      end_date:     Util.toLocalSeconds(t.end_date) as NaiveLocalTs,
-      PRT_01:       t.PRT_01,
-      PRT_02:       t.PRT_02,
-      PRODUCTION_VERSION: t.PRODUCTION_VERSION,
-      RUN_TIME:      t.RUN_TIME,
-      schedule_segments: (t.scheduleSegments || []).map(segment => ({
-        sequence: segment.sequence,
-        start_date: Util.toLocalSeconds(segment.startDate) as NaiveLocalTs,
-        end_date: Util.toLocalSeconds(segment.endDate) as NaiveLocalTs,
-      })),
+      id: t.id,
+      ...Persistence._taskEditSnapshot(t),
       base_version: t.row_version ?? null,
       force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
     }));
+    // Snapshot of exactly what's being sent for each dirty id, keyed by id — the
+    // response handler compares this against the LIVE value at response time
+    // before clearing that id's dirty flag (see the success handler below), so an
+    // edit made after this snapshot was taken (but before the response arrives)
+    // is never silently treated as saved.
+    const sentSnapshot = new Map<string, string>(
+      dirtyTasks.map(t => [String(t.id), JSON.stringify(Persistence._taskEditSnapshot(t))])
+    );
     const body = JSON.stringify({ tasks: taskPayload, blocks: Store.blocks, calendars: Store.calendars });
 
     // Stable reqId for this save attempt so the rejection log correlates to the
@@ -1176,8 +1245,22 @@ export const Persistence = {
           ...(result.not_found_ids || []),
         ].map(String));
         for (const id of accounted) {
-          Persistence._dirtyIds.delete(id);
-          Persistence._forceIds.delete(id);
+          // R8: an id being "accounted for" by this response is necessary but not
+          // sufficient to clear its dirty flag. If the user edited this task AGAIN
+          // after this request's payload was snapshotted (sentSnapshot) but before
+          // this response arrived, the live value no longer matches what was
+          // actually sent — clearing dirty here would silently drop that newer
+          // edit (it was never transmitted, and nothing would ever retry it).
+          // Only clear when the live task still equals its sent snapshot.
+          const tk = Store.tasks[id];
+          const sentValue = sentSnapshot.get(id);
+          const stillMatchesSent = tk != null && sentValue !== undefined
+            && JSON.stringify(Persistence._taskEditSnapshot(tk)) === sentValue;
+          if (stillMatchesSent) {
+            Persistence._dirtyIds.delete(id);
+            Persistence._forceIds.delete(id);
+          }
+          // else: leave dirty — the next saveAll() will pick up the newer edit.
         }
         if (stale.length) {
           ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
@@ -1207,7 +1290,8 @@ export const Persistence = {
             { reqId }, { reqId, errorCode: 'http.network' });
           Toast.show(Util.t('toast.saved_locally'), 'info');
         }
-      });
+      })
+      .finally(() => { Persistence._saveInFlight = false; });
   },
 
   /** Optimistic-concurrency reconciliation: pull the server's current dates +
