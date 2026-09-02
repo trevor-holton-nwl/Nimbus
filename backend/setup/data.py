@@ -498,16 +498,25 @@ def derive_machine_state_before_replacement(plant, machine, *, captured_at: date
             "signature_version": definition["signature_version"]}
 
 
-def capture_setup_states_before_schedule_mutation(*, actor: str = "system", reason: str) -> list[dict]:
-    """Capture each existing setup-defined machine immediately before a schedule mutation."""
+def capture_setup_states_before_schedule_mutation(*, actor: str = "system", reason: str,
+                                                   plants: list[str] | None = None) -> list[dict]:
+    """Capture each existing setup-defined machine immediately before a schedule mutation.
+
+    ``plants``, when provided, scopes the scan to just those plants (avoiding an
+    all-plants/all-machines sequential scan when only a subset is being mutated).
+    ``None`` preserves the original unscoped, all-plants behavior byte-for-byte.
+    """
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """SELECT DISTINCT o.plant, p.timezone, o.machine FROM orders o
+        query = """SELECT DISTINCT o.plant, p.timezone, o.machine FROM orders o
                  JOIN setup_definition d ON d.plant = o.plant
                  JOIN machine m ON m.plant = o.plant AND m.machine = o.machine
                  LEFT JOIN plants p ON p.plant = o.plant
                 WHERE o.plant IS NOT NULL AND o.machine IS NOT NULL"""
-        )
+        params: list = []
+        if plants is not None:
+            query += " AND o.plant = ANY(%s)"
+            params.append(plants)
+        cur.execute(query, params)
         pairs = cur.fetchall()
     captures: dict[str, datetime] = {}
     results = []

@@ -692,7 +692,8 @@ def sync_object(object_key: str, *, user_email: str | None = None,
             # Stage 0 observation seam.  Keep this immediately before the
             # shared orders upsert; setup data remains read-only to scheduling.
             setup_data.capture_setup_states_before_schedule_mutation(
-                actor=user_email or "system", reason="SAP order replacement"
+                actor=user_email or "system", reason="SAP order replacement",
+                plants=sorted({r.get("plant") for r in mapped if r.get("plant")}) or None,
             )
             apply_res = db.upsert_orders(mapped, source="sap", batch_id=None,
                                          filename=None, raw_row_count=rows_read)
