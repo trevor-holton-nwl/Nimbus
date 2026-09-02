@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at            TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- orders.plant — per-order plant attribution. Added here (immediately after
+-- CREATE TABLE orders) so every index/constraint below that references
+-- orders.plant can rely on the column already existing on a fresh bootstrap.
+-- See the backfill UPDATE further down (after the machine table exists) for
+-- how existing rows get this populated from machine→plant.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS plant TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_orders_basic_start  ON orders(basic_start_date);
 CREATE INDEX IF NOT EXISTS idx_orders_upload_batch ON orders(upload_batch_id);
 CREATE INDEX IF NOT EXISTS idx_orders_machine       ON orders(machine);
@@ -165,7 +172,7 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER;
 -- non-setup-aware split allocator (Calendar.allocateRuntime) and the
 -- setup-aware placeWithSetup primitive enforce — "no split piece shorter
 -- than this, except one complete unsplit order below the boundary". Was a
--- fixed system-wide 30 in code (frontend/schedule-services.mjs's
+-- fixed system-wide 30 in code (web/schedule-services.mjs's
 -- MIN_PRODUCTIVE_SEGMENT_MINUTES); NOT NULL DEFAULT 30 here preserves that
 -- exact behavior for every existing plant until an admin opts into a
 -- different floor via the validated
@@ -337,8 +344,11 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
--- orders.plant — per-order plant attribution. Placed AFTER machine so the
--- backfill below can resolve the machine→plant mapping. The /tasks read path now selects
+-- orders.plant backfill — the column itself is now added immediately after
+-- CREATE TABLE orders (see above) so bootstrap-order dependents (e.g.
+-- idx_orders_plant_eff_start) never hit "column does not exist". The indexes
+-- and backfill below stay here because they depend on the machine table
+-- (created above, well before this point). The /tasks read path now selects
 -- o.plant directly instead of LEFT JOINing machine on the machine code alone,
 -- which fanned out / mis-attributed orders when a machine code is reused across plants.
 -- Ingest sets plant from a WERKS/PLANT upload column when present, else derives it from
@@ -347,7 +357,6 @@ ON CONFLICT (table_name, column_name) DO NOTHING;
 --   ⚠ Re-run schema.sql after deploying this change, or GET /tasks errors on the
 --     missing orders.plant column (the read path references o.plant). See MIGRATION.md.
 -- ----------------------------------------------------------------------------
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS plant TEXT;
 CREATE INDEX IF NOT EXISTS idx_orders_plant ON orders(plant);
 -- Partial index: the post-machine-change re-attribution and ingest derivation scan
 -- orders WHERE plant IS NULL; a plain btree won't serve IS NULL efficiently, so
@@ -1096,7 +1105,7 @@ CREATE TABLE IF NOT EXISTS priority_list (
 -- moves from a single TEXT value to a production-version-keyed table (see
 -- docs/scheduling_priority.md's "PRT_02" decision) — materializing it now
 -- costs nothing and the column name already exists as a dead entry in
--- frontend/order-field-catalog.mjs, so this is fixing pre-existing drift, not
+-- web/order-field-catalog.mjs, so this is fixing pre-existing drift, not
 -- adding new.
 -- ----------------------------------------------------------------------------
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS prt_01             TEXT;
@@ -1105,7 +1114,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS production_version TEXT;
 
 -- ----------------------------------------------------------------------------
 -- 9 SAP COOIS extract fields, upload-sourced (no post-upsert stamping like
--- prt_01/prt_02 above). Hidden by default in frontend/order-field-catalog.mjs;
+-- prt_01/prt_02 above). Hidden by default in web/order-field-catalog.mjs;
 -- an admin opts them into the grid/Inspector via System Configuration.
 -- ----------------------------------------------------------------------------
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS planned_order_initial_quantity NUMERIC;
