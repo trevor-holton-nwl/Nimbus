@@ -82,7 +82,7 @@ NIMBUS is designed to grow to enterprise scale. **All UI and data design decisio
 - **Hierarchy navigation** (plant → machine) must be scoped, and **API endpoints returning plant or machine lists** must support server-side pagination or filtering.
 - **Priority lists (color, PRT tooling, production version), setup definitions/matrices, blackout blocks, and calendar configs are per-plant** — storage and retrieval keyed by plant ID, never assumed global.
 - **Utilization and dashboard charts** must be filterable and aggregatable by plant, not rendered for all plants at once.
-- **The setup matrix is O(states²) per plant** — never render or fetch a full plant matrix snapshot for a UI that needs only one from-state's rows (`GET /setup/{plant}/matrix-rows` exists precisely to avoid that; see `docs/Setup_matrix_redesign.md`).
+- **The setup matrix is O(states²) per plant** — never render or fetch a full plant matrix snapshot for a UI that needs only one from-state's rows (`GET /setup/{plant}/matrix-rows` exists precisely to avoid that; see `docs/archive/Setup_matrix_redesign.md`).
 
 ## Running the App
 

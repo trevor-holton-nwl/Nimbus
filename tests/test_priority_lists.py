@@ -15,6 +15,7 @@ Two layers, mirroring test_color_wheel_store.py / test_schema_idempotent.py:
 """
 import os
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -366,7 +367,10 @@ class TestStampOrderAttributesAndTheInverseLedgerTrap:
     def _seed(self, pg):
         db = pg
         with db._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("INSERT INTO subnetworks (code) VALUES (%s) ON CONFLICT DO NOTHING", (self.SUB,))
+            cur.execute(
+                "INSERT INTO subnetworks (code, name) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (self.SUB, self.SUB),
+            )
             cur.execute(
                 "INSERT INTO plants (subnetwork, plant) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                 (self.SUB, self.PLANT),
@@ -391,6 +395,8 @@ class TestStampOrderAttributesAndTheInverseLedgerTrap:
             cur.execute("DELETE FROM orders WHERE production_order = %s", (self.ORDER_NO,))
             cur.execute("DELETE FROM material_plants WHERE material_id = %s AND plant = %s",
                        (self.MATERIAL, self.PLANT))
+            cur.execute("DELETE FROM machine_setup_state WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM setup_definition WHERE plant = %s", (self.PLANT,))
             cur.execute("DELETE FROM machine WHERE subnetwork = %s AND plant = %s",
                        (self.SUB, self.PLANT))
             cur.execute("DELETE FROM plants WHERE subnetwork = %s AND plant = %s", (self.SUB, self.PLANT))
@@ -461,6 +467,32 @@ class TestStampOrderAttributesAndTheInverseLedgerTrap:
                        "WHERE production_order = %s", (self.ORDER_NO,))
             color, prt01, prt02, prod_ver = cur.fetchone()
         assert (color, prt01, prt02, prod_ver) == ("RED", "MOLD-A", "MOLD-B", "0001")
+
+    def test_setup_signature_on_tooling_fields_reads_the_materialized_orders_columns(self, pg):
+        """The setup/changeover matrix's tooling-based signature (prt01/prt02) reads
+        orders.prt_01/prt_02 directly (backend/setup/data.py's
+        derive_machine_state_before_replacement) — the exact query that would raise
+        UndefinedColumn if migrations/2026-08-11-priority-lists.sql were unapplied.
+        No prior test exercised this path against a live database row."""
+        db = pg
+        self._upsert_one_order(db)
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET color = %s, prt_01 = %s, prt_02 = %s, production_version = %s "
+                "WHERE production_order = %s",
+                ("RED", "MOLD-A", "MOLD-B", "0001", self.ORDER_NO),
+            )
+            conn.commit()
+
+        setup_data.save_definition(self.PLANT, ["prt01", "prt02"], False, "owner@example.com")
+        result = setup_data.derive_machine_state_before_replacement(
+            self.PLANT, self.LINE, captured_at=datetime(2026, 8, 11, 9, 0), actor="owner@example.com",
+        )
+        assert result["accepted"] is True
+        assert result["state_key"] == [
+            {"fieldKey": "prt01", "value": "MOLD-A"},
+            {"fieldKey": "prt02", "value": "MOLD-B"},
+        ]
 
 
 @pytest.mark.pg

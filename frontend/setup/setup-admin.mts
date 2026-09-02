@@ -148,7 +148,7 @@ export const SetupAdmin = (() => {
   // Grid state (Setup Standard's from-state x to-state editor). Rebuilt every
   // renderSnapshot() call, same full-repaint model as the rest of this module.
   let _gridModel: SetupGridModel | null = null;
-  // Split From/To (docs/Setup_matrix_redesign.md §6) — a single shared filter
+  // Split From/To (docs/archive/Setup_matrix_redesign.md §6) — a single shared filter
   // applied to both axes made directional inspection (e.g. BLUE→RED) impossible:
   // filtering "BLUE" collapsed the grid to the BLUE→BLUE block only.
   let _gridFilterFrom = '';
@@ -160,7 +160,7 @@ export const SetupAdmin = (() => {
   let _gridDragging = false;
   let _gridDragAnchor: { row: number; col: number } | null = null;
   let _gridSelTds: Set<HTMLTableCellElement> = new Set();
-  // Four-band layout (docs/Setup_matrix_redesign.md §9): the signature editor
+  // Four-band layout (docs/archive/Setup_matrix_redesign.md §9): the signature editor
   // moved from an always-open panel into a popover behind the band-B chip.
   let _signaturePopoverOpen = false;
   // List/Matrix toggle (Setup_matrix_redesign v2): List is the default because
@@ -217,7 +217,7 @@ export const SetupAdmin = (() => {
   /** Same `constraint.<key>` vocabulary Scheduling Rules already uses for
    *  these four fields, so the signature reads "Color" instead of the
    *  raw `colorWheel` field key — one term for the same underlying registry
-   *  instead of two (docs/Setup_matrix_redesign.md §3). Falls back to the
+   *  instead of two (docs/archive/Setup_matrix_redesign.md §3). Falls back to the
    *  raw key if a field has no translated label. */
   function fieldLabel(fieldKey: string): string {
     const translated = setupText(`constraint.${fieldKey}`, '');
@@ -226,7 +226,7 @@ export const SetupAdmin = (() => {
   /** `.empty-state`-styled markup for the grid/pane's empty conditions,
    *  reusing the app's existing empty-state visual language (application-
    *  shell.mts's EmptyState) instead of ad hoc `.setup-help`/`.setup-empty`
-   *  text scattered across multiple styles (docs/Setup_matrix_redesign.md
+   *  text scattered across multiple styles (docs/archive/Setup_matrix_redesign.md
    *  §4-5). Inline markup, not the EmptyState module itself, so this has no
    *  dependency on that module's mount/action wiring. */
   function emptyState(message: string, hint?: string): string {
@@ -401,7 +401,7 @@ export const SetupAdmin = (() => {
     return row.sig === col.sig ? 0 : null;
   }
 
-  /** The six states a cell must render distinctly (docs/Setup_matrix_redesign.md
+  /** The six states a cell must render distinctly (docs/archive/Setup_matrix_redesign.md
    *  §7) — a bare numeric value can only ever say "0 or not 0", which
    *  collapses an explicit diagonal row, a structurally-free implicit zero, a
    *  line override, and a plant-default value into the same look. `lineScope`
@@ -416,7 +416,7 @@ export const SetupAdmin = (() => {
     return lineScope && !existing.inherited ? 'line-override' : 'plant-default';
   }
 
-  /** Bounds the rendered universe per axis (docs/Setup_matrix_redesign.md §6
+  /** Bounds the rendered universe per axis (docs/archive/Setup_matrix_redesign.md §6
    *  — an unbounded cross-product renders one `<input>` DOM node per cell, and
    *  a two-field, 20-30-value-per-field signature already produces hundreds of
    *  thousands of cells). Reports `total`/`truncated` so the caller can tell
@@ -889,7 +889,7 @@ export const SetupAdmin = (() => {
     // Seed the scope from the global line filter (Store.selectedLines) once
     // per plant, on open only — deliberately NOT a live bind. Live-binding
     // would silently re-scope the matrix an admin is mid-edit on whenever the
-    // Gantt/Orders line filter changes elsewhere (docs/Setup_matrix_redesign.md
+    // Gantt/Orders line filter changes elsewhere (docs/archive/Setup_matrix_redesign.md
     // §16 Q2). Only seeds when exactly one of this plant's lines is selected;
     // an empty or multi-line filter has no single unambiguous scope to seed.
     if (_scopeSeededPlant !== snapshot.plant) {
@@ -1038,7 +1038,7 @@ export const SetupAdmin = (() => {
   }
 
   /** Compact "you are here" readout inline under the Scope selector — replaces
-   *  the old standalone "Line Status" group/panel (docs/Setup_matrix_redesign.md
+   *  the old standalone "Line Status" group/panel (docs/archive/Setup_matrix_redesign.md
    *  §9 "what moves off the page"). The grid itself marks the matching row;
    *  this is only the state text + the write affordance (`editState`/
    *  `wireCompatibility` still need a mount point in the DOM). */

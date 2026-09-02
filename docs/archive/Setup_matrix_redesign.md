@@ -1,5 +1,14 @@
 # Setup Matrix — Tab Reformulation
 
+> **Archive note (2026-09-01):** despite the "unimplemented proposal" framing below, §9's four-band
+> layout, §6's `MAX_AXIS`-capped grid, and §7's six-state cell model all shipped in commit `9576055`
+> — the same commit that added this doc, whose parent is actually `8da20d7` (this doc's own commit
+> ordering claim below is backwards). Live in `frontend/setup/setup-admin.mts`: `setup-context-bar`/
+> `setup-standard-rail`/`setup-action-bar`, `MAX_AXIS = 60`, and the `SetupGridCellState` union. Only
+> two items from §16 remain genuinely open — keyboard arrow-navigation between grid cells, and whether
+> `Scope` binds live to `Store.selectedLines` vs. only seeding from it — tracked in `docs/MIGRATION.md`.
+> Treat everything else below as a historical design rationale, not a live proposal.
+
 **Status:** proposal, **partially superseded 2026-08-14** (same day, later commit `8da20d7`). Originally
 written 2026-08-14 as a UI reformulation proposal (§9's four-band layout, with Activation Readiness relocated
 into a modal behind a status chip). Before this proposal was picked up for implementation, a separate,

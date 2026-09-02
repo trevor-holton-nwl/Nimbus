@@ -42,11 +42,36 @@ actually does today; read §1-8 for why it was built that way.
 
 **Stage 1 status (2026-08-11):** all code from `docs/superpowers/plans/archive/2026-08-10-priority-lists-stage-1.md`
 is written, tested at the pure-logic level, and both `npm run build`/`typecheck` and the Python test
-suite pass. **Not done:** the migration has not been applied to any database (local or Azure), and
-pre-ship check #1 (population counts for `material_plants.color`/`prt_01`/`prt_02` per plant) was
-explicitly waived by the user rather than run before this landed — see Risk 3. The `@pytest.mark.pg`
-tests in `tests/test_priority_lists.py` have not been executed against a live database either.
-Applying the migration and running that check remain open steps before this is genuinely "shipped."
+suite pass.
+
+**Correction, 2026-09-01: this section was wrong.** It said the migration had never been applied
+anywhere. In fact **`migration_files_applied` on Azure shows it landed 2026-08-11 18:51:51+00 — the
+same day it was written** — via a routine `promote-azure` run nobody came back to record here. This
+doc's own staleness, not a real gap, is what made the setup-signature landmine below look open for
+three weeks. **Azure's data is fully populated, not just structurally present:** plant `1085` shows 100%
+coverage across the board — `material_plants` (179/179 rows have `color`/`prt_01`/`prt_02`) and
+`orders` (1,842/1,842 have `color`/`prt_01`/`prt_02`/`production_version`). **Pre-ship check #1 is
+answered, definitively, not waived:** the tooling data is complete and has been for three weeks. The
+only reason the setup/changeover-matrix landmine (a plant's signature reading `orders.prt_01`/`prt_02`
+before those columns existed — see the Setup Matrix note in `docs/MIGRATION.md`) never actually fired
+is that plant `1085`'s live signature is still `["colorWheel"]` only (`setup_active = true`, confirmed
+2026-09-01) — the capability was safe to use the whole time, just never turned on.
+
+This dev machine's **local** Postgres was a separate, genuine mess, worth recording for the next
+person who hits it: its ledger fired back on 2026-08-20 but as a **complete no-op** (`color_wheel`/
+`material_plants` were both empty locally at that moment — the migration's own "inverse ledger trap"
+warning, playing out for real), and `.env` on this machine is Azure-configured
+(`PG_USER=TempAdmin`), not local — the exact hazard `CLAUDE.md`'s Database Setup section warns about.
+Overriding `PG_HOST`/`PG_USER`/`PG_PASS`/`PG_SSLMODE` to local values got all 57 `@pytest.mark.pg`
+tests in `tests/test_priority_lists.py` plus `test_setup_data.py` passing locally (117 total, up from
+the 17 that had ever actually run before). One genuine pre-existing bug was found and fixed along the way: the
+`TestStampOrderAttributesAndTheInverseLedgerTrap._seed` fixture inserted into `subnetworks` without the
+required `name` column, a `NotNullViolation` dormant since these tests had never actually run against a
+real database before. A new test,
+`TestStampOrderAttributesAndTheInverseLedgerTrap::test_setup_signature_on_tooling_fields_reads_the_materialized_orders_columns`,
+now proves the separate landmine this migration also gated — the setup/changeover matrix's tooling-based
+signature (`backend/setup/data.py`'s `derive_machine_state_before_replacement`, reading
+`orders.prt_01`/`prt_02` directly) — actually works against a live row, closing a gap no prior test covered.
 
 **Stage 2 status (2026-08-10):** all 15 implementation tasks land — backend (Tasks 1-8: `master_data.RANKABLE_FIELDS` default labels, `known_line_codes_for_plant`, `db.missing_master_data_for_plant`, the six new endpoints below, and `POST /color-wheel/{plant}` rewritten onto the shared `_resolve_priority_list_columns`/`_persist_priority_list` helpers per Decision 9b) and frontend (Tasks 9-15: new TS types, the mapping + generic viewer modals, `PriorityListMapping`, `PriorityListViewer` — which delegates to the untouched `ColorWheelViewer` for `colorWheel` only when no line override is requested — the rewritten per-field Optimization tab with its missing-master-data panel and Resync Now button, CSS, and i18n across all 5 locales). `npm run build`/`typecheck` are clean and the new `locale-completeness` test passes. Several real bugs were found and fixed during implementation, verified by code review at each step: a pandas-3 landmine where `Series.astype(str)` no longer stringifies `NaN` the way pandas 2 did (fixed throughout the new upload-parsing code via `.fillna("")` before `.astype(str)` — see `docs/MIGRATION.md`), two back-compat breaks on the rewritten `/color-wheel/{plant}` route that contradicted Decision 9b's own "no previously-valid file can start failing" principle (duplicate-value-conflict rejection and empty-file rejection, both restored for that route only), and a production-breaking bug where the new Optimization tab's missing-master-data fetch used bare `fetch()` instead of `Util.fetchTraced` against an admin-gated, plant-scoped endpoint — invisible locally (no auth), but it would have silently failed to render for real admin users on the Azure pilot and mis-scoped a plant-restricted user's request; both fixed.
 **Not done, and not to be treated as shipped until they are:** (1) the `@pytest.mark.pg` tests in `tests/test_priority_lists.py` were never executed against a real Postgres this session — this machine's `.env` currently points `PG_HOST` at the live Azure pilot DB, so the test harness's own collection-time guard (see `AGENTS.md`/`CLAUDE.md` → Database Setup) auto-skips the entire pg-marked suite; verification instead relied on careful manual code-tracing and, for the pandas-3 fix, empirically running equivalent snippets against the installed dependency versions. Run `PG_HOST=localhost NIMBUS_TEST_DB=1 python -m pytest tests/test_priority_lists.py -v` against working local credentials before calling this verified. (2) ~~`tests/modules/legacy-surface.test.mjs`'s contract-snapshot test is currently failing because the new onclick handlers added in Tasks 10-12 aren't reflected in `tests/contracts/cq1-legacy-surface.json` yet — run `node scripts/legacy-surface.mjs --write` and commit the regenerated fixture before merge.~~ **DONE** — the fixture was regenerated in `f8e7269`; the test passes 10/10 (verified by running it, 2026-08-11, Stage 3 Task 0 audit). Note for Stage 3: its tree-UI task adds more inline handlers, so this fixture will need regenerating again — a failure there will be newly introduced, not this leftover. (3) No task did a real browser/visual check of the new UI — the mapping modal against a genuinely ambiguous-column file (not just the pytest fixture), the upload flow end-to-end, and dark mode across all the new surfaces all remain to be done by hand. (4) `POST /color-wheel/{plant}` has no verified external-caller check — a manual curl/Postman test against a real `.xlsx` (with and without `ORDER_Y`) confirming the back-compat contract holds is still outstanding.

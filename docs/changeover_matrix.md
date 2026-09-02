@@ -3,7 +3,7 @@
 **Status:** design agreed through the 2026-08-12 debate; **implemented** across Stages 0-1-2 (~50 commits;
 `setup_data.py`, `web/setup-domain.mts`, `web/setup-scheduler.mts`, four `schema.sql` tables, setup-aware
 placement, due-date search, capacity diagnostics, derived Gantt bars, preview explanations). Live for a plant
-via the single "Include setup times in optimizer" checkbox (`docs/Setup_matrix_redesign.md` §15) rather than
+via the single "Include setup times in optimizer" checkbox (`docs/archive/Setup_matrix_redesign.md` §15) rather than
 the multi-step authorization flow this document assumed — see that document's §1.1/§15 for the correction and
 what changed. `docs/archive/changeover_matrix_stage_1.md`'s checkbox tracking is stale; treat git log as authoritative.
 **Supersedes:** the live feature requirements in `docs/archive/Setup_teardown_bars.md`, which remains the historical

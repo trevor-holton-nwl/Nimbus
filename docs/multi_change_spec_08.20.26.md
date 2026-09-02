@@ -795,7 +795,7 @@ Not part of any workstream; recorded so they aren't lost.
   `psycopg.sql.Identifier` discipline used in `master_data.py`.
 - **Stale-by-design `plants` columns.** `setup_policy_config` and `setup_release_evidence`
   (`schema.sql:162-165`) have zero Python and zero `.mts` readers — their endpoints were deleted when
-  the `active` checkbox replaced them (`docs/Setup_matrix_redesign.md`). Candidates to drop.
+  the `active` checkbox replaced them (`docs/archive/Setup_matrix_redesign.md`). Candidates to drop.
 
 ---
 

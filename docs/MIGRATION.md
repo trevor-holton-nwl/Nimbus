@@ -1197,3 +1197,52 @@ when a real need arrives (they were cut to keep the refactor executable in ~13�
   mega-module (e.g. Timeline+Interaction+Hierarchy together in `frontend/scheduling/gantt.mts`). Splitting
   further is a within-folder edit with no cross-domain seams — cheap to do later if a file grows
   painful, and not worth pre-paying.
+
+## Setup Matrix four-band redesign — two open items (2026-09-01)
+
+`docs/archive/Setup_matrix_redesign.md` was archived on 2026-09-01: its core proposal (the four-band
+layout, the `MAX_AXIS`-capped grid, and the six-state cell model) turned out to already be shipped in
+commit `9576055`, the same commit that added the doc. Two items from its §16 "open questions" were
+never resolved and have no other home now that the doc is archived:
+
+1. **Keyboard arrow-navigation between grid cells** — explicitly flagged "not done" in `9576055`'s
+   commit message and never picked up since. Low-severity accessibility/efficiency gap for planners
+   editing many cells in a row.
+2. **Whether `Scope` should bind live to `Store.selectedLines`, or only seed from it on open.** The
+   doc's author leaned toward seed-only (binding live would silently re-scope the matrix being edited
+   whenever the Gantt's line filter changes elsewhere), but this was never actually decided or built —
+   `Scope` in `frontend/setup/setup-admin.mts` currently has whatever behavior shipped by default, not
+   a deliberate choice either way. Worth a five-minute decision next time someone is in this file.
+
+## Setup-signature tooling landmine — was already closed on Azure, docs just didn't know it (2026-09-01)
+
+`master_data.RANKABLE_FIELDS` (`prt01`/`prt02`/`productionVersion`) has always been a valid setup
+signature field, and `backend/setup/data.py`'s `derive_machine_state_before_replacement` has always read
+`orders.prt_01`/`prt_02`/`production_version` directly on every schedule-mutation path (not just an
+admin-config action). Those columns are created by `migrations/2026-08-11-priority-lists.sql`. Both
+`docs/scheduling_priority.md` and this investigation initially believed that migration had **never**
+been applied anywhere — it turns out it landed on Azure on **2026-08-11 18:51:51+00, the same day it
+was written**, via a routine `promote-azure` run nobody recorded here. Plant `1085`'s data is 100%
+populated (179/179 `material_plants` rows, 1,842/1,842 `orders` rows) and has been for three weeks. The
+landmine never fired only because no plant's live `setup_definition.fields` has ever included a tooling
+field (`1085` is `["colorWheel"]` only) — the capability was safe to use the entire time.
+
+**What actually needed fixing, found while chasing this down (2026-09-01):**
+- Local dev Postgres had the same migration recorded in its ledger (2026-08-20) but as a **complete
+  no-op** — `color_wheel`/`material_plants` were both empty locally at that moment, so no test or local
+  run could ever have caught this by accident. This dev machine's `.env` is Azure-configured
+  (`PG_USER=TempAdmin`), not local — see `CLAUDE.md`'s Database Setup DB-safety note; overriding
+  `PG_HOST`/`PG_USER`/`PG_PASS`/`PG_SSLMODE` got all 57 `@pytest.mark.pg` tests in
+  `tests/test_priority_lists.py` (plus `test_setup_data.py`) running locally for the first time (117
+  passed, up from 17 that had ever actually executed before).
+- Fixed a genuine, unrelated, dormant bug this surfaced: `TestStampOrderAttributesAndTheInverseLedgerTrap
+  ._seed` in `tests/test_priority_lists.py` inserted into `subnetworks` without the required `name`
+  column — a `NotNullViolation` that had never been hit because these tests had never run against a
+  real database before.
+- Added `test_setup_signature_on_tooling_fields_reads_the_materialized_orders_columns` — no prior test
+  exercised the tooling-signature DB-read path against a live row; this one does and passes.
+
+**Still genuinely open, unrelated to the above:** the RBAC gap on
+`POST /master-data/plants/{plant}/constraints` (tracked further up this file), and no plant has actually
+turned on a tooling-based signature or priority-list ranking yet — the data and code both support it,
+turning it on for a real plant is a product decision, not an engineering one.

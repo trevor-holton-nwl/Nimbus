@@ -67,6 +67,6 @@ Run: `python -m pytest tests/test_setup_data.py tests/test_setup_coverage.py tes
 ## Gotchas
 
 - Don't describe `PUT /setup/{plant}/active` as "the" activation checkbox in any new doc or code comment — it is dead-but-kept. `PUT /plant/{plant}/setup-active` is current.
-- `docs/Setup_matrix_redesign.md` §1.1/§15 (cited by the wider refactor's own planning docs as the corrected activation story) predates the D2 relocation described above and is itself now one step out of date — verify against `set_plant_setup_active_route`/`Plant._renderSettingsPane` in live code, not that doc section.
+- `docs/archive/Setup_matrix_redesign.md` §1.1/§15 (cited by the wider refactor's own planning docs as the corrected activation story) predates the D2 relocation described above and is itself now one step out of date — verify against `set_plant_setup_active_route`/`Plant._renderSettingsPane` in live code, not that doc section.
 - `docs/archive/changeover_matrix_stage_{0,1,2}.md` carry stale unchecked boxes even though all three stages shipped (~50 commits) — trust `git log`, not those checkboxes.
 - `RANKABLE_FIELDS` is genuinely owned by `master_data.py`, not this domain — resist the urge to "finish the move" by relocating it here; that's an explicitly deferred cross-file edge per the refactor plan.
