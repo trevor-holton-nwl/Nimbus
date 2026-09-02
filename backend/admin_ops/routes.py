@@ -37,11 +37,22 @@ def get_diagnostics():
 def get_health():
     """Fast DB ping + system snapshot. Polled every 30 s by the Admin Cockpit."""
     db_stats = db.get_health_stats()
+    pool_stats = db.get_pool_stats()
+
+    # This endpoint is unauthenticated (polled by the Admin Cockpit before
+    # login), so raw exception text from either stats dict — which can
+    # contain internal hostnames/ports/DB details — must not leak here.
+    # db.py's own error field stays untouched for the admin-gated
+    # /diagnostics/db deep-dive route, which needs the real text.
+    if db_stats.get("error"):
+        db_stats = {**db_stats, "error": "unavailable"}
+    if pool_stats.get("error"):
+        pool_stats = {**pool_stats, "error": "unavailable"}
 
     # Stateless: "loaded" now means "DB reachable" rather than "DataFrame in RAM".
     return {
         "db": db_stats,
-        "pool": db.get_pool_stats(),
+        "pool": pool_stats,
         "memory": {
             "stateless":   True,
             "loaded":      bool(db_stats.get("connected")),

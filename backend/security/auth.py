@@ -546,7 +546,10 @@ def require_admin(request: Request) -> str:
     own onboarding."""
     email = _actor_email(request)
     role = get_user_role(email)
-    if role == "admin" or not admin_exists():
+    if role == "admin":
+        return email
+    if not admin_exists():
+        log.warning("Admin bootstrap grace granted access to %r (no admin user exists yet)", email)
         return email
     raise HTTPException(status_code=403, detail="Admin role required")
 
@@ -560,10 +563,13 @@ def whoami(request: Request) -> dict:
     email = _actor_email(request)
     profile = get_user_profile(email) or {}
     role = profile.get("role")
+    grace = role != "admin" and not admin_exists()
+    if grace:
+        log.warning("Admin bootstrap grace reflected in whoami() for %r (no admin user exists yet)", email)
     return {
         "username": email,
         "role": role,
-        "is_admin": role == "admin" or not admin_exists(),
+        "is_admin": role == "admin" or grace,
         "first_name": profile.get("first_name"),
         "last_name": profile.get("last_name"),
         "allowed_plants": get_allowed_plants(email),
@@ -677,7 +683,7 @@ def authenticate(username: str, password: str) -> dict | None:
 # then remove it and rotate the password via Security -> Users. If unset,
 # no bootstrap user is seeded — require_admin's first-run grace (see below)
 # stays open until the first admin is created directly through the UI.
-_BOOTSTRAP_ADMIN_USERNAME = os.getenv("NIMBUS_BOOTSTRAP_ADMIN_USERNAME", "PJ29587").strip()
+_BOOTSTRAP_ADMIN_USERNAME = os.getenv("NIMBUS_BOOTSTRAP_ADMIN_USERNAME", "admin").strip()
 
 
 def ensure_bootstrap_admin() -> None:

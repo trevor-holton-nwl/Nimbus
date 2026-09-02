@@ -27,7 +27,8 @@ import os
 #   color_wheel_<PLANT>.xlsx   — one file per plant (plant code sanitized to [A-Z0-9_])
 #   _meta.json                 — upload metadata per plant (filename, row count, timestamp, user)
 #   _audit_log.json            — append-only log of all color-wheel + optimization events
-COLOR_WHEEL_DIR = os.getenv("COLOR_WHEEL_DIR", r"C:\Users\pj29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Scheduler\color_wheels")
+COLOR_WHEEL_DIR = os.getenv("COLOR_WHEEL_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "color_wheels"))
+os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
 
 
 # The audit log stays file-based for now: COLOR_WHEEL_DIR/_audit_log.json is a

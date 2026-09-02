@@ -55,7 +55,7 @@ def get_audit_log(limit: int = 200):
     return {"entries": list(reversed(log[-limit:]))}
 
 
-@router.post("/audit/log")
+@router.post("/audit/log", dependencies=[Depends(auth.require_authenticated)])
 def append_audit_log(entry: dict, request: Request):
     """Frontend-triggered audit entry (e.g. optimization_run events)."""
     entry.setdefault("ts", datetime.utcnow().isoformat() + "Z")
