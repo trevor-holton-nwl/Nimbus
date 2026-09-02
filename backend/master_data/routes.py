@@ -64,7 +64,7 @@ def append_audit_log(entry: dict, request: Request):
     return {"status": "ok"}
 
 
-@router.post("/audit/log/clear", dependencies=[Depends(require_admin)])
+@router.post("/audit/log/clear", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def clear_audit_log():
     """Wipe the full audit log."""
     try:
@@ -97,7 +97,7 @@ def md_audit(limit: int = 100):
     return {"entries": md.list_audit(limit)}
 
 
-@router.get("/master-data/_schema-export", dependencies=[Depends(require_admin)])
+@router.get("/master-data/_schema-export", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_schema_export():
     """
     Read-only: dump every column currently registered (via column_metadata)
@@ -120,11 +120,12 @@ def md_schema_export():
 # OD-E2 (documented data-exposure decision): unlike every other admin/master-
 # data route, these three do NOT call _assert_plant_allowed / scope by
 # role_plants. A catalog-wide browser is cross-plant by nature — there is no
-# single-plant version of "list every table" — so scoping is deliberately
-# skipped and access is gated on admin role alone (require_admin), same
-# posture as GET /diagnostics and GET /master-data/_schema-export. All three
-# are pure reads: browser.py never builds an INSERT/UPDATE/DELETE or DDL
-# statement (OD-E3).
+# single-plant version of "list every table" — so plant-scoping is
+# deliberately skipped; access is gated on admin role (require_admin) plus
+# the require_api_key shared-secret (added 2026-09-02's require_api_key
+# sweep), same posture as GET /diagnostics/db and GET /master-data/_schema-
+# export. All three are pure reads: browser.py never builds an
+# INSERT/UPDATE/DELETE or DDL statement (OD-E3).
 # ---------------------------------------------------------------------------
 def _admin_tables_query_filters(request: Request) -> dict[str, list[str]]:
     """Filter transport: a repeated query parameter per column, e.g.
@@ -145,7 +146,7 @@ def _admin_tables_query_filters(request: Request) -> dict[str, list[str]]:
     return filters
 
 
-@router.get("/admin/tables", dependencies=[Depends(require_admin)])
+@router.get("/admin/tables", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def admin_list_tables():
     """Catalog listing of every table in the `public` schema, discovered
     fresh on this request (see admin_tables.list_tables — no process-level
@@ -157,7 +158,7 @@ def admin_list_tables():
     return {"tables": admin_tables.list_tables()}
 
 
-@router.get("/admin/tables/{table}", dependencies=[Depends(require_admin)])
+@router.get("/admin/tables/{table}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def admin_table_rows(table: str, request: Request,
                       limit: int = Query(default=100, ge=1, le=1000),
                       offset: int = Query(default=0, ge=0)):
@@ -180,7 +181,7 @@ def admin_table_rows(table: str, request: Request,
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/admin/tables/{table}/export.csv", dependencies=[Depends(require_admin)])
+@router.get("/admin/tables/{table}/export.csv", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def admin_table_export_csv(table: str, request: Request, offset: int = Query(default=0, ge=0)):
     """Streaming CSV export of `table` (same filter transport as
     GET /admin/tables/{table}), soft-capped at admin_tables.EXPORT_ROW_CAP

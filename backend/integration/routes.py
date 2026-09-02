@@ -209,7 +209,7 @@ def get_live_missing_master_data(
     return {"plant": plant, **result}
 
 
-@router.post("/upload/audit/clear", dependencies=[Depends(require_admin)])
+@router.post("/upload/audit/clear", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def clear_upload_audit():
     """Delete all upload history records."""
     return db.clear_upload_audit()

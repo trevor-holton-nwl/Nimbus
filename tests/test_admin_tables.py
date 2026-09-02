@@ -28,6 +28,7 @@ if ROOT not in sys.path:
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import backend.master_data.browser as at  # noqa: E402
+import backend.security.auth as auth  # noqa: E402
 import brain  # noqa: E402
 
 
@@ -133,6 +134,47 @@ def test_admin_table_routes_reject_when_require_admin_fails(method, path):
     finally:
         brain.api.dependency_overrides.clear()
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# require_api_key sweep (2026-09-02) — these routes previously had no
+# require_api_key at all (unlike their destructive/DDL siblings that already
+# had it). Same negative-test template as
+# test_setup_endpoints.py::test_setup_writes_reject_missing_api_key: the
+# guard must reject when X-API-Key is missing even though require_admin is
+# overridden to succeed.
+# ---------------------------------------------------------------------------
+_API_KEY_SWEPT_PATHS = [
+    ("GET", "/admin/tables"),
+    ("GET", "/admin/tables/plants"),
+    ("GET", "/admin/tables/plants/export.csv"),
+    ("GET", "/master-data/_schema-export"),
+]
+
+
+@pytest.mark.parametrize("method,path", _API_KEY_SWEPT_PATHS)
+def test_admin_table_and_schema_export_routes_reject_missing_api_key(monkeypatch, method, path):
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    try:
+        response = TestClient(brain.api).request(method, path)
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
+    assert response.status_code == 401
+
+
+def test_audit_log_clear_rejects_missing_api_key(monkeypatch):
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    try:
+        response = TestClient(brain.api).post("/audit/log/clear")
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
+    assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------

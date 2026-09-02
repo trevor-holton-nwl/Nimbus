@@ -585,6 +585,54 @@ def test_color_wheel_endpoints_are_backed_by_priority_list(client, pg):
         pg.delete_priority_list(plant, "colorWheel", line="")
 
 
+# --- GET /color-wheel/{plant} plant gate ----------------------------------
+# This route shipped without the per-user plant scope every sibling in this
+# block carries (same gap already found and fixed once for GET
+# /priority-rank-maps — see that trio above), so a plant-restricted user
+# could read any plant's color wheel. The DB-free style below (monkeypatch
+# db.get_priority_list) mirrors that fix's approach of not requiring a live
+# Postgres for a pure auth-gate test.
+
+def test_color_wheel_get_rejects_a_plant_outside_the_users_scope(client, monkeypatch):
+    import db
+    import backend.security.auth as auth
+    monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["1006"])
+    monkeypatch.setattr(db, "get_priority_list", lambda plant, field_key, line="": {
+        "entries": {"RED": 1.0}, "uploaded_at": None, "uploaded_by": "tester",
+        "filename": "w.xlsx", "row_count": 1,
+    })
+    r = client.get("/color-wheel/5512", headers={"x-user-email": "scoped.user@example.com"})
+    assert r.status_code == 403
+    # And the payload must not leak on the way out.
+    assert "RED" not in r.text
+
+
+def test_color_wheel_get_allows_a_plant_inside_the_users_scope(client, monkeypatch):
+    """The gate must not break the legitimate case — regression guard for the
+    coupled frontend change: ColorWheelViewer._load() had to move from a bare
+    fetch() to Util.fetchTraced so the x-user-email header this reads is
+    actually sent. Without that, this path 403s for every scoped user."""
+    import db
+    import backend.security.auth as auth
+    monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["5512", "1006"])
+    monkeypatch.setattr(db, "get_priority_list", lambda plant, field_key, line="": {
+        "entries": {"RED": 1.0}, "uploaded_at": None, "uploaded_by": "tester",
+        "filename": "w.xlsx", "row_count": 1,
+    })
+    r = client.get("/color-wheel/5512", headers={"x-user-email": "scoped.user@example.com"})
+    assert r.status_code == 200
+    assert r.json()["entries"] == [{"color": "RED", "order_y": 1.0}]
+
+
+def test_color_wheel_get_maps_a_blank_plant_to_400_not_500(client):
+    """_assert_plant_allowed raises ValueError (not PlantNotAllowed) for a
+    blank/whitespace plant — catch both, or the ValueError escapes as a 500.
+    Same trap the sibling GET /priority-rank-maps already hit."""
+    r = client.get("/color-wheel/%20")
+    assert r.status_code == 400
+    assert "plant is required" in r.json()["detail"]
+
+
 @pytest.mark.pg
 class TestMissingMasterDataForPlant:
     PLANT = "ZZTEST_MMD_PLANT"

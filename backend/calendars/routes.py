@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 import master_data as md
 from backend.admin_ops.logbuffer import _set_admin_log_details
-from backend.security.auth import require_admin, require_authenticated
+from backend.security.auth import require_admin, require_api_key, require_authenticated
 
 router = APIRouter()
 
@@ -29,7 +29,7 @@ def plant_calendar_get(plant: str):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/plant-calendar/plant-hours", dependencies=[Depends(require_admin)])
+@router.post("/plant-calendar/plant-hours", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default={})):
     """Set a plant's weekly working hours. Payload: { plant, work_hours:{0..6:[h1,h2]|null} }."""
     try:
@@ -44,7 +44,7 @@ def plant_calendar_plant_hours_post(request: Request, body: dict = Body(default=
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/plant-calendar/line-hours", dependencies=[Depends(require_admin)])
+@router.post("/plant-calendar/line-hours", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={})):
     """Upsert per-line working hours (batched). Payload:
     { plant, lines:[{machine, work_hours:{0..6:[h1,h2]|null}}] }."""
@@ -60,7 +60,7 @@ def plant_calendar_line_hours_post(request: Request, body: dict = Body(default={
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/plant-calendar/line-blackouts", dependencies=[Depends(require_admin)])
+@router.post("/plant-calendar/line-blackouts", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(default={})):
     """Delta write of machine blackouts. Payload:
     { plant, upserts:[{id, machine?, start, end, reason?}], deletes?:[id] }.
@@ -81,7 +81,7 @@ def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(defau
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/plant-calendar/plant-blackouts", dependencies=[Depends(require_admin)])
+@router.post("/plant-calendar/plant-blackouts", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(default={})):
     """Delta write of plant-level blackouts. Payload:
     { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }."""

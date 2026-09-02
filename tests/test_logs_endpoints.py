@@ -13,6 +13,7 @@ try:
     from fastapi.routing import iter_route_contexts
     from starlette.testclient import TestClient
 
+    import backend.security.auth as auth
     import brain
 except Exception as e:  # pragma: no cover - environment dependent
     pytest.skip(f"brain/TestClient unavailable in this environment: {e}",
@@ -183,6 +184,36 @@ def test_admin_write_is_automatically_recorded_with_safe_route_scope(tc):
     assert event["outcome"] == "success"
     assert event["ctx"]["actor"] == "ops@example.com"
     assert event["ctx"]["status"] == 200
+
+
+# --------------------------------------------------------------------------- #
+# require_api_key sweep (2026-09-02) — GET /logs/backend and GET             #
+# /diagnostics/db now also require the shared-secret API key on top of       #
+# require_admin, matching every destructive/DDL sibling route. Same          #
+# negative-test template as test_setup_endpoints.py::                        #
+# test_setup_writes_reject_missing_api_key: the guard must reject a request  #
+# missing X-API-Key even when the admin/identity dependency is satisfied.    #
+# --------------------------------------------------------------------------- #
+def test_logs_backend_get_rejects_missing_api_key(monkeypatch, tc):
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    r = tc.get("/logs/backend")
+    assert r.status_code == 401
+
+
+def test_logs_backend_get_allows_correct_api_key(monkeypatch, tc):
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    r = tc.get("/logs/backend", headers={"X-API-Key": "required-key"})
+    assert r.status_code == 200
+
+
+def test_diagnostics_db_rejects_missing_api_key(monkeypatch):
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    try:
+        r = TestClient(brain.api).get("/diagnostics/db")
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
+    assert r.status_code == 401
 
 
 # --------------------------------------------------------------------------- #

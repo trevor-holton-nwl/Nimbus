@@ -190,7 +190,7 @@ def post_system_settings(request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.get("/diagnostics/db", dependencies=[Depends(require_admin)])
+@router.get("/diagnostics/db", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def get_diagnostics_db():
     """
     Full DB deep-dive: pool stats, server info, table health, connection activity,
@@ -254,7 +254,7 @@ def maintenance_analyze(body: dict = Body(default={})):
 # BACKEND EVENT LOG — in-memory ring buffer, surfaced in Admin Cockpit
 # =============================================================================
 
-@router.get("/logs/backend", dependencies=[Depends(require_admin)])
+@router.get("/logs/backend", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def get_backend_logs(level: str | None = None, limit: int = 200,
                      category: str | None = None, since: str | None = None,
                      q: str | None = None, offset: int = 0,

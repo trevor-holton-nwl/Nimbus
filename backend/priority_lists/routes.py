@@ -428,7 +428,8 @@ def delete_priority_list_generic(
 # =========================
 
 @router.post("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
-async def upload_color_wheel(plant: str, request: Request, file: UploadFile = File(...)):
+async def upload_color_wheel(plant: str, request: Request, file: UploadFile = File(...),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Upload or replace a plant-specific color wheel (persisted to the
     priority_list table). Consolidated (Decision 9b) onto the same
     _resolve_priority_list_columns/_persist_priority_list helpers
@@ -459,6 +460,12 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
     new/desired only for the generic endpoint's fresh, no-back-compat-promise
     contract.
     """
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     raw = await file.read()
     spec = md.RANKABLE_FIELDS["colorWheel"]
     try:
@@ -496,8 +503,15 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
 
 
 @router.get("/color-wheel/{plant}")
-def get_color_wheel(plant: str):
+def get_color_wheel(plant: str,
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Return the stored color wheel for a plant as sorted JSON entries."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     row = db.get_priority_list(plant, "colorWheel", line="")
     if row is None:
         raise HTTPException(status_code=404, detail=f"No color wheel uploaded for plant {plant!r}")
@@ -518,8 +532,15 @@ def get_color_wheel(plant: str):
 
 
 @router.delete("/color-wheel/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def delete_color_wheel(plant: str, request: Request):
+def delete_color_wheel(plant: str, request: Request,
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Delete a plant's stored color wheel."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     res = db.delete_priority_list(plant, "colorWheel", line="")
     if res is None:
         return {"status": "not_found"}

@@ -89,7 +89,7 @@ export const ColorWheelViewer = (() => {
     if (countEl) countEl.textContent = '';
     if (listEl)  listEl.innerHTML    = `<div class="cw-loading"><span class="cw-spin"></span>${Util.t('ui.loading_wheel')}</div>`;
 
-    fetch(`${Config.API_BASE}/color-wheel/${encodeURIComponent(_plant!)}`, { signal: AbortSignal.timeout(8000) })
+    Util.fetchTraced(`${Config.API_BASE}/color-wheel/${encodeURIComponent(_plant!)}`, { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<ColorWheelResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(body => {
         _entries = body.entries || [];
