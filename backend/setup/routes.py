@@ -132,15 +132,17 @@ def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-def _setup_coverage_payload(result: dict, *, machine: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+def _setup_coverage_payload(context: dict, *, machine: str | None = None, offset: int = 0, limit: int = 100) -> dict:
     """Keep coverage totals useful without embedding an unbounded missing-edge list."""
+    result = setup_data.summarize_setup_coverage(context)
     payload = {"plant": result["plant"], "signature_version": result.get("definition", {}).get("signature_version")
                if result.get("definition") else None}
     for kind in ("observed", "reachable"):
         summary = result[kind]
-        page = setup_data.page_missing_pairs(summary["missing"], machine=machine, offset=offset, limit=limit)
-        payload[kind] = {key: value for key, value in summary.items() if key != "missing"}
-        payload[kind]["missing_page"] = page
+        payload[kind] = dict(summary)
+        payload[kind]["missing_page"] = setup_data.page_setup_missing_pairs(
+            context, kind, machine=machine, offset=offset, limit=limit,
+        )
     return _setup_freshness(payload)
 
 
@@ -151,7 +153,8 @@ def get_setup_coverage(plant: str, machine: str | None = Query(default=None), of
     """Bounded Stage 0 transition coverage; this observes, never changes, schedules."""
     _setup_plant_guard(plant, allowed_plants)
     try:
-        return _setup_coverage_payload(setup_data.get_setup_coverage(plant), machine=machine, offset=offset, limit=limit)
+        context = setup_data.load_setup_coverage(plant)
+        return _setup_coverage_payload(context, machine=machine, offset=offset, limit=limit)
     except ValueError as exc:
         raise _setup_error(exc) from exc
 
@@ -188,14 +191,17 @@ def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed")
     if kind not in {"observed", "reachable"}:
         raise HTTPException(status_code=400, detail="kind must be observed or reachable")
     try:
-        coverage = setup_data.get_setup_coverage(plant)
-        page = setup_data.page_missing_pairs(coverage[kind]["missing"], machine=machine, offset=offset, limit=limit)
+        context = setup_data.load_setup_coverage(plant)
+        page = setup_data.page_setup_missing_pairs(
+            context, kind, machine=machine, offset=offset, limit=limit,
+        )
     except ValueError as exc:
         raise _setup_error(exc) from exc
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Plant", "Machine", "Scope", "Signature version", "From setup state", "To setup state"])
-    version = coverage.get("definition", {}).get("signature_version") if coverage.get("definition") else ""
+    definition = context.get("definition")
+    version = definition.get("signature_version") if definition else ""
     for row in page["rows"]:
         writer.writerow([plant, row["machine"], row["scope"], version,
                          json.dumps(row["from_key"], separators=(",", ":")),

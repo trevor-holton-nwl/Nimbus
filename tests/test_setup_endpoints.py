@@ -128,6 +128,37 @@ class _SetupServiceWithMatrixRows(_SetupService):
         raise AssertionError("get_setup_snapshot must not be called by matrix-rows endpoint")
 
 
+class _SetupServiceWithCoverage(_SetupService):
+    def __init__(self):
+        self.page_calls = []
+
+    def load_setup_coverage(self, plant):
+        assert plant == "PLANT-A"
+        return {"plant": plant, "definition": {"signature_version": 4}, "states": [], "observed": []}
+
+    def summarize_setup_coverage(self, context):
+        assert context["plant"] == "PLANT-A"
+        return {
+            "plant": "PLANT-A",
+            "definition": context["definition"],
+            "observed": {"total_pairs": 3, "covered_pairs": 2, "missing_pairs": 1},
+            "reachable": {"total_pairs": 9, "covered_pairs": 4, "missing_pairs": 5},
+        }
+
+    def page_setup_missing_pairs(self, context, kind, machine=None, offset=0, limit=100):
+        self.page_calls.append((kind, machine, offset, limit))
+        row = {
+            "machine": machine or "LINE-1", "scope": "plant",
+            "from_key": [{"fieldKey": "colorWheel", "value": "BLUE"}],
+            "to_key": [{"fieldKey": "colorWheel", "value": "GREEN"}],
+            "covered": False, "implicit_zero": False,
+        }
+        return {"rows": [row], "meta": {"total": 1, "offset": offset, "limit": limit}}
+
+    def get_setup_snapshot(self, plant):
+        raise AssertionError("coverage endpoints must not call get_setup_snapshot")
+
+
 def _install_matrix_rows_double(monkeypatch):
     """Install the matrix-rows service double over the real `setup_data` module.
 
@@ -148,6 +179,18 @@ def _install_matrix_rows_double(monkeypatch):
     # (moved there per docs/architecture/domain-refactor-plan.md §4's "auth
     # guards live in backend/security/auth.py" rule) — the real guard reads the
     # module-level constant from there, not from brain.
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "setup-test-key")
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    return service
+
+
+def _install_coverage_double(monkeypatch):
+    service = _SetupServiceWithCoverage()
+    for name in ("load_setup_coverage", "summarize_setup_coverage", "page_setup_missing_pairs",
+                 "get_setup_snapshot"):
+        monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
     monkeypatch.setattr(auth, "NIMBUS_API_KEY", "setup-test-key")
     brain.api.dependency_overrides[brain.require_api_key] = lambda: None
     brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
@@ -504,6 +547,50 @@ def test_setup_write_audit_has_safe_actor_operation_scope_outcome_and_request_id
     assert event["ctx"]["actor"] == "owner@example.com"
     assert event["ctx"]["plant"] == "5512"
     assert "file_content" not in event["ctx"]
+
+
+def test_setup_coverage_and_csv_share_the_bounded_snapshot_free_page_path(monkeypatch):
+    """JSON keeps its wire shape and CSV delegates to the identical capped missing-pair helper."""
+    service = _install_coverage_double(monkeypatch)
+    try:
+        client = TestClient(brain.api)
+        coverage = client.get(
+            "/setup/PLANT-A/coverage",
+            params={"machine": "LINE-2", "offset": 1, "limit": 2},
+        )
+        exported = client.get(
+            "/setup/PLANT-A/missing-pairs.csv",
+            params={"kind": "reachable", "machine": "LINE-2", "offset": 1, "limit": 2},
+        )
+    finally:
+        brain.api.dependency_overrides.clear()
+
+    assert coverage.status_code == 200
+    body = coverage.json()
+    assert body["signature_version"] == 4
+    assert body["observed"] == {
+        "total_pairs": 3,
+        "covered_pairs": 2,
+        "missing_pairs": 1,
+        "missing_page": {
+            "rows": [{
+                "machine": "LINE-2", "scope": "plant",
+                "from_key": [{"fieldKey": "colorWheel", "value": "BLUE"}],
+                "to_key": [{"fieldKey": "colorWheel", "value": "GREEN"}],
+                "covered": False, "implicit_zero": False,
+            }],
+            "meta": {"total": 1, "offset": 1, "limit": 2},
+        },
+    }
+    assert "definition" not in body
+    assert exported.status_code == 200
+    assert exported.headers["x-total-count"] == "1"
+    assert "PLANT-A,LINE-2,plant,4" in exported.text
+    assert service.page_calls == [
+        ("observed", "LINE-2", 1, 2),
+        ("reachable", "LINE-2", 1, 2),
+        ("reachable", "LINE-2", 1, 2),
+    ]
 
 
 def test_get_setup_matrix_rows_scopes_by_line_and_from_state(monkeypatch):

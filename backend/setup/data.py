@@ -894,18 +894,24 @@ def page_matrix_rows(plant: str, machine: str, signature_version: int, *, from_k
             "meta": {"total": total, "offset": offset, "limit": limit}}
 
 
-def get_setup_coverage(plant: str) -> dict:
-    """Measure one plant's current schedule transitions without mutating it."""
-    snapshot = get_setup_snapshot(plant)
-    definition = snapshot["definition"]
-    if definition is None:
-        return {"plant": plant, "definition": None,
-                "observed": _coverage_summary([]), "reachable": _coverage_summary([])}
-    # Every selected column is chosen from the registered, server-owned field
-    # catalog, never from an HTTP parameter.
-    columns = [RANKABLE_FIELDS[field]["orders_column"] for field in definition["fields"]]
-    select_attributes = ", ".join(columns)
+def load_setup_coverage(plant: str) -> dict:
+    """Load only the current definition and linear order-state inputs needed by coverage.
+
+    The optimizer snapshot intentionally remains a separate, complete contract.
+    Coverage neither calls it nor reads machine states, occurrence overrides, or
+    an unbounded setup-matrix result set.
+    """
+    plant = _required_text(plant, "Plant")
     with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        definition = _definition(cur, plant)
+        if definition is None:
+            return {"plant": plant, "definition": None, "states": [], "observed": []}
+        definition = {**definition, "plant": plant}
+        # Every selected identifier comes from the server-owned field registry,
+        # never from an HTTP parameter. Values and plant scope remain bound.
+        columns = [RANKABLE_FIELDS[field]["orders_column"] for field in definition["fields"]]
+        select_attributes = ", ".join(columns)
         cur.execute(
             f"""SELECT machine, COALESCE(scheduled_start, basic_start_date),
                        {select_attributes}
@@ -923,9 +929,232 @@ def get_setup_coverage(plant: str) -> dict:
             state = _coverage_state(definition, values)
             if state is not None:
                 by_machine.setdefault(machine, []).append(state)
-    transitions: list[dict] = []
-    for machine, states in by_machine.items():
-        transitions.extend({"machine": machine, "from_key": states[index - 1], "to_key": states[index]}
-                           for index in range(1, len(states)))
-    result = build_setup_coverage(definition, snapshot["plant_rows"], snapshot["machine_rows"], transitions, by_machine)
-    return {"plant": plant, "definition": definition, **result}
+
+    state_rows: list[dict] = []
+    observed_rows: list[dict] = []
+    pair_order = 0
+    for machine_order, machine in enumerate(sorted(by_machine)):
+        scheduled_states = by_machine[machine]
+        unique_states: dict[str, list[dict[str, str]]] = {}
+        for state in scheduled_states:
+            unique_states.setdefault(_state_token(state), state)
+        for state_order, state in enumerate(unique_states.values()):
+            state_rows.append({"machine": machine, "state_key": state,
+                               "machine_order": machine_order, "state_order": state_order})
+
+        seen_pairs: set[tuple[str, str]] = set()
+        for index in range(1, len(scheduled_states)):
+            from_key = scheduled_states[index - 1]
+            to_key = scheduled_states[index]
+            token = (_state_token(from_key), _state_token(to_key))
+            if token in seen_pairs:
+                continue
+            seen_pairs.add(token)
+            observed_rows.append({"machine": machine, "from_key": from_key, "to_key": to_key,
+                                  "pair_order": pair_order})
+            pair_order += 1
+    return {"plant": plant, "definition": definition, "states": state_rows, "observed": observed_rows}
+
+
+def _coverage_counts(context: dict) -> dict[str, dict[str, dict[str, int]]]:
+    cached = context.get("_coverage_counts")
+    if isinstance(cached, dict):
+        return cached
+    definition = context.get("definition")
+    counts: dict[str, dict[str, dict[str, int]]] = {"observed": {}, "reachable": {}}
+    if definition is None:
+        context["_coverage_counts"] = counts
+        return counts
+
+    states_by_machine: dict[str, int] = {}
+    for row in context["states"]:
+        states_by_machine[row["machine"]] = states_by_machine.get(row["machine"], 0) + 1
+    observed_by_machine: dict[str, int] = {}
+    for row in context["observed"]:
+        observed_by_machine[row["machine"]] = observed_by_machine.get(row["machine"], 0) + 1
+    for machine, total in observed_by_machine.items():
+        counts["observed"][machine] = {"total": total, "covered": 0}
+    for machine, state_count in states_by_machine.items():
+        counts["reachable"][machine] = {"total": state_count * state_count, "covered": 0}
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """/* setup coverage summary */
+            WITH state_input AS (
+                SELECT machine, state_key
+                  FROM jsonb_to_recordset(%s::jsonb)
+                       AS state(machine text, state_key jsonb, machine_order integer, state_order integer)
+            ),
+            observed_input AS (
+                SELECT machine, from_key, to_key
+                  FROM jsonb_to_recordset(%s::jsonb)
+                       AS pair(machine text, from_key jsonb, to_key jsonb, pair_order integer)
+            ),
+            effective_rows AS (
+                SELECT DISTINCT target.machine, matrix.from_key, matrix.to_key
+                  FROM (SELECT DISTINCT machine FROM state_input) AS target
+                  JOIN setup_matrix AS matrix
+                    ON matrix.plant = %s
+                   AND matrix.signature_version = %s
+                   AND matrix.machine IN ('', target.machine)
+                 WHERE EXISTS (
+                           SELECT 1 FROM state_input AS source_state
+                            WHERE source_state.machine = target.machine
+                              AND source_state.state_key = matrix.from_key
+                       )
+                   AND EXISTS (
+                           SELECT 1 FROM state_input AS target_state
+                            WHERE target_state.machine = target.machine
+                              AND target_state.state_key = matrix.to_key
+                       )
+                   AND (
+                       matrix.machine = target.machine
+                       OR NOT EXISTS (
+                           SELECT 1 FROM setup_matrix AS override
+                            WHERE override.plant = matrix.plant
+                              AND override.signature_version = matrix.signature_version
+                              AND override.machine = target.machine
+                              AND override.from_key = matrix.from_key
+                              AND override.to_key = matrix.to_key
+                       )
+                   )
+            ),
+            reachable_counts AS (
+                SELECT machine, COUNT(*)::bigint AS state_count
+                  FROM state_input GROUP BY machine
+            )
+            SELECT 'observed', pair.machine,
+                   COUNT(*) FILTER (
+                       WHERE pair.from_key = pair.to_key
+                          OR EXISTS (
+                              SELECT 1 FROM effective_rows AS effective
+                               WHERE effective.machine = pair.machine
+                                 AND effective.from_key = pair.from_key
+                                 AND effective.to_key = pair.to_key
+                          )
+                   )::bigint AS covered
+              FROM observed_input AS pair
+             GROUP BY pair.machine
+            UNION ALL
+            SELECT 'reachable', reachable.machine,
+                   (reachable.state_count + COUNT(effective.from_key) FILTER (
+                       WHERE effective.from_key <> effective.to_key
+                   ))::bigint AS covered
+              FROM reachable_counts AS reachable
+              LEFT JOIN effective_rows AS effective ON effective.machine = reachable.machine
+             GROUP BY reachable.machine, reachable.state_count""",
+            (Jsonb(context["states"]), Jsonb(context["observed"]),
+             context["plant"], definition["signature_version"]),
+        )
+        for kind, machine, covered in cur.fetchall():
+            if kind in counts and machine in counts[kind]:
+                counts[kind][machine]["covered"] = int(covered)
+    context["_coverage_counts"] = counts
+    return counts
+
+
+def summarize_setup_coverage(context: dict) -> dict:
+    """Return wire-compatible totals without constructing reachable state pairs."""
+    counts = _coverage_counts(context)
+
+    def summary(kind: str) -> dict:
+        total = sum(item["total"] for item in counts[kind].values())
+        covered = sum(item["covered"] for item in counts[kind].values())
+        return {"total_pairs": total, "covered_pairs": covered, "missing_pairs": total - covered}
+
+    return {"plant": context["plant"], "definition": context.get("definition"),
+            "observed": summary("observed"), "reachable": summary("reachable")}
+
+
+def page_setup_missing_pairs(context: dict, kind: str, *, machine: str | None = None,
+                             offset: int = 0, limit: int = 100) -> dict:
+    """Generate one stable, capped missing-pair page from linear coverage inputs."""
+    if kind not in {"observed", "reachable"}:
+        raise ValueError("kind must be observed or reachable")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a nonnegative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    definition = context.get("definition")
+    if definition is None:
+        return {"rows": [], "meta": {"total": 0, "offset": offset, "limit": limit}}
+
+    counts = _coverage_counts(context)[kind]
+    selected = [counts[machine]] if machine in counts else [] if machine is not None else list(counts.values())
+    total = sum(item["total"] - item["covered"] for item in selected)
+    if total == 0 or offset >= total:
+        return {"rows": [], "meta": {"total": total, "offset": offset, "limit": limit}}
+
+    if kind == "observed":
+        comment = "setup observed missing page"
+        source = """observed_input AS (
+                SELECT machine, from_key, to_key, pair_order
+                  FROM jsonb_to_recordset(%s::jsonb)
+                       AS pair(machine text, from_key jsonb, to_key jsonb, pair_order integer)
+            )"""
+        select = """SELECT pair.machine, pair.from_key, pair.to_key
+              FROM observed_input AS pair
+             WHERE (%s::text IS NULL OR pair.machine = %s)
+               AND pair.from_key <> pair.to_key
+               AND NOT EXISTS (
+                       SELECT 1 FROM setup_matrix AS matrix
+                        WHERE matrix.plant = %s AND matrix.signature_version = %s
+                          AND matrix.machine = pair.machine
+                          AND matrix.from_key = pair.from_key AND matrix.to_key = pair.to_key
+                   )
+               AND NOT EXISTS (
+                       SELECT 1 FROM setup_matrix AS matrix
+                        WHERE matrix.plant = %s AND matrix.signature_version = %s
+                          AND matrix.machine = ''
+                          AND matrix.from_key = pair.from_key AND matrix.to_key = pair.to_key
+                   )
+             ORDER BY pair.pair_order
+             LIMIT %s OFFSET %s"""
+        params = (Jsonb(context["observed"]), machine, machine,
+                  context["plant"], definition["signature_version"],
+                  context["plant"], definition["signature_version"], limit, offset)
+    else:
+        comment = "setup reachable missing page"
+        source = """state_input AS (
+                SELECT machine, state_key, machine_order, state_order
+                  FROM jsonb_to_recordset(%s::jsonb)
+                       AS state(machine text, state_key jsonb, machine_order integer, state_order integer)
+            )"""
+        select = """SELECT source_state.machine, source_state.state_key, target_state.state_key
+              FROM state_input AS source_state
+              JOIN state_input AS target_state ON target_state.machine = source_state.machine
+             WHERE (%s::text IS NULL OR source_state.machine = %s)
+               AND source_state.state_key <> target_state.state_key
+               AND NOT EXISTS (
+                       SELECT 1 FROM setup_matrix AS matrix
+                        WHERE matrix.plant = %s AND matrix.signature_version = %s
+                          AND matrix.machine = source_state.machine
+                          AND matrix.from_key = source_state.state_key
+                          AND matrix.to_key = target_state.state_key
+                   )
+               AND NOT EXISTS (
+                       SELECT 1 FROM setup_matrix AS matrix
+                        WHERE matrix.plant = %s AND matrix.signature_version = %s
+                          AND matrix.machine = ''
+                          AND matrix.from_key = source_state.state_key
+                          AND matrix.to_key = target_state.state_key
+                   )
+             ORDER BY source_state.machine_order, source_state.state_order, target_state.state_order
+             LIMIT %s OFFSET %s"""
+        params = (Jsonb(context["states"]), machine, machine,
+                  context["plant"], definition["signature_version"],
+                  context["plant"], definition["signature_version"], limit, offset)
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(f"/* {comment} */ WITH {source} {select}", params)
+        rows = [
+            {"machine": row[0], "scope": "plant", "from_key": row[1], "to_key": row[2],
+             "covered": False, "implicit_zero": False}
+            for row in cur.fetchall()
+        ]
+    return {"rows": rows, "meta": {"total": total, "offset": offset, "limit": limit}}
+
+
+def get_setup_coverage(plant: str) -> dict:
+    """Compatibility wrapper for callers that need bounded coverage totals only."""
+    return summarize_setup_coverage(load_setup_coverage(plant))
