@@ -115,6 +115,97 @@ Command:
 
 Output: exit 0, no output.
 
+## Fix-round 2 — independent re-review remediation (2026-09-02)
+
+The second review's six findings were addressed within the Task 3 ownership
+scope. No frontend files or production modules were changed.
+
+### Integration fixture ownership
+
+`tests/test_integration_pg.py` now creates a per-process `ZZTEST_*` token and
+uses exact test-owned keys for every seeded record. Cleanup removes the exact
+BOM primary key, order IDs (including schedule segments first), upload batch
+IDs and per-run filename, BOM audit IDs/details, the two exact
+`material_plants` keys, and the two exact material IDs. It no longer filters
+any table by the shared `ZZTEST_P3` plant or a broad namespace prefix. Cleanup
+ordering is BOM → schedule segments/orders → audits → material_plants →
+materials, preserving the BOM foreign-key dependency order. The fixture
+contract is also pinned by a DB-free fake-cursor test.
+
+The plant remains `ZZTEST_P3` (9 characters, within `material_plants.plant`
+`VARCHAR(10)`). Generated material IDs are 16 characters (within
+`VARCHAR(18)`), and the seeded `ZZT`, `PV01`/`PV02`, `FERT`, and `EA` values
+fit their schema limits.
+
+### Smoke replay and migration partition
+
+`scripts/schema_bootstrap_smoke.py` still passes `ON_ERROR_STOP=1` and refuses
+non-local hosts. It now applies the 22 explicitly selected
+current-schema-compatible/replayable migrations twice. It compares `orders`
+columns and a bounded, stable public structural fingerprint covering base
+tables, columns, indexes, and table constraints. The fingerprint deliberately
+excludes volatile row contents and the eight explicitly skipped historical or
+hand-applied migration files; the script prints every skipped name and says
+that those files were not checked in both its documentation and failure/success
+scope text. `tests/test_schema_idempotent.py` now asserts the complete 22-file
+applied / 8-file skipped partition and the second-replay/fingerprint wiring.
+
+### Route imports and required-Postgres regression
+
+`tests/test_integration_routes.py` no longer converts arbitrary import/setup
+errors into a module-level skip; required imports now fail collection normally.
+`tests/test_db_safety.py` adds a subprocess collection test for both missing
+`NIMBUS_TEST_DB` opt-in and an unavailable local DB while
+`NIMBUS_REQUIRE_TEST_DB=1` is set. Local auto-skipping and non-local/Azure
+refusal remain unchanged.
+
+### Fix-round verification
+
+Focused DB-free tests:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB=''; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_routes.py tests/test_integration_pg.py tests/test_schema_idempotent.py tests/test_db_safety.py -m "not pg" -q -ra
+```
+
+Output: `49 passed, 5 deselected, 13 warnings in 14.81s`.
+
+Guarded integration/concurrency check:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py -q -ra
+```
+
+Output: `1 passed, 6 skipped in 0.08s`. The three integration PG tests and
+three concurrency tests skipped because the local Postgres probe is
+unavailable (this machine's local connection has the existing SSL/auth
+mismatch). No Azure or remote database was used.
+
+Required-CI-mode collection check:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB='1'; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py --collect-only -q -ra
+```
+
+Expected output/exit: exit 1 with
+`pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI PostgreSQL test DB`.
+This verifies that CI cannot silently accept all PG tests as skipped.
+
+Static checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check tests/test_integration_pg.py tests/test_integration_routes.py tests/test_schema_idempotent.py tests/test_db_safety.py scripts/schema_bootstrap_smoke.py
+.\.venv\Scripts\python.exe -m py_compile tests/test_integration_pg.py tests/test_integration_routes.py tests/test_schema_idempotent.py tests/test_db_safety.py scripts/schema_bootstrap_smoke.py
+npm run check:static-assets
+```
+
+Outputs: `All checks passed!`; compile exit 0 with no output; `Static asset
+boundary OK.`
+
+The real scratch-database smoke script could not be run locally for the same
+Postgres/auth reason; its replay/fingerprint orchestration and partition are
+covered by DB-free tests, while CI's local Postgres service runs the actual
+script with `PGPASSWORD`.
+
 ### Full DB-free pytest attempt
 
 Command:
@@ -311,6 +402,52 @@ Command:
 
 Output: exit 0, no output.
 
+## Fix-round 2 final verification addendum (2026-09-02)
+
+The independent re-review remediation was verified after the implementation
+changes and before commit. The detailed change summary is recorded in the
+earlier fix-round 2 section above.
+
+Focused DB-free command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB=''; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_routes.py tests/test_integration_pg.py tests/test_schema_idempotent.py tests/test_db_safety.py -m "not pg" -q -ra
+```
+
+Result: `49 passed, 5 deselected, 13 warnings in 14.81s`.
+
+Guarded Postgres and concurrency command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py -q -ra
+```
+
+Result: `1 passed, 6 skipped in 0.08s`; all six real DB tests skipped because
+the local probe is unavailable with this machine's existing PostgreSQL
+SSL/auth mismatch. No Azure or remote database was contacted.
+
+Required-CI collection command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB='1'; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py --collect-only -q -ra
+```
+
+Expected result: exit 1 with
+`pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI PostgreSQL test DB`.
+
+Touched-file Ruff, Python compile, and static asset checks all passed:
+
+```text
+ruff: All checks passed!
+py_compile: exit 0, no output
+static assets: Static asset boundary OK.
+```
+
+The real scratch-database smoke run remains unexecuted locally solely because
+of that Postgres/auth condition; its second-replay, bounded-fingerprint,
+curated-partition, and reporting behavior is covered by the focused DB-free
+regression tests. No full suite was run in this fix round.
+
 Command:
 
 ```powershell
@@ -415,3 +552,20 @@ Command:
 ```
 
 Output: exit 0, no output.
+
+## Fix-round 2 final verification (appended 2026-09-02)
+
+The independent re-review remediation was verified after implementation and
+before commit. Focused DB-free tests reported `49 passed, 5 deselected, 13
+warnings in 14.81s`; the guarded integration/concurrency subset reported
+`1 passed, 6 skipped in 0.08s` because the local PostgreSQL probe has the
+existing SSL/auth mismatch. The required-CI collection check exited 1 with
+`pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI
+PostgreSQL test DB`. Touched-file Ruff passed, Python compilation exited 0,
+and `npm run check:static-assets` reported `Static asset boundary OK.`
+
+The real scratch-database smoke script was not run locally because of the
+same Postgres/auth condition; its second replay, bounded structural
+fingerprint, complete migration partition, and accurate reporting are covered
+by the focused DB-free regression tests. No full suite was run in this
+fix-round.

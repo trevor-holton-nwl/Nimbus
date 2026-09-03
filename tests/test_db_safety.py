@@ -1,4 +1,6 @@
 import ast
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +12,8 @@ from tests.support.db_safety import (
     is_test_database_opted_in,
     validate_test_database,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize('value', ['1', 'true', 'TRUE', 'yes', ' on '])
@@ -87,6 +91,47 @@ def test_required_test_db_setting_turns_pg_skip_into_collection_error(required, 
     from tests import conftest
 
     assert conftest._required_test_db_error(required=required, opted_in=opted_in, pg_up=pg_up) == expected
+
+
+@pytest.mark.parametrize(
+    ("test_db", "port", "expected"),
+    [
+        (None, "5432", "NIMBUS_REQUIRE_TEST_DB=1 requires NIMBUS_TEST_DB=1"),
+        ("1", "1", "NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI PostgreSQL test DB"),
+    ],
+)
+def test_required_test_db_fails_collection_in_subprocess_when_guard_cannot_pass(test_db, port, expected):
+    """Collection must fail before pg tests can be silently marked skipped."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "PG_HOST": "localhost",
+            "PG_PORT": port,
+            "PG_DB": "nimbus",
+            "PG_USER": "postgres",
+            "PG_PASS": "test-only",
+            "NIMBUS_REQUIRE_TEST_DB": "1",
+            "NIMBUS_PG_POOL_MIN": "0",
+        }
+    )
+    if test_db is None:
+        env.pop("NIMBUS_TEST_DB", None)
+    else:
+        env["NIMBUS_TEST_DB"] = test_db
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_integration_pg.py", "--collect-only", "-q"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0
+    assert expected in output
 
 
 def test_pytest_sessionfinish_closes_an_imported_application_pool(monkeypatch):

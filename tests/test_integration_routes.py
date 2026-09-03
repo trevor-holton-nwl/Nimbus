@@ -22,15 +22,11 @@ if ROOT not in sys.path:
 
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
-try:
-    from starlette.testclient import TestClient
+from starlette.testclient import TestClient  # noqa: E402
 
-    import backend.integration.routes as int_routes
-    import backend.security.auth as auth
-    import brain
-except Exception as e:  # pragma: no cover - environment dependent
-    pytest.skip(f"brain/TestClient unavailable in this environment: {e}",
-                allow_module_level=True)
+import backend.integration.routes as int_routes  # noqa: E402
+import backend.security.auth as auth  # noqa: E402
+import brain  # noqa: E402
 
 
 @pytest.fixture

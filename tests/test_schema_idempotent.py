@@ -16,6 +16,7 @@ Two layers:
 """
 import os
 import re
+import sys
 
 import pytest
 
@@ -99,8 +100,101 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-08-20-setup-value-case-fold-backfill.sql",
     }
 
-    assert expected_skipped <= skipped_names
-    assert not (expected_skipped & {os.path.basename(path) for path in applied})
+    expected_replayable = {
+        "2026-07-07-color-wheel-table.sql",
+        "2026-07-07-security-tables.sql",
+        "2026-07-08-username-ci-index.sql",
+        "2026-07-08-user-name-fields.sql",
+        "2026-07-09-user-settings.sql",
+        "2026-07-15-bom-items.sql",
+        "2026-08-03-user-last-login.sql",
+        "2026-08-07-material-plant-attributes.sql",
+        "2026-08-12-order-schedule-segments.sql",
+        "2026-08-12-plant-timezone.sql",
+        "2026-08-13-changeover-matrix-stage-2-policies.sql",
+        "2026-08-17-plant-max-pull-forward-days.sql",
+        "2026-08-17-system-settings.sql",
+        "2026-08-20-plant-frozen-horizon.sql",
+        "2026-08-20-plant-visibility-horizon.sql",
+        "2026-08-21-min-productive-segment-minutes.sql",
+        "2026-08-21-plants-grid-roll-hour.sql",
+        "2026-08-21-plants-grid-visibility.sql",
+        "2026-08-24-orders-firming-indicator.sql",
+        "2026-09-01-orders-sap-coois-fields.sql",
+        "2026-09-02-drop-redundant-setup-matrix-index.sql",
+        "2026-09-02-orders-plant-column.sql",
+    }
+    all_names = {
+        os.path.basename(path)
+        for path in schema_bootstrap_smoke.glob.glob(
+            os.path.join(schema_bootstrap_smoke.MIGRATIONS_DIR, "*.sql")
+        )
+    }
+    applied_names = {os.path.basename(path) for path in applied}
+
+    assert skipped_names == expected_skipped
+    assert applied_names == expected_replayable
+    assert all_names == expected_replayable | expected_skipped
+    assert applied_names.isdisjoint(skipped_names)
+
+
+def test_schema_bootstrap_smoke_replays_subset_twice_and_compares_bounded_fingerprint(monkeypatch, capsys):
+    """The smoke entrypoint must exercise the second replay, not just define it."""
+    calls = []
+
+    monkeypatch.setattr(
+        schema_bootstrap_smoke,
+        "_dropcreate_db",
+        lambda _args, dbname: calls.append(("dropcreate", dbname)),
+    )
+    monkeypatch.setattr(
+        schema_bootstrap_smoke,
+        "_apply_file",
+        lambda _args, dbname, path: calls.append(("apply", dbname, os.path.basename(path))),
+    )
+    monkeypatch.setattr(schema_bootstrap_smoke, "_orders_columns", lambda _args, _dbname: "orders")
+    monkeypatch.setattr(
+        schema_bootstrap_smoke,
+        "_schema_fingerprint",
+        lambda _args, _dbname: "bounded-fingerprint",
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", ["schema_bootstrap_smoke.py", "--host", "localhost"])
+
+    assert schema_bootstrap_smoke.main() == 0
+
+    applied_names = [
+        call[2]
+        for call in calls
+        if call[0] == "apply"
+        and call[1] == schema_bootstrap_smoke.MIGRATIONS_DB
+        and call[2] != "schema.sql"
+    ]
+    counts = {name: applied_names.count(name) for name in set(applied_names)}
+    expected_names = {
+        os.path.basename(path) for path in schema_bootstrap_smoke._migration_files()[0]
+    }
+    assert counts == {name: 2 for name in expected_names}
+
+    output = capsys.readouterr().out.lower()
+    assert "second replay" in output
+    assert "bounded public-schema structural fingerprint" in output
+    assert "not checked" in output
+
+
+def test_schema_bootstrap_smoke_fingerprint_is_bounded_public_catalog_structure():
+    """The documented fingerprint covers stable public structure, not volatile rows."""
+    fingerprint_sql = schema_bootstrap_smoke.SCHEMA_FINGERPRINT_SQL.lower()
+
+    for fragment in (
+        "information_schema.tables",
+        "information_schema.columns",
+        "pg_indexes",
+        "pg_constraint",
+        "pg_get_constraintdef",
+        "table_schema = 'public'",
+    ):
+        assert fragment in fingerprint_sql
 
 
 def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():

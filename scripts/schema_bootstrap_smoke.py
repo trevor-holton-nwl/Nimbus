@@ -24,13 +24,15 @@ actually matter:
   1. A fresh `psql -v ON_ERROR_STOP=1 -f schema.sql` bootstrap succeeds
      end-to-end against an EMPTY database (the literal A3 regression: schema.sql
      used to reference `orders.plant` in an index before the column existed).
-  2. Applying the current-schema-compatible `migrations/*.sql` subset,
-     filename-sorted, ON TOP of that same schema.sql bootstrap succeeds and
-     produces the SAME `orders` column shape as schema.sql alone -- i.e. the
-     replayable ledger never silently drifts the live shape away from what a
-     fresh clone of the repo would produce. Frozen pre-cutover migrations that
-     target legacy production_lines/line_* names, default_workcenter, or
-     hand-applied one-shot cutovers are explicitly skipped and printed.
+  2. Applying the current-schema-compatible migration subset, filename-sorted,
+     ON TOP of that same schema.sql bootstrap succeeds twice. After both
+     replays, it compares the SAME `orders` column shape and a bounded,
+     structural public-schema fingerprint (tables, columns, indexes, and
+     constraints) against schema.sql alone. The bounded fingerprint deliberately
+     excludes row contents and the explicitly skipped historical files. Frozen
+     pre-cutover migrations that target legacy production_lines/line_* names,
+     default_workcenter, or hand-applied one-shot cutovers are explicitly
+     skipped and printed; those files are not checked by this smoke test.
 
 This is a STANDALONE script, not a pytest test: it shells out to `psql`
 against two throwaway scratch databases and does not touch the app's own
@@ -50,14 +52,18 @@ Requires:
   - `psql` on PATH, or pass --psql "C:\\Program Files\\PostgreSQL\\18\\bin\\psql.exe".
   - PGPASSWORD set in the environment (or a trust/peer-auth local setup).
 
-Exit code 0 = both paths produced an identical `orders` column set; nonzero =
-either a `psql` step failed (ON_ERROR_STOP=1 aborts that step) or the two
-`orders` shapes diverged (diff printed to stdout).
+Exit code 0 = schema.sql bootstrap plus the replayable/current-schema-compatible
+migration subset passed a second replay, and both the `orders` column shape and
+the bounded public-schema structural fingerprint matched the schema.sql
+baseline. Nonzero = a `psql` step failed (ON_ERROR_STOP=1 aborts that step), a
+second replay failed, or one of those bounded comparisons diverged. Explicitly
+skipped historical/hand-applied migrations are not checked by this script.
 """
 from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import os
 import subprocess
 import sys
@@ -74,6 +80,50 @@ ORDERS_COLUMNS_SQL = (
     "FROM information_schema.columns "
     "WHERE table_name = 'orders' ORDER BY column_name;"
 )
+
+# Deliberately bounded and structural: this catches drift in every ordinary
+# public table, column, index, and table constraint without depending on
+# volatile row contents, sequence values, object identifiers, or excluded
+# historical/hand-applied migrations. The output is sorted and hashed by
+# Python, so identical fresh databases produce the same fingerprint.
+SCHEMA_FINGERPRINT_SQL = """
+WITH objects AS (
+    SELECT
+        'table'::text AS object_type,
+        table_name AS object_name,
+        table_type AS object_detail
+      FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_type = 'BASE TABLE'
+    UNION ALL
+    SELECT
+        'column'::text,
+        table_name || '.' || lpad(ordinal_position::text, 4, '0') || '.' || column_name,
+        concat_ws('|', data_type, udt_schema, udt_name, is_nullable,
+                  character_maximum_length, numeric_precision, column_default)
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+    UNION ALL
+    SELECT
+        'index'::text,
+        schemaname || '.' || indexname,
+        indexdef
+      FROM pg_indexes
+     WHERE schemaname = 'public'
+    UNION ALL
+    SELECT
+        'constraint'::text,
+        ns.nspname || '.' || cls.relname || '.' || con.conname,
+        concat_ws('|', pg_get_constraintdef(con.oid, true), con.convalidated)
+      FROM pg_constraint con
+      JOIN pg_class cls ON cls.oid = con.conrelid
+      JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+     WHERE ns.nspname = 'public'
+)
+SELECT object_type, object_name, object_detail
+  FROM objects
+ ORDER BY object_type, object_name, object_detail;
+"""
 
 SKIPPED_POST_SCHEMA_MIGRATIONS = {
     # Pre machine-rename SAP seed uses the legacy production_lines object key.
@@ -124,6 +174,13 @@ def _orders_columns(args, dbname: str) -> str:
     return result.stdout.strip()
 
 
+def _schema_fingerprint(args, dbname: str) -> str:
+    """Return a stable hash of the bounded public-schema structural contract."""
+    cmd = _psql_base(args) + ["-d", dbname, "-A", "-t", "-c", SCHEMA_FINGERPRINT_SQL]
+    result = _run(cmd)
+    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+
+
 def _migration_files() -> tuple[list[str], list[tuple[str, str]]]:
     migration_files = sorted(glob.glob(os.path.join(MIGRATIONS_DIR, "*.sql")))
     applied: list[str] = []
@@ -136,6 +193,12 @@ def _migration_files() -> tuple[list[str], list[tuple[str, str]]]:
         else:
             applied.append(path)
     return applied, skipped
+
+
+def _replay_migrations(args, dbname: str, migration_files: list[str], pass_name: str) -> None:
+    print(f"{pass_name}: {len(migration_files)} replayable/current-schema-compatible migration files")
+    for path in migration_files:
+        _apply_file(args, dbname, path)
 
 
 def main() -> int:
@@ -156,8 +219,8 @@ def main() -> int:
     _dropcreate_db(args, SCHEMA_DB)
     _apply_file(args, SCHEMA_DB, SCHEMA_SQL)
 
-    print("\n== Step 2: schema.sql bootstrap, THEN the replayable migrations/*.sql subset on top ==")
-    print("(skips frozen legacy/hand-applied cutover files that do not apply to current schema.sql)")
+    print("\n== Step 2: schema.sql bootstrap, THEN the replayable/current-schema-compatible migration subset ==")
+    print("(frozen legacy/hand-applied cutover files are explicitly skipped and are not checked)")
     _dropcreate_db(args, MIGRATIONS_DB)
     _apply_file(args, MIGRATIONS_DB, SCHEMA_SQL)
     migration_files, skipped = _migration_files()
@@ -167,24 +230,66 @@ def main() -> int:
         print("Skipped post-schema migration replay files:")
         for name, reason in skipped:
             print(f"  - {name}: {reason}")
-    for path in migration_files:
-        _apply_file(args, MIGRATIONS_DB, path)
+    _replay_migrations(args, MIGRATIONS_DB, migration_files, "First replay")
 
-    print("\n== Step 3: diff orders column shape ==")
+    print("\n== Step 3: compare orders columns and bounded public-schema structural fingerprint after first replay ==")
     schema_cols = _orders_columns(args, SCHEMA_DB)
-    migrations_cols = _orders_columns(args, MIGRATIONS_DB)
+    first_replay_cols = _orders_columns(args, MIGRATIONS_DB)
+    schema_fingerprint = _schema_fingerprint(args, SCHEMA_DB)
+    first_replay_fingerprint = _schema_fingerprint(args, MIGRATIONS_DB)
 
-    if schema_cols == migrations_cols:
-        print("MATCH: schema.sql alone and schema.sql+migrations/*.sql produce an "
-              "identical orders table shape -- the ledger has not drifted.")
+    print("\n== Step 4: replay the same replayable/current-schema-compatible migration subset a second time ==")
+    _replay_migrations(args, MIGRATIONS_DB, migration_files, "Second replay")
+    second_replay_cols = _orders_columns(args, MIGRATIONS_DB)
+    second_replay_fingerprint = _schema_fingerprint(args, MIGRATIONS_DB)
+
+    scope = (
+        "schema.sql plus the replayable/current-schema-compatible migration subset "
+        f"({len(migration_files)} files); explicitly skipped historical/hand-applied "
+        f"files ({len(skipped)} files) were not checked"
+    )
+    mismatches = []
+    if schema_cols != first_replay_cols:
+        mismatches.append("orders columns after first replay")
+    if schema_cols != second_replay_cols:
+        mismatches.append("orders columns after second replay")
+    if first_replay_cols != second_replay_cols:
+        mismatches.append("orders columns between replays")
+    if schema_fingerprint != first_replay_fingerprint:
+        mismatches.append("bounded structural fingerprint after first replay")
+    if schema_fingerprint != second_replay_fingerprint:
+        mismatches.append("bounded structural fingerprint after second replay")
+    if first_replay_fingerprint != second_replay_fingerprint:
+        mismatches.append("bounded structural fingerprint between replays")
+
+    if not mismatches:
+        print(
+            "PASS: "
+            f"{scope}; first and second replay completed, orders columns match, "
+            "and the bounded public-schema structural fingerprint "
+            "(tables, columns, indexes, constraints) matches the schema.sql baseline."
+        )
         return 0
 
-    print("MISMATCH: applying the full migrations/*.sql ledger changed the orders "
-          "shape relative to schema.sql alone.", file=sys.stderr)
+    print(f"FAIL: {scope}; comparison mismatch: {', '.join(mismatches)}.", file=sys.stderr)
+    print(
+        "The smoke check covered schema.sql plus the replayable/current-schema-compatible "
+        "subset and its second replay; excluded historical/hand-applied migrations "
+        "were not checked.",
+        file=sys.stderr,
+    )
     print("--- schema.sql orders columns ---", file=sys.stderr)
     print(schema_cols, file=sys.stderr)
-    print("--- schema.sql + migrations/*.sql orders columns ---", file=sys.stderr)
-    print(migrations_cols, file=sys.stderr)
+    print("--- first replay orders columns ---", file=sys.stderr)
+    print(first_replay_cols, file=sys.stderr)
+    print("--- second replay orders columns ---", file=sys.stderr)
+    print(second_replay_cols, file=sys.stderr)
+    print("--- schema.sql bounded structural fingerprint ---", file=sys.stderr)
+    print(schema_fingerprint, file=sys.stderr)
+    print("--- first replay bounded structural fingerprint ---", file=sys.stderr)
+    print(first_replay_fingerprint, file=sys.stderr)
+    print("--- second replay bounded structural fingerprint ---", file=sys.stderr)
+    print(second_replay_fingerprint, file=sys.stderr)
     return 1
 
 
