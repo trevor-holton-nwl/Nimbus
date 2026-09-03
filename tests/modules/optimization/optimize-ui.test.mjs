@@ -186,13 +186,24 @@ test('Persistence setup writes stale an open preview without applying or rerunni
 test('Task 1: a local edit to an unpatched preview-plant task blocks Apply and audit', () => {
   const plant = 'TASK-BASELINE-LOCAL';
   const untouchedId = 'task-baseline-firmed';
+  const candidateTaskId = 'task-baseline-free';
   const fixture = openTaskBaselinePreview(plant, [
     previewTask(untouchedId, plant, 5),
-    previewTask('task-baseline-free', plant, 1),
+    previewTask(candidateTaskId, plant, 1),
   ], { firmedIds: [untouchedId] });
+  const engineApplyEvents = [];
+  const unsubscribe = Store.subscribe(event => {
+    if (event.type === 'tasks:bulkUpdate' && event.source === 'engine') engineApplyEvents.push(event);
+  }, 'task-1-stale-local-apply-contract');
   try {
     assert.equal(OptimizerPreview._candidate.patches.some(patch => patch.id === untouchedId), false,
       'the edited task is deliberately outside the candidate patch set');
+    assert.equal(OptimizerPreview._candidate.patches.some(patch => patch.id === candidateTaskId), true,
+      'the candidate contains a real schedule patch whose application can be observed');
+    const scheduleBeforeApply = {
+      start_date: Store.tasks[candidateTaskId].start_date,
+      end_date: Store.tasks[candidateTaskId].end_date,
+    };
 
     Store.updateTask(untouchedId, {
       start_date: new Date('2026-08-04T09:00:00'),
@@ -203,8 +214,14 @@ test('Task 1: a local edit to an unpatched preview-plant task blocks Apply and a
     assert.equal(OptimizerPreview.canApply(), false, 'the changed baseline cannot apply');
     OptimizerPreview.apply();
     assert.ok(OptimizerPreview._candidate, 'blocked Apply leaves the candidate available for discard or rerun');
+    assert.deepEqual({
+      start_date: Store.tasks[candidateTaskId].start_date,
+      end_date: Store.tasks[candidateTaskId].end_date,
+    }, scheduleBeforeApply, 'blocked Apply leaves the candidate-patched task schedule unchanged');
+    assert.equal(engineApplyEvents.length, 0, 'blocked Apply emits no engine task mutation');
     assert.equal(fixture.auditRequests.length, 0, 'blocked Apply never emits the optimization audit event');
   } finally {
+    unsubscribe();
     fixture.restore();
   }
 });
@@ -253,18 +270,36 @@ test('Task 1: edits in an unrelated plant do not stale the active preview', () =
 
 test('Task 1: removing a preview-plant task blocks Apply', () => {
   const plant = 'TASK-BASELINE-REMOVE';
+  const remainingTaskId = 'task-remains';
   const fixture = openTaskBaselinePreview(plant, [
     previewTask('task-remove', plant),
-    previewTask('task-remains', plant),
+    previewTask(remainingTaskId, plant),
   ]);
+  const engineApplyEvents = [];
+  const unsubscribe = Store.subscribe(event => {
+    if (event.type === 'tasks:bulkUpdate' && event.source === 'engine') engineApplyEvents.push(event);
+  }, 'task-1-stale-removal-apply-contract');
   try {
+    assert.equal(OptimizerPreview._candidate.patches.some(patch => patch.id === remainingTaskId), true,
+      'the candidate contains a surviving task patch whose application can be observed');
+    const scheduleBeforeApply = {
+      start_date: Store.tasks[remainingTaskId].start_date,
+      end_date: Store.tasks[remainingTaskId].end_date,
+    };
+
     Store.removeTask('task-remove', 'server-delete');
 
     assert.equal(OptimizerPreview.stale, true, 'removing a baseline task immediately stales the preview');
     assert.equal(OptimizerPreview.canApply(), false, 'a removed task cannot be silently recreated or bypassed');
     OptimizerPreview.apply();
+    assert.deepEqual({
+      start_date: Store.tasks[remainingTaskId].start_date,
+      end_date: Store.tasks[remainingTaskId].end_date,
+    }, scheduleBeforeApply, 'blocked Apply leaves the surviving candidate-patched task schedule unchanged');
+    assert.equal(engineApplyEvents.length, 0, 'blocked Apply emits no engine task mutation');
     assert.equal(fixture.auditRequests.length, 0, 'a removal mismatch blocks the audit event too');
   } finally {
+    unsubscribe();
     fixture.restore();
   }
 });
