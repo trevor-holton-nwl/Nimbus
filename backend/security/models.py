@@ -89,3 +89,10 @@ class BulkUsersResult(BaseModel):
     inserted: int
     updated: int
     deleted: int
+
+
+class ClientConfigResult(BaseModel):
+    """GET /security/client-config's shape -- lets the SPA learn the current
+    NIMBUS_API_KEY deployment-config stopgap value so it can echo it back as
+    X-API-Key on subsequent requests. Empty string when the key is unset."""
+    apiKey: str

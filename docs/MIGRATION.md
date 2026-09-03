@@ -646,9 +646,14 @@ The destructive / DDL / maintenance endpoints (`/upload`, `/purge`, `/master-dat
 
 - **No-op until `NIMBUS_API_KEY` is set** — local/dev runs unchanged.
 - When set, those routes require a matching `X-API-Key` header (else `401`).
-- **To enable for a non-Azure host:** set `NIMBUS_API_KEY` on the backend **and** make admin
-  clients send `X-API-Key`. The current frontend does **not** send it yet, so enabling the key
-  without wiring the frontend will break the in-app admin actions — wire it first.
+- **2026-09-02: the frontend is now wired.** `GET /security/client-config` (public, no
+  `Depends(...)`) lets the SPA learn the current key at boot; `Util.setApiKey` +
+  `fetchTraced` (`frontend/platform/foundation.mts`) echo it back as `X-API-Key` on every
+  request. This closes the exact gap flagged just above — enabling the key on
+  `ca-nimbus-dev` the same day `700daab` swept `require_api_key` onto more admin routes,
+  *before* this wiring existed, briefly 401'd real admin users on `/security/users`,
+  `/admin/tables`, `/diagnostics/db`, and `/logs/backend`. To enable on a non-Azure host now,
+  only the backend env var needs setting — the frontend picks it up automatically.
 
 **This is NOT user-level security.** Actor identity is *still* read from spoofable
 `X-User` / `x-user-email` headers, so audit attribution remains untrustworthy. The real fix is

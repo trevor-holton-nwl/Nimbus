@@ -42,6 +42,27 @@ test('Util.setPreferenceResolver changes what _timeFormatPref/_dateFormatPref re
   assert.equal(Util._timeFormatPref(), '12h'); // documented fallback
 });
 
+test('Util.setApiKey makes fetchTraced attach X-API-Key; unset attaches nothing', async () => {
+  const origFetch = globalThis.fetch;
+  let seenHeaders;
+  globalThis.fetch = (url, opts) => {
+    seenHeaders = opts.headers;
+    return Promise.resolve({ ok: true, status: 200, clone: () => ({}) });
+  };
+  try {
+    Util.setApiKey('');
+    await Util.fetchTraced('/tasks');
+    assert.equal(seenHeaders.has('x-api-key'), false);
+
+    Util.setApiKey('required-key');
+    await Util.fetchTraced('/tasks');
+    assert.equal(seenHeaders.get('x-api-key'), 'required-key');
+  } finally {
+    globalThis.fetch = origFetch;
+    Util.setApiKey(''); // reset
+  }
+});
+
 test('Util.setLocale/locale round-trip and t() reads the active locale', () => {
   const prevLocale = Util.locale();
   globalThis.window = globalThis.window || {};

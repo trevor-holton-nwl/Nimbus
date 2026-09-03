@@ -178,6 +178,31 @@ def test_audit_log_clear_rejects_missing_api_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# GET /security/client-config (2026-09-02) — public/unauthenticated by design,
+# so the SPA can learn the current NIMBUS_API_KEY value at boot and echo it
+# back as X-API-Key on every subsequent request (see Util.setApiKey/
+# fetchTraced in frontend/platform/foundation.mts). Must stay reachable with
+# NO headers at all, in both the unset (no-op) and set states.
+# ---------------------------------------------------------------------------
+def test_client_config_returns_empty_key_when_unset(monkeypatch):
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", None)
+    response = TestClient(brain.api).get("/security/client-config")
+    assert response.status_code == 200
+    assert response.json() == {"apiKey": ""}
+
+
+def test_client_config_returns_the_key_when_set(monkeypatch):
+    from starlette.testclient import TestClient
+
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    response = TestClient(brain.api).get("/security/client-config")
+    assert response.status_code == 200
+    assert response.json() == {"apiKey": "required-key"}
+
+
+# ---------------------------------------------------------------------------
 # @pytest.mark.pg — real catalog / real tables
 # ---------------------------------------------------------------------------
 @pytest.mark.pg

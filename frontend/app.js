@@ -709,6 +709,18 @@ const NIMBUS = (function () {
   App._bootMain = _bootMain;
 
   function _domReadyGate() {
+    // Learn the NIMBUS_API_KEY deployment-config stopgap (see backend/security/
+    // CLAUDE.md) as early as possible, in parallel with everything below — the
+    // route is public/same-origin, so by the time a signed-in admin reaches the
+    // Security or Table Browser tabs this has long since resolved. Fire-and-
+    // forget, same pattern as ErrorLog._shipNow's own infra calls; a failure
+    // here just leaves Util's api-key empty, matching the pre-existing no-op
+    // behavior when NIMBUS_API_KEY is unset on the backend.
+    fetch(`${Config.API_BASE}/security/client-config`)
+      .then(r => r.json())
+      .then(d => Util.setApiKey(d.apiKey))
+      .catch(() => {});
+
     // Mandatory login gate — blocks the whole app until authenticated against
     // user_security. A cached session (page reload while signed in) skips
     // straight to _bootMain(); otherwise showLoginScreen() takes over and calls

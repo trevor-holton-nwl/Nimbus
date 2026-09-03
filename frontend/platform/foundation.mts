@@ -165,6 +165,11 @@ let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
 let _changeoverFieldsResolver: (() => string[]) | null = null;
 let _locale: string = (typeof localStorage !== 'undefined' && localStorage.getItem('nimbus.locale')) || 'en';
+// The NIMBUS_API_KEY deployment-config stopgap (see backend/security/CLAUDE.md),
+// learned once at boot from GET /security/client-config (app.js's _domReadyGate)
+// and echoed back on every request via fetchTraced. Empty when the backend key
+// is unset (the default) — matches that route's no-op default exactly.
+let _apiKey: string = '';
 
 /** What counts as a changeover when no resolver is wired (Node tests, or before
  *  app.js's boot glue runs): the historical hardcoded pair, so an unwired Util
@@ -179,6 +184,7 @@ export const Util = {
   setActorResolver(fn: ActorResolver): void { _actorResolver = typeof fn === 'function' ? fn : () => undefined; },
   setUtilizationResolver(fn: UtilizationResolverFn | null): void { _utilizationResolver = typeof fn === 'function' ? fn : null; },
   setChangeoverFieldsResolver(fn: (() => string[]) | null): void { _changeoverFieldsResolver = typeof fn === 'function' ? fn : null; },
+  setApiKey(key: string): void { _apiKey = key || ''; },
 
   /** The task fields whose change between adjacent orders is a changeover, for
    *  the plant currently being scheduled. Resolved through the injected seam so
@@ -467,6 +473,7 @@ export const Util = {
     const headers = new Headers(init.headers || {});
     if (!headers.has('x-request-id')) headers.set('x-request-id', reqId);
     if (!headers.has('x-user-email') && !headers.has('X-User')) headers.set('x-user-email', _actorResolver() as string);
+    if (!headers.has('x-api-key') && _apiKey) headers.set('x-api-key', _apiKey);
     const method = init.method || 'GET';
     const url    = typeof input === 'string' ? input : input.url;
     const t0     = performance.now();

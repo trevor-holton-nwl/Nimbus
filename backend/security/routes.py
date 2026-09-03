@@ -14,6 +14,7 @@ from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
 from backend.security.models import (
     BulkUsersResult,
+    ClientConfigResult,
     LoginResult,
     OkResult,
     UpdateOwnNameResult,
@@ -40,6 +41,18 @@ def security_login(request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     auth._reset_login_throttle(username, client_ip)
     return result
+
+
+@router.get("/security/client-config", response_model=ClientConfigResult)
+def security_client_config():
+    """Public, unauthenticated by design (no Depends(...) at all) -- see
+    backend/security/CLAUDE.md's NIMBUS_API_KEY note. Lets the SPA learn the
+    current deployment-config stopgap key at boot so it can echo it back as
+    X-API-Key on every subsequent request (see Util.setApiKey/fetchTraced in
+    frontend/platform/foundation.mts). The key is not a secret from browser
+    clients -- it only needs to be unknown to anonymous non-SPA callers that
+    never load this page, which is NIMBUS_API_KEY's whole documented purpose."""
+    return {"apiKey": auth.NIMBUS_API_KEY or ""}
 
 
 @router.get("/security/me", response_model=WhoAmIResult)
