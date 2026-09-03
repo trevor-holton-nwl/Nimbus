@@ -138,48 +138,139 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     assert applied_names.isdisjoint(skipped_names)
 
 
-def test_schema_bootstrap_smoke_replays_subset_twice_and_compares_bounded_fingerprint(monkeypatch, capsys):
-    """The smoke entrypoint must exercise the second replay, not just define it."""
+def _stub_smoke_dependencies(monkeypatch):
+    schema_db = "nimbus_bootstrap_test_schema_tmp"
+    migrations_db = "nimbus_bootstrap_test_migrations_tmp"
     calls = []
+    cleaned = []
+    seeded = []
+    orders_calls = []
 
     monkeypatch.setattr(
         schema_bootstrap_smoke,
-        "_dropcreate_db",
-        lambda _args, dbname: calls.append(("dropcreate", dbname)),
+        "_scratch_db_names",
+        lambda: (schema_db, migrations_db),
+    )
+    def create_stub(_args, dbname):
+        calls.append(("create", dbname))
+
+    monkeypatch.setattr(schema_bootstrap_smoke, "_create_database", create_stub)
+    monkeypatch.setattr(
+        schema_bootstrap_smoke,
+        "_drop_database_best_effort",
+        lambda _args, dbname: cleaned.append(dbname),
+    )
+    monkeypatch.setattr(
+        schema_bootstrap_smoke,
+        "_seed_data_contract",
+        lambda _args, dbname: seeded.append(dbname),
     )
     monkeypatch.setattr(
         schema_bootstrap_smoke,
         "_apply_file",
         lambda _args, dbname, path: calls.append(("apply", dbname, os.path.basename(path))),
     )
-    monkeypatch.setattr(schema_bootstrap_smoke, "_orders_columns", lambda _args, _dbname: "orders")
-    monkeypatch.setattr(
-        schema_bootstrap_smoke,
-        "_schema_fingerprint",
-        lambda _args, _dbname: "bounded-fingerprint",
-        raising=False,
-    )
+
+    def fake_orders(_args, dbname):
+        orders_calls.append(dbname)
+        return "orders"
+
+    monkeypatch.setattr(schema_bootstrap_smoke, "_orders_columns", fake_orders)
     monkeypatch.setattr(sys, "argv", ["schema_bootstrap_smoke.py", "--host", "localhost"])
+    return schema_db, migrations_db, calls, cleaned, seeded, orders_calls
+
+
+def test_schema_bootstrap_smoke_replays_subset_twice_and_compares_bounded_contracts(monkeypatch, capsys):
+    """The smoke entrypoint must exercise every baseline/replay contract call."""
+    schema_db, migrations_db, calls, cleaned, seeded, orders_calls = _stub_smoke_dependencies(monkeypatch)
+    structural_calls = []
+    data_calls = []
+
+    def fake_structural_fingerprint(_args, dbname):
+        structural_calls.append(dbname)
+        return "bounded-structural-fingerprint"
+
+    def fake_data_fingerprint(_args, dbname):
+        data_calls.append(dbname)
+        return "bounded-data-contract"
+
+    monkeypatch.setattr(schema_bootstrap_smoke, "_schema_fingerprint", fake_structural_fingerprint)
+    monkeypatch.setattr(schema_bootstrap_smoke, "_data_fingerprint", fake_data_fingerprint)
 
     assert schema_bootstrap_smoke.main() == 0
 
     applied_names = [
         call[2]
         for call in calls
-        if call[0] == "apply"
-        and call[1] == schema_bootstrap_smoke.MIGRATIONS_DB
-        and call[2] != "schema.sql"
+        if call[0] == "apply" and call[1] == migrations_db and call[2] != "schema.sql"
     ]
+    assert [call[1] for call in calls if call[0] == "create"] == [schema_db, migrations_db]
     counts = {name: applied_names.count(name) for name in set(applied_names)}
-    expected_names = {
-        os.path.basename(path) for path in schema_bootstrap_smoke._migration_files()[0]
-    }
+    expected_names = {os.path.basename(path) for path in schema_bootstrap_smoke._migration_files()[0]}
     assert counts == {name: 2 for name in expected_names}
+    assert seeded == [schema_db, migrations_db]
+    assert orders_calls == [schema_db, migrations_db, migrations_db]
+    assert structural_calls == [schema_db, migrations_db, migrations_db]
+    assert data_calls == [schema_db, migrations_db, migrations_db]
+    assert cleaned == [migrations_db, schema_db]
 
     output = capsys.readouterr().out.lower()
     assert "second replay" in output
     assert "bounded public-schema structural fingerprint" in output
+    assert "bounded deterministic data/ledger contract" in output
     assert "not checked" in output
+
+
+def test_schema_bootstrap_smoke_cleans_only_created_databases_after_failure(monkeypatch):
+    """A failed bootstrap must still clean the database created by that run."""
+    schema_db, _migrations_db, _calls, cleaned, _seeded, _orders_calls = _stub_smoke_dependencies(monkeypatch)
+
+    def fail_during_schema_apply(_args, _dbname, _path):
+        raise SystemExit("synthetic schema failure")
+
+    monkeypatch.setattr(schema_bootstrap_smoke, "_apply_file", fail_during_schema_apply)
+
+    with pytest.raises(SystemExit, match="synthetic schema failure"):
+        schema_bootstrap_smoke.main()
+
+    assert cleaned == [schema_db]
+
+
+def test_schema_bootstrap_smoke_uses_unique_quoted_database_identifiers():
+    first = schema_bootstrap_smoke._scratch_db_names()
+    second = schema_bootstrap_smoke._scratch_db_names()
+
+    assert first != second
+    assert all(name.startswith(schema_bootstrap_smoke.SCRATCH_DB_PREFIX) for name in first + second)
+    assert all(len(name) <= 63 for name in first + second)
+    assert schema_bootstrap_smoke._quote_identifier('scratch"db') == '"scratch""db"'
+
+
+def test_schema_bootstrap_smoke_fails_when_structural_fingerprint_changes(monkeypatch, capsys):
+    """A structural mismatch must produce a nonzero smoke result and diagnostic."""
+    _stub_smoke_dependencies(monkeypatch)
+    fingerprints = iter(("baseline", "baseline", "changed-on-second-replay"))
+    monkeypatch.setattr(schema_bootstrap_smoke, "_schema_fingerprint", lambda _args, _dbname: next(fingerprints))
+    monkeypatch.setattr(schema_bootstrap_smoke, "_data_fingerprint", lambda _args, _dbname: "same")
+
+    assert schema_bootstrap_smoke.main() == 1
+
+    error = capsys.readouterr().err.lower()
+    assert "bounded structural fingerprint between replays" in error
+    assert "not checked" in error
+
+
+def test_schema_bootstrap_smoke_fails_when_data_contract_changes(monkeypatch, capsys):
+    """A data/ledger contract mismatch must not be hidden by equal structure."""
+    _stub_smoke_dependencies(monkeypatch)
+    monkeypatch.setattr(schema_bootstrap_smoke, "_schema_fingerprint", lambda _args, _dbname: "same")
+    data_contracts = iter(("baseline", "baseline", "changed-on-second-replay"))
+    monkeypatch.setattr(schema_bootstrap_smoke, "_data_fingerprint", lambda _args, _dbname: next(data_contracts))
+
+    assert schema_bootstrap_smoke.main() == 1
+
+    error = capsys.readouterr().err.lower()
+    assert "bounded data/ledger contract between replays" in error
 
 
 def test_schema_bootstrap_smoke_fingerprint_is_bounded_public_catalog_structure():

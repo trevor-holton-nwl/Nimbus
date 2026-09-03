@@ -569,3 +569,97 @@ same Postgres/auth condition; its second replay, bounded structural
 fingerprint, complete migration partition, and accurate reporting are covered
 by the focused DB-free regression tests. No full suite was run in this
 fix-round.
+
+## Fix-round 3/5 remediation (appended 2026-09-03)
+
+Addressed all seven findings from the independent re-review without changing
+production purge behavior or touching Azure/frontend files.
+
+### Changes
+
+- `scripts/schema_bootstrap_smoke.py` now creates UUID-suffixed scratch database
+  names, quotes them as PostgreSQL identifiers, tracks only databases created by
+  the current invocation, and drops them in a best-effort `finally` block. The
+  local-host refusal and `ON_ERROR_STOP=1` remain unchanged.
+- The smoke replay is explicitly curated to 22 replayable/current-schema-
+  compatible migrations and prints the complete eight-file skipped partition.
+  It now replays that subset twice and compares orders columns, a bounded public
+  structural fingerprint, and a bounded deterministic data/ledger contract.
+  The latter includes schema-migration IDs, column metadata, the singleton
+  system-settings JSON, and a seeded sentinel order, excluding volatile
+  timestamps and sequence-backed values. Success/failure text names exactly
+  this checked scope and does not claim to check the excluded files.
+- `tests/test_schema_idempotent.py` now asserts the complete applied/skipped
+  partition, baseline/first-replay/second-replay calls for both fingerprints,
+  mismatch failures, failure cleanup, and unique/quoted scratch identifiers.
+- `tests/test_integration_pg.py` now runs the real global purge SQL only inside
+  a uniquely named, schema-bootstrapped disposable database. A real connection
+  is routed through the production pool lookup for the test, so the test still
+  invokes `db.purge_orders_by_date` and its unchanged SQL while eliminating
+  shared-database TOCTOU exposure. BOM audit cleanup captures all exact audit
+  IDs created after the per-run high-water mark and deletes only those IDs; the
+  prior predicate fallback is gone. FK cleanup remains BOM → schedule/order →
+  upload/admin audit → material_plants → materials.
+- `tests/test_db_safety.py` explicitly sets an empty `NIMBUS_TEST_DB` in the
+  missing-opt-in subprocess case, preventing `.env` from repopulating it.
+
+### Verification
+
+Focused DB-free command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB=''; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_routes.py tests/test_integration_pg.py tests/test_schema_idempotent.py tests/test_db_safety.py -m 'not pg' -q -ra
+```
+
+Result: `53 passed, 5 deselected, 13 warnings in 18.37s`.
+
+Guarded integration/concurrency command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py -q -ra
+```
+
+Result: `2 passed, 6 skipped in 0.13s`. The six PostgreSQL tests (three
+integration tests and three concurrency tests) skipped because the local
+PostgreSQL probe is unavailable; the local instance has the existing SSL/auth
+mismatch. No Azure or non-local database was contacted.
+
+Required-DB missing-opt-in check:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB=''; $env:NIMBUS_REQUIRE_TEST_DB='1'; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py --collect-only -q -ra
+```
+
+Result: exit 1 with `pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires
+NIMBUS_TEST_DB=1`.
+
+Required-DB unreachable-probe check with opt-in:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB='1'; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py --collect-only -q -ra
+```
+
+Result: exit 1 with `pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires
+reachable local/CI PostgreSQL test DB` (plus the existing interpreter-shutdown
+pool finalizer warning).
+
+Touched-file static checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check scripts/schema_bootstrap_smoke.py tests/test_schema_idempotent.py tests/test_integration_pg.py tests/test_db_safety.py tests/test_integration_routes.py
+.\.venv\Scripts\python.exe -m py_compile scripts/schema_bootstrap_smoke.py tests/test_schema_idempotent.py tests/test_integration_pg.py tests/test_db_safety.py tests/test_integration_routes.py
+```
+
+Results: Ruff `All checks passed!`; `py_compile` exited 0 with no output.
+
+Additional checks:
+
+- `git diff --check` exited 0.
+- `npm run check:static-assets` reported `Static asset boundary OK.`
+- `python scripts/schema_bootstrap_smoke.py --host example.invalid` exited 1
+  with the expected non-local-host refusal before any database operation.
+- The real scratch smoke replay and real PostgreSQL ingest/purge tests could
+  not run locally because of the guarded PostgreSQL availability/auth issue;
+  CI's PostgreSQL service remains the execution environment for those checks.
+- No full test suite was run. The pre-existing unrelated working-tree change in
+  `Code_Review_09_01.md` was left untouched.

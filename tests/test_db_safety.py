@@ -115,7 +115,9 @@ def test_required_test_db_fails_collection_in_subprocess_when_guard_cannot_pass(
         }
     )
     if test_db is None:
-        env.pop("NIMBUS_TEST_DB", None)
+        # load_dotenv() does not replace an explicitly present empty value;
+        # this makes the missing-opt-in branch independent of the developer .env.
+        env["NIMBUS_TEST_DB"] = ""
     else:
         env["NIMBUS_TEST_DB"] = test_db
 

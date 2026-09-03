@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import datetime as dt
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 import uuid
 
 import pandas as pd
+import psycopg
 import pytest
+from psycopg import sql
 
 import db
 import master_data as md
@@ -45,6 +48,69 @@ def _xlsx(rows: list[dict]) -> bytes:
     buf = BytesIO()
     pd.DataFrame(rows).to_excel(buf, index=False)
     return buf.getvalue()
+
+
+def _connect_pg_database(dbname: str, *, autocommit: bool = False):
+    return psycopg.connect(
+        host=db.PG_HOST,
+        port=db.PG_PORT,
+        dbname=dbname,
+        user=db.PG_USER,
+        password=db.PG_PASS,
+        sslmode=db.PG_SSLMODE,
+        connect_timeout=5,
+        autocommit=autocommit,
+    )
+
+
+def _drop_isolated_database(dbname: str) -> None:
+    with _connect_pg_database("postgres", autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(dbname))
+        )
+
+
+@pytest.fixture
+def isolated_purge_database(pg):
+    """Yield a schema-bootstrapped DB used only by the real purge SQL test.
+
+    The scratch name is unique to this invocation. The fixture temporarily
+    routes db.purge_orders_by_date's existing pool lookup to one real psycopg
+    connection in that database, eliminating a shared-database TOCTOU window
+    without changing production route semantics or SQL.
+    """
+    del pg  # The fixture dependency is the collection-time local-DB safety gate.
+    scratch_name = f"nimbus_task3_purge_{uuid.uuid4().hex[:12]}"
+    original_pool = db._pool
+    scratch_conn = None
+    try:
+        with _connect_pg_database("postgres", autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(scratch_name)))
+
+        scratch_conn = _connect_pg_database(scratch_name)
+        schema_sql = Path(__file__).resolve().parents[1].joinpath("schema.sql").read_text(encoding="utf-8")
+        with scratch_conn.cursor() as cur:
+            cur.execute(schema_sql)
+        scratch_conn.commit()
+
+        class _ConnectionLease:
+            def __enter__(self):
+                return scratch_conn
+
+            def __exit__(self, *_args):
+                return False
+
+        class _SingleConnectionPool:
+            def connection(self):
+                return _ConnectionLease()
+
+        db._pool = _SingleConnectionPool()
+        yield scratch_conn
+    finally:
+        db._pool = original_pool
+        if scratch_conn is not None:
+            scratch_conn.close()
+        _drop_isolated_database(scratch_name)
 
 
 def test_fixture_values_fit_material_plant_schema_lengths():
@@ -101,16 +167,6 @@ def _cleanup_owned_records(pg, records) -> None:
                 "DELETE FROM admin_audit WHERE id = ANY(%s)",
                 (list(records.admin_audit_ids),),
             )
-        cur.execute(
-            """
-            DELETE FROM admin_audit
-             WHERE table_name = 'bom_items'
-               AND action = 'bulk_apply'
-               AND user_email = %s
-               AND details @> '{"inserted": 1, "updated": 0, "deleted": 0}'::jsonb
-            """,
-            (ZZTEST_USER,),
-        )
         for material_id in (ZZTEST_MAT_PARENT, ZZTEST_MAT_COMPONENT):
             cur.execute(
                 "DELETE FROM material_plants WHERE material_id = %s AND plant = %s",
@@ -126,7 +182,8 @@ def _admin_audit_max_id(pg) -> int:
         return int(cur.fetchone()[0])
 
 
-def _record_bom_audit_rows(pg, records, previous_max_id: int) -> None:
+def _capture_bom_audit_rows(pg, records, previous_max_id: int) -> list[int]:
+    """Track exact audit IDs created by this ingest for ownership-safe cleanup."""
     with pg._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -141,8 +198,8 @@ def _record_bom_audit_rows(pg, records, previous_max_id: int) -> None:
             (previous_max_id, ZZTEST_USER),
         )
         audit_ids = [int(row[0]) for row in cur.fetchall()]
-    assert len(audit_ids) == 1, "BOM ingest must create exactly one owned admin audit row"
     records.admin_audit_ids.update(audit_ids)
+    return audit_ids
 
 
 def test_cleanup_targets_explicit_keys_only():
@@ -326,8 +383,12 @@ def test_ingest_bom_from_excel_persists_valid_bom_item(pg, zztest_integration_re
     ])
 
     audit_floor = _admin_audit_max_id(pg)
-    result = md.ingest_bom_from_excel(body, ZZTEST_BOM_FILENAME, ZZTEST_USER)
-    _record_bom_audit_rows(pg, zztest_integration_records, audit_floor)
+    try:
+        result = md.ingest_bom_from_excel(body, ZZTEST_BOM_FILENAME, ZZTEST_USER)
+    finally:
+        audit_ids = _capture_bom_audit_rows(pg, zztest_integration_records, audit_floor)
+
+    assert len(audit_ids) == 1, "BOM ingest must create exactly one owned admin audit row"
 
     assert result == {
         "status": "ok",
@@ -363,9 +424,9 @@ def test_ingest_bom_from_excel_persists_valid_bom_item(pg, zztest_integration_re
 
 
 @pytest.mark.pg
-def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(pg, zztest_integration_records):
-    """A real date-range purge must delete rows whose effective end falls in
-    range and preserve rows outside the range."""
+def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(isolated_purge_database):
+    """The real purge SQL runs in an isolated scratch DB with no TOCTOU window."""
+    conn = isolated_purge_database
     start = dt.datetime(2026, 11, 1, 0, 0)
     end = dt.datetime(2026, 11, 30, 23, 59)
     rows = [
@@ -397,7 +458,7 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(pg, zzte
             None,
         ),
     ]
-    with pg._pool.connection() as conn, conn.cursor() as cur:
+    with conn.cursor() as cur:
         cur.executemany(
             """
             INSERT INTO orders
@@ -408,7 +469,7 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(pg, zzte
             [(row[0], row[1], row[2], ZZTEST_PLANT, *row[3:]) for row in rows],
         )
         conn.commit()
-    with pg._pool.connection() as conn, conn.cursor() as cur:
+    with conn.cursor() as cur:
         cur.execute(
             """
             SELECT id
@@ -429,7 +490,7 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(pg, zzte
     result = db.purge_orders_by_date(start, end)
 
     assert result == {"status": "ok", "deleted": 2}
-    with pg._pool.connection() as conn, conn.cursor() as cur:
+    with conn.cursor() as cur:
         cur.execute(
             "SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id",
             (list(ZZTEST_PURGE_IDS),),

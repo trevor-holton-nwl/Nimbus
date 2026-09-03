@@ -26,11 +26,13 @@ actually matter:
      used to reference `orders.plant` in an index before the column existed).
   2. Applying the current-schema-compatible migration subset, filename-sorted,
      ON TOP of that same schema.sql bootstrap succeeds twice. After both
-     replays, it compares the SAME `orders` column shape and a bounded,
-     structural public-schema fingerprint (tables, columns, indexes, and
-     constraints) against schema.sql alone. The bounded fingerprint deliberately
-     excludes row contents and the explicitly skipped historical files. Frozen
-     pre-cutover migrations that target legacy production_lines/line_* names,
+     replays, it compares the SAME `orders` column shape, a bounded structural
+     public-schema fingerprint (tables, columns, indexes, and constraints), and
+     a bounded deterministic data/ledger contract against schema.sql alone. The
+     data contract covers stable schema-migration IDs, column metadata, the
+     singleton system settings row, and a deterministic sentinel order while
+     excluding volatile timestamps and sequence values. Frozen pre-cutover
+     migrations that target legacy production_lines/line_* names,
      default_workcenter, or hand-applied one-shot cutovers are explicitly
      skipped and printed; those files are not checked by this smoke test.
 
@@ -53,11 +55,12 @@ Requires:
   - PGPASSWORD set in the environment (or a trust/peer-auth local setup).
 
 Exit code 0 = schema.sql bootstrap plus the replayable/current-schema-compatible
-migration subset passed a second replay, and both the `orders` column shape and
-the bounded public-schema structural fingerprint matched the schema.sql
-baseline. Nonzero = a `psql` step failed (ON_ERROR_STOP=1 aborts that step), a
-second replay failed, or one of those bounded comparisons diverged. Explicitly
-skipped historical/hand-applied migrations are not checked by this script.
+migration subset passed a second replay, and the `orders` column shape, bounded
+structural fingerprint, and bounded deterministic data/ledger contract matched
+the schema.sql baseline. Nonzero = a `psql` step failed (ON_ERROR_STOP=1 aborts
+that step), a second replay failed, or one of those bounded comparisons
+diverged. Explicitly skipped historical/hand-applied migrations are not
+checked by this script.
 """
 from __future__ import annotations
 
@@ -67,13 +70,13 @@ import hashlib
 import os
 import subprocess
 import sys
+import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_SQL = os.path.join(ROOT, "schema.sql")
 MIGRATIONS_DIR = os.path.join(ROOT, "migrations")
 
-SCHEMA_DB = "nimbus_bootstrap_test_schema"
-MIGRATIONS_DB = "nimbus_bootstrap_test_migrations"
+SCRATCH_DB_PREFIX = "nimbus_bootstrap_test_"
 
 ORDERS_COLUMNS_SQL = (
     "SELECT column_name, data_type, is_nullable, column_default "
@@ -125,6 +128,80 @@ SELECT object_type, object_name, object_detail
  ORDER BY object_type, object_name, object_detail;
 """
 
+# Deliberately bounded data contract: compare deterministic rows and ledger
+# keys that data-mutating migrations can touch without hashing volatile audit
+# timestamps, upload timestamps, or sequence-backed IDs. The fixed order and
+# settings/metadata sentinel are seeded in both scratch databases before the
+# first replay, so a second replay that mutates these stable values is visible.
+DATA_CONTRACT_SQL = """
+WITH contracts AS (
+    SELECT
+        'schema_migrations'::text AS contract_name,
+        id::text AS contract_key,
+        id::text AS contract_value
+      FROM schema_migrations
+    UNION ALL
+    SELECT
+        'column_metadata'::text,
+        table_name || '.' || column_name,
+        concat_ws('|', display_label, is_locked::text, column_order::text)
+      FROM column_metadata
+    UNION ALL
+    SELECT
+        'system_settings'::text,
+        id::text,
+        settings::text
+      FROM system_settings
+     WHERE id = 1
+    UNION ALL
+    SELECT
+        'orders'::text,
+        o.id,
+        (to_jsonb(o) - ARRAY['uploaded_at', 'updated_at', 'upload_batch_id'])::text
+      FROM orders AS o
+     WHERE o.id = 'ZZTEST_SMOKE_ORDER'
+)
+SELECT contract_name, contract_key, contract_value
+  FROM contracts
+ ORDER BY contract_name, contract_key, contract_value;
+"""
+
+DATA_SENTINEL_SQL = """
+INSERT INTO column_metadata
+    (table_name, column_name, display_label, is_locked, column_order)
+VALUES ('ZZTEST_SMOKE', 'sentinel', 'Task 3 smoke sentinel', TRUE, 999)
+ON CONFLICT (table_name, column_name) DO UPDATE SET
+    display_label = EXCLUDED.display_label,
+    is_locked = EXCLUDED.is_locked,
+    column_order = EXCLUDED.column_order;
+
+INSERT INTO system_settings (id, settings)
+VALUES (1, '{"task3SmokeSentinel": "v1"}'::jsonb)
+ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings;
+
+INSERT INTO orders
+    (id, production_order, material_number, material_description, machine,
+     basic_start_date, basic_finish_date, plant, run_time, color,
+     order_quantity, notes)
+VALUES
+    ('ZZTEST_SMOKE_ORDER', 'ZZTEST_SMOKE_ORDER', 'ZZTEST_SMOKE_MATERIAL',
+     'Task 3 smoke sentinel order', 'ZZTEST_SMOKE_MACHINE',
+     TIMESTAMP '2026-01-02 08:00:00', TIMESTAMP '2026-01-02 12:00:00',
+     'ZZTEST_SMOKE', 4, 'ZZTEST_BLUE', 25, 'Task 3 smoke sentinel')
+ON CONFLICT (id) DO UPDATE SET
+    production_order = EXCLUDED.production_order,
+    material_number = EXCLUDED.material_number,
+    material_description = EXCLUDED.material_description,
+    machine = EXCLUDED.machine,
+    basic_start_date = EXCLUDED.basic_start_date,
+    basic_finish_date = EXCLUDED.basic_finish_date,
+    plant = EXCLUDED.plant,
+    run_time = EXCLUDED.run_time,
+    color = EXCLUDED.color,
+    order_quantity = EXCLUDED.order_quantity,
+    notes = EXCLUDED.notes;
+"""
+
 SKIPPED_POST_SCHEMA_MIGRATIONS = {
     # Pre machine-rename SAP seed uses the legacy production_lines object key.
     "2026-06-30-sap-interface.sql": "pre-cutover production_lines SAP object key",
@@ -157,10 +234,42 @@ def _run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return result
 
 
-def _dropcreate_db(args, dbname: str) -> None:
+def _quote_identifier(identifier: str) -> str:
+    """Quote a generated database name as a PostgreSQL identifier."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _scratch_db_names() -> tuple[str, str]:
+    """Return unique names owned by this invocation only."""
+    token = uuid.uuid4().hex[:12]
+    return (
+        f"{SCRATCH_DB_PREFIX}schema_{token}",
+        f"{SCRATCH_DB_PREFIX}migrations_{token}",
+    )
+
+
+def _create_database(args, dbname: str) -> None:
     admin = _psql_base(args) + ["-d", "postgres"]
-    _run(admin + ["-c", f'DROP DATABASE IF EXISTS "{dbname}";'])
-    _run(admin + ["-c", f'CREATE DATABASE "{dbname}";'])
+    _run(admin + ["-c", f"CREATE DATABASE {_quote_identifier(dbname)};"])
+
+
+def _drop_database_best_effort(args, dbname: str) -> None:
+    """Drop only this run's scratch database without masking an earlier error."""
+    admin = _psql_base(args) + ["-d", "postgres"]
+    try:
+        result = _run(
+            admin
+            + [
+                "-c",
+                f"DROP DATABASE IF EXISTS {_quote_identifier(dbname)} WITH (FORCE);",
+            ],
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - subprocess startup failure
+        print(f"WARNING: scratch database cleanup failed for {dbname}: {exc}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        print(f"WARNING: scratch database cleanup failed for {dbname}", file=sys.stderr)
 
 
 def _apply_file(args, dbname: str, path: str) -> None:
@@ -177,6 +286,19 @@ def _orders_columns(args, dbname: str) -> str:
 def _schema_fingerprint(args, dbname: str) -> str:
     """Return a stable hash of the bounded public-schema structural contract."""
     cmd = _psql_base(args) + ["-d", dbname, "-A", "-t", "-c", SCHEMA_FINGERPRINT_SQL]
+    result = _run(cmd)
+    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+
+
+def _seed_data_contract(args, dbname: str) -> None:
+    """Seed stable, disposable rows used by the replay data-idempotence check."""
+    cmd = _psql_base(args) + ["-d", dbname, "-c", DATA_SENTINEL_SQL]
+    _run(cmd)
+
+
+def _data_fingerprint(args, dbname: str) -> str:
+    """Return a stable hash of the bounded deterministic data/ledger contract."""
+    cmd = _psql_base(args) + ["-d", dbname, "-A", "-t", "-c", DATA_CONTRACT_SQL]
     result = _run(cmd)
     return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
 
@@ -215,82 +337,116 @@ def main() -> int:
             "and DROPs scratch databases; never point it at the Azure pilot."
         )
 
-    print("== Step 1: fresh schema.sql bootstrap (the literal A3 regression check) ==")
-    _dropcreate_db(args, SCHEMA_DB)
-    _apply_file(args, SCHEMA_DB, SCHEMA_SQL)
+    schema_db, migrations_db = _scratch_db_names()
+    created_databases: list[str] = []
+    print(f"Scratch databases for this run: {schema_db}, {migrations_db}")
 
-    print("\n== Step 2: schema.sql bootstrap, THEN the replayable/current-schema-compatible migration subset ==")
-    print("(frozen legacy/hand-applied cutover files are explicitly skipped and are not checked)")
-    _dropcreate_db(args, MIGRATIONS_DB)
-    _apply_file(args, MIGRATIONS_DB, SCHEMA_SQL)
-    migration_files, skipped = _migration_files()
-    if not migration_files:
-        raise SystemExit(f"No migration files found under {MIGRATIONS_DIR}")
-    if skipped:
-        print("Skipped post-schema migration replay files:")
-        for name, reason in skipped:
-            print(f"  - {name}: {reason}")
-    _replay_migrations(args, MIGRATIONS_DB, migration_files, "First replay")
+    try:
+        print("== Step 1: fresh schema.sql bootstrap (the literal A3 regression check) ==")
+        _create_database(args, schema_db)
+        created_databases.append(schema_db)
+        _apply_file(args, schema_db, SCHEMA_SQL)
 
-    print("\n== Step 3: compare orders columns and bounded public-schema structural fingerprint after first replay ==")
-    schema_cols = _orders_columns(args, SCHEMA_DB)
-    first_replay_cols = _orders_columns(args, MIGRATIONS_DB)
-    schema_fingerprint = _schema_fingerprint(args, SCHEMA_DB)
-    first_replay_fingerprint = _schema_fingerprint(args, MIGRATIONS_DB)
+        print("\n== Step 2: schema.sql bootstrap, THEN the replayable/current-schema-compatible migration subset ==")
+        print("(frozen legacy/hand-applied cutover files are explicitly skipped and are not checked)")
+        _create_database(args, migrations_db)
+        created_databases.append(migrations_db)
+        _apply_file(args, migrations_db, SCHEMA_SQL)
+        _seed_data_contract(args, schema_db)
+        _seed_data_contract(args, migrations_db)
+        migration_files, skipped = _migration_files()
+        if not migration_files:
+            raise SystemExit(f"No migration files found under {MIGRATIONS_DIR}")
+        if skipped:
+            print("Skipped post-schema migration replay files:")
+            for name, reason in skipped:
+                print(f"  - {name}: {reason}")
+        _replay_migrations(args, migrations_db, migration_files, "First replay")
 
-    print("\n== Step 4: replay the same replayable/current-schema-compatible migration subset a second time ==")
-    _replay_migrations(args, MIGRATIONS_DB, migration_files, "Second replay")
-    second_replay_cols = _orders_columns(args, MIGRATIONS_DB)
-    second_replay_fingerprint = _schema_fingerprint(args, MIGRATIONS_DB)
-
-    scope = (
-        "schema.sql plus the replayable/current-schema-compatible migration subset "
-        f"({len(migration_files)} files); explicitly skipped historical/hand-applied "
-        f"files ({len(skipped)} files) were not checked"
-    )
-    mismatches = []
-    if schema_cols != first_replay_cols:
-        mismatches.append("orders columns after first replay")
-    if schema_cols != second_replay_cols:
-        mismatches.append("orders columns after second replay")
-    if first_replay_cols != second_replay_cols:
-        mismatches.append("orders columns between replays")
-    if schema_fingerprint != first_replay_fingerprint:
-        mismatches.append("bounded structural fingerprint after first replay")
-    if schema_fingerprint != second_replay_fingerprint:
-        mismatches.append("bounded structural fingerprint after second replay")
-    if first_replay_fingerprint != second_replay_fingerprint:
-        mismatches.append("bounded structural fingerprint between replays")
-
-    if not mismatches:
         print(
-            "PASS: "
-            f"{scope}; first and second replay completed, orders columns match, "
-            "and the bounded public-schema structural fingerprint "
-            "(tables, columns, indexes, constraints) matches the schema.sql baseline."
+            "\n== Step 3: compare orders columns, bounded public-schema structural "
+            "fingerprint, and bounded deterministic data/ledger contract after first replay =="
         )
-        return 0
+        schema_cols = _orders_columns(args, schema_db)
+        first_replay_cols = _orders_columns(args, migrations_db)
+        schema_fingerprint = _schema_fingerprint(args, schema_db)
+        first_replay_fingerprint = _schema_fingerprint(args, migrations_db)
+        schema_data_fingerprint = _data_fingerprint(args, schema_db)
+        first_replay_data_fingerprint = _data_fingerprint(args, migrations_db)
 
-    print(f"FAIL: {scope}; comparison mismatch: {', '.join(mismatches)}.", file=sys.stderr)
-    print(
-        "The smoke check covered schema.sql plus the replayable/current-schema-compatible "
-        "subset and its second replay; excluded historical/hand-applied migrations "
-        "were not checked.",
-        file=sys.stderr,
-    )
-    print("--- schema.sql orders columns ---", file=sys.stderr)
-    print(schema_cols, file=sys.stderr)
-    print("--- first replay orders columns ---", file=sys.stderr)
-    print(first_replay_cols, file=sys.stderr)
-    print("--- second replay orders columns ---", file=sys.stderr)
-    print(second_replay_cols, file=sys.stderr)
-    print("--- schema.sql bounded structural fingerprint ---", file=sys.stderr)
-    print(schema_fingerprint, file=sys.stderr)
-    print("--- first replay bounded structural fingerprint ---", file=sys.stderr)
-    print(first_replay_fingerprint, file=sys.stderr)
-    print("--- second replay bounded structural fingerprint ---", file=sys.stderr)
-    print(second_replay_fingerprint, file=sys.stderr)
-    return 1
+        print("\n== Step 4: replay the same replayable/current-schema-compatible migration subset a second time ==")
+        _replay_migrations(args, migrations_db, migration_files, "Second replay")
+        second_replay_cols = _orders_columns(args, migrations_db)
+        second_replay_fingerprint = _schema_fingerprint(args, migrations_db)
+        second_replay_data_fingerprint = _data_fingerprint(args, migrations_db)
+
+        scope = (
+            "schema.sql plus the replayable/current-schema-compatible migration subset "
+            f"({len(migration_files)} files), a second replay, the bounded structural "
+            "fingerprint (tables, columns, indexes, constraints), and the bounded "
+            "deterministic data/ledger contract (schema_migrations IDs, column_metadata, "
+            "system_settings, and the sentinel order; volatile timestamps/sequence values "
+            f"excluded); explicitly skipped historical/hand-applied files ({len(skipped)} files) "
+            "were not checked"
+        )
+        mismatches = []
+        if schema_cols != first_replay_cols:
+            mismatches.append("orders columns after first replay")
+        if schema_cols != second_replay_cols:
+            mismatches.append("orders columns after second replay")
+        if first_replay_cols != second_replay_cols:
+            mismatches.append("orders columns between replays")
+        if schema_fingerprint != first_replay_fingerprint:
+            mismatches.append("bounded structural fingerprint after first replay")
+        if schema_fingerprint != second_replay_fingerprint:
+            mismatches.append("bounded structural fingerprint after second replay")
+        if first_replay_fingerprint != second_replay_fingerprint:
+            mismatches.append("bounded structural fingerprint between replays")
+        if schema_data_fingerprint != first_replay_data_fingerprint:
+            mismatches.append("bounded data/ledger contract after first replay")
+        if schema_data_fingerprint != second_replay_data_fingerprint:
+            mismatches.append("bounded data/ledger contract after second replay")
+        if first_replay_data_fingerprint != second_replay_data_fingerprint:
+            mismatches.append("bounded data/ledger contract between replays")
+
+        if not mismatches:
+            print(
+                "PASS: "
+                f"{scope}; first and second replay completed, orders columns match, "
+                "and both bounded fingerprints match the schema.sql baseline."
+            )
+            return 0
+
+        print(f"FAIL: {scope}; comparison mismatch: {', '.join(mismatches)}.", file=sys.stderr)
+        print(
+            "The smoke check covered schema.sql, the replayable/current-schema-compatible "
+            "subset, a second replay, the bounded structural fingerprint, and the bounded "
+            "deterministic data/ledger contract; excluded historical/hand-applied migrations "
+            "were not checked.",
+            file=sys.stderr,
+        )
+        print("--- schema.sql orders columns ---", file=sys.stderr)
+        print(schema_cols, file=sys.stderr)
+        print("--- first replay orders columns ---", file=sys.stderr)
+        print(first_replay_cols, file=sys.stderr)
+        print("--- second replay orders columns ---", file=sys.stderr)
+        print(second_replay_cols, file=sys.stderr)
+        print("--- schema.sql bounded structural fingerprint ---", file=sys.stderr)
+        print(schema_fingerprint, file=sys.stderr)
+        print("--- first replay bounded structural fingerprint ---", file=sys.stderr)
+        print(first_replay_fingerprint, file=sys.stderr)
+        print("--- second replay bounded structural fingerprint ---", file=sys.stderr)
+        print(second_replay_fingerprint, file=sys.stderr)
+        print("--- schema.sql bounded data/ledger contract ---", file=sys.stderr)
+        print(schema_data_fingerprint, file=sys.stderr)
+        print("--- first replay bounded data/ledger contract ---", file=sys.stderr)
+        print(first_replay_data_fingerprint, file=sys.stderr)
+        print("--- second replay bounded data/ledger contract ---", file=sys.stderr)
+        print(second_replay_data_fingerprint, file=sys.stderr)
+        return 1
+    finally:
+        for dbname in reversed(created_databases):
+            _drop_database_best_effort(args, dbname)
 
 
 if __name__ == "__main__":
