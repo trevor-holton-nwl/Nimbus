@@ -339,3 +339,79 @@ F401 tests\test_task_concurrency.py:26:8 `db` imported but unused
 ```
 
 Those files were not changed in this fix round.
+
+## Final Finish Pass
+
+Ran the focused checks again before the final commit.
+
+### Focused Changed-Area DB-Free Tests
+
+Command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_routes.py tests/test_db_safety.py tests/test_schema_idempotent.py -m "not pg" -q -ra
+```
+
+Output:
+
+```text
+43 passed, 2 deselected, 13 warnings in 3.41s
+```
+
+### Guarded PostgreSQL/Concurrency Tests
+
+Command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:NIMBUS_TEST_DB='1'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py -q -ra
+```
+
+Output:
+
+```text
+6 skipped in 0.07s
+```
+
+Skip reason remained local Postgres unavailability:
+
+```text
+Postgres unavailable (set NIMBUS_TEST_DB=1 for a local/CI test DB)
+```
+
+### CI-Required PostgreSQL Failure Mode
+
+Command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB='1'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py -q -ra
+```
+
+Expected local failure output:
+
+```text
+pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI PostgreSQL test DB
+```
+
+This is the intended CI behavior if PostgreSQL is unavailable; it prevents silent `@pytest.mark.pg` skips in CI.
+
+### Static Checks
+
+Command:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check tests/test_integration_routes.py tests/test_integration_pg.py tests/test_db_safety.py tests/test_schema_idempotent.py tests/conftest.py scripts/schema_bootstrap_smoke.py
+```
+
+Output:
+
+```text
+All checks passed!
+```
+
+Command:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile tests/test_integration_routes.py tests/test_integration_pg.py tests/test_db_safety.py tests/test_schema_idempotent.py tests/conftest.py scripts/schema_bootstrap_smoke.py
+```
+
+Output: exit 0, no output.
