@@ -81,6 +81,12 @@ test('Alerts dismissal snapshots are detached and restore without scheduling rec
     snapshot.clear();
     assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['dismissed-a', 'dismissed-b', 'mutated-after-snapshot']),
       'restore must copy the supplied set so later caller mutations cannot change Alerts state');
+    Alerts.restoreDismissed(null);
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(),
+      'null restores an empty dismissal set');
+    Alerts.restoreDismissed(undefined);
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(),
+      'undefined restores an empty dismissal set');
     assert.equal(scheduleCalls, 0, 'snapshot/restore APIs must not schedule an alert recompute');
   } finally {
     Alerts.restoreDismissed(priorDismissed);

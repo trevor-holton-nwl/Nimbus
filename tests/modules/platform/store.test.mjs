@@ -43,7 +43,13 @@ test('Store.replaceBlocks/replaceCalendars/replacePlants/replacePlantBlocks/repl
   assert.deepEqual(Store.blocks, [{ id: 'b1' }]);
   assert.deepEqual(Store.plantBlocks, [{ id: 'pb1' }]);
   assert.ok(Store.firmedIds.has('t1'));
-  assert.deepEqual(events, ['blocks:replace', 'calendar:replace', 'plants:replace', 'plantBlocks:replace', 'firmed:replace']);
+  assert.deepEqual(events, [
+    'blocks:replace', 'blocks:change',
+    'calendar:replace', 'calendar:change',
+    'plants:replace', 'calendar:change',
+    'plantBlocks:replace', 'plantBlocks:change',
+    'firmed:replace', 'firmed:change',
+  ]);
 });
 
 test('Store exposes priorityRankMaps state and setter', () => {

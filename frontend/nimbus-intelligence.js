@@ -1379,6 +1379,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _history: [],
     _badge:   null,
     _recomputeDebounced: null,
+    _cancelRecomputeDebounced: null,
 
     init() {
       try { localStorage.removeItem('nimbus.confHistory'); } catch (e) {  // clear any previously persisted history
@@ -1386,7 +1387,21 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           ? window.NIMBUS.ErrorLog.warn('intel', 'Confidence history clear failed', { err: String(e), errorCode: 'internal' })
           : console.warn('[Confidence] history clear failed', e));
       }
-      Confidence._recomputeDebounced = Util.debounce(Confidence._recompute, 400);
+      // Keep a cancel seam for What-If discard. Store task replacement events
+      // fire while Sandbox.active is still true and otherwise leave this timer
+      // armed to run against the restored Confidence baseline after exit.
+      let confidenceTimer = null;
+      Confidence._recomputeDebounced = () => {
+        clearTimeout(confidenceTimer);
+        confidenceTimer = setTimeout(() => {
+          confidenceTimer = null;
+          Confidence._recompute();
+        }, 400);
+      };
+      Confidence._cancelRecomputeDebounced = () => {
+        clearTimeout(confidenceTimer);
+        confidenceTimer = null;
+      };
       Confidence._injectBadge();
       Store.subscribe(evt => {
         if (evt?.type === 'plant:selected') {

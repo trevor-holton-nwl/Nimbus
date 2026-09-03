@@ -2005,6 +2005,7 @@ export const SandboxAdapter = {
   _confSnapshot: null as unknown,
   _lastOptimizeSnapshot: null as Date | null,
   _dismissedSnapshot: null as Set<string> | null,
+  _linePlantSnapshot: null as Map<string, string | null> | null,
   _sideEffectSnapshotActive: false,
 
   init() {
@@ -2043,6 +2044,9 @@ export const SandboxAdapter = {
     const lastOptimize = Store.lastOptimize;
     SandboxAdapter._lastOptimizeSnapshot = lastOptimize ? new Date(lastOptimize) : null;
     SandboxAdapter._dismissedSnapshot = Alerts.snapshotDismissed();
+    SandboxAdapter._linePlantSnapshot = new Map(
+      Object.keys(Store.calendars).map((line) => [line, Store.getPlantForLine(line)]),
+    );
     SandboxAdapter._sideEffectSnapshotActive = true;
 
     document.body.classList.add('sandbox-mode');
@@ -2061,6 +2065,7 @@ export const SandboxAdapter = {
   _onExited(evt: StoreEvent) {
     const applied = !!evt.applied;
     const snap = evt.snapshot as SandboxExitSnapshot | undefined;
+    const affectedPlants = applied ? SandboxAdapter._collectAffectedPlants(snap) : null;
 
     if (applied) {
       const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || 'What-If';
@@ -2071,6 +2076,11 @@ export const SandboxAdapter = {
       SandboxAdapter._clearSideEffectSnapshot();
     } else {
       if (SandboxAdapter._sideEffectSnapshotActive) {
+        // Sandbox.exit(false) restores schedule state while Sandbox.active is
+        // still true, so task replacement events can arm Confidence's debounce.
+        // Cancel that pending work before restoring the detached baseline; the
+        // restored score/history must remain authoritative after the 400ms wait.
+        (NIMBUS!.Confidence as { _cancelRecomputeDebounced?(): void } | undefined)?._cancelRecomputeDebounced?.();
         Store.setLastOptimize(
           SandboxAdapter._lastOptimizeSnapshot ? new Date(SandboxAdapter._lastOptimizeSnapshot) : null,
           'sandbox',
@@ -2109,8 +2119,10 @@ export const SandboxAdapter = {
       // guards on Sandbox.active); push the promoted config now that active=false.
       // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
       // so a delete-then-promote doesn't resurrect the block on next hydration. (F3)
-      if (Store.selectedPlant) {
-        const plant = Store.selectedPlant;
+      // Include every plant touched by the trial, not just the plant selected at
+      // promote time: plant selection remains editable while What-If is active.
+      if (Store.selectedPlant) affectedPlants?.add(Store.selectedPlant);
+      for (const plant of affectedPlants || []) {
         // Store._state.blocks/.plantBlocks direct touch — deliberate, out of scope
         // for this task (see the file header comment above OptimizeDialog).
         const curLine  = new Set(Store._state.blocks.filter((b) => b.plant === plant).map((b) => b.id));
@@ -2121,6 +2133,10 @@ export const SandboxAdapter = {
         };
         CalendarSync.flushPlant(plant, removed);
       }
+      // Promotion changes Store.rev() (UndoStack.push plus sandbox teardown),
+      // invalidating any worker request started during the trial. Queue one full
+      // post-promote request after all retained side effects are in place.
+      Alerts.scheduleRecompute();
     }
 
     // If a plant-config hydration was dropped because its GET resolved mid-What-If (F2),
@@ -2151,7 +2167,53 @@ export const SandboxAdapter = {
     SandboxAdapter._confSnapshot = null;
     SandboxAdapter._lastOptimizeSnapshot = null;
     SandboxAdapter._dismissedSnapshot = null;
+    SandboxAdapter._linePlantSnapshot = null;
     SandboxAdapter._sideEffectSnapshotActive = false;
+  },
+
+  _sameSnapshotValue(before: unknown, current: unknown): boolean {
+    if (Object.is(before, current)) return true;
+    try { return JSON.stringify(before) === JSON.stringify(current); } catch { return false; }
+  },
+
+  _collectAffectedPlants(snap: SandboxExitSnapshot | undefined): Set<string> {
+    const affected = new Set<string>();
+    const add = (plant: unknown): void => {
+      if (typeof plant === 'string' && plant) affected.add(plant);
+    };
+
+    const beforePlants = snap?.plants || {};
+    const currentPlants = Store.plants;
+    for (const plant of new Set([...Object.keys(beforePlants), ...Object.keys(currentPlants)])) {
+      if (!SandboxAdapter._sameSnapshotValue(beforePlants[plant], currentPlants[plant])) add(plant);
+    }
+
+    const beforeCalendars = snap?.calendars || {};
+    const currentCalendars = Store.calendars;
+    for (const line of new Set([...Object.keys(beforeCalendars), ...Object.keys(currentCalendars)])) {
+      if (!SandboxAdapter._sameSnapshotValue(beforeCalendars[line], currentCalendars[line])) {
+        add(SandboxAdapter._linePlantSnapshot?.get(line));
+        add(Store.getPlantForLine(line));
+      }
+    }
+
+    const collectChangedBlockPlants = <T extends { id: string; plant?: string | null }>(
+      before: T[], current: T[],
+    ): void => {
+      const beforeById = new Map(before.map(block => [String(block.id), block]));
+      const currentById = new Map(current.map(block => [String(block.id), block]));
+      for (const id of new Set([...beforeById.keys(), ...currentById.keys()])) {
+        const oldBlock = beforeById.get(id);
+        const newBlock = currentById.get(id);
+        if (!SandboxAdapter._sameSnapshotValue(oldBlock, newBlock)) {
+          add(oldBlock?.plant);
+          add(newBlock?.plant);
+        }
+      }
+    };
+    collectChangedBlockPlants(snap?.blocks || [], Store.blocks);
+    collectChangedBlockPlants(snap?.plantBlocks || [], Store.plantBlocks);
+    return affected;
   },
 };
 

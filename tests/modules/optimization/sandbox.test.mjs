@@ -40,7 +40,7 @@ test('Sandbox.exit(false) restores the pre-enter snapshot and emits sandbox:exit
   assert.equal(exitEvt.snapshot, snap);
 });
 
-test('Sandbox.exit(false) emits one *:replace event per restored field, pinned so drift is deliberate', () => {
+test('Sandbox.exit(false) emits replace events plus change compatibility events for every restored field', () => {
   // Each Store.replaceX() call fires its own '<field>:replace' event, distinct
   // from the '<field>:change' events that field's normal mutators fire — see
   // docs/architecture/cq1-compatibility-inventory.md §6. Nothing subscribes to
@@ -58,11 +58,11 @@ test('Sandbox.exit(false) emits one *:replace event per restored field, pinned s
   off();
   assert.deepEqual(events, [
     'tasks:bulk',
-    'blocks:replace',
-    'calendar:replace',
-    'plants:replace',
-    'plantBlocks:replace',
-    'firmed:replace',
+    'blocks:replace', 'blocks:change',
+    'calendar:replace', 'calendar:change',
+    'plants:replace', 'calendar:change',
+    'plantBlocks:replace', 'plantBlocks:change',
+    'firmed:replace', 'firmed:change',
     'sandbox:exited',
   ]);
 });

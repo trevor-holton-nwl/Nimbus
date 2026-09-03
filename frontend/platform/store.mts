@@ -208,7 +208,7 @@ export const Store = {
    *  every optimize call, a real behavior change this setter must not introduce.
    *  `source` is accepted only for signature symmetry with the other setters. */
   setLastOptimize(date: Date | null, _source?: string): void {
-    this._state.meta.lastOptimize = date;
+    this._state.meta.lastOptimize = date ? new Date(date) : null;
   },
 
   /** Replace the master-data snapshot ({plants, lines} from /master-data/*) wholesale
@@ -618,17 +618,37 @@ export const Store = {
   },
 
   /* ----- wholesale replace (bulk hydration paths) ------------------------ */
-  replaceBlocks(blocks: NimbusBlock[], source?: string): void { this._state.blocks = blocks; this.emit({ type: 'blocks:replace', source }); },
-  replaceCalendars(calendars: Record<string, CalendarEntry>, source?: string): void { this._state.calendars = calendars; this.emit({ type: 'calendar:replace', source }); },
-  replacePlants(plants: Record<string, CalendarEntry>, source?: string): void { this._state.plants = plants; this.emit({ type: 'plants:replace', source }); },
-  replacePlantBlocks(plantBlocks: NimbusPlantBlock[], source?: string): void { this._state.plantBlocks = plantBlocks; this.emit({ type: 'plantBlocks:replace', source }); },
+  replaceBlocks(blocks: NimbusBlock[], source?: string): void {
+    this._state.blocks = blocks;
+    this.emit({ type: 'blocks:replace', source });
+    this.emit({ type: 'blocks:change', source });
+  },
+  replaceCalendars(calendars: Record<string, CalendarEntry>, source?: string): void {
+    this._state.calendars = calendars;
+    this.emit({ type: 'calendar:replace', source });
+    this.emit({ type: 'calendar:change', source });
+  },
+  replacePlants(plants: Record<string, CalendarEntry>, source?: string): void {
+    this._state.plants = plants;
+    this.emit({ type: 'plants:replace', source });
+    // Plant hours use the established calendar:change channel, as does
+    // setPlantWorkHours(). There is no separate plants:change contract.
+    this.emit({ type: 'calendar:change', source });
+  },
+  replacePlantBlocks(plantBlocks: NimbusPlantBlock[], source?: string): void {
+    this._state.plantBlocks = plantBlocks;
+    this.emit({ type: 'plantBlocks:replace', source });
+    this.emit({ type: 'plantBlocks:change', source });
+  },
   replaceFirmedIds(idSet: Set<string>, source?: string): void {
+    const changedIds = new Set([...this._state.firmedIds, ...idSet]);
     this._state.firmedIds = new Set([...idSet]);
     for (const id of this._state.firmedIds) {
       const t = this._state.tasks[id];
       if (t) t.firmed = true;
     }
     this.emit({ type: 'firmed:replace', source });
+    this.emit({ type: 'firmed:change', ids: [...changedIds], source });
   },
 
   // Patch a single task reference inside the _tasksByPlant index after updateTask swaps

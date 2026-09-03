@@ -8,9 +8,10 @@ import { createRequire } from 'node:module';
 import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../frontend/optimization/optimize-ui.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { Util, ErrorLog } from '../../../frontend/platform/foundation.mjs';
-import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
+import { Util, ErrorLog, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Alerts, Compute, Utilization } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
@@ -36,6 +37,73 @@ if (typeof globalThis.document === 'undefined') {
   };
 }
 globalThis.window = globalThis.window || {};
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function makeSandboxElement(id, value = '') {
+  const listeners = new Map();
+  const classes = new Set();
+  return {
+    id,
+    value,
+    hidden: false,
+    innerHTML: '',
+    textContent: '',
+    style: {},
+    classList: {
+      add(...names) { names.forEach(name => classes.add(name)); },
+      remove(...names) { names.forEach(name => classes.delete(name)); },
+      contains(name) { return classes.has(name); },
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : force;
+        if (next) classes.add(name); else classes.delete(name);
+        return next;
+      },
+    },
+    addEventListener(type, handler) {
+      (listeners.get(type) || (listeners.set(type, []), listeners.get(type))).push(handler);
+    },
+    dispatch(type) {
+      for (const handler of listeners.get(type) || []) handler({ type, target: this });
+    },
+    appendChild() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    setAttribute() {},
+    focus() {},
+  };
+}
+
+function makeSandboxDocument() {
+  const elements = new Map([
+    ['sandbox-banner', makeSandboxElement('sandbox-banner')],
+    ['sb-scenario-name', makeSandboxElement('sb-scenario-name', 'Test scenario')],
+    ['sb-discard-btn', makeSandboxElement('sb-discard-btn')],
+    ['sb-apply-btn', makeSandboxElement('sb-apply-btn')],
+  ]);
+  const body = makeSandboxElement('body');
+  return {
+    elements,
+    body,
+    document: {
+      getElementById(id) { return elements.get(id) || null; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      createElement(id) { return makeSandboxElement(id); },
+      addEventListener() {},
+      removeEventListener() {},
+      body,
+    },
+  };
+}
+
+function subscribeSandboxAdapter() {
+  return Store.subscribe(event => {
+    if (event.type === 'sandbox:entered') SandboxAdapter._onEntered();
+    else if (event.type === 'sandbox:exited') SandboxAdapter._onExited(event);
+    else if (event.type === 'sandbox:reverted') SandboxAdapter._onReverted();
+  }, 'unit-test-sandbox-adapter');
+}
 
 function previewTask(id, plant, runTime = 1) {
   return {
@@ -106,11 +174,16 @@ test('Store.lastOptimize is a detached getter and setLastOptimize remains non-em
   const date = new Date('2026-08-05T10:00:00Z');
   try {
     Store.setLastOptimize(date, 'unit-test');
+    date.setTime(date.getTime() + 30 * 60 * 1000);
+    assert.equal(Store.lastOptimize?.getTime(), new Date('2026-08-05T10:00:00Z').getTime(),
+      'mutating the setter input must not mutate Store metadata');
     const read = Store.lastOptimize;
-    assert.equal(read?.getTime(), date.getTime());
-    read?.setTime(date.getTime() + 60 * 60 * 1000);
-    assert.equal(Store.lastOptimize?.getTime(), date.getTime(),
+    assert.equal(read?.getTime(), new Date('2026-08-05T10:00:00Z').getTime());
+    read?.setTime(new Date('2026-08-05T11:00:00Z').getTime());
+    assert.equal(Store.lastOptimize?.getTime(), new Date('2026-08-05T10:00:00Z').getTime(),
       'mutating the getter result must not mutate Store metadata');
+    Store.setLastOptimize(null, 'unit-test');
+    assert.equal(Store.lastOptimize, null, 'null round-trips through the setter/getter');
     assert.equal(Store.rev(), beforeRevision,
       'setLastOptimize must preserve its existing no-event behavior');
   } finally {
@@ -709,7 +782,7 @@ test('SandboxAdapter retains promoted side effects and clears snapshots on promo
     assert.equal(SandboxAdapter._confSnapshot, null, 'revert clears the Confidence snapshot');
     assert.equal(SandboxAdapter._lastOptimizeSnapshot, null, 'revert clears the last-optimize snapshot');
     assert.equal(SandboxAdapter._dismissedSnapshot, null, 'revert clears the dismissal snapshot');
-    assert.equal(recomputeCalls, 1, 'revert retains the existing single alert recompute');
+    assert.equal(recomputeCalls, 2, 'promote and later revert each retain their post-teardown alert recompute');
   } finally {
     if (Sandbox.active) Sandbox.exit(false, 'unit-test');
     unsubscribeAdapter();
@@ -722,6 +795,299 @@ test('SandboxAdapter retains promoted side effects and clears snapshots on promo
     UndoStack._entries.length = 0;
     UndoStack._entries.push(...priorEntries);
     globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('SandboxAdapter restores null and non-null last-optimize baselines on discard', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorLastOptimize = Store.lastOptimize;
+  const priorDismissed = Alerts.snapshotDismissed();
+  const priorSchedule = Alerts.scheduleRecompute;
+  const restoreObservations = [];
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => restoreObservations.push(Store.lastOptimize?.getTime() ?? null);
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+
+  try {
+    for (const baseline of [null, new Date('2026-08-06T10:00:00Z')]) {
+      Store.setSelectedPlant(null, 'unit-test');
+      Store.setLastOptimize(baseline, 'unit-test');
+      Alerts.restoreDismissed(new Set(['baseline-dismissal']));
+      Sandbox.enter('unit-test');
+      Store.setLastOptimize(new Date('2026-08-06T11:00:00Z'), 'unit-test');
+      Alerts.restoreDismissed(new Set(['trial-dismissal']));
+      Sandbox.exit(false, 'unit-test');
+
+      assert.equal(Store.lastOptimize?.getTime() ?? null, baseline?.getTime() ?? null,
+        'discard restores both null and non-null metadata baselines');
+      assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['baseline-dismissal']),
+        'discard restores the dismissal baseline for each metadata case');
+    }
+    assert.deepEqual(restoreObservations, [null, new Date('2026-08-06T10:00:00Z').getTime()],
+      'each discard recomputes only after the matching metadata baseline is restored');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts.restoreDismissed(priorDismissed);
+    Store.setLastOptimize(priorLastOptimize, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('SandboxAdapter cancels pending Confidence debounce before What-If discard', async () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSchedule = Alerts.scheduleRecompute;
+  const baseline = { score: 91, history: [{ ts: 1, score: 91 }] };
+  let timer = null;
+  let cancelCalls = 0;
+  const confidence = {
+    score: baseline.score,
+    history: baseline.history.map(item => ({ ...item })),
+    snapshot() { return { score: this.score, history: this.history.map(item => ({ ...item })) }; },
+    restore(snapshot) {
+      this.score = snapshot.score;
+      this.history = snapshot.history.map(item => ({ ...item }));
+    },
+    _recomputeDebounced() {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        this.score = 12;
+        this.history.push({ ts: 2, score: 12 });
+      }, 400);
+    },
+    _cancelRecomputeDebounced() {
+      cancelCalls++;
+      clearTimeout(timer);
+      timer = null;
+    },
+  };
+  globalThis.NIMBUS = { Confidence: confidence };
+  Alerts.scheduleRecompute = () => {};
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+
+  try {
+    Store.setTasks([{ id: 'confidence-discard', PLANT: 'CONFIDENCE', MACHINE: 'CONF-LINE', RUN_TIME: 1 }], 'unit-test');
+    Sandbox.enter('unit-test');
+    confidence.score = 34;
+    confidence.history.push({ ts: 2, score: 34 });
+    confidence._recomputeDebounced();
+    Sandbox.exit(false, 'unit-test');
+
+    await wait(450);
+    assert.equal(cancelCalls, 1, 'discard cancels the already-armed Confidence debounce');
+    assert.deepEqual({ score: confidence.score, history: confidence.history }, baseline,
+      'a delayed Confidence recompute cannot overwrite the restored discard snapshot');
+  } finally {
+    clearTimeout(timer);
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setTasks(priorTasks, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('SandboxAdapter refreshes post-promote worker alerts after the trial revision changes', async () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorAvailable = Compute.available;
+  const priorAlertsCompute = Compute.alerts;
+  const priorFlushPlant = CalendarSync.flushPlant;
+  const priorToast = Toast.show;
+  const priorEntries = UndoStack._entries.slice();
+  const priorTimer = Alerts._timer;
+  const priorPendingFull = Alerts._pendingFull;
+  const priorPendingLines = new Set(Alerts._pendingLines);
+  const requests = [];
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+  if (Alerts._timer) clearTimeout(Alerts._timer);
+  Alerts._timer = null;
+  Alerts._pendingFull = false;
+  Alerts._pendingLines = new Set();
+  Compute.available = () => true;
+  Compute.alerts = () => new Promise(resolve => requests.push(resolve));
+  CalendarSync.flushPlant = () => {};
+  Toast.show = () => {};
+  globalThis.NIMBUS = { Persistence: { saveAll() {} } };
+
+  try {
+    Store.setTasks([{ id: 'worker-promote', PLANT: 'WORKER-PROMOTE', MACHINE: 'WP-LINE', RUN_TIME: 1 }], 'unit-test');
+    Store.setSelectedPlant('WORKER-PROMOTE', 'unit-test');
+    Store.setAlerts([], 'unit-test');
+    Sandbox.enter('unit-test');
+    Alerts.recompute();
+    assert.equal(requests.length, 1, 'the trial creates the first worker alert request');
+
+    const revisionBeforePromote = Store.rev();
+    Sandbox.exit(true, 'unit-test');
+    assert.ok(Store.rev() > revisionBeforePromote, 'promotion changes the Store revision');
+
+    requests[0]({ alerts: [{ id: 'stale-worker-alert', taskId: 'worker-promote' }], elapsed: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(Store.alerts, [], 'the invalidated pre-promote worker result is discarded');
+
+    await wait(120);
+    assert.equal(requests.length, 2, 'promotion schedules a replacement full worker request');
+    requests[1]({ alerts: [{ id: 'fresh-worker-alert', taskId: 'worker-promote' }], elapsed: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(Store.alerts.map(alert => alert.id), ['fresh-worker-alert'],
+      'the post-promote worker result is applied');
+  } finally {
+    if (Alerts._timer) clearTimeout(Alerts._timer);
+    Alerts._timer = priorTimer;
+    Alerts._pendingFull = priorPendingFull;
+    Alerts._pendingLines = priorPendingLines;
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Compute.available = priorAvailable;
+    Compute.alerts = priorAlertsCompute;
+    CalendarSync.flushPlant = priorFlushPlant;
+    Toast.show = priorToast;
+    Store.setAlerts(priorAlerts, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    UndoStack._entries.length = 0;
+    UndoStack._entries.push(...priorEntries);
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('SandboxAdapter.init wires real buttons and promotes every affected plant', () => {
+  const priorDocument = globalThis.document;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorBlocks = structuredClone(Store.blocks);
+  const priorCalendars = structuredClone(Store.calendars);
+  const priorPlants = structuredClone(Store.plants);
+  const priorPlantBlocks = structuredClone(Store.plantBlocks);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorLastOptimize = Store.lastOptimize;
+  const priorDismissed = Alerts.snapshotDismissed();
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorFlushPlant = CalendarSync.flushPlant;
+  const priorToast = Toast.show;
+  const priorEntries = UndoStack._entries.slice();
+  const fixture = makeSandboxDocument();
+  const saveCalls = [];
+  const scheduleCalls = [];
+  const flushCalls = [];
+  const toastCalls = [];
+  const confidence = {
+    score: 80,
+    history: [{ ts: 1, score: 80 }],
+    snapshot() { return { score: this.score, history: this.history.map(item => ({ ...item })) }; },
+    restore(snapshot) { this.score = snapshot.score; this.history = snapshot.history.map(item => ({ ...item })); },
+  };
+  globalThis.document = fixture.document;
+  globalThis.NIMBUS = {
+    Confidence: confidence,
+    Persistence: { saveAll() { saveCalls.push(true); } },
+  };
+  Alerts.scheduleRecompute = () => scheduleCalls.push(true);
+  CalendarSync.flushPlant = (plant, removed) => flushCalls.push({ plant, removed });
+  Toast.show = (...args) => toastCalls.push(args);
+
+  try {
+    Store.setMasterData({
+      plants: [{ plant: 'P1' }, { plant: 'P2' }],
+      lines: [{ machine: 'L1', plant: 'P1' }, { machine: 'L2', plant: 'P2' }],
+    }, 'unit-test');
+    Store.setTasks([
+      { id: 'adapter-task-1', PLANT: 'P1', MACHINE: 'L1', RUN_TIME: 1 },
+      { id: 'adapter-task-2', PLANT: 'P2', MACHINE: 'L2', RUN_TIME: 1 },
+    ], 'unit-test');
+    Store.replacePlants({
+      P1: { workHours: { 0: [8, 16] } },
+      P2: { workHours: { 0: [8, 16] } },
+    }, 'unit-test');
+    Store.replaceCalendars({
+      L1: { workHours: { 0: [8, 16] } },
+      L2: { workHours: { 0: [8, 16] } },
+    }, 'unit-test');
+    Store.replaceBlocks([
+      { id: 'old-line-p1', plant: 'P1', line: 'L1', start: '2026-08-01T00:00:00Z', end: '2026-08-01T01:00:00Z' },
+      { id: 'old-line-p2', plant: 'P2', line: 'L2', start: '2026-08-01T00:00:00Z', end: '2026-08-01T01:00:00Z' },
+    ], 'unit-test');
+    Store.replacePlantBlocks([
+      { id: 'old-plant-p1', plant: 'P1', start: '2026-08-02T00:00:00Z', end: '2026-08-02T01:00:00Z' },
+      { id: 'old-plant-p2', plant: 'P2', start: '2026-08-02T00:00:00Z', end: '2026-08-02T01:00:00Z' },
+    ], 'unit-test');
+    Store.setSelectedPlant('P1', 'unit-test');
+    Store.setLastOptimize(new Date('2026-08-07T10:00:00Z'), 'unit-test');
+    Alerts.restoreDismissed(new Set(['before-discard']));
+
+    SandboxAdapter.init();
+    SandboxAdapter.enter();
+    Store.setLastOptimize(new Date('2026-08-07T11:00:00Z'), 'unit-test');
+    Alerts.restoreDismissed(new Set());
+    fixture.elements.get('sb-discard-btn').dispatch('click');
+    assert.equal(Sandbox.active, false, 'the real discard button exits What-If mode');
+    assert.equal(fixture.elements.get('sandbox-banner').hidden, true, 'discard tears down the banner');
+    assert.equal(fixture.body.classList.contains('sandbox-mode'), false, 'discard tears down body mode');
+    assert.equal(Store.lastOptimize?.getTime(), new Date('2026-08-07T10:00:00Z').getTime());
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['before-discard']));
+    assert.equal(saveCalls.length, 0, 'discard does not persist');
+    assert.equal(flushCalls.length, 0, 'discard does not flush calendar state');
+
+    scheduleCalls.length = 0;
+    Store.setSelectedPlant('P1', 'unit-test');
+    SandboxAdapter.enter();
+    Store.setPlantWorkHours('P1', 0, [9, 17], 'unit-test');
+    Store.setCalendar('L1', { 0: [9, 17] }, 'unit-test');
+    Store.addBlock({ id: 'new-line-p1', plant: 'P1', line: 'L1', start: '2026-08-03T00:00:00Z', end: '2026-08-03T01:00:00Z' }, 'unit-test');
+    Store.addPlantBlock({ id: 'new-plant-p1', plant: 'P1', start: '2026-08-04T00:00:00Z', end: '2026-08-04T01:00:00Z' }, 'unit-test');
+    Store.setPlantWorkHours('P2', 0, [10, 18], 'unit-test');
+    Store.setCalendar('L2', { 0: [10, 18] }, 'unit-test');
+    Store.addBlock({ id: 'new-line-p2', plant: 'P2', line: 'L2', start: '2026-08-05T00:00:00Z', end: '2026-08-05T01:00:00Z' }, 'unit-test');
+    Store.addPlantBlock({ id: 'new-plant-p2', plant: 'P2', start: '2026-08-06T00:00:00Z', end: '2026-08-06T01:00:00Z' }, 'unit-test');
+    Store.setSelectedPlant('P2', 'unit-test');
+    Store.setLastOptimize(new Date('2026-08-07T12:00:00Z'), 'unit-test');
+    Alerts.restoreDismissed(new Set(['after-promote']));
+    fixture.elements.get('sb-apply-btn').dispatch('click');
+
+    assert.equal(Sandbox.active, false, 'the real promote button exits What-If mode');
+    assert.equal(saveCalls.length, 1, 'promote persists once');
+    assert.deepEqual(flushCalls.map(call => call.plant).sort(), ['P1', 'P2'],
+      'promote flushes every plant changed during the sandbox, even after selection switches');
+    assert.equal(scheduleCalls.length, 1, 'promote schedules one post-teardown alert recompute');
+    assert.equal(fixture.elements.get('sandbox-banner').hidden, true, 'promote tears down the banner');
+    assert.equal(fixture.body.classList.contains('sandbox-mode'), false, 'promote tears down body mode');
+    assert.equal(SandboxAdapter._sideEffectSnapshotActive, false, 'promote clears the side-effect snapshot');
+    assert.ok(toastCalls.some(args => args[0] === 'toast.scenario_applied'), 'promote uses the existing success toast');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Alerts.scheduleRecompute = priorSchedule;
+    CalendarSync.flushPlant = priorFlushPlant;
+    Toast.show = priorToast;
+    Alerts.restoreDismissed(priorDismissed);
+    Store.setAlerts(priorAlerts, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceBlocks(priorBlocks, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.replacePlants(priorPlants, 'unit-test');
+    Store.replacePlantBlocks(priorPlantBlocks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setLastOptimize(priorLastOptimize, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    UndoStack._entries.length = 0;
+    UndoStack._entries.push(...priorEntries);
+    globalThis.NIMBUS = priorNimbus;
+    globalThis.document = priorDocument;
   }
 });
 
