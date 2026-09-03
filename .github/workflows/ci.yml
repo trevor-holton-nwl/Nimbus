@@ -59,6 +59,7 @@ jobs:
           --health-retries 10
     env:
       NIMBUS_TEST_DB: '1'
+      NIMBUS_REQUIRE_TEST_DB: '1'
       PG_HOST: localhost
       PG_PORT: '5432'
       PG_DB: nimbus

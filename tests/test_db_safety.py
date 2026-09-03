@@ -74,6 +74,21 @@ def test_pg_fixture_returns_the_module_loaded_by_the_guarded_probe(monkeypatch):
     assert conftest.pg.__wrapped__() is expected
 
 
+@pytest.mark.parametrize(
+    ("required", "opted_in", "pg_up", "expected"),
+    [
+        (False, False, False, None),
+        (True, False, False, "NIMBUS_REQUIRE_TEST_DB=1 requires NIMBUS_TEST_DB=1"),
+        (True, True, False, "NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI PostgreSQL test DB"),
+        (True, True, True, None),
+    ],
+)
+def test_required_test_db_setting_turns_pg_skip_into_collection_error(required, opted_in, pg_up, expected):
+    from tests import conftest
+
+    assert conftest._required_test_db_error(required=required, opted_in=opted_in, pg_up=pg_up) == expected
+
+
 def test_pytest_sessionfinish_closes_an_imported_application_pool(monkeypatch):
     from tests import conftest
 

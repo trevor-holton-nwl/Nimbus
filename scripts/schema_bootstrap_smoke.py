@@ -24,12 +24,13 @@ actually matter:
   1. A fresh `psql -v ON_ERROR_STOP=1 -f schema.sql` bootstrap succeeds
      end-to-end against an EMPTY database (the literal A3 regression: schema.sql
      used to reference `orders.plant` in an index before the column existed).
-  2. Applying the full `migrations/*.sql` ledger, filename-sorted, ON TOP of
-     that same schema.sql bootstrap (simulating Azure's real history: schema
-     loaded once, then every dated migration applied since) produces the
-     SAME `orders` column shape as schema.sql alone -- i.e. the ledger never
-     silently drifts the live shape away from what a fresh clone of the repo
-     would produce.
+  2. Applying the current-schema-compatible `migrations/*.sql` subset,
+     filename-sorted, ON TOP of that same schema.sql bootstrap succeeds and
+     produces the SAME `orders` column shape as schema.sql alone -- i.e. the
+     replayable ledger never silently drifts the live shape away from what a
+     fresh clone of the repo would produce. Frozen pre-cutover migrations that
+     target legacy production_lines/line_* names, default_workcenter, or
+     hand-applied one-shot cutovers are explicitly skipped and printed.
 
 This is a STANDALONE script, not a pytest test: it shells out to `psql`
 against two throwaway scratch databases and does not touch the app's own
@@ -74,6 +75,20 @@ ORDERS_COLUMNS_SQL = (
     "WHERE table_name = 'orders' ORDER BY column_name;"
 )
 
+SKIPPED_POST_SCHEMA_MIGRATIONS = {
+    # Pre machine-rename SAP seed uses the legacy production_lines object key.
+    "2026-06-30-sap-interface.sql": "pre-cutover production_lines SAP object key",
+    # These frozen files target tables/columns renamed by the 2026-08-20 cutover.
+    "2026-07-03-production-line-optimizer-flags.sql": "pre-cutover production_lines table",
+    "2026-08-10-material-plant-default-workcenter.sql": "pre-cutover default_workcenter column",
+    "2026-08-11-priority-lists.sql": "pre-cutover priority_list.line column",
+    "2026-08-13-changeover-matrix-stage-0.sql": "pre-cutover production_lines/setup line columns",
+    "2026-08-17-line-key-columns.sql": "pre-cutover production_lines/line_key columns",
+    # Hand-applied operational cutovers are not repeatable post-current-schema.
+    "2026-08-20-line-to-machine.sql": "hand-applied line-to-machine cutover",
+    "2026-08-20-setup-value-case-fold-backfill.sql": "hand-applied setup value backfill",
+}
+
 
 def _psql_base(args) -> list[str]:
     base = [args.psql, "-h", args.host, "-p", str(args.port), "-U", args.user, "-v", "ON_ERROR_STOP=1"]
@@ -109,6 +124,20 @@ def _orders_columns(args, dbname: str) -> str:
     return result.stdout.strip()
 
 
+def _migration_files() -> tuple[list[str], list[tuple[str, str]]]:
+    migration_files = sorted(glob.glob(os.path.join(MIGRATIONS_DIR, "*.sql")))
+    applied: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    for path in migration_files:
+        name = os.path.basename(path)
+        reason = SKIPPED_POST_SCHEMA_MIGRATIONS.get(name)
+        if reason:
+            skipped.append((name, reason))
+        else:
+            applied.append(path)
+    return applied, skipped
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("PG_HOST", "localhost"))
@@ -127,14 +156,17 @@ def main() -> int:
     _dropcreate_db(args, SCHEMA_DB)
     _apply_file(args, SCHEMA_DB, SCHEMA_SQL)
 
-    print("\n== Step 2: schema.sql bootstrap, THEN the full migrations/*.sql ledger on top ==")
-    print("(mirrors Azure's real history: schema loaded ONCE at provisioning, "
-          "every dated migration applied since -- see docs/DEPLOYMENT.md)")
+    print("\n== Step 2: schema.sql bootstrap, THEN the replayable migrations/*.sql subset on top ==")
+    print("(skips frozen legacy/hand-applied cutover files that do not apply to current schema.sql)")
     _dropcreate_db(args, MIGRATIONS_DB)
     _apply_file(args, MIGRATIONS_DB, SCHEMA_SQL)
-    migration_files = sorted(glob.glob(os.path.join(MIGRATIONS_DIR, "*.sql")))
+    migration_files, skipped = _migration_files()
     if not migration_files:
         raise SystemExit(f"No migration files found under {MIGRATIONS_DIR}")
+    if skipped:
+        print("Skipped post-schema migration replay files:")
+        for name, reason in skipped:
+            print(f"  - {name}: {reason}")
     for path in migration_files:
         _apply_file(args, MIGRATIONS_DB, path)
 

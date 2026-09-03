@@ -35,6 +35,7 @@ load_dotenv(os.path.join(ROOT, ".env"))
 PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_DB = os.getenv("PG_DB", "nimbus")
 TEST_DB_OPTED_IN = is_test_database_opted_in(os.getenv("NIMBUS_TEST_DB"))
+REQUIRE_TEST_DB = is_test_database_opted_in(os.getenv("NIMBUS_REQUIRE_TEST_DB"))
 
 # Prevent application imports in DB-free tests from opening warm connections.
 # A non-local host is always rejected, including when the suite is not opted in.
@@ -67,6 +68,25 @@ def _pg_available() -> bool:
 
 
 PG_UP = _pg_available() if TEST_DB_OPTED_IN else False
+
+
+def _required_test_db_error(*, required: bool, opted_in: bool, pg_up: bool) -> str | None:
+    if not required:
+        return None
+    if not opted_in:
+        return "NIMBUS_REQUIRE_TEST_DB=1 requires NIMBUS_TEST_DB=1"
+    if not pg_up:
+        return "NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI PostgreSQL test DB"
+    return None
+
+
+required_test_db_error = _required_test_db_error(
+    required=REQUIRE_TEST_DB,
+    opted_in=TEST_DB_OPTED_IN,
+    pg_up=PG_UP,
+)
+if required_test_db_error:
+    raise pytest.UsageError(required_test_db_error)
 
 
 def pytest_sessionfinish(session, exitstatus):

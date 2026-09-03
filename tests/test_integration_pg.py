@@ -206,9 +206,9 @@ def test_ingest_bom_from_excel_persists_valid_bom_item(pg, zztest_integration_re
     assert row == (
         ZZTEST_MAT_PARENT,
         ZZTEST_PLANT,
-        "01",
+        "1",
         1,
-        "0010",
+        "10",
         ZZTEST_MAT_COMPONENT,
         1,
         2.5,
@@ -262,6 +262,22 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(pg, zzte
             [(row[0], row[1], row[2], ZZTEST_PLANT, *row[3:]) for row in rows],
         )
         conn.commit()
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id
+              FROM orders
+             WHERE COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s
+             ORDER BY id
+            """,
+            (start, end),
+        )
+        matched_ids = [r[0] for r in cur.fetchall()]
+
+    assert all(order_id.startswith("ZZTEST_INT_") for order_id in matched_ids), (
+        "Refusing to exercise global purge on a date range containing non-test orders"
+    )
+    assert matched_ids == ["ZZTEST_INT_PURGE_BASIC", "ZZTEST_INT_PURGE_SCHEDULED"]
 
     result = db.purge_orders_by_date(start, end)
 

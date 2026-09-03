@@ -19,6 +19,8 @@ import re
 
 import pytest
 
+from scripts import schema_bootstrap_smoke
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "schema.sql")
 SETUP_MIGRATION_PATH = os.path.join(ROOT, "migrations", "2026-08-13-changeover-matrix-stage-0.sql")
@@ -75,6 +77,30 @@ def test_schema_migrations_ledger_present():
     assert "plants_horizon_minutes" in text, (
         "The horizon conversion must be recorded in the schema_migrations ledger."
     )
+
+
+def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
+    """The smoke script replays only migrations safe after current schema.sql.
+
+    Frozen pre-machine-rename and hand-applied cutover migrations are already
+    represented in current schema.sql; replaying them afterward would target
+    legacy production_lines/line_* names or duplicate one-shot data backfills.
+    """
+    applied, skipped = schema_bootstrap_smoke._migration_files()
+    skipped_names = {name for name, _reason in skipped}
+    expected_skipped = {
+        "2026-06-30-sap-interface.sql",
+        "2026-07-03-production-line-optimizer-flags.sql",
+        "2026-08-10-material-plant-default-workcenter.sql",
+        "2026-08-11-priority-lists.sql",
+        "2026-08-13-changeover-matrix-stage-0.sql",
+        "2026-08-17-line-key-columns.sql",
+        "2026-08-20-line-to-machine.sql",
+        "2026-08-20-setup-value-case-fold-backfill.sql",
+    }
+
+    assert expected_skipped <= skipped_names
+    assert not (expected_skipped & {os.path.basename(path) for path in applied})
 
 
 def test_setup_schema_has_versioned_plant_and_line_scoped_table_contracts():
