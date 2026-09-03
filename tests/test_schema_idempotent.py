@@ -246,31 +246,117 @@ def test_schema_bootstrap_smoke_uses_unique_quoted_database_identifiers():
     assert schema_bootstrap_smoke._quote_identifier('scratch"db') == '"scratch""db"'
 
 
-def test_schema_bootstrap_smoke_fails_when_structural_fingerprint_changes(monkeypatch, capsys):
-    """A structural mismatch must produce a nonzero smoke result and diagnostic."""
+@pytest.mark.parametrize(
+    ("fingerprint_values", "expected_message"),
+    [
+        (("baseline", "changed-on-first-replay", "changed-on-second-replay"), "after first replay"),
+        (("baseline", "baseline", "changed-on-second-replay"), "between replays"),
+    ],
+)
+def test_schema_bootstrap_smoke_fails_when_structural_fingerprint_changes(
+    monkeypatch, capsys, fingerprint_values, expected_message
+):
+    """Structural mismatches are enforced against both replay comparison points."""
     _stub_smoke_dependencies(monkeypatch)
-    fingerprints = iter(("baseline", "baseline", "changed-on-second-replay"))
+    fingerprints = iter(fingerprint_values)
     monkeypatch.setattr(schema_bootstrap_smoke, "_schema_fingerprint", lambda _args, _dbname: next(fingerprints))
     monkeypatch.setattr(schema_bootstrap_smoke, "_data_fingerprint", lambda _args, _dbname: "same")
 
     assert schema_bootstrap_smoke.main() == 1
 
     error = capsys.readouterr().err.lower()
-    assert "bounded structural fingerprint between replays" in error
+    assert f"bounded structural fingerprint {expected_message}" in error
     assert "not checked" in error
 
 
-def test_schema_bootstrap_smoke_fails_when_data_contract_changes(monkeypatch, capsys):
-    """A data/ledger contract mismatch must not be hidden by equal structure."""
+@pytest.mark.parametrize(
+    ("data_values", "expected_message"),
+    [
+        (("baseline", "changed-on-first-replay", "changed-on-second-replay"), "after first replay"),
+        (("baseline", "baseline", "changed-on-second-replay"), "between replays"),
+    ],
+)
+def test_schema_bootstrap_smoke_fails_when_data_contract_changes(
+    monkeypatch, capsys, data_values, expected_message
+):
+    """Data/ledger mismatches are enforced against both replay comparison points."""
     _stub_smoke_dependencies(monkeypatch)
     monkeypatch.setattr(schema_bootstrap_smoke, "_schema_fingerprint", lambda _args, _dbname: "same")
-    data_contracts = iter(("baseline", "baseline", "changed-on-second-replay"))
+    data_contracts = iter(data_values)
     monkeypatch.setattr(schema_bootstrap_smoke, "_data_fingerprint", lambda _args, _dbname: next(data_contracts))
 
     assert schema_bootstrap_smoke.main() == 1
 
     error = capsys.readouterr().err.lower()
-    assert "bounded data/ledger contract between replays" in error
+    assert f"bounded data/ledger contract {expected_message}" in error
+
+
+@pytest.mark.parametrize(
+    ("column_values", "expected_message"),
+    [
+        (("baseline", "changed-on-first-replay", "changed-on-second-replay"), "after first replay"),
+        (("baseline", "baseline", "changed-on-second-replay"), "between replays"),
+    ],
+)
+def test_schema_bootstrap_smoke_fails_when_orders_columns_change(
+    monkeypatch, capsys, column_values, expected_message
+):
+    """The original orders-column contract remains protected at both points."""
+    _stub_smoke_dependencies(monkeypatch)
+    columns = iter(column_values)
+    monkeypatch.setattr(schema_bootstrap_smoke, "_orders_columns", lambda _args, _dbname: next(columns))
+    monkeypatch.setattr(schema_bootstrap_smoke, "_schema_fingerprint", lambda _args, _dbname: "same")
+    monkeypatch.setattr(schema_bootstrap_smoke, "_data_fingerprint", lambda _args, _dbname: "same")
+
+    assert schema_bootstrap_smoke.main() == 1
+
+    error = capsys.readouterr().err.lower()
+    assert f"orders columns {expected_message}" in error
+
+
+@pytest.mark.parametrize("failure_stage", ["after_schema_creation", "after_migrations_creation", "during_first_replay"])
+def test_schema_bootstrap_smoke_preserves_original_failure_when_cleanup_fails(monkeypatch, capsys, failure_stage):
+    """Every created DB is attempted during cleanup without replacing the failure."""
+    schema_db, migrations_db, calls, cleaned, _seeded, _orders_calls = _stub_smoke_dependencies(monkeypatch)
+    expected_created = {
+        "after_schema_creation": (schema_db,),
+        "after_migrations_creation": (schema_db, migrations_db),
+        "during_first_replay": (schema_db, migrations_db),
+    }[failure_stage]
+    first_migration = os.path.basename(schema_bootstrap_smoke._migration_files()[0][0])
+
+    def fail_at_stage(_args, dbname, path):
+        calls.append(("apply", dbname, os.path.basename(path)))
+        basename = os.path.basename(path)
+        if (
+            failure_stage == "after_schema_creation"
+            and dbname == schema_db
+            and basename == "schema.sql"
+        ) or (
+            failure_stage == "after_migrations_creation"
+            and dbname == migrations_db
+            and basename == "schema.sql"
+        ) or (
+            failure_stage == "during_first_replay"
+            and dbname == migrations_db
+            and basename == first_migration
+        ):
+            raise SystemExit(f"synthetic {failure_stage} failure")
+
+    monkeypatch.setattr(schema_bootstrap_smoke, "_apply_file", fail_at_stage)
+
+    def fail_one_cleanup(_args, dbname):
+        cleaned.append(dbname)
+        if dbname == expected_created[-1]:
+            raise RuntimeError("synthetic cleanup failure")
+
+    monkeypatch.setattr(schema_bootstrap_smoke, "_drop_database_best_effort", fail_one_cleanup)
+
+    with pytest.raises(SystemExit, match=f"synthetic {failure_stage} failure"):
+        schema_bootstrap_smoke.main()
+
+    assert cleaned == list(reversed(expected_created))
+    assert "scratch database cleanup failed" in capsys.readouterr().err.lower()
 
 
 def test_schema_bootstrap_smoke_fingerprint_is_bounded_public_catalog_structure():

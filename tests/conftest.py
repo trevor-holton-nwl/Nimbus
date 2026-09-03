@@ -121,14 +121,11 @@ def pg():
 def client():
     """
     FastAPI TestClient over brain.api, for endpoint-level tests (e.g. the #191
-    color-wheel auth-gate fix). Imports brain lazily and skips if it cannot be
-    constructed (e.g. the hardcoded COLOR_WHEEL_DIR path is absent on this
-    machine).
+    color-wheel auth-gate fix). Imports brain lazily; application import or
+    TestClient construction errors must fail the requesting test.
     """
-    try:
-        from starlette.testclient import TestClient
+    from starlette.testclient import TestClient
 
-        import brain
-        return TestClient(brain.api)
-    except Exception as e:  # pragma: no cover - environment dependent
-        pytest.skip(f"brain app could not be imported in this environment: {e}")
+    import brain
+
+    return TestClient(brain.api)

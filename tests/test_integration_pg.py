@@ -9,6 +9,8 @@ from __future__ import annotations
 import datetime as dt
 from io import BytesIO
 from pathlib import Path
+import sys
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -70,6 +72,83 @@ def _drop_isolated_database(dbname: str) -> None:
         )
 
 
+def _drop_isolated_database_best_effort(dbname: str, attempts: int = 3) -> bool:
+    """Retry scratch cleanup and report failures without raising from teardown."""
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            _drop_isolated_database(dbname)
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(0.1)
+    print(
+        f"WARNING: isolated purge database cleanup failed for {dbname} after "
+        f"{attempts} attempts: {last_error}",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _cleanup_isolated_purge_database(scratch_name, created, scratch_conn, original_pool) -> None:
+    """Restore the application pool, close safely, and drop only owned scratch DBs."""
+    db._pool = original_pool
+    if scratch_conn is not None:
+        try:
+            scratch_conn.close()
+        except Exception as exc:
+            print(f"WARNING: isolated purge connection close failed: {exc}", file=sys.stderr)
+    if created:
+        try:
+            _drop_isolated_database_best_effort(scratch_name)
+        except Exception as exc:  # pragma: no cover - defensive around cleanup monkeypatches
+            print(f"WARNING: isolated purge database cleanup failed for {scratch_name}: {exc}", file=sys.stderr)
+
+
+@pytest.mark.parametrize("created", [False, True])
+def test_isolated_purge_cleanup_drops_only_owned_databases(monkeypatch, capsys, created):
+    dropped = []
+    original_pool = db._pool
+
+    class Connection:
+        def close(self):
+            raise RuntimeError("synthetic connection close failure")
+
+    def record_drop(dbname):
+        dropped.append(dbname)
+
+    monkeypatch.setattr(sys.modules[__name__], "_drop_isolated_database_best_effort", record_drop)
+
+    _cleanup_isolated_purge_database("nimbus_task3_purge_owned", created, Connection(), original_pool)
+
+    assert db._pool is original_pool
+    assert dropped == (["nimbus_task3_purge_owned"] if created else [])
+    assert "connection close failed" in capsys.readouterr().err
+
+
+def test_isolated_purge_drop_retries_and_reports_without_raising(monkeypatch, capsys):
+    attempts = []
+
+    def flaky_drop(dbname):
+        attempts.append(dbname)
+        if len(attempts) < 3:
+            raise RuntimeError("synthetic transient drop failure")
+
+    monkeypatch.setattr(sys.modules[__name__], "_drop_isolated_database", flaky_drop)
+    monkeypatch.setattr(sys.modules[__name__].time, "sleep", lambda _seconds: None, raising=False)
+
+    assert _drop_isolated_database_best_effort("nimbus_task3_purge_retry") is True
+    assert attempts == ["nimbus_task3_purge_retry"] * 3
+
+    def always_fail_drop(_dbname):
+        raise RuntimeError("synthetic permanent drop failure")
+
+    monkeypatch.setattr(sys.modules[__name__], "_drop_isolated_database", always_fail_drop)
+    assert _drop_isolated_database_best_effort("nimbus_task3_purge_failure") is False
+    assert "cleanup failed for nimbus_task3_purge_failure after 3 attempts" in capsys.readouterr().err
+
+
 @pytest.fixture
 def isolated_purge_database(pg):
     """Yield a schema-bootstrapped DB used only by the real purge SQL test.
@@ -83,9 +162,11 @@ def isolated_purge_database(pg):
     scratch_name = f"nimbus_task3_purge_{uuid.uuid4().hex[:12]}"
     original_pool = db._pool
     scratch_conn = None
+    created = False
     try:
         with _connect_pg_database("postgres", autocommit=True) as conn:
             conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(scratch_name)))
+            created = True
 
         scratch_conn = _connect_pg_database(scratch_name)
         schema_sql = Path(__file__).resolve().parents[1].joinpath("schema.sql").read_text(encoding="utf-8")
@@ -107,10 +188,7 @@ def isolated_purge_database(pg):
         db._pool = _SingleConnectionPool()
         yield scratch_conn
     finally:
-        db._pool = original_pool
-        if scratch_conn is not None:
-            scratch_conn.close()
-        _drop_isolated_database(scratch_name)
+        _cleanup_isolated_purge_database(scratch_name, created, scratch_conn, original_pool)
 
 
 def test_fixture_values_fit_material_plant_schema_lengths():
@@ -202,6 +280,120 @@ def _capture_bom_audit_rows(pg, records, previous_max_id: int) -> list[int]:
     return audit_ids
 
 
+def _run_bom_ingest_with_capture(pg, records, body, filename, user, audit_floor: int):
+    """Run BOM ingest and preserve its exception while capturing owned audits."""
+    ingest_error = None
+    try:
+        result = md.ingest_bom_from_excel(body, filename, user)
+    except Exception as exc:
+        ingest_error = exc
+
+    try:
+        audit_ids = _capture_bom_audit_rows(pg, records, audit_floor)
+    except Exception as capture_error:
+        if ingest_error is not None:
+            print(
+                f"WARNING: BOM audit capture failed after ingest failure: {capture_error}",
+                file=sys.stderr,
+            )
+            raise ingest_error from capture_error
+        raise
+
+    if ingest_error is not None:
+        raise ingest_error
+    return result, audit_ids
+
+
+def _fake_audit_pg(rows=(), error=None):
+    executed = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, statement, params=()):
+            executed.append((statement, params))
+            if error is not None:
+                raise error
+
+        def fetchall(self):
+            return list(rows)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    class Pool:
+        def connection(self):
+            return Connection()
+
+    return SimpleNamespace(_pool=Pool()), executed
+
+
+def test_bom_ingest_failure_preserves_original_and_captures_exact_audit_ids(monkeypatch):
+    records = SimpleNamespace(admin_audit_ids=set())
+    pg, _executed = _fake_audit_pg(rows=[(41,)])
+
+    def fail_ingest(*_args):
+        raise ValueError("synthetic BOM ingest failure")
+
+    monkeypatch.setattr(md, "ingest_bom_from_excel", fail_ingest)
+
+    with pytest.raises(ValueError, match="synthetic BOM ingest failure"):
+        _run_bom_ingest_with_capture(pg, records, b"body", "file.xlsx", ZZTEST_USER, 40)
+
+    assert records.admin_audit_ids == {41}
+
+
+def test_bom_audit_capture_failure_does_not_replace_ingest_failure(monkeypatch, capsys):
+    records = SimpleNamespace(admin_audit_ids=set())
+    pg, _executed = _fake_audit_pg(error=RuntimeError("synthetic audit query failure"))
+
+    def fail_ingest(*_args):
+        raise ValueError("synthetic BOM ingest failure")
+
+    monkeypatch.setattr(md, "ingest_bom_from_excel", fail_ingest)
+
+    with pytest.raises(ValueError, match="synthetic BOM ingest failure") as raised:
+        _run_bom_ingest_with_capture(pg, records, b"body", "file.xlsx", ZZTEST_USER, 40)
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "audit capture failed after ingest failure" in capsys.readouterr().err
+
+
+def test_bom_audit_capture_failure_surfaces_when_ingest_succeeds(monkeypatch):
+    records = SimpleNamespace(admin_audit_ids=set())
+    pg, _executed = _fake_audit_pg(error=RuntimeError("synthetic audit query failure"))
+    monkeypatch.setattr(md, "ingest_bom_from_excel", lambda *_args: {"status": "ok"})
+
+    with pytest.raises(RuntimeError, match="synthetic audit query failure"):
+        _run_bom_ingest_with_capture(pg, records, b"body", "file.xlsx", ZZTEST_USER, 40)
+
+
+@pytest.mark.parametrize("audit_ids", [[], [41, 42]])
+def test_bom_audit_capture_tracks_zero_or_multiple_exact_ids(monkeypatch, audit_ids):
+    records = SimpleNamespace(admin_audit_ids=set())
+    pg, _executed = _fake_audit_pg(rows=[(audit_id,) for audit_id in audit_ids])
+    monkeypatch.setattr(md, "ingest_bom_from_excel", lambda *_args: {"status": "ok"})
+
+    result, captured_ids = _run_bom_ingest_with_capture(
+        pg, records, b"body", "file.xlsx", ZZTEST_USER, 40
+    )
+
+    assert result == {"status": "ok"}
+    assert captured_ids == audit_ids
+    assert records.admin_audit_ids == set(audit_ids)
+
+
 def test_cleanup_targets_explicit_keys_only():
     """The guarded fixture must never delete every row at its namespace plant."""
     executed = []
@@ -234,30 +426,41 @@ def test_cleanup_targets_explicit_keys_only():
             return Connection()
 
     records = SimpleNamespace(
-        order_ids={"ZZTEST_INT_owned_order"},
-        upload_batch_ids=set(),
-        upload_audit_filenames={"ZZTEST_INT_owned.xlsx"},
-        admin_audit_ids=set(),
+        order_ids={"ZZTEST_INT_owned_order", "ZZTEST_INT_owned_order_2"},
+        upload_batch_ids={"owned-batch-1", "owned-batch-2"},
+        upload_audit_filenames={"ZZTEST_INT_owned.xlsx", "ZZTEST_INT_owned_2.xlsx"},
+        admin_audit_ids={101, 202},
     )
 
     _cleanup_owned_records(SimpleNamespace(_pool=Pool()), records)
 
-    statements = [" ".join(statement.split()).lower() for statement, _params in executed]
-    assert any("delete from orders where id = any(%s)" in statement for statement in statements)
-    assert any(
-        "delete from bom_items" in statement
-        and "material_id = %s" in statement
-        and "plant = %s" in statement
-        for statement in statements
-    )
-    assert any(
-        "delete from material_plants" in statement
-        and "material_id = %s" in statement
-        and "plant = %s" in statement
-        for statement in statements
-    )
-    assert any("delete from materials where material_id = %s" in statement for statement in statements)
-    assert all("where plant = %s" not in statement for statement in statements)
+    normalized = [(" ".join(statement.split()).lower(), params) for statement, params in executed]
+
+    def params_for(fragment):
+        matches = [params for statement, params in normalized if fragment in statement]
+        assert len(matches) == 1, f"expected one cleanup statement containing {fragment!r}"
+        return matches[0]
+
+    assert set(params_for("delete from order_schedule_segments where order_id = any(%s)")[0]) == records.order_ids
+    assert set(params_for("delete from orders where id = any(%s)")[0]) == records.order_ids
+    assert params_for("delete from bom_items") == ZZTEST_BOM_KEY
+    assert set(params_for("delete from upload_audit where batch_id = any(%s)")[0]) == records.upload_batch_ids
+    assert set(params_for("delete from upload_audit where filename = any(%s)")[0]) == records.upload_audit_filenames
+    assert set(params_for("delete from admin_audit where id = any(%s)")[0]) == records.admin_audit_ids
+    assert {
+        params
+        for statement, params in normalized
+        if "delete from material_plants" in statement
+    } == {
+        (ZZTEST_MAT_PARENT, ZZTEST_PLANT),
+        (ZZTEST_MAT_COMPONENT, ZZTEST_PLANT),
+    }
+    assert {
+        params
+        for statement, params in normalized
+        if "delete from materials where material_id = %s" in statement
+    } == {(ZZTEST_MAT_PARENT,), (ZZTEST_MAT_COMPONENT,)}
+    assert all("where plant = %s" not in statement for statement, _params in normalized)
 
 
 @pytest.fixture
@@ -383,10 +586,9 @@ def test_ingest_bom_from_excel_persists_valid_bom_item(pg, zztest_integration_re
     ])
 
     audit_floor = _admin_audit_max_id(pg)
-    try:
-        result = md.ingest_bom_from_excel(body, ZZTEST_BOM_FILENAME, ZZTEST_USER)
-    finally:
-        audit_ids = _capture_bom_audit_rows(pg, zztest_integration_records, audit_floor)
+    result, audit_ids = _run_bom_ingest_with_capture(
+        pg, zztest_integration_records, body, ZZTEST_BOM_FILENAME, ZZTEST_USER, audit_floor
+    )
 
     assert len(audit_ids) == 1, "BOM ingest must create exactly one owned admin audit row"
 

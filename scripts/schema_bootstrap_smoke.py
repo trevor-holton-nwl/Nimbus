@@ -446,7 +446,10 @@ def main() -> int:
         return 1
     finally:
         for dbname in reversed(created_databases):
-            _drop_database_best_effort(args, dbname)
+            try:
+                _drop_database_best_effort(args, dbname)
+            except Exception as exc:  # pragma: no cover - defensive around cleanup helpers
+                print(f"WARNING: scratch database cleanup failed for {dbname}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

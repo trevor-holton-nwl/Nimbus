@@ -663,3 +663,76 @@ Additional checks:
   CI's PostgreSQL service remains the execution environment for those checks.
 - No full test suite was run. The pre-existing unrelated working-tree change in
   `Code_Review_09_01.md` was left untouched.
+
+## Fix-round 4/5 re-review remediation (appended 2026-09-03)
+
+Addressed the six findings from the follow-up Task 3 review in Task 3-owned
+files only. No production purge semantics, Azure resources, or unrelated
+remediation waves were changed.
+
+### Changes
+
+- `tests/test_integration_pg.py` now records successful scratch-database
+  creation inside the CREATE context and drops only when `created` is true.
+  Connection close is guarded, database drop uses the quoted generated name,
+  retries three times, and reports cleanup failures without raising from
+  teardown. The purge test still invokes the unchanged production
+  `db.purge_orders_by_date` SQL through a real connection in the isolated
+  schema-bootstrapped database.
+- Exact cleanup regression coverage now binds and checks the actual order,
+  BOM-key, upload-batch, upload-filename, admin-audit, material, and plant
+  parameters, with all ownership branches populated.
+- BOM capture now preserves the ingest exception; a capture failure is chained
+  and reported without replacing it. Tests cover ingest failure, capture-query
+  failure, zero rows, and multiple rows, and assert captured IDs are retained
+  for exact-ID cleanup.
+- `tests/test_schema_idempotent.py` parameterizes structural, data/ledger, and
+  orders-column mismatch tests for both first-replay and between-replay
+  failures. It also injects failures after each database creation boundary and
+  during replay while making one cleanup attempt raise, proving every created
+  database is attempted and the original failure survives.
+- `tests/conftest.py` no longer catches application import or TestClient setup
+  errors in the shared `client` fixture; those errors now fail the requesting
+  test. `tests/test_db_safety.py` statically guards that contract.
+
+### Verification
+
+Focused DB-free command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB=''; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_routes.py tests/test_integration_pg.py tests/test_schema_idempotent.py tests/test_db_safety.py -m 'not pg' -q -ra
+```
+
+Result: `69 passed, 5 deselected, 13 warnings in 18.70s`.
+
+Guarded integration/concurrency command:
+
+```powershell
+$env:PG_HOST='localhost'; $env:PG_PORT='5432'; $env:NIMBUS_TEST_DB='1'; $env:NIMBUS_REQUIRE_TEST_DB=''; $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python.exe -m pytest tests/test_integration_pg.py tests/test_task_concurrency.py -q -ra
+```
+
+Result: `10 passed, 6 skipped in 0.20s`. The three guarded integration tests
+and three concurrency tests skipped because the local PostgreSQL probe is
+unavailable under the existing local SSL/auth configuration. No Azure or
+non-local database was contacted.
+
+Required-DB collection checks:
+
+- With `NIMBUS_TEST_DB=''` and `NIMBUS_REQUIRE_TEST_DB='1'`, pytest exited 1
+  with `pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires NIMBUS_TEST_DB=1`.
+- With both values set to `1`, pytest exited 1 with
+  `pytest.UsageError: NIMBUS_REQUIRE_TEST_DB=1 requires reachable local/CI
+  PostgreSQL test DB` (plus the existing interpreter-shutdown pool finalizer
+  warning).
+
+Touched-file checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check scripts/schema_bootstrap_smoke.py tests/conftest.py tests/test_schema_idempotent.py tests/test_integration_pg.py tests/test_db_safety.py tests/test_integration_routes.py
+.\.venv\Scripts\python.exe -m py_compile scripts/schema_bootstrap_smoke.py tests/conftest.py tests/test_schema_idempotent.py tests/test_integration_pg.py tests/test_db_safety.py tests/test_integration_routes.py
+```
+
+Results: Ruff passed; `py_compile` exited 0 with no output. `git diff --check`
+also exited 0. The real PostgreSQL ingest/purge and scratch smoke paths remain
+CI-only verification on this machine because local PostgreSQL is unavailable.
+No full suite was run.

@@ -68,6 +68,26 @@ def test_conftest_imports_db_only_inside_pg_available():
     assert db_import_lines <= allowed_lines
 
 
+def test_shared_client_fixture_does_not_skip_application_setup_failures():
+    from tests import conftest
+
+    tree = ast.parse(Path(conftest.__file__).read_text(encoding='utf-8'))
+    client = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == 'client'
+    )
+    skip_calls = [
+        node for node in ast.walk(client)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == 'pytest'
+        and node.func.attr == 'skip'
+    ]
+
+    assert not skip_calls
+
+
 def test_pg_fixture_returns_the_module_loaded_by_the_guarded_probe(monkeypatch):
     from tests import conftest
 
