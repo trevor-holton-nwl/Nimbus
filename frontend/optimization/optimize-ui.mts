@@ -2071,6 +2071,7 @@ export const SandboxAdapter = {
     const applied = !!evt.applied;
     const snap = evt.snapshot as SandboxExitSnapshot | undefined;
     const affectedPlants = applied ? SandboxAdapter._collectAffectedPlants(snap) : null;
+    const capturedLinePlants = applied ? SandboxAdapter._linePlantSnapshot : null;
 
     if (applied) {
       const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || 'What-If';
@@ -2102,7 +2103,13 @@ export const SandboxAdapter = {
       // this is the one existing post-discard recompute, and it must see the
       // restored dismissal set above.
       SandboxAdapter._clearSideEffectSnapshot();
-      (NIMBUS!.Confidence as { _suppressNextAlertRefresh?(): void } | undefined)?._suppressNextAlertRefresh?.();
+      (NIMBUS!.Confidence as {
+        _suppressNextAlertRefresh?(): void;
+        _scheduleStartupRecompute?(delay?: number): void;
+      } | undefined)?._suppressNextAlertRefresh?.();
+      (NIMBUS!.Confidence as {
+        _scheduleStartupRecompute?(delay?: number): void;
+      } | undefined)?._scheduleStartupRecompute?.();
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.scenario_discarded'), 'info');
     }
@@ -2140,7 +2147,7 @@ export const SandboxAdapter = {
           line:  (snap?.blocks || []).filter((b) => b.plant === plant && !curLine.has(b.id)).map((b) => b.id),
           plant: (snap?.plantBlocks || []).filter((b) => b.plant === plant && !curPlant.has(b.id)).map((b) => b.id),
         };
-        CalendarSync.flushPlant(plant, removed);
+        CalendarSync.flushPlant(plant, removed, capturedLinePlants || undefined);
       }
       // Promotion changes Store.rev() (UndoStack.push plus sandbox teardown),
       // invalidating any worker request started during the trial. Queue one full

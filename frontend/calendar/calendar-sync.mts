@@ -334,12 +334,18 @@ export const CalendarSync = {
    *  the pre-sandbox snapshot is still alive (it is nulled before flush). Without the
    *  deletes, a blackout removed in What-If would resurrect from the backend on the next
    *  hydration. (F3) */
-  flushPlant(plant: string, removed?: { line: string[]; plant: string[] }): void {
+  flushPlant(
+    plant: string,
+    removed?: { line: string[]; plant: string[] },
+    capturedLinePlants?: ReadonlyMap<string, string | null>,
+  ): void {
     if (!plant) return;
     removed = removed || { line: [], plant: [] };
     this.savePlantHours(plant, Store.plants[plant]?.workHours);
+    const lineOwner = (line: string): string | null =>
+      Store.getPlantForLine(line) || capturedLinePlants?.get(line) || null;
     const lines = Object.keys(Store.calendars)
-      .filter(l => Store.getPlantForLine(l) === plant)
+      .filter(l => lineOwner(l) === plant)
       .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
     if (lines.length) this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours');
     const lineBk = Store.blocks.filter(b => b.plant === plant);

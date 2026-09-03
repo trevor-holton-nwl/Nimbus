@@ -1381,6 +1381,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _recomputeDebounced: null,
     _cancelRecomputeDebounced: null,
     _startupTimer: null,
+    _startupPending: false,
     _lifecycleGeneration: 0,
     _suppressedAlertRefreshes: 0,
 
@@ -1399,6 +1400,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _suppressNextAlertRefresh() {
       Confidence._suppressedAlertRefreshes++;
+    },
+
+    _scheduleStartupRecompute(delay = 600) {
+      if (!Confidence._startupPending || Confidence._startupTimer) return;
+      Confidence._startupTimer = setTimeout(() => {
+        Confidence._startupTimer = null;
+        Confidence._recompute();
+      }, delay);
     },
 
     _canApply(generation, rev) {
@@ -1429,6 +1438,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         clearTimeout(confidenceTimer);
         confidenceTimer = null;
       };
+      Confidence._startupPending = true;
       Confidence._injectBadge();
       Store.subscribe(evt => {
         if (evt?.type === 'sandbox:entered') {
@@ -1477,10 +1487,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         }
         Confidence._recomputeDebounced();
       }, 'Confidence.autoRecompute');
-      Confidence._startupTimer = setTimeout(() => {
-        Confidence._startupTimer = null;
-        Confidence._recompute();
-      }, 600);
+      Confidence._scheduleStartupRecompute();
     },
 
     _injectBadge() {
@@ -1583,6 +1590,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     _apply(score) {
+      Confidence._startupPending = false;
       const prev = Confidence._score;
       Confidence._score = score;
       Confidence._history.push({ ts: Date.now(), score });

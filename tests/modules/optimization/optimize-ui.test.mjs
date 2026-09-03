@@ -1163,6 +1163,57 @@ test('SandboxAdapter promotes calendar edits for explicit task plants without li
   }
 });
 
+test('SandboxAdapter promotes changed line hours after the only task owner disappears', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorCalendars = structuredClone(Store.calendars);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorPost = CalendarSync._post;
+  const priorSavePlantHours = CalendarSync.savePlantHours;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorToast = Toast.show;
+  const lineHourCalls = [];
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+  globalThis.NIMBUS = { Persistence: { saveAll() {} } };
+  CalendarSync.savePlantHours = () => Promise.resolve({ ok: true });
+  CalendarSync._post = (path, body, label) => {
+    lineHourCalls.push({ path, body, label });
+    return Promise.resolve({ ok: true });
+  };
+  Alerts.scheduleRecompute = () => {};
+  Toast.show = () => {};
+
+  try {
+    Store.setMasterData({ plants: [{ plant: 'OWNER-DISAPPEARS' }], lines: [] }, 'unit-test');
+    Store.setTasks([
+      { id: 'owner-task', PLANT: 'OWNER-DISAPPEARS', MACHINE: 'OWNERLESS-LINE', RUN_TIME: 1 },
+    ], 'unit-test');
+    Store.replaceCalendars({ 'OWNERLESS-LINE': { workHours: { 0: [8, 16] } } }, 'unit-test');
+
+    Sandbox.enter('unit-test');
+    Store.setCalendar('OWNERLESS-LINE', { 0: [9, 17] }, 'unit-test');
+    Store.removeTask('owner-task', 'unit-test');
+    Sandbox.exit(true, 'unit-test');
+
+    const promoted = lineHourCalls.find(call => call.path === '/plant-calendar/line-hours');
+    assert.ok(promoted, 'promotion still sends line hours for the changed calendar line');
+    assert.deepEqual(promoted.body.lines.map(line => line.machine), ['OWNERLESS-LINE'],
+      'promotion uses the captured pre-sandbox line owner when current task lookup is empty');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    CalendarSync._post = priorPost;
+    CalendarSync.savePlantHours = priorSavePlantHours;
+    Alerts.scheduleRecompute = priorSchedule;
+    Toast.show = priorToast;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
 // Pulled out of schedule-workbench.test.mjs's combined 'EditCalendar/
 // ColorWheelViewer/Printer/SandboxAdapter/AlertsUIAdapter expose their
 // documented public API' smoke test, which spanned five modules across four

@@ -76,6 +76,7 @@ test('real discard alert refresh does not re-arm Confidence after restoring its 
   const priorTimer = Alerts._timer;
   const priorPendingFull = Alerts._pendingFull;
   const priorPendingLines = new Set(Alerts._pendingLines);
+  const priorStartupPending = Confidence._startupPending;
   globalThis.NIMBUS = nimbus;
   nimbus.Toast.show = () => {};
   if (Alerts._timer) clearTimeout(Alerts._timer);
@@ -91,6 +92,9 @@ test('real discard alert refresh does not re-arm Confidence after restoring its 
 
   try {
     Confidence._invalidatePending(true);
+    // This test starts from an already-established live baseline. The early
+    // discard regression below separately covers the still-pending bootstrap.
+    Confidence._startupPending = false;
     Confidence.restore({ score: 86, history: [{ ts: 1, score: 86 }] });
     Store.setTasks([], 'test');
     Store.setSelectedPlant(null, 'test');
@@ -111,7 +115,63 @@ test('real discard alert refresh does not re-arm Confidence after restoring its 
     Alerts._pendingFull = priorPendingFull;
     Alerts._pendingLines = priorPendingLines;
     if (Sandbox.active) Sandbox.exit(false, 'test');
+    Confidence._startupPending = priorStartupPending;
     nimbus.Toast.show = priorToast;
+    Store.setAlerts(priorAlerts, 'test');
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('an early What-If discard re-arms the pending Confidence bootstrap', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorNimbus = globalThis.NIMBUS;
+  const priorToast = nimbus.Toast.show;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorStartupPending = Confidence._startupPending;
+  const priorLastAlerts = Confidence._lastAlertsSrc;
+  const priorLastRev = Confidence._lastRev;
+  const priorConfidence = Confidence.snapshot();
+  const unsubscribeAdapter = Store.subscribe(event => {
+    if (event.type === 'sandbox:entered') SandboxAdapter._onEntered();
+    else if (event.type === 'sandbox:exited') SandboxAdapter._onExited(event);
+  }, 'confidence-early-bootstrap-test');
+  globalThis.NIMBUS = nimbus;
+  nimbus.Toast.show = () => {};
+  Alerts.scheduleRecompute = () => {};
+
+  try {
+    Confidence._invalidatePending(true);
+    Confidence._startupPending = true;
+    Confidence.restore({ score: 91, history: [{ ts: 1, score: 91 }] });
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant(null, 'test');
+    Confidence._lastAlertsSrc = null;
+    Confidence._lastRev = null;
+    Confidence._scheduleStartupRecompute();
+
+    Sandbox.enter('test');
+    Sandbox.exit(false, 'test');
+
+    await wait(700); // beyond the re-armed 600 ms bootstrap delay
+    const after = Confidence.snapshot();
+    assert.equal(after.score, 100, 'the restored live state receives its initial Confidence score');
+    assert.equal(after.history.length, 2,
+      'early discard does not leave the live badge permanently at its pre-bootstrap baseline');
+    assert.equal(Confidence._startupPending, false, 'the re-armed bootstrap marks itself complete');
+  } finally {
+    unsubscribeAdapter();
+    Confidence._invalidatePending(true);
+    Confidence._startupPending = priorStartupPending;
+    Confidence._lastAlertsSrc = priorLastAlerts;
+    Confidence._lastRev = priorLastRev;
+    Confidence.restore(priorConfidence);
+    if (Sandbox.active) Sandbox.exit(false, 'test');
+    nimbus.Toast.show = priorToast;
+    Alerts.scheduleRecompute = priorSchedule;
     Store.setAlerts(priorAlerts, 'test');
     Store.setTasks(priorTasks, 'test');
     Store.setSelectedPlant(priorPlant, 'test');

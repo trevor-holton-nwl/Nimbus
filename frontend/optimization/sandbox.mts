@@ -69,9 +69,14 @@ export const Sandbox = {
       // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below
       // fires its own '<field>:replace' event (distinct from that field's normal
       // '<field>:change' event) — a future consumer of 'blocks:change' /
-      // 'calendar:change' / 'plants:change' / 'plantBlocks:change' / 'firmed:change'
-      // receives the following compatibility change event, so existing change
-      // subscribers also refresh after a What-If discard. See
+      // 'calendar:change' / 'plantBlocks:change' / 'firmed:change' receive
+      // their following compatibility change event, so existing subscribers
+      // also refresh after a What-If discard. replacePlants emits
+      // plants:replace followed by calendar:change (plant hours use the
+      // calendar channel); it does not emit plants:change. See
+      // Mapping: replaceBlocks -> blocks:change, replaceCalendars and
+      // replacePlants -> calendar:change, replacePlantBlocks ->
+      // plantBlocks:change, and replaceFirmedIds -> firmed:change.
       // docs/architecture/cq1-compatibility-inventory.md §6 and the pinned
       // event-sequence test in tests/modules/optimization/sandbox.test.mjs.
       Store.setTasks(snap.tasks, 'sandbox');

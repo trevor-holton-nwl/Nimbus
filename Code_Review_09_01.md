@@ -6,6 +6,23 @@
 
 ---
 
+## 0.5 Review remediation pass — 2026-09-03 (authoritative latest status)
+
+This addendum supersedes older inline statuses below, which are retained as the historical record of earlier review passes. The four waves in the current remediation plan are implemented on `main`:
+
+| Wave | Status | Evidence |
+|---|---|---|
+| Optimizer preview concurrency (P1-7) | RESOLVED | `7c14aa3`, `895ef5b`; baseline/event/revalidation guards and stale-preview regression tests |
+| Setup coverage bounds (P1-9) | PARTIAL by design | `26f82d3`, `08ff97e`; coverage and missing-pairs CSV use bounded reads, while `GET /setup/{plant}` remains the complete optimizer snapshot contract and needs a separate lazy-snapshot redesign |
+| Integration and database verification | IMPLEMENTED; live Postgres run pending | `72f06de`, `2ccfa9f`, `c18962a`, `870bed9`, `5e53ce8`, `9a463db`; DB-free ingest/purge/route tests, `ZZTEST_*` Postgres fixtures, required-CI DB gating, and schema smoke idempotence/fingerprint checks |
+| What-If sandbox side effects | RESOLVED | `0d2ad4f`, `98a50b1`, `6e518b2`; discard restores task state, `Store.lastOptimize`, alert dismissals, and Confidence before recomputation; Promote retains the trial state |
+
+Corrections to stale statuses: P1-8 is RESOLVED at both the SAP-sync and order-upload capture call sites; `/purge` remains intentionally unscoped because its date-range contract has no plant input. `GET /master-data/{table}` authentication is RESOLVED (`283ec30`) after the frontend identity-header migration (`e2f4cdb`).
+
+No schema migration or Azure deployment was part of this remediation. Local PostgreSQL is unavailable because the configured local server does not pass the repository's connection probe; the DB guard was not bypassed. CI runs the Postgres suite with `NIMBUS_REQUIRE_TEST_DB=1` and runs the schema smoke against the service database. The smoke explicitly reports and excludes frozen legacy/hand-applied cutover migrations rather than claiming to verify the entire historical ledger.
+
+The Entra/Easy Auth migration remains explicitly deferred. The pilot's identity boundary still trusts the spoofable `X-User` header; this is an accepted pilot risk and is not represented as fixed by the remediation above.
+
 ## 0. Remediation Status — 2026-09-02
 
 All three P0s and eleven of the twelve P1s are now fixed on `main` (10 commits, `242a632`..`32371e6`). Every finding below carries an inline **✅ RESOLVED** / **⏳ OPEN** marker with the commit that addressed it. Two things are **not** code fixes and remain genuinely open:

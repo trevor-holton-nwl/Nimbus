@@ -41,7 +41,10 @@ export const CalendarUI = {
       <label class="cal-filter-label">${Util.t('ui.cal_filter_line')}</label>
       <select class="cal-filter-select" id="cal-line-select">
         <option value="all"${sel === 'all' ? ' selected' : ''}>${Util.t('ui.all_lines_count', {count: lines.length})}</option>
-        ${lines.map(l => `<option value="${l}"${sel === l ? ' selected' : ''}>${l}</option>`).join('')}
+        ${lines.map(l => {
+          const safeLine = Util.escapeHtml(l);
+          return `<option value="${safeLine}"${sel === l ? ' selected' : ''}>${safeLine}</option>`;
+        }).join('')}
       </select>
       ${sel !== 'all' ? `<button class="cal-filter-clear" onclick="NIMBUS.CalendarUI._clearLineFilter()">${Util.t('btn.show_all')}</button>` : ''}
     </div>`;
@@ -58,11 +61,11 @@ export const CalendarUI = {
       const color = Config.COLORS[li % Config.COLORS.length];
       const cal = Store.calendars[line].workHours;
       html += `<tr>
-        <td><div class="line-label"><span class="line-dot" style="background:${color}"></span>${line}</div></td>`;
+        <td><div class="line-label"><span class="line-dot" style="background:${color}"></span>${Util.escapeHtml(line)}</div></td>`;
       for (let d = 0; d < 7; d++) {
         const wh = cal[d];
         const off = !wh;
-        html += `<td><div class="hours-cell ${off ? 'off':''}" data-line="${line}" data-day="${d}">
+        html += `<td><div class="hours-cell ${off ? 'off':''}" data-line="${Util.escapeHtml(line)}" data-day="${d}">
           <input type="text" class="hours-start" value="${off ? '' : Util.hoursToTimeString(wh![0])}">
           <span class="dash">–</span>
           <input type="text" class="hours-end" value="${off ? '' : Util.hoursToTimeString(wh![1])}">
@@ -122,7 +125,10 @@ export const CalendarUI = {
       <label class="cal-filter-label">${Util.t('ui.filter_label')}</label>
       <select class="cal-filter-select" id="cal-block-filter">
         <option value="all"${bFilter === 'all' ? ' selected' : ''}>${Util.t('ui.all_lines_filter')}</option>
-        ${lines.map(l => `<option value="${l}"${bFilter === l ? ' selected' : ''}>${l}</option>`).join('')}
+        ${lines.map(l => {
+          const safeLine = Util.escapeHtml(l);
+          return `<option value="${safeLine}"${bFilter === l ? ' selected' : ''}>${safeLine}</option>`;
+        }).join('')}
       </select>
       <span class="cal-block-count">${Util.t('ui.blocks_count', {count: blocks.length, plural: blocks.length !== 1 ? 's' : ''})}</span>
     </div>`;
@@ -150,15 +156,17 @@ export const CalendarUI = {
       CalendarUI._renderBlocks();
     };
 
-    // Wire remove-block button delegation
-    list.addEventListener('click', (e: Event) => {
+    // Wire one delegated remove-block handler. Assignment replaces the prior
+    // handler when the persistent list is re-rendered, so refreshes cannot
+    // multiply persistence/toast side effects for a single click.
+    list.onclick = (e: Event) => {
       const target = e.target as HTMLElement;
       const btn = target.closest('button[data-block-id]') as HTMLButtonElement | null;
       if (btn) {
         const blockId = btn.dataset.blockId;
         if (blockId) CalendarUI.removeBlock(blockId);
       }
-    });
+    };
   },
 
   removeBlock(id: string): void {
@@ -176,7 +184,10 @@ export const CalendarUI = {
     if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: blk-reason'); return; }
 
     lineSel.innerHTML = `<option value="">${Util.t('ui.all_lines_filter')}</option>` +
-      CalendarUI._getLines().map(l => `<option value="${l}">${l}</option>`).join('');
+      CalendarUI._getLines().map(l => {
+        const safeLine = Util.escapeHtml(l);
+        return `<option value="${safeLine}">${safeLine}</option>`;
+      }).join('');
 
     const now = new Date(); now.setMinutes(0, 0, 0);
     const plus1 = new Date(now.getTime() + Config.MS_HOUR);
