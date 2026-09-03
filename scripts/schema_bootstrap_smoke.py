@@ -34,7 +34,9 @@ actually matter:
 This is a STANDALONE script, not a pytest test: it shells out to `psql`
 against two throwaway scratch databases and does not touch the app's own
 `NIMBUS_TEST_DB=1` DB-safety guard (tests/conftest.py) at all -- there is no
-app import here, just raw `psql` invocations.
+app import here, just raw `psql` invocations. CI runs it after the main
+`schema.sql` bootstrap, using the workflow's local Postgres service and
+`PGPASSWORD` environment variable.
 
 Usage (matches the local dev setup in root CLAUDE.md's "Database Setup"):
     & "C:\\Program Files\\PostgreSQL\\18\\bin\\psql.exe" --version   # confirm psql is on PATH first
@@ -50,12 +52,6 @@ Requires:
 Exit code 0 = both paths produced an identical `orders` column set; nonzero =
 either a `psql` step failed (ON_ERROR_STOP=1 aborts that step) or the two
 `orders` shapes diverged (diff printed to stdout).
-
-NOT RUN as part of this change: no local Postgres was reachable in the
-sandboxed environment this script was written in (`psql -h localhost` hangs
-waiting on a connection). Documented in docs/DEPLOYMENT.md as a manual/CI
-verification step -- a human with local Postgres must run this to confirm it
-actually passes.
 """
 from __future__ import annotations
 
@@ -86,7 +82,7 @@ def _psql_base(args) -> list[str]:
 
 def _run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     print(f"$ {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.stdout.strip():
         print(result.stdout)
     if result.returncode != 0:

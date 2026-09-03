@@ -83,5 +83,9 @@ jobs:
         run: python -m ruff check .
       - name: Bootstrap schema
         run: psql "postgresql://postgres:postgres@localhost:5432/nimbus" -f schema.sql
+      - name: Schema bootstrap smoke
+        env:
+          PGPASSWORD: ${{ env.PG_PASS }}
+        run: python scripts/schema_bootstrap_smoke.py
       - name: Run tests
         run: pytest -ra
