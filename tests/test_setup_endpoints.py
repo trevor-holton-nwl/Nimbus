@@ -132,20 +132,27 @@ class _SetupServiceWithCoverage(_SetupService):
     def __init__(self):
         self.page_calls = []
 
-    def load_setup_coverage(self, plant):
+    def get_setup_coverage_page(self, plant, machine=None, offset=0, limit=100):
         assert plant == "PLANT-A"
-        return {"plant": plant, "definition": {"signature_version": 4}, "states": [], "observed": []}
+        return self._coverage_result(plant, machine, offset, limit, ("observed", "reachable"))
 
-    def summarize_setup_coverage(self, context):
-        assert context["plant"] == "PLANT-A"
-        return {
+    def get_setup_missing_pairs_page(self, plant, kind, machine=None, offset=0, limit=100):
+        assert plant == "PLANT-A"
+        result = self._coverage_result(plant, machine, offset, limit, (kind,))
+        return {"plant": plant, "definition": result["definition"], "page": result[kind]["missing_page"]}
+
+    def _coverage_result(self, plant, machine, offset, limit, page_kinds):
+        result = {
             "plant": "PLANT-A",
-            "definition": context["definition"],
+            "definition": {"signature_version": 4},
             "observed": {"total_pairs": 3, "covered_pairs": 2, "missing_pairs": 1},
             "reachable": {"total_pairs": 9, "covered_pairs": 4, "missing_pairs": 5},
         }
+        for page_kind in page_kinds:
+            result[page_kind]["missing_page"] = self._page(page_kind, machine, offset, limit)
+        return result
 
-    def page_setup_missing_pairs(self, context, kind, machine=None, offset=0, limit=100):
+    def _page(self, kind, machine, offset, limit):
         self.page_calls.append((kind, machine, offset, limit))
         row = {
             "machine": machine or "LINE-1", "scope": "plant",
@@ -188,7 +195,7 @@ def _install_matrix_rows_double(monkeypatch):
 
 def _install_coverage_double(monkeypatch):
     service = _SetupServiceWithCoverage()
-    for name in ("load_setup_coverage", "summarize_setup_coverage", "page_setup_missing_pairs",
+    for name in ("get_setup_coverage_page", "get_setup_missing_pairs_page",
                  "get_setup_snapshot"):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
     monkeypatch.setattr(auth, "NIMBUS_API_KEY", "setup-test-key")

@@ -132,17 +132,13 @@ def set_plant_setup_active_route(plant: str, request: Request, body: dict = Body
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-def _setup_coverage_payload(context: dict, *, machine: str | None = None, offset: int = 0, limit: int = 100) -> dict:
+def _setup_coverage_payload(result: dict) -> dict:
     """Keep coverage totals useful without embedding an unbounded missing-edge list."""
-    result = setup_data.summarize_setup_coverage(context)
     payload = {"plant": result["plant"], "signature_version": result.get("definition", {}).get("signature_version")
                if result.get("definition") else None}
     for kind in ("observed", "reachable"):
         summary = result[kind]
         payload[kind] = dict(summary)
-        payload[kind]["missing_page"] = setup_data.page_setup_missing_pairs(
-            context, kind, machine=machine, offset=offset, limit=limit,
-        )
     return _setup_freshness(payload)
 
 
@@ -153,8 +149,8 @@ def get_setup_coverage(plant: str, machine: str | None = Query(default=None), of
     """Bounded Stage 0 transition coverage; this observes, never changes, schedules."""
     _setup_plant_guard(plant, allowed_plants)
     try:
-        context = setup_data.load_setup_coverage(plant)
-        return _setup_coverage_payload(context, machine=machine, offset=offset, limit=limit)
+        result = setup_data.get_setup_coverage_page(plant, machine=machine, offset=offset, limit=limit)
+        return _setup_coverage_payload(result)
     except ValueError as exc:
         raise _setup_error(exc) from exc
 
@@ -191,16 +187,16 @@ def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed")
     if kind not in {"observed", "reachable"}:
         raise HTTPException(status_code=400, detail="kind must be observed or reachable")
     try:
-        context = setup_data.load_setup_coverage(plant)
-        page = setup_data.page_setup_missing_pairs(
-            context, kind, machine=machine, offset=offset, limit=limit,
+        result = setup_data.get_setup_missing_pairs_page(
+            plant, kind, machine=machine, offset=offset, limit=limit,
         )
+        page = result["page"]
     except ValueError as exc:
         raise _setup_error(exc) from exc
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Plant", "Machine", "Scope", "Signature version", "From setup state", "To setup state"])
-    definition = context.get("definition")
+    definition = result.get("definition")
     version = definition.get("signature_version") if definition else ""
     for row in page["rows"]:
         writer.writerow([plant, row["machine"], row["scope"], version,

@@ -131,8 +131,9 @@ exit 0
   Missing-page queries exclude diagonals and both machine- and plant-covered
   pairs.
 - Reachable total count is `state_count²` per machine, but no Python list of
-  those pairs is created. Missing rows are returned only through SQL
-  `LIMIT %s OFFSET %s`, capped at 500 by both FastAPI and the data helper.
+  those pairs is created. Observed rows use SQL `LIMIT/OFFSET`; reachable rows
+  use bounded ordinal-window candidate inputs and SQL `LIMIT`, capped at 500 by
+  both FastAPI and the data helper.
 - The context caches only per-machine integer counts, not matrix rows or a
   Cartesian product. Both JSON and CSV reuse the same context/page contract.
 - Coverage remains authenticated and plant-authorized through the unchanged
@@ -146,3 +147,94 @@ exit 0
   Task 3's database-verification wave.
 - The focused suite emits 34 pre-existing deprecation warnings. No warning is
   introduced by the Task 2 implementation.
+
+## Review remediation — second pass
+
+### Findings addressed
+
+- Reachable paging no longer self-joins `state_input`. `_page_reachable_missing_pairs`
+  walks each machine's row-major ordinal range in windows of at most 500
+  candidates, excludes diagonal ordinals before SQL, and asks PostgreSQL to
+  return only missing candidates from that bounded window. The SQL anti-joins
+  only the submitted candidate rows against machine and plant matrix scopes;
+  it cannot construct the full state Cartesian product.
+- `get_setup_coverage_page()` loads the current definition/orders, computes
+  counts, and obtains observed and reachable pages on one connection/cursor
+  after `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`. The CSV
+  data entry point uses the same cursor-bound bundle for its selected page and
+  total. Route handlers now call those transaction-scoped entry points once;
+  they no longer request summary and pages separately.
+- Added guarded real-PostgreSQL tests for no definition, empty orders, stable
+  observed paging, machine filtering, machine-over-plant rows, implicit
+  diagonals, and summary/page total parity. Each expected result is derived
+  independently through `build_setup_coverage`; the real SQL path is not
+  replaced by the endpoint test double.
+
+### TDD evidence for the review fixes
+
+- RED: the new cursor/window regression initially failed with
+  `AttributeError: module 'backend.setup.data' has no attribute
+  'get_setup_coverage_page'`, proving the test exercised missing production
+  behavior. A later bounded-window assertion also failed until the ordinal
+  query added its SQL `LIMIT`.
+- GREEN: the focused red/green set finished with `5 passed` after the
+  transaction bundle, ordinal paging, route wiring, and bounded-return fixes.
+
+### Fresh verification
+
+- Focused setup suite:
+
+  ```text
+  & '.\.venv\Scripts\python.exe' -m pytest tests/test_setup_data.py tests/test_setup_coverage.py tests/test_setup_endpoints.py -q
+  exit 0
+  90 passed, 3 skipped, 34 warnings in 5.32s
+  ```
+
+- Guarded real-PostgreSQL coverage suite, explicitly with `PG_HOST=localhost`
+  and `NIMBUS_TEST_DB=1`:
+
+  ```text
+  & '.\.venv\Scripts\python.exe' -m pytest tests/test_setup_coverage.py -m pg -q
+  exit 0
+  3 skipped, 8 deselected in 0.05s
+  ```
+
+  The local PostgreSQL probe was unavailable, so the three integration tests
+  remained safely skipped by `tests/conftest.py`; no Azure/live host was used.
+
+- Scoped Ruff:
+
+  ```text
+  & '.\.venv\Scripts\python.exe' -m ruff check backend/setup/data.py backend/setup/routes.py tests/test_setup_coverage.py tests/test_setup_endpoints.py
+  exit 0
+  All checks passed!
+  ```
+
+- Full Python regression suite with database opt-in absent:
+
+  ```text
+  & '.\.venv\Scripts\python.exe' -m pytest -q
+  exit 0
+  320 passed, 107 skipped, 121 warnings in 5.02s
+  ```
+
+### Remaining concern
+
+The guarded integration tests are committed for CI/local execution but could
+not execute here because no local PostgreSQL service/authentication was
+available. Existing Starlette and pandas deprecation warnings remain; no new
+warning was introduced by this remediation.
+
+## Review remediation — final fix round
+
+- Reproduced the live attempted diff before editing: the bounded reachable-page
+  regression returned one row instead of two for an in-machine offset.
+- Root cause: each SQL candidate input was bounded, but its result `LIMIT` was
+  the requested page size. Rows consumed by the offset could therefore exhaust
+  the SQL result before the page filled.
+- Fixed the query to cap results at the current candidate-window size. The
+  candidate list and returned result remain bounded to 500 rows, while offsets
+  can no longer under-fill a requested page.
+- Fresh targeted verification: `3 passed, 1 warning`; scoped Ruff and
+  `git diff --check` both exited 0. The warning is the existing Starlette
+  `TestClient` deprecation.

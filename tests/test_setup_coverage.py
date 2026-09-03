@@ -3,6 +3,7 @@ import copy
 from datetime import datetime
 
 import pytest
+from psycopg.types.json import Jsonb
 
 import backend.setup.data as setup_data
 
@@ -110,17 +111,18 @@ def test_bounded_coverage_summary_and_page_match_existing_semantics_without_snap
         lambda _plant: (_ for _ in ()).throw(AssertionError("coverage must not load the optimizer snapshot")),
     )
 
-    context = setup_data.load_setup_coverage("5512")
-    summary = setup_data.summarize_setup_coverage(context)
-    page = setup_data.page_setup_missing_pairs(context, "reachable", machine="L2", offset=1, limit=2)
+    result = setup_data.get_setup_coverage_page("5512", machine="L2", offset=1, limit=2)
 
-    assert summary == {
-        "plant": "5512",
-        "definition": DEFINITION,
+    assert result["plant"] == "5512"
+    assert result["definition"] == DEFINITION
+    assert {
+        kind: {key: result[kind][key] for key in ("total_pairs", "covered_pairs", "missing_pairs")}
+        for kind in ("observed", "reachable")
+    } == {
         "observed": {"total_pairs": 4, "covered_pairs": 3, "missing_pairs": 1},
         "reachable": {"total_pairs": 18, "covered_pairs": 9, "missing_pairs": 9},
     }
-    assert page == {
+    assert result["reachable"]["missing_page"] == {
         "rows": [
             {"machine": "L2", "scope": "plant", "from_key": BLUE, "to_key": RED,
              "covered": False, "implicit_zero": False},
@@ -133,18 +135,57 @@ def test_bounded_coverage_summary_and_page_match_existing_semantics_without_snap
     assert "FROM machine_setup_state" not in statements
     assert "FROM setup_occurrence_override" not in statements
     assert "jsonb_to_recordset" in statements
-    assert "LIMIT %s OFFSET %s" in statements
+    assert "candidate_input" in statements
+    assert "LIMIT %s" in statements
+
+
+def test_get_setup_coverage_compatibility_wrapper_never_loads_snapshot(monkeypatch):
+    """The legacy totals-only data entry point remains snapshot-free."""
+    cursor = _CoverageCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    monkeypatch.setattr(
+        setup_data,
+        "get_setup_snapshot",
+        lambda _plant: (_ for _ in ()).throw(AssertionError("coverage must not load the optimizer snapshot")),
+    )
+
+    result = setup_data.get_setup_coverage("5512")
+
+    assert result == {
+        "plant": "5512",
+        "definition": DEFINITION,
+        "observed": {"total_pairs": 4, "covered_pairs": 3, "missing_pairs": 1},
+        "reachable": {"total_pairs": 18, "covered_pairs": 9, "missing_pairs": 9},
+    }
 
 
 def test_bounded_coverage_rejects_an_oversized_page_before_database_access(monkeypatch):
-    """The public missing-pair helper enforces the route's 500-row ceiling itself."""
+    """The public coverage bundle enforces the route's 500-row ceiling itself."""
     monkeypatch.setattr(setup_data, "_pool", _FailPool())
     with pytest.raises(ValueError, match="limit"):
-        setup_data.page_setup_missing_pairs(
-            {"plant": "5512", "definition": DEFINITION, "states": [], "observed": []},
-            "reachable",
-            limit=501,
-        )
+        setup_data.get_setup_coverage_page("5512", limit=501)
+
+
+def test_coverage_bundle_uses_one_repeatable_read_cursor_and_bounded_reachable_candidates(monkeypatch):
+    """Summary and pages share one snapshot, while reachable paging submits only a bounded ordinal window."""
+    cursor = _CoverageCursor()
+    pool = _CountingPool(cursor)
+    monkeypatch.setattr(setup_data, "_pool", pool)
+    result = setup_data.get_setup_coverage_page("5512", machine="L2", offset=1, limit=2)
+
+    assert pool.connection_calls == 1
+    assert cursor.executed[0][0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    assert result["reachable"]["missing_page"]["meta"] == {"total": 5, "offset": 1, "limit": 2}
+    reachable_sql = [sql for sql, _params in cursor.executed if "setup reachable missing" in sql]
+    assert reachable_sql
+    assert all("JOIN state_input AS target_state" not in sql for sql in reachable_sql)
+    assert all("candidate_input" in sql for sql in reachable_sql)
+    candidate_sizes = [
+        len(params[0].obj if hasattr(params[0], "obj") else params[0])
+        for sql, params in cursor.executed
+        if "setup reachable missing" in sql
+    ]
+    assert candidate_sizes and max(candidate_sizes) <= 500
 
 
 class _CoverageCursor:
@@ -175,14 +216,22 @@ class _CoverageCursor:
         return (["colorWheel"], 4, True, False)
 
     def fetchall(self):
-        sql, _params = self.executed[-1]
+        sql, params = self.executed[-1]
         if "FROM orders" in sql:
             return self.ORDER_ROWS
         if "setup coverage summary" in sql:
             return [("observed", "L1", 2), ("observed", "L2", 1),
                     ("reachable", "L1", 5), ("reachable", "L2", 4)]
-        if "setup reachable missing page" in sql:
-            return [("L2", BLUE, RED), ("L2", BLUE, GREEN)]
+        if "setup observed missing page" in sql:
+            return [("L2", BLUE, GREEN)]
+        if "setup reachable missing ordinal window" in sql:
+            candidates = params[0].obj if hasattr(params[0], "obj") else params[0]
+            rows = [
+                (candidate["machine"], candidate["from_key"], candidate["to_key"])
+                for candidate in candidates
+                if candidate["pair_ordinal"] in (1, 3, 5)
+            ]
+            return rows[:params[-1]]
         raise AssertionError(f"Unexpected coverage query: {sql}")
 
 
@@ -208,6 +257,165 @@ class _Pool:
         return _Connection(self._cursor)
 
 
+class _CountingPool(_Pool):
+    def __init__(self, cursor):
+        super().__init__(cursor)
+        self.connection_calls = 0
+
+    def connection(self):
+        self.connection_calls += 1
+        return super().connection()
+
+
 class _FailPool:
     def connection(self):
         raise AssertionError("paging validation must run before database access")
+
+
+@pytest.mark.pg
+def test_real_coverage_no_definition_is_empty_and_snapshot_free(pg):
+    """A real current-plant lookup with no definition returns empty bounded coverage."""
+    plant = "ZZTEST_SETUP_COVERAGE_NO_DEF"
+    _reset_real_coverage_plant(pg, plant)
+    try:
+        result = setup_data.get_setup_coverage_page(plant, offset=0, limit=500)
+        assert result["plant"] == plant
+        assert result["definition"] is None
+        for kind in ("observed", "reachable"):
+            assert result[kind] == {
+                "total_pairs": 0, "covered_pairs": 0, "missing_pairs": 0,
+                "missing_page": {"rows": [], "meta": {"total": 0, "offset": 0, "limit": 500}},
+            }
+    finally:
+        _reset_real_coverage_plant(pg, plant)
+
+
+@pytest.mark.pg
+def test_real_coverage_empty_orders_has_zero_state_universe(pg):
+    """A current definition with no valid order states has no observed or reachable pairs."""
+    plant = "ZZTEST_SETUP_COVERAGE_EMPTY"
+    _reset_real_coverage_plant(pg, plant)
+    _insert_real_coverage_definition(pg, plant, version=7)
+    try:
+        result = setup_data.get_setup_coverage_page(plant, offset=0, limit=500)
+        assert result["definition"]["signature_version"] == 7
+        assert result["observed"] == {
+            "total_pairs": 0, "covered_pairs": 0, "missing_pairs": 0,
+            "missing_page": {"rows": [], "meta": {"total": 0, "offset": 0, "limit": 500}},
+        }
+        assert result["reachable"] == result["observed"]
+    finally:
+        _reset_real_coverage_plant(pg, plant)
+
+
+@pytest.mark.pg
+def test_real_coverage_matches_pure_semantics_for_paging_filter_and_inheritance(pg):
+    """Real SQL preserves pure coverage semantics, stable pages, diagonal coverage, and inheritance."""
+    plant = "ZZTEST_SETUP_COVERAGE_SEMANTICS"
+    version = 7
+    red = [{"fieldKey": "colorWheel", "value": "RED"}]
+    blue = [{"fieldKey": "colorWheel", "value": "BLUE"}]
+    green = [{"fieldKey": "colorWheel", "value": "GREEN"}]
+    definition = {
+        "plant": plant, "fields": ["colorWheel"], "signature_version": version,
+        "strict_blanks": True, "active": False,
+    }
+    plant_rows = [_real_coverage_row("", red, blue, version)]
+    machine_rows = [
+        _real_coverage_row("L1", red, blue, version),
+        _real_coverage_row("L1", blue, green, version),
+    ]
+    observed = [
+        {"machine": "L1", "from_key": red, "to_key": blue},
+        {"machine": "L1", "from_key": blue, "to_key": green},
+        {"machine": "L1", "from_key": green, "to_key": red},
+        {"machine": "L2", "from_key": red, "to_key": blue},
+        {"machine": "L2", "from_key": blue, "to_key": green},
+    ]
+    states = {"L1": [red, blue, green], "L2": [red, blue, green]}
+    expected = setup_data.build_setup_coverage(definition, plant_rows, machine_rows, observed, states)
+    _reset_real_coverage_plant(pg, plant)
+    _insert_real_coverage_definition(pg, plant, version=version)
+    _insert_real_coverage_orders(pg, plant, states={"L1": [red, blue, green, red], "L2": [red, blue, green]})
+    _insert_real_coverage_matrix(pg, plant, plant_rows + machine_rows)
+    try:
+        result = setup_data.get_setup_coverage_page(plant, offset=1, limit=1)
+        for kind in ("observed", "reachable"):
+            expected_missing = expected[kind]["missing"]
+            assert {
+                key: result[kind][key] for key in ("total_pairs", "covered_pairs", "missing_pairs")
+            } == {
+                key: expected[kind][key] for key in ("total_pairs", "covered_pairs", "missing_pairs")
+            }
+            assert result[kind]["missing_page"]["meta"] == {
+                "total": len(expected_missing), "offset": 1, "limit": 1,
+            }
+            assert result[kind]["missing_page"]["rows"] == expected_missing[1:2]
+
+        filtered = setup_data.get_setup_coverage_page(plant, machine="L2", offset=0, limit=500)
+        for kind in ("observed", "reachable"):
+            expected_missing = [row for row in expected[kind]["missing"] if row["machine"] == "L2"]
+            assert filtered[kind]["missing_page"] == {
+                "rows": expected_missing,
+                "meta": {"total": len(expected_missing), "offset": 0, "limit": 500},
+            }
+
+        exported_path = setup_data.get_setup_missing_pairs_page(plant, "observed", offset=1, limit=1)
+        assert exported_path["page"] == result["observed"]["missing_page"]
+    finally:
+        _reset_real_coverage_plant(pg, plant)
+
+
+def _real_coverage_row(machine, from_key, to_key, version):
+    return {"machine": machine, "signature_version": version, "from_key": from_key,
+            "to_key": to_key, "setup_min": 12}
+
+
+def _reset_real_coverage_plant(pg, plant):
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM setup_matrix WHERE plant = %s", (plant,))
+        cur.execute("DELETE FROM setup_definition WHERE plant = %s", (plant,))
+        cur.execute("DELETE FROM orders WHERE plant = %s", (plant,))
+        conn.commit()
+
+
+def _insert_real_coverage_definition(pg, plant, version):
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO setup_definition
+               (plant, fields, signature_version, strict_blanks, active)
+               VALUES (%s, %s, %s, TRUE, FALSE)""",
+            (plant, Jsonb(["colorWheel"]), version),
+        )
+        conn.commit()
+
+
+def _insert_real_coverage_orders(pg, plant, states):
+    order_no = 0
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        for machine, machine_states in states.items():
+            for state in machine_states:
+                order_no += 1
+                order_id = f"zzsc_{plant[-8:].lower()}_{order_no}"
+                color = state[0]["value"]
+                cur.execute(
+                    """INSERT INTO orders
+                       (id, production_order, material_number, plant, machine, color, basic_start_date)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (order_id, order_id, order_id, plant, machine, color,
+                     datetime(2026, 9, 1, 8 + order_no)),
+                )
+        conn.commit()
+
+
+def _insert_real_coverage_matrix(pg, plant, rows):
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        for row in rows:
+            cur.execute(
+                """INSERT INTO setup_matrix
+                   (plant, machine, signature_version, from_key, to_key, setup_min)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (plant, row["machine"], row["signature_version"], Jsonb(row["from_key"]),
+                 Jsonb(row["to_key"]), row["setup_min"]),
+            )
+        conn.commit()
