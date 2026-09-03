@@ -2003,6 +2003,9 @@ type SandboxExitSnapshot = NonNullable<ReturnType<typeof Sandbox.exit>>;
    ========================================================================== */
 export const SandboxAdapter = {
   _confSnapshot: null as unknown,
+  _lastOptimizeSnapshot: null as Date | null,
+  _dismissedSnapshot: null as Set<string> | null,
+  _sideEffectSnapshotActive: false,
 
   init() {
     const banner = document.getElementById('sandbox-banner');
@@ -2035,7 +2038,12 @@ export const SandboxAdapter = {
     // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
     // Captured here (not in Sandbox.enter()) at the same logical moment as before —
     // the state module doesn't know about the cross-file Confidence module.
-    SandboxAdapter._confSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
+    const confidenceSnapshot = NIMBUS!.Confidence?.snapshot?.() ?? null;
+    SandboxAdapter._confSnapshot = confidenceSnapshot === null ? null : Util.clone(confidenceSnapshot);
+    const lastOptimize = Store.lastOptimize;
+    SandboxAdapter._lastOptimizeSnapshot = lastOptimize ? new Date(lastOptimize) : null;
+    SandboxAdapter._dismissedSnapshot = Alerts.snapshotDismissed();
+    SandboxAdapter._sideEffectSnapshotActive = true;
 
     document.body.classList.add('sandbox-mode');
     const banner = document.getElementById('sandbox-banner');
@@ -2057,12 +2065,28 @@ export const SandboxAdapter = {
     if (applied) {
       const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || 'What-If';
       Toast.show(Util.t('toast.scenario_applied', { name: scenarioName }), 'success');
+      // Promotion makes the trial side effects the new live baseline. Clear
+      // the pre-sandbox copies before any persistence work can run. A later
+      // undo/revert must not accidentally restore these discarded copies.
+      SandboxAdapter._clearSideEffectSnapshot();
     } else {
-      if (NIMBUS!.Confidence && SandboxAdapter._confSnapshot) NIMBUS!.Confidence!.restore!(SandboxAdapter._confSnapshot);
+      if (SandboxAdapter._sideEffectSnapshotActive) {
+        Store.setLastOptimize(
+          SandboxAdapter._lastOptimizeSnapshot ? new Date(SandboxAdapter._lastOptimizeSnapshot) : null,
+          'sandbox',
+        );
+        if (SandboxAdapter._dismissedSnapshot) Alerts.restoreDismissed(SandboxAdapter._dismissedSnapshot);
+        if (NIMBUS!.Confidence && SandboxAdapter._confSnapshot) {
+          NIMBUS!.Confidence!.restore!(Util.clone(SandboxAdapter._confSnapshot));
+        }
+      }
+      // RestoreDismissed intentionally has no scheduling behavior of its own:
+      // this is the one existing post-discard recompute, and it must see the
+      // restored dismissal set above.
+      SandboxAdapter._clearSideEffectSnapshot();
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.scenario_discarded'), 'info');
     }
-    SandboxAdapter._confSnapshot = null;
 
     document.body.classList.remove('sandbox-mode');
     const banner = document.getElementById('sandbox-banner');
@@ -2115,8 +2139,19 @@ export const SandboxAdapter = {
   // then emits this instead of calling Alerts/Toast directly (those are cross-module
   // concerns the state module doesn't own). Matches the pre-refactor inline behavior.
   _onReverted() {
+    // The promoted scenario intentionally kept its side effects. Revert is a
+    // schedule undo event, not a request to restore the pre-sandbox metadata;
+    // only clear any stale adapter copies before the normal alert refresh.
+    SandboxAdapter._clearSideEffectSnapshot();
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.scenario_discarded'), 'info');
+  },
+
+  _clearSideEffectSnapshot() {
+    SandboxAdapter._confSnapshot = null;
+    SandboxAdapter._lastOptimizeSnapshot = null;
+    SandboxAdapter._dismissedSnapshot = null;
+    SandboxAdapter._sideEffectSnapshotActive = false;
   },
 };
 

@@ -355,6 +355,22 @@ export const Alerts = {
 
   _dismissed: new Set<string>(),
 
+  /** Return a detached dismissal baseline for callers such as SandboxAdapter.
+   * Mutating the returned set must never mutate the live alert filter. */
+  snapshotDismissed(): Set<string> {
+    return new Set(Alerts._dismissed);
+  },
+
+  /** Replace the dismissal filter from a detached baseline. This deliberately
+   * does not touch Store.alerts or schedule a recompute; callers restore the
+   * filter first and then choose the correct recompute path. Copy the input
+   * before clearing so restoring from Alerts._dismissed itself is safe. */
+  restoreDismissed(ids: Iterable<string> | null | undefined): void {
+    const restored = new Set(ids ?? []);
+    Alerts._dismissed.clear();
+    for (const id of restored) Alerts._dismissed.add(id);
+  },
+
   dismiss(alertId: string): void {
     Alerts._dismissed.add(alertId);
     Store.dismissAlert(alertId, 'alerts');

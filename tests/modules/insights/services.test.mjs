@@ -64,6 +64,31 @@ test('Alerts exposes computation methods only (no showForCell/toggleDrawer/rende
 });
 
 
+test('Alerts dismissal snapshots are detached and restore without scheduling recompute', () => {
+  const priorDismissed = Alerts.snapshotDismissed();
+  const priorSchedule = Alerts.scheduleRecompute;
+  let scheduleCalls = 0;
+  Alerts.scheduleRecompute = () => { scheduleCalls++; };
+  try {
+    Alerts.restoreDismissed(new Set(['dismissed-a', 'dismissed-b']));
+    const snapshot = Alerts.snapshotDismissed();
+    snapshot.add('mutated-after-snapshot');
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['dismissed-a', 'dismissed-b']),
+      'mutating a saved dismissal set must not change Alerts state');
+
+    Alerts.clearDismissed();
+    Alerts.restoreDismissed(snapshot);
+    snapshot.clear();
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['dismissed-a', 'dismissed-b', 'mutated-after-snapshot']),
+      'restore must copy the supplied set so later caller mutations cannot change Alerts state');
+    assert.equal(scheduleCalls, 0, 'snapshot/restore APIs must not schedule an alert recompute');
+  } finally {
+    Alerts.restoreDismissed(priorDismissed);
+    Alerts.scheduleRecompute = priorSchedule;
+  }
+});
+
+
 test('Alerts.recompute with no worker/no plant falls back to sync compute', () => {
   Store.setSelectedPlant(null, 'unit-test'); // no plant -> forces sync path regardless of Compute.available()
   Store.setTasks([], 'unit-test');
@@ -164,10 +189,11 @@ test('Alerts.applyFix still calls Engine.autoReflow for overlap alerts (Task 3: 
   // This verifies Engine.autoReflow is still called from applyFix for overlap type.
   const line = 'REFLOW-OVERLAP-TEST-LINE';
   const plant = '5512';
-  const start1 = new Date('2026-08-25T08:00:00');
-  const end1 = new Date('2026-08-25T10:00:00');
-  const start2 = new Date('2026-08-25T09:00:00'); // overlaps with task 1
-  const end2 = new Date('2026-08-25T11:00:00');
+  const base = Date.now() + 24 * 60 * 60 * 1000;
+  const start1 = new Date(base + 8 * 60 * 60 * 1000);
+  const end1 = new Date(base + 10 * 60 * 60 * 1000);
+  const start2 = new Date(base + 9 * 60 * 60 * 1000); // overlaps with task 1
+  const end2 = new Date(base + 11 * 60 * 60 * 1000);
   const priorPlant = Store.selectedPlant;
   const priorAutoReflow = Engine.autoReflow;
 

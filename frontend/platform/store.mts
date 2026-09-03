@@ -188,6 +188,13 @@ export const Store = {
   get orderFieldVisibility(): StoreState['orderFieldVisibility'] { return this._state.orderFieldVisibility; },
   get visibilityHorizonEnd(): Date | null { return this._state.visibilityHorizonEnd; },
   get frozenHorizonEnd(): Date | null { return this._state.frozenHorizonEnd; },
+  /** Read the timestamp of the most recent optimizer run. Return a detached
+   * Date so callers cannot mutate Store's metadata without going through the
+   * setter. */
+  get lastOptimize(): Date | null {
+    const date = this._state.meta.lastOptimize;
+    return date ? new Date(date) : null;
+  },
 
   isFirmed(id: string | number): boolean    { return this._state.firmedIds.has(String(id)); },
 

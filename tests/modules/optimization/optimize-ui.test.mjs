@@ -7,10 +7,12 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../frontend/optimization/optimize-ui.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -29,7 +31,8 @@ if (typeof globalThis.document === 'undefined') {
       };
     },
     querySelector() { return null; },
-    body: { appendChild() {} },
+    querySelectorAll() { return []; },
+    body: { appendChild() {}, classList: { add() {}, remove() {} } },
   };
 }
 globalThis.window = globalThis.window || {};
@@ -97,6 +100,24 @@ test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizerPreview.runWithPreview, 'function');
 });
 
+test('Store.lastOptimize is a detached getter and setLastOptimize remains non-emitting', () => {
+  const prior = Store.lastOptimize;
+  const beforeRevision = Store.rev();
+  const date = new Date('2026-08-05T10:00:00Z');
+  try {
+    Store.setLastOptimize(date, 'unit-test');
+    const read = Store.lastOptimize;
+    assert.equal(read?.getTime(), date.getTime());
+    read?.setTime(date.getTime() + 60 * 60 * 1000);
+    assert.equal(Store.lastOptimize?.getTime(), date.getTime(),
+      'mutating the getter result must not mutate Store metadata');
+    assert.equal(Store.rev(), beforeRevision,
+      'setLastOptimize must preserve its existing no-event behavior');
+  } finally {
+    Store.setLastOptimize(prior, 'unit-test');
+  }
+});
+
 test('combined is no longer an optimizer strategy users can select', () => {
   const { readFileSync } = require('node:fs');
   const types = readFileSync(new URL('../../../frontend/platform/types.mts', import.meta.url), 'utf8');
@@ -123,7 +144,10 @@ test('OptimizerPreview retains only a bounded candidate explanation and drops it
     postKpis: { changeovers: 6, span_h: 18, late_count: 2, late_h: 3, peak_util_pct: 88 },
   });
   assert.equal(explanation.reasons.length, 8, 'the UI explanation caps candidate reasons');
-  assert.equal(explanation.missingPairs.length, 12, 'the UI explanation caps missing setup pairs');
+  assert.deepEqual(explanation.missingPairs, [],
+    'the compact UI explanation does not retain missing-pair detail');
+  assert.equal(explanation.missingPairsTotal, 0,
+    'missing-pair detail is derived separately while the candidate is in scope');
   assert.deepEqual(explanation.search, { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false });
   assert.equal(Object.hasOwn(explanation, 'tasks'), false, 'the compact explanation never retains a schedule snapshot');
 
@@ -148,11 +172,14 @@ test('OptimizerPreview derives and exports real setup states for bounded missing
     { id: 'red-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'RED' },
     { id: 'blue-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'BLUE' },
   ], setup);
-  assert.deepEqual(pairs, [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'colorWheel=RED', toState: 'colorWheel=BLUE', reason: 'matrix-missing' }]);
-  const csv = OptimizerPreview.missingPairsCsv(pairs);
+  assert.deepEqual(pairs, {
+    pairs: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'RED', toState: 'BLUE', reason: 'matrix-missing' }],
+    total: 1,
+  });
+  const csv = OptimizerPreview.missingPairsCsv(pairs.pairs);
   assert.match(csv, /From setup state,To setup state/);
-  assert.match(csv, /colorWheel=RED/);
-  assert.match(csv, /colorWheel=BLUE/);
+  assert.match(csv, /"RED"/);
+  assert.match(csv, /"BLUE"/);
 });
 
 test('Persistence setup writes stale an open preview without applying or rerunning it', () => {
@@ -335,6 +362,7 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
   const priorTimelineItems = Timeline._items;
   const priorPlant = Store.selectedPlant;
   const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
   const priorFetch = globalThis.fetch;
   const timelineUpdates = [];
   const publications = [];
@@ -346,6 +374,7 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
   globalThis.NIMBUS = {};
   Timeline._items = { update(items) { timelineUpdates.push(...items); } };
   Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
   globalThis.fetch = (...args) => {
     auditRequests.push(args);
     return Promise.resolve({ ok: true });
@@ -401,6 +430,7 @@ test('OptimizerPreview keeps trial patches detached until Apply, then commits th
     unsubscribe();
     OptimizerPreview._clear();
     Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
     globalThis.fetch = priorFetch;
     Timeline._items = priorTimelineItems;
     Store.setTasks([], 'unit-test');
@@ -511,6 +541,186 @@ test('OptimizerPreview keeps evaluation failures out of ErrorLog persistence', (
     Store.setMasterData(priorMasterData, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
     globalThis.requestAnimationFrame = priorRaf;
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('SandboxAdapter restores optimizer side effects on What-If discard before alert recompute', () => {
+  const plant = 'WHAT-IF-DISCARD';
+  const baselineLastOptimize = new Date('2026-08-01T10:00:00Z');
+  const baselineDismissed = new Set(['what-if-alert-a', 'what-if-alert-b']);
+  const baselineConfidence = { score: 82, history: [{ ts: 1, score: 82 }] };
+  const baselineTasks = [
+    { id: 'what-if-long', PLANT: plant, MACHINE: 'WHAT-IF-LINE', RUN_TIME: 5, start_date: null, end_date: null },
+    { id: 'what-if-short', PLANT: plant, MACHINE: 'WHAT-IF-LINE', RUN_TIME: 1, start_date: null, end_date: null },
+  ];
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorLastOptimize = Store.lastOptimize;
+  const priorDismissed = Alerts.snapshotDismissed();
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorEntries = UndoStack._entries.slice();
+  const confidence = {
+    score: baselineConfidence.score,
+    history: baselineConfidence.history.map(item => ({ ...item })),
+    restoreCalls: 0,
+    snapshot() {
+      return { score: this.score, history: this.history.map(item => ({ ...item })) };
+    },
+    restore(snapshot) {
+      this.restoreCalls++;
+      this.score = snapshot.score;
+      this.history = snapshot.history.map(item => ({ ...item }));
+    },
+  };
+  const recomputeObservations = [];
+  globalThis.NIMBUS = { Confidence: confidence };
+  Alerts.scheduleRecompute = () => {
+    recomputeObservations.push({
+      lastOptimize: Store.lastOptimize?.getTime() ?? null,
+      dismissed: new Set(Alerts.snapshotDismissed()),
+      confidence: { score: confidence.score, history: confidence.history.map(item => ({ ...item })) },
+    });
+  };
+  const unsubscribeAdapter = Store.subscribe(event => {
+    if (event.type === 'sandbox:entered') SandboxAdapter._onEntered();
+    else if (event.type === 'sandbox:exited') SandboxAdapter._onExited(event);
+    else if (event.type === 'sandbox:reverted') SandboxAdapter._onReverted();
+  }, 'unit-test-sandbox-adapter');
+
+  try {
+    Store.setTasks(baselineTasks, 'unit-test');
+    const beforeTasks = structuredClone(Store.tasksArr);
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setLastOptimize(baselineLastOptimize, 'unit-test');
+    Alerts.restoreDismissed(baselineDismissed);
+    Sandbox.enter('unit-test');
+
+    confidence.score = 41;
+    confidence.history.push({ ts: 2, score: 41 });
+    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
+    assert.notDeepEqual(Store.tasksArr, beforeTasks,
+      'the optimizer run must change the What-If schedule before discard restores it');
+    assert.notEqual(Store.lastOptimize?.getTime(), baselineLastOptimize.getTime(),
+      'the optimizer run must change last-optimize metadata before discard');
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(),
+      'the optimizer run clears dismissals in the What-If state');
+
+    // Ignore the optimizer's own pending debounce request; discard replaces it
+    // with the one post-restore request whose inputs are asserted below.
+    recomputeObservations.length = 0;
+    Sandbox.exit(false, 'unit-test');
+
+    assert.deepEqual(Store.tasksArr, beforeTasks, 'discard restores the pre-optimizer task state');
+    assert.equal(Store.lastOptimize?.getTime(), baselineLastOptimize.getTime(),
+      'discard restores last-optimize metadata');
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), baselineDismissed,
+      'discard restores alert dismissal IDs');
+    assert.deepEqual({ score: confidence.score, history: confidence.history }, baselineConfidence,
+      'discard restores Confidence state');
+    assert.equal(confidence.restoreCalls, 1, 'discard restores Confidence exactly once');
+    assert.equal(recomputeObservations.length, 1, 'discard schedules exactly one adapter alert recompute');
+    assert.equal(recomputeObservations[0].lastOptimize, baselineLastOptimize.getTime(),
+      'alert recompute sees restored last-optimize metadata');
+    assert.deepEqual(recomputeObservations[0].dismissed, baselineDismissed,
+      'alert recompute sees the restored dismissal set');
+    assert.deepEqual(recomputeObservations[0].confidence, baselineConfidence,
+      'alert recompute runs after Confidence restoration');
+    assert.equal(SandboxAdapter._confSnapshot, null, 'discard clears the Confidence snapshot');
+    assert.equal(SandboxAdapter._lastOptimizeSnapshot, null, 'discard clears the last-optimize snapshot');
+    assert.equal(SandboxAdapter._dismissedSnapshot, null, 'discard clears the dismissal snapshot');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts.restoreDismissed(priorDismissed);
+    Store.setLastOptimize(priorLastOptimize, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    UndoStack._entries.length = 0;
+    UndoStack._entries.push(...priorEntries);
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('SandboxAdapter retains promoted side effects and clears snapshots on promote and revert', () => {
+  const baselineLastOptimize = new Date('2026-08-03T10:00:00Z');
+  const promotedLastOptimize = new Date('2026-08-04T10:00:00Z');
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorLastOptimize = Store.lastOptimize;
+  const priorDismissed = Alerts.snapshotDismissed();
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorEntries = UndoStack._entries.slice();
+  const confidence = {
+    score: 77,
+    history: [{ ts: 3, score: 77 }],
+    snapshot() { return { score: this.score, history: this.history.map(item => ({ ...item })) }; },
+    restore(snapshot) { this.score = snapshot.score; this.history = snapshot.history.map(item => ({ ...item })); },
+  };
+  let recomputeCalls = 0;
+  globalThis.NIMBUS = {
+    Confidence: confidence,
+    Persistence: { saveAll() {} },
+  };
+  Alerts.scheduleRecompute = () => { recomputeCalls++; };
+  const unsubscribeAdapter = Store.subscribe(event => {
+    if (event.type === 'sandbox:entered') SandboxAdapter._onEntered();
+    else if (event.type === 'sandbox:exited') SandboxAdapter._onExited(event);
+    else if (event.type === 'sandbox:reverted') SandboxAdapter._onReverted();
+  }, 'unit-test-sandbox-adapter');
+
+  try {
+    Store.setTasks([{ id: 'what-if-promote', PLANT: 'WHAT-IF-PROMOTE', MACHINE: 'PROMOTE-LINE', RUN_TIME: 1 }], 'unit-test');
+    Store.setSelectedPlant(null, 'unit-test');
+    Store.setLastOptimize(baselineLastOptimize, 'unit-test');
+    Alerts.restoreDismissed(new Set(['before-promote']));
+    Sandbox.enter('unit-test');
+
+    Store.setLastOptimize(promotedLastOptimize, 'unit-test');
+    Alerts.restoreDismissed(new Set(['after-promote']));
+    confidence.score = 63;
+    Sandbox.exit(true, 'unit-test');
+
+    assert.equal(Store.lastOptimize?.getTime(), promotedLastOptimize.getTime(),
+      'promote retains the trial last-optimize metadata');
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['after-promote']),
+      'promote retains trial alert dismissals');
+    assert.equal(confidence.score, 63, 'promote retains trial Confidence state');
+    assert.equal(SandboxAdapter._confSnapshot, null, 'promote clears the Confidence snapshot');
+    assert.equal(SandboxAdapter._lastOptimizeSnapshot, null, 'promote clears the last-optimize snapshot');
+    assert.equal(SandboxAdapter._dismissedSnapshot, null, 'promote clears the dismissal snapshot');
+
+    // A promoted scenario's later undo emits the revert event. It should clear
+    // any stale adapter snapshot but must not roll side effects back to the
+    // pre-sandbox baseline that was intentionally promoted away.
+    SandboxAdapter._confSnapshot = { score: 1, history: [] };
+    SandboxAdapter._lastOptimizeSnapshot = baselineLastOptimize;
+    SandboxAdapter._dismissedSnapshot = new Set(['before-promote']);
+    UndoStack.pop();
+    assert.equal(Store.lastOptimize?.getTime(), promotedLastOptimize.getTime(),
+      'revert does not restore pre-promote metadata');
+    assert.deepEqual(new Set(Alerts.snapshotDismissed()), new Set(['after-promote']),
+      'revert does not restore pre-promote dismissals');
+    assert.equal(confidence.score, 63, 'revert does not restore pre-promote Confidence');
+    assert.equal(SandboxAdapter._confSnapshot, null, 'revert clears the Confidence snapshot');
+    assert.equal(SandboxAdapter._lastOptimizeSnapshot, null, 'revert clears the last-optimize snapshot');
+    assert.equal(SandboxAdapter._dismissedSnapshot, null, 'revert clears the dismissal snapshot');
+    assert.equal(recomputeCalls, 1, 'revert retains the existing single alert recompute');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts.restoreDismissed(priorDismissed);
+    Store.setLastOptimize(priorLastOptimize, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    UndoStack._entries.length = 0;
+    UndoStack._entries.push(...priorEntries);
     globalThis.NIMBUS = priorNimbus;
   }
 });
