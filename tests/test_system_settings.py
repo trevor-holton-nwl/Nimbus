@@ -4,6 +4,8 @@ mocked-pool pattern in test_master_data_setup_policy.py so no live DB is
 required."""
 from contextlib import contextmanager
 
+import pytest
+
 import master_data as md
 
 
@@ -92,8 +94,5 @@ def test_upsert_system_settings_self_heals_missing_singleton_row(monkeypatch):
 
 def test_upsert_system_settings_rejects_non_dict_patch(monkeypatch):
     monkeypatch.setattr(md, "_pool", _Pool(_Cursor()))
-    try:
+    with pytest.raises(ValueError):
         md.upsert_system_settings("not-a-dict")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass

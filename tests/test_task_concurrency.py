@@ -23,9 +23,6 @@ import datetime as dt
 
 import pytest
 
-import db
-
-
 @pytest.mark.pg
 class TestUpdateTaskDatesBulkXminConflict:
     PLANT = "ZZTEST_CONC_PLANT"
