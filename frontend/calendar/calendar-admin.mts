@@ -5,6 +5,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CalendarSync } from './calendar-sync.mjs';
+import { getActiveTabResolvers } from '../shell/tab-resolvers.mjs';
 import type { NimbusBlock } from '../platform/types.mjs';
 
 /* =============================================================================
@@ -217,3 +218,14 @@ export const CalendarUI = {
     return [...set].sort();
   },
 };
+
+// Wholesale calendar replacement is used by What-If discard and backend
+// hydration. Keep the visible calendar pane in sync with those state changes,
+// but avoid rendering hidden panes (and avoid doing work before the shell has
+// wired its active-tab resolver).
+Store.subscribe(evt => {
+  if (evt.type !== 'calendar:change' && evt.type !== 'blocks:change' && evt.type !== 'plantBlocks:change') return;
+  const tabs = getActiveTabResolvers();
+  if (tabs.currentTab() !== 'masterdata' || tabs.currentMasterSub() !== 'plant') return;
+  if (typeof document !== 'undefined' && document.getElementById('cal-hours-body')) CalendarUI.render();
+}, 'CalendarUI.sync');

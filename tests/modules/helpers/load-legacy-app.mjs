@@ -94,7 +94,7 @@ function makeElement(tag = 'div') {
 
 function makeNodeList(items) {
   return Object.assign(items, {
-    forEach(fn) { items.forEach(fn); },
+    forEach(fn) { Array.prototype.forEach.call(items, fn); },
     [Symbol.iterator]() { return items[Symbol.iterator](); },
   });
 }

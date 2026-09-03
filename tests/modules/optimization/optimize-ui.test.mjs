@@ -46,6 +46,7 @@ function makeSandboxElement(id, value = '') {
   return {
     id,
     value,
+    className: '',
     hidden: false,
     innerHTML: '',
     textContent: '',
@@ -75,20 +76,35 @@ function makeSandboxElement(id, value = '') {
 }
 
 function makeSandboxDocument() {
-  const elements = new Map([
-    ['sandbox-banner', makeSandboxElement('sandbox-banner')],
-    ['sb-scenario-name', makeSandboxElement('sb-scenario-name', 'Test scenario')],
-    ['sb-discard-btn', makeSandboxElement('sb-discard-btn')],
-    ['sb-apply-btn', makeSandboxElement('sb-apply-btn')],
-  ]);
+  const elements = new Map();
+  const sandboxButtons = [makeSandboxElement('sandbox-mode-toggle')];
+  sandboxButtons[0].className = 'sandbox-btn';
+  sandboxButtons[0].onclick = () => {};
+  const banner = makeSandboxElement('sandbox-banner');
+  let bannerHtml = '';
+  Object.defineProperty(banner, 'innerHTML', {
+    get() { return bannerHtml; },
+    set(html) {
+      bannerHtml = html;
+      for (const match of String(html).matchAll(/<(input|button)[^>]*\bid="([^"]+)"[^>]*>/g)) {
+        const [, tag, id] = match;
+        const value = tag === 'input'
+          ? (String(html).match(new RegExp(`<input[^>]*\\bid="${id}"[^>]*\\bvalue="([^"]*)"`))?.[1] || '')
+          : '';
+        elements.set(id, makeSandboxElement(id, value));
+      }
+    },
+  });
+  elements.set('sandbox-banner', banner);
   const body = makeSandboxElement('body');
   return {
     elements,
+    sandboxButtons,
     body,
     document: {
       getElementById(id) { return elements.get(id) || null; },
       querySelector() { return null; },
-      querySelectorAll() { return []; },
+      querySelectorAll(selector) { return selector === '.sandbox-btn' ? sandboxButtons : []; },
       createElement(id) { return makeSandboxElement(id); },
       addEventListener() {},
       removeEventListener() {},
@@ -861,10 +877,13 @@ test('SandboxAdapter cancels pending Confidence debounce before What-If discard'
         this.history.push({ ts: 2, score: 12 });
       }, 400);
     },
-    _cancelRecomputeDebounced() {
+    _invalidatePending() {
       cancelCalls++;
       clearTimeout(timer);
       timer = null;
+    },
+    _cancelRecomputeDebounced() {
+      this._invalidatePending();
     },
   };
   globalThis.NIMBUS = { Confidence: confidence };
@@ -874,6 +893,7 @@ test('SandboxAdapter cancels pending Confidence debounce before What-If discard'
   try {
     Store.setTasks([{ id: 'confidence-discard', PLANT: 'CONFIDENCE', MACHINE: 'CONF-LINE', RUN_TIME: 1 }], 'unit-test');
     Sandbox.enter('unit-test');
+    cancelCalls = 0;
     confidence.score = 34;
     confidence.history.push({ ts: 2, score: 34 });
     confidence._recomputeDebounced();
@@ -1032,10 +1052,14 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
 
     SandboxAdapter.init();
     SandboxAdapter.enter();
+    assert.equal(fixture.sandboxButtons[0].onclick, null,
+      'enter clears the existing sandbox toggle handler while What-If is active');
     Store.setLastOptimize(new Date('2026-08-07T11:00:00Z'), 'unit-test');
     Alerts.restoreDismissed(new Set());
     fixture.elements.get('sb-discard-btn').dispatch('click');
     assert.equal(Sandbox.active, false, 'the real discard button exits What-If mode');
+    assert.equal(typeof fixture.sandboxButtons[0].onclick, 'function',
+      'discard restores the existing sandbox toggle handler');
     assert.equal(fixture.elements.get('sandbox-banner').hidden, true, 'discard tears down the banner');
     assert.equal(fixture.body.classList.contains('sandbox-mode'), false, 'discard tears down body mode');
     assert.equal(Store.lastOptimize?.getTime(), new Date('2026-08-07T10:00:00Z').getTime());
@@ -1046,6 +1070,8 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
     scheduleCalls.length = 0;
     Store.setSelectedPlant('P1', 'unit-test');
     SandboxAdapter.enter();
+    Store.removeBlock('old-line-p1', 'unit-test');
+    Store.removePlantBlock('old-plant-p1', 'unit-test');
     Store.setPlantWorkHours('P1', 0, [9, 17], 'unit-test');
     Store.setCalendar('L1', { 0: [9, 17] }, 'unit-test');
     Store.addBlock({ id: 'new-line-p1', plant: 'P1', line: 'L1', start: '2026-08-03T00:00:00Z', end: '2026-08-03T01:00:00Z' }, 'unit-test');
@@ -1063,6 +1089,13 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
     assert.equal(saveCalls.length, 1, 'promote persists once');
     assert.deepEqual(flushCalls.map(call => call.plant).sort(), ['P1', 'P2'],
       'promote flushes every plant changed during the sandbox, even after selection switches');
+    const p1Flush = flushCalls.find(call => call.plant === 'P1');
+    assert.deepEqual(p1Flush.removed, { line: ['old-line-p1'], plant: ['old-plant-p1'] },
+      'promote flushes the exact line and plant blackout IDs deleted in the sandbox');
+    assert.ok(!Store.blocks.some(block => block.id === 'old-line-p1'),
+      'a promoted line blackout deletion must not be recreated locally');
+    assert.ok(!Store.plantBlocks.some(block => block.id === 'old-plant-p1'),
+      'a promoted plant blackout deletion must not be recreated locally');
     assert.equal(scheduleCalls.length, 1, 'promote schedules one post-teardown alert recompute');
     assert.equal(fixture.elements.get('sandbox-banner').hidden, true, 'promote tears down the banner');
     assert.equal(fixture.body.classList.contains('sandbox-mode'), false, 'promote tears down body mode');
@@ -1088,6 +1121,45 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
     UndoStack._entries.push(...priorEntries);
     globalThis.NIMBUS = priorNimbus;
     globalThis.document = priorDocument;
+  }
+});
+
+test('SandboxAdapter promotes calendar edits for explicit task plants without line master data', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorCalendars = structuredClone(Store.calendars);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorFlushPlant = CalendarSync.flushPlant;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorToast = Toast.show;
+  const flushCalls = [];
+  globalThis.NIMBUS = { Persistence: { saveAll() {} } };
+  CalendarSync.flushPlant = (plant, removed) => flushCalls.push({ plant, removed });
+  Alerts.scheduleRecompute = () => {};
+  Toast.show = () => {};
+
+  try {
+    Store.setMasterData({ plants: [{ plant: 'UNMAPPED-PLANT' }], lines: [] }, 'unit-test');
+    Store.setTasks([
+      { id: 'unmapped-task-plant', PLANT: 'UNMAPPED-PLANT', MACHINE: 'UNMAPPED-LINE', RUN_TIME: 1 },
+    ], 'unit-test');
+    Store.replaceCalendars({ 'UNMAPPED-LINE': { workHours: { 0: [8, 16] } } }, 'unit-test');
+    Sandbox.enter('unit-test');
+    Store.setCalendar('UNMAPPED-LINE', { 0: [9, 17] }, 'unit-test');
+    Sandbox.exit(true, 'unit-test');
+
+    assert.deepEqual(flushCalls.map(call => call.plant), ['UNMAPPED-PLANT'],
+      'an explicit task PLANT is the fallback owner for an unmapped calendar line');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    CalendarSync.flushPlant = priorFlushPlant;
+    Alerts.scheduleRecompute = priorSchedule;
+    Toast.show = priorToast;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
   }
 });
 

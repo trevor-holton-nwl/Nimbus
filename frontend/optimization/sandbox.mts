@@ -70,8 +70,8 @@ export const Sandbox = {
       // fires its own '<field>:replace' event (distinct from that field's normal
       // '<field>:change' event) — a future consumer of 'blocks:change' /
       // 'calendar:change' / 'plants:change' / 'plantBlocks:change' / 'firmed:change'
-      // must also handle the '*:replace' counterpart or it will silently miss
-      // updates that happen via a What-If discard. See
+      // receives the following compatibility change event, so existing change
+      // subscribers also refresh after a What-If discard. See
       // docs/architecture/cq1-compatibility-inventory.md §6 and the pinned
       // event-sequence test in tests/modules/optimization/sandbox.test.mjs.
       Store.setTasks(snap.tasks, 'sandbox');

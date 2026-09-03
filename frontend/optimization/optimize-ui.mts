@@ -2035,6 +2035,11 @@ export const SandboxAdapter = {
   },
 
   _onEntered() {
+    // Cancel any live Confidence worker/debounce before the sandbox starts
+    // mutating Store. The Confidence module also observes this event directly;
+    // this optional seam keeps the adapter safe when boot/test wiring orders
+    // the cross-module listeners differently.
+    (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
     // So a discarded what-if session leaves no trace in the confidence tracker,
     // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
     // Captured here (not in Sandbox.enter()) at the same logical moment as before —
@@ -2080,7 +2085,10 @@ export const SandboxAdapter = {
         // still true, so task replacement events can arm Confidence's debounce.
         // Cancel that pending work before restoring the detached baseline; the
         // restored score/history must remain authoritative after the 400ms wait.
-        (NIMBUS!.Confidence as { _cancelRecomputeDebounced?(): void } | undefined)?._cancelRecomputeDebounced?.();
+        (NIMBUS!.Confidence as {
+          _invalidatePending?(clearSuppressed?: boolean): void;
+          _suppressNextAlertRefresh?(): void;
+        } | undefined)?._invalidatePending?.();
         Store.setLastOptimize(
           SandboxAdapter._lastOptimizeSnapshot ? new Date(SandboxAdapter._lastOptimizeSnapshot) : null,
           'sandbox',
@@ -2094,6 +2102,7 @@ export const SandboxAdapter = {
       // this is the one existing post-discard recompute, and it must see the
       // restored dismissal set above.
       SandboxAdapter._clearSideEffectSnapshot();
+      (NIMBUS!.Confidence as { _suppressNextAlertRefresh?(): void } | undefined)?._suppressNextAlertRefresh?.();
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.scenario_discarded'), 'info');
     }
@@ -2159,6 +2168,7 @@ export const SandboxAdapter = {
     // schedule undo event, not a request to restore the pre-sandbox metadata;
     // only clear any stale adapter copies before the normal alert refresh.
     SandboxAdapter._clearSideEffectSnapshot();
+    (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.scenario_discarded'), 'info');
   },

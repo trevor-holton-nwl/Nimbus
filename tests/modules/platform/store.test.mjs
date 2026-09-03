@@ -31,6 +31,23 @@ test('Store.rebuildPlantIndex is public (renamed from _rebuildPlantIndex)', () =
   assert.doesNotThrow(() => Store.rebuildPlantIndex());
 });
 
+test('Store.getPlantForLine falls back to explicit task ownership when master data is absent', () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorLineSettings = structuredClone(Store.lineSettings);
+  try {
+    Store.setMasterData({ plants: [{ plant: 'TASK-OWNER' }], lines: [] }, 'unit-test');
+    Store.setTasks([{ id: 'task-owner', PLANT: 'TASK-OWNER', MACHINE: 'UNMAPPED-LINE', RUN_TIME: 1 }], 'unit-test');
+    assert.equal(Store.getPlantForLine('UNMAPPED-LINE'), 'TASK-OWNER');
+  } finally {
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    for (const line of Object.keys(Store.lineSettings)) delete Store.lineSettings[line];
+    Object.assign(Store.lineSettings, priorLineSettings);
+    Store.rebuildPlantIndex();
+  }
+});
+
 test('Store.replaceBlocks/replaceCalendars/replacePlants/replacePlantBlocks/replaceFirmedIds replace wholesale and emit', () => {
   const events = [];
   const off = Store.subscribe(evt => events.push(evt.type));

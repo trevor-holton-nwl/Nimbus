@@ -41,15 +41,17 @@ test('Sandbox.exit(false) restores the pre-enter snapshot and emits sandbox:exit
 });
 
 test('Sandbox.exit(false) emits replace events plus change compatibility events for every restored field', () => {
-  // Each Store.replaceX() call fires its own '<field>:replace' event, distinct
-  // from the '<field>:change' events that field's normal mutators fire — see
+  // Each Store.replaceX() call fires its own '<field>:replace' event followed
+  // by the established '<field>:change' compatibility event. Consumers must
   // docs/architecture/cq1-compatibility-inventory.md §6. Nothing subscribes to
-  // the *:replace variants today (a grep across frontend/ confirms it), so the extra
+  // the *:replace variant is paired with the normal compatibility event so
   // events are inert — but a future consumer of 'blocks:change'/'calendar:change'/
   // etc. must also handle the '*:replace' counterpart, or it will silently miss
   // updates made during a What-If discard. This test exists so a change to that
   // event contract (fewer/more/renamed events) is a deliberate edit here, not a
-  // silent regression.
+  // silent regression. The compatibility event is the live refresh channel;
+  // the replace event records the wholesale operation for consumers that need
+  // to distinguish it from an incremental mutation.
   Store.setTasks([{ id: 'sb-repl', RUN_TIME: '1' }], 'unit-test');
   Sandbox.enter('unit-test');
   const events = [];

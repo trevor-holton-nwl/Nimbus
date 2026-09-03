@@ -551,9 +551,15 @@ export const Store = {
     // before the linear .find fallback so this stays O(1) on hot paths (tasksForSelectedPlant,
     // worker snapshots, util matrix builds). A miss falls through to the authoritative scan.
     const cached = this._lineToPlant[line];
-    if (cached !== undefined) return cached;
+    if (cached) return cached;
     const mdLine = (this._state.masterData?.lines ?? []).find(r => r.machine === line);
-    return mdLine?.plant ?? null;
+    if (mdLine?.plant) return mdLine.plant;
+    // Task payloads carry an explicit PLANT even when master-data hydration is
+    // incomplete. Use that as the final ownership fallback so calendar flushes,
+    // plant indexes, and What-If promotion do not silently omit an otherwise
+    // identifiable line. Lines are plant-owned; if malformed data repeats a
+    // line across plants, the first explicit owner is the deterministic choice.
+    return this.tasksArr.find(t => t.MACHINE === line && t.PLANT)?.PLANT ?? null;
   },
   setSelectedPlant(plant: string | null, source?: string): void {
     const next = plant || null;

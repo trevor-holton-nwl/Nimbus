@@ -1380,6 +1380,33 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _badge:   null,
     _recomputeDebounced: null,
     _cancelRecomputeDebounced: null,
+    _startupTimer: null,
+    _lifecycleGeneration: 0,
+    _suppressedAlertRefreshes: 0,
+
+    // Invalidation is deliberately separate from debounce cancellation: a
+    // Compute worker request may already be in flight when What-If exits, so
+    // clearing its timer alone cannot stop the eventual continuation.
+    _invalidatePending(clearSuppressed = false) {
+      Confidence._lifecycleGeneration++;
+      Confidence._cancelRecomputeDebounced?.();
+      if (Confidence._startupTimer) {
+        clearTimeout(Confidence._startupTimer);
+        Confidence._startupTimer = null;
+      }
+      if (clearSuppressed) Confidence._suppressedAlertRefreshes = 0;
+    },
+
+    _suppressNextAlertRefresh() {
+      Confidence._suppressedAlertRefreshes++;
+    },
+
+    _canApply(generation, rev) {
+      return generation === Confidence._lifecycleGeneration
+        && Store.rev() === rev
+        && !NIMBUS.OptimizerPreview?.active
+        && !NIMBUS.Sandbox?.active;
+    },
 
     init() {
       try { localStorage.removeItem('nimbus.confHistory'); } catch (e) {  // clear any previously persisted history
@@ -1404,6 +1431,18 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       };
       Confidence._injectBadge();
       Store.subscribe(evt => {
+        if (evt?.type === 'sandbox:entered') {
+          Confidence._invalidatePending(true);
+          return;
+        }
+        if (evt?.type === 'sandbox:exited') {
+          Confidence._invalidatePending();
+          return;
+        }
+        if (evt?.type === 'sandbox:reverted') {
+          Confidence._invalidatePending(true);
+          return;
+        }
         if (evt?.type === 'plant:selected') {
           Confidence._history = [];
           Confidence._score   = 100;
@@ -1431,9 +1470,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Confidence._recomputeDebounced();
       });
       Store.subscribe(evt => {
-        if (evt.type === 'alerts:change') Confidence._recomputeDebounced();
+        if (evt.type !== 'alerts:change') return;
+        if (Confidence._suppressedAlertRefreshes > 0) {
+          Confidence._suppressedAlertRefreshes--;
+          return;
+        }
+        Confidence._recomputeDebounced();
       }, 'Confidence.autoRecompute');
-      setTimeout(Confidence._recompute, 600);
+      Confidence._startupTimer = setTimeout(() => {
+        Confidence._startupTimer = null;
+        Confidence._recompute();
+      }, 600);
     },
 
     _injectBadge() {
@@ -1464,6 +1511,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // fully captures the inputs. plant:selected nulls these to force a repaint.
       const alerts = Store.alerts || [];
       const rev = Store.rev();
+      const generation = Confidence._lifecycleGeneration;
       if (Confidence._lastAlertsSrc === alerts && Confidence._lastRev === rev) return;
       Confidence._lastAlertsSrc = alerts;
       Confidence._lastRev = rev;
@@ -1501,6 +1549,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
         try {
           const result = await NIMBUS.Compute.utilization(startMs, days);
+          if (!Confidence._canApply(generation, rev)) return;
           matrix = result.matrix;
           // Update the shared cache so subsequent sync calls can reuse it
           Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix };
@@ -1514,12 +1563,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
           NIMBUS.Compute.utilization(startMs, days)
             .then(({ matrix: m }) => {
-              if (Store.rev() !== rev) return; // stale
+              if (!Confidence._canApply(generation, rev)) return; // stale
               Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
             })
             .catch(() => {});
         }
       }
+
+      if (!Confidence._canApply(generation, rev)) return;
 
       Object.values(matrix).forEach(lineData => {
         Object.values(lineData).forEach(row => {
