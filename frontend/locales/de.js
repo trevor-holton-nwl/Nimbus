@@ -1405,6 +1405,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_preview_stale_title':          'Vorschau ist veraltet.',
   'ui.setup_preview_stale_default_reason': 'Setup-Daten haben sich geändert',
   'ui.setup_preview_stale_note':           'Übernehmen ist deaktiviert; führen Sie die Optimierung erneut aus, um diesen Vergleich zu aktualisieren.',
+  'ui.opt_preview_task_stale':             'Der Zeitplan wurde geändert, während diese Vorschau geöffnet war. Führen Sie die Optimierung erneut aus, bevor Sie die Änderungen anwenden.',
   'ui.setup_search_label':            'Suche:',
   'ui.setup_constraints_label':       'Einschränkungen:',
   'ui.setup_constraints_none':        'keine gemeldet',

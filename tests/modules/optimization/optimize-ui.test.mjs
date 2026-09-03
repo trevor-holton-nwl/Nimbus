@@ -34,6 +34,63 @@ if (typeof globalThis.document === 'undefined') {
 }
 globalThis.window = globalThis.window || {};
 
+function previewTask(id, plant, runTime = 1) {
+  return {
+    id, PLANT: plant, plant, MACHINE: `${plant}-LINE`, RUN_TIME: runTime,
+    row_version: 1, start_date: null, end_date: null,
+  };
+}
+
+function openTaskBaselinePreview(plant, tasks, { firmedIds = [] } = {}) {
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorFirmedIds = new Set(Store.firmedIds);
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorFetch = globalThis.fetch;
+  const auditRequests = [];
+  globalThis.requestAnimationFrame = callback => {
+    callback(performance.now());
+    return 1;
+  };
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  globalThis.fetch = (...args) => {
+    auditRequests.push(args);
+    return Promise.resolve({ ok: true });
+  };
+  Store.replaceFirmedIds(new Set(), 'unit-test');
+  Store.setTasks(tasks, 'unit-test');
+  if (firmedIds.length) Store.setFirmed(firmedIds, true, 'unit-test');
+  Store.setSelectedPlant(plant, 'unit-test');
+  OptimizerPreview.runWithPreview('spt', {
+    plant, respectCalendar: false, now: new Date('2026-08-03T08:00:00'),
+    auditDetails: {
+      mode: 'spt', wheelUsed: false, taskCount: tasks.length, scope: 'plant', lines: null,
+      activePriorityFields: [], unrankedPriorityFields: [], splitOrderPolicy: 'never',
+    },
+  });
+  assert.ok(OptimizerPreview._candidate, 'the task-baseline fixture opens a detached preview');
+
+  return {
+    auditRequests,
+    restore() {
+      OptimizerPreview._clear();
+      Alerts.scheduleRecompute = priorScheduleRecompute;
+      Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+      Store.setTasks(priorTasks, 'unit-test');
+      Store.replaceFirmedIds(priorFirmedIds, 'unit-test');
+      Store.setSelectedPlant(priorPlant, 'unit-test');
+      globalThis.fetch = priorFetch;
+      globalThis.requestAnimationFrame = priorRaf;
+      globalThis.NIMBUS = priorNimbus;
+    },
+  };
+}
+
 test('OptimizeDialog/OptimizerPreview expose the documented public API', () => {
   assert.equal(typeof OptimizeDialog.open, 'function');
   assert.equal(typeof OptimizeDialog.run, 'function');
@@ -123,6 +180,117 @@ test('Persistence setup writes stale an open preview without applying or rerunni
   } finally {
     OptimizerPreview._clear();
     globalThis.fetch = priorFetch;
+  }
+});
+
+test('Task 1: a local edit to an unpatched preview-plant task blocks Apply and audit', () => {
+  const plant = 'TASK-BASELINE-LOCAL';
+  const untouchedId = 'task-baseline-firmed';
+  const fixture = openTaskBaselinePreview(plant, [
+    previewTask(untouchedId, plant, 5),
+    previewTask('task-baseline-free', plant, 1),
+  ], { firmedIds: [untouchedId] });
+  try {
+    assert.equal(OptimizerPreview._candidate.patches.some(patch => patch.id === untouchedId), false,
+      'the edited task is deliberately outside the candidate patch set');
+
+    Store.updateTask(untouchedId, {
+      start_date: new Date('2026-08-04T09:00:00'),
+      end_date: new Date('2026-08-04T14:00:00'),
+    }, 'manual-drag');
+
+    assert.equal(OptimizerPreview.stale, true, 'a local schedule edit immediately stales the preview');
+    assert.equal(OptimizerPreview.canApply(), false, 'the changed baseline cannot apply');
+    OptimizerPreview.apply();
+    assert.ok(OptimizerPreview._candidate, 'blocked Apply leaves the candidate available for discard or rerun');
+    assert.equal(fixture.auditRequests.length, 0, 'blocked Apply never emits the optimization audit event');
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('Task 1: server task refresh events invalidate row-version and full-reload mismatches', () => {
+  const plant = 'TASK-BASELINE-REFRESH';
+  let fixture = openTaskBaselinePreview(plant, [previewTask('task-refresh', plant)]);
+  try {
+    Store.tasks['task-refresh'].row_version = 2;
+    Store.emit({ type: 'tasks:bulkUpdate', ids: ['task-refresh'], source: 'refresh' });
+    assert.equal(OptimizerPreview.stale, true, 'a refresh row-version change stales the preview');
+    assert.equal(OptimizerPreview.canApply(), false);
+  } finally {
+    fixture.restore();
+  }
+
+  fixture = openTaskBaselinePreview(plant, [previewTask('task-reload', plant)]);
+  try {
+    Store.setTasks([{ ...previewTask('task-reload', plant), row_version: 2 }], 'backend');
+    assert.equal(OptimizerPreview.stale, true, 'a tasks:bulk reload mismatch stales the preview');
+    assert.equal(OptimizerPreview.canApply(), false);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('Task 1: edits in an unrelated plant do not stale the active preview', () => {
+  const previewPlant = 'TASK-BASELINE-A';
+  const otherPlant = 'TASK-BASELINE-B';
+  const fixture = openTaskBaselinePreview(previewPlant, [
+    previewTask('task-preview-plant', previewPlant),
+    previewTask('task-other-plant', otherPlant),
+  ]);
+  try {
+    Store.updateTask('task-other-plant', {
+      start_date: new Date('2026-08-05T08:00:00'),
+      end_date: new Date('2026-08-05T09:00:00'),
+    }, 'manual-drag');
+
+    assert.equal(OptimizerPreview.stale, false, 'another plant cannot invalidate this comparison');
+    assert.equal(OptimizerPreview.canApply(), true, 'the unchanged preview-plant baseline remains applicable');
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('Task 1: removing a preview-plant task blocks Apply', () => {
+  const plant = 'TASK-BASELINE-REMOVE';
+  const fixture = openTaskBaselinePreview(plant, [
+    previewTask('task-remove', plant),
+    previewTask('task-remains', plant),
+  ]);
+  try {
+    Store.removeTask('task-remove', 'server-delete');
+
+    assert.equal(OptimizerPreview.stale, true, 'removing a baseline task immediately stales the preview');
+    assert.equal(OptimizerPreview.canApply(), false, 'a removed task cannot be silently recreated or bypassed');
+    OptimizerPreview.apply();
+    assert.equal(fixture.auditRequests.length, 0, 'a removal mismatch blocks the audit event too');
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('Task 1: an unchanged baseline applies once with the engine force-save source', () => {
+  const plant = 'TASK-BASELINE-APPLY';
+  const fixture = openTaskBaselinePreview(plant, [
+    previewTask('task-apply-long', plant, 5),
+    previewTask('task-apply-short', plant, 1),
+  ]);
+  const applyEvents = [];
+  const unsubscribe = Store.subscribe(event => {
+    if (event.type === 'tasks:bulkUpdate') applyEvents.push(event);
+  }, 'task-1-force-save-contract');
+  try {
+    assert.equal(OptimizerPreview.canApply(), true, 'an unchanged baseline is explicitly validated');
+
+    OptimizerPreview.apply();
+
+    assert.equal(applyEvents.length, 1, 'Apply publishes exactly one bulk task mutation');
+    assert.equal(applyEvents[0].source, 'engine', 'the mutation retains the force-save source contract');
+    assert.equal(fixture.auditRequests.length, 1, 'a validated Apply emits exactly one audit event');
+    assert.equal(OptimizerPreview._candidate, null, 'a successful Apply clears the detached candidate');
+  } finally {
+    unsubscribe();
+    fixture.restore();
   }
 });
 

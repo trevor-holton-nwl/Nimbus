@@ -1403,6 +1403,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_preview_stale_title':          'L’aperçu est obsolète.',
   'ui.setup_preview_stale_default_reason': 'Les données de réglage ont changé',
   'ui.setup_preview_stale_note':           'Appliquer est désactivé ; relancez l’optimisation pour actualiser cette comparaison.',
+  'ui.opt_preview_task_stale':             'Le planning a changé pendant que cet aperçu était ouvert. Relancez l’optimisation avant d’appliquer les modifications.',
   'ui.setup_search_label':            'Recherche :',
   'ui.setup_constraints_label':       'Contraintes :',
   'ui.setup_constraints_none':        'aucune signalée',

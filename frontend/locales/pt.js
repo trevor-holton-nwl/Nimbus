@@ -1402,6 +1402,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_preview_stale_title':          'A pré-visualização está desatualizada.',
   'ui.setup_preview_stale_default_reason': 'Os dados de preparação mudaram',
   'ui.setup_preview_stale_note':           'Aplicar está desabilitado; execute a otimização novamente para atualizar esta comparação.',
+  'ui.opt_preview_task_stale':             'A programação foi alterada enquanto esta pré-visualização estava aberta. Execute a otimização novamente antes de aplicar as alterações.',
   'ui.setup_search_label':            'Busca:',
   'ui.setup_constraints_label':       'Restrições:',
   'ui.setup_constraints_none':        'nenhuma reportada',

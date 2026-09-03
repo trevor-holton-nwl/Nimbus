@@ -1403,6 +1403,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_preview_stale_title':          'La vista previa está desactualizada.',
   'ui.setup_preview_stale_default_reason': 'Los datos de preparación cambiaron',
   'ui.setup_preview_stale_note':           'Aplicar está deshabilitado; ejecute la optimización de nuevo para actualizar esta comparación.',
+  'ui.opt_preview_task_stale':             'La programación cambió mientras esta vista previa estaba abierta. Vuelva a ejecutar la optimización antes de aplicar los cambios.',
   'ui.setup_search_label':            'Búsqueda:',
   'ui.setup_constraints_label':       'Restricciones:',
   'ui.setup_constraints_none':        'ninguna reportada',

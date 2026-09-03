@@ -924,6 +924,28 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
   return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(' and '), worse: worse.join(' and ') });
 }
 
+const PREVIEW_TASK_CHANGE_EVENTS = new Set<StoreEvent['type']>([
+  'task:update', 'tasks:bulkUpdate', 'tasks:bulk', 'task:remove',
+]);
+
+/** Canonicalize the complete task record so row_version, schedule edits, and
+ *  every optimizer input participate in the preview baseline without relying
+ *  on object insertion order. Task records are JSON-like data bags; Date gets
+ *  an explicit representation because schedule fields are normalized Dates. */
+function canonicalTaskBaselineValue(value: unknown): unknown {
+  if (value instanceof Date) return { dateMs: value.getTime() };
+  if (Array.isArray(value)) return value.map(canonicalTaskBaselineValue);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonicalTaskBaselineValue(record[key])]));
+  }
+  return value;
+}
+
+function taskBaseline(tasks: ReadonlyArray<NimbusTask>): Map<string, string> {
+  return new Map(tasks.map(task => [String(task.id), JSON.stringify(canonicalTaskBaselineValue(task))]));
+}
+
 /* =============================================================================
    OPTIMIZER PREVIEW (C4) — wraps Engine.runAndApply so the planner sees a
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
@@ -958,6 +980,10 @@ export const OptimizerPreview = {
   _finalistsPending: false,
   stale: false,
   _staleReason: null as string | null,
+  _staleMessageKey: null as string | null,
+  _taskBaseline: null as Map<string, string> | null,
+  _taskWatchUnsubscribe: null as (() => void) | null,
+  _applying: false,
   active:    false,  // true while detached candidate details await Apply/Discard
   _abandonGuardInstalled: false,
   /** Phase 2 (Pkg D): monotonic token, incremented at the top of every
@@ -1090,7 +1116,58 @@ export const OptimizerPreview = {
       [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.fromState, pair.toState, pair.reason].map(quote).join(','))].join('\n');
   },
 
-  canApply(): boolean { return OptimizerPreview.active && !OptimizerPreview.stale && !!OptimizerPreview._candidate && !!OptimizerPreview._snapshot; },
+  canApply(): boolean {
+    if (!OptimizerPreview.active || OptimizerPreview.stale || !OptimizerPreview._candidate
+      || !OptimizerPreview._snapshot || !OptimizerPreview._taskBaseline) return false;
+    return OptimizerPreview._revalidateTaskBaseline();
+  },
+
+  _staleMessage(): string {
+    return Util.t(OptimizerPreview._staleMessageKey || 'ui.opt_stale_banner');
+  },
+
+  /** Compare the complete preview-plant task set against the detached baseline.
+   *  This catches changed fields/versions, additions, plant moves, and removals. */
+  _revalidateTaskBaseline(): boolean {
+    if (OptimizerPreview.stale) return false;
+    const baseline = OptimizerPreview._taskBaseline;
+    const plant = OptimizerPreview._plant;
+    if (!OptimizerPreview.active || !baseline || !plant) return false;
+    const current = taskBaseline(Store.tasksArr.filter(task =>
+      (task.PLANT || Store.getPlantForLine(task.MACHINE)) === plant));
+    let matches = current.size === baseline.size;
+    if (matches) {
+      for (const [id, value] of baseline) {
+        if (current.get(id) !== value) { matches = false; break; }
+      }
+    }
+    if (!matches) OptimizerPreview._markTaskStale('preview-plant task baseline changed');
+    return matches;
+  },
+
+  _startTaskWatch(): void {
+    OptimizerPreview._stopTaskWatch();
+    OptimizerPreview._taskWatchUnsubscribe = Store.subscribe(event => {
+      if (!OptimizerPreview.active || !OptimizerPreview._taskBaseline
+        || !PREVIEW_TASK_CHANGE_EVENTS.has(event.type)) return;
+      if (OptimizerPreview._applying && event.source === 'engine') return;
+      OptimizerPreview._revalidateTaskBaseline();
+    }, 'OptimizerPreview.tasks');
+  },
+
+  _stopTaskWatch(): void {
+    OptimizerPreview._taskWatchUnsubscribe?.();
+    OptimizerPreview._taskWatchUnsubscribe = null;
+  },
+
+  _markTaskStale(reason: string): void {
+    if (OptimizerPreview.stale) return;
+    OptimizerPreview.stale = true;
+    OptimizerPreview._staleReason = reason;
+    OptimizerPreview._staleMessageKey = 'ui.opt_preview_task_stale';
+    OptimizerPreview._syncApplyButton();
+    if (typeof document !== 'undefined') OptimizerPreview._render();
+  },
 
   /** Single place that decides whether Apply is clickable — always derived
    *  from canApply(), never poked ad hoc. Replaces three separate direct-DOM
@@ -1102,7 +1179,7 @@ export const OptimizerPreview = {
     const applyable = OptimizerPreview.canApply();
     button.disabled = !applyable;
     button.title = applyable ? '' : (OptimizerPreview.stale
-      ? Util.t('ui.setup_preview_apply_stale_title')
+      ? OptimizerPreview._staleMessage()
       : Util.t('ui.setup_preview_apply_not_ready_title'));
   },
 
@@ -1112,6 +1189,7 @@ export const OptimizerPreview = {
     if (!OptimizerPreview.active || !OptimizerPreview._candidate || OptimizerPreview._plant !== plant) return;
     OptimizerPreview.stale = true;
     OptimizerPreview._staleReason = `${kind} setup data changed`;
+    OptimizerPreview._staleMessageKey = 'ui.opt_stale_banner';
     OptimizerPreview._syncApplyButton();
     if (typeof document !== 'undefined') OptimizerPreview._render();
   },
@@ -1176,6 +1254,7 @@ export const OptimizerPreview = {
         snapshot = structuredClone(scopedTasks);
         // Keep this detached copy only for the Undo entry if the planner applies.
         OptimizerPreview._snapshot = snapshot;
+        OptimizerPreview._taskBaseline = taskBaseline(snapshot);
         OptimizerPreview.active = true;
         PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
@@ -1276,6 +1355,8 @@ export const OptimizerPreview = {
 
         OptimizerPreview.stale = false;
         OptimizerPreview._staleReason = null;
+        OptimizerPreview._staleMessageKey = null;
+        OptimizerPreview._startTaskWatch();
 
         footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._syncApplyButton();
@@ -1620,7 +1701,7 @@ export const OptimizerPreview = {
     })();
 
     const staleHtml = OptimizerPreview.stale
-      ? `<div class="opt-pv-stale">${Util.escapeHtml(Util.t('ui.opt_stale_banner'))}</div>`
+      ? `<div class="opt-pv-stale">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
       : '';
 
     // Never-freeze fallback banner — orders this candidate actually placed
@@ -1763,10 +1844,11 @@ export const OptimizerPreview = {
     const plant = OptimizerPreview._plant;
     const auditDetails = OptimizerPreview._auditDetails;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
-    if (!OptimizerPreview.canApply()) {
-      Toast.show(Util.t('ui.setup_preview_apply_stale_title'), 'warn');
+    if (!OptimizerPreview._revalidateTaskBaseline() || !OptimizerPreview.canApply()) {
+      Toast.show(OptimizerPreview._staleMessage(), 'warn');
       return;
     }
+    OptimizerPreview._applying = true;
     if (auditDetails && plant) {
       fetch(`${Config.API_BASE}/audit/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
@@ -1867,7 +1949,9 @@ export const OptimizerPreview = {
   },
 
   _clear(keepPreviewDiagnostics: boolean = false) {
+    OptimizerPreview._stopTaskWatch();
     OptimizerPreview._snapshot = null;
+    OptimizerPreview._taskBaseline = null;
     OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;
     OptimizerPreview._postKpis = null;
@@ -1883,6 +1967,8 @@ export const OptimizerPreview = {
     OptimizerPreview._finalistsPending = false;
     OptimizerPreview.stale = false;
     OptimizerPreview._staleReason = null;
+    OptimizerPreview._staleMessageKey = null;
+    OptimizerPreview._applying = false;
     if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];
     OptimizerPreview.active       = false;
   },

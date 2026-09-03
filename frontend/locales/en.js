@@ -1573,6 +1573,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_pv_chip_plant_title':         'Plant scope',
   'ui.opt_pv_chip_policy_title':        'Plant-level split-order allocation policy',
   'ui.opt_stale_banner':               'Setup data changed while this comparison was open. Run optimization again before applying — these numbers no longer describe the current setup times.',
+  'ui.opt_preview_task_stale':          'The schedule changed while this preview was open. Run optimization again before applying.',
   'ui.opt_pv_gaps_badge':              '{{count}} pairs',
   'ui.opt_pv_gaps_truncated':          'Showing the {{shown}} pairs that blocked the most orders, of {{total}}.',
   'ui.opt_pv_lines_changed':           'Machines changed',
