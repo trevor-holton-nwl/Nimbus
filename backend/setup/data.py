@@ -663,7 +663,26 @@ def current_signature_version(plant: str) -> int | None:
 
 
 def get_setup_snapshot(plant: str) -> dict:
-    """Return exactly one plant's versioned setup truth; no cross-plant rows leak."""
+    """Return exactly one plant's versioned setup truth; no cross-plant rows leak.
+
+    machine_rows/machine_states/overrides are scoped to the plant's LIVE
+    machine roster (registered in master data for this plant, or already
+    appearing on a loaded order for this plant) -- not every machine code
+    that has ever recorded a setup-matrix row for this plant. This bounds
+    the payload to the plant's actual current machine count (the Production
+    Scale Roadmap's "70+ machines per plant" target) instead of an unbounded
+    historical superset that can accumulate renamed/decommissioned/typo'd
+    machine codes over time -- see Code_Review_09_01.md P1-9. plant_rows
+    (machine = '') are the single plant-default fallback tier and are never
+    machine-scoped -- every machine on the plant inherits from them.
+
+    A machine that is neither registered nor yet on a loaded order (e.g. a
+    brand-new machine added to master data and immediately assigned a task
+    within the same session, before the next snapshot refetch) resolves to
+    setup-domain.mts's existing 'uncovered' fallback rather than a wrong
+    non-zero value -- the same honest fallback a genuinely unconfigured
+    machine already gets today.
+    """
     plant = _required_text(plant, "Plant")
     with _pool.connection() as conn, conn.cursor() as cur:
         # One repeatable-read transaction prevents a definition edit from
@@ -675,10 +694,19 @@ def get_setup_snapshot(plant: str) -> dict:
                     "machine_states": [], "overrides": []}
         version = definition["signature_version"]
         cur.execute(
+            """SELECT machine FROM machine WHERE plant = %s
+               UNION
+               SELECT DISTINCT machine FROM orders WHERE plant = %s AND machine IS NOT NULL""",
+            (plant, plant),
+        )
+        live_machines = [r[0] for r in cur.fetchall()]
+        cur.execute(
             """SELECT machine, signature_version, from_key, to_key, setup_min, source, source_metadata,
                       source_reference, created_by, created_at, updated_by, updated_at
-                 FROM setup_matrix WHERE plant = %s AND signature_version = %s ORDER BY machine, from_key, to_key""",
-            (plant, version),
+                 FROM setup_matrix
+                WHERE plant = %s AND signature_version = %s AND (machine = '' OR machine = ANY(%s))
+                ORDER BY machine, from_key, to_key""",
+            (plant, version, live_machines),
         )
         matrix = [
             {"machine": r[0], "signature_version": int(r[1]), "from_key": r[2], "to_key": r[3],
@@ -689,7 +717,9 @@ def get_setup_snapshot(plant: str) -> dict:
         cur.execute(
             """SELECT machine, state_key, signature_version, physical_mold_id, observed_at, source, reason,
                       created_by, created_at, updated_by, updated_at
-                 FROM machine_setup_state WHERE plant = %s AND signature_version = %s ORDER BY machine""", (plant, version)
+                 FROM machine_setup_state
+                WHERE plant = %s AND signature_version = %s AND machine = ANY(%s)
+                ORDER BY machine""", (plant, version, live_machines)
         )
         states = [
             {"machine": r[0], "state_key": r[1], "signature_version": int(r[2]), "physical_mold_id": r[3],
@@ -702,8 +732,10 @@ def get_setup_snapshot(plant: str) -> dict:
                       predecessor_state_key, successor_state_key, standard_min, remaining_min, status, reason,
                       created_by, created_at, updated_by, updated_at
                  FROM setup_occurrence_override
-                WHERE plant = %s AND signature_version = %s AND status IN ('active', 'inactive') ORDER BY id""",
-            (plant, version),
+                WHERE plant = %s AND signature_version = %s AND status IN ('active', 'inactive')
+                  AND machine = ANY(%s)
+                ORDER BY id""",
+            (plant, version, live_machines),
         )
         overrides = [
             {"id": int(r[0]), "machine": r[1], "signature_version": int(r[2]),

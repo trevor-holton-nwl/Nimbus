@@ -369,6 +369,37 @@ def test_snapshot_reads_only_one_current_signature_version_in_a_repeatable_trans
     assert "status IN ('active', 'inactive')" in statements
 
 
+def test_snapshot_scopes_machine_rows_states_and_overrides_to_the_live_machine_roster(monkeypatch):
+    """machine_rows/machine_states/overrides must be bounded to the plant's live
+    machine set (Code_Review_09_01.md P1-9) -- plant_rows (machine = '') stay
+    unscoped, since they're the single fallback tier every machine inherits from."""
+    cursor = _SnapshotCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    setup_data.get_setup_snapshot("5512")
+    statements = [sql for sql, _params in cursor.executed]
+    live_machine_query = next(sql for sql in statements if "SELECT machine FROM machine" in sql)
+    assert "UNION" in live_machine_query
+    assert "FROM orders" in live_machine_query
+
+    matrix_query, matrix_params = next(
+        (sql, params) for sql, params in cursor.executed if "FROM setup_matrix" in sql
+    )
+    assert "machine = '' OR machine = ANY(%s)" in matrix_query
+    assert matrix_params[-1] == ["LINE-1"]
+
+    states_query, states_params = next(
+        (sql, params) for sql, params in cursor.executed if "FROM machine_setup_state" in sql
+    )
+    assert "machine = ANY(%s)" in states_query
+    assert states_params[-1] == ["LINE-1"]
+
+    overrides_query, overrides_params = next(
+        (sql, params) for sql, params in cursor.executed if "FROM setup_occurrence_override" in sql
+    )
+    assert "machine = ANY(%s)" in overrides_query
+    assert overrides_params[-1] == ["LINE-1"]
+
+
 def test_identified_override_update_rejects_cleared_history_before_writing(monkeypatch):
     """A URL-bound override update cannot resurrect or alter cleared/replaced historical truth."""
     cursor = _InactiveOverrideCursor()
@@ -501,6 +532,8 @@ class _SnapshotCursor(_DefinitionCursor):
 
     def fetchall(self):
         query = self.executed[-1][0]
+        if "SELECT machine FROM machine" in query:
+            return [("LINE-1",)]
         if "FROM setup_matrix" in query:
             return [("", 4, [], [], 12, "manual", {}, None, "owner", None, "owner", None)]
         if "FROM machine_setup_state" in query:
