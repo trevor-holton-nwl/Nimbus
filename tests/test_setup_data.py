@@ -400,6 +400,27 @@ def test_snapshot_scopes_machine_rows_states_and_overrides_to_the_live_machine_r
     assert overrides_params[-1] == ["LINE-1"]
 
 
+def test_snapshot_with_empty_live_machine_roster_keeps_plant_rows_and_empties_machine_rows(monkeypatch):
+    """When the live-machine-set query returns zero rows (e.g. a plant with no
+    registered machines and no orders yet), plant_rows -- the single
+    plant-default fallback tier, unscoped by live_machines -- must still come
+    back populated from setup_matrix, while machine_rows/machine_states/
+    overrides (all scoped by the empty live_machines list) come back empty."""
+    cursor = _EmptyRosterSnapshotCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    snapshot = setup_data.get_setup_snapshot("5512")
+    assert snapshot["plant_rows"] != []
+    assert snapshot["plant_rows"][0]["machine"] == ""
+    assert snapshot["machine_rows"] == []
+    assert snapshot["machine_states"] == []
+    assert snapshot["overrides"] == []
+
+    matrix_query, matrix_params = next(
+        (sql, params) for sql, params in cursor.executed if "FROM setup_matrix" in sql
+    )
+    assert matrix_params[-1] == []
+
+
 def test_identified_override_update_rejects_cleared_history_before_writing(monkeypatch):
     """A URL-bound override update cannot resurrect or alter cleared/replaced historical truth."""
     cursor = _InactiveOverrideCursor()
@@ -541,6 +562,24 @@ class _SnapshotCursor(_DefinitionCursor):
         if "FROM setup_occurrence_override" in query:
             return [(9, "LINE-1", 4, "before", "after", [], [], 12, 4, "active", "floor", "owner", None,
                      "owner", None)]
+        return []
+
+
+class _EmptyRosterSnapshotCursor(_SnapshotCursor):
+    """Same canned definition/matrix truth as _SnapshotCursor, but the
+    live-machine-set query returns zero rows -- proving plant_rows (unscoped)
+    survives while the machine-scoped tables come back empty."""
+
+    def fetchall(self):
+        query = self.executed[-1][0]
+        if "SELECT machine FROM machine" in query:
+            return []
+        if "FROM setup_matrix" in query:
+            return [("", 4, [], [], 12, "manual", {}, None, "owner", None, "owner", None)]
+        if "FROM machine_setup_state" in query:
+            return []
+        if "FROM setup_occurrence_override" in query:
+            return []
         return []
 
 

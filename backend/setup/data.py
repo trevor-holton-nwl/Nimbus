@@ -669,19 +669,32 @@ def get_setup_snapshot(plant: str) -> dict:
     machine roster (registered in master data for this plant, or already
     appearing on a loaded order for this plant) -- not every machine code
     that has ever recorded a setup-matrix row for this plant. This bounds
-    the payload to the plant's actual current machine count (the Production
-    Scale Roadmap's "70+ machines per plant" target) instead of an unbounded
-    historical superset that can accumulate renamed/decommissioned/typo'd
-    machine codes over time -- see Code_Review_09_01.md P1-9. plant_rows
-    (machine = '') are the single plant-default fallback tier and are never
-    machine-scoped -- every machine on the plant inherits from them.
+    the payload to the plant's live machine roster (registered machines, or
+    machines with at least one retained order -- which may still include a
+    renamed/decommissioned code for as long as its historical orders remain
+    in the database, a materially tighter bound than every setup-matrix row
+    ever recorded, even if not a perfectly current one; the Production Scale
+    Roadmap's "70+ machines per plant" target is the motivating case) instead
+    of an unbounded historical superset that can accumulate renamed/
+    decommissioned/typo'd machine codes over time -- see Code_Review_09_01.md
+    P1-9. plant_rows (machine = '') are the single plant-default fallback
+    tier and are never machine-scoped -- every machine on the plant inherits
+    from them.
 
-    A machine that is neither registered nor yet on a loaded order (e.g. a
-    brand-new machine added to master data and immediately assigned a task
-    within the same session, before the next snapshot refetch) resolves to
-    setup-domain.mts's existing 'uncovered' fallback rather than a wrong
-    non-zero value -- the same honest fallback a genuinely unconfigured
-    machine already gets today.
+    A machine excluded from the live roster can never actually be the subject
+    of a live resolveSetup call: every real caller (deriveSetupObservation in
+    engine.mts, and orders.mts's two call sites) only resolves setup for a
+    machine that currently has a task/order loaded on it, and any such
+    machine is already included via this function's own `orders` half of the
+    live-machine-set query -- so "excluded" and "has something to resolve"
+    never overlap in practice. (In the abstract, resolveSetup's own
+    precedence -- override, then line row, then plant-default row, then
+    implicit-zero, then uncovered -- means an excluded machine's calls WOULD
+    silently fall through to the plant-default minutes rather than
+    'uncovered' if one ever occurred; this is a property of resolveSetup
+    itself, not something this scoping introduces, and it stays unreachable
+    as long as every caller keeps anchoring calls to the machine's own
+    tasks/orders, per the invariant above.)
     """
     plant = _required_text(plant, "Plant")
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -696,7 +709,7 @@ def get_setup_snapshot(plant: str) -> dict:
         cur.execute(
             """SELECT machine FROM machine WHERE plant = %s
                UNION
-               SELECT DISTINCT machine FROM orders WHERE plant = %s AND machine IS NOT NULL""",
+               SELECT DISTINCT machine FROM orders WHERE plant = %s AND machine IS NOT NULL AND machine <> ''""",
             (plant, plant),
         )
         live_machines = [r[0] for r in cur.fetchall()]
