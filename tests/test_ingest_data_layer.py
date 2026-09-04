@@ -120,7 +120,7 @@ class TestIngestOrdersFromExcelRealDb:
 @pytest.mark.pg
 class TestIngestBomFromExcelRealDb:
     MATERIAL, COMPONENT, UNKNOWN_COMPONENT, PLANT = (
-        "ZZTEST_BOM_MAT", "ZZTEST_BOM_COMP", "ZZTEST_BOM_NOPE", "ZZTEST_BOM_PLANT",
+        "ZZTEST_BOM_MAT", "ZZTEST_BOM_COMP", "ZZTEST_BOM_NOPE", "ZZT_BOMPLT",
     )
 
     @pytest.fixture(autouse=True)
