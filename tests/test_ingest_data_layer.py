@@ -36,13 +36,21 @@ class TestIngestOrdersFromExcelRealDb:
     @pytest.fixture(autouse=True)
     def _cleanup(self, pg):
         db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM orders WHERE production_order = %s", (self.ORDER,)
+            )
+            cur.execute(
+                "DELETE FROM upload_audit WHERE filename LIKE 'zztest_ingest%'"
+            )
+            conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM orders WHERE production_order = %s", (self.ORDER,)
             )
             cur.execute(
-                "DELETE FROM upload_audit WHERE filename LIKE 'zztest_ingest%%'"
+                "DELETE FROM upload_audit WHERE filename LIKE 'zztest_ingest%'"
             )
             conn.commit()
 
@@ -152,6 +160,15 @@ class TestIngestBomFromExcelRealDb:
                 "DELETE FROM materials WHERE material_id IN (%s, %s)",
                 (self.MATERIAL, self.COMPONENT),
             )
+            # master_data.ingest_bom_from_excel's bulk_apply() call writes an
+            # admin_audit row (table_name='bom_items', action='bulk_apply',
+            # user_email=<the ingest caller>) on every run -- scoped narrowly
+            # to this test's own actor so real audit history is untouched.
+            cur.execute(
+                "DELETE FROM admin_audit WHERE table_name = %s AND action = %s"
+                " AND user_email = %s",
+                ("bom_items", "bulk_apply", "tester@example.com"),
+            )
             conn.commit()
 
     def test_valid_row_inserts_and_unknown_pair_is_rejected_not_hard_failed(self, pg):
@@ -215,11 +232,39 @@ class TestPurgeOrdersByDateRealDb:
             conn.commit()
 
     def test_deletes_only_rows_in_range_by_effective_end_date(self, pg):
+        """db.purge_orders_by_date is a bare, unscoped DELETE ... WHERE
+        COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s -- by
+        design, no id/plant filter (see db.py:1242). Run against a real,
+        possibly shared database, that means a date window that happens to
+        match OTHER real rows would silently mass-delete them and this test
+        would still pass (it only checked status/>=1). So before each
+        destructive call we assert exactly how many rows the window will
+        touch and refuse to proceed if it's not exactly what this test
+        expects -- loudly, via pytest.fail, rather than letting the purge
+        run against unknown data."""
         db_ = pg
+
+        def _matching_count(start, end):
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM orders WHERE "
+                    "COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s",
+                    (start, end),
+                )
+                (count,) = cur.fetchone()
+            return count
+
         out_of_range_start = self.finish + dt.timedelta(days=30)
         out_of_range_end = self.finish + dt.timedelta(days=31)
+        pre_miss = _matching_count(out_of_range_start, out_of_range_end)
+        if pre_miss != 0:
+            pytest.fail(
+                f"expected 0 matching rows before purge, found {pre_miss} -- "
+                "refusing to run a destructive purge that would delete unrelated data"
+            )
         result_miss = db_.purge_orders_by_date(out_of_range_start, out_of_range_end)
         assert result_miss["status"] == "ok"
+        assert result_miss["deleted"] == 0
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self.oid,))
             (still_there,) = cur.fetchone()
@@ -227,9 +272,15 @@ class TestPurgeOrdersByDateRealDb:
 
         in_range_start = self.finish - dt.timedelta(days=1)
         in_range_end = self.finish + dt.timedelta(days=1)
+        pre_hit = _matching_count(in_range_start, in_range_end)
+        if pre_hit != 1:
+            pytest.fail(
+                f"expected 1 matching row (the sentinel) before purge, found {pre_hit} -- "
+                "refusing to run a destructive purge that would delete unrelated data"
+            )
         result_hit = db_.purge_orders_by_date(in_range_start, in_range_end)
         assert result_hit["status"] == "ok"
-        assert result_hit["deleted"] >= 1
+        assert result_hit["deleted"] == 1
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self.oid,))
             (gone,) = cur.fetchone()
