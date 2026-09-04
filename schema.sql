@@ -337,6 +337,23 @@ CREATE TABLE IF NOT EXISTS workcenter_mapping (
     PRIMARY KEY (plant, machine)
 );
 
+-- column_metadata: display labels + whether a column is a locked key column.
+-- System columns (created_at, updated_at) are never inserted here — the
+-- backend filters them out before returning column lists to the UI.
+-- Moved here (was originally declared much further down, after several
+-- INSERT INTO column_metadata statements that ran before it — a fresh-
+-- bootstrap "relation does not exist" regression caught by
+-- scripts/schema_bootstrap_smoke.py) so every later INSERT INTO
+-- column_metadata in this file has the table available.
+CREATE TABLE IF NOT EXISTS column_metadata (
+    table_name      TEXT NOT NULL,
+    column_name     TEXT NOT NULL,
+    display_label   TEXT NOT NULL,
+    is_locked       BOOLEAN NOT NULL DEFAULT FALSE,
+    column_order    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (table_name, column_name)
+);
+
 INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
     ('workcenter_mapping', 'plant',          'Plant',            TRUE,  1),
     ('workcenter_mapping', 'machine',        'Machine',          TRUE,  2),
@@ -475,18 +492,6 @@ CREATE TABLE IF NOT EXISTS bom_items (
 );
 CREATE INDEX IF NOT EXISTS idx_bom_items_material_plant ON bom_items(material_id, plant);
 CREATE INDEX IF NOT EXISTS idx_bom_items_component_plant ON bom_items(component_id, plant);
-
--- column_metadata: display labels + whether a column is a locked key column.
--- System columns (created_at, updated_at) are never inserted here — the
--- backend filters them out before returning column lists to the UI.
-CREATE TABLE IF NOT EXISTS column_metadata (
-    table_name      TEXT NOT NULL,
-    column_name     TEXT NOT NULL,
-    display_label   TEXT NOT NULL,
-    is_locked       BOOLEAN NOT NULL DEFAULT FALSE,
-    column_order    INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (table_name, column_name)
-);
 
 -- admin_audit: every DDL change (add/drop/rename column) and bulk data
 -- operation writes one row here for compliance and troubleshooting.
