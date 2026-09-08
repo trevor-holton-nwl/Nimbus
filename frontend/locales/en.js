@@ -334,6 +334,7 @@ window.__NIMBUS_LOCALES.en = {
 
   /* ── UI status / label strings ───────────────────────────────────────────── */
   'ui.dark_mode_on':                   'Dark mode on',
+  'ui.nav_aria_label':                 'Timeline navigator',
   'ui.light_mode_on':                  'Light mode on',
   'ui.hint_navigate':                  '↑↓ navigate',
   'ui.hint_select':                    '↵ select',

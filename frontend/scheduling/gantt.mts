@@ -32,6 +32,7 @@ import { Persistence } from './persistence.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
+import { Calendar } from '../calendar/calendar-engine.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -1468,222 +1469,718 @@ export const Timeline = {
 };
 
 /* =============================================================================
-   TIMELINE NAV — minimap strip above the Gantt showing schedule range with
-   utilization heat bands. Draggable viewport rect pans the main timeline.
+   TIMELINE NAV — pure geometry helpers (exported for tests; no DOM, no Store)
    ========================================================================== */
+export const NAV_MIN_H = 42;          // strip height floor (px) — matches #timeline-nav CSS min-height
+export const NAV_MAX_H = 72;          // strip height ceiling (px) — matches #timeline-nav CSS max-height
+export const NAV_LABEL_H = 12;        // bottom day-label scrim height (px)
+export const NAV_MIN_ROW_PX = 2;      // smallest legible per-line row; below this the strip switches to histogram mode
+export const NAV_ROW_TARGET_PX = 3;   // preferred per-line row height when the strip can grow
+
+export interface NavRange { startMs: number; endMs: number; dayStarts: number[] }
+export interface NavRangeInput {
+  dataMinMs: number | null; dataMaxMs: number | null;
+  windowStartMs: number; windowEndMs: number;
+  nowMs: number; horizonEndMs: number | null;
+}
+export type NavBarStyle = 'standard' | 'firmed' | 'conflict' | 'dimmed';
+export interface NavLayout { mode: 'rows' | 'histogram'; stripH: number; bodyH: number; rowH: number }
+
+function _navLocalMidnight(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function _navAddDays(ms: number, n: number): number {
+  const d = new Date(ms);
+  d.setDate(d.getDate() + n);
+  return d.getTime();
+}
+
+export function navComputeRange(i: NavRangeInput): NavRange {
+  const today = _navLocalMidnight(i.nowMs);
+  let lo = Math.min(i.dataMinMs ?? i.nowMs, today, i.windowStartMs);
+  lo = _navAddDays(_navLocalMidnight(lo), -1);
+
+  let hi = Math.max(i.dataMaxMs ?? i.nowMs, _navAddDays(today, 14), i.windowEndMs);
+  if (i.horizonEndMs != null) {
+    hi = Math.min(hi, i.horizonEndMs);
+    hi = Math.max(hi, i.windowEndMs);
+  }
+
+  let m = _navLocalMidnight(hi);
+  if (m < hi) m = _navAddDays(m, 1);
+  hi = m;
+
+  if (hi <= lo) hi = _navAddDays(lo, 1);
+
+  const dayStarts: number[] = [];
+  let d = lo;
+  while (d < hi && dayStarts.length < 800) {
+    dayStarts.push(d);
+    d = _navAddDays(d, 1);
+  }
+
+  return { startMs: lo, endMs: hi, dayStarts };
+}
+
+export function navLayout(lineCount: number): NavLayout {
+  const n = Math.max(0, Math.floor(lineCount));
+  const bodyAvail = NAV_MAX_H - NAV_LABEL_H;
+
+  if (n > 0 && n * NAV_MIN_ROW_PX > bodyAvail) {
+    return { mode: 'histogram', stripH: NAV_MIN_H, bodyH: NAV_MIN_H - NAV_LABEL_H, rowH: 0 };
+  }
+
+  const stripH = Math.min(NAV_MAX_H, Math.max(NAV_MIN_H, NAV_LABEL_H + n * NAV_ROW_TARGET_PX));
+  const bodyH = stripH - NAV_LABEL_H;
+  const rowH = n > 0 ? Math.floor(bodyH / n) : 0;
+  return { mode: 'rows', stripH, bodyH, rowH };
+}
+
+export function navBarStyle(className: string | undefined): NavBarStyle {
+  const cls = (className || '').split(/\s+/);
+  if (cls.includes('dimmed')) return 'dimmed';
+  if (cls.includes('conflict-order')) return 'conflict';
+  if (cls.includes('order-firmed')) return 'firmed';
+  return 'standard';
+}
+
+export function navClampRect(x1: number, x2: number, cssW: number): { x1: number; x2: number } {
+  if (x2 < x1) [x1, x2] = [x2, x1];
+  if (x2 <= 0) return { x1: 0, x2: 0 };
+  if (x1 >= cssW) return { x1: cssW, x2: cssW };
+  return { x1: Math.max(0, x1), x2: Math.min(cssW, x2) };
+}
+
+/* =============================================================================
+   TIMELINE NAV — minimap strip above the Gantt. A faithful *projection* of
+   Timeline._items + Timeline._visibleLines(): same bars (order/order-segment,
+   including split-order segments), same row order, same firmed/conflict/
+   dimmed className state the Gantt renders — this module never re-derives
+   the task/line filter chain itself, it only reads what Timeline already
+   built. Repaints are rAF-coalesced through a single _frame() (same
+   precedent as Timeline._scheduleRebuild) so a pan or a burst of Store
+   events produces at most one repaint per animation frame instead of one
+   per event/frame.
+
+   Two rules on the `Timeline._items.on('*')` subscriber, both load-bearing:
+     - skip an event when every changed id resolves to kind:'zone' — the 1s
+       live ticker (Timeline.init's setInterval, ~line 291) advances the
+       past-zone/alert-horizon-zone/frozen-horizon-zone bands every second,
+       none of which this minimap ever draws, so reacting to it would
+       repaint the strip once a second for no visible reason;
+     - never gate on Timeline._suppressEvents — GanttFilter._doApply sets
+       that flag around exactly the className dim/undim batch update this
+       subscriber exists to catch (a pure className patch fires no Store
+       event at all), so skipping while it's set would make the nav miss
+       every color/form/PO-MAT filter toggle.
+
+   The viewport rect is painted as a scrim *outside* the window (not a rect
+   drawn on top of it) with a plain --fg stroke — deliberately not --accent,
+   which is the same hex as --bar-standard in light mode and would visually
+   merge with a standard order bar sitting under the window's edge.
+
+   Pure geometry (navComputeRange/navLayout/navBarStyle/navClampRect) lives
+   just above this block and is exported for tests; everything below is the
+   stateful controller that calls those helpers once per frame.
+   ========================================================================== */
+interface _NavBarModel {
+  rowIdx: number;
+  startMs: number;
+  endMs: number;
+  style: NavBarStyle;
+  firmed: boolean;   // independent of `style` — a conflict bar still needs to know its base color
+}
+interface _NavBlackoutModel {
+  rowIdx: number | 'all';
+  startMs: number;
+  endMs: number;
+}
+interface _NavTheme {
+  bg: string; closedFill: string; warnFill: string; errFill: string;
+  barStandard: string; barFirmed: string; dimFill: string; dividerColor: string;
+  labelScrim: string; labelText: string; fontMono: string; accent: string; fg: string;
+}
+interface _NavModel {
+  range: NavRange;
+  layout: NavLayout;
+  bars: _NavBarModel[];
+  blackouts: _NavBlackoutModel[];
+  alertByDay: Map<number, 'warn' | 'err'>;   // key = index into range.dayStarts
+  closedDay: boolean[];                       // parallel to range.dayStarts
+  histAll: Float64Array | null;               // histogram mode only — share of rows busy per day
+  histActive: Float64Array | null;            // same, excluding dimmed bars
+  nowMs: number;
+  theme: _NavTheme;
+}
+interface _NavGesture {
+  pointerId: number;
+  startX: number;
+  startWin: TimelineWindowMs;
+  moved: boolean;
+}
+
 export const TimelineNav = {
-  _canvas: null as HTMLCanvasElement | null,
-  _ctx:    null as CanvasRenderingContext2D | null,
-  _dragging: false,
-  _dragStartX: 0,
-  _dragStartRange: null as TimelineWindowMs | null,
+  _canvas:    null as HTMLCanvasElement | null,
+  _ctx:       null as CanvasRenderingContext2D | null,
+  _container: null as HTMLElement | null,
+  _dirty:     true,
+  _rafId:     null as number | null,
+  _model:     null as _NavModel | null,
+  _lastCssW:  0,
+  _lastCssH:  0,
+  _lastDpr:   0,
+  _itemsSubAttached: false,
+  _tlHooked:  false,
   _unsubStore: null as (() => void) | null,
+  _resizeObserver: null as ResizeObserver | null,
+  _tickInterval: null as ReturnType<typeof setInterval> | null,
+  _gesture:     null as _NavGesture | null,
+  _frozenRange: null as NavRange | null,
 
   init(): void {
+    if (TimelineNav._canvas) return; // idempotent — never double-wire listeners/intervals
     const el = document.getElementById('timeline-nav');
     if (!el) return;
+    TimelineNav._container = el;
     const canvas = document.createElement('canvas');
-    canvas.style.cssText = 'width:100%;height:100%;display:block;cursor:pointer;';
+    canvas.setAttribute('aria-label', Util.t('ui.nav_aria_label'));
     el.appendChild(canvas);
     TimelineNav._canvas = canvas;
     TimelineNav._ctx    = canvas.getContext('2d');
 
-    // Pan by dragging the viewport rect
-    canvas.addEventListener('mousedown', e => {
-      if (!Timeline._tl) return;
-      TimelineNav._dragging = true;
-      TimelineNav._dragStartX = e.offsetX;
-      const w = Timeline._tl.getWindow();
-      TimelineNav._dragStartRange = { start: w.start.getTime(), end: w.end.getTime() };
-      e.preventDefault();
-    });
-    window.addEventListener('mousemove', e => {
-      if (!TimelineNav._dragging || !Timeline._tl) return;
-      const { scheduleMin, scheduleMax, pixelW } = TimelineNav._scheduleRange();
-      if (!scheduleMin) return;
-      const totalMs = scheduleMax! - scheduleMin;
-      const msPerPx = totalMs / pixelW!;
-      const dx = e.clientX - canvas.getBoundingClientRect().left - TimelineNav._dragStartX;
-      const shift = dx * msPerPx;
-      const r = TimelineNav._dragStartRange!;
-      Timeline._tl.setWindow(new Date(r.start + shift), new Date(r.end + shift));
-    });
-    window.addEventListener('mouseup', () => { TimelineNav._dragging = false; });
+    TimelineNav._wirePointerEvents(canvas);
+    TimelineNav._wireTimelineHooks();
 
-    // Click to center on click position
-    canvas.addEventListener('click', e => {
-      if (!Timeline._tl) return;
-      const { scheduleMin, scheduleMax, pixelW } = TimelineNav._scheduleRange();
-      if (!scheduleMin) return;
-      const totalMs = scheduleMax! - scheduleMin;
-      const clickMs = scheduleMin + (e.offsetX / pixelW!) * totalMs;
-      const w = Timeline._tl.getWindow();
-      const halfSpan = (w.end.getTime() - w.start.getTime()) / 2;
-      Timeline._tl.setWindow(new Date(clickMs - halfSpan), new Date(clickMs + halfSpan),
-        { animation: { duration: 200 } });
-    });
-
-    // Re-render on timeline range changes
-    if (Timeline._tl) {
-      Timeline._tl.on('rangechanged', () => TimelineNav.render());
-      Timeline._tl.on('rangechange',  () => TimelineNav.render());
-    }
-
-    // Re-render when store changes
     TimelineNav._unsubStore = Store.subscribe(evt => {
-      if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
-          || evt.type === 'task:update' || evt.type === 'calendar:change'
-          || evt.type === 'blocks:change' || evt.type === 'alerts:change') {
-        setTimeout(() => TimelineNav.render(), 50);
+      switch (evt.type) {
+        case 'lines:selected':
+        case 'plant:selected':
+        case 'alerts:change':
+        case 'blocks:change':
+        case 'plantBlocks:change':
+        case 'calendar:change':
+        case 'settings:change':
+        case 'tasks:bulk':
+          TimelineNav._dirty = true;
+          TimelineNav._scheduleFrame();
+          break;
+        default: break;
       }
     }, 'TimelineNav');
 
-    window.addEventListener('resize', Util.debounce(() => TimelineNav.render(), 100));
-    setTimeout(() => TimelineNav.render(), 200);
-  },
+    if (typeof ResizeObserver !== 'undefined') {
+      TimelineNav._resizeObserver = new ResizeObserver(() => TimelineNav._scheduleFrame());
+      TimelineNav._resizeObserver.observe(el);
+    } else {
+      window.addEventListener('resize', Util.debounce(() => TimelineNav.render(), 100));
+    }
 
-  _scheduleRange(): { scheduleMin?: number; scheduleMax?: number; pixelW?: number } {
-    const el = TimelineNav._canvas;
-    if (!el) return {};
-    const rect = el.getBoundingClientRect();
-    const pixelW = rect.width || el.offsetWidth || 800;
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const scheduleMin = today.getTime();
-    // C1 (2026-08-20 convention, OD-C1d/e): cap the future edge at the plant
-    // visibility horizon when one is set — same bound Timeline.rebuild() applies
-    // to the Gantt's `max` option, so the minimap can't imply a scrollable range
-    // past the point orders actually stop appearing. scheduleMin is left alone;
-    // only the future edge is ever bounded.
-    const horizon = Store.visibilityHorizonEnd?.getTime();
-    const scheduleMax = Math.min(scheduleMin + 42 * Config.MS_DAY, horizon ?? Infinity);
-    return { scheduleMin, scheduleMax, pixelW };
+    // Now-marker advance — skip while the tab is backgrounded (mirrors the
+    // live ticker's own document.hidden guard at ~line 292).
+    TimelineNav._tickInterval = setInterval(() => {
+      if (document.hidden) return;
+      TimelineNav._scheduleFrame();
+    }, 60_000);
+
+    TimelineNav._dirty = true;
+    TimelineNav._scheduleFrame();
   },
 
   render(): void {
-    const canvas = TimelineNav._canvas;
-    if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.offsetWidth  || 800;
-    const cssH = canvas.offsetHeight || 42;
-    canvas.width  = cssW * dpr;
-    canvas.height = cssH * dpr;
-    const ctx = TimelineNav._ctx!;
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, cssW, cssH);
+    TimelineNav._dirty = true;
+    TimelineNav._scheduleFrame();
+  },
 
-    // Scope to the selected plant (R17) so the nav strip draws only the current
-    // plant's orders, not every plant's. Phase 3 (Pkg E): the utilization
-    // heat-band below (computeMatrix) is now scoped the same way via
-    // srcTasks, instead of recomputing a global, all-plant matrix.
-    const tasks = (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])
-      .filter(t => t.start_date && t.end_date);
-    if (!tasks.length || !Timeline._tl) return;
+  _scheduleFrame(): void {
+    if (TimelineNav._rafId != null) return;
+    TimelineNav._rafId = requestAnimationFrame(() => {
+      TimelineNav._rafId = null;
+      TimelineNav._frame();
+    });
+  },
 
-    // Share the horizon-capped range with the drag/click math (one source of truth).
-    const { scheduleMin, scheduleMax } = TimelineNav._scheduleRange();
-    if (scheduleMin == null || scheduleMax == null) return;
-    const totalMs = scheduleMax - scheduleMin;
-    if (totalMs <= 0) return;
-
-    const toX = (ms: number): number => ((ms - scheduleMin) / totalMs) * cssW;
-
-    const isDark = document.body.classList.contains('dark');
-    // Command Band re-skin (Task 6): this minimap renders in the content area
-    // (isDark tracks the user's own Dark Mode toggle, not the always-dark chrome
-    // band), so backgrounds/dividers repoint toward the light/dark *content*
-    // neutrals (--bg-subtle/--line/--fg), not --chrome-*. Dark-branch literals
-    // that already matched a neutral (cool, non-amber) dark token are left as-is.
-    const navBg        = isDark ? '#1c1d26' : '#f4f7fa';
-    const navDivider   = isDark ? 'rgba(140,142,160,0.30)' : 'rgba(213,220,228,0.6)';
-    const navLabelScrim = isDark ? 'rgba(25,26,34,0.85)'  : 'rgba(244,247,250,0.82)';
-    const navLabelText = isDark ? 'rgba(237,235,227,0.88)' : 'rgba(28,43,58,0.88)';
-    const navWindow    = isDark ? '#4d9fff' : '#ff0033';
-
-    // Background
-    ctx.fillStyle = navBg;
-    ctx.fillRect(0, 0, cssW, cssH);
-
-    // Alert-severity day bands — worst alert per day, same source as the Gantt's
-    // alertcell background items (Store.alerts already excludes dismissed alerts),
-    // replacing the old utilization heat bands (overload/near-capacity are alert
-    // types themselves, so capacity trouble still surfaces here).
-    const plantLines = new Set(tasks.map(t => t.MACHINE || 'Unknown'));
-    const worstByDay: Record<string, 'warn' | 'err'> = {};
-    for (const a of Store.alerts) {
-      if (!a.line || !a.time || !plantLines.has(a.line)) continue;
-      const at = a.time.getTime();
-      if (at < scheduleMin || at >= scheduleMax) continue;
-      const dk = Util.dayKey(a.time);
-      if (a.sev === 'err' || !worstByDay[dk]) worstByDay[dk] = a.sev;
+  // Timeline.init() runs before TimelineNav.init() (app.js boot order), but
+  // retry across a handful of frames anyway rather than assume it — same
+  // bounded-retry precedent as Timeline.gotoLineDay's scrollToLine loop
+  // (~line 1460).
+  _wireTimelineHooks(): void {
+    if (TimelineNav._tlHooked) return;
+    if (!Timeline._tl) {
+      let attempts = 0;
+      const MAX_ATTEMPTS = 20;
+      const tryHook = (): void => {
+        if (Timeline._tl) { TimelineNav._wireTimelineHooks(); return; }
+        if (++attempts < MAX_ATTEMPTS) requestAnimationFrame(tryHook);
+      };
+      requestAnimationFrame(tryHook);
+      return;
     }
-    const SEV_COLORS: Record<'warn' | 'err', string> = { warn: 'rgba(147,97,10,0.40)', err: 'rgba(176,42,32,0.55)' };
-    for (const [dk, sev] of Object.entries(worstByDay)) {
-      const dayStart = new Date(dk + 'T00:00:00').getTime();
-      const x1 = Math.max(0, toX(dayStart));
-      const x2 = Math.min(cssW, toX(dayStart + Config.MS_DAY));
-      ctx.fillStyle = SEV_COLORS[sev];
-      ctx.fillRect(x1, 0, x2 - x1, cssH);
-    }
+    TimelineNav._tlHooked = true;
+    Timeline._tl.on('rangechange',  () => TimelineNav._scheduleFrame());
+    Timeline._tl.on('rangechanged', () => TimelineNav._scheduleFrame());
+  },
 
-    // Day dividers — snap to local midnight so labels match vis-timeline's local-time headers
-    const dayMs = Config.MS_DAY;
-    const _firstDayLocal = new Date(scheduleMin);
-    _firstDayLocal.setHours(0, 0, 0, 0);
-    const firstDay = _firstDayLocal.getTime();
-    ctx.strokeStyle = navDivider;
-    ctx.lineWidth = 0.5;
-    for (let d = firstDay; d < scheduleMax; d += dayMs) {
-      const x = toX(d);
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, cssH); ctx.stroke();
-    }
+  // Attached lazily the first time _frame() sees Timeline._items non-null —
+  // Timeline._items is created inside Timeline.init(), so this can't be
+  // wired eagerly at TimelineNav.init() time with certainty either.
+  _wireItemsSubscription(): void {
+    if (TimelineNav._itemsSubAttached || !Timeline._items) return;
+    TimelineNav._itemsSubAttached = true;
+    Timeline._items.on('*', (ev, props) => {
+      if (ev !== 'remove') {
+        const ids = props?.items ?? [];
+        const allZone = ids.length > 0 && ids.every(id => {
+          const item = Timeline._items!.get(id) as TimelineVisItem | null;
+          return item != null && item.kind === 'zone';
+        });
+        if (allZone) return;
+      }
+      TimelineNav._dirty = true;
+      TimelineNav._scheduleFrame();
+    });
+  },
 
-    // Order blocks (tiny)
-    const lineColors: Record<string, string> = {};
-    tasks.forEach(t => {
-      const line = t.MACHINE || 'Unknown';
-      if (!lineColors[line]) {
-        const ci = Timeline._colorIndex(line);
-        lineColors[line] = Config.COLORS[ci % Config.COLORS.length];
+  _wirePointerEvents(canvas: HTMLCanvasElement): void {
+    canvas.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.button !== 0 || !Timeline._tl) return;
+      const w = Timeline._tl.getWindow();
+      TimelineNav._frozenRange = TimelineNav._model?.range ?? null;
+      TimelineNav._gesture = {
+        pointerId: e.pointerId,
+        startX: e.offsetX,
+        startWin: { start: w.start.getTime(), end: w.end.getTime() },
+        moved: false,
+      };
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      e.preventDefault();
+      canvas.style.cursor = 'grabbing';
+    });
+
+    canvas.addEventListener('pointermove', (e: PointerEvent) => {
+      const g = TimelineNav._gesture;
+      if (g && g.pointerId === e.pointerId) {
+        const dx = e.offsetX - g.startX;
+        if (!g.moved && Math.abs(dx) < 3) return;
+        g.moved = true;
+        if (!Timeline._tl) return;
+        const range = TimelineNav._frozenRange ?? TimelineNav._model?.range ?? null;
+        if (!range) return;
+        const cssW = canvas.offsetWidth || 1;
+        const msPerPx = (range.endMs - range.startMs) / cssW;
+        Timeline._tl.setWindow(new Date(g.startWin.start + dx * msPerPx), new Date(g.startWin.end + dx * msPerPx));
+        return;
+      }
+      // Hover (no active gesture): native-tooltip date + grab/pointer cursor.
+      const range = TimelineNav._model?.range ?? null;
+      if (!range) return;
+      const cssW = canvas.offsetWidth || 1;
+      const ms = range.startMs + (e.offsetX / cssW) * (range.endMs - range.startMs);
+      try { canvas.title = Util._fmtDatePref(new Date(ms)); } catch { canvas.title = new Date(ms).toLocaleDateString(); }
+      if (Timeline._tl) {
+        const win = Timeline._tl.getWindow();
+        const totalMs = (range.endMs - range.startMs) || 1;
+        const x1raw = ((win.start.getTime() - range.startMs) / totalMs) * cssW;
+        const x2raw = ((win.end.getTime()   - range.startMs) / totalMs) * cssW;
+        const { x1, x2 } = navClampRect(x1raw, x2raw, cssW);
+        canvas.style.cursor = (e.offsetX >= x1 && e.offsetX <= x2) ? 'grab' : 'pointer';
       }
     });
-    const lineArr = [...new Set(tasks.map(t => t.MACHINE || 'Unknown'))].sort();
-    const lineH = Math.max(2, Math.floor(cssH / (lineArr.length || 1)));
-    tasks.forEach(t => {
-      const li = lineArr.indexOf(t.MACHINE || 'Unknown');
-      const x1 = toX(t.start_date!.getTime());
-      const x2 = toX(t.end_date!.getTime());
-      const y  = li * lineH;
-      ctx.fillStyle = lineColors[t.MACHINE || 'Unknown'] + 'cc';
-      ctx.fillRect(x1, y, Math.max(1, x2 - x1), lineH);
-    });
 
-    // Day labels — bottom 12px strip with a light scrim for readability
-    const LABEL_H = 12;
-    ctx.fillStyle = navLabelScrim;
-    ctx.fillRect(0, cssH - LABEL_H, cssW, LABEL_H);
-    const dayPxW = (dayMs / totalMs) * cssW;
-    const labelStep = Math.max(1, Math.ceil(30 / Math.max(1, dayPxW)));
-    ctx.fillStyle = navLabelText;
-    ctx.font = '9px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    for (let d = firstDay; d < scheduleMax; d += dayMs * labelStep) {
-      const labelX = toX(d + (dayMs * labelStep) / 2);
-      if (labelX < 4 || labelX > cssW - 4) continue;
-      const dt = new Date(d);
-      ctx.fillText(`${dt.getMonth() + 1}/${dt.getDate()}`, labelX, cssH - 2);
+    // Structurally removes the old "drag ends with a recenter jump" bug and
+    // the stuck-_dragging hazard: a gesture that never crossed the 3px
+    // threshold recenters on release; one that did just... stops, wherever
+    // the drag left the window.
+    const endGesture = (e: PointerEvent): void => {
+      const g = TimelineNav._gesture;
+      if (!g || g.pointerId !== e.pointerId) return;
+      if (!g.moved && Timeline._tl) {
+        const range = TimelineNav._frozenRange ?? TimelineNav._model?.range ?? null;
+        if (range) {
+          const cssW = canvas.offsetWidth || 1;
+          const c = range.startMs + (e.offsetX / cssW) * (range.endMs - range.startMs);
+          const win = Timeline._tl.getWindow();
+          const half = (win.end.getTime() - win.start.getTime()) / 2;
+          Timeline._tl.setWindow(new Date(c - half), new Date(c + half), { animation: { duration: 150 } });
+        }
+      }
+      TimelineNav._gesture = null;
+      TimelineNav._frozenRange = null;
+      TimelineNav._dirty = true;
+      TimelineNav._scheduleFrame();
+      canvas.style.cursor = 'pointer';
+    };
+    canvas.addEventListener('pointerup', endGesture);
+    canvas.addEventListener('pointercancel', endGesture);
+    canvas.addEventListener('lostpointercapture', endGesture);
+    canvas.addEventListener('pointerleave', () => { canvas.title = ''; });
+  },
+
+  _frame(): void {
+    const canvas = TimelineNav._canvas;
+    if (!canvas || !TimelineNav._ctx || canvas.offsetWidth === 0) return; // tab hidden — _dirty stays set for the next wake
+    TimelineNav._wireItemsSubscription();
+
+    const win = Timeline._tl ? Timeline._tl.getWindow() : null;
+    const leftRange = !!(win && TimelineNav._model && !TimelineNav._gesture &&
+      (win.start.getTime() < TimelineNav._model.range.startMs || win.end.getTime() > TimelineNav._model.range.endMs));
+
+    if (TimelineNav._dirty || !TimelineNav._model || leftRange) {
+      TimelineNav._dirty = false;
+      TimelineNav._model = TimelineNav._collect();
     }
 
-    // Viewport window rect
-    const win = Timeline._tl.getWindow();
-    const vx1 = Math.max(0, toX(win.start.getTime()));
-    const vx2 = Math.min(cssW, toX(win.end.getTime()));
-    ctx.strokeStyle = navWindow;
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(vx1, 0, vx2 - vx1, cssH);
+    const model = TimelineNav._model!;
+    const container = TimelineNav._container;
+    if (container && Math.round(container.getBoundingClientRect().height) !== model.layout.stripH) {
+      container.style.height = model.layout.stripH + 'px';
+      Timeline.redraw();
+    }
 
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }
+    TimelineNav._ensureSize();
+    TimelineNav._paint(model);
+  },
+
+  _ensureSize(): void {
+    const canvas = TimelineNav._canvas!;
+    const ctx    = TimelineNav._ctx!;
+    const dpr  = window.devicePixelRatio || 1;
+    const cssW = canvas.offsetWidth  || 1;
+    const cssH = canvas.offsetHeight || NAV_MIN_H;
+    if (cssW !== TimelineNav._lastCssW || cssH !== TimelineNav._lastCssH || dpr !== TimelineNav._lastDpr) {
+      canvas.width  = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+      TimelineNav._lastCssW = cssW;
+      TimelineNav._lastCssH = cssH;
+      TimelineNav._lastDpr  = dpr;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  },
+
+  _dayIndexFor(ms: number, dayStarts: number[]): number {
+    let lo = 0, hi = dayStarts.length - 1, ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (dayStarts[mid] <= ms) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return ans;
+  },
+
+  _dayMonthOrder(): 'D/M' | 'M/D' {
+    try {
+      const tok = Util._dateFormatPref();
+      const firstOf = (chars: string): number => {
+        for (let i = 0; i < tok.length; i++) if (chars.includes(tok[i])) return i;
+        return -1;
+      };
+      const dIdx = firstOf('dj');
+      const mIdx = firstOf('mnMF');
+      if (dIdx >= 0 && (mIdx < 0 || dIdx < mIdx)) return 'D/M';
+      return 'M/D';
+    } catch { return 'M/D'; }
+  },
+
+  _collect(): _NavModel {
+    const lines = Timeline._visibleLines();
+    const rowOf = new Map<string, number>();
+    lines.forEach((l, i) => rowOf.set(l, i));
+    const rowCount = lines.length;
+
+    const raw = Timeline._items ? Timeline._items.get() : null;
+    const items: TimelineVisItem[] = Array.isArray(raw) ? raw : [];
+
+    const bars: _NavBarModel[] = [];
+    const blackouts: _NavBlackoutModel[] = [];
+    let dataMinMs: number | null = null, dataMaxMs: number | null = null;
+
+    for (const item of items) {
+      if (item.kind === 'order' || item.kind === 'order-segment') {
+        const g = item.group;
+        if (g == null || !rowOf.has(g)) continue;
+        const startMs = item.start.getTime(), endMs = item.end.getTime();
+        const cls = (item.className || '').split(/\s+/);
+        bars.push({
+          rowIdx: rowOf.get(g)!,
+          startMs, endMs,
+          style: navBarStyle(item.className),
+          firmed: cls.includes('order-firmed'),
+        });
+        if (dataMinMs == null || startMs < dataMinMs) dataMinMs = startMs;
+        if (dataMaxMs == null || endMs   > dataMaxMs) dataMaxMs = endMs;
+      } else if (item.kind === 'blackout') {
+        const g = item.group;
+        const rowIdx: number | 'all' = (g != null && rowOf.has(g)) ? rowOf.get(g)! : 'all';
+        blackouts.push({ rowIdx, startMs: item.start.getTime(), endMs: item.end.getTime() });
+      }
+      // 'zone' and 'setup' items are never projected onto the minimap.
+    }
+
+    const nowMs = Date.now();
+    const win = Timeline._tl ? Timeline._tl.getWindow() : null;
+    const windowStartMs = win ? win.start.getTime() : nowMs;
+    const windowEndMs   = win ? win.end.getTime()   : nowMs;
+    const horizonEndMs  = Store.visibilityHorizonEnd?.getTime() ?? null;
+
+    // While a drag gesture is active, reuse the range frozen at pointerdown
+    // instead of recomputing — an unrelated Store event landing mid-drag
+    // (e.g. a background alerts recompute) must not shift the range under
+    // the user's hand.
+    const range = (TimelineNav._gesture && TimelineNav._frozenRange)
+      ? TimelineNav._frozenRange
+      : navComputeRange({ dataMinMs, dataMaxMs, windowStartMs, windowEndMs, nowMs, horizonEndMs });
+
+    const layout = navLayout(rowCount);
+
+    const alertByDay = new Map<number, 'warn' | 'err'>();
+    for (const a of Store.alerts) {
+      if (!a.line || !rowOf.has(a.line)) continue;
+      const t = a.time.getTime();
+      if (t < range.startMs || t >= range.endMs) continue;
+      const day = TimelineNav._dayIndexFor(t, range.dayStarts);
+      if (day < 0) continue;
+      if (a.sev === 'err' || !alertByDay.has(day)) alertByDay.set(day, a.sev);
+    }
+
+    // A day is closed only when NO visible line has a work window — early
+    // exit on the first open line, so the typical cost is one call per day.
+    const closedDay: boolean[] = new Array(range.dayStarts.length).fill(true);
+    for (let i = 0; i < range.dayStarts.length; i++) {
+      for (const line of lines) {
+        try {
+          if (Calendar.workWindow(line, new Date(range.dayStarts[i])) !== null) { closedDay[i] = false; break; }
+        } catch { closedDay[i] = false; break; } // treat as open on error
+      }
+    }
+
+    let histAll: Float64Array | null = null;
+    let histActive: Float64Array | null = null;
+    if (layout.mode === 'histogram' && rowCount > 0 && range.dayStarts.length > 0) {
+      const dayCount = range.dayStarts.length;
+      const bmpAll    = new Uint8Array(dayCount * rowCount);
+      const bmpActive = new Uint8Array(dayCount * rowCount);
+      for (const bar of bars) {
+        let day = TimelineNav._dayIndexFor(Math.max(bar.startMs, range.startMs), range.dayStarts);
+        if (day < 0) day = 0;
+        while (day < dayCount && range.dayStarts[day] < bar.endMs) {
+          const idx = day * rowCount + bar.rowIdx;
+          bmpAll[idx] = 1;
+          if (bar.style !== 'dimmed') bmpActive[idx] = 1;
+          day++;
+        }
+      }
+      histAll = new Float64Array(dayCount);
+      histActive = new Float64Array(dayCount);
+      for (let d = 0; d < dayCount; d++) {
+        let sa = 0, sc = 0;
+        const base = d * rowCount;
+        for (let r = 0; r < rowCount; r++) { sa += bmpAll[base + r]; sc += bmpActive[base + r]; }
+        histAll[d]    = sa / rowCount;
+        histActive[d] = sc / rowCount;
+      }
+    }
+
+    return { range, layout, bars, blackouts, alertByDay, closedDay, histAll, histActive, nowMs, theme: TimelineNav._readTheme() };
+  },
+
+  // Copy of Dashboard._cssVar (insights-ui.mts) — not imported, to avoid a
+  // cross-domain edge for a 3-line helper; canvas can't use CSS var() so
+  // colors are read from the real custom properties once per paint.
+  _cssVar(name: string, fallback: string): string {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  },
+
+  _readTheme(): _NavTheme {
+    // Read once per data repaint (when _dirty) and cached on the model — never per frame; render() marks dirty so DarkMode's repaint hook still re-reads.
+    return {
+      bg: TimelineNav._cssVar('--bg-subtle', '#f4f7fa'),
+      closedFill: TimelineNav._cssVar('--fg-faint', '#7d8da0'),
+      warnFill: TimelineNav._cssVar('--warn', '#93610a'),
+      errFill: TimelineNav._cssVar('--err', '#b02a20'),
+      barStandard: TimelineNav._cssVar('--bar-standard', '#1f5fbf'),
+      barFirmed: TimelineNav._cssVar('--bar-firmed', '#b02a20'),
+      dimFill: TimelineNav._cssVar('--fg-faint', '#7d8da0'),
+      dividerColor: TimelineNav._cssVar('--line', '#d5dce4'),
+      labelScrim: TimelineNav._cssVar('--bg-subtle', '#f4f7fa'),
+      labelText: TimelineNav._cssVar('--fg-mute', '#5b6b7c'),
+      fontMono: TimelineNav._cssVar('--font-mono', '"JetBrains Mono", monospace'),
+      accent: TimelineNav._cssVar('--accent', '#1f5fbf'),
+      fg: TimelineNav._cssVar('--fg', '#1c2b3a'),
+    };
+  },
+
+  _paint(model: _NavModel): void {
+    const canvas = TimelineNav._canvas!;
+    const ctx    = TimelineNav._ctx!;
+    const cssW = canvas.offsetWidth  || 1;
+    const cssH = canvas.offsetHeight || NAV_MIN_H;
+    const { range, layout } = model;
+    const totalMs = (range.endMs - range.startMs) || 1;
+    const msToX = (ms: number): number => ((ms - range.startMs) / totalMs) * cssW;
+    const bodyH = layout.bodyH;
+
+    const theme = model.theme;
+
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    // 1. background
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    // 2. closed days
+    ctx.fillStyle = theme.closedFill;
+    ctx.globalAlpha = 0.12;
+    for (let i = 0; i < range.dayStarts.length; i++) {
+      if (!model.closedDay[i]) continue;
+      const d0 = range.dayStarts[i];
+      const d1 = i + 1 < range.dayStarts.length ? range.dayStarts[i + 1] : range.endMs;
+      const x1 = msToX(d0), x2 = msToX(d1);
+      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, bodyH);
+    }
+    ctx.globalAlpha = 1;
+
+    // 3. alert day bands
+    for (const [day, sev] of model.alertByDay) {
+      const d0 = range.dayStarts[day];
+      const d1 = day + 1 < range.dayStarts.length ? range.dayStarts[day + 1] : range.endMs;
+      const x1 = msToX(d0), x2 = msToX(d1);
+      if (x2 <= x1) continue;
+      ctx.globalAlpha = sev === 'err' ? 0.38 : 0.28;
+      ctx.fillStyle   = sev === 'err' ? theme.errFill : theme.warnFill;
+      ctx.fillRect(x1, 0, x2 - x1, bodyH);
+    }
+    ctx.globalAlpha = 1;
+
+    // 4. blackouts
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = theme.errFill;
+    for (const b of model.blackouts) {
+      const x1 = msToX(Math.max(b.startMs, range.startMs));
+      const x2 = msToX(Math.min(b.endMs, range.endMs));
+      if (x2 <= x1) continue;
+      if (layout.mode === 'histogram' || b.rowIdx === 'all') {
+        ctx.fillRect(x1, 0, x2 - x1, bodyH);
+      } else {
+        const y = b.rowIdx * layout.rowH;
+        ctx.fillRect(x1, y, x2 - x1, Math.max(1, layout.rowH));
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // 5. bars
+    if (layout.mode === 'rows') {
+      for (const bar of model.bars) {
+        const x1 = msToX(bar.startMs), x2 = msToX(bar.endMs);
+        const w = Math.max(1, x2 - x1);
+        const y = bar.rowIdx * layout.rowH;
+        const h = Math.max(1, layout.rowH);
+        const baseColor = bar.firmed ? theme.barFirmed : theme.barStandard;
+        if (bar.style === 'dimmed') {
+          ctx.globalAlpha = 0.35;
+          ctx.fillStyle = theme.dimFill;
+          ctx.fillRect(x1, y, w, h);
+        } else if (bar.style === 'conflict') {
+          if (layout.rowH >= 4) {
+            ctx.globalAlpha = 0.9;
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(x1, y, w, h);
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = theme.errFill;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x1 + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+          } else {
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = theme.errFill;
+            ctx.fillRect(x1, y, w, h);
+          }
+        } else {
+          ctx.globalAlpha = 0.9;
+          ctx.fillStyle = baseColor;
+          ctx.fillRect(x1, y, w, h);
+        }
+        ctx.globalAlpha = 1;
+      }
+    } else if (model.histAll && model.histActive) {
+      for (let d = 0; d < range.dayStarts.length; d++) {
+        const d0 = range.dayStarts[d];
+        const d1 = d + 1 < range.dayStarts.length ? range.dayStarts[d + 1] : range.endMs;
+        const x1 = msToX(d0), x2 = Math.max(x1 + 1, msToX(d1));
+        const allH    = model.histAll[d]    * bodyH;
+        const activeH = model.histActive[d] * bodyH;
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = theme.dimFill;
+        ctx.fillRect(x1, bodyH - allH, x2 - x1, allH);
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = theme.accent;
+        ctx.fillRect(x1, bodyH - activeH, x2 - x1, activeH);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // 6. day dividers
+    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = theme.dividerColor;
+    ctx.lineWidth = 0.5;
+    for (const d of range.dayStarts) {
+      const x = msToX(d);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, cssH); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // 7. label scrim + day labels
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = theme.labelScrim;
+    ctx.fillRect(0, cssH - NAV_LABEL_H, cssW, NAV_LABEL_H);
+    ctx.globalAlpha = 1;
+
+    const dayCount = range.dayStarts.length;
+    const dayPx = dayCount > 0 ? cssW / dayCount : cssW;
+    const STEPS = [1, 2, 3, 7, 14, 28];
+    const step = STEPS.find(s => s * dayPx >= 34) ?? STEPS[STEPS.length - 1];
+    const order = TimelineNav._dayMonthOrder();
+
+    ctx.fillStyle = theme.labelText;
+    ctx.font = `9px ${theme.fontMono}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    for (let i = 0; i < dayCount; i += step) {
+      const d0 = range.dayStarts[i];
+      const nextIdx = i + step;
+      const d1 = nextIdx < dayCount ? range.dayStarts[nextIdx] : range.endMs;
+      const labelX = msToX((d0 + d1) / 2);
+      if (labelX < 4 || labelX > cssW - 4) continue;
+      const dt = new Date(d0);
+      const mm = dt.getMonth() + 1, dd = dt.getDate();
+      ctx.fillText(order === 'D/M' ? `${dd}/${mm}` : `${mm}/${dd}`, labelX, cssH - 2);
+    }
+
+    // 8. now marker
+    const nowMs = Date.now();
+    if (nowMs >= range.startMs && nowMs <= range.endMs) {
+      ctx.fillStyle = theme.accent;
+      ctx.fillRect(msToX(nowMs), 0, 1, cssH);
+    }
+
+    // 9. viewport — scrim outside the window + a plain --fg outline on it
+    if (Timeline._tl) {
+      const win = Timeline._tl.getWindow();
+      const { x1, x2 } = navClampRect(msToX(win.start.getTime()), msToX(win.end.getTime()), cssW);
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = theme.fg;
+      if (x1 > 0) ctx.fillRect(0, 0, x1, cssH);
+      if (x2 < cssW) ctx.fillRect(x2, 0, cssW - x2, cssH);
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = theme.fg;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x1, 0.75, Math.max(0, x2 - x1), cssH - 1.5);
+      ctx.globalAlpha = 1;
+    }
+    // 10. empty state (no bars) falls through to here naturally — every
+    // step above runs unconditionally on the model, so background/dividers/
+    // labels/now-marker/viewport still paint instead of leaving a blank canvas.
+  },
 };
 
 /* =============================================================================

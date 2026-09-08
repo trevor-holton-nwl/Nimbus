@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect } from '../../../frontend/scheduling/gantt.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
@@ -473,6 +473,152 @@ test('delegated alert-cell click opens a real alert cell but leaves setup items 
 test('TimelineNav exposes init/render', () => {
   assert.equal(typeof TimelineNav.init, 'function');
   assert.equal(typeof TimelineNav.render, 'function');
+});
+
+// Helper for local-time test inputs: month is 0-based (0=January)
+const L = (y, m, d, h = 0, mi = 0) => new Date(y, m, d, h, mi).getTime();
+
+test('navComputeRange: no data → today-1d … today+14d, all local midnights', () => {
+  const now = L(2026, 8, 8, 10, 30); // Sep 8 2026 10:30 local
+  const windowStart = L(2026, 8, 10);
+  const windowEnd = L(2026, 8, 17);
+  const result = navComputeRange({
+    dataMinMs: null,
+    dataMaxMs: null,
+    windowStartMs: windowStart,
+    windowEndMs: windowEnd,
+    nowMs: now,
+    horizonEndMs: null,
+  });
+
+  assert.equal(result.startMs, L(2026, 8, 7), 'startMs should be Sep 7 (today-1d, ceiled to midnight)');
+  assert.equal(result.endMs, L(2026, 8, 22), 'endMs should be Sep 22 (today+14d, ceiled to next midnight)');
+  assert.equal(result.dayStarts.length, 15, 'should have 15 day entries');
+  assert.equal(result.dayStarts[0], result.startMs, 'first dayStart should equal startMs');
+
+  for (const dayStart of result.dayStarts) {
+    const d = new Date(dayStart);
+    assert.equal(d.getHours(), 0, `dayStart ${dayStart} must have hour 0`);
+    assert.equal(d.getMinutes(), 0, `dayStart ${dayStart} must have minute 0`);
+  }
+});
+
+test('navComputeRange: data widens both edges', () => {
+  const now = L(2026, 8, 8, 10, 30); // Sep 8 2026 10:30 local
+  const windowStart = L(2026, 8, 10);
+  const windowEnd = L(2026, 8, 17);
+  const dataMinMs = L(2026, 8, 1, 12); // Aug 1 12:00
+  const dataMaxMs = L(2026, 9, 10, 15); // Oct 10 15:00
+
+  const result = navComputeRange({
+    dataMinMs,
+    dataMaxMs,
+    windowStartMs: windowStart,
+    windowEndMs: windowEnd,
+    nowMs: now,
+    horizonEndMs: null,
+  });
+
+  assert.equal(result.startMs, L(2026, 7, 31), 'startMs should be Aug 31 (dataMin ceiled to prev midnight, then -1d)');
+  assert.equal(result.endMs, L(2026, 9, 11), 'endMs should be Oct 11 00:00 (dataMax ceiled to next midnight)');
+});
+
+test('navComputeRange: horizon caps the right edge but never below the window end', () => {
+  const now = L(2026, 8, 8, 10, 30); // Sep 8 2026 10:30 local
+  const horizonEndMs = L(2026, 8, 15); // Sep 15
+
+  // First case: window end is before horizon — result should be horizon
+  const result1 = navComputeRange({
+    dataMinMs: null,
+    dataMaxMs: null,
+    windowStartMs: L(2026, 8, 10),
+    windowEndMs: L(2026, 8, 17),
+    nowMs: now,
+    horizonEndMs,
+  });
+  assert.equal(result1.endMs, L(2026, 8, 17), 'endMs should be window end (Sep 17) because horizon (Sep 15) would be below window end');
+
+  // Second case: window end is after horizon — result should be capped at horizon
+  const result2 = navComputeRange({
+    dataMinMs: null,
+    dataMaxMs: null,
+    windowStartMs: L(2026, 8, 10),
+    windowEndMs: L(2026, 8, 12),
+    nowMs: now,
+    horizonEndMs,
+  });
+  assert.equal(result2.endMs, L(2026, 8, 15), 'endMs should be horizon (Sep 15) when horizon > window end');
+});
+
+test('navLayout: rows while they fit, histogram beyond 30 lines', () => {
+  const result10 = navLayout(10);
+  assert.deepEqual(result10, { mode: 'rows', stripH: 42, bodyH: 30, rowH: 3 },
+    'navLayout(10) should return rows mode with 3px per row');
+
+  const result30 = navLayout(30);
+  assert.deepEqual(result30, { mode: 'rows', stripH: 72, bodyH: 60, rowH: 2 },
+    'navLayout(30) should return rows mode with 2px per row');
+
+  const result31 = navLayout(31);
+  assert.equal(result31.mode, 'histogram', 'navLayout(31) should switch to histogram mode');
+  assert.equal(result31.stripH, 42, 'histogram stripH should be 42');
+  assert.equal(result31.rowH, 0, 'histogram rowH should be 0');
+
+  const result0 = navLayout(0);
+  assert.equal(result0.mode, 'rows', 'navLayout(0) should return rows mode');
+  assert.equal(result0.stripH, 42, 'navLayout(0) stripH should be 42');
+  assert.equal(result0.rowH, 0, 'navLayout(0) rowH should be 0');
+});
+
+test('navBarStyle precedence: dimmed > conflict > firmed > standard', () => {
+  assert.equal(
+    navBarStyle('order-firmed conflict-order dimmed'),
+    'dimmed',
+    'dimmed takes highest precedence'
+  );
+  assert.equal(
+    navBarStyle('order-standard conflict-order'),
+    'conflict',
+    'conflict takes precedence over standard'
+  );
+  assert.equal(
+    navBarStyle('order-firmed split-order-segment'),
+    'firmed',
+    'firmed is recognized and returned'
+  );
+  assert.equal(
+    navBarStyle('order-standard'),
+    'standard',
+    'standard is returned when alone'
+  );
+  assert.equal(
+    navBarStyle(undefined),
+    'standard',
+    'undefined defaults to standard'
+  );
+});
+
+test('navClampRect never inverts and clamps off-range windows to an edge', () => {
+  assert.deepEqual(
+    navClampRect(-50, -10, 800),
+    { x1: 0, x2: 0 },
+    'both x off left edge clamp to left edge (x1=x2=0)'
+  );
+  assert.deepEqual(
+    navClampRect(900, 950, 800),
+    { x1: 800, x2: 800 },
+    'both x off right edge clamp to right edge'
+  );
+  assert.deepEqual(
+    navClampRect(-20, 100, 800),
+    { x1: 0, x2: 100 },
+    'x1 off left edge clamps to 0, x2 stays'
+  );
+  assert.deepEqual(
+    navClampRect(300, 200, 800),
+    { x1: 200, x2: 300 },
+    'inverted x1>x2 swaps them (x1=200, x2=300)'
+  );
 });
 
 test('DependencyOverlay.highlightChain reads Store dependencies without throwing when empty', () => {

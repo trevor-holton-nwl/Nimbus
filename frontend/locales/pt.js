@@ -329,6 +329,7 @@ window.__NIMBUS_LOCALES.pt = {
 
   /* ── UI status / label strings ───────────────────────────────────────────── */
   'ui.dark_mode_on':                   'Modo escuro ativado',
+  'ui.nav_aria_label':                 'Navegador da linha do tempo',
   'ui.light_mode_on':                  'Modo claro ativado',
   'ui.hint_navigate':                  '↑↓ navegar',
   'ui.hint_select':                    '↵ selecionar',

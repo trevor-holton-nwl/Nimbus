@@ -2241,12 +2241,20 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
    P2: TIMELINE NAVIGATOR MINIMAP
    ========================================================================== */
 #timeline-nav {
-  height: 42px;
+  height: 42px;              /* JS (TimelineNav) may grow this up to max-height when many lines are shown */
+  min-height: 42px;
+  max-height: 72px;
   flex-shrink: 0;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
   position: relative;
+}
+#timeline-nav canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;        /* pointer-drag pans the Gantt; don't let touch scroll the page */
 }
 
 /* =============================================================================

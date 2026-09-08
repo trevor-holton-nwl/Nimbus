@@ -329,6 +329,7 @@ window.__NIMBUS_LOCALES.de = {
 
   /* ── UI status / label strings ───────────────────────────────────────────── */
   'ui.dark_mode_on':                   'Dunkelmodus aktiviert',
+  'ui.nav_aria_label':                 'Zeitleisten-Navigator',
   'ui.light_mode_on':                  'Hellmodus aktiviert',
   'ui.hint_navigate':                  '↑↓ navigieren',
   'ui.hint_select':                    '↵ auswählen',

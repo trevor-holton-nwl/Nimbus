@@ -329,6 +329,7 @@ window.__NIMBUS_LOCALES.fr = {
 
   /* ── UI status / label strings ───────────────────────────────────────────── */
   'ui.dark_mode_on':                   'Mode sombre activé',
+  'ui.nav_aria_label':                 'Navigateur de la chronologie',
   'ui.light_mode_on':                  'Mode clair activé',
   'ui.hint_navigate':                  '↑↓ naviguer',
   'ui.hint_select':                    '↵ sélectionner',
