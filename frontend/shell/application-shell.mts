@@ -1156,38 +1156,64 @@ class FactoryScene {
         ctx.fillStyle = T(55); ctx.fillRect(6, -12, 8, 5);              // dial
         ctx.restore(); } },
       { id: 'STROLLER-S2', w: 58, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
-        // wheels (rear left, front right — travelling right)
+        // Right-facing stroller: open seat profile above a folding chassis.
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        // Under-seat shopping basket, behind the frame.
+        ctx.fillStyle = '#33485e'; ctx.beginPath();
+        ctx.moveTo(15, -21); ctx.lineTo(41, -20); ctx.lineTo(37, -12);
+        ctx.quadraticCurveTo(27, -10, 18, -14); ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = '#56677c'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(16, -20); ctx.lineTo(40, -19); ctx.stroke();
+        // Slender crossed tubes: push handle to front fork, rear axle to seat.
+        ctx.strokeStyle = '#8fa1b3'; ctx.lineWidth = 2.6;
+        ctx.beginPath(); ctx.moveTo(6, -58); ctx.lineTo(10, -58);
+        ctx.quadraticCurveTo(12, -58, 13, -54);
+        ctx.lineTo(25, -32); ctx.lineTo(47, -12); ctx.lineTo(49, -6); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(12, -9); ctx.lineTo(31, -35); ctx.stroke();
+        // Padded horizontal push grip.
+        ctx.strokeStyle = '#56677c'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(2, -59); ctx.lineTo(8, -59); ctx.stroke();
+        // Reclined backrest, seat cushion and downward-sloping leg support.
+        // The space above the cushion stays open beneath the canopy.
+        ctx.fillStyle = T(39, 42); ctx.beginPath();
+        ctx.moveTo(17, -47); ctx.quadraticCurveTo(21, -48, 23, -43);
+        ctx.lineTo(28, -32); ctx.lineTo(37, -32);
+        ctx.quadraticCurveTo(39, -32, 41, -29); ctx.lineTo(46, -21);
+        ctx.lineTo(42, -19); ctx.lineTo(35, -27); ctx.lineTo(25, -27);
+        ctx.quadraticCurveTo(22, -27, 21, -31);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = T(62, 38); ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(21, -43); ctx.lineTo(27, -31); ctx.lineTo(36, -31); ctx.stroke();
+        // Bumper bar and footplate project forward from the open seat.
+        ctx.strokeStyle = '#56677c'; ctx.lineWidth = 2.4;
+        ctx.beginPath(); ctx.moveTo(30, -37); ctx.lineTo(39, -38);
+        ctx.quadraticCurveTo(43, -38, 43, -34); ctx.lineTo(40, -29); ctx.stroke();
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(42, -19); ctx.lineTo(49, -19); ctx.stroke();
+        // Full fabric hood: rounded crown, extended visor and one panel seam.
+        ctx.fillStyle = T(47, 46); ctx.beginPath();
+        ctx.moveTo(16, -43); ctx.lineTo(16, -50);
+        ctx.bezierCurveTo(16, -59, 22, -64, 30, -63);
+        ctx.bezierCurveTo(39, -63, 44, -57, 48, -48);
+        ctx.lineTo(30, -47); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = T(35, 42); ctx.beginPath();
+        ctx.moveTo(16, -43); ctx.lineTo(16, -50);
+        ctx.quadraticCurveTo(16, -61, 27, -63);
+        ctx.quadraticCurveTo(22, -56, 26, -46); ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = T(65, 40); ctx.lineWidth = 0.8;
+        ctx.beginPath(); ctx.moveTo(30, -61);
+        ctx.quadraticCurveTo(37, -56, 38, -49); ctx.stroke();
+        ctx.strokeStyle = T(29, 38); ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.moveTo(30, -47); ctx.lineTo(48, -48); ctx.stroke();
+        // Folding hinge and wheels sit in front of the tubes, hiding their ends.
+        ctx.fillStyle = '#c6d0db'; ctx.beginPath(); ctx.arc(25, -30, 2.3, 0, Math.PI * 2); ctx.fill();
         const wheel = (wx: number, r: number) => {
           ctx.fillStyle = '#1c2b3a'; ctx.beginPath(); ctx.arc(wx, -r, r, 0, Math.PI * 2); ctx.fill();
-          ctx.fillStyle = '#56677c'; ctx.beginPath(); ctx.arc(wx, -r, r * 0.42, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = '#56677c'; ctx.lineWidth = 0.8; ctx.stroke();
+          ctx.fillStyle = '#8fa1b3'; ctx.beginPath(); ctx.arc(wx, -r, r * 0.54, 0, Math.PI * 2); ctx.fill();
           ctx.fillStyle = '#1c2b3a'; ctx.beginPath(); ctx.arc(wx, -r, r * 0.16, 0, Math.PI * 2); ctx.fill();
         };
-        wheel(12, 9); wheel(48, 7);
-        // frame: rear axle up to push handle (leaning back-left), front axle up to seat
-        ctx.strokeStyle = '#56677c'; ctx.lineWidth = 3; ctx.lineCap = 'round';
-        ctx.beginPath(); ctx.moveTo(12, -9); ctx.lineTo(4, -52); ctx.stroke();   // handle stem
-        ctx.beginPath(); ctx.moveTo(48, -7); ctx.lineTo(30, -30); ctx.stroke();  // front strut
-        ctx.beginPath(); ctx.moveTo(12, -9); ctx.lineTo(30, -30); ctx.stroke();  // rear strut
-        // push handle grip
-        ctx.strokeStyle = '#1c2b3a'; ctx.lineWidth = 4;
-        ctx.beginPath(); ctx.moveTo(4, -52); ctx.quadraticCurveTo(1, -56, 6, -58); ctx.stroke();
-        ctx.lineWidth = 1; ctx.lineCap = 'butt';
-        // seat pod: reclined bucket hanging on the frame
-        ctx.fillStyle = T(44); ctx.beginPath();
-        ctx.moveTo(18, -26);                             // seat front-bottom
-        ctx.quadraticCurveTo(34, -22, 44, -28);          // footwell curve
-        ctx.quadraticCurveTo(48, -36, 42, -42);          // seat front rises
-        ctx.lineTo(28, -44);                             // seat top edge
-        ctx.quadraticCurveTo(18, -46, 16, -38);          // back of seat
-        ctx.closePath(); ctx.fill();
-        ctx.fillStyle = T(30); ctx.beginPath();          // seat pad inset
-        ctx.moveTo(24, -40); ctx.quadraticCurveTo(34, -40, 40, -34);
-        ctx.quadraticCurveTo(34, -28, 24, -30); ctx.closePath(); ctx.fill();
-        // canopy hood over the top
-        ctx.fillStyle = T(37); ctx.beginPath();
-        ctx.moveTo(14, -40); ctx.quadraticCurveTo(20, -58, 40, -52);
-        ctx.quadraticCurveTo(30, -50, 24, -44); ctx.quadraticCurveTo(18, -42, 14, -40);
-        ctx.closePath(); ctx.fill();
+        wheel(12, 9); wheel(49, 6);
         ctx.restore(); } },
       { id: 'BOTTLE-40OZ', w: 24, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
         // stainless body: tapered base like a tumbler-bottle
