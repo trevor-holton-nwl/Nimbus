@@ -228,13 +228,12 @@ h1, h2, h3, h4 {
 }
 .context-pill:hover { background: var(--bg-subtle); color: var(--fg); }
 
-/* Scheduling-only action cluster (zoom + Fit/Now + Optimize/What-If/Print) —
+/* Scheduling-only action cluster (Optimize/What-If/Print) —
    shown only while body[data-tab="gantt"], which App.goto sets on every
    navigation. This is the light content area, so .seg-btn.active's navy
    --primary fill applies (DESIGN.md CTA/Chrome Rule #3), not --chrome-accent. */
 #context-sched-actions { display: none; margin-left: auto; align-items: center; gap: 10px; flex-shrink: 0; }
 body[data-tab="gantt"] #context-sched-actions { display: flex; }
-#context-sched-actions .group { display: flex; gap: 4px; }
 
 /* --- LEFT NAV DRAWER + SCRIM (Command Band re-skin) -------------------------
    Replaces the old horizontal nav.tabs strip. Reuses the existing .tab-btn
@@ -441,6 +440,17 @@ body[data-tab="gantt"] #context-sched-actions { display: flex; }
   content: ''; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
   width: 6px; height: 6px; border-radius: 50%; background: var(--chrome-accent);
 }
+
+/* While the group is expanded (.open, set by App._setGanttNavExpanded) the
+   active parent reads as an open section header, not a second selected row:
+   the sole selection marker is the active .nav-sub-btn below it. Collapsing
+   the children hands the marker back to the parent. */
+#nav-drawer .nav-group.open .tab-btn.active {
+  background: transparent; box-shadow: none; padding-left: 12px;
+  color: var(--chrome-fg); font-weight: 600;
+}
+#nav-drawer .nav-group.open .tab-btn.active::before { content: none; }
+#nav-drawer .nav-group.open .nav-group-chevron { color: var(--chrome-fg); }
 
 .tab-btn {
   display: flex; align-items: center; gap: 7px;
@@ -2323,6 +2333,10 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
+/* Zoom + Fit/Now sit at the right end of the filter row (pushed by .spacer);
+   26px matches .flt-sel/.flt-input so the row reads as one line. */
+.gantt-filterbar .group { display: flex; gap: 4px; }
+.gantt-filterbar .seg-btn { height: 26px; }
 .flt-sel {
   height: 26px; padding: 3px 8px;
   font-size: 12px;

@@ -1737,6 +1737,10 @@ const App = {
       chev.setAttribute('aria-expanded', String(open));
       chev.classList.toggle('open', open);
     }
+    // .open on the group is the CSS hook that turns the active parent into a
+    // header-style row so only the active child carries the selection marker.
+    const grp = document.getElementById('nav-group-gantt');
+    if (grp) grp.classList.toggle('open', open);
   },
 
   // Re-arms itself on every tick, aligned to the next minute boundary, so the
@@ -2379,11 +2383,7 @@ const App = {
     const ordersPane   = document.getElementById('gantt-sub-orders');
     if (timelinePane) timelinePane.style.display = sub === 'timeline' ? 'flex' : 'none';
     if (ordersPane)   ordersPane.style.display   = sub === 'orders'   ? 'flex' : 'none';
-    const show = sub === 'timeline';
-    ['gantt-zoom-controls', 'gantt-zoom-sep', 'gantt-fit-controls'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = show ? '' : 'none';
-    });
+    // Zoom/Fit/Now live inside #gantt-sub-timeline now, so the pane toggle above hides them on the Orders sub-view.
     if (sub === 'orders') {
       setTimeout(() => {
         if (Table._api) Table._api.sizeColumnsToFit();

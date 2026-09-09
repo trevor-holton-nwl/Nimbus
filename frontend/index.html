@@ -52,8 +52,8 @@
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->
-<script>window.NIMBUS_BUILD_ID = '2026-09-09';</script>
-<link rel="stylesheet" href="styles.css?v=2026-09-09">
+<script>window.NIMBUS_BUILD_ID = '2026-09-09-a';</script>
+<link rel="stylesheet" href="styles.css?v=2026-09-09-a">
 
 <style>
 /* ── Dashboard Filter Bar ───────────────────────────────────── */
@@ -1232,21 +1232,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
     </div>
 
-    <!-- Scheduling-only right cluster — shown only while body[data-tab="gantt"] (App.goto).
-         Zoom/Fit/Now additionally hide on the Orders sub-view via App.gotoGanttSub's
-         id-based display toggles. Inline onclick= kept verbatim (legacy-surface contract). -->
+    <!-- Scheduling-only action cluster — shown only while body[data-tab="gantt"] (App.goto).
+         Optimize/What-If/Print stay here; zoom + Fit/Now moved to gantt-filterbar.
+         Inline onclick= kept verbatim (legacy-surface contract). -->
     <div class="context-sched-actions" id="context-sched-actions">
-      <div class="group" id="gantt-zoom-controls">
-        <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
-        <button class="seg-btn" data-view="day"  data-i18n="btn.day">Day</button>
-        <button class="seg-btn" data-view="week" data-i18n="btn.week">Week</button>
-      </div>
-      <div class="sep-v" id="gantt-zoom-sep"></div>
-      <div class="group" id="gantt-fit-controls">
-        <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view"><span aria-hidden="true">⊡</span><span class="sa-label" data-i18n="btn.fit">Fit</span></button>
-        <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now"><span aria-hidden="true">⊙</span><span class="sa-label" data-i18n="btn.now">Now</span></button>
-      </div>
-      <div class="sep-v"></div>
       <button class="seg-btn btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize"><span aria-hidden="true">📈</span><span class="sa-label" data-i18n="btn.optimize">Optimize</span></button>
       <!-- .sandbox-btn is load-bearing: SandboxAdapter rewrites textContent + onclick. Keep flat, no inner spans. -->
       <button class="seg-btn sandbox-btn" onclick="NIMBUS.SandboxAdapter.enter()" data-i18n="ui.sandbox_off" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
@@ -1380,7 +1369,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <!-- Pane: Gantt Timeline -->
     <div id="gantt-sub-timeline" style="flex:1;min-height:0;display:flex;flex-direction:column;">
 
-    <!-- Gantt filter bar (below toolbar) -->
+    <!-- Gantt filter bar — filters left, zoom + Fit/Now right -->
     <div class="gantt-filterbar" id="gantt-filterbar">
       <div class="gantt-line-filter-group">
         <button class="flt-sel gantt-line-btn" id="gantt-flt-line-btn"
@@ -1446,6 +1435,17 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <input  id="flt-text"  class="flt-input" type="search" placeholder="Search orders…" data-i18n-placeholder="ph.search_orders">
       <span class="flt-badge-wrap" id="flt-badge-wrap" hidden><span class="flt-badge" id="flt-badge"></span></span>
       <button class="btn btn-ghost sm" id="flt-clear" data-i18n="btn.clear">✕ Clear</button>
+      <div class="spacer"></div>
+      <div class="group" id="gantt-zoom-controls">
+        <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
+        <button class="seg-btn" data-view="day"  data-i18n="btn.day">Day</button>
+        <button class="seg-btn" data-view="week" data-i18n="btn.week">Week</button>
+      </div>
+      <div class="sep-v" id="gantt-zoom-sep"></div>
+      <div class="group" id="gantt-fit-controls">
+        <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view"><span aria-hidden="true">⊡</span><span data-i18n="btn.fit">Fit</span></button>
+        <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now"><span aria-hidden="true">⊙</span><span data-i18n="btn.now">Now</span></button>
+      </div>
     </div>
 
     <div class="main-row">
