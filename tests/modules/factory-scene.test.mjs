@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RefinedFactoryScene } from '../../frontend/shell/factory-scene.mjs';
+import { FactoryCameo } from '../../frontend/shell/factory-cameo.mjs';
 
 // Canvas calls are irrelevant to lifecycle assertions; rendering is inspected in-browser.
 function withRuntime(reduced, run) {
@@ -28,7 +29,8 @@ function withRuntime(reduced, run) {
     scene = new RefinedFactoryScene(canvas, { assembly: 'Assembly', inspection: 'Inspection', packing: 'Packing' });
     run({ scene, canvas, motion, doc, frames, text, draws: () => draws, disconnected: () => disconnected,
       resize: value => { rect = value; resize(); },
-      tick: () => { const [id, callback] = frames.entries().next().value; frames.delete(id); now += 16; callback(now); },
+      tick: (delta = 16) => { const [id, callback] = frames.entries().next().value; frames.delete(id); now += delta; callback(now); },
+      jump: delta => { now += delta; },
     });
   } finally {
     scene?.destroy();
@@ -50,6 +52,26 @@ test('reduced motion draws a populated still, redraws on resize and responds to 
     runtime.tick();
     assert.equal(runtime.frames.size, 1);
   });
+});
+
+test('cameo timing counts visible time without slowing with conveyor frame clamping', () => {
+  const original = FactoryCameo.prototype.draw, times = [];
+  FactoryCameo.prototype.draw = (_ctx, _lane, elapsed) => { times.push(elapsed); };
+  try {
+    withRuntime(false, runtime => {
+      runtime.tick(60000); assert.equal(times.at(-1), 60);
+      runtime.doc.hidden = true; runtime.doc.dispatchEvent(new Event('visibilitychange'));
+      runtime.jump(120000);
+      runtime.doc.hidden = false; runtime.doc.dispatchEvent(new Event('visibilitychange'));
+      runtime.tick(60000); assert.equal(times.at(-1), 120, 'hidden time is excluded');
+      const before = times.length;
+      runtime.motion.matches = true; runtime.motion.dispatchEvent(new Event('change'));
+      assert.equal(times.length, before, 'reduced motion omits the cameo');
+      runtime.resize({ width: 560, height: 700 });
+      runtime.motion.matches = false; runtime.motion.dispatchEvent(new Event('change'));
+      runtime.tick(); assert.equal(times.length, before, 'no cameo without A-02');
+    });
+  } finally { FactoryCameo.prototype.draw = original; }
 });
 
 test('stage captions appear once beneath A-01 and floating orders follow finished products', () => {

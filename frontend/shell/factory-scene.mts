@@ -2,6 +2,7 @@ import { createFactoryProducts } from './factory-products.mjs';
 import type { ProductDef } from './factory-products.mjs';
 import { FACTORY_GEOMETRY as G, factoryLaneLayout, sampleFactoryLane, sampleFactoryDispatch } from './factory-scene-model.mjs';
 import type { FactoryLaneLayout, FactoryLaneSample, FactoryItem } from './factory-scene-model.mjs';
+import { FactoryCameo } from './factory-cameo.mjs';
 
 // Set style to 'classic' and rebuild to restore the previous scene composition.
 export const FACTORY_SCENE = { style: 'refined' as 'classic' | 'refined' };
@@ -17,6 +18,8 @@ export class RefinedFactoryScene {
   private width = 0;
   private height = 0;
   private elapsed = 0;
+  private visibleElapsed = 0;
+  private cameo = new FactoryCameo();
   private last = 0;
   private raf = 0;
   private destroyed = false;
@@ -39,6 +42,7 @@ export class RefinedFactoryScene {
     this.ro.disconnect();
     this.motion.removeEventListener('change', this.sync);
     document.removeEventListener('visibilitychange', this.sync);
+    this.cameo.destroy();
   }
 
   private resize = (): void => {
@@ -66,7 +70,9 @@ export class RefinedFactoryScene {
   private tick = (now: number): void => {
     this.raf = 0;
     if (this.destroyed || document.hidden || this.motion.matches || !this.lanes.length) return;
-    this.elapsed += Math.min(0.1, Math.max(0, (now - this.last) / 1000));
+    const delta = Math.max(0, (now - this.last) / 1000);
+    this.elapsed += Math.min(0.1, delta);
+    this.visibleElapsed += delta;
     this.last = now;
     this.draw();
     this.raf = requestAnimationFrame(this.tick);
@@ -135,6 +141,8 @@ export class RefinedFactoryScene {
       this.workOrder(sample);
       c.restore();
     }
+    const back = this.lanes.find(lane => lane.index === 1);
+    if (back && !this.motion.matches) this.cameo.draw(c, back, this.visibleElapsed, this.width);
   }
 
   private infrastructure(): void {
@@ -361,11 +369,14 @@ export class RefinedFactoryScene {
   }
 
   private stageLabels(): void {
-    this.label('01 / ' + this.labels.assembly, G.assemblyX + 12, 49, 18, '#7e93ab');
-    const inspection = '02 / ' + this.labels.inspection;
-    const inspectionX = G.scanX - this.ctx.measureText(inspection).width / 2;
-    this.label(inspection, inspectionX, 49, 18, '#7e93ab');
-    this.label('03 / ' + this.labels.packing, G.packX + 8, 49, 18, '#7e93ab');
+    const c = this.ctx;
+    c.save();
+    c.font = "500 18px 'JetBrains Mono', monospace";
+    c.fillStyle = '#7e93ab'; c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+    c.fillText('01/ ' + this.labels.assembly, G.assemblyX + G.assemblyW / 2, 49);
+    c.fillText('02/ ' + this.labels.inspection, G.scanX, 49);
+    c.fillText('03/ ' + this.labels.packing, G.packX + G.packW / 2, 49);
+    c.restore();
   }
 
   private workOrder(sample: FactoryLaneSample): void {

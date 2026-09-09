@@ -55,9 +55,12 @@ None — this is a frontend-only shell/boot domain.
   `factory-product-styles.mts` selects refinements per product. `factory-scene.mts`
   renders the refined assembly/inspection/packing scene and handles pause, resize,
   reduced motion and cleanup. `factory-scene-model.mts` provides its pure flow/layout.
+  `factory-cameo.mts` adds the hidden A-02 greeting at each minute of visible time,
+  starting at 60 seconds, using `assets/chris-peterson-cameo.png`. It has no manual
+  control, loads artwork shortly before the first greeting, and skips reduced motion.
   `FACTORY_SCENE.style = 'classic'` selects the prior scene retained in
   `application-shell.mts`. See `docs/LOGIN-ARTWORK.md` for independent scene/product rollback.
-- `tests/modules/factory-{product-styles,scene-model,scene}.test.mjs` cover artwork
+- `tests/modules/factory-{product-styles,scene-model,scene,cameo}.test.mjs` cover artwork
   selection, flow, responsive layout, reduced motion and animation lifecycle.
 
 - `tests/modules/application-shell.test.mjs` — direct test of this domain.
