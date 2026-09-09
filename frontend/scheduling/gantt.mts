@@ -479,6 +479,12 @@ export const Timeline = {
           }
         }
         PerfMonitor.record('Timeline.patchLoop', performance.now() - _pmT0patch);
+        // Keep the past-edge bound fresh: a drag/optimize patch here (no full
+        // rebuild) can move the earliest order earlier, and _applyTimeBounds()
+        // is one O(n) pass over the plant's tasks — cheap enough to run
+        // unconditionally rather than diffing whether this batch touched the
+        // current oldest order.
+        Timeline._applyTimeBounds();
       }
     } else if (evt.type === 'task:update' && evt.id != null) {
       Timeline._applyTaskPatch(String(evt.id));
@@ -1004,10 +1010,14 @@ export const Timeline = {
     // db.compute_visibility_horizon_end). This is an ADDITIONAL bound on top
     // of the zoomMin/zoomMax options set at init() — those cap how far the
     // user can zoom OUT, this caps the latest instant they can pan/zoom TO.
-    // Deliberately never touches `min` — only the future edge is bounded
-    // (OD-C1d/e); the past stays exactly as unbounded as it already was.
+    // C1 follow-up (2026-09-09): the past edge is now bounded too, via the
+    // same setOptions() call — see _applyTimeBounds(). `min` clamps at local
+    // midnight of the oldest order on the plant (or today, whichever is
+    // earlier), so today's midnight stays reachable even with no orders or
+    // an all-future plant. Both bounds are applied together so they can
+    // never end up inverted (computeTimelineMinBound() itself guards that).
     if (Timeline._tl) {
-      Timeline._tl.setOptions({ max: Store.visibilityHorizonEnd });
+      Timeline._applyTimeBounds();
 
       // C1: labeled vertical marker at the horizon edge itself, so a planner
       // sees WHY the timeline ends / orders vanish there instead of just
@@ -1184,8 +1194,9 @@ export const Timeline = {
       Timeline._tl.setWindow(savedWindow.start, savedWindow.end, { animation: false });
     }
     // Rebuild writes items straight into the parent DataSet while the DataView
-    // filter may hold a stale window (setOptions({max}) above can clamp the range
-    // without firing rangechanged, and the setWindow restore is a same-range no-op
+    // filter may hold a stale window (setOptions({max, min}) via _applyTimeBounds()
+    // above can clamp the range without firing rangechanged — both bounds clamp
+    // silently the same way — and the setWindow restore is a same-range no-op
     // event-wise). Resync + full refresh + redraw here, or freshly-added bars stay
     // culled until the user's next zoom/pan.
     Timeline._refreshViewNow();
@@ -1293,6 +1304,33 @@ export const Timeline = {
       end:   cur ? Math.max(cur.end,   endMs)   : endMs,
     };
     if (Timeline._visItems) Timeline._visItems.refresh();
+  },
+
+  // C1 follow-up (2026-09-09): recompute and apply both vis-timeline time
+  // bounds together — `max` at the plant's visibility horizon (unchanged
+  // since 2026-08-20) and `min` at local midnight of the oldest order on the
+  // plant, or today, whichever is earlier (computeTimelineMinBound(),
+  // ~line 1527). Scoped to ALL orders on the selected plant (not
+  // line-filtered), so the bound stays stable when the Gantt line filter
+  // changes. Plain for-loop, not Math.min(...spread) — same call-stack/scale
+  // hazard called out at gantt.mts:1350-1352 for large task arrays. Called
+  // from rebuild() and again after tasks:bulkUpdate patches (_onStore) so a
+  // drag/optimize that moves the earliest order earlier keeps the bound
+  // fresh without a full rebuild.
+  _applyTimeBounds(): void {
+    if (!Timeline._tl) return;
+    let dataMinMs: number | null = null;
+    for (const t of Store.tasksForSelectedPlant()) {
+      if (!t.start_date) continue;
+      const s = new Date(t.start_date).getTime();
+      if (dataMinMs === null || s < dataMinMs) dataMinMs = s;
+    }
+    const nowMs = (Timeline._rebuildNow || new Date()).getTime();
+    const maxMs = Store.visibilityHorizonEnd ? Store.visibilityHorizonEnd.getTime() : null;
+    Timeline._tl.setOptions({
+      max: Store.visibilityHorizonEnd,
+      min: computeTimelineMinBound({ dataMinMs, nowMs, maxMs }),
+    });
   },
 
   // Undebounced core of the rangechanged refresh: resync the DataView culling
@@ -1523,6 +1561,22 @@ export function navComputeRange(i: NavRangeInput): NavRange {
   }
 
   return { startMs: lo, endMs: hi, dayStarts };
+}
+
+export interface TimelineMinBoundInput { dataMinMs: number | null; nowMs: number; maxMs?: number | null }
+
+// C1 follow-up (2026-09-09): the earliest instant the Gantt should let a
+// planner pan/zoom to — local midnight of whichever is earlier, the oldest
+// order on the plant or "today" (so today's midnight is always reachable
+// even when every order is in the future or the plant has no orders at all —
+// setView()/gotoNow() all anchor there, gantt.mts:1310-1328). Never returns
+// an instant that would invert min/max: if the caller's `maxMs` is at or
+// before the computed bound, return null and leave the past unbounded in
+// that degenerate case.
+export function computeTimelineMinBound(i: TimelineMinBoundInput): number | null {
+  const bound = _navLocalMidnight(Math.min(i.dataMinMs ?? i.nowMs, i.nowMs));
+  if (i.maxMs != null && bound >= i.maxMs) return null;
+  return bound;
 }
 
 export function navLayout(lineCount: number): NavLayout {

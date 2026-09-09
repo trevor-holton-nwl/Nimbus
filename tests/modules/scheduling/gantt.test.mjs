@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound } from '../../../frontend/scheduling/gantt.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
@@ -548,6 +548,31 @@ test('navComputeRange: horizon caps the right edge but never below the window en
     horizonEndMs,
   });
   assert.equal(result2.endMs, L(2026, 8, 15), 'endMs should be horizon (Sep 15) when horizon > window end');
+});
+
+test('computeTimelineMinBound: oldest order in the past → local midnight of that day', () => {
+  const nowMs = L(2026, 3, 15) + 10 * 3600 * 1000; // Apr 15 2026 10:00 local
+  const dataMinMs = L(2026, 3, 1, 6); // Apr 1 2026 06:00 local (two weeks before "today")
+  const result = computeTimelineMinBound({ dataMinMs, nowMs });
+  assert.equal(result, L(2026, 3, 1), 'should be local midnight of the oldest order\'s day');
+});
+
+test('computeTimelineMinBound: no orders, or oldest order in the future → today\'s local midnight', () => {
+  const nowMs = L(2026, 3, 15) + 10 * 3600 * 1000; // Apr 15 2026 10:00 local
+  const todayMidnight = L(2026, 3, 15);
+
+  const noData = computeTimelineMinBound({ dataMinMs: null, nowMs });
+  assert.equal(noData, todayMidnight, 'no orders on the plant → today\'s local midnight');
+
+  const futureData = computeTimelineMinBound({ dataMinMs: L(2026, 3, 20), nowMs });
+  assert.equal(futureData, todayMidnight, 'oldest order in the future → today\'s local midnight (today always reachable)');
+});
+
+test('computeTimelineMinBound: maxMs at or before the computed bound → null (never invert min/max)', () => {
+  const nowMs = L(2026, 3, 15) + 10 * 3600 * 1000; // Apr 15 2026 10:00 local
+  const dataMinMs = L(2026, 3, 1, 6); // computed bound would be Apr 1 local midnight
+  const result = computeTimelineMinBound({ dataMinMs, nowMs, maxMs: L(2026, 2, 25) });
+  assert.equal(result, null, 'maxMs earlier than the computed bound must return null');
 });
 
 test('navLayout: rows while they fit, histogram beyond 30 lines', () => {
