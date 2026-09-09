@@ -55,8 +55,14 @@ whole shell file. The drawings now live in `factory-products.mts`.
 
 Compact silhouettes, muted materials, restrained highlights, and the existing
 navy factory background. The cooler retains an up-right side face; cylindrical
-items use shallow ellipses. The refined scene fits a 1420-unit production/dispatch line to
-the available canvas; its back lane is 84% of the front lane scale. The previous
+items use shallow ellipses. The refined scene frames the production/pallet area from
+128 to 1202.2 scene units, cropping roughly half the foreground infeed's visible length.
+The assembly-outlet-to-scanner and scanner-to-packing spans are each 10% shorter
+(198 to 178.2 units and 180 to 162 units). Packing, the belt end and pallet dispatch
+shift left together by 37.8 units. Fitting this recovered width makes the lines about
+3.5% larger again on width-limited canvases. Machine/product dimensions and the
+framing margins are retained. The forklift approach extends beyond the right
+edge instead of reserving empty space. Its back lane is 84% of the front lane scale. The previous
 scene retains its 1x/0.72x scales. Brand marks are part of the illustration.
 
 The user chose the earlier navy mechanical style with visible assembly, inspection
@@ -74,8 +80,8 @@ The two-row layout fits complete envelopes (185 units above each belt and 85 bel
 with at least 110 screen pixels between them, shrinking both rows on shorter desktop
 canvases. A-02 has an additional horizontal offset, and both infeed belts extend to
 the viewport's left edge with the same component spacing. Assembly/Inspection/Packing
-captions appear only beneath the upper A-02
-line; the compact A-01-only layout has no stage captions. Floating navy work-order
+captions appear only beneath the lower A-01 line, in 18-unit monospaced type,
+with Inspection centered beneath its scanner; the compact A-01-only layout retains them. Floating navy work-order
 callouts follow one finished product per row and fade as it traverses the open span.
 Drinkware callouts identify CONTIGO or BUBBA-KEG instead of the legacy bottle slot ID.
 

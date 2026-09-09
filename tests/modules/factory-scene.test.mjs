@@ -52,15 +52,17 @@ test('reduced motion draws a populated still, redraws on resize and responds to 
   });
 });
 
-test('stage captions appear once beneath A-02 and floating orders follow finished products', () => {
+test('stage captions appear once beneath A-01 and floating orders follow finished products', () => {
   withRuntime(true, runtime => {
     for (const stage of ['Assembly', 'Inspection', 'Packing']) {
       assert.equal(runtime.text.filter(value => value.includes(stage)).length, 1);
     }
     assert.ok(runtime.text.some(value => value.startsWith('WO-') && value.includes(' · ')));
     runtime.resize({ width: 560, height: 700 });
-    assert.ok(!runtime.text.some(value => /Assembly|Inspection|Packing/.test(value)),
-      'the compact A-01 line does not repeat the A-02 captions');
+    for (const stage of ['Assembly', 'Inspection', 'Packing']) {
+      assert.equal(runtime.text.filter(value => value.includes(stage)).length, 1,
+        'the compact A-01 line retains the stage captions');
+    }
   });
 });
 

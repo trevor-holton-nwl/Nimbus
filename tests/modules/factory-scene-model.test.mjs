@@ -50,7 +50,8 @@ test('layout uses two lanes on a large scene, one on a compact scene, and none w
   assert.equal(factoryLaneLayout(560, 700).length, 1);
   assert.deepEqual(factoryLaneLayout(0, 0), []);
   for (const lane of factoryLaneLayout(1080, 900)) {
-    assert.ok(lane.x >= 0);
+    assert.ok(lane.x + FACTORY_GEOMETRY.infeedCrop * lane.scale >= 0);
+    assert.ok(lane.x + FACTORY_GEOMETRY.assemblyX * lane.scale > 0, 'assembly stays fully visible');
     assert.ok(lane.x + FACTORY_GEOMETRY.width * lane.scale <= 1080);
     assert.ok(lane.y + 85 * lane.scale < 900);
   }

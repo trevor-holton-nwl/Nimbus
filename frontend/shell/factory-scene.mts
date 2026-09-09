@@ -131,7 +131,7 @@ export class RefinedFactoryScene {
       this.inspection(sample);
       this.packing(sample);
       this.dispatch(lane.index, right);
-      if (lane.index === 1) this.stageLabels();
+      if (lane.index === 0) this.stageLabels();
       this.workOrder(sample);
       c.restore();
     }
@@ -139,7 +139,7 @@ export class RefinedFactoryScene {
 
   private infrastructure(): void {
     // Simple steel legs leave the products and operating cells prominent.
-    for (const x of [50, 195, 470, 738, 993]) {
+    for (const x of [50, 195, G.assemblyX + G.assemblyW + 18, G.scanX + 88, G.beltEnd - 25]) {
       this.box('#142d49', x, 23, 5, 54);
       this.box('#1b3655', x - 5, 75, 15, 3);
     }
@@ -361,24 +361,27 @@ export class RefinedFactoryScene {
   }
 
   private stageLabels(): void {
-    this.label('01 / ' + this.labels.assembly, G.assemblyX + 12, 49, 10, '#7e93ab');
-    this.label('02 / ' + this.labels.inspection, G.scanX - 24, 49, 10, '#7e93ab');
-    this.label('03 / ' + this.labels.packing, G.packX + 8, 49, 10, '#7e93ab');
+    this.label('01 / ' + this.labels.assembly, G.assemblyX + 12, 49, 18, '#7e93ab');
+    const inspection = '02 / ' + this.labels.inspection;
+    const inspectionX = G.scanX - this.ctx.measureText(inspection).width / 2;
+    this.label(inspection, inspectionX, 49, 18, '#7e93ab');
+    this.label('03 / ' + this.labels.packing, G.packX + 8, 49, 18, '#7e93ab');
   }
 
   private workOrder(sample: FactoryLaneSample): void {
     // One drifting callout per lane, tied to a visible outbound product.
-    const out = sample.items.find(item => item.material === 'finished' && item.x > 475 && item.x < 790);
+    const start = G.assemblyX + G.assemblyW + 23, end = G.packX - 40;
+    const out = sample.items.find(item => item.material === 'finished' && item.x > start && item.x < end);
     if (!out) return;
     const c = this.ctx, product = this.products[out.productIndex];
     const productLabel = product.id === 'BOTTLE-40OZ'
       ? (out.hue % 2 === 0 ? 'CONTIGO' : 'BUBBA-KEG') : product.id;
     const text = 'WO-' + (48213 + out.serial) + ' · ' + productLabel + ' · ' + (82 + out.serial % 15) + '%';
     c.save();
-    c.globalAlpha = Math.max(0, Math.min(1, (out.x - 475) / 25, (790 - out.x) / 25));
+    c.globalAlpha = Math.max(0, Math.min(1, (out.x - start) / 25, (end - out.x) / 25));
     c.font = "500 10px 'JetBrains Mono', monospace";
     const width = c.measureText(text).width + 16;
-    const x = Math.max(475, Math.min(G.packX - 24 - width, out.x - 10)), y = -139;
+    const x = Math.max(start, Math.min(G.packX - 24 - width, out.x - 10)), y = -139;
     c.fillStyle = 'rgba(18,38,63,0.92)'; c.strokeStyle = '#2c4a6b'; c.lineWidth = 1;
     c.beginPath(); c.roundRect(x, y, width, 22, 3); c.fill(); c.stroke();
     this.label(text, x + 8, y + 14.5, 10);

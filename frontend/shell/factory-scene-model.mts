@@ -1,8 +1,14 @@
 // Deterministic, decorative production flow. No live scheduling data or timers.
+// Shorten both transport spans around inspection by 10%, keeping machine sizes.
+const assemblyOutlet = 222 + 230;
+const inspectionX = assemblyOutlet + (650 - assemblyOutlet) * 0.9;
+const packingX = inspectionX + (830 - 650) * 0.9;
+const recoveredWidth = 830 - packingX;
 export const FACTORY_GEOMETRY = {
-  width: 1420, speed: 34, run: 1260, spacing: 210,
-  assemblyX: 222, assemblyW: 230, scanX: 650, packX: 830, packW: 126,
-  beltEnd: 1018, palletX: 1076, palletY: 66, transferTime: 1.4,
+  // Fit the production/pallet area; the forklift approach can extend offscreen.
+  width: 1240 - recoveredWidth, infeedCrop: 128, speed: 34, run: 1260, spacing: 210,
+  assemblyX: 222, assemblyW: 230, scanX: inspectionX, packX: packingX, packW: 126,
+  beltEnd: 1018 - recoveredWidth, palletX: 1076 - recoveredWidth, palletY: 66, transferTime: 1.4,
 } as const;
 
 export interface FactoryItem {
@@ -16,10 +22,13 @@ export interface FactoryLaneLayout { x: number; y: number; scale: number; index:
 
 export function factoryLaneLayout(width: number, height: number): FactoryLaneLayout[] {
   if (width <= 0 || height <= 0) return [];
-  const scale = Math.min(1.18, (width - 32) / FACTORY_GEOMETRY.width, height / 360);
+  const { width: rightEdge, infeedCrop } = FACTORY_GEOMETRY;
+  const visibleWidth = rightEdge - infeedCrop;
+  const scale = Math.min(1.3, (width - 32) / visibleWidth, height / 360);
   if (scale <= 0) return [];
   const lane = (y: number, k: number, index: number): FactoryLaneLayout => ({
-    x: (width - FACTORY_GEOMETRY.width * k) / 2, y, scale: k, index,
+    // Zoom into the infeed while retaining the same right-hand scene boundary.
+    x: (width - visibleWidth * k) / 2 - infeedCrop * k, y, scale: k, index,
   });
   if (width > 760 && height > 560) {
     // Fit complete row envelopes (roof/callouts through feet), not belt baselines.
