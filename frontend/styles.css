@@ -1599,8 +1599,22 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   display: inline-flex; align-items: center; gap: 6px;
 }
 .ag-theme-quartz .cell-line-tag .dot { width: 8px; height: 8px; border-radius: 2px; }
-.ag-theme-quartz .row-alert { background-color: var(--err-soft) !important; }
-.ag-theme-quartz .row-warn  { background-color: var(--warn-soft) !important; }
+.ag-theme-quartz .ag-row.row-alert { background-color: var(--err-soft); }
+.ag-theme-quartz .ag-row.row-warn  { background-color: var(--warn-soft); }
+
+/* Quartz draws row hover/selection as an absolutely-positioned ::before on
+   .ag-row. Cells are position:absolute too, so they paint *above* that overlay
+   — which is why the old cell-level tint survived selection. With the tint on
+   the row, an opaque overlay would erase it, and NIMBUS overrides both overlay
+   colors with opaque tokens. Make the overlay translucent on alert rows only,
+   so hover/selection reads as a wash over the tint instead of replacing it. */
+.ag-theme-quartz .ag-row.row-alert.ag-row-hover::before,
+.ag-theme-quartz .ag-row.row-alert.ag-row-selected::before,
+.ag-theme-quartz .ag-row.row-warn.ag-row-hover::before,
+.ag-theme-quartz .ag-row.row-warn.ag-row-selected::before {
+  background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+  background-image: none;
+}
 .ag-theme-quartz .ag-cell.ag-cell-copy-flash {
   outline: 2.5px solid var(--accent) !important;
   outline-offset: -2px;

@@ -390,8 +390,14 @@ export const Table = {
         filter:   true,
         resizable: true,
         flex: 1,
-        minWidth: 100,
-        cellClass: (p: { data: NimbusTask | null }) => Table._rowClass(p.data)
+        minWidth: 100
+      },
+      // Alert tint is a ROW class, not a cell class: a column that declares its
+      // own `cellClass` overwrites `defaultColDef.cellClass` outright, which used
+      // to leave the numeric/date columns untinted on alert rows.
+      rowClassRules: {
+        'row-alert': (p: { data: NimbusTask | null }) => Table._alertSeverity(p.data) === 'err',
+        'row-warn':  (p: { data: NimbusTask | null }) => Table._alertSeverity(p.data) === 'warn',
       },
       columnDefs: [
         {
@@ -1017,22 +1023,22 @@ export const Table = {
       Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'firmed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
-      // Incremental update: only refresh rows for task IDs that changed alert membership.
-      // Fall back to full refresh if changedIds is absent (unscoped recompute).
+      // Incremental update: only touch rows whose alert membership changed; fall
+      // back to the whole plant if changedIds is absent (unscoped recompute).
+      // applyTransaction rather than refreshCells because a row-data change is
+      // what makes AG Grid re-evaluate rowClassRules (where the alert tint lives),
+      // and it also re-renders the Alerts flag cellRenderer. The old code passed
+      // `columns: ['id']`, which resolves to the HIDDEN id column — two columns
+      // declare field 'id', so the Alerts column's colId is actually 'id_1' — so
+      // nothing visible was ever recomputed. No redrawRows: that would re-enter
+      // AG Grid's render cycle.
       const changedIds = evt.changedIds as Array<string | number> | undefined;
-      if (changedIds && changedIds.length) {
-        const rowNodes = [];
-        for (const taskId of changedIds) {
-          const rowNode = Table._api.getRowNode(String(taskId));
-          if (rowNode) rowNodes.push(rowNode);
-        }
-        if (rowNodes.length) {
-          Table._api.refreshCells({ rowNodes, columns: ['id'], force: true });
-        }
-      } else {
-        // Unscoped recompute: refresh all visible rows (no redrawRows — would re-enter AG Grid's render cycle)
-        Table._api.refreshCells({ columns: ['id'], force: true });
-      }
+      const updated = changedIds && changedIds.length
+        ? changedIds
+            .map(id => Store.tasks[id])
+            .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant)
+        : Store.tasksForSelectedPlant();
+      if (updated.length) Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'conflict' || Table._chipFilters.status === 'atrisk') {
         Table._api.onFilterChanged();
       }
@@ -1180,12 +1186,12 @@ export const Table = {
       Inspector.show(task);
     }
   },
-  _rowClass(data: NimbusTask | null): string {
-    if (!data) return '';
+  _alertSeverity(data: NimbusTask | null): 'err' | 'warn' | null {
+    if (!data) return null;
     const ids = Store.alertsByTask().get(String(data.id)) || [];
-    if (ids.some(a => a.sev === 'err')) return 'row-alert';
-    if (ids.some(a => a.sev === 'warn')) return 'row-warn';
-    return '';
+    if (ids.some(a => a.sev === 'err')) return 'err';
+    if (ids.some(a => a.sev === 'warn')) return 'warn';
+    return null;
   },
 
   _getLineOptions(): string[] {
