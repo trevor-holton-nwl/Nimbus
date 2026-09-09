@@ -232,24 +232,22 @@ class TestPurgeOrdersByDateRealDb:
             conn.commit()
 
     def test_deletes_only_rows_in_range_by_effective_end_date(self, pg):
-        """db.purge_orders_by_date is a bare, unscoped DELETE ... WHERE
-        COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s -- by
-        design, no id/plant filter (see db.py:1242). Run against a real,
-        possibly shared database, that means a date window that happens to
-        match OTHER real rows would silently mass-delete them and this test
-        would still pass (it only checked status/>=1). So before each
-        destructive call we assert exactly how many rows the window will
-        touch and refuse to proceed if it's not exactly what this test
-        expects -- loudly, via pytest.fail, rather than letting the purge
-        run against unknown data."""
+        """db.purge_orders_by_date is now plant-scoped (a required leading
+        `plant = %s` predicate, see db.py's _PURGE_WHERE_SQL) -- the fix for
+        the original hazard this test used to document, where an unscoped
+        DELETE run against a real, possibly shared database could silently
+        mass-delete unrelated rows sharing the date window. This sentinel's
+        PLANT ('ZZTEST_PURGE_PLANT') is itself the isolation boundary now, but
+        the pre-count discipline below is kept as defense in depth -- it
+        would still catch a regression that dropped the plant filter."""
         db_ = pg
 
         def _matching_count(start, end):
             with db_._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute(
-                    "SELECT COUNT(*) FROM orders WHERE "
+                    "SELECT COUNT(*) FROM orders WHERE plant = %s AND "
                     "COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s",
-                    (start, end),
+                    (self.PLANT, start, end),
                 )
                 (count,) = cur.fetchone()
             return count
@@ -262,7 +260,7 @@ class TestPurgeOrdersByDateRealDb:
                 f"expected 0 matching rows before purge, found {pre_miss} -- "
                 "refusing to run a destructive purge that would delete unrelated data"
             )
-        result_miss = db_.purge_orders_by_date(out_of_range_start, out_of_range_end)
+        result_miss = db_.purge_orders_by_date(self.PLANT, out_of_range_start, out_of_range_end)
         assert result_miss["status"] == "ok"
         assert result_miss["deleted"] == 0
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -278,7 +276,7 @@ class TestPurgeOrdersByDateRealDb:
                 f"expected 1 matching row (the sentinel) before purge, found {pre_hit} -- "
                 "refusing to run a destructive purge that would delete unrelated data"
             )
-        result_hit = db_.purge_orders_by_date(in_range_start, in_range_end)
+        result_hit = db_.purge_orders_by_date(self.PLANT, in_range_start, in_range_end)
         assert result_hit["status"] == "ok"
         assert result_hit["deleted"] == 1
         with db_._pool.connection() as conn, conn.cursor() as cur:

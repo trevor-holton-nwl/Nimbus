@@ -208,19 +208,42 @@ def test_failed_ingest_or_purge_snapshot_cannot_advance_from_future_work():
 
 
 def test_purge_captures_observation_before_deleting_source_schedule_with_actor(monkeypatch):
-    """A purge must preserve only a pre-mutation observation, never schedule-changing setup work."""
+    """A purge must preserve only a pre-mutation observation, never schedule-changing
+    setup work — exercised via brain's back-compat re-export (brain.purge_orders IS
+    backend.integration.routes.purge_orders, same function object) to pin that path
+    too, not just the direct backend.integration.routes import used elsewhere.
+
+    Routed through TestClient rather than called as a bare function: the route now
+    depends on FastAPI-resolved `allowed_plants` (Depends(...)), which only resolves
+    inside a real request lifecycle."""
     import brain
+    from starlette.testclient import TestClient
+    import backend.security.auth as auth
 
     calls = []
     monkeypatch.setattr(brain.setup_data, "capture_setup_states_before_schedule_mutation",
                         lambda **kwargs: calls.append(("snapshot", kwargs)))
     monkeypatch.setattr(brain.db, "purge_orders_by_date",
-                        lambda start, end: calls.append(("purge", start, end)) or {"status": "ok", "deleted": 1})
-    request = type("Request", (), {"headers": {"x-user-email": "scheduler@example.com"}})()
-    result = brain.purge_orders({"start_date": "2026-08-01", "end_date": "2026-08-02"}, request)
-    assert result["deleted"] == 1
+                        lambda plant, start, end, machines=None, **kw: calls.append(("purge", plant, start, end))
+                        or {"status": "ok", "deleted": 1, "plant": plant, "machines": []})
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", None)
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "test-admin"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    try:
+        response = TestClient(brain.api).post(
+            "/purge",
+            json={"plant": "1006", "start_date": "2026-08-01", "end_date": "2026-08-02"},
+            headers={"x-user-email": "scheduler@example.com"},
+        )
+    finally:
+        brain.api.dependency_overrides.pop(brain.require_admin, None)
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 1
     assert [call[0] for call in calls] == ["snapshot", "purge"]
     assert calls[0][1]["actor"] == "scheduler@example.com"
+    assert calls[0][1]["plants"] == ["1006"]
 
 
 def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):

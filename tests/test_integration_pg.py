@@ -25,6 +25,7 @@ import master_data as md
 
 _TEST_RUN_TOKEN = uuid.uuid4().hex[:8].upper()
 ZZTEST_PLANT = "ZZTEST_P3"
+ZZTEST_PLANT_OTHER = "ZZTEST_P4"
 ZZTEST_USER = f"zztest.integration+{_TEST_RUN_TOKEN.lower()}@example.com"
 ZZTEST_MAT_PARENT = f"ZZTEST_{_TEST_RUN_TOKEN}P"
 ZZTEST_MAT_COMPONENT = f"ZZTEST_{_TEST_RUN_TOKEN}C"
@@ -35,7 +36,9 @@ ZZTEST_ORDER_ID = db.make_id(ZZTEST_ORDER_NO, ZZTEST_MAT_PARENT)
 ZZTEST_PURGE_BASIC_ID = f"ZZTEST_INT_{_TEST_RUN_TOKEN}_PURGE_BASIC"
 ZZTEST_PURGE_SCHEDULED_ID = f"ZZTEST_INT_{_TEST_RUN_TOKEN}_PURGE_SCHEDULED"
 ZZTEST_PURGE_KEEP_ID = f"ZZTEST_INT_{_TEST_RUN_TOKEN}_PURGE_KEEP"
-ZZTEST_PURGE_IDS = frozenset({ZZTEST_PURGE_BASIC_ID, ZZTEST_PURGE_SCHEDULED_ID, ZZTEST_PURGE_KEEP_ID})
+ZZTEST_PURGE_OTHER_PLANT_ID = f"ZZTEST_INT_{_TEST_RUN_TOKEN}_PURGE_OTHER_PLANT"
+ZZTEST_PURGE_IDS = frozenset({ZZTEST_PURGE_BASIC_ID, ZZTEST_PURGE_SCHEDULED_ID, ZZTEST_PURGE_KEEP_ID,
+                              ZZTEST_PURGE_OTHER_PLANT_ID})
 ZZTEST_BOM_KEY = (
     ZZTEST_MAT_PARENT,
     ZZTEST_PLANT,
@@ -627,7 +630,9 @@ def test_ingest_bom_from_excel_persists_valid_bom_item(pg, zztest_integration_re
 
 @pytest.mark.pg
 def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(isolated_purge_database):
-    """The real purge SQL runs in an isolated scratch DB with no TOCTOU window."""
+    """The real purge SQL runs in an isolated scratch DB with no TOCTOU window.
+    Also proves plant scoping: an order in ZZTEST_PLANT_OTHER with an end date
+    in the same range must survive a purge of ZZTEST_PLANT."""
     conn = isolated_purge_database
     start = dt.datetime(2026, 11, 1, 0, 0)
     end = dt.datetime(2026, 11, 30, 23, 59)
@@ -636,6 +641,7 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(isolated
             ZZTEST_PURGE_BASIC_ID,
             f"ZZTEST_INT_{_TEST_RUN_TOKEN}_ORD_PURGE_BASIC",
             f"ZZTEST_INT_{_TEST_RUN_TOKEN}_MAT_PURGE_BASIC",
+            ZZTEST_PLANT,
             dt.datetime(2026, 11, 5, 8, 0),
             dt.datetime(2026, 11, 5, 12, 0),
             None,
@@ -645,6 +651,7 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(isolated
             ZZTEST_PURGE_SCHEDULED_ID,
             f"ZZTEST_INT_{_TEST_RUN_TOKEN}_ORD_PURGE_SCHEDULED",
             f"ZZTEST_INT_{_TEST_RUN_TOKEN}_MAT_PURGE_SCHEDULED",
+            ZZTEST_PLANT,
             dt.datetime(2026, 12, 5, 8, 0),
             dt.datetime(2026, 12, 5, 12, 0),
             dt.datetime(2026, 11, 6, 8, 0),
@@ -654,6 +661,109 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(isolated
             ZZTEST_PURGE_KEEP_ID,
             f"ZZTEST_INT_{_TEST_RUN_TOKEN}_ORD_PURGE_KEEP",
             f"ZZTEST_INT_{_TEST_RUN_TOKEN}_MAT_PURGE_KEEP",
+            ZZTEST_PLANT,
+            dt.datetime(2026, 12, 6, 8, 0),
+            dt.datetime(2026, 12, 6, 12, 0),
+            None,
+            None,
+        ),
+        (
+            ZZTEST_PURGE_OTHER_PLANT_ID,
+            f"ZZTEST_INT_{_TEST_RUN_TOKEN}_ORD_PURGE_OTHER_PLANT",
+            f"ZZTEST_INT_{_TEST_RUN_TOKEN}_MAT_PURGE_OTHER_PLANT",
+            ZZTEST_PLANT_OTHER,
+            dt.datetime(2026, 11, 5, 8, 0),
+            dt.datetime(2026, 11, 5, 12, 0),
+            None,
+            None,
+        ),
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO orders
+                (id, production_order, material_number, plant, basic_start_date,
+                 basic_finish_date, scheduled_start, scheduled_end)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            rows,
+        )
+        conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id
+              FROM orders
+             WHERE plant = %s
+               AND COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s
+             ORDER BY id
+            """,
+            (ZZTEST_PLANT, start, end),
+        )
+        matched_ids = [r[0] for r in cur.fetchall()]
+
+    assert all(order_id.startswith("ZZTEST_INT_") for order_id in matched_ids), (
+        "Refusing to exercise a purge on a date range containing non-test orders"
+    )
+    expected_purge_ids = sorted([ZZTEST_PURGE_BASIC_ID, ZZTEST_PURGE_SCHEDULED_ID])
+    assert matched_ids == expected_purge_ids
+
+    result = db.purge_orders_by_date(ZZTEST_PLANT, start, end, user_email=ZZTEST_USER)
+
+    assert result == {"status": "ok", "deleted": 2, "plant": ZZTEST_PLANT, "machines": []}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id",
+            (list(ZZTEST_PURGE_IDS),),
+        )
+        remaining = [r[0] for r in cur.fetchall()]
+
+    assert remaining == sorted([ZZTEST_PURGE_KEEP_ID, ZZTEST_PURGE_OTHER_PLANT_ID])
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT details, user_email FROM admin_audit
+             WHERE table_name = 'orders' AND action = 'purge_by_date_range'
+             ORDER BY id DESC LIMIT 1
+            """
+        )
+        audit_row = cur.fetchone()
+
+    assert audit_row is not None, "purge must write a durable admin_audit row"
+    details, user_email = audit_row
+    assert details["plant"] == ZZTEST_PLANT
+    assert details["deleted"] == 2
+    assert sorted(details["order_ids"]) == expected_purge_ids
+    assert user_email == ZZTEST_USER
+
+
+@pytest.mark.pg
+def test_purge_preview_matches_delete_count(isolated_purge_database):
+    """Regression guard for the original defect: the preview and the real
+    delete must agree exactly on how many rows are in scope, because they now
+    share one selector fragment (db._purge_scope_sql_params). This is the one
+    test that would have caught a client-side preview count silently
+    diverging from the server-side DELETE."""
+    conn = isolated_purge_database
+    start = dt.datetime(2026, 11, 1, 0, 0)
+    end = dt.datetime(2026, 11, 30, 23, 59)
+    rows = [
+        (
+            ZZTEST_PURGE_BASIC_ID,
+            f"ZZTEST_INT_{_TEST_RUN_TOKEN}_ORD_PURGE_BASIC",
+            f"ZZTEST_INT_{_TEST_RUN_TOKEN}_MAT_PURGE_BASIC",
+            ZZTEST_PLANT,
+            dt.datetime(2026, 11, 5, 8, 0),
+            dt.datetime(2026, 11, 5, 12, 0),
+            dt.datetime(2026, 11, 5, 8, 0),
+            None,
+        ),
+        (
+            ZZTEST_PURGE_KEEP_ID,
+            f"ZZTEST_INT_{_TEST_RUN_TOKEN}_ORD_PURGE_KEEP",
+            f"ZZTEST_INT_{_TEST_RUN_TOKEN}_MAT_PURGE_KEEP",
+            ZZTEST_PLANT,
             dt.datetime(2026, 12, 6, 8, 0),
             dt.datetime(2026, 12, 6, 12, 0),
             None,
@@ -668,35 +778,12 @@ def test_purge_orders_by_date_deletes_only_in_range_effective_end_dates(isolated
                  basic_finish_date, scheduled_start, scheduled_end)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            [(row[0], row[1], row[2], ZZTEST_PLANT, *row[3:]) for row in rows],
+            rows,
         )
         conn.commit()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id
-              FROM orders
-             WHERE COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s
-             ORDER BY id
-            """,
-            (start, end),
-        )
-        matched_ids = [r[0] for r in cur.fetchall()]
 
-    assert all(order_id.startswith("ZZTEST_INT_") for order_id in matched_ids), (
-        "Refusing to exercise global purge on a date range containing non-test orders"
-    )
-    expected_purge_ids = sorted([ZZTEST_PURGE_BASIC_ID, ZZTEST_PURGE_SCHEDULED_ID])
-    assert matched_ids == expected_purge_ids
+    preview = db.preview_purge_orders(ZZTEST_PLANT, start, end)
+    result = db.purge_orders_by_date(ZZTEST_PLANT, start, end)
 
-    result = db.purge_orders_by_date(start, end)
-
-    assert result == {"status": "ok", "deleted": 2}
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id",
-            (list(ZZTEST_PURGE_IDS),),
-        )
-        remaining = [r[0] for r in cur.fetchall()]
-
-    assert remaining == [ZZTEST_PURGE_KEEP_ID]
+    assert preview["total"] == result["deleted"] == 1
+    assert preview["planner_overridden"] == 1  # ZZTEST_PURGE_BASIC_ID has scheduled_start set

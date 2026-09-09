@@ -121,28 +121,98 @@ async def upload_bom(request: Request, file: UploadFile = File(...)):
     return result
 
 
-@router.post("/purge", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def purge_orders(payload: dict, request: Request):
-    """
-    payload: { start_date: ISO, end_date: ISO } — both inclusive.
-    Deletes orders where effective end date falls in the range. Stateless:
-    no in-memory frame to refresh afterward. (Sync handler → runs in the
-    threadpool, so the blocking DELETE doesn't stall the event loop.)
-    """
+def _parse_purge_scope(body: dict) -> tuple[str, "datetime", "datetime", list[str]]:
+    """Shared validation for /purge/preview and /purge, so the two routes can
+    never validate (and therefore scope) their date range differently. Returns
+    (plant, start, end, machines). Raises HTTPException on any invalid input."""
+    plant = (body.get("plant") or "").strip()
+    if not plant:
+        raise HTTPException(status_code=400, detail="plant is required")
+
     try:
-        start = datetime.fromisoformat(str(payload["start_date"]).replace("Z", ""))
-        end   = datetime.fromisoformat(str(payload["end_date"]).replace("Z", ""))
+        start = datetime.fromisoformat(str(body["start_date"]).replace("Z", ""))
+        end   = datetime.fromisoformat(str(body["end_date"]).replace("Z", ""))
     except (KeyError, ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid date range: {e}") from e
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
+
+    machines_raw = body.get("machines") or []
+    if not isinstance(machines_raw, list):
+        raise HTTPException(status_code=400, detail="machines must be a list")
+    machines = [str(m).strip() for m in machines_raw if str(m).strip()]
+
+    return plant, start, end, machines
+
+
+def _assert_purge_plant_allowed(plant: str, allowed_plants: list[str] | None) -> None:
+    """Same choke point as /master-data/resync-order-attributes: require_admin
+    alone proves the caller is an admin, not that this plant is inside their
+    role_plants scope. A purge is a DELETE, strictly more destructive than that
+    route's UPDATE, so the same guard applies here for at least as strong a
+    reason."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/purge/preview", dependencies=[Depends(require_admin)])
+def purge_preview(body: dict = Body(default={}),
+                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """
+    Read-only dry run for POST /purge, sharing its validation
+    (_parse_purge_scope) and plant-scope guard so the previewed count can never
+    describe a different row set than the real delete. Deliberately a separate
+    route rather than a `dry_run` flag on /purge: brain.py's
+    _ADMIN_WRITE_OPERATIONS maps by route path, so a flag would file every
+    preview under the same orders.purge audit operation as a real delete.
+    Not registered in _ADMIN_WRITE_OPERATIONS and carries no require_api_key —
+    it changes nothing and is safe to call freely as the admin edits the form.
+
+    Payload: { plant: str, start_date: ISO, end_date: ISO, machines?: string[] }
+    Response: { status, plant, total, planner_overridden }
+    """
+    plant, start, end, machines = _parse_purge_scope(body)
+    _assert_purge_plant_allowed(plant, allowed_plants)
+    return db.preview_purge_orders(plant, start, end, machines or None)
+
+
+@router.post("/purge", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def purge_orders(request: Request, body: dict = Body(default={}),
+                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """
+    payload: { plant: str, start_date: ISO, end_date: ISO, machines?: string[] }
+    Deletes one plant's orders where effective end date falls in the range
+    (both inclusive). Stateless: no in-memory frame to refresh afterward.
+    (Sync handler → runs in the threadpool, so the blocking DELETE doesn't
+    stall the event loop.)
+
+    Plant-scoped and role_plants-checked (_assert_purge_plant_allowed) — a
+    plant-restricted admin must not be able to delete another plant's orders,
+    the same reasoning /master-data/resync-order-attributes already applies to
+    its strictly less destructive UPDATE.
+    """
+    plant, start, end, machines = _parse_purge_scope(body)
+    _set_admin_log_details(request, plant=plant, machines=",".join(machines),
+                            start=str(start), end=str(end))
+    _assert_purge_plant_allowed(plant, allowed_plants)
+
     # This must remain adjacent to the DELETE below: a derived state may only
-    # observe the prior schedule while it still exists.
+    # observe the prior schedule while it still exists. Scoped to this plant
+    # only (plants=[plant]) — unlike the prior unscoped call, matching how
+    # /upload already scopes its own capture.
     setup_data.capture_setup_states_before_schedule_mutation(
-        actor=request.headers.get("x-user-email") or "system", reason="order purge"
+        actor=request.headers.get("x-user-email") or "system", reason="order purge",
+        plants=[plant],
     )
-    result = db.purge_orders_by_date(start, end)
-    if result.get("status") == "ok":
-        _log_event("info", "purge", "Orders purged by date range",
-                   deleted=result.get("deleted", 0), start=str(start), end=str(end))
+    result = db.purge_orders_by_date(plant, start, end, machines or None,
+                                      user_email=request.headers.get("x-user-email"))
+    _set_admin_log_details(request, deleted=result.get("deleted", 0))
+    _log_event("info", "purge", "Orders purged by date range",
+               plant=plant, deleted=result.get("deleted", 0), start=str(start), end=str(end))
     return result
 
 

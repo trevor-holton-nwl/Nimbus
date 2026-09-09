@@ -1239,14 +1239,79 @@ def update_task_note(task_id: str, notes) -> dict:
     return {"status": "ok", "updated": updated, "versions": versions}
 
 
-def purge_orders_by_date(start, end) -> dict:
-    """DELETE rows whose effective end date (scheduled_end, falling back to basic_finish_date) falls in [start, end]."""
-    sql = "DELETE FROM orders WHERE COALESCE(scheduled_end, basic_finish_date) BETWEEN %s AND %s"
+# Purge selector: plant-scoped, on the order's effective end date (scheduled_end,
+# falling back to basic_finish_date). Shared verbatim between preview_purge_orders
+# and purge_orders_by_date so the two can never describe different row sets —
+# that divergence (a client-side preview count disagreeing with the real DELETE)
+# was the original defect this pair of functions replaces. Measured against the
+# only real dataset available (2026-09-08, plant 1085, 1842 orders): this
+# predicate, _EFF_END_SQL, and the full /tasks read-path expression all agreed
+# exactly, so the predicate itself is intentionally left unchanged — only the
+# scoping is new. See docs/architecture (purge hardening) for the measurement.
+_PURGE_WHERE_SQL = "plant = %(plant)s AND COALESCE(scheduled_end, basic_finish_date) BETWEEN %(start)s AND %(end)s"
+
+
+def _purge_scope_sql_params(plant, start, end, machines=None):
+    where = _PURGE_WHERE_SQL
+    params = {"plant": plant, "start": start, "end": end}
+    if machines:
+        where += " AND machine = ANY(%(machines)s)"
+        params["machines"] = list(machines)
+    return where, params
+
+
+def preview_purge_orders(plant, start, end, machines=None) -> dict:
+    """Server-side dry run for a plant-scoped date-range purge. Returns a
+    fully-seeded, stable-shape dict (the md.cascade_preview discipline) so the
+    caller never has to distinguish "0" from "absent". `total` is the count the
+    real DELETE will remove; `planner_overridden` counts orders with a
+    scheduled_start (a planner-set schedule the ingest upsert never restores on
+    re-upload — see schema.sql's orders comment), which is the number that
+    matters most for an honest confirmation prompt."""
+    where, params = _purge_scope_sql_params(plant, start, end, machines)
+    sql = (f"SELECT COUNT(*), COUNT(scheduled_start) FROM orders WHERE {where}")
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, (start, end))
-        deleted = cur.rowcount
-        conn.commit()
-    return {"status": "ok", "deleted": deleted}
+        cur.execute(sql, params)
+        total, planner_overridden = cur.fetchone()
+    return {"status": "ok", "plant": plant, "total": int(total),
+            "planner_overridden": int(planner_overridden)}
+
+
+def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -> dict:
+    """DELETE orders in one plant whose effective end date (scheduled_end,
+    falling back to basic_finish_date) falls in [start, end]. Plant-scoped
+    (unlike the prior unscoped version) so a plant-restricted admin can never
+    reach another plant's rows — the caller is responsible for having already
+    authorized `plant` via md._assert_plant_allowed before calling this.
+
+    Writes a durable admin_audit row in the SAME transaction as the delete, so
+    an audit record can never exist without the delete it describes (or vice
+    versa). The audit's order_ids list is capped at 200 (~7KB of JSONB; see the
+    material_ids[:50] capping precedent in master_data.py) — deleted count and
+    plant/range are always present in full regardless of that cap.
+    """
+    where, params = _purge_scope_sql_params(plant, start, end, machines)
+    sql = f"DELETE FROM orders WHERE {where} RETURNING id"
+    with _pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute(sql, params)
+            ids = [row[0] for row in cur.fetchall()]
+            deleted = len(ids)
+            cur.execute(
+                "INSERT INTO admin_audit (table_name, action, details, user_email)"
+                " VALUES ('orders', 'purge_by_date_range', %s, %s)",
+                (Jsonb({"plant": plant, "machines": list(machines or []),
+                        "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
+                        "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
+                        "deleted": deleted, "order_ids": ids[:200],
+                        "order_id_count": len(ids), "truncated": len(ids) > 200}),
+                 user_email),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return {"status": "ok", "deleted": deleted, "plant": plant, "machines": list(machines or [])}
 
 
 def clear_upload_audit() -> dict:

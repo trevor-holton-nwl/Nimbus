@@ -1934,9 +1934,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <div class="panel admin-card" id="admin-purge">
                 <header class="panel-head">
                   <h3 data-i18n="ui.purge_orders">Purge orders by date range</h3>
-                  <span class="panel-hint" data-i18n="ui.purge_hint">Deletes orders whose effective end date falls inclusively in the range</span>
+                  <span class="panel-hint" data-i18n="ui.purge_hint">Deletes one plant's orders whose scheduled end (or SAP finish date, if none) falls inclusively in the range</span>
                 </header>
                 <div class="panel-body">
+                  <div class="form-row">
+                    <label data-i18n="ui.plant_label">Plant</label>
+                    <select id="admin-purge-plant"></select>
+                  </div>
                   <div class="form-row form-row-2">
                     <div>
                       <label data-i18n="ui.start_date">Start date</label>

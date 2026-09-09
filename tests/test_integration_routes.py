@@ -211,30 +211,37 @@ def test_upload_bom_surfaces_ingest_failure_as_400(admin_client, monkeypatch):
 
 def test_purge_captures_immediately_before_deleting_orders(admin_client, monkeypatch):
     """Purge must preserve setup observability immediately before the
-    destructive date-range delete and return the delete result."""
+    destructive date-range delete and return the delete result. Also pins
+    that the capture is now scoped to just the target plant (plants=[plant]),
+    matching how /upload already scopes its own capture."""
     events = []
 
     def fake_capture(**kwargs):
         events.append(("capture", kwargs))
 
-    def fake_purge(start, end):
-        events.append(("purge", {"start": start.isoformat(), "end": end.isoformat()}))
-        return {"status": "ok", "deleted": 3}
+    def fake_purge(plant, start, end, machines=None, *, user_email=None):
+        events.append(("purge", {"plant": plant, "start": start.isoformat(), "end": end.isoformat(),
+                                  "machines": machines, "user_email": user_email}))
+        return {"status": "ok", "deleted": 3, "plant": plant, "machines": list(machines or [])}
 
     monkeypatch.setattr(int_routes.setup_data, "capture_setup_states_before_schedule_mutation", fake_capture)
     monkeypatch.setattr(int_routes.db, "purge_orders_by_date", fake_purge)
-
-    response = admin_client.post(
-        "/purge",
-        json={"start_date": "2026-09-01T00:00:00", "end_date": "2026-09-30T23:59:59"},
-        headers={"x-user-email": "planner@example.com"},
-    )
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    try:
+        response = admin_client.post(
+            "/purge",
+            json={"plant": "1006", "start_date": "2026-09-01T00:00:00", "end_date": "2026-09-30T23:59:59"},
+            headers={"x-user-email": "planner@example.com"},
+        )
+    finally:
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "deleted": 3}
+    assert response.json() == {"status": "ok", "deleted": 3, "plant": "1006", "machines": []}
     assert [name for name, _ in events] == ["capture", "purge"]
-    assert events[0][1] == {"actor": "planner@example.com", "reason": "order purge"}
-    assert events[1][1] == {"start": "2026-09-01T00:00:00", "end": "2026-09-30T23:59:59"}
+    assert events[0][1] == {"actor": "planner@example.com", "reason": "order purge", "plants": ["1006"]}
+    assert events[1][1] == {"plant": "1006", "start": "2026-09-01T00:00:00", "end": "2026-09-30T23:59:59",
+                             "machines": None, "user_email": "planner@example.com"}
 
 
 def test_purge_rejects_invalid_date_range_before_capture_or_delete(admin_client, monkeypatch):
@@ -248,14 +255,115 @@ def test_purge_rejects_invalid_date_range_before_capture_or_delete(admin_client,
     monkeypatch.setattr(
         int_routes.db,
         "purge_orders_by_date",
-        lambda start, end: events.append(("purge", start, end)) or {"status": "ok", "deleted": 0},
+        lambda plant, start, end, machines=None, **kw: events.append(("purge", plant, start, end)) or {"status": "ok", "deleted": 0},
     )
 
-    response = admin_client.post("/purge", json={"start_date": "not-a-date", "end_date": "2026-09-30"})
+    response = admin_client.post(
+        "/purge", json={"plant": "1006", "start_date": "not-a-date", "end_date": "2026-09-30"}
+    )
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Invalid date range:")
     assert events == []
+
+
+def test_purge_requires_plant(admin_client, monkeypatch):
+    """A purge with no plant must be rejected before any side effects — this
+    is the guard that makes /purge scoped rather than global."""
+    events = []
+    monkeypatch.setattr(
+        int_routes.setup_data,
+        "capture_setup_states_before_schedule_mutation",
+        lambda **kwargs: events.append(("capture", kwargs)),
+    )
+    monkeypatch.setattr(
+        int_routes.db,
+        "purge_orders_by_date",
+        lambda plant, start, end, machines=None, **kw: events.append(("purge",)) or {"status": "ok", "deleted": 0},
+    )
+
+    response = admin_client.post(
+        "/purge", json={"start_date": "2026-09-01T00:00:00", "end_date": "2026-09-30T23:59:59"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "plant is required"
+    assert events == []
+
+
+def test_purge_rejects_inverted_range(admin_client, monkeypatch):
+    """start_date after end_date must 400, not silently delete zero rows."""
+    events = []
+    monkeypatch.setattr(
+        int_routes.setup_data,
+        "capture_setup_states_before_schedule_mutation",
+        lambda **kwargs: events.append(("capture", kwargs)),
+    )
+    monkeypatch.setattr(
+        int_routes.db,
+        "purge_orders_by_date",
+        lambda plant, start, end, machines=None, **kw: events.append(("purge",)) or {"status": "ok", "deleted": 0},
+    )
+
+    response = admin_client.post(
+        "/purge",
+        json={"plant": "1006", "start_date": "2026-09-30T00:00:00", "end_date": "2026-09-01T00:00:00"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "start_date must be on or before end_date"
+    assert events == []
+
+
+def test_purge_rejects_out_of_scope_plant(admin_client, monkeypatch):
+    """A plant outside the caller's role_plants scope must 403 before either
+    the setup-state capture or the delete runs — the regression guard for the
+    original global-delete vulnerability."""
+    events = []
+    monkeypatch.setattr(
+        int_routes.setup_data,
+        "capture_setup_states_before_schedule_mutation",
+        lambda **kwargs: events.append(("capture", kwargs)),
+    )
+    monkeypatch.setattr(
+        int_routes.db,
+        "purge_orders_by_date",
+        lambda plant, start, end, machines=None, **kw: events.append(("purge",)) or {"status": "ok", "deleted": 0},
+    )
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["ZZTEST_PA"]
+    try:
+        response = admin_client.post(
+            "/purge",
+            json={"plant": "ZZTEST_PB", "start_date": "2026-09-01T00:00:00", "end_date": "2026-09-30T23:59:59"},
+        )
+    finally:
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+
+    assert response.status_code == 403
+    assert "not in your assigned plants" in response.json()["detail"]
+    assert events == []
+
+
+def test_purge_preview_enforces_allowed_plant_scope(monkeypatch):
+    """/purge/preview must apply the same plant-scope guard as /purge —
+    otherwise the read-only preview would leak counts for plants the caller
+    isn't authorized to purge."""
+    calls = []
+    brain.api.dependency_overrides[int_routes.require_admin] = lambda: "test-admin"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["ZZTEST_PA"]
+    monkeypatch.setattr(int_routes.db, "preview_purge_orders", lambda *a, **kw: calls.append((a, kw)))
+    try:
+        response = TestClient(brain.api).post(
+            "/purge/preview",
+            json={"plant": "ZZTEST_PB", "start_date": "2026-09-01T00:00:00", "end_date": "2026-09-30T23:59:59"},
+        )
+    finally:
+        brain.api.dependency_overrides.pop(int_routes.require_admin, None)
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+
+    assert response.status_code == 403
+    assert "not in your assigned plants" in response.json()["detail"]
+    assert calls == []
 
 
 def test_live_missing_master_data_enforces_allowed_plant_scope(monkeypatch):

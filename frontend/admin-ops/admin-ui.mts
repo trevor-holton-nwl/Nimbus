@@ -325,10 +325,23 @@ interface AdminUploadResult {
   error_code?: string;
 }
 
+/** POST /purge/preview response (db.preview_purge_orders). */
+interface AdminPurgePreview {
+  status: string;
+  plant: string;
+  total: number;
+  planner_overridden: number;
+  message?: string;
+  detail?: string;
+  error_code?: string;
+}
+
 /** POST /purge response (db.purge_orders_by_date). */
 interface AdminPurgeResult {
   status: string;
   deleted: number;
+  plant?: string;
+  machines?: string[];
   message?: string;
   detail?: string;
   error_code?: string;
@@ -430,6 +443,9 @@ export const AdminCockpit = {
   _auditLogAbort: null as AbortController | null,
   _fpPurgeStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpPurgeEnd: null as NimbusVendor.FlatpickrInstance | null,
+  _purgePlant: null as string | null,
+  _purgePreview: null as AdminPurgePreview | null,
+  _purgePreviewSeq: 0,
 
   gotoOvTab(tab: 'diagnostics' | 'data-ops' | 'logs' | 'thread'): void {
     AdminCockpit._activeOvTab = tab;
@@ -1117,22 +1133,99 @@ export const AdminCockpit = {
     }
   },
 
+  // Server-backed preview (replaces a former client-side count over Store.tasksArr,
+  // which only ever reflected the currently-loaded plant(s)/horizon while the
+  // real DELETE was — and still is, absent a plant here — global; that mismatch
+  // meant the shown count could silently understate the real impact by orders of
+  // magnitude). Debounced + sequence-guarded so a slow, stale response can never
+  // overwrite a newer one. Fails CLOSED: any preview error disables the purge
+  // button rather than falling through to an un-verified confirm — the same
+  // discipline frontend/master-data/admin-ui.mts uses for cascade-preview.
+  _purgePreviewTimer: null as ReturnType<typeof setTimeout> | null,
+
   _updatePurgeCount(): void {
+    // Disable immediately (not just once the debounced fetch resolves) so the
+    // button is never clickable against a stale preview while a new one loads.
+    AdminCockpit._purgePreview = null;
+    AdminCockpit._setPurgeButtonEnabled(false);
+    if (AdminCockpit._purgePreviewTimer) clearTimeout(AdminCockpit._purgePreviewTimer);
+    AdminCockpit._purgePreviewTimer = setTimeout(() => AdminCockpit._fetchPurgePreview(), 250);
+  },
+
+  _setPurgeButtonEnabled(enabled: boolean): void {
+    const btn = document.getElementById('admin-purge-btn') as HTMLButtonElement | null;
+    if (btn) btn.disabled = !enabled;
+  },
+
+  async _fetchPurgePreview(): Promise<void> {
+    const el = document.getElementById('admin-past-count');
+    const plant = AdminCockpit._purgePlant;
     const start = AdminCockpit._fpPurgeStart?.selectedDates[0];
     const end   = AdminCockpit._fpPurgeEnd?.selectedDates[0];
-    const el    = document.getElementById('admin-past-count');
+    AdminCockpit._purgePreview = null;
+    AdminCockpit._setPurgeButtonEnabled(false);
     if (!el) return;
+    if (!plant) { el.textContent = Util.t('ui.purge_pick_plant'); return; }
     if (!start || !end) { el.textContent = ''; return; }
-    const endOfDay = new Date(end); endOfDay.setHours(23, 59, 59, 999);
-    const count = (Store.tasksArr || []).filter(t => t.end_date && t.end_date >= start && t.end_date <= endOfDay).length;
-    el.innerHTML = count > 0
-      ? `<strong style="color:var(--err,#c0392b)">${Util.t('ui.orders_in_range', {count, plural: count === 1 ? '' : 's'})}</strong>`
-      : `<span style="color:var(--text-muted,#888)">${Util.t('ui.orders_in_range', {count: 0, plural: 's'})}</span>`;
+    if (start > end) { el.textContent = ''; return; }
+
+    const seq = ++AdminCockpit._purgePreviewSeq;
+    const startStr = Util.toLocalSeconds(start).slice(0, 10);
+    const endStr   = Util.toLocalSeconds(end).slice(0, 10);
+    el.innerHTML = `<span style="color:var(--text-muted,#888)">${Util.t('ui.checking_purge_impact')}</span>`;
+    try {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/purge/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plant, start_date: startStr, end_date: endStr }),
+      });
+      const body = await r.json().catch(() => ({})) as AdminPurgePreview;
+      if (seq !== AdminCockpit._purgePreviewSeq) return; // superseded by a newer request
+      if (!r.ok || body.status !== 'ok') {
+        el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.t('toast.purge_preview_failed', { msg: body.detail || body.message || 'unknown' })}</span>`;
+        return;
+      }
+      AdminCockpit._purgePreview = body;
+      const { total, planner_overridden } = body;
+      const parts = [Util.t('ui.orders_in_range', { count: total, plural: total === 1 ? '' : 's' })];
+      if (planner_overridden > 0) parts.push(Util.t('ui.purge_planner_overridden', { count: planner_overridden }));
+      el.innerHTML = total > 0
+        ? `<strong style="color:var(--err,#c0392b)">${parts.join(' — ')}</strong>`
+        : `<span style="color:var(--text-muted,#888)">${parts[0]}</span>`;
+      AdminCockpit._setPurgeButtonEnabled(true);
+    } catch (e) {
+      if (seq !== AdminCockpit._purgePreviewSeq) return;
+      el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.t('toast.purge_preview_failed', { msg: (e as Error).message })}</span>`;
+    }
   },
 
   _renderPurgeMeta(): void {
     const yesterday   = new Date(); yesterday.setDate(yesterday.getDate() - 1);
     const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+
+    const plantSel = document.getElementById('admin-purge-plant') as HTMLSelectElement | null;
+    if (plantSel && !plantSel.dataset.wired) {
+      plantSel.dataset.wired = '1';
+      plantSel.addEventListener('change', () => {
+        AdminCockpit._purgePlant = plantSel.value || null;
+        AdminCockpit._updatePurgeCount();
+      });
+    }
+    if (plantSel) {
+      const plants = Store.knownPlants();
+      const prevValue = plantSel.value;
+      plantSel.innerHTML = `<option value="">${Util.t('ui.select_plant_label')}</option>`
+        + plants.map(p => `<option value="${Util.escapeHtml(p)}">${Util.escapeHtml(Store.plantLabel(p))}</option>`).join('');
+      // Preserve a still-valid selection across re-renders; otherwise default to
+      // the single plant when there's only one (the common pilot-scale case).
+      if (prevValue && plants.includes(prevValue)) {
+        plantSel.value = prevValue;
+      } else if (plants.length === 1) {
+        plantSel.value = plants[0];
+      }
+      AdminCockpit._purgePlant = plantSel.value || null;
+    }
+
     if (!AdminCockpit._fpPurgeStart) {
       AdminCockpit._fpPurgeStart = flatpickr('#admin-purge-start', {
         dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
@@ -1239,11 +1332,17 @@ export const AdminCockpit = {
   },
 
   async _purge(): Promise<void> {
+    const plantSel = document.getElementById('admin-purge-plant') as HTMLSelectElement | null;
     const startEl = document.getElementById('admin-purge-start') as HTMLInputElement | null;
     const endEl   = document.getElementById('admin-purge-end') as HTMLInputElement | null;
     const status  = document.getElementById('admin-purge-status');
+    const plant = plantSel?.value;
     const start = startEl?.value;
     const end   = endEl?.value;
+    if (!plant) {
+      AdminCockpit._setStatus(status, Util.t('toast.pick_purge_plant'), 'warn');
+      return;
+    }
     if (!start || !end) {
       AdminCockpit._setStatus(status, Util.t('toast.pick_purge_dates'), 'warn');
       return;
@@ -1252,7 +1351,29 @@ export const AdminCockpit = {
       AdminCockpit._setStatus(status, Util.t('toast.purge_start_before_end'), 'warn');
       return;
     }
-    const ok = await Modal.confirm({ title: Util.t('modal.purge_confirm', { start, end }), confirmLabel: Util.t('btn.yes_delete') });
+    // Fail closed: never confirm a purge without a verified server-side preview
+    // for the exact plant/range being submitted. The purge button is disabled
+    // whenever no matching preview is in hand (see _updatePurgeCount), so
+    // reaching this point with a null/mismatched preview means something raced
+    // past the debounce — refuse rather than guess.
+    const preview = AdminCockpit._purgePreview;
+    if (!preview || preview.plant !== plant) {
+      AdminCockpit._setStatus(status, Util.t('toast.purge_preview_failed', { msg: 'stale preview' }), 'warn');
+      return;
+    }
+
+    const plantLabel = Store.plantLabel(plant);
+    const detailLines = [Util.t('modal.purge_impact_total', { count: preview.total })];
+    if (preview.planner_overridden > 0) {
+      detailLines.push(Util.t('modal.purge_impact_override', { count: preview.planner_overridden }));
+    }
+    const ok = await Modal.confirm({
+      title:        Util.t('modal.purge_confirm', { start, end }),
+      message:      Util.t('modal.purge_scope', { plant: plantLabel }),
+      detail:       detailLines.map(s => `<div>${s}</div>`).join(''),
+      confirmLabel: Util.t('btn.yes_delete'),
+      tone:         'danger',
+    });
     if (!ok) return;
 
     AdminCockpit._setStatus(status, Util.t('toast.purging', { start, end }), 'info');
@@ -1262,7 +1383,7 @@ export const AdminCockpit = {
     Util.fetchTraced(`${Config.API_BASE}/purge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
-      body: JSON.stringify({ start_date: start + 'T00:00:00', end_date: end + 'T23:59:59' })
+      body: JSON.stringify({ plant, start_date: start + 'T00:00:00', end_date: end + 'T23:59:59' })
     })
       .then((r) => r.json().catch(() => ({})) as Promise<AdminPurgeResult>)
       .then((body) => {
@@ -1272,9 +1393,12 @@ export const AdminCockpit = {
             { reqId, errorCode: body?.error_code || 'http.status' });
           return;
         }
-        AdminCockpit._setStatus(status, `✓ Deleted ${body.deleted} order${body.deleted === 1 ? '' : 's'}`, 'success');
-        ErrorLog.info('admin', `Purge: deleted ${body.deleted} (${start} → ${end})`);
+        AdminCockpit._setStatus(status, Util.t('toast.purge_deleted', { count: body.deleted }), 'success');
+        ErrorLog.info('admin', `Purge: deleted ${body.deleted} (plant=${plant} ${start} → ${end})`);
         Toast.show(Util.t('toast.purge_ok', { count: body.deleted }), 'success');
+        AdminCockpit._purgePreview = null;
+        AdminCockpit._setPurgeButtonEnabled(false);
+        AdminCockpit._updatePurgeCount();
         Persistence.reload().then(() => {
           AdminCockpit._renderHealth();
           AdminCockpit._renderPipeline();
