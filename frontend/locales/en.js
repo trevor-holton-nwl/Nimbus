@@ -287,6 +287,7 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
   'tab.home':                          'Dashboard',
   'tab.gantt':                         'Scheduling Board',
+  'tab.gantt_timeline':                'Gantt Timeline',
   'tab.labor':                         'Labor Plan',
   'tab.table':                         'Orders',
   'tab.masterdata':                    'Master Data',
@@ -742,6 +743,10 @@ window.__NIMBUS_LOCALES.en = {
   'btn.hour':                          'Hour',
   'btn.day':                           'Day',
   'btn.week':                          'Week',
+  'btn.fit':                           'Fit',
+  'btn.now':                           'Now',
+  'btn.optimize':                      'Optimize',
+  'btn.print':                         'Print',
 
   /* ── Static UI labels ────────────────────────────────────────────────────── */
   'ui.plant_label':                    'Plant',
@@ -1326,10 +1331,12 @@ window.__NIMBUS_LOCALES.en = {
   'aria.command_palette':              'Command palette',
   'aria.nav_drawer_toggle':            'Toggle navigation menu',
   'aria.nav_drawer_close':             'Close navigation menu',
+  'aria.nav_gantt_toggle':             'Show or hide Scheduling Board views',
 
   // Nav drawer (Command Band re-skin)
   'ui.nav_drawer_heading':             'NAVIGATE',
   'ui.nav_drawer_footer':              'NIMBUS Production Scheduling',
+  'ui.section_label_with_sub':         '{{tab}} · {{sub}}',
 
   /* ── SAP Interface (data sync) ───────────────────────────────────────────── */
   'ui.sap_transport':                  'Transport',

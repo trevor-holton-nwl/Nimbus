@@ -287,6 +287,7 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
   'tab.home':                          'Panel',
   'tab.gantt':                         'Panel de Programación',
+  'tab.gantt_timeline':                'Cronograma Gantt',
   'tab.labor':                         'Plan de mano de obra',
   'tab.table':                         'Pedidos',
   'tab.masterdata':                    'Gestionar Datos Maestros',
@@ -530,6 +531,10 @@ window.__NIMBUS_LOCALES.es = {
   'btn.hour':                          'Hora',
   'btn.day':                           'Día',
   'btn.week':                          'Semana',
+  'btn.fit':                           'Ajustar',
+  'btn.now':                           'Ahora',
+  'btn.optimize':                      'Optimizar',
+  'btn.print':                         'Imprimir',
 
   'ui.plant_label':                    'Planta',
   'ui.hop_on':                         'Bienvenido',
@@ -1337,10 +1342,12 @@ window.__NIMBUS_LOCALES.es = {
   'aria.command_palette':              'Command palette',                           // MISSING TRANSLATION
   'aria.nav_drawer_toggle':            'Alternar menú de navegación',
   'aria.nav_drawer_close':             'Cerrar menú de navegación',
+  'aria.nav_gantt_toggle':             'Mostrar u ocultar las vistas del tablero de programación',
 
   // Nav drawer (Command Band re-skin)
   'ui.nav_drawer_heading':             'NAVEGACIÓN',
   'ui.nav_drawer_footer':              'NIMBUS Programación de Producción',
+  'ui.section_label_with_sub':         '{{tab}} · {{sub}}',
   'ui.setup_matrix_title': 'Matriz de preparación',
   'ui.setup_matrix_sub': 'Cuánto tarda en cambiarse el utillaje de una máquina entre dos órdenes — se usa para planificar los cambios una vez que la programación consciente de la preparación esté activada para {{plant}}. Esto todavía no afecta al programa actual.',
   'ui.setup_plant_default': 'Predeterminado de planta',

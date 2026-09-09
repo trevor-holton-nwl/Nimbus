@@ -283,6 +283,7 @@ window.__NIMBUS_LOCALES.de = {
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
   'tab.home':                          'Dashboard',
   'tab.gantt':                         'Planungstafel',
+  'tab.gantt_timeline':                'Gantt-Zeitleiste',
   'tab.labor':                         'Personalplan',
   'tab.table':                         'Aufträge',
   'tab.masterdata':                    'Stammdaten verwalten',
@@ -526,6 +527,10 @@ window.__NIMBUS_LOCALES.de = {
   'btn.hour':                          'Stunde',
   'btn.day':                           'Tag',
   'btn.week':                          'Woche',
+  'btn.fit':                           'Anpassen',
+  'btn.now':                           'Jetzt',
+  'btn.optimize':                      'Optimieren',
+  'btn.print':                         'Drucken',
 
   'ui.plant_label':                    'Werk',
   'ui.hop_on':                         'Willkommen',
@@ -1336,10 +1341,12 @@ window.__NIMBUS_LOCALES.de = {
   'aria.command_palette':              'Command palette',                           // MISSING TRANSLATION
   'aria.nav_drawer_toggle':            'Navigationsmenü umschalten',
   'aria.nav_drawer_close':             'Navigationsmenü schließen',
+  'aria.nav_gantt_toggle':             'Ansichten des Plantafel-Bereichs ein- oder ausblenden',
 
   // Nav drawer (Command Band re-skin)
   'ui.nav_drawer_heading':             'NAVIGATION',
   'ui.nav_drawer_footer':              'NIMBUS Produktionsplanung',
+  'ui.section_label_with_sub':         '{{tab}} · {{sub}}',
   'ui.setup_matrix_title': 'Setup-Matrix',
   'ui.setup_matrix_sub': 'Wie lange der Werkzeugwechsel einer Maschine zwischen zwei Aufträgen dauert — dient der Planung von Rüstzeiten, sobald die rüstzeitbewusste Planung für {{plant}} aktiviert ist. Dies wirkt sich noch nicht auf den heutigen Zeitplan aus.',
   'ui.setup_plant_default': 'Werksstandard',

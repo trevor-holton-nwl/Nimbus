@@ -1322,7 +1322,7 @@ export const Timeline = {
       end   = new Date(start.getTime() + 7 * 24 * Config.MS_HOUR);
     }
     Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
-    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+    document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
       b.classList.toggle('active', b.dataset.view === mode);
     });
   },
@@ -1443,7 +1443,7 @@ export const Timeline = {
         const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * Config.MS_HOUR);
         Timeline._syncViewWindow(dayStart.getTime(), dayLevelEnd.getTime());
         Timeline._tl.setWindow(dayStart, dayLevelEnd, { animation: { duration: 300 } });
-        document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach(b => {
+        document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
           b.classList.toggle('active', b.dataset.view === 'day');
         });
       }

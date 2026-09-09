@@ -228,6 +228,14 @@ h1, h2, h3, h4 {
 }
 .context-pill:hover { background: var(--bg-subtle); color: var(--fg); }
 
+/* Scheduling-only action cluster (zoom + Fit/Now + Optimize/What-If/Print) —
+   shown only while body[data-tab="gantt"], which App.goto sets on every
+   navigation. This is the light content area, so .seg-btn.active's navy
+   --primary fill applies (DESIGN.md CTA/Chrome Rule #3), not --chrome-accent. */
+#context-sched-actions { display: none; margin-left: auto; align-items: center; gap: 10px; flex-shrink: 0; }
+body[data-tab="gantt"] #context-sched-actions { display: flex; }
+#context-sched-actions .group { display: flex; gap: 4px; }
+
 /* --- LEFT NAV DRAWER + SCRIM (Command Band re-skin) -------------------------
    Replaces the old horizontal nav.tabs strip. Reuses the existing .tab-btn
    class/data-tab contract untouched (see overrides below) so the tab-switch
@@ -395,6 +403,45 @@ h1, h2, h3, h4 {
 #nav-drawer .tab-btn[data-tab="masterdata"]:not(.active) { background: transparent; border-color: transparent; }
 #nav-drawer .tab-btn[data-tab="masterdata"]:not(.active):hover { background: var(--chrome-panel); border-color: transparent; }
 #nav-drawer .tab-btn[data-tab="masterdata"].active { background: var(--chrome-panel); }
+
+/* Nested Scheduling Board sub-views (Gantt Timeline / Orders) in the drawer.
+   Children are .nav-sub-btn, deliberately NOT .tab-btn (no data-tab), so the
+   generic .tab-btn click wiring and App.goto's active-toggle ignore them.
+   Explicit [hidden]{display:none} pairs are required because display:flex
+   would otherwise beat the UA [hidden] rule. Chrome tokens per DESIGN.md Rule #2. */
+#nav-drawer .nav-group { display: flex; flex-direction: column; gap: 2px; }
+#nav-drawer .nav-group[hidden] { display: none; }
+#nav-drawer .nav-group-row { display: flex; align-items: stretch; gap: 2px; }
+#nav-drawer .nav-group-row .tab-btn { flex: 1; min-width: 0; }
+#nav-drawer .nav-group-chevron {
+  flex-shrink: 0; width: 30px;
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-md);
+  color: var(--chrome-fg-faint); font-size: 12px; cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+#nav-drawer .nav-group-chevron:hover { background: var(--chrome-panel); color: var(--chrome-fg); }
+#nav-drawer .nav-group-chevron-glyph { display: inline-block; transition: transform var(--t-fast); }
+#nav-drawer .nav-group-chevron[aria-expanded="true"] .nav-group-chevron-glyph { transform: rotate(90deg); }
+#nav-drawer .nav-sub-list { display: flex; flex-direction: column; gap: 2px; padding-left: 14px; }
+#nav-drawer .nav-sub-list[hidden] { display: none; }
+#nav-drawer .nav-sub-btn {
+  display: flex; align-items: center; width: 100%; justify-content: flex-start;
+  padding: 7px 12px;
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-md);
+  color: var(--chrome-fg-mute); font-size: 12px; font-weight: 500; cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+#nav-drawer .nav-sub-btn:hover { color: var(--chrome-fg); background: var(--chrome-panel); }
+#nav-drawer .nav-sub-btn.active {
+  color: var(--chrome-fg); background: var(--chrome-panel);
+  box-shadow: inset 3px 0 0 var(--chrome-accent);
+  position: relative; padding-left: 22px;
+}
+#nav-drawer .nav-sub-btn.active::before {
+  content: ''; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  width: 6px; height: 6px; border-radius: 50%; background: var(--chrome-accent);
+}
+
 .tab-btn {
   display: flex; align-items: center; gap: 7px;
   padding: 6px 12px;
@@ -525,6 +572,9 @@ h1, h2, h3, h4 {
     white-space: nowrap;
     max-width: 90px;
   }
+  #context-sched-actions .sa-label { display: none; }
+  #context-sched-actions .seg-btn { padding: 0 7px; }
+  #context-sched-actions { gap: 6px; }
 }
 .icon-btn .badge {
   position: absolute; top: 2px; right: 2px;
@@ -553,11 +603,6 @@ h1, h2, h3, h4 {
 .seg-btn:hover { background: var(--bg-subtle); color: var(--fg); }
 .seg-btn.active {
   background: var(--primary); color: var(--primary-fg); border-color: var(--primary);
-}
-.gantt-toolbar .seg-btn[data-gantt-sub].active {
-  background: var(--primary); border-color: var(--primary);
-  color: var(--primary-fg); font-weight: 600;
-  box-shadow: 0 2px 8px rgba(12,28,48,0.28);
 }
 .btn-optimize {
   background: transparent;
@@ -929,15 +974,6 @@ textarea { min-height: 60px; padding: 7px 10px; }
 /* =============================================================================
    TIMELINE TAB
    ========================================================================== */
-.gantt-toolbar {
-  flex-shrink: 0;
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 16px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--line);
-  min-height: 46px;
-}
-.gantt-toolbar .group { display: flex; gap: 4px; }
 .spacer { flex: 1; }
 .sep-v { width: 1px; height: 22px; background: var(--line); }
 

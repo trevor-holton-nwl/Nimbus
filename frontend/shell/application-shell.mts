@@ -248,6 +248,10 @@ const SessionUIAdapter = {
     document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(btn => {
       const tab = btn.dataset.tab as TopLevelTab | undefined;
       if (tab) btn.hidden = !Session.canAccessTab(tab);
+      // Hides the chevron + sub-view children with the parent when the
+      // role lacks access to this tab (currently only gantt has a group).
+      const grp = btn.closest?.('.nav-group') as HTMLElement | null;
+      if (grp) grp.hidden = btn.hidden;
     });
     SessionUIAdapter._renderUserButton();
     try { ErrorLog.renderBadge(); } catch {}
@@ -1800,6 +1804,10 @@ const App = {
   _currentTab: 'home' as TopLevelTab,
   _currentMasterSub: 'lines' as MasterSubTab,
   _ganttSub: 'timeline' as GanttSubTab,
+  // Drawer sub-list expansion for the gantt nav group — follows the active
+  // tab on every goto; the chevron is a transient manual override until the
+  // next goto resets it.
+  _ganttNavExpanded: false as boolean,
   _laborSub: 'aggregate' as LaborSubTab,
   _pausables: new Set<{ pause?(): void; resume?(): void }>(),
   _drawerOpen: false,
@@ -1878,6 +1886,20 @@ const App = {
     toggle?.focus();
   },
 
+  // Drives the gantt nav-group's sub-list open/closed. Expanded state
+  // follows the active tab on every goto; the chevron is a transient
+  // manual override until the next goto resets it.
+  _setGanttNavExpanded(open: boolean): void {
+    App._ganttNavExpanded = open;
+    const list = document.getElementById('nav-sub-gantt');
+    if (list) list.hidden = !open;
+    const chev = document.getElementById('nav-gantt-chevron');
+    if (chev) {
+      chev.setAttribute('aria-expanded', String(open));
+      chev.classList.toggle('open', open);
+    }
+  },
+
   // Re-arms itself on every tick, aligned to the next minute boundary, so the
   // clock flips exactly on the minute instead of drifting off a fixed interval.
   _armPlantClockTimer(): void {
@@ -1911,7 +1933,7 @@ const App = {
     if (!drawer) return;
     const focusables = Array.from(drawer.querySelectorAll<HTMLElement>(
       'button:not([hidden]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    )).filter(el => !(el as HTMLButtonElement).disabled);
+    )).filter(el => !(el as HTMLButtonElement).disabled && !el.closest('[hidden]'));
     if (!focusables.length) return;
     const first = focusables[0];
     const last  = focusables[focusables.length - 1];
@@ -2029,6 +2051,13 @@ const App = {
   _updateSectionLabel(tab: TopLevelTab): void {
     const el = document.getElementById('cmd-band-section-label');
     if (!el) return;
+    if (tab === 'gantt') {
+      el.textContent = Util.t('ui.section_label_with_sub', {
+        tab: Util.t('tab.gantt'),
+        sub: Util.t(App._ganttSub === 'orders' ? 'tab.table' : 'tab.gantt_timeline'),
+      });
+      return;
+    }
     const KEY: Record<TopLevelTab, string> = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', masterdata: 'tab.masterdata', admin: 'tab.admin' };
     el.textContent = KEY[tab] ? Util.t(KEY[tab]) : '';
   },
@@ -2101,6 +2130,13 @@ const App = {
       navDrawerClose.setAttribute('aria-label', Util.t('aria.nav_drawer_close'));
       navDrawerClose.addEventListener('click', () => App._closeDrawer());
     }
+    // Gantt nav-group chevron — manual expand/collapse of the sub-list,
+    // independent of the parent button's own navigate-and-expand click.
+    const navGanttChevron = document.getElementById('nav-gantt-chevron');
+    if (navGanttChevron) {
+      navGanttChevron.setAttribute('aria-label', Util.t('aria.nav_gantt_toggle'));
+      navGanttChevron.addEventListener('click', () => App._setGanttNavExpanded(!App._ganttNavExpanded));
+    }
 
     /* Drawer's PLANT row — "Change" button opens a modal ON TOP of the
        still-open drawer (drawer is intentionally NOT closed here — this
@@ -2156,15 +2192,15 @@ const App = {
     });
 
     /* Timeline toolbar view buttons */
-    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-view]').forEach(btn => {
+    document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(btn => {
       btn.onclick = () => Timeline.setView(btn.dataset.view as string);
     });
 
-    /* Gantt sub-tab toggle (Timeline vs Orders) — was a static onclick=
-       attribute in index.html; converted to a real listener here (this
-       task's own module, per this phase's inline-handler-migration mandate). */
-    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(btn => {
-      btn.onclick = () => App.gotoGanttSub(btn.dataset.ganttSub as GanttSubTab);
+    /* Gantt sub-view children in the nav drawer (Timeline vs Orders) — same
+       combinator as gotoGanttTimeline; goto() closes the drawer and applies
+       the Session gate. */
+    document.querySelectorAll<HTMLElement>('.nav-sub-btn[data-gantt-sub]').forEach(btn => {
+      btn.onclick = () => { App.goto('gantt'); App.gotoGanttSub(btn.dataset.ganttSub as GanttSubTab); };
     });
 
     /* Labor Planning sub-tab toggle — same conversion as above. */
@@ -2448,6 +2484,9 @@ const App = {
       App._prevTab = App._currentTab;
     }
     App._currentTab = tab;
+    // Drives CSS visibility of the scheduling-only #context-sched-actions cluster.
+    if (document.body) document.body.dataset.tab = tab;
+    App._setGanttNavExpanded(tab === 'gantt');
     App._updateSectionLabel(tab);
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.getElementById(tab + '-tab')!.classList.add('active');
@@ -2491,9 +2530,12 @@ const App = {
       App._saveScroll(App._scrollKeyFor('gantt'));
     }
     App._ganttSub = sub;
-    document.querySelectorAll<HTMLElement>('.gantt-toolbar .seg-btn[data-gantt-sub]').forEach(b => {
-      b.classList.toggle('active', b.dataset.ganttSub === sub);
+    document.querySelectorAll<HTMLElement>('.nav-sub-btn[data-gantt-sub]').forEach(b => {
+      const on = b.dataset.ganttSub === sub;
+      b.classList.toggle('active', on);
+      if (on) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
     });
+    if (App._currentTab === 'gantt') App._updateSectionLabel('gantt');
     const timelinePane = document.getElementById('gantt-sub-timeline');
     const ordersPane   = document.getElementById('gantt-sub-orders');
     if (timelinePane) timelinePane.style.display = sub === 'timeline' ? 'flex' : 'none';

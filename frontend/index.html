@@ -1231,6 +1231,27 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="dash-filter-checklist" id="context-lines-checklist"></div>
       </div>
     </div>
+
+    <!-- Scheduling-only right cluster — shown only while body[data-tab="gantt"] (App.goto).
+         Zoom/Fit/Now additionally hide on the Orders sub-view via App.gotoGanttSub's
+         id-based display toggles. Inline onclick= kept verbatim (legacy-surface contract). -->
+    <div class="context-sched-actions" id="context-sched-actions">
+      <div class="group" id="gantt-zoom-controls">
+        <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
+        <button class="seg-btn" data-view="day"  data-i18n="btn.day">Day</button>
+        <button class="seg-btn" data-view="week" data-i18n="btn.week">Week</button>
+      </div>
+      <div class="sep-v" id="gantt-zoom-sep"></div>
+      <div class="group" id="gantt-fit-controls">
+        <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view"><span aria-hidden="true">⊡</span><span class="sa-label" data-i18n="btn.fit">Fit</span></button>
+        <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now"><span aria-hidden="true">⊙</span><span class="sa-label" data-i18n="btn.now">Now</span></button>
+      </div>
+      <div class="sep-v"></div>
+      <button class="seg-btn btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize"><span aria-hidden="true">📈</span><span class="sa-label" data-i18n="btn.optimize">Optimize</span></button>
+      <!-- .sandbox-btn is load-bearing: SandboxAdapter rewrites textContent + onclick. Keep flat, no inner spans. -->
+      <button class="seg-btn sandbox-btn" onclick="NIMBUS.SandboxAdapter.enter()" data-i18n="ui.sandbox_off" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
+      <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule"><span aria-hidden="true">⎙</span><span class="sa-label" data-i18n="btn.print">Print</span></button>
+    </div>
   </div>
 
   <!-- =========================================================
@@ -1356,31 +1377,6 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
        TAB: TIMELINE
        ========================================================= -->
   <section class="tab-panel" id="gantt-tab" role="tabpanel">
-    <!-- Toolbar: view toggles + zoom + actions (always visible) -->
-    <div class="gantt-toolbar">
-      <div class="group">
-        <button class="seg-btn active" data-gantt-sub="timeline">Gantt Timeline</button>
-        <button class="seg-btn" data-gantt-sub="orders">Orders</button>
-      </div>
-      <div class="sep-v"></div>
-      <div class="group" id="gantt-zoom-controls">
-        <button class="seg-btn active" data-view="hour" data-i18n="btn.hour">Hour</button>
-        <button class="seg-btn" data-view="day" data-i18n="btn.day">Day</button>
-        <button class="seg-btn" data-view="week" data-i18n="btn.week">Week</button>
-      </div>
-      <div class="sep-v" id="gantt-zoom-sep"></div>
-      <div class="group" id="gantt-fit-controls">
-        <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view">⊡ Fit</button>
-        <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now">⊙ Now</button>
-      </div>
-      <div class="spacer"></div>
-      <button class="seg-btn btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize">📈 Optimize</button>
-      <div class="sep-v"></div>
-      <button class="seg-btn sandbox-btn" onclick="NIMBUS.SandboxAdapter.enter()" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
-      <div class="sep-v"></div>
-      <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule">⎙ Print</button>
-    </div>
-
     <!-- Pane: Gantt Timeline -->
     <div id="gantt-sub-timeline" style="flex:1;min-height:0;display:flex;flex-direction:column;">
 
@@ -2112,9 +2108,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <!-- =========================================================
      NAV DRAWER (slide-in) + scrim — replaces the old horizontal nav.tabs.
      Open/close wiring (hamburger, scrim click, PLANT row, admin-gate hidden
-     toggle already exists in application-shell.mjs) is a later task; the
-     markup here is inert (no .open class, hamburger/close/plant buttons have
-     no handlers yet).
+     toggle already exists in application-shell.mjs); Scheduling Board row has
+     a chevron + .nav-sub-btn children wired by App.init.
      ========================================================= -->
 <div class="drawer-scrim" id="nav-drawer-scrim"></div>
 <nav class="nav-drawer" id="nav-drawer" aria-label="Primary">
@@ -2128,9 +2123,20 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <button class="tab-btn active" data-tab="home" role="tab">
       <span data-i18n="tab.home">Dashboard</span>
     </button>
-    <button class="tab-btn" data-tab="gantt" role="tab">
-      <span data-i18n="tab.gantt">Scheduling Board</span>
-    </button>
+    <div class="nav-group" id="nav-group-gantt" role="none">
+      <div class="nav-group-row" role="none">
+        <button class="tab-btn" data-tab="gantt" role="tab" id="nav-tab-gantt" aria-controls="nav-sub-gantt">
+          <span data-i18n="tab.gantt">Scheduling Board</span>
+        </button>
+        <button type="button" class="nav-group-chevron" id="nav-gantt-chevron" aria-expanded="false" aria-controls="nav-sub-gantt" aria-label="Show or hide Scheduling Board views">
+          <span class="nav-group-chevron-glyph" aria-hidden="true">▸</span>
+        </button>
+      </div>
+      <div class="nav-sub-list" id="nav-sub-gantt" role="group" aria-labelledby="nav-tab-gantt" hidden>
+        <button type="button" class="nav-sub-btn active" data-gantt-sub="timeline" aria-current="true"><span data-i18n="tab.gantt_timeline">Gantt Timeline</span></button>
+        <button type="button" class="nav-sub-btn" data-gantt-sub="orders"><span data-i18n="tab.table">Orders</span></button>
+      </div>
+    </div>
     <button class="tab-btn" data-tab="labor" role="tab">
       <span data-i18n="tab.labor">Labor Plan</span>
     </button>

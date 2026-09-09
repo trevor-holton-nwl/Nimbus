@@ -283,6 +283,7 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Tab labels ──────────────────────────────────────────────────────────── */
   'tab.home':                          'Tableau de Bord',
   'tab.gantt':                         'Tableau de Planification',
+  'tab.gantt_timeline':                'Chronologie Gantt',
   'tab.labor':                         'Plan de main-d’œuvre',
   'tab.table':                         'Ordres',
   'tab.masterdata':                    'Gestion des Données Maîtres',
@@ -526,6 +527,10 @@ window.__NIMBUS_LOCALES.fr = {
   'btn.hour':                          'Heure',
   'btn.day':                           'Jour',
   'btn.week':                          'Semaine',
+  'btn.fit':                           'Ajuster',
+  'btn.now':                           'Maintenant',
+  'btn.optimize':                      'Optimiser',
+  'btn.print':                         'Imprimer',
 
   'ui.plant_label':                    'Usine',
   'ui.hop_on':                         'Bienvenue',
@@ -1337,10 +1342,12 @@ window.__NIMBUS_LOCALES.fr = {
   'aria.command_palette':              'Command palette',                           // MISSING TRANSLATION
   'aria.nav_drawer_toggle':            'Basculer le menu de navigation',
   'aria.nav_drawer_close':             'Fermer le menu de navigation',
+  'aria.nav_gantt_toggle':             'Afficher ou masquer les vues du tableau de planification',
 
   // Nav drawer (Command Band re-skin)
   'ui.nav_drawer_heading':             'NAVIGATION',
   'ui.nav_drawer_footer':              'NIMBUS Planification de la Production',
+  'ui.section_label_with_sub':         '{{tab}} · {{sub}}',
   'ui.setup_matrix_title': 'Matrice de réglage',
   'ui.setup_matrix_sub': 'Le temps nécessaire pour changer l\'outillage d\'une machine entre deux ordres — utilisé pour planifier les changements une fois la planification tenant compte des réglages activée pour {{plant}}. Cela n\'affecte pas encore le planning actuel.',
   'ui.setup_plant_default': 'Valeur usine',
