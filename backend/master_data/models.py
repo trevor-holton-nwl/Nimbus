@@ -157,6 +157,12 @@ class PlantMaxPullForwardDaysResult(BaseModel):
     max_pull_forward_days: int | None = None
 
 
+class PlantMaxPushForwardDaysResult(BaseModel):
+    status: str
+    plant: str
+    max_push_forward_days: int | None = None
+
+
 class PlantMinProductiveSegmentMinutesResult(BaseModel):
     status: str
     plant: str

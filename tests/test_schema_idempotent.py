@@ -123,6 +123,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-01-orders-sap-coois-fields.sql",
         "2026-09-02-drop-redundant-setup-matrix-index.sql",
         "2026-09-02-orders-plant-column.sql",
+        "2026-09-09-plant-max-push-forward-days.sql",
     }
     all_names = {
         os.path.basename(path)

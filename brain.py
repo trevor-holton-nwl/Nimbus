@@ -270,6 +270,7 @@ async def lifespan(app: FastAPI):
     md.ensure_plant_constraints_column()
     md.ensure_plant_split_order_policy_column()
     md.ensure_plant_max_pull_forward_days_column()
+    md.ensure_plant_max_push_forward_days_column()
     md.ensure_plant_min_productive_segment_minutes_column()
     md.ensure_plant_visibility_horizon_columns()
     md.ensure_plant_frozen_horizon_column()
@@ -593,6 +594,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/constraints": "plant.constraints_update",
     "/master-data/plants/{plant}/split-order-policy": "plant.split_order_policy_update",
     "/master-data/plants/{plant}/max-pull-forward-days": "plant.max_pull_forward_days_update",
+    "/master-data/plants/{plant}/max-push-forward-days": "plant.max_push_forward_days_update",
     "/master-data/plants/{plant}/min-productive-segment-minutes": "plant.min_productive_segment_minutes_update",
     "/master-data/plants/{plant}/visibility-horizon": "plant.visibility_horizon_update",
     "/master-data/plants/{plant}/frozen-horizon-days": "plant.frozen_horizon_update",

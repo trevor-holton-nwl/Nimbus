@@ -104,6 +104,7 @@ const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   confHorizon:          { title: 'ui.conf_horizon_title',           help: ['ui.conf_horizon_help'] },
   frozenHorizon:        { title: 'ui.frozen_horizon_title',         help: ['ui.frozen_horizon_help'] },
   maxPullForward:       { title: 'ui.max_pull_forward_title',       help: ['ui.max_pull_forward_help'] },
+  maxPushForward:       { title: 'ui.max_push_forward_title',       help: ['ui.max_push_forward_help'] },
   minProductiveSegment: { title: 'ui.min_productive_segment_title', help: ['ui.min_productive_segment_help', 'ui.min_productive_segment_help_detail'] },
   splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
 };
@@ -1200,6 +1201,12 @@ export const Plant = {
                   <span class="sched-rule-unit">${Util.t('ui.days')}</span>
                 </div>
 
+                <div class="sched-rule-row" data-rule-key="maxPushForward">
+                  <label for="sys-max-push-forward-days">${Util.t('ui.max_push_forward_title')}</label>
+                  <input type="number" id="sys-max-push-forward-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_push_forward_none')}">
+                  <span class="sched-rule-unit">${Util.t('ui.days')}</span>
+                </div>
+
                 <div class="sched-rule-row" data-rule-key="minProductiveSegment">
                   <label for="sys-min-productive-segment-minutes">${Util.t('ui.min_productive_segment_title')}</label>
                   <input type="number" id="sys-min-productive-segment-minutes" class="form-input" min="1" step="1" inputmode="numeric">
@@ -1209,8 +1216,8 @@ export const Plant = {
                 <!-- Spans both grid columns: unlike its numeric siblings this is
                      a select whose longest option ("Allow partial orders across
                      operating intervals") needs roughly 50 characters, so a
-                     half-width cell would truncate it. It still starts flush
-                     left on the row below the pull-forward limit. -->
+                     half-width cell would truncate it. It starts flush left on
+                     the row below the Productive Segment Floor row. -->
                 <div class="sched-rule-row sched-rule-row--wide" data-rule-key="splitOrderPolicy">
                   <label for="sys-split-order-policy">${Util.t('ui.split_order_title')}</label>
                   <select id="sys-split-order-policy" class="form-input">
@@ -1303,6 +1310,7 @@ export const Plant = {
     const confDaysInp  = pane.querySelector('#sys-conf-horizon-days') as HTMLInputElement;
     const splitPolicySelect = pane.querySelector('#sys-split-order-policy') as HTMLSelectElement;
     const maxPullForwardInp = pane.querySelector('#sys-max-pull-forward-days') as HTMLInputElement;
+    const maxPushForwardInp = pane.querySelector('#sys-max-push-forward-days') as HTMLInputElement;
     const minProductiveSegmentInp = pane.querySelector('#sys-min-productive-segment-minutes') as HTMLInputElement;
     const frozenHorizonDaysInp = pane.querySelector('#sys-frozen-horizon-days') as HTMLInputElement;
 
@@ -1313,6 +1321,8 @@ export const Plant = {
       ? savedSplitPolicy : 'never';
     maxPullForwardInp.value = Number.isInteger(plantRow?.max_pull_forward_days) && (plantRow!.max_pull_forward_days as number) >= 0
       ? String(plantRow!.max_pull_forward_days) : '';
+    maxPushForwardInp.value = Number.isInteger(plantRow?.max_push_forward_days) && (plantRow!.max_push_forward_days as number) >= 0
+      ? String(plantRow!.max_push_forward_days) : '';
     minProductiveSegmentInp.value = Number.isInteger(plantRow?.min_productive_segment_minutes) && (plantRow!.min_productive_segment_minutes as number) > 0
       ? String(plantRow!.min_productive_segment_minutes) : '30';
     frozenHorizonDaysInp.value = Number.isInteger(plantRow?.frozen_horizon_days) && (plantRow!.frozen_horizon_days as number) >= 0
@@ -1432,6 +1442,33 @@ export const Plant = {
         maxPullForwardInp.value = previous === null ? '' : String(previous);
         Toast.show(`${Util.t('ui.max_pull_forward_failed')}: ${(error as Error).message}`, 'error');
       } finally { maxPullForwardInp.disabled = false; }
+    });
+
+    maxPushForwardInp.addEventListener('change', async () => {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const previous = Number.isInteger(plantRow.max_push_forward_days) && (plantRow.max_push_forward_days as number) >= 0
+        ? plantRow.max_push_forward_days : null;
+      const raw = maxPushForwardInp.value.trim();
+      const next = raw === '' ? null : Number(raw);
+      if (next !== null && (!Number.isInteger(next) || next < 0)) {
+        maxPushForwardInp.value = previous === null ? '' : String(previous);
+        Toast.show(Util.t('ui.max_push_forward_invalid'), 'error');
+        return;
+      }
+      maxPushForwardInp.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/max-push-forward-days`,
+          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_push_forward_days: next }) },
+        );
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        plantRow.max_push_forward_days = next;
+        Toast.show(Util.t('ui.max_push_forward_saved'), 'success');
+      } catch (error) {
+        maxPushForwardInp.value = previous === null ? '' : String(previous);
+        Toast.show(`${Util.t('ui.max_push_forward_failed')}: ${(error as Error).message}`, 'error');
+      } finally { maxPushForwardInp.disabled = false; }
     });
 
     // B3 (2026-08-21): min_productive_segment_minutes — same fetch/toast/
@@ -2409,6 +2446,7 @@ interface PlantRow extends MasterDataRow {
   conf_score_horizon?: number;
   split_order_policy?: 'never' | 'overlong_only' | 'partial_allowed' | null;
   max_pull_forward_days?: number | null;
+  max_push_forward_days?: number | null;
   /** C2 (2026-08-20): nullable whole calendar days of the plant's frozen
    *  horizon; NULL/0 both mean "off" (unlike visibility_horizon_days). */
   frozen_horizon_days?: number | null;

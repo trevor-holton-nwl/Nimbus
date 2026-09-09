@@ -239,6 +239,8 @@ test('OptimizerPreview retains only a bounded candidate explanation and drops it
     'missing-pair detail is derived separately while the candidate is in scope');
   assert.deepEqual(explanation.search, { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false });
   assert.equal(Object.hasOwn(explanation, 'tasks'), false, 'the compact explanation never retains a schedule snapshot');
+  assert.deepEqual(explanation.overLatenessCap, { orders: 0, lines: 0, days: null },
+    'without input.tasks/input.plant supplied, the due-date push-forward cap tally falls back to the no-op shape rather than throwing');
 
   OptimizerPreview._explanation = explanation;
   OptimizerPreview.active = true;

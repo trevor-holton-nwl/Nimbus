@@ -3443,3 +3443,103 @@ test('a firmed boundary starting exactly at bounds.now schedules cleanly with no
     'free RED starts 10 setup minutes after the boundary ends at 09:00');
   assert.deepEqual(result.unchangedLines, []);
 });
+
+// --- Due-date push-forward limit (WP4, 2026-09-09) ------------------------
+
+test('evaluateDueDateFirst keeps a capped order within its due-date push-forward limit even when the cheaper order saves more setup minutes', () => {
+  // Mirrors the "bounded strict-improvement local search" fixture above:
+  // RED-then-BLUE costs 0 setup minutes (vs. 60 for BLUE-then-RED) and would
+  // normally win on setup savings alone once due-lateness ties at zero for
+  // both orderings. With `bounds.notAfter` giving only BLUE a ceiling that
+  // RED-then-BLUE's later BLUE placement would violate, score[SCORE_OVER_CAP]
+  // must outrank the setup-savings term and keep BLUE-then-RED (BLUE first,
+  // within its cap) as the winner instead.
+  const capRed = scheduledTask('cap-red', 1, 'RED', '2026-08-03T13:00:00');
+  const capBlue = scheduledTask('cap-blue', 1, 'BLUE', '2026-08-03T12:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 30), setupRow('BLUE', 'RED', 30),
+    setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0),
+  ] });
+  const notAfter = task => (task.id === 'cap-blue' ? at('2026-08-03T09:45:00') : null);
+
+  const capped = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([capRed, capBlue]),
+    dueDateBounds(setup, { exactSearchThreshold: 1, iterationCap: 3, notAfter }),
+  );
+  assert.deepEqual(capped.patches.map(patch => patch.id), ['cap-blue', 'cap-red'],
+    'BLUE must go first to stay within its push-forward cap, even though RED-then-BLUE is 60 minutes cheaper');
+  assert.equal(patchFor(capped, 'cap-blue').changes.end_date.getTime(), at('2026-08-03T09:30:00').getTime());
+  assert.equal(capped.score.length, 8);
+  assert.equal(capped.score[7], 0, 'the winning (within-cap) sequence has zero over-cap orders');
+
+  // A1/A3: with notAfter omitted entirely, the winner reverts to the
+  // setup-minimizing RED-then-BLUE order (unchanged legacy behavior), and
+  // every candidate's score[SCORE_OVER_CAP] stays 0 — a provable no-op.
+  const uncapped = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([capRed, capBlue]),
+    dueDateBounds(setup, { exactSearchThreshold: 1, iterationCap: 3 }),
+  );
+  assert.equal(uncapped.score.length, 8, 'the score vector is 8-wide even when bounds.notAfter is absent');
+  assert.equal(uncapped.score[7], 0, 'no notAfter rule means score[SCORE_OVER_CAP] stays zero by default');
+  assert.deepEqual(uncapped.patches.map(patch => patch.id), ['cap-red', 'cap-blue'],
+    'without a cap, the setup-minimizing RED-then-BLUE order wins, exactly as before this feature existed');
+});
+
+test('evaluateMinChangeover rejects a candidate that pushes an already-late order past its due-date push-forward cap', () => {
+  // The order is late both before (its raw persisted end_date is already
+  // past due) and after (the freshly computed schedule is also past due) —
+  // so the existing 'min-changeover-rejected-lateness' gate does not fire
+  // (afterLate === beforeLate, nothing is newly late). But the raw persisted
+  // end_date sat within the plant's due-date push-forward cap while the
+  // freshly computed schedule (built from bounds.now, weeks after the stale
+  // due date) blows well past it — a newly-over-cap order the dedicated
+  // 'min-changeover-rejected-lateness-cap' gate must catch on its own.
+  const order = scheduledTask(
+    'cap-gate-order', 1, 'RED', '2026-07-20T08:00:00', null, '2026-07-20T09:00:00',
+  );
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0)] });
+  const notAfter = task => (task.id === 'cap-gate-order' ? at('2026-07-20T10:00:00') : null);
+
+  const result = SetupScheduler.evaluateMinChangeover(
+    setupSnapshot([order]),
+    dueDateBounds(setup, { notAfter }),
+  );
+
+  assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-rejected-lateness-cap'), true,
+    'the dedicated push-forward-cap rejection reason must be present');
+  assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-rejected-lateness'), false,
+    'the plain lateness gate must not fire: the order was already late both before and after');
+  assert.equal(result.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
+    'this is not a starvation case: the baseline pass produces a real patch');
+});
+
+test('an adjacency-failure (infeasible) candidate result carries the full 8-wide score vector', () => {
+  // A2/A3: an infeasible/unchanged-line result must never silently stay
+  // 7-wide (which would corrupt every score[7] read downstream) — this reuses
+  // the same protected-pair-cannot-fit fixture used above to pin
+  // `unchangedLineResult`'s score arity now that SCORE_OVER_CAP exists.
+  const predecessor = scheduledTask('cap-arity-predecessor', 1, 'RED', '2026-08-03T09:00:00');
+  const successor = scheduledTask('cap-arity-successor', 1, 'BLUE', '2026-08-03T10:00:00');
+  const setup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0),
+      setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+    ],
+    overrides: [{
+      id: 'cap-arity-active-override', machine: 'L1', signature_version: 1,
+      predecessor_order_id: 'cap-arity-predecessor', successor_order_id: 'cap-arity-successor',
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'protected capacity-bound occurrence',
+    }],
+  });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([predecessor, successor]),
+    dueDateBounds(setup, { horizonEnd: at('2026-08-03T09:30:00') }),
+  );
+
+  assert.deepEqual(result.patches, []);
+  assert.deepEqual(result.unchangedLines, ['L1']);
+  assert.equal(result.score.length, 8, 'unchangedLineResult must carry the full 8-wide score vector');
+  assert.deepEqual(result.score, [0, 0, 0, 0, 0, 0, 0, 0]);
+});

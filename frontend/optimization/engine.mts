@@ -88,7 +88,7 @@ import type {
   EvaluationRequest,
 } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
@@ -604,7 +604,8 @@ function detachedCandidateResult(
     // A2: 7th element is the uncovered-edge-count tier (SCORE_UNCOVERED in
     // setup-scheduler.mts) — a detached legacy result has no coverage concept
     // of its own, so it contributes 0.
-    score: [0, 0, 0, 0, 0, patches.length, 0],
+    // score[7] = SCORE_OVER_CAP (setup-scheduler), never populated on the legacy path
+    score: [0, 0, 0, 0, 0, patches.length, 0, 0],
     explanation: [],
     diagnostics: {
       candidateCount: termination === 'completed' ? 1 : 0,
@@ -843,16 +844,15 @@ export const Engine = {
   /** Local due-date calendar-day floor for a plant's optional pull-forward
    *  limit, MAXED with the plant's C2 frozen-horizon floor (Engine.
    *  frozenHorizonEnd) so every one of this function's existing callers —
-   *  the legacy walk's fitsAt/nextPullForwardFloor/queueBlockedByPullForward/
-   *  forcePlaceableTask, _dispatchPolicyAware, the SPT cursor floor, and
-   *  setup-scheduler's bounds.notBefore seam — gets the frozen floor for
-   *  free, with no call site needing to know a second floor exists. This is
-   *  the "single shared floor helper" the C2 placement-floor fix hangs on:
-   *  the originally-proposed reuse of `bounds.notBefore` didn't generalize
-   *  (it's per-order, due-date-derived, null without a due date), but THIS
-   *  function is already consulted at every legacy-walk placement site, so
-   *  folding the frozen floor in here — rather than a second, parallel
-   *  check scattered across those same sites — is the actual fix. */
+   *  the legacy walk's cursor floor, _dispatchPolicyAware, and setup-scheduler's
+   *  bounds.notBefore seam — gets the frozen floor for free, with no call site
+   *  needing to know a second floor exists. This is the "single shared floor
+   *  helper" the C2 placement-floor fix hangs on: the originally-proposed reuse
+   *  of `bounds.notBefore` didn't generalize (it's per-order, due-date-derived,
+   *  null without a due date), but THIS function is already consulted at every
+   *  legacy-walk placement site, so folding the frozen floor in here — rather
+   *  than a second, parallel check scattered across those same sites — is the
+   *  actual fix. */
   earliestAllowedStart(task: NimbusTask, plant: string | null): Date | null {
     let floor: Date | null = null;
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
@@ -867,6 +867,61 @@ export const Engine = {
     const frozenEnd = Engine.frozenHorizonEnd();
     if (frozenEnd && (!floor || frozenEnd > floor)) floor = new Date(frozenEnd);
     return floor;
+  },
+
+  /** Local due-date calendar-day CEILING for a plant's optional push-forward
+   *  (max lateness) limit — the mirror image of earliestAllowedStart. An order
+   *  may not FINISH after (due-date local midnight) + (N + 1) days, so N = 0
+   *  means "by end of its due day". Null when the plant has no limit or the
+   *  order has no SAP due date (Util.sapDueDate). Optimizer-only, like the
+   *  pull-forward floor: manual moves, Alerts fixes, autoReflow and Remove
+   *  Backlog never consult it. Unlike earliestAllowedStart this is NOT maxed
+   *  with the frozen horizon — the two floors/ceilings are independent. */
+  latestAllowedEnd(task: NimbusTask, plant: string | null): Date | null {
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
+    if (!Number.isInteger(value) || (value as number) < 0) return null;
+    const due = Util.sapDueDate(task);
+    if (!due) return null;
+    const ceiling = new Date(due);
+    ceiling.setHours(0, 0, 0, 0);
+    ceiling.setDate(ceiling.getDate() + (value as number) + 1);
+    return ceiling;
+  },
+
+  /** Post-hoc over-cap reporting for the due-date push-forward limit
+   *  (`plants.max_push_forward_days`). Walks the APPLIED patches (never the
+   *  evaluator's own score tally, which counts something slightly different
+   *  mid-search) and counts how many now finish after `latestAllowedEnd`.
+   *  Fast-exits with an all-zero/`days: null` result when the plant has no
+   *  configured limit, so a default (no-cap) plant never pays the per-patch
+   *  scan. `tasks` must be the pre-apply task list the patches were computed
+   *  against (a task's own due date is never itself patched, so the pre-apply
+   *  copy is equivalent to a post-apply one for this purpose, but MACHINE
+   *  lookups need a real object). */
+  _overCapSummary(
+    patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
+    tasks: ReadonlyArray<NimbusTask>,
+    plant: string | null,
+  ): { orders: number; lines: number; days: number | null } {
+    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
+    const days = Number.isInteger(value) && (value as number) >= 0 ? (value as number) : null;
+    if (days === null) return { orders: 0, lines: 0, days: null };
+    const byId = new Map(tasks.map(t => [String(t.id), t]));
+    const overCapLines = new Set<string>();
+    let orders = 0;
+    for (const patch of patches) {
+      const endDate = patch.changes.end_date;
+      if (!endDate) continue;
+      const task = byId.get(String(patch.id));
+      if (!task) continue;
+      const ceiling = Engine.latestAllowedEnd(task, plant);
+      if (!ceiling) continue;
+      if (new Date(endDate).getTime() > ceiling.getTime()) {
+        orders += 1;
+        overCapLines.add(task.MACHINE || 'Unknown');
+      }
+    }
+    return { orders, lines: overCapLines.size, days };
   },
 
   /** Regenerate one logical order from its requested parent start. Segments
@@ -1732,6 +1787,7 @@ export const Engine = {
         now: horizonStart,
         horizonEnd,
         notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant),
+        notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant),
         convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
       };
       let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
@@ -1814,6 +1870,22 @@ export const Engine = {
         Toast.show(Util.t('toast.optimize_missing_setup_summary', {
           orders: unknownSetupOrderIds.size,
           lines: unknownSetupLines.size,
+        }), 'warn');
+      }
+      // Due-date push-forward limit (plants.max_push_forward_days): report
+      // violations post-hoc from the applied patches, same as the missing-
+      // setup summary above, but NOT gated on `synthetic` — a plant with no
+      // active setup definition can still configure a push-forward cap, and
+      // the never-freeze "minimize violations, always place everything" rule
+      // applies regardless of the synthetic-snapshot mechanism.
+      const overCapSummary = Engine._overCapSummary(result.patches, snapshot.tasks, plant);
+      if (overCapSummary.orders) {
+        Toast.show(Util.t('toast.optimize_over_lateness_cap', {
+          orders: overCapSummary.orders,
+          lines: overCapSummary.lines,
+          // days is never null here: overCapSummary.orders > 0 only when the
+          // plant has a configured limit (see _overCapSummary's null fast-exit).
+          days: overCapSummary.days ?? 0,
         }), 'warn');
       }
       // B3: derive the unplaced set by difference, in this one place, rather
@@ -1941,7 +2013,17 @@ export const Engine = {
           }
           return 0;
         });
-        const selectedOrder = decorated.map(d => d.t);
+        // Cap-aware resequencing for the plant's due-date push-forward limit
+        // (`plants.max_push_forward_days`): identity when no task on this
+        // line has a ceiling, otherwise pulls an otherwise-savable capped
+        // order ahead of the SPT head when the head would push it past its
+        // latest allowed start.
+        const selectedOrder = capAwareSequence(
+          decorated.map(d => d.t),
+          cursor.getTime(),
+          t => Engine.latestAllowedEnd(t, plant)?.getTime() ?? null,
+          t => Util.runHours(t) * Config.MS_HOUR,
+        );
         patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, firmedTasks, cursor, splitPolicy, plant));
         continue;
       }
@@ -1958,7 +2040,17 @@ export const Engine = {
         }
         return 0;
       });
-      freeTasks = decorated.map(d => d.t);
+      // Cap-aware resequencing for the plant's due-date push-forward limit
+      // (`plants.max_push_forward_days`): identity when no task on this line
+      // has a ceiling, otherwise pulls an otherwise-savable capped order
+      // ahead of the SPT head when the head would push it past its latest
+      // allowed start.
+      freeTasks = capAwareSequence(
+        decorated.map(d => d.t),
+        cursor.getTime(),
+        t => Engine.latestAllowedEnd(t, plant)?.getTime() ?? null,
+        t => Util.runHours(t) * Config.MS_HOUR,
+      );
 
       // Walk through free tasks, jumping past each firmed task we encounter.
       let firmIdx = 0;
@@ -2020,6 +2112,20 @@ export const Engine = {
     }
 
     if (candidateRun) return detachedCandidateResult(patches, _pmT0e);
+
+    // Due-date push-forward limit (plants.max_push_forward_days): same
+    // post-hoc reporting as the setup-aware branch above, using this run's
+    // own patches and the plant's pre-apply tasks.
+    const overCapSummary = Engine._overCapSummary(patches, sourceTasksByPlant(plant), plant);
+    if (overCapSummary.orders) {
+      Toast.show(Util.t('toast.optimize_over_lateness_cap', {
+        orders: overCapSummary.orders,
+        lines: overCapSummary.lines,
+        // days is never null here: overCapSummary.orders > 0 only when the
+        // plant has a configured limit (see _overCapSummary's null fast-exit).
+        days: overCapSummary.days ?? 0,
+      }), 'warn');
+    }
 
     applySchedulePatches(patches);
     Store.setLastOptimize(new Date(), 'engine');

@@ -323,7 +323,7 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         #     all three as of 2026-08-21, their Scheduling Rules rows removed.
         #   unregistered (read-only here, written by a dedicated route):
         #     constraints, split_order_policy, max_pull_forward_days,
-        #     frozen_horizon_days, min_productive_segment_minutes.
+        #     max_push_forward_days, frozen_horizon_days, min_productive_segment_minutes.
         # Scope the fetch to the plants on this page so a paged/filtered request
         # never re-scans the whole table.
         if table == 'plants':
@@ -332,22 +332,23 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                 if page_plants:
                     cur.execute(
                         "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, "
-                        "setup_active, visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days, "
-                        "min_productive_segment_minutes "
+                        "max_push_forward_days, setup_active, visibility_horizon_days, horizon_roll_hour_utc, "
+                        "frozen_horizon_days, min_productive_segment_minutes "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10]) for r in cur.fetchall()}
                     for row in rows:
-                        (constraints, policy, max_pull_forward_days, setup_active,
+                        (constraints, policy, max_pull_forward_days, max_push_forward_days, setup_active,
                          visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days,
                          min_productive_segment_minutes) = cmap.get(
                             (row.get('subnetwork'), row.get('plant')),
-                            (None, 'never', None, False, None, 19, None, 30)
+                            (None, 'never', None, None, False, None, 19, None, 30)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
                         row['max_pull_forward_days'] = max_pull_forward_days
+                        row['max_push_forward_days'] = max_push_forward_days
                         row['setup_active'] = bool(setup_active)
                         row['visibility_horizon_days'] = visibility_horizon_days
                         row['horizon_roll_hour_utc'] = horizon_roll_hour_utc if horizon_roll_hour_utc is not None else 19
@@ -1162,6 +1163,13 @@ def ensure_plant_max_pull_forward_days_column() -> None:
         conn.commit()
 
 
+def ensure_plant_max_push_forward_days_column() -> None:
+    """Idempotent nullable plant scheduling guardrail, kept out of the grid."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_push_forward_days INTEGER")
+        conn.commit()
+
+
 def ensure_plant_min_productive_segment_minutes_column() -> None:
     """Idempotent B3 (2026-08-21) column: the plant-configurable productive-
     segment floor both Calendar.allocateRuntime (frontend, non-setup-aware)
@@ -1449,6 +1457,34 @@ def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | No
         )
         conn.commit()
     return {"status": "ok", "plant": plant, "max_pull_forward_days": value}
+
+
+def set_plant_max_push_forward_days(subnetwork: str, plant: str, value: int | None,
+                                    user_email: str | None = None) -> dict:
+    """Persist a nullable whole-calendar-day push-forward (max lateness) limit for one plant."""
+    if not plant:
+        raise ValueError("plant is required")
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise ValueError("max_push_forward_days must be a non-negative integer or null")
+
+    params: list = [value, plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET max_push_forward_days = %s, updated_at = NOW() WHERE {where}", params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_max_push_forward_days', %s, %s)",
+            (Jsonb({"plant": plant, "max_push_forward_days": value}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "max_push_forward_days": value}
 
 
 def set_plant_min_productive_segment_minutes(subnetwork: str, plant: str, value: int,

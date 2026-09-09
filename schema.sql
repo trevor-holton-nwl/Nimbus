@@ -168,6 +168,7 @@ ALTER TABLE plants ADD COLUMN IF NOT EXISTS timezone      TEXT;
 -- legacy behavior until an admin deliberately opts in.
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS split_order_policy TEXT NOT NULL DEFAULT 'never';
 ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_pull_forward_days INTEGER;
+ALTER TABLE plants ADD COLUMN IF NOT EXISTS max_push_forward_days INTEGER;
 -- B3 (2026-08-21): the productive-segment floor (minutes) both the
 -- non-setup-aware split allocator (Calendar.allocateRuntime) and the
 -- setup-aware placeWithSetup primitive enforce — "no split piece shorter
@@ -201,6 +202,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_max_pull_forward_days_nonnegative') THEN
     ALTER TABLE plants ADD CONSTRAINT plants_max_pull_forward_days_nonnegative
       CHECK (max_pull_forward_days IS NULL OR max_pull_forward_days >= 0);
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plants_max_push_forward_days_nonnegative') THEN
+    ALTER TABLE plants ADD CONSTRAINT plants_max_push_forward_days_nonnegative
+      CHECK (max_push_forward_days IS NULL OR max_push_forward_days >= 0);
   END IF;
 END $$;
 -- Workstream C1 (2026-08-20): plant-level visibility horizon — how far into the

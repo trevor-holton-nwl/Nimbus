@@ -1406,6 +1406,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/master-data/plants/{plant}/max-push-forward-days": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Plant Max Push Forward Days
+         * @description Persist a nullable, non-negative whole-calendar-day scheduling ceiling.
+         */
+        post: operations["md_set_plant_max_push_forward_days_master_data_plants__plant__max_push_forward_days_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/master-data/plants/{plant}/min-productive-segment-minutes": {
         parameters: {
             query?: never;
@@ -2432,6 +2452,15 @@ export interface components {
             plant: string;
             /** Max Pull Forward Days */
             max_pull_forward_days?: number | null;
+        };
+        /** PlantMaxPushForwardDaysResult */
+        PlantMaxPushForwardDaysResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Max Push Forward Days */
+            max_push_forward_days?: number | null;
         };
         /** PlantMinProductiveSegmentMinutesResult */
         PlantMinProductiveSegmentMinutesResult: {
@@ -5168,6 +5197,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PlantMaxPullForwardDaysResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_plant_max_push_forward_days_master_data_plants__plant__max_push_forward_days_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlantMaxPushForwardDaysResult"];
                 };
             };
             /** @description Validation Error */

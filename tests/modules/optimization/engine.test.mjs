@@ -31,6 +31,7 @@ import {
   Engine, snapshotSchedule, deriveSetupObservation,
   MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
 } from '../../../frontend/optimization/engine.mjs';
+import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
 
@@ -73,6 +74,50 @@ test('Engine leaves undated orders and disabled pull-forward limits unrestricted
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN' }, 'OPEN'), null);
 });
 
+test('Engine derives a due-date-day push-forward ceiling using calendar days', () => {
+  Store.setMasterData({ plants: [{ plant: 'PUSH', max_push_forward_days: 7 }], lines: [] }, 'unit-test');
+  const ceiling = Engine.latestAllowedEnd(
+    { PLANT: 'PUSH', original_end_date: new Date('2026-08-17T18:30:00') },
+    'PUSH',
+  );
+  assert.deepEqual(
+    [ceiling?.getFullYear(), ceiling?.getMonth(), ceiling?.getDate(), ceiling?.getHours()],
+    [2026, 7, 25, 0],
+    'seven calendar days after the due-date calendar day, at local midnight rather than 168 elapsed hours later',
+  );
+  const dstCeiling = Engine.latestAllowedEnd(
+    { PLANT: 'PUSH', original_end_date: new Date('2026-03-05T12:00:00') },
+    'PUSH',
+  );
+  assert.deepEqual([dstCeiling?.getMonth(), dstCeiling?.getDate(), dstCeiling?.getHours()], [2, 13, 0],
+    'crossing daylight saving still adds seven calendar days and lands at local midnight');
+});
+
+test('Engine push-forward ceiling: zero means end of due day; unset/undated are unrestricted', () => {
+  Store.setMasterData({ plants: [{ plant: 'PUSH', max_push_forward_days: 0 }], lines: [] }, 'unit-test');
+  const ceiling = Engine.latestAllowedEnd(
+    { PLANT: 'PUSH', original_end_date: new Date('2026-08-17T18:30:00') },
+    'PUSH',
+  );
+  assert.deepEqual(
+    [ceiling?.getFullYear(), ceiling?.getMonth(), ceiling?.getDate(), ceiling?.getHours()],
+    [2026, 7, 18, 0],
+    'zero days means end of the due day itself',
+  );
+
+  Store.setMasterData({ plants: [{ plant: 'PUSH', max_push_forward_days: null }], lines: [] }, 'unit-test');
+  assert.equal(Engine.latestAllowedEnd({ PLANT: 'PUSH', original_end_date: new Date('2026-08-17') }, 'PUSH'), null,
+    'null limit is unrestricted');
+
+  Store.setMasterData({ plants: [{ plant: 'PUSH', max_push_forward_days: 7 }], lines: [] }, 'unit-test');
+  assert.equal(Engine.latestAllowedEnd({ PLANT: 'PUSH' }, 'PUSH'), null,
+    'no due date is unrestricted');
+
+  Store.setMasterData({ plants: [{ plant: 'PUSH', max_push_forward_days: -1 }], lines: [] }, 'unit-test');
+  assert.equal(Engine.latestAllowedEnd({ PLANT: 'PUSH', original_end_date: new Date('2026-08-17') }, 'PUSH'), null,
+    'negative limit is unrestricted');
+});
+
 // ---------------------------------------------------------------------------
 // B3 (2026-08-21) — plant-configurable productive-segment floor.
 // ---------------------------------------------------------------------------
@@ -93,6 +138,59 @@ test('Engine.minProductiveSegmentMinutesFor resolves the plant override and fall
 
   assert.equal(Engine.minProductiveSegmentMinutesFor('UNKNOWN'), MIN_PRODUCTIVE_SEGMENT_MINUTES,
     'an absent plant row must fall back to the exported default');
+});
+
+// ---------------------------------------------------------------------------
+// capAwareSequence tests — deadline-respecting SPT sequencer
+// ---------------------------------------------------------------------------
+
+test('capAwareSequence returns the input unchanged when no task has a ceiling', () => {
+  const tasks = [
+    { id: 'A', runMs: 1 * 3600_000, ceilingMs: null },
+    { id: 'B', runMs: 2 * 3600_000, ceilingMs: null },
+    { id: 'C', runMs: 3 * 3600_000, ceilingMs: null },
+  ];
+  const result = capAwareSequence(
+    tasks,
+    0,
+    (t) => t.ceilingMs,
+    (t) => t.runMs,
+  );
+  assert.deepEqual(result.map(t => t.id), ['A', 'B', 'C'],
+    'returns input in original order when no ceilings exist');
+  assert.notStrictEqual(result, tasks, 'does not return the same array reference');
+});
+
+test('capAwareSequence pulls a threatened, savable order ahead of shorter SPT work', () => {
+  const tasks = [
+    { id: 'A', runMs: 1 * 3600_000, ceilingMs: null },
+    { id: 'B', runMs: 2 * 3600_000, ceilingMs: null },
+    { id: 'C', runMs: 5 * 3600_000, ceilingMs: 7 * 3600_000 },  // latestStart = 2h
+  ];
+  const result = capAwareSequence(
+    tasks,
+    0,
+    (t) => t.ceilingMs,
+    (t) => t.runMs,
+  );
+  assert.deepEqual(result.map(t => t.id), ['A', 'C', 'B'],
+    'after A (ends at 1h), cursor is at 1h; placing B would end at 3h > C\'s latestStart 2h, so C is at risk and preempted; then B');
+});
+
+test('capAwareSequence leaves an unreachable ceiling in SPT order and ignores zero-runtime tasks', () => {
+  const tasks = [
+    { id: 'A', runMs: 1 * 3600_000, ceilingMs: null },
+    { id: 'Z', runMs: 0, ceilingMs: null },
+    { id: 'C', runMs: 5 * 3600_000, ceilingMs: 3 * 3600_000 },  // latestStart = -2h < cursor 0, not savable
+  ];
+  const result = capAwareSequence(
+    tasks,
+    0,
+    (t) => t.ceilingMs,
+    (t) => t.runMs,
+  );
+  assert.deepEqual(result.map(t => t.id), ['A', 'Z', 'C'],
+    'C is unreachable (latestStart < cursor), Z has zero runtime; both stay in SPT order');
 });
 
 // ---------------------------------------------------------------------------
@@ -2837,5 +2935,262 @@ test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respect
     else delete Store.calendars[line];
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// WP5 (2026-09-09) — due-date push-forward limit (`plants.max_push_forward_days`)
+// end-to-end integration through Engine.evaluateSchedule. Pure-function
+// coverage for Engine.latestAllowedEnd and capAwareSequence itself lives
+// earlier in this file; these probe the real wiring (bounds.notAfter into the
+// setup-aware evaluator for 'changeover', capAwareSequence into the legacy
+// per-line walk for 'spt').
+// ---------------------------------------------------------------------------
+
+test("Engine.evaluateSchedule('changeover') due-date push-forward cap is a no-op: null vs. a very permissive limit place identically", () => {
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./frontend/optimization/engine.mjs');
+    const plant = 'PARITY-CO-PLANT';
+    const line = 'PARITY-CO-LINE';
+    const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+    const now = new Date('2035-03-01T00:00:00');
+    Store.setSelectedPlant(plant, 'child-test');
+    Store.replaceSetupSnapshot(null, 'child-test');
+    Store.replaceCalendars({ [line]: { workHours: hours } }, 'child-test');
+    Store.replacePlants({ [plant]: { workHours: hours } }, 'child-test');
+    Store.setTasks([
+      { id: 'ord-1', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'RED',
+        original_end_date: new Date('2035-04-01T00:00:00'), start_date: null, end_date: null },
+      { id: 'ord-2', PLANT: plant, MACHINE: line, RUN_TIME: '2', COLOR: 'GREEN',
+        original_end_date: new Date('2035-04-02T00:00:00'), start_date: null, end_date: null },
+      { id: 'ord-3', PLANT: plant, MACHINE: line, RUN_TIME: '3', COLOR: 'BLUE',
+        original_end_date: new Date('2035-04-03T00:00:00'), start_date: null, end_date: null },
+    ], 'child-test');
+    const runOpts = {
+      plant, startDate: now, endDate: new Date(now.getTime() + 60 * 24 * 3600 * 1000), now,
+      respectFirmed: true, respectCalendar: true,
+    };
+    const serialize = (result) => result.patches.map(p => ({
+      id: p.id,
+      start: p.changes.start_date ? new Date(p.changes.start_date).toISOString() : null,
+      end: p.changes.end_date ? new Date(p.changes.end_date).toISOString() : null,
+    }));
+
+    Store.setMasterData({
+      plants: [{ plant, max_push_forward_days: null }],
+      lines: [{ machine: line, plant }],
+    }, 'child-test');
+    const withoutCap = serialize(Engine.evaluateSchedule('changeover', runOpts, snapshotSchedule()));
+
+    Store.setMasterData({
+      plants: [{ plant, max_push_forward_days: 3650 }],
+      lines: [{ machine: line, plant }],
+    }, 'child-test');
+    const withCap = serialize(Engine.evaluateSchedule('changeover', runOpts, snapshotSchedule()));
+
+    console.log(JSON.stringify({ withoutCap, withCap }));
+    process.exit(0);
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+  });
+  assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
+  const { withoutCap, withCap } = JSON.parse(run.stdout.trim());
+  assert.equal(withoutCap.length, 3, 'sanity: all 3 orders were placed');
+  assert.deepEqual(withoutCap, withCap,
+    'a very permissive push-forward cap (3650 days) must produce byte-identical placement to no cap at all (null)');
+});
+
+
+test("Engine.evaluateSchedule('spt') legacy walk: due-date push-forward cap is a no-op when null vs. a very permissive limit", () => {
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./frontend/optimization/engine.mjs');
+    const plant = 'PARITY-SPT-PLANT';
+    const line = 'PARITY-SPT-LINE';
+    const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+    const now = new Date('2035-03-01T00:00:00');
+    Store.setSelectedPlant(plant, 'child-test');
+    // 'spt' only routes through the setup-aware evaluator when Store.setupSnapshot
+    // is genuinely active-and-matching -- default null here keeps it on the
+    // legacy per-line walk this test targets.
+    Store.replaceSetupSnapshot(null, 'child-test');
+    Store.replaceCalendars({ [line]: { workHours: hours } }, 'child-test');
+    Store.replacePlants({ [plant]: { workHours: hours } }, 'child-test');
+    Store.setTasks([
+      { id: 'ord-1', PLANT: plant, MACHINE: line, RUN_TIME: '1',
+        original_end_date: new Date('2035-04-01T00:00:00'), start_date: null, end_date: null },
+      { id: 'ord-2', PLANT: plant, MACHINE: line, RUN_TIME: '2',
+        original_end_date: new Date('2035-04-02T00:00:00'), start_date: null, end_date: null },
+      { id: 'ord-3', PLANT: plant, MACHINE: line, RUN_TIME: '3',
+        original_end_date: new Date('2035-04-03T00:00:00'), start_date: null, end_date: null },
+    ], 'child-test');
+    const runOpts = {
+      plant, startDate: now, endDate: new Date(now.getTime() + 60 * 24 * 3600 * 1000), now,
+      respectFirmed: true, respectCalendar: true,
+    };
+    const serialize = (result) => result.patches.map(p => ({
+      id: p.id,
+      start: p.changes.start_date ? new Date(p.changes.start_date).toISOString() : null,
+      end: p.changes.end_date ? new Date(p.changes.end_date).toISOString() : null,
+    }));
+
+    Store.setMasterData({
+      plants: [{ plant, max_push_forward_days: null, split_order_policy: 'never' }],
+      lines: [{ machine: line, plant }],
+    }, 'child-test');
+    const withoutCap = serialize(Engine.evaluateSchedule('spt', runOpts, snapshotSchedule()));
+
+    Store.setMasterData({
+      plants: [{ plant, max_push_forward_days: 3650, split_order_policy: 'never' }],
+      lines: [{ machine: line, plant }],
+    }, 'child-test');
+    const withCap = serialize(Engine.evaluateSchedule('spt', runOpts, snapshotSchedule()));
+
+    console.log(JSON.stringify({ withoutCap, withCap }));
+    process.exit(0);
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+  });
+  assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
+  const { withoutCap, withCap } = JSON.parse(run.stdout.trim());
+  assert.equal(withoutCap.length, 3, 'sanity: all 3 orders were placed');
+  assert.deepEqual(withoutCap, withCap,
+    'a very permissive push-forward cap (3650 days) must produce byte-identical placement to no cap at all (null)');
+});
+
+
+test("Engine.evaluateSchedule('changeover') keeps an already-late order within its due-date push-forward cap when a compliant sequence exists", () => {
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./frontend/optimization/engine.mjs');
+    const plant = 'CAP-CO-PLANT';
+    const line = 'CAP-CO-LINE';
+    // A deliberately tight 1h/day window: each 1h order consumes one whole
+    // calendar day, so the SEQUENCE POSITION (1st/2nd/3rd) directly controls
+    // which calendar day an order lands on and therefore whether it beats the
+    // push-forward ceiling below.
+    const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 9]]));
+    const now = new Date('2035-01-06T08:00:00');
+    const dueDate = new Date('2035-01-05T10:00:00'); // "yesterday" relative to now
+    Store.setSelectedPlant(plant, 'child-test');
+    Store.replaceSetupSnapshot(null, 'child-test');
+    Store.replaceCalendars({ [line]: { workHours: hours } }, 'child-test');
+    Store.replacePlants({ [plant]: { workHours: hours } }, 'child-test');
+    Store.setMasterData({
+      plants: [{ plant, max_push_forward_days: 2 }],
+      lines: [{ machine: line, plant }],
+    }, 'child-test');
+    Store.setTasks([
+      { id: 'late-order', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'BLUE',
+        original_end_date: dueDate, start_date: null, end_date: null },
+      { id: 'peer-1', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'RED',
+        start_date: null, end_date: null },
+      { id: 'peer-2', PLANT: plant, MACHINE: line, RUN_TIME: '1', COLOR: 'RED',
+        start_date: null, end_date: null },
+    ], 'child-test');
+    const result = Engine.evaluateSchedule('changeover', {
+      plant, startDate: now, endDate: new Date(now.getTime() + 30 * 24 * 3600 * 1000), now,
+      respectFirmed: true, respectCalendar: true,
+    }, snapshotSchedule());
+    const patch = result.patches.find(p => p.id === 'late-order');
+    const end = patch?.changes.end_date ? new Date(patch.changes.end_date) : null;
+    const ceiling = Engine.latestAllowedEnd({ PLANT: plant, original_end_date: dueDate }, plant);
+    console.log(JSON.stringify({
+      hasPatch: !!patch,
+      endIso: end ? end.toISOString() : null,
+      ceilingIso: ceiling ? ceiling.toISOString() : null,
+      withinCap: !!(end && ceiling && end.getTime() <= ceiling.getTime()),
+    }));
+    process.exit(0);
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+  });
+  assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
+  const output = JSON.parse(run.stdout.trim());
+  assert.equal(output.hasPatch, true, 'the already-late order must still be placed (never-freeze: always place everything)');
+  assert.equal(output.withinCap, true,
+    `the already-late order's end (${output.endIso}) must not exceed its push-forward ceiling (${output.ceilingIso}) when a compliant sequence exists`);
+});
+
+
+test("Engine.evaluateSchedule('spt') legacy walk pulls a near-cap long order ahead of shorter SPT work via capAwareSequence", () => {
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine, snapshotSchedule } = await import('./frontend/optimization/engine.mjs');
+    const plant = 'CAP-SPT-PLANT';
+    const line = 'CAP-SPT-LINE';
+    const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+    // Chosen so the 5h order's latest allowed start (its push-forward ceiling
+    // minus its own runtime) is exactly 1.5h ahead of the cursor when the walk
+    // begins -- SPT order is [1h, 2h, 5h]; after the 1h order the cursor sits
+    // 1h in, still short of the 5h order's 1.5h-from-start risk threshold, but
+    // running the 2h order next would blow past it, so capAwareSequence must
+    // pull the 5h order ahead of the 2h order (never ahead of the 1h order,
+    // which poses no risk yet).
+    const now = new Date('2035-02-02T17:30:00');
+    Store.setSelectedPlant(plant, 'child-test');
+    Store.replaceSetupSnapshot(null, 'child-test');
+    Store.replaceCalendars({ [line]: { workHours: hours } }, 'child-test');
+    Store.replacePlants({ [plant]: { workHours: hours } }, 'child-test');
+    Store.setMasterData({
+      plants: [{ plant, max_push_forward_days: 0, split_order_policy: 'never' }],
+      lines: [{ machine: line, plant }],
+    }, 'child-test');
+    Store.setTasks([
+      { id: 'short-1h', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: null, end_date: null },
+      { id: 'mid-2h', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: null, end_date: null },
+      { id: 'long-5h', PLANT: plant, MACHINE: line, RUN_TIME: '5',
+        original_end_date: new Date('2035-02-02T10:00:00'), start_date: null, end_date: null },
+    ], 'child-test');
+    const result = Engine.evaluateSchedule('spt', {
+      plant, startDate: now, endDate: new Date(now.getTime() + 10 * 24 * 3600 * 1000), now,
+      respectFirmed: true, respectCalendar: true,
+    }, snapshotSchedule());
+    const byId = Object.fromEntries(result.patches.map(p => [p.id, p.changes.start_date]));
+    console.log(JSON.stringify({
+      shortStart: byId['short-1h'] ? new Date(byId['short-1h']).toISOString() : null,
+      midStart: byId['mid-2h'] ? new Date(byId['mid-2h']).toISOString() : null,
+      longStart: byId['long-5h'] ? new Date(byId['long-5h']).toISOString() : null,
+    }));
+    process.exit(0);
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+  });
+  assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
+  const { shortStart, midStart, longStart } = JSON.parse(run.stdout.trim());
+  assert.ok(shortStart && midStart && longStart, 'all three orders must be placed');
+  assert.ok(new Date(shortStart).getTime() < new Date(longStart).getTime(),
+    'the 1h order (no ceiling) still runs first -- it poses no risk to the 5h order when the walk begins');
+  assert.ok(new Date(longStart).getTime() < new Date(midStart).getTime(),
+    'the 5h order, savable but at risk of missing its cap if the 2h order ran next, is pulled ahead of the 2h order');
 });
 

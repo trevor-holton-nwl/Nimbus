@@ -225,6 +225,8 @@ export interface NimbusMasterPlant {
   split_order_policy?: SplitOrderPolicy | null;
   /** Nullable whole calendar days an order may be scheduled before its due-date day. */
   max_pull_forward_days?: number | null;
+  /** Nullable whole calendar days an order may be scheduled after its due-date day. */
+  max_push_forward_days?: number | null;
   /** B3 (2026-08-21): plant-configurable override of the productive-segment
    *  floor (schema.sql: NOT NULL DEFAULT 30) that both the non-setup-aware
    *  split allocator (Calendar.allocateRuntime) and the setup-aware

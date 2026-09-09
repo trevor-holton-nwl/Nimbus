@@ -830,6 +830,13 @@ interface PreviewExplanation {
    *  B3 comment in schedule-services.mts for why: the worst drops produce no
    *  diagnostic object at all, so there is nothing else to collect from). */
   unplacedOrders: { orders: number; lines: number };
+  /** Due-date push-forward limit (`plants.max_push_forward_days`) tally for
+   *  this candidate — the same post-hoc reporting `Engine.runAndApply`'s live
+   *  path derives, computed here from `candidate.patches` against the
+   *  pre-apply task list so the preview banner and the live-run toast agree.
+   *  `days: null` (with `orders`/`lines` both 0) means the plant has no
+   *  configured limit — the default, no-op case. */
+  overLatenessCap: { orders: number; lines: number; days: number | null };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
   /** Aggregate prune tally for the whole run (§4.3 docs/archive/OPTIMIZER-PREVIEW.md), bucketed
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
@@ -849,6 +856,13 @@ interface PreviewExplanationInput {
   unplacedCandidates?: ReadonlyArray<{ id: string; line: string }>;
   /** Firmed/pinned ids — deliberately never moved, so never counted as unplaced. */
   firmedIds?: ReadonlySet<string> | ReadonlyArray<string>;
+  /** Full pre-apply task list for the candidate snapshot — resolves the
+   *  MACHINE/due-date lookups `Engine._overCapSummary` needs for
+   *  `overLatenessCap`. Omitted only by callers that don't want the tally. */
+  tasks?: ReadonlyArray<NimbusTask>;
+  /** Plant this candidate was evaluated for — read alongside `tasks` for
+   *  `overLatenessCap` (`plants.max_push_forward_days` is per-plant). */
+  plant?: string | null;
 }
 
 const PREVIEW_REASON_LIMIT = 8;
@@ -1077,6 +1091,9 @@ export const OptimizerPreview = {
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
       scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
       unplacedOrders: { orders: unplacedOrderIds.size, lines: unplacedLines.size },
+      overLatenessCap: input.tasks
+        ? Engine._overCapSummary(candidate.patches, input.tasks, input.plant ?? null)
+        : { orders: 0, lines: 0, days: null },
       prunes: tallyPrunes(candidate.explanation),
       search: {
         candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
@@ -1332,6 +1349,8 @@ export const OptimizerPreview = {
           postKpis,
           unplacedCandidates,
           firmedIds: effectiveFirmedIdSet(candidateSnapshot.tasks, candidateSnapshot.firmedIds, runNow, opts.respectFirmed ?? true),
+          tasks: candidateSnapshot.tasks,
+          plant,
         });
         const described = OptimizerPreview.describeMissingPairs(
           candidate,
@@ -1716,6 +1735,19 @@ export const OptimizerPreview = {
         }))}</div>`
       : '';
 
+    // Due-date push-forward limit banner — same tally as the live-run toast
+    // (toast.optimize_over_lateness_cap), rendered here so the preview
+    // surfaces the violation before the planner applies.
+    const overLatenessCapHtml = (explanation && explanation.overLatenessCap.orders > 0)
+      ? `<div class="opt-pv-backlog-warning">${Util.escapeHtml(Util.t('ui.opt_pv_over_lateness_cap', {
+          orders: explanation.overLatenessCap.orders,
+          lines: explanation.overLatenessCap.lines,
+          // days is never null here: overLatenessCap.orders > 0 only when the
+          // plant has a configured limit (see _overCapSummary's null fast-exit).
+          days: explanation.overLatenessCap.days ?? 0,
+        }))}</div>`
+      : '';
+
     // Per-card markup
     const cardsHtml = cards.map(c => {
       const preV  = pre[c.k]  ?? 0;
@@ -1810,6 +1842,8 @@ export const OptimizerPreview = {
 
         ${scheduledWithoutSetupHtml}
 
+        ${overLatenessCapHtml}
+
         <div class="opt-pv-sections">
           ${whyHtml}
           ${gapsHtml}
@@ -1899,7 +1933,7 @@ export const OptimizerPreview = {
     Toast.show(Util.t('toast.opt_applied'), 'success');
     // Fire warning toasts — matching the live Engine.runAndApply patterns from schedule-services.mts
     if (OptimizerPreview._explanation) {
-      const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
+      const { scheduledWithoutSetup, unplacedOrders, overLatenessCap } = OptimizerPreview._explanation;
       if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {
         Toast.show(Util.t('toast.optimize_missing_setup_summary', {
           orders: scheduledWithoutSetup.orders,
@@ -1910,6 +1944,15 @@ export const OptimizerPreview = {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
           lines: unplacedOrders.lines,
+        }), 'warn');
+      }
+      if (overLatenessCap.orders) {
+        Toast.show(Util.t('toast.optimize_over_lateness_cap', {
+          orders: overLatenessCap.orders,
+          lines: overLatenessCap.lines,
+          // days is never null here: overLatenessCap.orders > 0 only when the
+          // plant has a configured limit (see _overCapSummary's null fast-exit).
+          days: overLatenessCap.days ?? 0,
         }), 'warn');
       }
     }

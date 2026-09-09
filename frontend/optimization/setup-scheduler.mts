@@ -7,7 +7,7 @@
  */
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
 import { candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
@@ -375,6 +375,9 @@ export interface DueDateFirstBounds {
   horizonEnd: Date;
   /** Optional plant rule supplied by the live engine; absent retains detached legacy behavior. */
   notBefore?: (task: NimbusTask) => Date | null;
+  /** Optional plant rule: latest allowed END for a task (due-date push-forward
+   * limit). Null = unconstrained. Mirrors notBefore. */
+  notAfter?: (task: NimbusTask) => Date | null;
   /** Phase 1a: an optional caller-owned per-run context of indexes/memos
    *  (see `SetupRunContext`/`buildRunContext` below). Every hot-loop consumer
    *  reads this only when `runContext.snapshot` is the SAME object reference
@@ -418,6 +421,7 @@ export interface SetupRunContext {
   _stateForOrder: Map<string, SetupStateKey | null>;
   _stateSignatureKey: Map<string, string | null>;
   _notBefore: Map<string, Date | null>;
+  _notAfter: Map<string, Date | null>;
   /** Lazy per-(line, taskId) memos, keyed by NUL-joined `line + taskId`
    *  (mirrors `setup-domain.mts`'s `joinIndexKey` convention). */
   _rankVector: Map<string, number[]>;
@@ -471,6 +475,7 @@ export function buildRunContext(
     _stateForOrder: new Map(),
     _stateSignatureKey: new Map(),
     _notBefore: new Map(),
+    _notAfter: new Map(),
     _rankVector: new Map(),
     _policyKeyForTask: new Map(),
     _lineBlocks: new Map(),
@@ -572,15 +577,35 @@ export const SETUP_AWARE_TAIL_OVERRUN_MS = 1000;
  * renumbering would corrupt the min-changeover accept/reject decision.
  * Compared explicitly in `compareCandidate` immediately after `policyKey` —
  * never folded into the mode-permuted `terms` list — so it stays mode-
- * independent: fewest uncovered edges always outranks every due/setup term. */
+ * independent: fewest uncovered edges always outranks every term except the
+ * over-cap tier (SCORE_OVER_CAP), which is compared first. */
 const SCORE_UNCOVERED = 6;
 
-/** The canonical hard-infeasible score vector (`score[0] = 1`), now 7-wide so
+/** Score index carrying the count of over-cap orders in a candidate
+ * (due-date push-forward limit, 2026-09-09): an order whose scheduled end
+ * exceeds `bounds.notAfter(task)`. Appended, never inserted — same rule as
+ * SCORE_UNCOVERED above. Compared in `compareCandidate` immediately after
+ * `policyKey` and BEFORE the coverage tier (SCORE_UNCOVERED): on a plant with
+ * no real matrix, coverage is effectively same-signature grouping, so the cap
+ * must outrank it or a changeover saving could push an order arbitrarily far
+ * past its cap. Null/absent `bounds.notAfter` means every candidate's
+ * score[SCORE_OVER_CAP] is 0 — a provable no-op default. */
+const SCORE_OVER_CAP = 7;
+
+/** The canonical hard-infeasible score vector (`score[0] = 1`), now 8-wide so
  * every candidate — feasible or not — carries the same arity as `score[
- * SCORE_UNCOVERED]`. Arity is not type-enforced (`score` is `number[]`), so
+ * SCORE_OVER_CAP]`. Arity is not type-enforced (`score` is `number[]`), so
  * this exists to keep every literal in one place rather than drifting. */
 function infeasibleScore(): number[] {
-  return [1, 0, 0, 0, 0, 0, 0];
+  return [1, 0, 0, 0, 0, 0, 0, 0];
+}
+
+/** The canonical zero (fully-neutral) 8-wide score vector — every
+ * accumulator/placeholder site that used to hand-write a 7-wide zero literal
+ * now calls this instead, so widening the vector again means editing one
+ * function rather than re-auditing every call site. */
+function zeroScore(): number[] {
+  return [0, 0, 0, 0, 0, 0, 0, 0];
 }
 
 export interface CandidateResult {
@@ -884,6 +909,22 @@ function notBeforeFor(bounds: Readonly<DueDateFirstBounds>, task: Readonly<Nimbu
   if (cached !== undefined) return cached;
   const value = bounds.notBefore(task) ?? null;
   ctx._notBefore.set(id, value);
+  return value;
+}
+
+/** Phase 1a memo: `bounds.notAfter` (due-date push-forward limit ceiling) is
+ * an engine-supplied rule a hot loop calls on the same task repeatedly across
+ * permutations. Falls back to the direct call whenever no run context is
+ * threaded. Mirrors `notBeforeFor` exactly. */
+function notAfterFor(bounds: Readonly<DueDateFirstBounds>, task: Readonly<NimbusTask>): Date | null {
+  if (!bounds.notAfter) return null;
+  const ctx = bounds.runContext;
+  if (!ctx) return bounds.notAfter(task) ?? null;
+  const id = taskId(task);
+  const cached = ctx._notAfter.get(id);
+  if (cached !== undefined) return cached;
+  const value = bounds.notAfter(task) ?? null;
+  ctx._notAfter.set(id, value);
   return value;
 }
 
@@ -1842,6 +1883,16 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // candidate pair a search evaluates.
   const policyDelta = ordinalCompare(left.policyKey, right.policyKey);
   if (policyDelta) return policyDelta;
+  // Due-date push-forward limit (2026-09-09): compared immediately after
+  // policyKey and BEFORE the coverage tier — deliberate. On a plant with no
+  // real matrix, the coverage tier is effectively same-signature grouping
+  // (identical states resolve implicit-zero/covered), so the cap must outrank
+  // it or "pushed 30 days out to save a changeover" persists. Hard
+  // feasibility (score[0]) and the priority tree (policyKey) still come
+  // first. `compareBoundaryFallback` calls this without `mode`; that's fine —
+  // this tier sits before the mode-permuted terms below.
+  const overCapDelta = (left.score[SCORE_OVER_CAP] ?? 0) - (right.score[SCORE_OVER_CAP] ?? 0);
+  if (overCapDelta) return overCapDelta;
   // Coverage tier (A2): compared outside the mode-permuted `terms` list below
   // so it is immune to future reordering there, and so a mode like
   // `throughput` (which puts score[5] first) can never prefer a cheaper
@@ -1896,6 +1947,11 @@ function candidateForSequence(
   let setupMinutes = 0;
   let lateCount = 0;
   let latenessMinutes = 0;
+  // Due-date push-forward limit: count of orders in this sequence whose
+  // simulated end exceeds `bounds.notAfter(task)`. Rolled into
+  // score[SCORE_OVER_CAP] on the feasible return below; compareCandidate
+  // minimizes it ahead of every other tier except hard feasibility/policyKey.
+  let overCapCount = 0;
   const unadmitted: NimbusTask[] = [];
   // A1/A2: count of uncovered-but-admitted transitions in this sequence
   // (mid-sequence + firmed-boundary-incoming). Rolled into score[SCORE_UNCOVERED]
@@ -2098,6 +2154,8 @@ function candidateForSequence(
       lateCount += 1;
       latenessMinutes += Math.ceil((last.end.getTime() - due) / (60 * 1000));
     }
+    const ceiling = notAfterFor(bounds, task);
+    if (ceiling && last.end.getTime() > ceiling.getTime()) overCapCount += 1;
     if (!unknownPredecessor && !uncoveredAdmission && !suppressExplanations) {
       explanation.push({
         code: 'due-date-first-placement',
@@ -2200,11 +2258,12 @@ function candidateForSequence(
     patches,
     // Lower is better. The due-date objective intentionally remains ahead of
     // admitted work and setup consumption; the sequence key is the final tie.
-    // score[SCORE_UNCOVERED] (A2) is compared in compareCandidate immediately
-    // after policyKey, ahead of every term below.
+    // score[SCORE_OVER_CAP] (due-date push-forward limit) and
+    // score[SCORE_UNCOVERED] (A2) are both compared in compareCandidate
+    // immediately after policyKey, ahead of every term below — over-cap first.
     score: [
       0, policyScore(snapshot, bounds.setup.plant, line, sequence, bounds.runContext), lateCount, latenessMinutes, -patches.length,
-      setupMinutes, uncoveredEdgeCount,
+      setupMinutes, uncoveredEdgeCount, overCapCount,
     ],
     policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, sequence, bounds.runContext),
     sequenceKey: sequence.map(taskId).join('|'),
@@ -2743,7 +2802,23 @@ function searchFragment(
     // instead of rejecting the candidate), so a single evaluation replaces
     // the former retry-with-demotion loop.
     budget.remainingIterations -= 1;
-    const sequence = orderWithAdjacency(orderedByProductiveRuntime(workingTasks), fragment, adjacency);
+    // Due-date push-forward limit: this is a single fixed run-time-ordered
+    // walk (no ranking search to steer via score[SCORE_OVER_CAP]), so
+    // capAwareSequence pulls a still-savable capped order ahead of the SPT
+    // head when the head would otherwise push it past its latest allowed
+    // start. A no-op when no task in this fragment has a ceiling
+    // (bounds.notAfter absent/null) — capAwareSequence returns its input
+    // unchanged in that case.
+    const sequence = orderWithAdjacency(
+      capAwareSequence(
+        orderedByProductiveRuntime(workingTasks),
+        fragment.start.getTime(),
+        task => notAfterFor(bounds, task)?.getTime() ?? null,
+        task => productiveRuntimeMinutes(task) * 60 * 1000,
+      ),
+      fragment,
+      adjacency,
+    );
     if (!sequence) {
       return {
         candidateCount: 1,
@@ -2788,7 +2863,7 @@ function unchangedLineResult(
 ): LineSearchResult {
   return {
     patches: [],
-    score: [0, 0, 0, 0, 0, 0, 0],
+    score: zeroScore(),
     explanation: [...priorExplanation, { code, message, line }],
     missingEdges,
     candidateCount: 0,
@@ -3340,6 +3415,10 @@ function completeFinalBoundaryCandidate(
       // compareBoundaryFallback routes through compareCandidate, which reads
       // score[SCORE_UNCOVERED] directly.
       (preFirmed.score[SCORE_UNCOVERED] ?? 0) + (continuation.score[SCORE_UNCOVERED] ?? 0),
+      // Due-date push-forward limit: sum both halves' over-cap counts for the
+      // same reason — compareCandidate reads score[SCORE_OVER_CAP] directly,
+      // and it is compared even earlier than score[SCORE_UNCOVERED] above.
+      (preFirmed.score[SCORE_OVER_CAP] ?? 0) + (continuation.score[SCORE_OVER_CAP] ?? 0),
     ],
     policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
     sequenceKey: joinKey(preFirmed.patches.map(patch => patch.id).join('|'), continuation.patches.map(patch => patch.id).join('|')),
@@ -3782,7 +3861,7 @@ function evaluateLineWithFirmedBoundaries(
   let predecessorOrderId: string | null = initial.predecessorOrderId;
   let requiredFirstOrderId: string | undefined = initialFreeLock.requiredFirstOrderId;
   const patches: SchedulePatch[] = [];
-  const score = [0, 0, 0, 0, 0, 0, 0];
+  const score = zeroScore();
   const explanation: CandidateReason[] = [...baseExplanation];
   const missingEdges: MissingSetupEdge[] = [...baseMissingEdges];
   let candidateCount = 0;
@@ -4279,7 +4358,7 @@ function evaluateLineWithFirmedBoundaries(
           taskId: taskId(boundary.task),
         });
         return {
-          patches: [], score: [0, 0, 0, 0, 0, 0, 0], explanation, missingEdges,
+          patches: [], score: zeroScore(), explanation, missingEdges,
           candidateCount, method, termination, unchanged: true,
         };
       }
@@ -4353,7 +4432,7 @@ function evaluateLineWithFirmedBoundaries(
     if (isOverrideConflict) {
       explanation.push({ code: 'setup-sequence-infeasible', message: 'No covered feasible setup sequence was found.', line });
       return {
-        patches: [], score: [0, 0, 0, 0, 0, 0, 0], explanation, missingEdges,
+        patches: [], score: zeroScore(), explanation, missingEdges,
         candidateCount, method, termination, unchanged: true,
       };
     }
@@ -4431,7 +4510,7 @@ export function evaluateSptWithSetup(
   const explanation: CandidateReason[] = [];
   const unchangedLines: string[] = [];
   const missingEdges: MissingSetupEdge[] = [];
-  const score = [0, 0, 0, 0, 0, 0, 0];
+  const score = zeroScore();
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   let linesRemaining = orderedLines.length;
@@ -4605,7 +4684,7 @@ export function evaluateDueDateFirst(
   const explanation: CandidateReason[] = [];
   const unchangedLines: string[] = [];
   const missingEdges: MissingSetupEdge[] = [];
-  const score = [0, 0, 0, 0, 0, 0, 0];
+  const score = zeroScore();
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   let linesRemaining = orderedLines.length;
@@ -4745,12 +4824,23 @@ function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
   return end ? Math.floor(end.getTime() / (60 * 1000)) : null;
 }
 
-function lateOrderFacts(tasks: ReadonlyArray<NimbusTask>): Map<string, { late: boolean; end: number | null }> {
-  const facts = new Map<string, { late: boolean; end: number | null }>();
+/** `notAfter` is optional and, when supplied, mirrors `bounds.notAfter` (the
+ * due-date push-forward limit ceiling) so a caller can compare before/after
+ * over-cap counts the same way it already compares before/after lateness.
+ * `selectThroughputCandidate` deliberately calls this WITHOUT `notAfter` —
+ * the cap is a min-changeover-only due-safe rule, not a throughput one — so
+ * every entry's `overCap` there is simply `false`. */
+function lateOrderFacts(
+  tasks: ReadonlyArray<NimbusTask>,
+  notAfter?: (task: NimbusTask) => Date | null,
+): Map<string, { late: boolean; end: number | null; overCap: boolean }> {
+  const facts = new Map<string, { late: boolean; end: number | null; overCap: boolean }>();
   for (const task of tasks) {
     const end = scheduledEndMinutes(task);
     const due = dueTimestamp(task);
-    facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end });
+    const ceiling = notAfter ? notAfter(task) ?? null : null;
+    const overCap = end !== null && ceiling !== null && end * 60 * 1000 > ceiling.getTime();
+    facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end, overCap });
   }
   return facts;
 }
@@ -4778,12 +4868,15 @@ export function evaluateMinChangeover(
   const remainingMs = Math.max(0, bounds.deadline - now);
   const baseline = evaluateDueDateFirst(snapshot, { ...bounds, deadline: now + remainingMs / 2 });
   const candidate = evaluateDueDateFirst(snapshot, { ...bounds, deadline: bounds.deadline }, 'min-changeover');
-  const before = lateOrderFacts(snapshot.tasks);
+  const before = lateOrderFacts(snapshot.tasks, bounds.notAfter);
   const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
-  const after = lateOrderFacts(afterTasks);
+  const after = lateOrderFacts(afterTasks, bounds.notAfter);
   const beforeLate = [...before.values()].filter(fact => fact.late).length;
   const afterLate = [...after.values()].filter(fact => fact.late).length;
   const newlyLate = [...after.entries()].filter(([id, fact]) => fact.late && !before.get(id)?.late);
+  const beforeOverCap = [...before.values()].filter(fact => fact.overCap).length;
+  const afterOverCap = [...after.values()].filter(fact => fact.overCap).length;
+  const newlyOverCap = [...after.entries()].filter(([id, fact]) => fact.overCap && !before.get(id)?.overCap);
   const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
 
   // Starvation guard: a candidate pass that hit its own deadline/iteration
@@ -4800,6 +4893,18 @@ export function evaluateMinChangeover(
       baseline,
       'min-changeover-starved',
       'The min-changeover candidate pass was starved of search budget; kept the baseline schedule.',
+    );
+  }
+
+  // Due-date push-forward limit (2026-09-09): a separate rejection branch,
+  // checked before the plain-lateness one — an order already late in both
+  // before/after never trips `newlyLate`/`afterLate > beforeLate`, but can
+  // still newly cross its own push-forward cap, which this catches on its own.
+  if (afterOverCap > beforeOverCap || newlyOverCap.length) {
+    return withPolicyReason(
+      baseline,
+      'min-changeover-rejected-lateness-cap',
+      `Rejected ${savings} setup minutes saved because the alternative would push ${newlyOverCap.length || afterOverCap - beforeOverCap} order(s) past the plant's due-date push-forward limit.`,
     );
   }
 

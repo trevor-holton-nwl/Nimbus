@@ -39,6 +39,7 @@ from backend.master_data.models import (
     PlantConstraintsResult,
     PlantFrozenHorizonDaysResult,
     PlantMaxPullForwardDaysResult,
+    PlantMaxPushForwardDaysResult,
     PlantMinProductiveSegmentMinutesResult,
     PlantSplitOrderPolicyResult,
     RolePageAccessResult,
@@ -451,6 +452,21 @@ def md_set_plant_max_pull_forward_days(plant: str, request: Request, body: dict 
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             value=body.get("max_pull_forward_days"),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/master-data/plants/{plant}/max-push-forward-days", response_model=PlantMaxPushForwardDaysResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_plant_max_push_forward_days(plant: str, request: Request, body: dict = Body(default={})):
+    """Persist a nullable, non-negative whole-calendar-day lateness ceiling."""
+    try:
+        return md.set_plant_max_push_forward_days(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            value=body.get("max_push_forward_days"),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:
