@@ -10,7 +10,10 @@ function withRuntime(reduced, run) {
   const frames = new Map();
   const motion = Object.assign(new EventTarget(), { matches: reduced });
   const doc = Object.assign(new EventTarget(), { hidden: false });
-  const ctx = new Proxy({ clearRect() { draws++; } }, { get: (target, key) => target[key] ?? (() => {}) });
+  const text = [];
+  const ctx = new Proxy({ clearRect() { draws++; text.length = 0; },
+    fillText(value) { text.push(value); }, measureText(value) { return { width: value.length * 6 }; },
+  }, { get: (target, key) => target[key] ?? (() => {}) });
   const canvas = { getContext: () => ctx, getBoundingClientRect: () => rect };
   const globals = {
     window: { devicePixelRatio: 3, matchMedia: () => motion }, document: doc,
@@ -23,7 +26,7 @@ function withRuntime(reduced, run) {
   let scene;
   try {
     scene = new RefinedFactoryScene(canvas, { assembly: 'Assembly', inspection: 'Inspection', packing: 'Packing' });
-    run({ scene, canvas, motion, doc, frames, draws: () => draws, disconnected: () => disconnected,
+    run({ scene, canvas, motion, doc, frames, text, draws: () => draws, disconnected: () => disconnected,
       resize: value => { rect = value; resize(); },
       tick: () => { const [id, callback] = frames.entries().next().value; frames.delete(id); now += 16; callback(now); },
     });
@@ -46,6 +49,18 @@ test('reduced motion draws a populated still, redraws on resize and responds to 
     assert.equal(runtime.frames.size, 1);
     runtime.tick();
     assert.equal(runtime.frames.size, 1);
+  });
+});
+
+test('stage captions appear once beneath A-02 and floating orders follow finished products', () => {
+  withRuntime(true, runtime => {
+    for (const stage of ['Assembly', 'Inspection', 'Packing']) {
+      assert.equal(runtime.text.filter(value => value.includes(stage)).length, 1);
+    }
+    assert.ok(runtime.text.some(value => value.startsWith('WO-') && value.includes(' · ')));
+    runtime.resize({ width: 560, height: 700 });
+    assert.ok(!runtime.text.some(value => /Assembly|Inspection|Packing/.test(value)),
+      'the compact A-01 line does not repeat the A-02 captions');
   });
 });
 

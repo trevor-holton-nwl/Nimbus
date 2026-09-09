@@ -39,38 +39,74 @@ export function applyFactoryProductStyles(
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y);
   };
   const drawings: Record<RefinedProductId, (tint: Tint, hue: number) => void> = {
-    'BOTTLE-40OZ': (tint, hue) => {
+    'BOTTLE-40OZ': (_tint, hue) => {
       if (hue % 2 === 0) {
-        // Contigo travel mug: tapered stainless body and asymmetric AUTOSEAL lid.
-        fill(tint(43, 30), () => {
-          ctx.moveTo(3, -42); ctx.lineTo(27, -42); ctx.lineTo(23, -5);
-          ctx.quadraticCurveTo(23, 0, 19, 0); ctx.lineTo(11, 0);
-          ctx.quadraticCurveTo(7, 0, 7, -5);
+        // West Loop: curved waist, full lower body and the tall front AUTOSEAL control.
+        // Proportions follow the official 470ml front photograph, not a paper-cup taper.
+        fill('#a9b4be', () => {
+          ctx.moveTo(5, -46); ctx.lineTo(25, -46);
+          ctx.bezierCurveTo(23, -32, 28, -19, 24, -3);
+          ctx.quadraticCurveTo(24, 0, 15, 0); ctx.quadraticCurveTo(6, 0, 6, -3);
+          ctx.bezierCurveTo(2, -19, 7, -32, 5, -46);
         });
-        fill('rgba(230,240,245,0.3)', () => { ctx.moveTo(6, -39); ctx.lineTo(10, -39); ctx.lineTo(13, -4); ctx.lineTo(10, -4); });
-        line('#c6d0db', 1.5, () => { ctx.moveTo(4, -41); ctx.lineTo(26, -41); });
-        box('#34495e', 2, -48, 26, 7, 2);
-        fill('#56677c', () => { ctx.moveTo(3, -48); ctx.lineTo(5, -53); ctx.lineTo(20, -53); ctx.quadraticCurveTo(27, -53, 27, -48); });
-        box('#8fa1b3', 4, -51, 6, 2.5, 0.8); box('#1c2b3a', 20, -47, 7, 3, 0.8);
-        badge('contigo', 16, -16, '#e8edf3', 4.4);
-        oval('#56677c', 15, -1.2, 7.5, 1.2);
+        fill('#cdd5dc', () => {
+          ctx.moveTo(8, -44); ctx.lineTo(12, -44); ctx.bezierCurveTo(10, -28, 11, -15, 11, -3);
+          ctx.lineTo(8, -3); ctx.bezierCurveTo(5, -19, 9, -33, 8, -44);
+        });
+        fill('#7e8d9b', () => {
+          ctx.moveTo(22, -44); ctx.lineTo(25, -44); ctx.bezierCurveTo(23, -30, 28, -17, 24, -3);
+          ctx.lineTo(21, -2); ctx.bezierCurveTo(24, -17, 21, -30, 22, -44);
+        });
+        fill('#283440', () => {
+          ctx.moveTo(3, -57); ctx.quadraticCurveTo(15, -59, 27, -57);
+          ctx.lineTo(25, -46); ctx.lineTo(21, -46); ctx.lineTo(20, -40);
+          ctx.quadraticCurveTo(15, -36, 10, -40); ctx.lineTo(9, -46); ctx.lineTo(5, -46);
+        });
+        box('#465566', 5, -54, 5, 8, 1.5); box('#465566', 21, -54, 4, 8, 1.5);
+        box('#c6d0db', 11, -56, 9, 17, 3); box('#142332', 12, -54, 7, 14, 2);
+        box('#718391', 13, -53, 5, 12, 1.7); box('#dce4e9', 14, -55, 3, 1, 0.4);
+        line('#607184', 0.8, () => { ctx.moveTo(4, -57); ctx.lineTo(26, -57); });
+        badge('contigo', 15, -6, '#f4f7fa', 4.3);
+        line('#657586', 0.8, () => { ctx.moveTo(8, -1); ctx.quadraticCurveTo(15, 1, 22, -1); });
       } else {
-        // Bubba keg: broad insulated barrel, steel band and substantial open handle.
-        line('#718697', 4.5, () => {
-          ctx.moveTo(28, -34); ctx.lineTo(36, -34); ctx.quadraticCurveTo(40, -34, 39, -29);
-          ctx.lineTo(36, -13); ctx.quadraticCurveTo(35, -10, 29, -12);
+        // Classic 52oz keg: black molded shoulders, broad steel barrel and deep D handle.
+        line('#29333d', 5, () => {
+          ctx.moveTo(29, -44); ctx.lineTo(35, -44);
+          ctx.bezierCurveTo(44, -38, 44, -18, 38, -10);
+          ctx.lineTo(29, -9);
         });
-        fill(tint(36, 27), () => {
-          ctx.moveTo(2, -38); ctx.lineTo(31, -38); ctx.lineTo(29, -7);
-          ctx.quadraticCurveTo(28, 0, 23, 0); ctx.lineTo(10, 0);
-          ctx.quadraticCurveTo(4, 0, 4, -7);
+        line('#5d6a77', 1.8, () => {
+          ctx.moveTo(34, -41); ctx.bezierCurveTo(40, -35, 40, -21, 36, -14);
         });
-        fill('#a7b8c3', () => { ctx.moveTo(3, -29); ctx.lineTo(30, -29); ctx.lineTo(29, -15); ctx.lineTo(4, -15); });
-        box('#c9d4dc', 6, -28, 3, 12, 0.7);
-        box('#34495e', 1, -42, 32, 5, 1.5); oval('#56677c', 17, -42, 15, 2.5);
-        box('#263848', 9, -46, 14, 4, 1); box('#8fa1b3', 9, -45, 6, 1.5, 0.5);
-        badge('bubba', 18, -22, '#34495e', 6);
-        line('#263848', 2, () => { ctx.moveTo(8, -2); ctx.lineTo(26, -2); });
+        fill('#29333d', () => {
+          ctx.moveTo(4, -48); ctx.quadraticCurveTo(16, -50, 29, -48);
+          ctx.bezierCurveTo(34, -37, 33, -21, 29, -10); ctx.lineTo(28, -4);
+          ctx.quadraticCurveTo(28, 0, 16, 0); ctx.quadraticCurveTo(4, 0, 4, -4);
+          ctx.lineTo(3, -12); ctx.bezierCurveTo(-1, -26, 0, -38, 4, -48);
+        });
+        fill('#3c4751', () => {
+          ctx.moveTo(4, -20); ctx.lineTo(8, -19); ctx.lineTo(9, -3); ctx.lineTo(6, -4);
+        });
+        fill('#afb8be', () => {
+          ctx.moveTo(1, -39); ctx.quadraticCurveTo(16, -37, 32, -39);
+          ctx.quadraticCurveTo(34, -28, 31, -18); ctx.quadraticCurveTo(16, -14, 2, -18);
+          ctx.quadraticCurveTo(0, -28, 1, -39);
+        });
+        fill('#d7dde1', () => {
+          ctx.moveTo(5, -38); ctx.lineTo(11, -38); ctx.lineTo(11, -17); ctx.lineTo(5, -18);
+        });
+        fill('#7c8a95', () => {
+          ctx.moveTo(28, -38); ctx.lineTo(31, -39); ctx.quadraticCurveTo(33, -28, 30, -19);
+          ctx.lineTo(27, -18); ctx.quadraticCurveTo(29, -28, 28, -38);
+        });
+        fill('#202a34', () => {
+          ctx.moveTo(2, -46); ctx.lineTo(4, -53); ctx.quadraticCurveTo(16, -55, 29, -53);
+          ctx.lineTo(31, -46); ctx.quadraticCurveTo(16, -44, 2, -46);
+        });
+        line('#5b6874', 0.8, () => { ctx.moveTo(5, -53); ctx.quadraticCurveTo(16, -55, 28, -53); });
+        box('#55616b', 10, -56, 13, 2, 0.8);
+        badge('bubba', 21, -24, '#34414e', 5.4);
+        line('#5d6b78', 0.7, () => { ctx.moveTo(6, -2); ctx.quadraticCurveTo(16, 1, 26, -2); });
       }
     },
     'COOLER-65Q': (_tint, hue) => {
@@ -240,7 +276,7 @@ export function applyFactoryProductStyles(
   return originals.map(product => {
     const id = product.id as RefinedProductId;
     if (styles[id] !== 'refined' || !Object.hasOwn(drawings, id)) return product;
-    return { ...product, w: id === 'BOTTLE-40OZ' ? Math.max(product.w, 42) : product.w, draw(x, y, scale, tint, hue) {
+    return { ...product, w: id === 'BOTTLE-40OZ' ? Math.max(product.w, 46) : product.w, draw(x, y, scale, tint, hue) {
       ctx.save();
       try {
         ctx.translate(x, y); ctx.scale(scale, scale);

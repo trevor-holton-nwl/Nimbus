@@ -18,7 +18,7 @@ test('refined defaults replace selected drawings and reserve space for the handl
   assert.deepEqual(Object.keys(FACTORY_PRODUCT_STYLES).sort(), [...ids].sort());
   products.forEach((product, i) => {
     assert.equal(product.id, originals[i].id);
-    assert.equal(product.w, product.id === 'BOTTLE-40OZ' ? Math.max(originals[i].w, 42) : originals[i].w);
+    assert.equal(product.w, product.id === 'BOTTLE-40OZ' ? Math.max(originals[i].w, 46) : originals[i].w);
     if (ids.includes(product.id)) assert.notEqual(product.draw, originals[i].draw);
     else assert.equal(product, originals[i]);
   });
