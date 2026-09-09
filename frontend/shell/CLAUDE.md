@@ -51,6 +51,15 @@ None — this is a frontend-only shell/boot domain.
 
 ## Tests
 
+- Login artwork: `factory-products.mts` holds the shared original product library;
+  `factory-product-styles.mts` selects refinements per product. `factory-scene.mts`
+  renders the refined assembly/inspection/packing scene and handles pause, resize,
+  reduced motion and cleanup. `factory-scene-model.mts` provides its pure flow/layout.
+  `FACTORY_SCENE.style = 'classic'` selects the prior scene retained in
+  `application-shell.mts`. See `docs/LOGIN-ARTWORK.md` for independent scene/product rollback.
+- `tests/modules/factory-{product-styles,scene-model,scene}.test.mjs` cover artwork
+  selection, flow, responsive layout, reduced motion and animation lifecycle.
+
 - `tests/modules/application-shell.test.mjs` — direct test of this domain.
 - `tests/modules/helpers/load-legacy-app.mjs` — shared VM harness loading the `app.js`/`app-entry.mjs` bridges (used by many module tests, not shell-specific).
 - No dedicated `tab-resolvers` test file exists — it's exercised indirectly via the `admin-ui`/`labor-planning`/`application-shell` tests.

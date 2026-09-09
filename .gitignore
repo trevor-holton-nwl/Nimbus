@@ -33,6 +33,9 @@ frontend/priority-lists/viewers.mjs
 frontend/calendar/edit-calendar.mjs
 frontend/shell/application-shell.mjs
 frontend/shell/factory-product-styles.mjs
+frontend/shell/factory-products.mjs
+frontend/shell/factory-scene-model.mjs
+frontend/shell/factory-scene.mjs
 frontend/master-data/material-grids.mjs
 frontend/setup/setup-domain.mjs
 frontend/optimization/setup-scheduler.mjs

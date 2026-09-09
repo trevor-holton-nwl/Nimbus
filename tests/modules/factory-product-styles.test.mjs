@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyFactoryProductStyles, FACTORY_PRODUCT_STYLES } from '../../frontend/shell/factory-product-styles.mjs';
 
-const ids = ['COOLER-65Q', 'BRUTE-44G', 'BLENDER-PRO', 'CANDLE-22OZ', 'BREW-12C', 'LANTERN-LED'];
-const originals = [...ids, 'STROLLER-S2', 'BOTTLE-40OZ', 'PEN-GEL07'].map((id, i) => ({
+const ids = ['COOLER-65Q', 'BRUTE-44G', 'BLENDER-PRO', 'CANDLE-22OZ', 'BREW-12C', 'LANTERN-LED', 'BOTTLE-40OZ'];
+const originals = [...ids, 'STROLLER-S2', 'PEN-GEL07'].map((id, i) => ({
   id, w: 30 + i, draw() {},
 }));
 
@@ -13,12 +13,12 @@ test('classic mode restores every original drawing without changing product orde
   products.forEach((product, i) => assert.equal(product, originals[i]));
 });
 
-test('refined defaults replace only the six requested drawings and retain conveyor widths', () => {
+test('refined defaults replace selected drawings and reserve space for the handled mug', () => {
   const products = applyFactoryProductStyles({}, originals);
   assert.deepEqual(Object.keys(FACTORY_PRODUCT_STYLES).sort(), [...ids].sort());
   products.forEach((product, i) => {
     assert.equal(product.id, originals[i].id);
-    assert.equal(product.w, originals[i].w);
+    assert.equal(product.w, product.id === 'BOTTLE-40OZ' ? Math.max(originals[i].w, 42) : originals[i].w);
     if (ids.includes(product.id)) assert.notEqual(product.draw, originals[i].draw);
     else assert.equal(product, originals[i]);
   });

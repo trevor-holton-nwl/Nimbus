@@ -1,7 +1,7 @@
 // Login canvas artwork only. Originals remain in FactoryScene's CLASSIC_PRODUCTS.
 // Change any entry to 'classic' and run npm run build to restore that item.
 type ProductStyle = 'classic' | 'refined';
-type RefinedProductId = 'COOLER-65Q' | 'BRUTE-44G' | 'BLENDER-PRO' | 'CANDLE-22OZ' | 'BREW-12C' | 'LANTERN-LED';
+type RefinedProductId = 'COOLER-65Q' | 'BRUTE-44G' | 'BLENDER-PRO' | 'CANDLE-22OZ' | 'BREW-12C' | 'LANTERN-LED' | 'BOTTLE-40OZ';
 export const FACTORY_PRODUCT_STYLES: Readonly<Record<RefinedProductId, ProductStyle>> = {
   'COOLER-65Q': 'refined',
   'BRUTE-44G': 'refined',
@@ -9,6 +9,7 @@ export const FACTORY_PRODUCT_STYLES: Readonly<Record<RefinedProductId, ProductSt
   'CANDLE-22OZ': 'refined',
   'BREW-12C': 'refined',
   'LANTERN-LED': 'refined',
+  'BOTTLE-40OZ': 'refined',
 };
 
 type Tint = (lightness: number, saturation?: number) => string;
@@ -38,6 +39,40 @@ export function applyFactoryProductStyles(
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y);
   };
   const drawings: Record<RefinedProductId, (tint: Tint, hue: number) => void> = {
+    'BOTTLE-40OZ': (tint, hue) => {
+      if (hue % 2 === 0) {
+        // Contigo travel mug: tapered stainless body and asymmetric AUTOSEAL lid.
+        fill(tint(43, 30), () => {
+          ctx.moveTo(3, -42); ctx.lineTo(27, -42); ctx.lineTo(23, -5);
+          ctx.quadraticCurveTo(23, 0, 19, 0); ctx.lineTo(11, 0);
+          ctx.quadraticCurveTo(7, 0, 7, -5);
+        });
+        fill('rgba(230,240,245,0.3)', () => { ctx.moveTo(6, -39); ctx.lineTo(10, -39); ctx.lineTo(13, -4); ctx.lineTo(10, -4); });
+        line('#c6d0db', 1.5, () => { ctx.moveTo(4, -41); ctx.lineTo(26, -41); });
+        box('#34495e', 2, -48, 26, 7, 2);
+        fill('#56677c', () => { ctx.moveTo(3, -48); ctx.lineTo(5, -53); ctx.lineTo(20, -53); ctx.quadraticCurveTo(27, -53, 27, -48); });
+        box('#8fa1b3', 4, -51, 6, 2.5, 0.8); box('#1c2b3a', 20, -47, 7, 3, 0.8);
+        badge('contigo', 16, -16, '#e8edf3', 4.4);
+        oval('#56677c', 15, -1.2, 7.5, 1.2);
+      } else {
+        // Bubba keg: broad insulated barrel, steel band and substantial open handle.
+        line('#718697', 4.5, () => {
+          ctx.moveTo(28, -34); ctx.lineTo(36, -34); ctx.quadraticCurveTo(40, -34, 39, -29);
+          ctx.lineTo(36, -13); ctx.quadraticCurveTo(35, -10, 29, -12);
+        });
+        fill(tint(36, 27), () => {
+          ctx.moveTo(2, -38); ctx.lineTo(31, -38); ctx.lineTo(29, -7);
+          ctx.quadraticCurveTo(28, 0, 23, 0); ctx.lineTo(10, 0);
+          ctx.quadraticCurveTo(4, 0, 4, -7);
+        });
+        fill('#a7b8c3', () => { ctx.moveTo(3, -29); ctx.lineTo(30, -29); ctx.lineTo(29, -15); ctx.lineTo(4, -15); });
+        box('#c9d4dc', 6, -28, 3, 12, 0.7);
+        box('#34495e', 1, -42, 32, 5, 1.5); oval('#56677c', 17, -42, 15, 2.5);
+        box('#263848', 9, -46, 14, 4, 1); box('#8fa1b3', 9, -45, 6, 1.5, 0.5);
+        badge('bubba', 18, -22, '#34495e', 6);
+        line('#263848', 2, () => { ctx.moveTo(8, -2); ctx.lineTo(26, -2); });
+      }
+    },
     'COOLER-65Q': (_tint, hue) => {
       const body = ['#35664f', '#a5473e', '#3d6487'][hue % 3];
       const side = ['#24463b', '#70352f', '#2b475f'][hue % 3];
@@ -205,7 +240,7 @@ export function applyFactoryProductStyles(
   return originals.map(product => {
     const id = product.id as RefinedProductId;
     if (styles[id] !== 'refined' || !Object.hasOwn(drawings, id)) return product;
-    return { ...product, draw(x, y, scale, tint, hue) {
+    return { ...product, w: id === 'BOTTLE-40OZ' ? Math.max(product.w, 42) : product.w, draw(x, y, scale, tint, hue) {
       ctx.save();
       try {
         ctx.translate(x, y); ctx.scale(scale, scale);
