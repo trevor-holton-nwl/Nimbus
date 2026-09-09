@@ -59,6 +59,7 @@
 // above (the same "no further change needed" idiom Phase 3/4 used for every
 // other now-same-file forward reference).
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
+import { applyFactoryProductStyles } from './factory-product-styles.mjs';
 import type { VirtualList } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
@@ -1128,7 +1129,8 @@ class FactoryScene {
     };
 
     // ---- product library (drawn with base-left at x, sitting on belt line y, scale k) ----
-    const PRODUCTS: ProductDef[] = [
+    // Original artwork stays intact for per-product rollback; see factory-product-styles.mts.
+    const CLASSIC_PRODUCTS: ProductDef[] = [
       { id: 'COOLER-65Q', w: 70, draw(x, y, k, T) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
         // body: Coleman-style box in the item's tint
         isoBox(0, 0, 66, 32, T(40));
@@ -1294,6 +1296,7 @@ class FactoryScene {
         ctx.fillStyle = '#8fa1b3'; ctx.fillRect(4, -9, 14, 3);          // clip
         ctx.restore(); } },
     ];
+    const PRODUCTS = applyFactoryProductStyles(ctx, CLASSIC_PRODUCTS);
     const RAW: ProductDef = { id: 'RAW', w: 44, draw(x, y, k) { ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
       ctx.fillStyle = '#8fa1b3'; roundRect(0, -24, 44, 24, 5); ctx.fill();
       quad([3, -24], [41, -24], [41 + IX, -24 + IY], [3 + IX, -24 + IY], shade('#8fa1b3', 1.18));

@@ -32,6 +32,7 @@ frontend/insights/insights-ui.mjs
 frontend/priority-lists/viewers.mjs
 frontend/calendar/edit-calendar.mjs
 frontend/shell/application-shell.mjs
+frontend/shell/factory-product-styles.mjs
 frontend/master-data/material-grids.mjs
 frontend/setup/setup-domain.mjs
 frontend/optimization/setup-scheduler.mjs
