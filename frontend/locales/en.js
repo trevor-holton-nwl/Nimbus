@@ -1569,7 +1569,6 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_pv_plan_baseline':            'Baseline',
   'ui.opt_pv_plan_chosen':              'Chosen.',
   'ui.opt_pv_plan_pruned':              'Pruned.',
-  'ui.opt_pv_plan_chosen_reason':       'Ran with {{mode}} dispatch this time.',
   'ui.opt_pv_plan_pruned_tie':          'No meaningful difference from the applied plan.',
   'ui.opt_pv_plan_pruned_worse':        'Would have meant {{list}}.',
   'ui.opt_pv_plan_pruned_better':       'Would have saved {{list}}, but was not run this time.',

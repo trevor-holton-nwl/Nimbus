@@ -1580,7 +1580,7 @@ export const OptimizerPreview = {
           : `<th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_alt', { label: f.label }))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(f.mode.toUpperCase())}</div></th>`
         ).join('');
         const verdictCells = finalists.map((f, i) => i === 0
-          ? `<td class="opt-pv-plan-applied-cell"><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen'))}</strong> ${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen_reason', { mode: f.mode.toUpperCase() }))}</td>`
+          ? `<td class="opt-pv-plan-applied-cell"><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen'))}</strong></td>`
           : `<td><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
         ).join('');
         planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
