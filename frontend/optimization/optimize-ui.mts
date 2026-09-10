@@ -1006,8 +1006,8 @@ export const OptimizerPreview = {
     const check = candidate.gapFill;
     if (!check) return '';
     return check.complete
-      ? `Capacity check complete: ${check.placed} additional orders scheduled. Remaining orders cannot be inserted without moving scheduled production.`
-      : `Capacity check incomplete: ${check.placed} additional orders scheduled; ${check.unchecked} orders still need a complete gap check.`;
+      ? `Capacity check: ${check.placed} more order(s) placed; the rest can't fit without moving scheduled work.`
+      : `Capacity check incomplete: ${check.placed} placed, ${check.unchecked} still unchecked.`;
   },
 
   planningSummary(candidate: CandidateResult, before: ReadonlyArray<NimbusTask>): {
@@ -1936,8 +1936,7 @@ export const OptimizerPreview = {
     const orderLabels = new Map((OptimizerPreview._snapshot ?? []).map(task => [task.id, task.PRODUCTION_ORDER || task.ORDER || task.id]));
     const planningHtml = planning ? `<div class="opt-pv-footer-note" role="status">
       <strong>${planning.scheduled} scheduled · ${planning.needsPlanning} Needs Planning (${planning.newlyQueued} newly queued)</strong>
-      <div>${planning.protectedExceptions} existing protected exceptions. Review unplaced orders in Orders → Status → Needs Planning.</div>
-      ${planning.incomplete ? '<div>Search incomplete. This is the best validated proposal found within the search budget.</div>' : ''}
+      ${planning.incomplete ? '<div>Search incomplete — best proposal found within budget.</div>' : ''}
       ${OptimizerPreview._candidate?.gapFill ? `<div>${Util.escapeHtml(OptimizerPreview.gapFillSummary(OptimizerPreview._candidate))}</div>` : ''}
       ${(OptimizerPreview._candidate?.validationFindings ?? []).filter(finding => finding.severity === 'error')
         .map(finding => `<div>${Util.escapeHtml(finding.message)}</div>`).join('')}
@@ -1946,6 +1945,7 @@ export const OptimizerPreview = {
     const protectedHtml = protectedFindings.length ? `<details class="opt-pv-section">
       <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Protected orders requiring attention</span><span class="opt-pv-section-badge">${protectedFindings.length}</span></summary>
       <div class="opt-pv-section-body">
+        <div>${protectedFindings.length} order(s) have existing protected-schedule conflicts — locked in place, can't be moved.</div>
         <ul>${protectedFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
         ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}

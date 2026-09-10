@@ -32,8 +32,8 @@ test('preview separates scheduled demand, new queue, protected exceptions and in
 
 test('preview distinguishes gap completion from the main sequence search', () => {
   assert.equal(typeof OptimizerPreview.gapFillSummary, 'function');
-  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: true, placed: 3, unchecked: 0 } }), /Capacity check complete.*3 additional orders/);
-  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: false, placed: 1, unchecked: 2 } }), /Capacity check incomplete.*2 orders/);
+  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: true, placed: 3, unchecked: 0 } }), /Capacity check:.*3 more order/);
+  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: false, placed: 1, unchecked: 2 } }), /Capacity check incomplete.*2 still unchecked/);
   assert.equal(OptimizerPreview.gapFillSummary({}), '');
 });
 
