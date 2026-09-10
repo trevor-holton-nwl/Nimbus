@@ -16,7 +16,9 @@ This consolidates the authoritative runbook in `DEPLOYMENT.md` — read that fil
 - **NEVER run `schema.sql` against the live DB.** It re-multiplies `plants` horizon columns ×1440 on every run (`schema.sql` ~line 110). Apply schema changes only via files in `migrations/`.
 - **NEVER read/echo the `pg-pass` secret** (`az containerapp secret show`). The operator supplies the DB password at runtime — `apply-migrations.ps1` prompts for it interactively (masked, `-AsSecureString`) when `$env:PGPASSWORD` isn't already set, so it's never typed into a command line, shell history, or a pasted transcript. Never ask the operator to paste the password into chat; have them run the script themselves.
 - **NEVER reuse an image tag.** A fresh `vN` is what makes rollback a one-liner.
-- **Confirm before each prod mutation** (migration apply, image build, app roll). Auto-mode will gate these — that's expected; surface the command and get explicit go-ahead.
+- **Build, roll, and verify run automatically, always — no pause for go-ahead.** Image build (step 2), app roll (step 3), and verification (step 4) proceed straight through without stopping for confirmation. Narrate each command as it runs so the operator can see what's happening, but don't wait on a response before continuing.
+- **Migration apply is the one step that still gates on confirmation** — surface the pending migration file(s) and the dry-run output, and get explicit go-ahead before running the real apply. This is deliberate asymmetry: code/roll is a one-liner rollback, a bad schema change usually isn't.
+- **A destructive migration is never folded into an auto run**, confirmation gate or not — stop and sequence it as its own deliberate decision (see Red flags).
 - **Do not set `NIMBUS_SAP_SYNC_ENABLED`** unless the operator explicitly wants the SAP scheduler live (it's a stub skeleton).
 
 ## Sequence
@@ -28,7 +30,7 @@ $env:PYTHONIOENCODING = "utf-8"
 az account show --query "{sub:name,user:user.name}" -o json   # expect Quantum Leap Playground
 az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.template.containers[0].image" -o tsv  # current tag -> next vN, and the ROLLBACK target
 ```
-- **Version stamp:** if frontend (`app.js`/`index.html`/`styles.css`) changed, confirm `APP_VERSION` (app.js) == `NIMBUS_BUILD_ID` (index.html) == `styles.css?v=` and bump all three to a new dated tag. **Do not auto-commit** the bump — surface it; the operator decides when to commit (they may be on a feature branch with unrelated changes).
+- **Version stamp:** if frontend (`frontend/app.js`/`frontend/index.html`/`frontend/styles.css`) changed, confirm `NIMBUS_BUILD_ID` (`frontend/index.html`, the sole cache-bust source of truth consumed by `frontend/app-entry.mjs`'s `runCacheBustGuard`) == `styles.css?v=` in the same file, and bump both to a new dated tag. (The old separate `APP_VERSION` constant in `app.js` was removed — don't look for it.) **Do not auto-commit** the bump — surface it; the operator decides when to commit (they may be on a feature branch with unrelated changes).
 - Decide what changed: code only? deps? schema? (schema → step 1 is required.)
 
 ### 1. DB migration FIRST — only if schema changed (guarded)
@@ -42,24 +44,38 @@ Run from a host with `psql` + DB firewall access (the dev laptop's `DevLaptop` r
 - The script maintains its own `migration_files_applied` ledger (run-once semantics, keyed by filename) — distinct from `schema_migrations` (id-keyed, owned by schema.sql for named one-time data mutations like `plants_horizon_minutes`; the script only bootstraps that table's existence, never writes to it). They collided under one overloaded name until 2026-08-11 — see the fix commit and the script's own header comment for the full story. Applies `migrations/*.sql` not yet recorded in lexicographic order, **refuses `schema.sql`**, and **blocks any file containing `ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE`** unless re-run with `-AllowDestructive` (those need expand/contract sequencing — treat as a deliberate, separate decision, not part of a routine roll).
 - Schema goes before the roll so the new code never serves traffic against missing tables.
 
-### 2. Build the image (fresh tag)
+### 2. Build the image (fresh tag) — automatic, no pause
 ```powershell
 az acr build --registry acrnimbusdev --image nimbus:vN .   # N = current + 1
 az acr task list-runs --registry acrnimbusdev --top 1 -o table   # confirm Succeeded (Windows log stream may crash; build still succeeds)
 ```
+Run straight through; don't stop for go-ahead. If the build fails, stop and report — don't retry blindly.
 
-### 3. Roll the app
+### 3. Roll the app — automatic, no pause
 ```powershell
 az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:vN
 ```
+Run straight through; don't stop for go-ahead.
 
-### 4. Verify
+### 4. Verify — active polling every 15s, not a single lazy check
+One-shot checks miss a container still spinning up or a revision still transitioning. Poll on a 15-second cadence until healthy or a timeout is hit, cache-busting every request (the corp proxy caches keyed on URL and will serve a pre-roll response, faking a failed deploy):
 ```powershell
 $fqdn = az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query properties.configuration.ingress.fqdn -o tsv
-Invoke-RestMethod "https://$fqdn/health"                  # db.connected: true
-Invoke-RestMethod "https://$fqdn/sap/interface/objects"   # 200 (proves new tables + endpoints live, if SAP shipped)
-Invoke-RestMethod "https://$fqdn/logs/backend"            # read errors here — `az logs` dies behind the corp proxy
+$deadline = (Get-Date).AddMinutes(5)
+$healthy = $false
+while ((Get-Date) -lt $deadline) {
+    try {
+        $cb = Get-Random
+        $resp = Invoke-RestMethod "https://$fqdn/health?cb=$cb" -Headers @{ "Cache-Control" = "no-cache" }
+        if ($resp.db.connected) { $healthy = $true; break }
+    } catch {}
+    Start-Sleep -Seconds 15
+}
+if (-not $healthy) { throw "Health check did not pass within 5 minutes — check /logs/backend, then consider rollback (step 5)" }
+Invoke-RestMethod "https://$fqdn/sap/interface/objects?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }   # 200 (proves new tables + endpoints live, if SAP shipped)
+Invoke-RestMethod "https://$fqdn/logs/backend?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }            # read errors here — `az logs` dies behind the corp proxy
 ```
+If the deadline is hit without a healthy response, stop and report — do not fall back to a single lazy check, and do not silently retry the roll.
 
 ### 5. Rollback (if verify fails)
 ```powershell
