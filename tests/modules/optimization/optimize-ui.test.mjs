@@ -30,6 +30,13 @@ test('preview separates scheduled demand, new queue, protected exceptions and in
     { scheduled: 1, needsPlanning: 2, newlyQueued: 1, protectedExceptions: 1, incomplete: true });
 });
 
+test('preview distinguishes gap completion from the main sequence search', () => {
+  assert.equal(typeof OptimizerPreview.gapFillSummary, 'function');
+  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: true, placed: 3, unchecked: 0 } }), /Capacity check complete.*3 additional orders/);
+  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: false, placed: 1, unchecked: 2 } }), /Capacity check incomplete.*2 orders/);
+  assert.equal(OptimizerPreview.gapFillSummary({}), '');
+});
+
 // Same split-realm/no-DOM situation documented in
 // tests/modules/schedule-services.test.mjs and schedule-data.test.mjs.
 if (typeof globalThis.document === 'undefined') {

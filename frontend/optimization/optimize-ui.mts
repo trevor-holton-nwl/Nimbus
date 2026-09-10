@@ -979,6 +979,14 @@ function taskBaseline(tasks: ReadonlyArray<NimbusTask>): Map<string, string> {
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
 export const OptimizerPreview = {
+  gapFillSummary(candidate: CandidateResult): string {
+    const check = candidate.gapFill;
+    if (!check) return '';
+    return check.complete
+      ? `Capacity check complete: ${check.placed} additional orders scheduled. Remaining orders cannot be inserted without moving scheduled production.`
+      : `Capacity check incomplete: ${check.placed} additional orders scheduled; ${check.unchecked} orders still need a complete gap check.`;
+  },
+
   planningSummary(candidate: CandidateResult, before: ReadonlyArray<NimbusTask>): {
     scheduled: number; needsPlanning: number; newlyQueued: number; protectedExceptions: number; incomplete: boolean;
   } {
@@ -1876,6 +1884,7 @@ export const OptimizerPreview = {
         .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
         ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}</details>` : ''}
       ${planning.incomplete ? '<div>Search incomplete. This is the best validated proposal found within the search budget.</div>' : ''}
+      ${OptimizerPreview._candidate?.gapFill ? `<div>${Util.escapeHtml(OptimizerPreview.gapFillSummary(OptimizerPreview._candidate))}</div>` : ''}
       ${(OptimizerPreview._candidate?.validationFindings ?? []).filter(finding => finding.severity === 'error')
         .map(finding => `<div>${Util.escapeHtml(finding.message)}</div>`).join('')}
     </div>` : '';

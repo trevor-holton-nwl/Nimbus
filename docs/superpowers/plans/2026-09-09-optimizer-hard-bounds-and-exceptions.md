@@ -87,3 +87,15 @@ Preflight: Tasks 1/3 share wire fields and atomic_optimizer; Tasks 2/3 share dis
 - The additive migration was applied against the local schema and exercised again by real database tests. The deployment runbook documents migration-first release and queue-aware rollback constraints. No Azure migration or application deployment was performed.
 - Browser visual QA remains unavailable because runtime browser discovery returned no connections. Automated UI contract tests passed; no visual verification is claimed.
 - Integration: fold `feature/optimizer-hard-bounds` into `main` with a local merge commit, then remove its worktree and merged branch. The root build-ID edit and untracked `data/` remain untouched. Full merged-checkout verification repeated successfully: 23 legacy and 563 module tests, including the TypeScript build.
+
+### Approved follow-up: final capacity check (2026-09-09)
+
+- [x] Reproduce exhausted-search gaps, setup consumed on both sides, and an incomplete final check before implementation.
+- [x] Add pure `fillPlanningGaps` after the chosen Due Date/SPT/Min Changeover proposal, with a separate soft 1,000 ms budget shared across all lines. Keep accepted production fixed, respect hard windows/calendars/blackouts/splits/override bindings, and retry earlier failures after setup bridges.
+- [x] Recompute final metrics and validation, preserve insertions on expiration, and distinguish completed no-fit checks from unfinished checks in order reasons and preview. Clear recovered lines from unchanged-line notices.
+- [x] Review machine-specific priority admission and successors beyond the search horizon; add failing regressions and fix both. Independent read-only review confirmed the corrections.
+- [x] Verify 606 tests (23 legacy + 583 module), TypeScript build/typecheck, and lint with zero errors and the same 46 warnings. Sixteen focused regressions cover the final pass and preview, including protected overlaps/floors, missing setup, missing due/runtime/expired defects, selected lines, overrides, priorities, timeout retention and setup bridges.
+
+Local Node benchmark, one-hour synthetic queued orders, 08:00-18:00 calendars over five days, zero setup, primary search already expired: 36 orders on one line all inserted in 122 ms; 700 orders on 70 lines all inserted in 533 ms. A full 300-order line stopped with 50 inserted and 80 unchecked in 1,015 ms; 2,100 orders across 70 lines stopped with 378 inserted and 1,722 unchecked in 1,141 ms. All four outcomes passed final validation. The latter elapsed times include validation after the soft search budget. These are local measurements, not browser latency guarantees.
+
+This follow-up changes frontend scheduling and preview only. No database access, migration, build-ID bump, push, or Azure deployment was performed. Existing queue/undo/atomic persistence contracts consume the completed proposal. Root `data/` remains untouched.

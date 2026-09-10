@@ -73,6 +73,7 @@ import {
   evaluateMinChangeover as evaluateMinChangeoverPure,
   evaluateSptWithSetup as evaluateSptWithSetupPure,
   evaluateThroughput as evaluateThroughputPure,
+  fillPlanningGaps,
   SETUP_AWARE_CONVERGENCE_WINDOW,
 } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
@@ -684,10 +685,14 @@ export const Engine = {
     if (!bounds.setup.plant_active) {
       throw new Error('Setup-aware evaluation is disabled for this plant');
     }
-    if (mode === 'due-date') return evaluateDueDateFirstPure(snapshot, bounds, 'due-date');
-    if (mode === 'due-date-first') return evaluateDueDateFirstPure(snapshot, bounds);
-    if (mode === 'spt') return evaluateSptWithSetupPure(snapshot, bounds);
-    if (mode === 'min-changeover') return evaluateMinChangeoverPure(snapshot, bounds);
+    // Finish only the chosen proposal, once per run (Min Changeover compares
+    // multiple primary searches internally). Backlog retains its date policy.
+    if (mode !== 'throughput') {
+      const candidate = mode === 'min-changeover' ? evaluateMinChangeoverPure(snapshot, bounds)
+        : mode === 'spt' ? evaluateSptWithSetupPure(snapshot, bounds)
+          : evaluateDueDateFirstPure(snapshot, bounds, mode);
+      return fillPlanningGaps(snapshot, bounds, candidate);
+    }
     return evaluateThroughputPure(snapshot, bounds, thresholds ?? {
       throughputMinSavingsMin: 60,
       throughputMaxSlipMin: 1440,

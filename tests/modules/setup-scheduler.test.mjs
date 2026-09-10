@@ -127,6 +127,202 @@ function segmentMinutes(result) {
   ));
 }
 
+function gapFillFixture(tasks, setup = setupTruth(), overrides = {}) {
+  const snapshot = setupSnapshot(tasks);
+  const bounds = dueDateBounds(setup, { deadline: -2000, ...overrides });
+  const candidate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  return { snapshot, bounds, candidate };
+}
+
+test('gap fill finds unused capacity after search expires without moving accepted production', () => {
+  const fixed = scheduledTask('accepted', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T12:00', '2026-08-03T13:00');
+  const waiting = scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00');
+  const { snapshot, bounds, candidate } = gapFillFixture([fixed, waiting]);
+  assert.equal(candidate.dispositions.find(d => d.id === 'waiting').status, 'needs_planning');
+  assert.equal(typeof SetupScheduler.fillPlanningGaps, 'function');
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  const final = SetupScheduler.applyPatchesToSnapshot(snapshot.tasks, result.patches);
+  assert.equal(+final.find(t => t.id === 'accepted').start_date, +fixed.start_date);
+  assert.equal(+final.find(t => t.id === 'waiting').start_date, +at('2026-08-03T08:00'));
+  assert.equal(result.gapFill.complete, true);
+  assert.equal(result.gapFill.placed, 1);
+  assert.equal(result.unchangedLines.includes('L1'), false, 'recovered lines must not still be reported as guarded/unchanged');
+  assert.equal(result.score[4], -2);
+  assert.equal(result.searchComplete, false, 'capacity completion is separate from sequence search');
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+});
+
+test('gap fill reserves setup on both sides and reports a completed no-fit check', () => {
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 60), setupRow('RED', 'BLUE', 60), setupRow('GREEN', 'BLUE', 0)] });
+  const fixed = scheduledTask('accepted', 1, 'BLUE', '2026-08-03T18:00', '2026-08-03T11:00', '2026-08-03T12:00');
+  const waiting = scheduledTask('waiting', 2, 'RED', '2026-08-03T18:00');
+  const { snapshot, bounds, candidate } = gapFillFixture([fixed, waiting], setup, { horizonEnd: at('2026-08-03T12:00') });
+  assert.equal(typeof SetupScheduler.fillPlanningGaps, 'function');
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.gapFill.complete, true);
+  assert.equal(result.gapFill.placed, 0);
+  assert.equal(result.dispositions.find(d => d.id === 'waiting').reason.code, 'no_fit_found');
+});
+
+test('gap fill has a separate budget and labels unchecked orders when it expires', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')]);
+  assert.equal(typeof SetupScheduler.fillPlanningGaps, 'function');
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate, 0);
+  assert.equal(result.gapFill.complete, false);
+  assert.equal(result.gapFill.unchecked, 1);
+  assert.match(result.dispositions[0].reason.message, /Capacity check incomplete/);
+  assert.equal(result.patches[0].changes.start_date, null);
+});
+
+test('gap fill runs through the shared engine adapter for all three hard-bound strategies', () => {
+  for (const mode of ['due-date', 'spt', 'min-changeover']) {
+    const { snapshot, bounds } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')], { ...setupTruth(), plant_active: true });
+    const result = Engine.evaluateSetupAware(mode, bounds, snapshot);
+    assert.equal(result.dispositions[0].status, 'scheduled', mode);
+    assert.equal(result.gapFill.complete, true, mode);
+  }
+});
+
+test('gap fill retries an urgent order after a new setup bridge makes it fit', () => {
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 240), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0)] });
+  const urgent = scheduledTask('urgent', 1, 'RED', '2026-08-03T10:00');
+  const bridge = scheduledTask('bridge', 1, 'BLUE', '2026-08-03T11:00');
+  const { snapshot, bounds, candidate } = gapFillFixture([urgent, bridge], setup, { horizonEnd: at('2026-08-03T11:00') });
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.gapFill.placed, 2);
+  assert.equal(result.gapFill.complete, true);
+  assert.equal(+patchFor(result, 'bridge').changes.start_date, +at('2026-08-03T08:00'));
+  assert.equal(+patchFor(result, 'urgent').changes.start_date, +at('2026-08-03T09:00'));
+  assert.equal(result.score[5], 0);
+});
+
+test('gap fill enforces floors, ceilings, blackouts and whole-order split policy', () => {
+  const waiting = scheduledTask('waiting', 2, 'GREEN', '2026-08-03T18:00');
+  const { snapshot, bounds, candidate } = gapFillFixture([waiting], setupTruth(), {
+    notBefore: () => at('2026-08-03T10:00'), notAfter: () => at('2026-08-03T13:00'),
+  });
+  snapshot.blocks = [{ id: 'break', line: 'L1', start: at('2026-08-03T11:00'), end: at('2026-08-03T12:00') }];
+  const noSplit = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(noSplit.gapFill.placed, 0);
+  snapshot.masterData.plants[0].split_order_policy = 'partial_allowed';
+  const split = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  const patch = patchFor(split, 'waiting');
+  assert.equal(split.gapFill.placed, 1);
+  assert.equal(+patch.changes.start_date, +at('2026-08-03T10:00'));
+  assert.equal(+patch.changes.end_date, +at('2026-08-03T13:00'));
+  assert.equal(patch.changes.scheduleSegments.length, 2);
+  assert.equal(split.validationFindings.some(f => f.severity === 'error'), false);
+});
+
+test('gap fill uses missing transitions as zero setup with separate warning and clean bound counts', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'RED', '2026-08-03T18:00')]);
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.gapFill.placed, 1);
+  assert.ok(result.validationFindings.some(f => f.code === 'missing_setup'));
+  assert.equal(result.score[7], 0, 'hard completion violations');
+  assert.equal(result.score[6], 1, 'uncovered setup transitions');
+});
+
+test('gap fill keeps successful insertions when its shared budget expires on another line', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([
+    scheduledTask('first', 1, 'GREEN', '2026-08-03T10:00'),
+    { ...scheduledTask('second', 1, 'GREEN', '2026-08-03T12:00'), MACHINE: 'L2' },
+  ]);
+  // Calls are entry, loop, gap, next-loop: expiration follows one validated addition.
+  let ticks = 0;
+  const result = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, clock: () => ticks++ }, candidate, 3);
+  assert.equal(result.gapFill.placed, 1);
+  assert.equal(result.gapFill.unchecked, 1);
+  assert.equal(result.dispositions.find(d => d.id === 'first').status, 'scheduled');
+  assert.equal(result.dispositions.find(d => d.id === 'second').reason.code, 'search_limit');
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+});
+
+test('gap fill checks a fixed successor beyond the search horizon at its actual setup time', () => {
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('RED', 'BLUE', 60)] });
+  const fixed = scheduledTask('fixed', 1, 'BLUE', '2026-08-04T18:00', '2026-08-04T10:00', '2026-08-04T11:00');
+  const waiting = scheduledTask('waiting', 10, 'RED', '2026-08-03T18:00');
+  const snapshot = setupSnapshot([fixed, waiting], { firmedIds: ['fixed'] });
+  const bounds = dueDateBounds(setup, { deadline: -2000 });
+  const candidate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.gapFill.placed, 1);
+  assert.equal(+patchFor(result, 'waiting').changes.end_date, +bounds.horizonEnd);
+});
+
+test('gap fill preserves overlapping protected reservations and their visible exceptions', () => {
+  const fixed = scheduledTask('fixed', 2, 'GREEN', '2026-08-03T18:00', '2026-08-03T10:00', '2026-08-03T12:00');
+  const overlap = scheduledTask('overlap', 2, 'GREEN', '2026-08-03T18:00', '2026-08-03T11:00', '2026-08-03T13:00');
+  const waiting = scheduledTask('waiting', 4, 'GREEN', '2026-08-03T18:00');
+  const snapshot = setupSnapshot([fixed, overlap, waiting], { firmedIds: ['fixed', 'overlap'] });
+  const bounds = dueDateBounds(setupTruth(), { deadline: -2000 });
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, SetupScheduler.evaluateDueDateFirst(snapshot, bounds));
+  assert.equal(+patchFor(result, 'waiting').changes.start_date, +at('2026-08-03T13:00'));
+  assert.ok(result.validationFindings.some(f => f.code === 'capacity_overlap' && f.severity === 'warning'));
+  assert.equal(result.patches.some(p => p.id === 'fixed' || p.id === 'overlap'), false);
+});
+
+test('gap fill cannot create a setup-floor violation on a protected successor', () => {
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'BLUE', 0), setupRow('RED', 'BLUE', 60)] });
+  const fixed = scheduledTask('fixed', 1, 'BLUE', '2026-08-03T18:00', '2026-08-03T11:00', '2026-08-03T12:00');
+  const waiting = scheduledTask('waiting', 1, 'RED', '2026-08-03T18:00');
+  const snapshot = setupSnapshot([fixed, waiting], { firmedIds: ['fixed'] });
+  const bounds = dueDateBounds(setup, { deadline: -2000, horizonEnd: at('2026-08-03T12:00'), notBefore: t => t.id === 'fixed' ? at('2026-08-03T11:00') : null });
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, SetupScheduler.evaluateDueDateFirst(snapshot, bounds));
+  assert.equal(result.gapFill.placed, 0);
+  assert.equal(result.validationFindings.some(f => f.code === 'setup_floor'), false);
+});
+
+test('gap fill uses machine-specific priorities when queued orders compete for a gap', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([
+    scheduledTask('a-green', 1, 'GREEN', '2026-08-03T18:00'),
+    scheduledTask('z-red', 1, 'RED', '2026-08-03T18:00'),
+  ], setupTruth(), { horizonEnd: at('2026-08-03T09:00') });
+  snapshot.priorityRankMaps = { '': { colorWheel: { GREEN: 0, RED: 1 } }, L1: { colorWheel: { RED: 0, GREEN: 1 } } };
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.dispositions.find(d => d.id === 'z-red').status, 'scheduled');
+  assert.equal(result.dispositions.find(d => d.id === 'a-green').status, 'needs_planning');
+});
+
+test('gap fill cannot break an active override between accepted orders', () => {
+  const setup = setupTruth({ overrides: [{ id: 'pair', machine: 'L1', signature_version: 1,
+    predecessor_order_id: 'first', successor_order_id: 'next',
+    predecessor_state_key: setupState('GREEN'), successor_state_key: setupState('BLUE'),
+    standard_min: 0, remaining_min: 0, status: 'active', reason: 'bound pair',
+  }] });
+  const { snapshot, bounds, candidate } = gapFillFixture([
+    scheduledTask('first', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T08:00', '2026-08-03T09:00'),
+    scheduledTask('next', 1, 'BLUE', '2026-08-03T18:00', '2026-08-03T11:00', '2026-08-03T12:00'),
+    scheduledTask('waiting', 1, 'RED', '2026-08-03T18:00'),
+  ], setup, { horizonEnd: at('2026-08-03T12:00') });
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.gapFill.placed, 0);
+  assert.equal(result.gapFill.complete, true);
+});
+
+test('gap fill leaves hard planning defects intact and respects selected lines', () => {
+  const { snapshot, bounds } = gapFillFixture([
+    scheduledTask('missing-due', 1, 'GREEN', null),
+    scheduledTask('runtime', 0, 'GREEN', '2026-08-03T18:00'),
+    scheduledTask('expired', 1, 'GREEN', '2026-08-02T18:00'),
+    { ...scheduledTask('excluded', 1, 'GREEN', '2026-08-03T18:00'), MACHINE: 'L2' },
+  ], setupTruth(), { lines: ['L1'] });
+  snapshot.masterData.plants[0].max_push_forward_days = 0;
+  const candidate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.deepEqual(result.dispositions.map(d => d.reason.code), ['missing_due_date', 'invalid_runtime', 'expired_window']);
+  assert.equal(result.patches.some(p => p.id === 'excluded'), false);
+  assert.equal(result.gapFill.unchecked, 0);
+});
+
+test('gap fill clears the unchanged-line notice after recovering an unknown-setup tail', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')], setupTruth({ definition: null }));
+  assert.equal(candidate.unchangedLines.includes('L1'), true);
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+  assert.equal(result.gapFill.placed, 1);
+  assert.equal(result.unchangedLines.includes('L1'), false);
+});
+
 test('placeWithSetup applies never, overlong_only, and partial_allowed without short productive pieces', () => {
   // This fails if Stage 1 never adds the pure placement primitive, or if a
   // policy starts splitting ordinary work / emits a sub-30-minute piece.

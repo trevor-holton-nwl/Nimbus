@@ -634,6 +634,7 @@ export interface CandidateResult {
   dispositions?: readonly PlanningDisposition[];
   validationFindings?: readonly ValidationFinding[];
   searchComplete?: boolean;
+  gapFill?: { complete: boolean; placed: number; unchecked: number; runtimeMs: number };
   validationContext?: { baselineSnapshot?: Readonly<ScheduleSnapshot>; snapshot: Readonly<ScheduleSnapshot>; bounds: Readonly<DueDateFirstBounds> };
   patches: ReadonlyArray<SchedulePatch>;
   score: readonly number[];
@@ -5114,7 +5115,7 @@ function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Due
   return [...tasks].sort((a, b) => {
     const deadline = (notAfterFor(bounds, a)?.getTime() ?? Infinity) - (notAfterFor(bounds, b)?.getTime() ?? Infinity);
     if (deadline && !Number.isNaN(deadline)) return deadline;
-    const priority = ordinalCompare(policyKeyForSequence(snapshot, bounds.setup.plant, line, [a], bounds.runContext), policyKeyForSequence(snapshot, bounds.setup.plant, line, [b], bounds.runContext));
+    const priority = ordinalCompare(policyKeyForSequence(snapshot, bounds.setup.plant, line || String(a.MACHINE), [a], bounds.runContext), policyKeyForSequence(snapshot, bounds.setup.plant, line || String(b.MACHINE), [b], bounds.runContext));
     return priority || dueTimestamp(a) - dueTimestamp(b) || (timestamp(a.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) - (timestamp(b.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) || ordinalCompare(taskId(a), taskId(b));
   });
 }
@@ -5359,9 +5360,14 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   result = preferIncumbent
     ? retainCompatiblePlacements(snapshot, bounds, incumbent, result)
     : retainCompatiblePlacements(snapshot, bounds, result, incumbent);
+  return refreshFinalMetrics(snapshot, bounds, result);
+}
+
+function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, result: CandidateResult): CandidateResult {
+  const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const score = [...result.score]; score[2] = 0; score[3] = 0; score[4] = -(result.dispositions ?? []).filter(d => d.status === 'scheduled').length; score[SCORE_OVER_CAP] = 0;
   const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
-  const scopeIds = new Set(dispositions.map(d => d.id));
+  const scopeIds = new Set(result.dispositions?.map(d => d.id));
   for (const task of final.filter(item => scopeIds.has(taskId(item)))) {
     const due = dueTimestamp(task); const end = timestamp(task.end_date);
     if (task.planning_status === 'needs_planning') { score[2]++; score[3] += Math.max(0, Math.ceil((+bounds.horizonEnd - due) / 60000)); }
@@ -5381,6 +5387,137 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   score[1] = [...new Set(orderedFinal.map(task => String(task.MACHINE)))].reduce((sum, line) => sum + policyScore(snapshot, bounds.setup.plant, line, orderedFinal.filter(task => String(task.MACHINE) === line), bounds.runContext), 0);
   score[SCORE_UNCOVERED] = actualMissing.length;
   return { ...result, patches: changedPatches, score, missingEdges: uniqueMissingEdges([...result.missingEdges.filter(edge => edge.reason !== 'scheduled-without-setup'), ...actualMissing]) };
+}
+
+/** One final insertion pass, shared across all selected lines. Accepted production
+ * stays fixed. A new predecessor can make an earlier failure fit, so recheck that
+ * line until stable or the separate, soft wall-clock budget expires. */
+export function fillPlanningGaps(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
+  candidate: CandidateResult, budgetMs = 1000,
+): CandidateResult {
+  const started = bounds.clock();
+  const expired = (): boolean => bounds.clock() - started >= budgetMs;
+  bounds = withRunContext(snapshot, hardBounds(snapshot, { ...bounds, runContext: undefined }));
+  const tasks = eligibleTasks(snapshot, bounds);
+  const patches = new Map(candidate.patches.map(p => [p.id, p]));
+  const dispositions = new Map(candidate.dispositions?.map(d => [d.id, d]));
+  const pending = urgencyOrder(snapshot, bounds, '', tasks).filter(task =>
+    dispositions.get(taskId(task))?.status === 'needs_planning' && !planningDefect(snapshot, bounds, task));
+  if (!pending.length) return { ...candidate, gapFill: { complete: true, placed: 0, unchecked: 0, runtimeMs: bounds.clock() - started } };
+  const revision = new Map<string, number>();
+  const checked = new Map<string, number>();
+  const availability = new Map<string, PlacementInterval[]>();
+  const byLine = new Map<string, NimbusTask[]>();
+  for (const task of tasks) {
+    const line = String(task.MACHINE);
+    const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
+  }
+  const definition = bounds.setup.definition;
+  const state = (task: NimbusTask): SetupStateKey | null => definition ? orderState(bounds, task, definition) : null;
+  let placed = 0;
+  // Do not try to repair an internally invalid proposal by inserting more work.
+  const valid = !validateCandidate(snapshot, bounds, candidate).some(f => f.severity === 'error');
+  while (valid && !expired()) {
+    const task = pending.find(item => dispositions.get(taskId(item))?.status === 'needs_planning'
+      && checked.get(taskId(item)) !== (revision.get(String(item.MACHINE)) ?? 0));
+    if (!task) break;
+    const id = taskId(task); const line = String(task.MACHINE);
+    const peers = byLine.get(line)!;
+    const lineIds = new Set(peers.map(taskId));
+    const accepted = applyPatchesToSnapshot(peers, [...patches.values()]).filter(item =>
+      dispositions.get(taskId(item))?.status !== 'needs_planning' && timestamp(item.start_date) && timestamp(item.end_date),
+    ).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+    if (!availability.has(line)) availability.set(line, freeIntervalsFor(snapshot, line, bounds.setup.plant, bounds.now, bounds.horizonEnd, bounds.runContext));
+    const free = availability.get(line)!;
+    const transition = (predecessor: NimbusTask | null, successor: NimbusTask): number | null => {
+      const from = predecessor ? state(predecessor) : definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
+      const to = state(successor);
+      if (definition && inactiveOverrideForTransition(bounds, line, from, to, predecessor ? taskId(predecessor) : null, taskId(successor), lineIds, true)) return null;
+      if (!definition || !from || !to || setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) return 0;
+      const resolution = resolveSetup({ definition, machine: line, predecessorState: from, successorState: to,
+        predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
+        plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
+        index: bounds.runContext?.resolutionIndex ?? undefined });
+      return resolution.covered ? resolution.effectiveMin ?? 0 : 0;
+    };
+    let cursor = +bounds.now;
+    let predecessor: NimbusTask | null = null;
+    let completed = true;
+    for (let index = 0; index <= accepted.length; index++) {
+      if (expired()) { completed = false; break; }
+      const next = accepted[index];
+      const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
+      const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
+      const incoming = gapEnd > floor ? transition(predecessor, task) : null;
+      const outgoing = next && incoming !== null ? transition(task, next) : 0;
+      if (incoming !== null && outgoing !== null) {
+        const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
+        const setupStart = nextStart - outgoing * 60000;
+        const ceiling = Math.min(gapEnd, setupStart, +(notAfterFor(bounds, task) ?? bounds.horizonEnd));
+        const outgoingFits = !next || outgoing === 0 || (
+          setupStart >= +(notBeforeFor(bounds, next) ?? bounds.now)
+          && coversInterval(nextStart > +bounds.horizonEnd
+            ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
+          { start: new Date(setupStart), end: new Date(nextStart) }));
+        if (ceiling > floor && outgoingFits) {
+          const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+          const policy = bounds.runContext!.splitOrderPolicy;
+          const placement = placeWithSetup({ earliestStart: new Date(floor), runtimeMinutes,
+            setup: { kind: 'resolved', minutes: incoming }, policy,
+            isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, new Date(floor), runtimeMinutes, bounds.runContext),
+            minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
+            freeIntervals: free.flatMap(slot => {
+              const start = Math.max(+slot.start, floor); const end = Math.min(+slot.end, ceiling);
+              return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
+            }),
+          });
+          if (placement.kind === 'placed') {
+            const segments = placement.productiveSegments;
+            const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
+              scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
+              planning_status: 'scheduled', planning_reason: null } };
+            const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
+            const trial = { ...candidate,
+              patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+              dispositions: peers.map(peer => taskId(peer) === id ? disposition : dispositions.get(taskId(peer))!),
+            };
+            if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line] }, trial).some(f => f.severity === 'error')) {
+              patches.set(id, patch); dispositions.set(id, disposition); placed++;
+              revision.set(line, (revision.get(line) ?? 0) + 1);
+              break;
+            }
+          }
+        }
+      }
+      if (next) {
+        // Overlapping protected orders reserve their entire union, including
+        // split-order envelopes; the last chronological order supplies state.
+        cursor = Math.max(cursor, +timestamp(next.end_date)!);
+        predecessor = next;
+      }
+    }
+    if (completed) checked.set(id, revision.get(line) ?? 0);
+    else break;
+  }
+  let unchecked = 0;
+  for (const task of pending) {
+    const id = taskId(task); const line = String(task.MACHINE);
+    if (dispositions.get(id)?.status !== 'needs_planning') continue;
+    const complete = checked.get(id) === (revision.get(line) ?? 0);
+    if (!complete) unchecked++;
+    const reason = complete
+      ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
+      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' };
+    patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
+    dispositions.set(id, { id, line, status: 'needs_planning', reason });
+  }
+  const result: CandidateResult = { ...candidate, patches: [...patches.values()], dispositions: [...dispositions.values()],
+    unchangedLines: candidate.unchangedLines.filter(line => !revision.has(line)),
+    gapFill: { complete: valid && unchecked === 0, placed, unchecked, runtimeMs: bounds.clock() - started } };
+  result.validationFindings = validateCandidate(snapshot, bounds, result);
+  const final = refreshFinalMetrics(snapshot, bounds, result);
+  return { ...final, gapFill: { ...result.gapFill!, runtimeMs: bounds.clock() - started } };
 }
 
 function baselineWithinWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): boolean {
