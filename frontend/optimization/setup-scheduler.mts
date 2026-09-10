@@ -578,7 +578,11 @@ export const SETUP_AWARE_TAIL_OVERRUN_MS = 1000;
  * Compared explicitly in `compareCandidate` immediately after `policyKey` —
  * never folded into the mode-permuted `terms` list — so it stays mode-
  * independent: fewest uncovered edges always outranks every term except the
- * over-cap tier (SCORE_OVER_CAP), which is compared first. */
+ * over-cap tier (SCORE_OVER_CAP), which is compared first. This ordering is
+ * mode-independent EXCEPT for `'due-date'` (2026-09-09), whose dedicated
+ * `compareDueDateCandidate` puts lateness (score[2]/score[3]) and even
+ * `policyKey` itself ahead of both this tier and SCORE_OVER_CAP — see that
+ * function. */
 const SCORE_UNCOVERED = 6;
 
 /** Score index carrying the count of over-cap orders in a candidate
@@ -589,7 +593,10 @@ const SCORE_UNCOVERED = 6;
  * no real matrix, coverage is effectively same-signature grouping, so the cap
  * must outrank it or a changeover saving could push an order arbitrarily far
  * past its cap. Null/absent `bounds.notAfter` means every candidate's
- * score[SCORE_OVER_CAP] is 0 — a provable no-op default. */
+ * score[SCORE_OVER_CAP] is 0 — a provable no-op default. Mode-independent
+ * except for `'due-date'`, where `compareDueDateCandidate` still compares this
+ * tier second (right after hard feasibility) but ahead of `policyKey` — see
+ * that function's own comment. */
 const SCORE_OVER_CAP = 7;
 
 /** The canonical hard-infeasible score vector (`score[0] = 1`), now 8-wide so
@@ -760,7 +767,7 @@ interface LineSearchResult {
   unchanged: boolean;
 }
 
-type FragmentMode = 'due-date-first' | 'spt' | 'min-changeover' | 'throughput';
+type FragmentMode = 'due-date-first' | 'spt' | 'min-changeover' | 'throughput' | 'due-date';
 
 interface BoundaryOverrideLocks {
   requiredFirstOrderId?: string;
@@ -1071,6 +1078,25 @@ function orderedByPolicyThenDue(
   decorated.sort((left, right) => (
     ordinalCompare(left.key, right.key)
     || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || taskId(left.task).localeCompare(taskId(right.task))
+  ));
+  return decorated.map(entry => entry.task);
+}
+
+/** `'due-date'` mode's counterpart to `orderedByPolicyThenDue` above: same
+ * decorate-sort-undecorate shape, but due date is compared FIRST so search
+ * seeding matches `compareDueDateCandidate`'s tier order (lateness ahead of
+ * policyKey). Falling back to `orderedByPolicyThenDue`'s ordering here would
+ * seed the search away from the very sequences `compareDueDateCandidate`
+ * prefers. */
+function orderedByDueThenPolicy(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
+  ctx?: SetupRunContext,
+): NimbusTask[] {
+  const decorated = tasks.map(task => ({ task, key: policyKeyForTask(snapshot, plant, line, task, ctx) }));
+  decorated.sort((left, right) => (
+    dueTimestamp(left.task) - dueTimestamp(right.task)
+    || ordinalCompare(left.key, right.key)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   return decorated.map(entry => entry.task);
@@ -1874,13 +1900,50 @@ function hasNominalWindow(
   return false;
 }
 
+/** `'due-date'` mode (2026-09-09): lateness outranks BOTH the priority-list
+ * order (`policyKey`) and setup/coverage grouping — the inverse of every
+ * other mode's tier order below. Order: hard feasibility (score[0]) ->
+ * over-cap count (SCORE_OVER_CAP) -> late count (score[2]) -> lateness
+ * minutes (score[3]) -> policyKey -> coverage count (SCORE_UNCOVERED) ->
+ * -patches (score[4]) -> setup minutes (score[5]) -> sequenceKey. Over-cap is
+ * still compared ahead of lateness here (both are "how late/how far past a
+ * hard ceiling" facts, and over-cap is the more severe of the two), but both
+ * now sit ahead of `policyKey`, unlike every other mode where `policyKey`
+ * comes first. */
+function compareDueDateCandidate(left: DueDateCandidate, right: DueDateCandidate): number {
+  const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
+  if (hardConstraintDelta) return hardConstraintDelta;
+  const overCapDelta = (left.score[SCORE_OVER_CAP] ?? 0) - (right.score[SCORE_OVER_CAP] ?? 0);
+  if (overCapDelta) return overCapDelta;
+  const lateCountDelta = (left.score[2] ?? 0) - (right.score[2] ?? 0);
+  if (lateCountDelta) return lateCountDelta;
+  const latenessDelta = (left.score[3] ?? 0) - (right.score[3] ?? 0);
+  if (latenessDelta) return latenessDelta;
+  const policyDelta = ordinalCompare(left.policyKey, right.policyKey);
+  if (policyDelta) return policyDelta;
+  const coverageDelta = (left.score[SCORE_UNCOVERED] ?? 0) - (right.score[SCORE_UNCOVERED] ?? 0);
+  if (coverageDelta) return coverageDelta;
+  const patchesDelta = (left.score[4] ?? 0) - (right.score[4] ?? 0);
+  if (patchesDelta) return patchesDelta;
+  const setupDelta = (left.score[5] ?? 0) - (right.score[5] ?? 0);
+  if (setupDelta) return setupDelta;
+  return ordinalCompare(left.sequenceKey, right.sequenceKey);
+}
+
 function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
                           mode: FragmentMode = 'due-date-first'): number {
+  // `'due-date'` (2026-09-09) inverts the usual tier order (lateness ahead of
+  // both policyKey and coverage) — routed to its own comparator up front
+  // rather than folded into the terms below, since it isn't just a
+  // reordering of the mode-permuted `terms` list further down.
+  if (mode === 'due-date') return compareDueDateCandidate(left, right);
   const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
   // Ordinal, not localeCompare: policyKey is zero-padded ASCII digits joined
   // by `|`/` ` (see `ordinalCompare`), and this comparison runs on every
-  // candidate pair a search evaluates.
+  // candidate pair a search evaluates. Mode-independent except for
+  // `'due-date'` (handled above, before this point), where lateness outranks
+  // policyKey instead.
   const policyDelta = ordinalCompare(left.policyKey, right.policyKey);
   if (policyDelta) return policyDelta;
   // Due-date push-forward limit (2026-09-09): compared immediately after
@@ -1899,7 +1962,9 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // zero-minute uncovered admission over fewer uncovered edges. Minimizing
   // the count of uncovered edges = minimizing state changes = maximal
   // same-signature grouping; a fully-covered sequence always wins when one
-  // exists, since it has zero uncovered edges.
+  // exists, since it has zero uncovered edges. Mode-independent except for
+  // `'due-date'` (handled above, before this point), where coverage is
+  // compared only after lateness AND policyKey.
   const coverageDelta = (left.score[SCORE_UNCOVERED] ?? 0) - (right.score[SCORE_UNCOVERED] ?? 0);
   if (coverageDelta) return coverageDelta;
   // All policies retain hard feasibility and configured policy tiers. Only the
@@ -2705,7 +2770,11 @@ function winnerEdgeKeySet(candidate: Readonly<DueDateCandidate> | null | undefin
  * carries — are skipped here: since A3 also collects a feasible candidate's
  * own uncovered incoming-firmed-boundary edge (see `exactSearch`/
  * `greedySearch`), the winner's own edge can otherwise appear in `edges` and
- * get reported as "Rejected …" even though it was the placement just made. */
+ * get reported as "Rejected …" even though it was the placement just made.
+ * Precondition (2026-09-09): this assumes the winner was chosen for having
+ * (among) the fewest uncovered edges, which only holds for the tier order
+ * every mode except `'due-date'` uses — callers on the `'due-date'` path must
+ * not call this (or must gate the call on `mode !== 'due-date'`). */
 function appendRejectedCoverageDiagnostics(
   missingEdges: MissingSetupEdge[],
   explanation: CandidateReason[],
@@ -2782,7 +2851,9 @@ function searchFragment(
       ...group,
       tasks: mode === 'spt'
         ? orderedByProductiveRuntime(group.tasks)
-        : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, group.tasks, bounds.runContext),
+        : mode === 'due-date'
+          ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, group.tasks, bounds.runContext)
+          : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, group.tasks, bounds.runContext),
     }))
     .sort((left, right) => left.key.localeCompare(right.key));
   if (mode === 'spt') {
@@ -3158,7 +3229,7 @@ function inactiveOutOfHorizonFirmedOverrideReasons(
 }
 
 function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary, mode: FragmentMode): boolean {
-  if (mode === 'due-date-first') return dueTimestamp(task) <= boundary.start.getTime();
+  if (mode === 'due-date-first' || mode === 'due-date') return dueTimestamp(task) <= boundary.start.getTime();
   // Pure SPT is ordered only by productive runtime. A stale or null planned
   // date must not pre-partition work behind the next firmed order; bounded
   // fragment placement decides what capacity can actually be admitted first.
@@ -3225,7 +3296,9 @@ function boundaryFallbackComponentPlan(
   if (!fragment.nextFirmed || !admitted.length) return null;
   const baseOrder = mode === 'spt'
     ? orderedByProductiveRuntime(admitted)
-    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted, bounds.runContext);
+    : mode === 'due-date'
+      ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, admitted, bounds.runContext)
+      : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted, bounds.runContext);
   const adjacency = fragmentAdjacency(bounds, line, admitted, fragment);
   const sequence = orderWithAdjacency(baseOrder, fragment, adjacency);
   if (!sequence) return null;
@@ -3310,7 +3383,17 @@ interface BoundaryFallbackCursor {
  * `searchFragment` continuation run triggered per component-subset option
  * below (both the terminal-boundary and non-terminal-boundary branches)
  * reuses that identical object reference too, never a fresh one. Confirmed
- * by inspection, not by a code change: nothing here needed fixing. */
+ * by inspection, not by a code change: nothing here needed fixing.
+ *
+ * `mode` (2026-09-09, due-date mode): despite the name/comment predating it,
+ * this is reached by every non-`'spt'` mode, not only `'due-date-first'` —
+ * `evaluateLineWithFirmedBoundaries` calls it for `'min-changeover'`/
+ * `'throughput'`/`'due-date'` too. It is threaded straight through to
+ * `boundaryFallbackComponentPlan` (rather than the previously hardcoded
+ * `'due-date-first'` literal) purely so that call picks
+ * `orderedByDueThenPolicy` over `orderedByPolicyThenDue` for `'due-date'`;
+ * every other mode maps to the same `orderedByPolicyThenDue` branch either
+ * way, so this is a no-op for them. */
 function dueDateBoundaryFallbackCursor(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
@@ -3319,9 +3402,10 @@ function dueDateBoundaryFallbackCursor(
   fragment: Readonly<FragmentContext>,
   freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
   budget: SearchBudget,
+  mode: FragmentMode,
 ): BoundaryFallbackCursor {
   const plan = boundaryFallbackComponentPlan(
-    snapshot, bounds, line, admitted, fragment, freeComponents, 'due-date-first',
+    snapshot, bounds, line, admitted, fragment, freeComponents, mode,
   );
   const removableComponents = plan
     ? plan.components.filter((_, index) => plan.removable[index])
@@ -3430,11 +3514,15 @@ function completeFinalBoundaryCandidate(
 
 /** Final-boundary alternatives represent complete candidates, so they use the
  * same immutable lexicographic comparison as normal Due-date-first search.
- * The deferred-id key is only a deterministic tie-break after that comparison. */
+ * The deferred-id key is only a deterministic tie-break after that
+ * comparison. `mode` is forwarded to `compareCandidate` (2026-09-09, due-date
+ * mode) so a terminal-boundary fallback comparison for `'due-date'` uses
+ * `compareDueDateCandidate` too, instead of always defaulting to
+ * `'due-date-first'`'s tier order. */
 function compareBoundaryFallback(
-  left: Readonly<EvaluatedBoundaryFallback>, right: Readonly<EvaluatedBoundaryFallback>,
+  left: Readonly<EvaluatedBoundaryFallback>, right: Readonly<EvaluatedBoundaryFallback>, mode: FragmentMode,
 ): number {
-  const candidateDelta = compareCandidate(left.candidate, right.candidate);
+  const candidateDelta = compareCandidate(left.candidate, right.candidate, mode);
   if (candidateDelta) return candidateDelta;
   return left.option.deferred.map(taskId).join('\u0000').localeCompare(right.option.deferred.map(taskId).join('\u0000'));
 }
@@ -3489,7 +3577,9 @@ export function placeUnknownTail(
 ): UnknownTailPlacement {
   const ordered = mode === 'spt'
     ? orderedByProductiveRuntime(tasks)
-    : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
+    : mode === 'due-date'
+      ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, tasks, bounds.runContext)
+      : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
   const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
@@ -4117,7 +4207,7 @@ function evaluateLineWithFirmedBoundaries(
         // one remaining free fragment, yielding a complete candidate.
         const completeFallbacks: EvaluatedBoundaryFallback[] = [];
         const fallbackCursor = dueDateBoundaryFallbackCursor(
-          snapshot, bounds, line, admitted, fragment, freeComponents, budget,
+          snapshot, bounds, line, admitted, fragment, freeComponents, budget, mode,
         );
         let completeEnumeration = true;
         for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
@@ -4171,7 +4261,8 @@ function evaluateLineWithFirmedBoundaries(
             ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges),
             ...continuationRuns.flatMap(continuation => continuation.missingEdges),
           );
-          appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
+          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
+          if (mode !== 'due-date') appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
           explanation.push({
             code: 'firmed-boundary-fallback-ambiguous',
             message: `The bounded fallback search could not compare every route around firmed ${taskId(boundary.task)}.`,
@@ -4200,17 +4291,28 @@ function evaluateLineWithFirmedBoundaries(
           continue;
         }
         let selectedFallback: EvaluatedBoundaryFallback | null = null;
+        // Historically this fallback comparison always ran with the implicit
+        // 'due-date-first' default (compareCandidate called with no mode arg)
+        // regardless of the outer mode — 'min-changeover' ([2,3,5,4]) and
+        // 'throughput' ([5,2,3,4]) must keep getting that same
+        // 'due-date-first' ([2,3,4,5]) terminal-boundary comparison, byte-
+        // identical to before this file introduced 'due-date'. Only 'due-date'
+        // itself opts into its own comparator (compareDueDateCandidate) here.
+        const fallbackCompareMode = mode === 'due-date' ? 'due-date' : 'due-date-first';
         for (const candidate of completeFallbacks) {
-          if (!selectedFallback || compareBoundaryFallback(candidate, selectedFallback) < 0) {
+          if (!selectedFallback || compareBoundaryFallback(candidate, selectedFallback, fallbackCompareMode) < 0) {
             selectedFallback = candidate;
           }
         }
         if (selectedFallback) {
           missingEdges.push(...run.missingEdges);
-          const selectedFallbackEdgeKeys = winnerEdgeKeySet(selectedFallback.candidate);
-          appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, selectedFallbackEdgeKeys);
-          appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.run.missingEdges, selectedFallbackEdgeKeys);
-          appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.continuation!.missingEdges, selectedFallbackEdgeKeys);
+          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
+          if (mode !== 'due-date') {
+            const selectedFallbackEdgeKeys = winnerEdgeKeySet(selectedFallback.candidate);
+            appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, selectedFallbackEdgeKeys);
+            appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.run.missingEdges, selectedFallbackEdgeKeys);
+            appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.continuation!.missingEdges, selectedFallbackEdgeKeys);
+          }
           applyCandidate(selectedFallback.candidate);
           explanation.push({
             code: 'covered-firmed-boundary-fallback',
@@ -4260,7 +4362,7 @@ function evaluateLineWithFirmedBoundaries(
         // closed instead of inventing a local admission-first objective.
         const feasibleFallbacks: EvaluatedBoundaryFallback[] = [];
         const fallbackCursor = dueDateBoundaryFallbackCursor(
-          snapshot, bounds, line, admitted, fragment, freeComponents, budget,
+          snapshot, bounds, line, admitted, fragment, freeComponents, budget, mode,
         );
         let completeEnumeration = true;
         for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
@@ -4291,7 +4393,8 @@ function evaluateLineWithFirmedBoundaries(
         }
         if (!completeEnumeration || feasibleFallbacks.length > 1) {
           missingEdges.push(...run.missingEdges, ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges));
-          appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
+          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
+          if (mode !== 'due-date') appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
           explanation.push({
             code: 'firmed-boundary-fallback-ambiguous',
             message: completeEnumeration
@@ -4323,7 +4426,10 @@ function evaluateLineWithFirmedBoundaries(
           tailSource = selectedFallback.run.unknownTail;
           deferredAcrossFirmed = selectedFallback.option.deferred;
           missingEdges.push(...run.missingEdges);
-          appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, winnerEdgeKeySet(winner));
+          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
+          if (mode !== 'due-date') {
+            appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, winnerEdgeKeySet(winner));
+          }
           explanation.push({
             code: 'covered-firmed-boundary-fallback',
             message: `Deferred ${deferredAcrossFirmed.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
@@ -4652,7 +4758,7 @@ export function evaluateSptWithSetup(
 export function evaluateDueDateFirst(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
-  mode: Extract<FragmentMode, 'due-date-first' | 'min-changeover' | 'throughput'> = 'due-date-first',
+  mode: Extract<FragmentMode, 'due-date-first' | 'min-changeover' | 'throughput' | 'due-date'> = 'due-date-first',
 ): CandidateResult {
   requireDueDateBounds(bounds);
   const started = bounds.clock();

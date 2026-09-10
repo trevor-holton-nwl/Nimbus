@@ -674,7 +674,7 @@ export const Engine = {
    * not route here; a caller must supply both the immutable snapshot and the
    * measured search bounds/setup truth before any setup-aware candidate exists. */
   evaluateSetupAware(
-    mode: 'due-date-first' | 'spt' | 'min-changeover' | 'throughput',
+    mode: 'due-date-first' | 'due-date' | 'spt' | 'min-changeover' | 'throughput',
     bounds: Readonly<DueDateFirstBounds>,
     snapshot: ScheduleSnapshot = snapshotSchedule(),
     thresholds?: Readonly<SetupPolicyThresholds>,
@@ -684,6 +684,7 @@ export const Engine = {
     if (!bounds.setup.plant_active) {
       throw new Error('Setup-aware evaluation is disabled for this plant');
     }
+    if (mode === 'due-date') return evaluateDueDateFirstPure(snapshot, bounds, 'due-date');
     if (mode === 'due-date-first') return evaluateDueDateFirstPure(snapshot, bounds);
     if (mode === 'spt') return evaluateSptWithSetupPure(snapshot, bounds);
     if (mode === 'min-changeover') return evaluateMinChangeoverPure(snapshot, bounds);
@@ -1734,15 +1735,19 @@ export const Engine = {
     // zero-cost one (Engine._syntheticZeroCostSetupSnapshot) stands in so the
     // SAME evaluator ('min-changeover') always decides changeover's
     // sequencing — the two dispatchers can no longer disagree about it.
+    // 'duedate' (2026-09-09) routes exactly like 'changeover': it always
+    // takes the setup-aware branch, synthesizing the same zero-cost snapshot
+    // when the plant has no genuine active-and-matching one, but selects the
+    // 'due-date' evaluator mode instead of 'min-changeover'.
     // 'spt' is untouched: it still only takes this branch when genuinely
     // active-and-matching, exactly as before B3a.
     const setupSnapshot = Store.setupSnapshot;
     const setupSnapshotActiveAndMatching = !!(setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active);
-    const effectiveSetupSnapshot: SetupSnapshot | null = mode === 'changeover' && !setupSnapshotActiveAndMatching
+    const effectiveSetupSnapshot: SetupSnapshot | null = (mode === 'changeover' || mode === 'duedate') && !setupSnapshotActiveAndMatching
       ? Engine._syntheticZeroCostSetupSnapshot(plant)
       : setupSnapshot;
-    if (mode === 'changeover' || setupSnapshotActiveAndMatching) {
-      const evaluatorMode = mode === 'spt' ? 'spt' : 'min-changeover';
+    if (mode === 'changeover' || mode === 'duedate' || setupSnapshotActiveAndMatching) {
+      const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'duedate' ? 'due-date' : 'min-changeover';
       // Phase 2 (Pkg D): scope the fallback snapshot's calendars to this run's
       // plant — every consumer of ScheduleSnapshot.calendars in this path
       // (freeIntervalsFor/jointWindowForDay/hasNominalWindow in

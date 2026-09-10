@@ -411,12 +411,24 @@ export const OptimizeDialog = (() => {
 
   function selectMode(mode: OptimizerMode) {
     _mode = mode;
-    document.querySelectorAll<HTMLElement>('.opt-strategy-pill').forEach((c) =>
-      c.classList.toggle('active', c.dataset.mode === mode)
-    );
+    const sel = document.getElementById('opt-strategy-select') as HTMLSelectElement | null;
+    if (sel && sel.value !== mode) sel.value = mode;
+    const hint = document.getElementById('opt-strategy-hint');
+    if (hint) hint.textContent = Util.t('tip.' + mode + '_mode');
     _applyModeOptions();
     if (mode === 'backlog') _applyBacklogDefaults();
     else _updatePlantBadge();
+  }
+
+  /** One-time listener binding for the strategy `<select>` — mirrors
+   *  `_initDropdownListener`'s guarded-boolean pattern so `open()` can call
+   *  this on every open without stacking duplicate `change` listeners. */
+  let _strategySelectListenerSet = false;
+  function _initStrategySelectListener() {
+    if (_strategySelectListenerSet) return;
+    _strategySelectListenerSet = true;
+    const sel = document.getElementById('opt-strategy-select') as HTMLSelectElement | null;
+    sel?.addEventListener('change', () => selectMode(sel.value as OptimizerMode));
   }
 
   /** Does this plant have any colorWheel ranks the optimizer could apply?
@@ -546,6 +558,7 @@ export const OptimizeDialog = (() => {
     }
     _initPickers();
     _buildPlantSelect();
+    _initStrategySelectListener();
     // Only the "safe" no-date presets seed cleanly (custom needs explicit dates).
     const savedPreset = _od?.preset;
     const _seedPreset: string = (savedPreset && ['horizon', '2w'].includes(savedPreset)) ? savedPreset : 'horizon';
@@ -553,7 +566,7 @@ export const OptimizeDialog = (() => {
     const savedMode = _od?.mode;
     // A previously saved unsupported strategy is intentionally normalized to
     // the default changeover strategy.
-    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'backlog'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
+    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'duedate', 'backlog'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
     _startDirty = false;
     _endDirty = false;
     selectMode(_seedMode);
@@ -689,7 +702,7 @@ export const OptimizeDialog = (() => {
     // a failed REFETCH wiped the cache while _rankMapsPlant still matched:
     // ranksFresh was true, the old colorWheel probe found nothing, and the run
     // went ahead unranked and unannounced.
-    if (unrankedFields.length && _mode === 'changeover') {
+    if (unrankedFields.length && (_mode === 'changeover' || _mode === 'duedate')) {
       const names = unrankedFields.map(k => Util.t(`constraint.${k}`)).join(', ');
       const ok = await Modal.confirm({
         title: Util.t('modal.no_priority_ranks_confirm_msg', { plant, fields: names }),
@@ -1331,7 +1344,7 @@ export const OptimizerPreview = {
           timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
-        OptimizerPreview._syntheticSetup = mode === 'changeover' && !(Store.setupSnapshot && Store.setupSnapshot.plant === plant && Store.setupSnapshot.plant_active);
+        OptimizerPreview._syntheticSetup = (mode === 'changeover' || mode === 'duedate') && !(Store.setupSnapshot && Store.setupSnapshot.plant === plant && Store.setupSnapshot.plant_active);
         // B3: the same run-scoped candidate pool used for the KPI comparison
         // (plant, via `scopedTasks` above using the B7 line→plant fallback,
         // plus opts.lines and excludeFromOpt) — NOT the time-windowed
@@ -1367,7 +1380,7 @@ export const OptimizerPreview = {
         // _render() call) instead of running synchronously back-to-back with
         // the primary evaluation. Until it lands, _finalists stays null and
         // _finalistsPending tells _render() to show a placeholder.
-        const altModeMap: Partial<Record<OptimizerMode, OptimizerMode>> = { changeover: 'spt', spt: 'changeover' };
+        const altModeMap: Partial<Record<OptimizerMode, OptimizerMode>> = { changeover: 'spt', spt: 'changeover', duedate: 'changeover' };
         const altMode = altModeMap[mode];
         OptimizerPreview._finalists = null;
         OptimizerPreview._finalistsPending = !!altMode;
@@ -1555,7 +1568,7 @@ export const OptimizerPreview = {
       return `<section class="opt-pv-backlog"><div class="opt-pv-backlog-title">${Util.escapeHtml(Util.t('ui.opt_pv_backlog_title'))}</div>${summary}<div class="opt-pv-backlog-grid">${rows.map(([label, value]) => `<div><span>${Util.escapeHtml(label)}</span><strong>${Util.escapeHtml(value)}</strong></div>`).join('')}</div>${boundary}</section>`;
     })();
 
-    const modeLabel = (OptimizerPreview._mode || '').toUpperCase();
+    const modeLabel = OptimizerPreview._mode ? Util.t('us.opt_mode_' + OptimizerPreview._mode) : '';
     const plant = OptimizerPreview._plant || '';
     const splitPolicyLabel: Record<SplitOrderPolicy, string> = {
       never: Util.t('ui.opt_pv_split_none'),
@@ -1595,8 +1608,8 @@ export const OptimizerPreview = {
           return `<tr><th scope="row" title="${Util.escapeHtml(c.tip)}">${Util.escapeHtml(c.label)}</th>${currentCell}${dataCells}</tr>`;
         }).join('');
         const headCells = finalists.map((f, i) => i === 0
-          ? `<th class="opt-pv-plan-applied-head"><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_applied'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(f.mode.toUpperCase())}</div></th>`
-          : `<th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_alt', { label: f.label }))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(f.mode.toUpperCase())}</div></th>`
+          ? `<th class="opt-pv-plan-applied-head"><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_applied'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('us.opt_mode_' + f.mode))}</div></th>`
+          : `<th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_alt', { label: f.label }))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('us.opt_mode_' + f.mode))}</div></th>`
         ).join('');
         const verdictCells = finalists.map((f, i) => i === 0
           ? `<td class="opt-pv-plan-applied-cell"><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen'))}</strong></td>`

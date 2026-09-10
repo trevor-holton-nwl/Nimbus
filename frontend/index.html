@@ -2547,23 +2547,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="opt-section">
         <div class="opt-section-key">Strategy</div>
         <div class="opt-section-ctrl">
-          <div class="opt-strategy-row">
-            <button class="opt-strategy-pill" data-mode="spt"
-                    title="Shortest processing first — minimize average completion time" data-i18n-title="tip.spt_mode"
-                    onclick="NIMBUS.OptimizeDialog.selectMode('spt')">
-              <span class="osp-icon">⚡</span><span>SPT</span>
-            </button>
-            <button class="opt-strategy-pill" data-mode="changeover"
-                    title="Daily sequence — each day's orders in color-wheel order; fills spare capacity by color match" data-i18n-title="tip.changeover_mode"
-                    onclick="NIMBUS.OptimizeDialog.selectMode('changeover')">
-              <span class="osp-icon">🔁</span><span>Min Changeover</span>
-            </button>
-            <button class="opt-strategy-pill" data-mode="backlog"
-                    title="Shift past scheduled orders forward without resequencing their line"
-                    onclick="NIMBUS.OptimizeDialog.selectMode('backlog')">
-              <span class="osp-icon">↪</span><span>Remove Backlog</span>
-            </button>
-          </div>
+          <select id="opt-strategy-select" class="input" aria-describedby="opt-strategy-hint">
+            <option value="spt"        data-i18n="us.opt_mode_spt">SPT</option>
+            <option value="changeover" data-i18n="us.opt_mode_changeover">Min Changeover</option>
+            <option value="duedate"    data-i18n="us.opt_mode_duedate">Due Date</option>
+            <option value="backlog"    data-i18n="us.opt_mode_backlog">Remove Backlog</option>
+          </select>
+          <p id="opt-strategy-hint" class="opt-strategy-hint"></p>
         </div>
       </div>
 

@@ -294,21 +294,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectMode('backlog')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectMode('changeover')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectMode('spt')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.OptimizeDialog.setScope('lines')"
     },
     {
@@ -680,7 +665,6 @@
     "OptimizeDialog.openToPicker",
     "OptimizeDialog.run",
     "OptimizeDialog.selectAllLines",
-    "OptimizeDialog.selectMode",
     "OptimizeDialog.setScope",
     "OptimizeDialog.toggleDropdown",
     "OptimizerPreview.apply",

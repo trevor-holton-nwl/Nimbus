@@ -3543,3 +3543,134 @@ test('an adjacency-failure (infeasible) candidate result carries the full 8-wide
   assert.equal(result.score.length, 8, 'unchangedLineResult must carry the full 8-wide score vector');
   assert.deepEqual(result.score, [0, 0, 0, 0, 0, 0, 0, 0]);
 });
+
+test("evaluateDueDateFirst('due-date') lets lateness outrank same-signature grouping, unlike 'due-date-first'", () => {
+  // GREEN -> BLUE is covered; nothing else is (no GREEN -> RED, no BLUE <->
+  // RED row at all). 'due-date-first' therefore groups both BLUE orders
+  // first (1 uncovered edge: BLUE -> RED) rather than opening with RED (2
+  // uncovered edges: GREEN -> RED, then RED -> BLUE) -- the coverage tier
+  // wins over lateness, so RED-soon lands last and finishes late.  'due-date'
+  // compares lateness before both policyKey and coverage, so it accepts the
+  // extra uncovered transition and places RED-soon first, on time.
+  const blueA1 = scheduledTask('due-mode-blue-a1', 1, 'BLUE', '2026-08-10T00:00:00');
+  const blueA2 = scheduledTask('due-mode-blue-a2', 1, 'BLUE', '2026-08-11T00:00:00');
+  const redSoon = scheduledTask('due-mode-red-soon', 1, 'RED', '2026-08-03T09:30:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  const snapshot = setupSnapshot([blueA1, blueA2, redSoon]);
+
+  const dueDateFirst = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.deepEqual(dueDateFirst.patches.map(patch => patch.id), [
+    'due-mode-blue-a1', 'due-mode-blue-a2', 'due-mode-red-soon',
+  ], 'due-date-first groups same-signature BLUE work first, leaving red-soon behind the block');
+  assert.ok(
+    patchFor(dueDateFirst, 'due-mode-red-soon').changes.end_date.getTime() > at('2026-08-03T09:30:00').getTime(),
+    'red-soon finishes late under due-date-first',
+  );
+
+  const dueDate = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup), 'due-date');
+  assert.deepEqual(dueDate.patches.map(patch => patch.id), [
+    'due-mode-red-soon', 'due-mode-blue-a1', 'due-mode-blue-a2',
+  ], 'due-date mode pulls red-soon ahead of the BLUE block, accepting one more uncovered transition');
+  assert.ok(
+    patchFor(dueDate, 'due-mode-red-soon').changes.end_date.getTime() <= at('2026-08-03T09:30:00').getTime(),
+    'red-soon finishes on time under due-date mode',
+  );
+});
+
+test("evaluateDueDateFirst('due-date') puts lateness ahead of the priority-list rank too, but falls back to list order once nothing is late", () => {
+  // Same fixture as above, plus a colorWheel priority rank map ranking BLUE
+  // (1) above RED (2). Comparing full sequence policyKeys ordinally means
+  // any sequence that opens with BLUE (rank 1) always beats one opening with
+  // RED (rank 2), so 'due-date-first' still selects BLUE-then-BLUE-then-RED
+  // (RED late) -- the priority list reinforces the same-signature grouping
+  // here rather than opposing it. 'due-date' still pulls RED ahead: lateness
+  // is compared before policyKey, so the list rank never gets a vote while
+  // red-soon would otherwise finish late.
+  const blueA1 = scheduledTask('due-mode-ranked-blue-a1', 1, 'BLUE', '2026-08-10T00:00:00');
+  const blueA2 = scheduledTask('due-mode-ranked-blue-a2', 1, 'BLUE', '2026-08-11T00:00:00');
+  const redSoon = scheduledTask('due-mode-ranked-red-soon', 1, 'RED', '2026-08-03T09:30:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  const rankedSnapshot = setupSnapshot([blueA1, blueA2, redSoon]);
+  rankedSnapshot.priorityRankMaps = { '': { colorWheel: { BLUE: 1, RED: 2 } } };
+
+  const dueDateFirst = SetupScheduler.evaluateDueDateFirst(rankedSnapshot, dueDateBounds(setup));
+  assert.deepEqual(dueDateFirst.patches.map(patch => patch.id), [
+    'due-mode-ranked-blue-a1', 'due-mode-ranked-blue-a2', 'due-mode-ranked-red-soon',
+  ], 'due-date-first still leaves red-soon behind the higher-ranked BLUE block');
+  assert.ok(
+    patchFor(dueDateFirst, 'due-mode-ranked-red-soon').changes.end_date.getTime() > at('2026-08-03T09:30:00').getTime(),
+    'red-soon is still late under due-date-first',
+  );
+
+  const dueDate = SetupScheduler.evaluateDueDateFirst(rankedSnapshot, dueDateBounds(setup), 'due-date');
+  assert.deepEqual(dueDate.patches.map(patch => patch.id), [
+    'due-mode-ranked-red-soon', 'due-mode-ranked-blue-a1', 'due-mode-ranked-blue-a2',
+  ], 'due-date mode still pulls red-soon ahead of the higher-ranked BLUE block: lateness beats list rank');
+  assert.ok(
+    patchFor(dueDate, 'due-mode-ranked-red-soon').changes.end_date.getTime() <= at('2026-08-03T09:30:00').getTime(),
+    'red-soon finishes on time under due-date mode even with a lower list rank',
+  );
+
+  // Push RED's due date far enough out that every ordering finishes on time
+  // (lateCount stays 0 everywhere). With lateness no longer distinguishing
+  // any candidate, 'due-date' falls through to policyKey, and the priority
+  // list's BLUE-before-RED rank decides the tie: BLUE goes first.
+  const redFarDue = scheduledTask('due-mode-ranked-red-fardue', 1, 'RED', '2026-08-03T20:00:00');
+  const tieBreakSnapshot = setupSnapshot([blueA1, blueA2, redFarDue]);
+  tieBreakSnapshot.priorityRankMaps = { '': { colorWheel: { BLUE: 1, RED: 2 } } };
+
+  const tieBreak = SetupScheduler.evaluateDueDateFirst(tieBreakSnapshot, dueDateBounds(setup), 'due-date');
+  assert.deepEqual(tieBreak.patches.map(patch => patch.id), [
+    'due-mode-ranked-blue-a1', 'due-mode-ranked-blue-a2', 'due-mode-ranked-red-fardue',
+  ], 'once nothing is late, due-date mode falls back to the priority list: BLUE (rank 1) ahead of RED (rank 2)');
+});
+
+test("evaluateDueDateFirst('due-date-first') and evaluateMinChangeover are unaffected by the new 'due-date' mode existing alongside them", () => {
+  // A lightweight determinism/parity check for the new mode's introduction:
+  // re-running the pre-existing modes against the same fixture used above
+  // must reproduce byte-identical patches every time. The full pre-existing
+  // suite (run separately) is the primary parity guarantee; this pins it for
+  // the exact fixture this file introduces for 'due-date'.
+  const blueA1 = scheduledTask('due-mode-parity-blue-a1', 1, 'BLUE', '2026-08-10T00:00:00');
+  const blueA2 = scheduledTask('due-mode-parity-blue-a2', 1, 'BLUE', '2026-08-11T00:00:00');
+  const redSoon = scheduledTask('due-mode-parity-red-soon', 1, 'RED', '2026-08-03T09:30:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  const snapshot = setupSnapshot([blueA1, blueA2, redSoon]);
+
+  const dueDateFirstFirst = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  const dueDateFirstAgain = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.deepEqual(dueDateFirstAgain.patches, dueDateFirstFirst.patches,
+    "'due-date-first' output is byte-identical across repeated runs now that 'due-date' exists");
+
+  const minChangeoverFirst = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup));
+  const minChangeoverAgain = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup));
+  assert.deepEqual(minChangeoverAgain.patches, minChangeoverFirst.patches,
+    "'min-changeover' output is byte-identical across repeated runs now that 'due-date' exists");
+});
+
+test("evaluateDueDateFirst('due-date') runs the firmed-boundary path without error when a firmed order sits mid-line", () => {
+  // Not a behavioral pin on `compareBoundaryFallback`/`dueDateBoundaryFallbackCursor`
+  // specifically (those aren't exported) -- just confirms the whole
+  // firmed-boundary evaluation loop in evaluateLineWithFirmedBoundaries runs
+  // to completion under 'due-date' mode with a genuine (non-elapsed) mid-line
+  // firmed boundary, rather than throwing or freezing the line.
+  const freeBefore = scheduledTask('duedate-firmed-free-before', 0.5, 'BLUE', '2026-08-10T00:00:00');
+  const firmedMid = scheduledTask(
+    'duedate-firmed-mid-yellow', 1, 'YELLOW', '2026-08-03T10:00:00',
+    '2026-08-03T09:00:00', '2026-08-03T10:00:00',
+  );
+  const freeAfter = scheduledTask('duedate-firmed-free-after', 0.5, 'RED', '2026-08-03T10:30:00');
+  const setup = setupTruth({
+    rows: [setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'YELLOW', 0), setupRow('YELLOW', 'RED', 0)],
+  });
+  const snapshot = setupSnapshot(
+    [freeBefore, firmedMid, freeAfter], { firmedIds: ['duedate-firmed-mid-yellow'] },
+  );
+
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup), 'due-date');
+
+  assert.equal(patchFor(result, 'duedate-firmed-mid-yellow'), undefined, 'the firmed order is never patched');
+  assert.ok(patchFor(result, 'duedate-firmed-free-before'), 'free work before the firmed boundary is scheduled');
+  assert.ok(patchFor(result, 'duedate-firmed-free-after'), 'free work after the firmed boundary is scheduled');
+  assert.deepEqual(result.unchangedLines, [], 'the line is never frozen under due-date mode');
+});

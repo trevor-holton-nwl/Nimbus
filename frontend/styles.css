@@ -4196,31 +4196,7 @@ body.dark .cw-active-card {
 }
 .opt-window-row .opt-date-summary { margin: 0; }
 
-/* Strategy as pill row (icon + label) */
-.opt-strategy-row { display: flex; flex-wrap: wrap; gap: 6px; }
-.opt-strategy-pill {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 32px; padding: 0 14px;
-  border-radius: 100px;
-  border: 1.5px solid var(--line);
-  background: var(--bg-subtle);
-  color: var(--fg);
-  font-size: 12.5px; font-weight: 600;
-  cursor: pointer;
-  transition: border-color var(--t-fast), background var(--t-fast), color var(--t-fast), box-shadow var(--t-fast);
-}
-.opt-strategy-pill:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-wash);
-}
-.opt-strategy-pill.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-  box-shadow: 0 2px 10px rgba(var(--accent-rgb),0.32);
-}
-.osp-icon { font-size: 14px; line-height: 1; }
+.opt-strategy-hint { margin: 4px 0 0; font-size: 12px; color: var(--fg-mute); line-height: 1.4; }
 .opt-check:has(input:disabled) { cursor: help; color: var(--fg-mute); }
 .opt-check input:disabled + .opt-check-box { opacity: .7; }
 

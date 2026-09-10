@@ -218,6 +218,50 @@ test('combined is no longer an optimizer strategy users can select', () => {
     'the optimize dialog must not render a combined strategy button');
 });
 
+test('the Strategy picker is a <select> with a \'duedate\' option, not the retired pill buttons', () => {
+  const { readFileSync } = require('node:fs');
+  const dialogMarkup = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
+
+  assert.match(dialogMarkup, /<option value="duedate"/,
+    'the strategy <select> must offer a duedate option');
+  assert.doesNotMatch(dialogMarkup, /opt-strategy-pill/,
+    'the old .opt-strategy-pill buttons must be fully retired from the dialog markup');
+});
+
+test('OptimizeDialog.selectMode(\'duedate\') updates the strategy <select> and its hint text', () => {
+  const priorDocument = globalThis.document;
+  const selectEl = makeSandboxElement('opt-strategy-select', 'changeover');
+  const hintEl = makeSandboxElement('opt-strategy-hint');
+  const runBtn = makeSandboxElement('opt-run-btn');
+  const badgeEl = makeSandboxElement('opt-wheel-badge');
+  const elements = new Map([
+    ['opt-strategy-select', selectEl],
+    ['opt-strategy-hint', hintEl],
+    ['opt-run-btn', runBtn],
+    ['opt-wheel-badge', badgeEl],
+  ]);
+  globalThis.document = {
+    getElementById(id) { return elements.get(id) || null; },
+    addEventListener() {}, removeEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    createElement() { return makeSandboxElement('created'); },
+    body: { appendChild() {}, classList: { add() {}, remove() {} } },
+  };
+
+  try {
+    OptimizeDialog.selectMode('duedate');
+    assert.equal(selectEl.value, 'duedate', 'selecting duedate must set the <select> value to duedate');
+    assert.ok(hintEl.textContent && hintEl.textContent.length > 0,
+      'selecting duedate must populate a non-empty strategy hint');
+  } finally {
+    globalThis.document = priorDocument;
+    // OptimizeDialog is a module-level singleton -- restore its internal mode
+    // to the pre-test default so later tests in this file are unaffected.
+    OptimizeDialog.selectMode('changeover');
+  }
+});
+
 test('OptimizerPreview retains only a bounded candidate explanation and drops it on discard', () => {
   // Regression target: retaining raw candidate schedules/reasons would make a
   // long preview unbounded and leave setup explanation data after Discard.

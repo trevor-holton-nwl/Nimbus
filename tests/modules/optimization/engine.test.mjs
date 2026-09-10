@@ -2133,6 +2133,69 @@ test('B3a: an inactive plant\'s changeover run produces identical sequencing to 
 });
 
 
+// 'duedate' (2026-09-09) routes exactly like 'changeover' above: an inactive
+// plant still fabricates Engine._syntheticZeroCostSetupSnapshot rather than
+// falling back to any legacy walk, but selects the 'due-date' evaluator mode
+// instead of 'min-changeover'. Spies on Engine.evaluateSetupAware (a plain
+// object method, safely monkey-patchable and restored in `finally`) to prove
+// the mode actually reaching the evaluator, not just the resulting sequence.
+test('B3a: \'duedate\' also routes through the setup-aware evaluator via a synthetic snapshot on an inactive plant, invoking it with mode \'due-date\'', () => {
+  const plant = 'B3A-DUEDATE-PARITY-PLANT';
+  const line = 'B3A-DUEDATE-PARITY-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorPriorityRankMaps = Store.priorityRankMaps;
+  const originalEvaluateSetupAware = Engine.evaluateSetupAware;
+
+  const freshTasks = () => ([
+    { id: 'dd-parity-a', PLANT: plant, MACHINE: line, COLOR: 'RED', FORM_SIZE: 'A', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-01T12:00:00') },
+    { id: 'dd-parity-b', PLANT: plant, MACHINE: line, COLOR: 'BLUE', FORM_SIZE: 'A', RUN_TIME: '1',
+      start_date: null, end_date: null, original_end_date: new Date('2026-09-01T13:00:00') },
+  ]);
+  const opts = {
+    plant, respectFirmed: true, respectCalendar: false,
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+  };
+
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+  for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test');
+  Store.setPriorityRankMaps({ '': { colorWheel: { BLUE: 1, RED: 2 } } });
+  // Never configured/activated for this plant -- 'duedate' must route through
+  // Engine._syntheticZeroCostSetupSnapshot exactly like 'changeover' does.
+  Store.replaceSetupSnapshot(null, 'unit-test');
+
+  const calls = [];
+  Engine.evaluateSetupAware = function (mode, bounds, snapshot, thresholds) {
+    calls.push({ mode, synthetic: bounds.setup.synthetic === true });
+    return originalEvaluateSetupAware.call(this, mode, bounds, snapshot, thresholds);
+  };
+
+  try {
+    Store.setTasks(freshTasks(), 'unit-test');
+    Engine.runAndApply('duedate', opts);
+
+    assert.equal(calls.length, 1, 'evaluateSetupAware must be invoked exactly once for a duedate run');
+    assert.equal(calls[0].mode, 'due-date', 'a \'duedate\' run must invoke the evaluator with mode \'due-date\', not \'min-changeover\'');
+    assert.equal(calls[0].synthetic, true, 'an inactive plant\'s duedate run must route through the same synthetic zero-cost snapshot as changeover');
+
+    assert.ok(Store.tasks['dd-parity-a'].start_date && Store.tasks['dd-parity-b'].start_date,
+      'both orders were actually placed under the synthetic due-date path (never-freeze invariant)');
+  } finally {
+    Engine.evaluateSetupAware = originalEvaluateSetupAware;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setPriorityRankMaps(priorPriorityRankMaps);
+  }
+});
+
+
 test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnostics (no toast, no reported uncovered edges)', () => {
   const plant = 'B3A-QUIET-PLANT';
   const line = 'B3A-QUIET-LINE';

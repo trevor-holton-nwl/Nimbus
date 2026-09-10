@@ -768,7 +768,7 @@ const SessionUIAdapter = {
     const fdowSel = (fdow === 1) ? 1 : 0;
     // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
     const od      = Session.pref('optimizerDefaults') as OptimizerDefaultsPref | null | undefined;
-    const odMode: string = (od && od.mode && ['spt', 'changeover'].includes(od.mode)) ? od.mode : 'changeover';
+    const odMode: string = (od && od.mode && ['spt', 'changeover', 'duedate'].includes(od.mode)) ? od.mode : 'changeover';
     const odFirmed = od ? (od.respectFirmed ?? (od as any).respectFixed) !== false : true;
     const odCal   = od ? od.respectCalendar !== false : true;
     pane.innerHTML = `
@@ -797,6 +797,7 @@ const SessionUIAdapter = {
         <select id="us-opt-mode">
           ${SessionUIAdapter._optTag('spt',        Util.t('us.opt_mode_spt'),        odMode)}
           ${SessionUIAdapter._optTag('changeover', Util.t('us.opt_mode_changeover'), odMode)}
+          ${SessionUIAdapter._optTag('duedate',    Util.t('us.opt_mode_duedate'),    odMode)}
         </select>
         <label class="us-toggle-row" style="margin-top:8px">
           <input type="checkbox" id="us-opt-firmed"${odFirmed ? ' checked' : ''}>
