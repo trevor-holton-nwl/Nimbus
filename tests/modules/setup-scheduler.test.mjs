@@ -193,6 +193,32 @@ test('setup-aware diagnostics expose a global budget and heuristic quality', () 
   assert.ok(['exact', 'heuristic'].includes(result.diagnostics.quality));
 });
 
+test('canonical Min Changeover objectives prefer covered edges before setup savings', () => {
+  const base = {
+    hardErrors: 0, overCap: 0, lateCount: 0, latenessMinutes: 0,
+    setupMinutes: 0, scheduledCount: 2, instabilityMinutes: 0,
+    policyKey: '00', sequenceKey: 'A|B',
+  };
+  const covered = { ...base, uncoveredEdges: 0, setupMinutes: 20 };
+  const uncovered = { ...base, uncoveredEdges: 1, setupMinutes: 0 };
+
+  assert.ok(SetupScheduler.compareObjectiveFacts(covered, uncovered, 'min-changeover') < 0,
+    'Min Changeover must not trade a known uncovered edge for setup-minute savings');
+});
+
+test('final setup-aware results expose canonical objective facts and compatible score slots', () => {
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([scheduledTask('contract-objective-order', 1, 'GREEN', '2026-08-03T18:00')]),
+    dueDateBounds(setupTruth()),
+  );
+
+  assert.equal(typeof result.objective?.uncoveredEdges, 'number');
+  assert.equal(result.score[6], result.objective?.uncoveredEdges);
+  assert.equal(result.score[7], result.objective?.overCap);
+  assert.equal(result.score[2], result.objective?.lateCount);
+  assert.equal(result.score[5], result.objective?.setupMinutes);
+});
+
 test('setup-aware placement uses placementStart when planningStart is in the past', () => {
   const waiting = scheduledTask('contract-past-planning-start', 1, 'GREEN', '2026-08-03T18:00');
   const setup = setupTruth();

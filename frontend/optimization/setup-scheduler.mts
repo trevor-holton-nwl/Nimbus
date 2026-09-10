@@ -2050,8 +2050,7 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   if (admissionDelta) return admissionDelta;
   if (mode === 'due-date') return compareDueDateCandidate(left, right);
   if (mode === 'min-changeover') {
-    for (const index of [0, 2, 3, 5]) { const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0); if (delta) return delta; }
-    return ordinalCompare(left.policyKey, right.policyKey) || ordinalCompare(left.sequenceKey, right.sequenceKey);
+    return compareObjectiveFacts(fragmentObjectiveFacts(left), fragmentObjectiveFacts(right), mode);
   }
   const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
@@ -5497,15 +5496,9 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
 function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, result: CandidateResult): CandidateResult {
   const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const explanations = [...result.explanation];
-  const score = [...result.score]; score[2] = 0; score[3] = 0; score[4] = -(result.dispositions ?? []).filter(d => d.status === 'scheduled').length; score[SCORE_OVER_CAP] = 0;
+  const score = [...result.score];
   const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
   const scopeIds = new Set(result.dispositions?.map(d => d.id));
-  for (const task of final.filter(item => scopeIds.has(taskId(item)))) {
-    const due = dueTimestamp(task); const end = timestamp(task.end_date);
-    if (task.planning_status === 'needs_planning') { score[2]++; score[3] += Math.max(0, Math.ceil((+bounds.horizonEnd - due) / 60000)); }
-    else if (end && +end > due) { score[2]++; score[3] += Math.ceil((+end - due) / 60000); }
-  }
-  score[5] = finalObjective(snapshot, bounds, result)[2];
   const predecessorById = new Map<string, string | null>();
   const orderedFinal = final.filter(task => scopeIds.has(taskId(task)) && task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((a, b) => ordinalCompare(String(a.MACHINE), String(b.MACHINE)) || +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
   for (let index = 0; index < orderedFinal.length; index++) predecessorById.set(taskId(orderedFinal[index]), index && orderedFinal[index - 1].MACHINE === orderedFinal[index].MACHINE ? taskId(orderedFinal[index - 1]) : null);
@@ -5536,10 +5529,6 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   });
   const knownUncovered = actualMissing.filter(edge => edge.reason === 'scheduled-without-setup');
   const unknownEdges = actualMissing.length - knownUncovered.length;
-  const overCap = orderedFinal.filter(task => {
-    const ceiling = notAfterFor(bounds, task);
-    return ceiling && timestamp(task.end_date) && +timestamp(task.end_date)! > +ceiling;
-  }).length;
   for (const task of orderedFinal) {
     if (!unknownStateIds.has(taskId(task))) continue;
     if (!explanations.some(reason => reason.code === 'unknown-setup-tail-placement' && reason.taskId === taskId(task))) {
@@ -5556,10 +5545,19 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     if (patch.changes.planning_status !== 'scheduled' || original.planning_status === 'needs_planning' || original.planning_reason) return true;
     return +timestamp(original.start_date)! !== +timestamp(patch.changes.start_date)! || +timestamp(original.end_date)! !== +timestamp(patch.changes.end_date)! || JSON.stringify(original.scheduleSegments ?? []) !== JSON.stringify(patch.changes.scheduleSegments ?? []);
   });
-  score[0] = (result.validationFindings ?? []).filter(f => f.severity === 'error').length;
+  const finalMissingEdges = uniqueMissingEdges([
+    ...result.missingEdges.filter(edge => !['scheduled-without-setup', 'successor-state-unknown', 'initial-state-unknown'].includes(edge.reason)),
+    ...actualMissing,
+  ]);
+  const objective = objectiveFactsForCandidate(snapshot, bounds, { ...result, missingEdges: finalMissingEdges });
+  score[0] = objective.hardErrors;
   score[1] = [...new Set(orderedFinal.map(task => String(task.MACHINE)))].reduce((sum, line) => sum + policyScore(snapshot, bounds.setup.plant, line, orderedFinal.filter(task => String(task.MACHINE) === line), bounds.runContext), 0);
-  score[SCORE_UNCOVERED] = knownUncovered.length;
-  score[SCORE_OVER_CAP] = overCap;
+  score[2] = objective.lateCount;
+  score[3] = objective.latenessMinutes;
+  score[4] = -objective.scheduledCount;
+  score[5] = objective.setupMinutes;
+  score[SCORE_UNCOVERED] = objective.uncoveredEdges;
+  score[SCORE_OVER_CAP] = objective.overCap;
   const diagnostics: SearchDiagnostics = {
     ...result.diagnostics,
     budgetMs: result.diagnostics.budgetMs ?? Math.max(0, bounds.deadline),
@@ -5574,7 +5572,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     quality: result.diagnostics.quality ?? (result.diagnostics.method.endsWith('exact') ? 'exact' : 'heuristic'),
     respectCalendar: result.diagnostics.respectCalendar ?? (bounds.respectCalendar ?? true),
   };
-  return { ...result, patches: changedPatches, score, diagnostics, explanation: explanations, missingEdges: uniqueMissingEdges([...result.missingEdges.filter(edge => !['scheduled-without-setup', 'successor-state-unknown', 'initial-state-unknown'].includes(edge.reason)), ...actualMissing]) };
+  return { ...result, patches: changedPatches, score, objective, diagnostics, explanation: explanations, missingEdges: finalMissingEdges };
 }
 
 /** One final insertion pass, shared across all selected lines. Accepted production
@@ -5719,16 +5717,94 @@ function admissionKey(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Due
   return urgencyOrder(snapshot, bounds, line, sequence).map(task => ids.has(taskId(task)) || (fragmentEnd < bounds.horizonEnd && (notAfterFor(bounds, task)?.getTime() ?? Infinity) > +fragmentEnd) ? '0' : '1').join('');
 }
 
-function finalObjective(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>): number[] {
+function fragmentObjectiveFacts(candidate: Readonly<DueDateCandidate>): ObjectiveFacts {
+  return {
+    hardErrors: candidate.score[0] ?? 0,
+    overCap: candidate.score[SCORE_OVER_CAP] ?? 0,
+    lateCount: candidate.score[2] ?? 0,
+    latenessMinutes: candidate.score[3] ?? 0,
+    uncoveredEdges: candidate.score[SCORE_UNCOVERED] ?? 0,
+    setupMinutes: candidate.score[5] ?? 0,
+    scheduledCount: Math.max(0, -(candidate.score[4] ?? 0)),
+    instabilityMinutes: 0,
+    policyKey: candidate.policyKey,
+    sequenceKey: candidate.sequenceKey,
+  };
+}
+
+/** Compare the typed objective facts used by both fragment search and final
+ * arbitration. Admission remains a separate prefix comparison because it is
+ * derived from the complete candidate's dispositions rather than one
+ * fragment. Every remaining term is a lower-is-better scalar or a stable
+ * ordinal key. */
+export function compareObjectiveFacts(
+  left: Readonly<ObjectiveFacts>, right: Readonly<ObjectiveFacts>,
+  mode: FragmentMode = 'due-date-first',
+): number {
+  const compareNumber = (leftValue: number, rightValue: number): number => leftValue - rightValue;
+  const compare = (leftValue: number | string, rightValue: number | string, descending = false): number => {
+    if (typeof leftValue === 'string' && typeof rightValue === 'string') return ordinalCompare(leftValue, rightValue);
+    const result = compareNumber(Number(leftValue), Number(rightValue));
+    return descending ? -result : result;
+  };
+  const terms: Array<[keyof ObjectiveFacts, boolean]> = mode === 'min-changeover'
+    ? [
+      ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false],
+      ['uncoveredEdges', false], ['setupMinutes', false], ['policyKey', false],
+      ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
+    ]
+    : mode === 'due-date'
+      ? [
+        ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false],
+        ['policyKey', false], ['uncoveredEdges', false], ['setupMinutes', false],
+        ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
+      ]
+      : mode === 'spt'
+        ? [
+          ['hardErrors', false], ['uncoveredEdges', false], ['overCap', false], ['lateCount', false],
+          ['latenessMinutes', false], ['setupMinutes', false], ['scheduledCount', true],
+          ['instabilityMinutes', false], ['sequenceKey', false],
+        ]
+        : mode === 'throughput'
+          ? [
+            ['hardErrors', false], ['overCap', false], ['uncoveredEdges', false], ['setupMinutes', false],
+            ['lateCount', false], ['latenessMinutes', false], ['policyKey', false],
+            ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
+          ]
+          : [
+            ['hardErrors', false], ['policyKey', false], ['overCap', false], ['uncoveredEdges', false],
+            ['lateCount', false], ['latenessMinutes', false], ['scheduledCount', true],
+            ['setupMinutes', false], ['instabilityMinutes', false], ['sequenceKey', false],
+          ];
+  for (const [key, descending] of terms) {
+    const delta = compare(left[key], right[key], descending);
+    if (delta) return delta;
+  }
+  return 0;
+}
+
+/** Derive objective facts from the final validated candidate. This function
+ * reads only the detached snapshot, bounds, and proposal, so the same result
+ * can be attached to a preview, compared at Apply, or tested without Store. */
+export function objectiveFactsForCandidate(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>,
+): ObjectiveFacts {
   const ids = new Set(eligibleTasks(snapshot, bounds).map(taskId));
   const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
-  let lateCount = 0; let lateness = 0; let setupMinutes = 0; let instability = 0; let completion = 0;
+  let lateCount = 0; let lateness = 0; let setupMinutes = 0; let instability = 0;
+  let overCap = 0;
   const original = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   for (const task of tasks) {
     const end = timestamp(task.end_date); const due = dueTimestamp(task);
-    if (task.planning_status === 'needs_planning') { lateCount++; lateness += Math.max(0, (+bounds.horizonEnd - due) / 60000); }
-    else if (end && +end > due) { lateCount++; lateness += (+end - due) / 60000; }
-    if (end) completion += (+end - +bounds.now) / 60000;
+    if (task.planning_status === 'needs_planning') {
+      lateCount++;
+      if (Number.isFinite(due)) lateness += Math.max(0, (+bounds.horizonEnd - due) / 60000);
+    } else if (end && Number.isFinite(due) && +end > due) {
+      lateCount++;
+      lateness += (+end - due) / 60000;
+    }
+    const ceiling = notAfterFor(bounds, task);
+    if (end && ceiling && +end > +ceiling) overCap++;
     const before = timestamp(original.get(taskId(task))?.start_date); const after = timestamp(task.start_date);
     if (before && after) instability += Math.abs(+after - +before) / 60000;
   }
@@ -5740,23 +5816,52 @@ function finalObjective(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
     for (const task of ordered) {
       const successor = stateForOrder(task, definition);
       if (state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
-        const resolved = resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides });
+        const resolved = resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined });
         if (resolved.covered) setupMinutes += resolved.effectiveMin ?? 0;
       }
       state = successor; previous = taskId(task);
     }
   }
-  return [lateCount, lateness, setupMinutes, instability, completion];
+  const uncoveredKeys = new Set(candidate.missingEdges
+    .filter(edge => edge.reason === 'scheduled-without-setup' || edge.reason === UNCOVERED_SETUP_TRANSITION_REASON)
+    .map(missingEdgeKey));
+  const scheduled = tasks.filter(task => task.planning_status !== 'needs_planning'
+    && timestamp(task.start_date) && timestamp(task.end_date));
+  const lines = [...new Set(scheduled.map(task => String(task.MACHINE)))].sort(ordinalCompare);
+  const orderedByLine = lines.map(line => scheduled
+    .filter(task => String(task.MACHINE) === line)
+    .sort((left, right) => +timestamp(left.start_date)! - +timestamp(right.start_date)! || ordinalCompare(taskId(left), taskId(right))));
+  const policyKey = orderedByLine.map((lineTasks, index) => (
+    `${lines[index]}:${policyKeyForSequence(snapshot, bounds.setup.plant, lines[index], lineTasks, bounds.runContext)}`
+  )).join('|');
+  const sequenceKey = orderedByLine.map((lineTasks, index) => (
+    `${lines[index]}:${lineTasks.map(taskId).join(',')}`
+  )).join('|');
+  const scoreUncovered = Number(candidate.score[SCORE_UNCOVERED]);
+  return {
+    hardErrors: (candidate.validationFindings ?? []).filter(finding => finding.severity === 'error').length,
+    overCap,
+    lateCount,
+    latenessMinutes: lateness,
+    uncoveredEdges: uncoveredKeys.size || (Number.isFinite(scoreUncovered) ? Math.max(0, scoreUncovered) : 0),
+    setupMinutes,
+    scheduledCount: scheduled.length,
+    instabilityMinutes: instability,
+    policyKey,
+    sequenceKey,
+  };
+}
+
+function finalObjective(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>): number[] {
+  const facts = objectiveFactsForCandidate(snapshot, bounds, candidate);
+  return [facts.lateCount, facts.latenessMinutes, facts.setupMinutes, facts.instabilityMinutes, -facts.scheduledCount];
 }
 function compareFinalObjectives(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, left: Readonly<CandidateResult>, right: Readonly<CandidateResult>): number {
-  const a = finalObjective(snapshot, bounds, left); const b = finalObjective(snapshot, bounds, right);
-  const indices = bounds.strategy === 'spt' ? [4, 0, 1, 2] : [0, 1, 2];
-  for (const index of indices) if (a[index] !== b[index]) return a[index] - b[index];
-  const priority = (proposal: Readonly<CandidateResult>): string => {
-    const tasks = applyPatchesToSnapshot(eligibleTasks(snapshot, bounds), proposal.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((x, y) => ordinalCompare(String(x.MACHINE), String(y.MACHINE)) || +timestamp(x.start_date)! - +timestamp(y.start_date)! || ordinalCompare(taskId(x), taskId(y)));
-    return tasks.map(task => policyKeyForSequence(snapshot, bounds.setup.plant, String(task.MACHINE), [task], bounds.runContext)).join(' ');
-  };
-  return ordinalCompare(priority(left), priority(right)) || a[3] - b[3];
+  return compareObjectiveFacts(
+    objectiveFactsForCandidate(snapshot, bounds, left),
+    objectiveFactsForCandidate(snapshot, bounds, right),
+    (bounds.strategy ?? 'due-date-first') as FragmentMode,
+  );
 }
 
 function coversInterval(free: readonly PlacementInterval[], interval: PlacementInterval): boolean {
