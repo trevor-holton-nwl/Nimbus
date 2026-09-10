@@ -5700,6 +5700,18 @@ function eligibleTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Du
     const start = timestamp(task.start_date);
     const end = timestamp(task.end_date);
     if (!start || !end || end <= start) return true;
+    // A persisted parent can sit exactly on the planning boundary while its
+    // child segments/runtime are stale or incomplete. Treat that malformed
+    // schedule as repairable even though a valid interval ending at the
+    // boundary is wholly outside [planningStart, horizonEnd). This preserves
+    // the strict half-open scope for valid incumbents without stranding a
+    // split-order parent that needs regeneration.
+    const expectedMinutes = Number(task.RUN_TIME) * 60;
+    const actualMinutes = productiveIntervals(task).reduce(
+      (sum, interval) => sum + (interval.end.getTime() - interval.start.getTime()) / 60000,
+      0,
+    );
+    if (!Number.isFinite(expectedMinutes) || expectedMinutes <= 0 || Math.abs(actualMinutes - expectedMinutes) > 0.001) return true;
     const planningStart = timestamp(bounds.planningStart)?.getTime() ?? +bounds.now;
     return end.getTime() > planningStart && start.getTime() < +bounds.horizonEnd;
   });
