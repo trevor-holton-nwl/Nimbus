@@ -32,6 +32,28 @@ test('queued demand has no scheduled finish and overdue queue remains in deliver
   assert.ok(Util.latenessHours(queued) >= 48);
 });
 
+test('Allowed window labels a frozen-floor conflict instead of showing a reversed date range', () => {
+  const priorMasterData = Store.masterData;
+  const priorFrozen = Store.frozenHorizonEnd;
+  const due = new Date('2026-09-15T18:00:00');
+  const ceiling = new Date('2026-09-16T00:00:00');
+  const order = { id: 'expired-window', PLANT: 'P1', MACHINE: 'L1', RUN_TIME: 1, original_end_date: due };
+  try {
+    Store.setMasterData({ ...priorMasterData, plants: [{ plant: 'P1', max_pull_forward_days: 0, max_push_forward_days: 0 }] }, 'test');
+    for (const floor of [new Date('2026-09-19T00:00:00'), ceiling]) {
+      Store.setFrozenHorizonEnd(floor, 'test');
+      assert.equal(Table._planningWindowLabel(order),
+        `No valid window: earliest start ${Util.fmtDTReadable(floor)}; complete by ${Util.fmtDTReadable(ceiling)}`);
+    }
+    Store.setFrozenHorizonEnd(null, 'test');
+    assert.equal(Table._planningWindowLabel(order),
+      `${Util.fmtDTReadable(new Date('2026-09-15T00:00:00'))} — ${Util.fmtDTReadable(ceiling)}`);
+  } finally {
+    Store.setMasterData(priorMasterData, 'test');
+    Store.setFrozenHorizonEnd(priorFrozen, 'test');
+  }
+});
+
 // Same split-realm/no-DOM situation documented in
 // tests/modules/schedule-services.test.mjs and schedule-data.test.mjs.
 if (typeof globalThis.document === 'undefined') {

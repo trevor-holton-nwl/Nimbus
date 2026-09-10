@@ -198,6 +198,9 @@ export const Table = {
     if (bounded && (!due || !Number.isFinite(due.getTime()))) return 'SAP due date required';
     const floor = Engine.earliestAllowedStart(task, plant);
     const ceiling = Engine.latestAllowedEnd(task, plant);
+    if (floor && ceiling && floor >= ceiling) {
+      return `No valid window: earliest start ${Util.fmtDTReadable(floor)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+    }
     return `${floor ? Util.fmtDTReadable(floor) : 'No start limit'} — ${ceiling ? Util.fmtDTReadable(ceiling) : 'No completion limit'}`;
   },
   _api:    null as NimbusVendor.AgGridApi | null,
@@ -466,7 +469,8 @@ export const Table = {
         { headerName: 'Planning reason', colId: 'planning_reason', minWidth: 240, editable: false,
           valueGetter: (p: { data: NimbusTask }) => p.data?.planning_reason?.message ?? '' },
         { headerName: 'Allowed window', colId: 'planning_window', minWidth: 260, editable: false,
-          valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },
+          valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),
+          tooltipValueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },
         ...Table._catalogOnlyColumns(),
         { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
           cellClass: 'cell-num', hide: Table._fieldHidden('RUN_TIME'),
