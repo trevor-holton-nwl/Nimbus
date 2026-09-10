@@ -511,6 +511,48 @@ test('Task 1: an unchanged baseline applies once with the engine force-save sour
   }
 });
 
+test('apply survives a Store revision bump from a non-schedule event (alerts recompute)', () => {
+  // Regression target: OptimizerPreview.apply() runs the candidate through
+  // validateCandidateForApply(candidate, snapshotSchedule(plant)), and
+  // snapshotSchedule stamps readModelVersion: String(Store.rev()). Store.rev()
+  // increments on every Store event -- including non-schedule ones like
+  // alerts:change -- so a stale revision comparison must not block Apply when
+  // no scheduling data actually changed.
+  const plant = 'TASK-BASELINE-REV-BUMP';
+  const fixture = openTaskBaselinePreview(plant, [
+    previewTask('task-rev-bump-long', plant, 5),
+    previewTask('task-rev-bump-short', plant, 1),
+  ]);
+  const candidate = OptimizerPreview._candidate;
+  const applyEvents = [];
+  const unsubscribe = Store.subscribe(event => {
+    if (event.type === 'tasks:bulkUpdate') applyEvents.push(event);
+  }, 'task-1-revision-bump-apply-contract');
+  try {
+    const revBefore = Store.rev();
+
+    Store.setAlerts([], 'alerts');
+
+    assert.ok(Store.rev() > revBefore, 'a Store event bumps the revision counter even for non-schedule state');
+    assert.equal(OptimizerPreview.canApply(), true,
+      'a revision-only change from an unrelated Store event must not block Apply');
+
+    OptimizerPreview.apply();
+
+    assert.equal(
+      (candidate.validationFindings ?? []).some(finding => finding.code === 'stale_candidate'),
+      false,
+      'Apply must not attach a stale_candidate finding for a revision bump with no schedule change');
+    assert.equal(applyEvents.length, 1, 'Apply publishes exactly one bulk task mutation');
+    assert.equal(applyEvents[0].source, 'engine', 'the mutation retains the force-save source contract');
+    assert.equal(fixture.auditRequests.length, 1, 'a validated Apply emits exactly one audit event');
+    assert.equal(OptimizerPreview._candidate, null, 'a successful Apply clears the detached candidate');
+  } finally {
+    unsubscribe();
+    fixture.restore();
+  }
+});
+
 test('OptimizerPreview keeps trial patches detached until Apply, then commits them once', () => {
   const priorRaf = globalThis.requestAnimationFrame;
   const priorNimbus = globalThis.NIMBUS;

@@ -4415,9 +4415,8 @@ test('hard bounds preserve a valid incumbent on timeout and reject stale or tamp
   assert.equal(result.dispositions[0].status, 'scheduled');
   assert.equal(SetupScheduler.validateCandidateForApply(result, snapshot).some(f => f.severity === 'error'), false);
   const revisionStale = structuredClone(snapshot); revisionStale.readModelVersion = 'revision-v2';
-  assert.ok(SetupScheduler.validateCandidateForApply(result, revisionStale).some(f => (
-    f.code === 'stale_candidate' && f.message.includes('read-model revision')
-  )), 'apply validation names a read-model revision change even when task values are unchanged');
+  assert.equal(SetupScheduler.validateCandidateForApply(result, revisionStale).some(f => f.severity === 'error'), false,
+    'a read-model revision change alone (Store.rev() moves on every Store event) must not reject an otherwise identical snapshot');
   const stale = structuredClone(snapshot); stale.tasks[0].RUN_TIME = 4;
   assert.ok(SetupScheduler.validateCandidateForApply(result, stale).some(f => f.code === 'stale_candidate'));
   const bad = { ...result, patches: [{ id: 'current', changes: { start_date: at('2026-08-04T08:00:00'), end_date: at('2026-08-04T11:00:00'), planning_status: 'scheduled' } }] };

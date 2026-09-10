@@ -5957,14 +5957,14 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
   const add = (code: string, message: string, task?: NimbusTask, protectedTask = false): void => { findings.push({ code, message, severity: protectedTask ? 'warning' : 'error', ...(task ? { taskId: taskId(task), line: String(task.MACHINE) } : {}) }); };
   if (currentSnapshot) {
     const baselineSnapshot = candidate.validationContext?.baselineSnapshot ?? snapshot;
-    if (baselineSnapshot.readModelVersion !== undefined
-      && currentSnapshot.readModelVersion !== undefined
-      && baselineSnapshot.readModelVersion !== currentSnapshot.readModelVersion) {
-      add('stale_candidate', 'The read-model revision changed after this proposal was evaluated.');
-    }
-    // The revision gets its own precise diagnostic above. Exclude it from the
-    // structural comparison so one Store mutation does not produce duplicate
-    // stale findings while task/setup/calendar drift still remains visible.
+    // `readModelVersion` is recorded for diagnostics only and is deliberately
+    // NOT a validity signal: it mirrors Store.rev(), a global counter that
+    // moves on every Store event (alerts:change from the async alert
+    // recompute, lines:selected, settings:change, ...), none of which alter
+    // the evaluator's inputs. Treating it as staleness rejected every Apply
+    // on the pilot. The structural comparison below covers the complete
+    // scheduling read model, so identical state means the candidate is
+    // exactly as valid as when it was evaluated.
     const { readModelVersion: _baselineRevision, ...baselineState } = baselineSnapshot;
     const { readModelVersion: _currentRevision, ...currentState } = currentSnapshot;
     const baseline = JSON.stringify({ ...baselineState, alerts: [], firmedIds: [...baselineSnapshot.firmedIds].sort() });
