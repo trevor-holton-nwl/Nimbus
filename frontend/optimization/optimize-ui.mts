@@ -1380,10 +1380,20 @@ export const OptimizerPreview = {
         // _render() call) instead of running synchronously back-to-back with
         // the primary evaluation. Until it lands, _finalists stays null and
         // _finalistsPending tells _render() to show a placeholder.
-        const altModeMap: Partial<Record<OptimizerMode, OptimizerMode>> = { changeover: 'spt', spt: 'changeover', duedate: 'changeover' };
-        const altMode = altModeMap[mode];
+        //
+        // Each primary mode can have multiple alternates (e.g. Changeover's
+        // alts are SPT and Due Date) — evaluated one at a time via a chained
+        // yield-per-alt tick (see runNextAlt below), never in one synchronous
+        // pass, so a single alt's up-to-SETUP_AWARE_DEADLINE_MS search can't
+        // compound into a multi-alt main-thread freeze.
+        const altModeMap: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
+          changeover: ['spt', 'duedate'],
+          spt: ['changeover', 'duedate'],
+          duedate: ['changeover'],
+        };
+        const altModes = altModeMap[mode] ?? [];
         OptimizerPreview._finalists = null;
-        OptimizerPreview._finalistsPending = !!altMode;
+        OptimizerPreview._finalistsPending = altModes.length > 0;
 
         OptimizerPreview.stale = false;
         OptimizerPreview._staleReason = null;
@@ -1394,53 +1404,65 @@ export const OptimizerPreview = {
         OptimizerPreview._syncApplyButton();
         OptimizerPreview._render();
 
-        if (altMode) {
-          // Paint first, then compute Plan B off the critical path.
-          // requestAnimationFrame alone still runs before the browser paints
-          // the just-scheduled frame; the extra setTimeout(0) yields to the
-          // event loop (and therefore a paint) before this runs.
-          requestAnimationFrame(() => setTimeout(() => {
-            // Race safety: bail silently — touching neither _finalists nor
-            // _finalistsPending — unless this preview is still the one the
-            // user is looking at. `active` catches apply/discard/abandon
-            // (all route through _clear(), which already resets both
-            // fields); `_runSeq` catches a newer runWithPreview call already
-            // in flight (whose own synchronous block already reset both
-            // fields for itself) so a slow, superseded run can never
-            // resurrect stale finalists or issue an orphan render. Also bail
-            // if `stale` went true between paint and this callback — a Store
-            // setup write landing in that window (see markStale) would make
-            // Plan B evaluate against setup data Plan A never saw, so the
-            // comparison would no longer be apples-to-apples.
-            if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq || OptimizerPreview.stale) return;
-            let finalists: typeof OptimizerPreview['_finalists'] = null;
-            try {
-              const _evalAltT0 = performance.now();
-              const altCandidate = evaluateSchedule(candidateSnapshot, {
-                mode: altMode, plant: opts.plant, lines: opts.lines,
-                startDate: opts.startDate, endDate: opts.endDate,
-                respectFirmed: opts.respectFirmed, respectCalendar: opts.respectCalendar,
-                // Controller ruling: Plan B is deferred off the click path,
-                // so background time is acceptable — give it the SAME full
-                // SETUP_AWARE_DEADLINE_MS window as the primary run rather
-                // than a reduced budget (previously ALT_PLAN_BUDGET_MS,
-                // removed — it silently handicapped the comparison).
-                deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS,
-              });
-              PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
-              const _applyPatchesT0b = performance.now();
-              const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
-              PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
-              const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot);
-              finalists = [
-                { label: 'A', mode, kpis: postKpis, whyNot: null },
-                { label: 'B', mode: altMode, kpis: altKpis, whyNot: describeFinalistWhyNot(postKpis, altKpis) },
-              ];
-            } catch { /* alt run failed — table stays absent */ }
-            OptimizerPreview._finalists = finalists;
-            OptimizerPreview._finalistsPending = false;
-            OptimizerPreview._render();
-          }, 0));
+        if (altModes.length > 0) {
+          const finalists: NonNullable<typeof OptimizerPreview['_finalists']> = [
+            { label: 'A', mode, kpis: postKpis, whyNot: null },
+          ];
+          // Paint first, then compute each alt off the critical path, one at
+          // a time. requestAnimationFrame alone still runs before the browser
+          // paints the just-scheduled frame; the extra setTimeout(0) yields
+          // to the event loop (and therefore a paint) before each alt runs.
+          const runNextAlt = (idx: number): void => {
+            if (idx >= altModes.length) {
+              OptimizerPreview._finalists = finalists.length > 1 ? finalists : null;
+              OptimizerPreview._finalistsPending = false;
+              OptimizerPreview._render();
+              return;
+            }
+            requestAnimationFrame(() => setTimeout(() => {
+              // Race safety: bail silently — touching neither _finalists nor
+              // _finalistsPending — unless this preview is still the one the
+              // user is looking at. `active` catches apply/discard/abandon
+              // (all route through _clear(), which already resets both
+              // fields); `_runSeq` catches a newer runWithPreview call already
+              // in flight (whose own synchronous block already reset both
+              // fields for itself) so a slow, superseded run can never
+              // resurrect stale finalists or issue an orphan render. Also bail
+              // if `stale` went true between paint and this callback — a Store
+              // setup write landing in that window (see markStale) would make
+              // this alt evaluate against setup data Plan A never saw, so the
+              // comparison would no longer be apples-to-apples. Checked before
+              // EVERY alt (not just once) since real time passes between them.
+              if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq || OptimizerPreview.stale) return;
+              const altMode = altModes[idx];
+              try {
+                const _evalAltT0 = performance.now();
+                const altCandidate = evaluateSchedule(candidateSnapshot, {
+                  mode: altMode, plant: opts.plant, lines: opts.lines,
+                  startDate: opts.startDate, endDate: opts.endDate,
+                  respectFirmed: opts.respectFirmed, respectCalendar: opts.respectCalendar,
+                  // Controller ruling: each alt is deferred off the click path,
+                  // so background time is acceptable — give it the SAME full
+                  // SETUP_AWARE_DEADLINE_MS window as the primary run rather
+                  // than a reduced budget (previously ALT_PLAN_BUDGET_MS,
+                  // removed — it silently handicapped the comparison).
+                  deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS,
+                });
+                PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
+                const _applyPatchesT0b = performance.now();
+                const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
+                PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
+                const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot);
+                finalists.push({
+                  label: String.fromCharCode(66 + idx), // 'B', 'C', ...
+                  mode: altMode, kpis: altKpis,
+                  whyNot: describeFinalistWhyNot(postKpis, altKpis),
+                });
+              } catch { /* this alt failed — omit it; other alts (and Plan A) still show */ }
+              runNextAlt(idx + 1);
+            }, 0));
+          };
+          runNextAlt(0);
         }
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : undefined;
