@@ -183,6 +183,16 @@ test('Engine skips invalid runtime without advancing the cursor and continues an
   assert.equal(+patch(result, 'other').changes.start_date, +at('2026-08-12T08:00'));
 });
 
+test('Engine leaves a scheduled row with a malformed interval immutable', () => {
+  const malformed = task('malformed-end', '2026-08-12T06:00', 1, { end_date: new Date('not-a-date') });
+  seed({ tasks: [malformed] });
+
+  assert.doesNotThrow(() => Engine.removeBacklog(opts()));
+  const result = Engine.removeBacklog(opts());
+  assert.equal(patch(result, 'malformed-end'), undefined,
+    'a malformed scheduled interval must be excluded before backlog repair');
+});
+
 // ---------------------------------------------------------------------------
 // Workstream C2 (2026-08-20), carved out for 'backlog' mode on 2026-08-22.
 //

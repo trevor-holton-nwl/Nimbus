@@ -373,6 +373,10 @@ export interface ObjectiveFacts {
   setupMinutes: number;
   scheduledCount: number;
   instabilityMinutes: number;
+  /** Deterministic per-order productive-runtime sequence used by SPT after
+   * hard feasibility, admission, and coverage safeguards. */
+  productiveRuntimeKey: string;
+  productiveRuntimeMinutes: number;
   policyKey: string;
   sequenceKey: string;
 }
@@ -410,6 +414,10 @@ export interface EvaluationRequest {
 export interface DueDateFirstBounds {
   setup: SetupTruthSnapshot;
   lines?: readonly string[];
+  /** Optional detached validation scope. Used by non-search repair modes to
+   * keep malformed/out-of-window records out of the apply accounting while
+   * retaining only the task ids that the repair actually promises to assess. */
+  scopeTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
   iterationCap: number;
@@ -551,11 +559,25 @@ export function buildRunContext(
  * or production interval may begin. Legacy callers only provide `now`, so it
  * remains the fallback for all three values. */
 function normalizeRunDates(bounds: Readonly<DueDateFirstBounds>): Readonly<DueDateFirstBounds> {
-  const legacyNow = timestamp(bounds.now) ?? new Date(0);
-  const planningStart = timestamp(bounds.planningStart) ?? legacyNow;
-  const runNow = timestamp(bounds.runNow) ?? legacyNow;
-  const placementStart = timestamp(bounds.placementStart)
-    ?? new Date(Math.max(+planningStart, +runNow));
+  const invalid = (): Date => new Date(Number.NaN);
+  const legacyNow = timestamp(bounds.now) ?? invalid();
+  const supplied = (value: unknown, fallback: Date): Date => {
+    if (value === undefined || value === null) return new Date(fallback);
+    return timestamp(value) ?? invalid();
+  };
+  const planningStart = supplied(bounds.planningStart, legacyNow);
+  const runNow = supplied(bounds.runNow, legacyNow);
+  // placementStart is derived exclusively from the two authoritative clocks.
+  // Validate a legacy supplied value so malformed detached requests fail
+  // closed, but never allow it to move the effective floor backwards.
+  const suppliedPlacement = bounds.placementStart === undefined || bounds.placementStart === null
+    ? null
+    : timestamp(bounds.placementStart);
+  const placementStart = suppliedPlacement === null && bounds.placementStart !== undefined && bounds.placementStart !== null
+    ? invalid()
+    : Number.isFinite(planningStart.getTime()) && Number.isFinite(runNow.getTime())
+      ? new Date(Math.max(+planningStart, +runNow))
+      : invalid();
   return {
     ...bounds,
     now: new Date(placementStart),
@@ -765,6 +787,8 @@ interface DueDateCandidate {
   unadmitted: NimbusTask[];
   explanation: CandidateReason[];
   missingEdges: MissingSetupEdge[];
+  productiveRuntimeKey?: string;
+  productiveRuntimeMinutes?: number;
   /** The predecessor identity/state this covered core actually ended on, set
    * only on a feasible result. A subsequent `placeUnknownTail` call or a
    * firmed boundary's incoming-setup reservation chains from this rather than
@@ -1022,7 +1046,17 @@ interface FragmentAdjacency {
 function timestamp(value: unknown): Date | null {
   if (value instanceof Date) return Number.isFinite(value.getTime()) ? new Date(value) : null;
   if (typeof value === 'string' || typeof value === 'number') {
-    const parsed = new Date(value);
+    // ECMAScript parses a date-only string as UTC, while the scheduler's
+    // persisted timestamps are plant wall-clock values. Keep date-only bounds
+    // in the same local wall-clock convention as date-time strings without a
+    // zone; zoned/instant inputs retain normal Date parsing below.
+    const dateOnly = typeof value === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+    const parsed = dateOnly
+      ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+      : new Date(value);
+    if (dateOnly && (parsed.getFullYear() !== Number(dateOnly[1])
+      || parsed.getMonth() !== Number(dateOnly[2]) - 1
+      || parsed.getDate() !== Number(dateOnly[3]))) return null;
     return Number.isFinite(parsed.getTime()) ? parsed : null;
   }
   return null;
@@ -1795,6 +1829,14 @@ function productiveRuntimeMinutes(task: NimbusTask): number {
   return Number.isFinite(minutes) && minutes >= 0 ? minutes : Number.MAX_SAFE_INTEGER;
 }
 
+function productiveRuntimeKey(tasks: ReadonlyArray<NimbusTask>): string {
+  return tasks.map(task => String(productiveRuntimeMinutes(task)).padStart(16, '0')).join('|');
+}
+
+function productiveRuntimeTotal(tasks: ReadonlyArray<NimbusTask>): number {
+  return tasks.reduce((total, task) => total + productiveRuntimeMinutes(task), 0);
+}
+
 function orderedByProductiveRuntime(tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
   return [...tasks].sort((left, right) => (
     productiveRuntimeMinutes(left) - productiveRuntimeMinutes(right) || taskId(left).localeCompare(taskId(right))
@@ -1999,7 +2041,11 @@ function taskIsFirmed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): b
   const firmedIds = snapshot.firmedIds instanceof Set
     ? snapshot.firmedIds
     : new Set(Array.from(snapshot.firmedIds, String));
-  return task.firmed === true || firmedIds.has(taskId(task));
+  // `task.firmed` is a Store mirror and may be stale in a detached snapshot.
+  // The caller folds manual/ECC/frozen protection into this effective set
+  // before evaluation; membership in that set is the only authoritative
+  // protection contract here.
+  return firmedIds.has(taskId(task));
 }
 
 // B7: resolve an order's plant the same way the legacy engine does
@@ -2013,7 +2059,10 @@ function taskIsFirmed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): b
 /** Phase 1a memo: built once, in full, on first use — a single linear scan
  * over `masterData.lines` replaces a `.find()` repeated for every task on
  * every line in the grouping loops below. */
-function plantByLineMap(ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapshot>): ReadonlyMap<string, string | null> {
+function plantByLineMap(
+  ctx: SetupRunContext,
+  snapshot: Pick<ScheduleSnapshot, 'masterData'>,
+): ReadonlyMap<string, string | null> {
   if (ctx._plantByLine) return ctx._plantByLine;
   const map = new Map<string, string | null>();
   for (const row of snapshot.masterData?.lines ?? []) {
@@ -2023,8 +2072,8 @@ function plantByLineMap(ctx: SetupRunContext, snapshot: Readonly<ScheduleSnapsho
   return map;
 }
 
-function resolveTaskPlant(
-  task: Readonly<NimbusTask>, snapshot: Readonly<ScheduleSnapshot>, ctx?: SetupRunContext,
+export function resolveTaskPlant(
+  task: Readonly<NimbusTask>, snapshot: Pick<ScheduleSnapshot, 'lineSettings' | 'masterData'>, ctx?: SetupRunContext,
 ): string | null {
   const direct = task.PLANT || task.plant;
   if (direct) return String(direct);
@@ -2322,7 +2371,7 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   const admissionDelta = ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
   if (admissionDelta) return admissionDelta;
   if (mode === 'due-date') return compareDueDateCandidate(left, right);
-  if (mode === 'min-changeover') {
+  if (mode === 'min-changeover' || mode === 'spt') {
     return compareObjectiveFacts(fragmentObjectiveFacts(left), fragmentObjectiveFacts(right), mode);
   }
   const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
@@ -2418,6 +2467,8 @@ function candidateForSequence(
     unadmitted: [],
     explanation,
     missingEdges: [...missingEdges, edge],
+    productiveRuntimeKey: productiveRuntimeKey(sequence),
+    productiveRuntimeMinutes: productiveRuntimeTotal(sequence),
   });
 
   const adjacencyFailure = sequenceAdjacencyFailure(line, sequence, fragment, adjacency);
@@ -2699,6 +2750,8 @@ function candidateForSequence(
     unadmitted,
     explanation,
     missingEdges,
+    productiveRuntimeKey: productiveRuntimeKey(sequence),
+    productiveRuntimeMinutes: productiveRuntimeTotal(sequence),
     finalState: predecessorState,
     finalPredecessorOrderId: predecessorOrderId,
   };
@@ -3288,10 +3341,14 @@ function searchFragment(
     const isBetterSptCandidate = (left: Readonly<DueDateCandidate>, right: Readonly<DueDateCandidate> | null): boolean => {
       if (!right || left.feasible !== right.feasible) return left.feasible;
       if (!left.feasible) return false;
-      // SPT keeps productive-runtime order as its primary objective. An
-      // alternate seed may replace it only when it admits more urgent work;
-      // equal-admission ties retain the first (runtime) seed.
-      return ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '') < 0;
+      // Admission remains the hard strategy gate. Once admissions tie, keep
+      // the known coverage safeguard ahead of the deterministic productive
+      // runtime sequence, then use the remaining canonical facts as stable
+      // tie-breakers. This prevents an SPT seed from winning merely because
+      // it was visited first when it leaves an uncovered edge behind.
+      const admissionDelta = ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
+      if (admissionDelta) return admissionDelta < 0;
+      return compareObjectiveFacts(fragmentObjectiveFacts(left), fragmentObjectiveFacts(right), 'spt') < 0;
     };
     const normalizeSptSequence = (base: ReadonlyArray<NimbusTask>): NimbusTask[] | null => (
       orderWithAdjacency(
@@ -3958,6 +4015,8 @@ function completeFinalBoundaryCandidate(
     unadmitted: [],
     explanation: [...preFirmed.explanation, ...continuation.explanation],
     missingEdges: [...preFirmed.missingEdges, ...continuation.missingEdges],
+    productiveRuntimeKey: productiveRuntimeKey(orderedTasks),
+    productiveRuntimeMinutes: productiveRuntimeTotal(orderedTasks),
   };
 }
 
@@ -4747,14 +4806,9 @@ function evaluateLineWithFirmedBoundaries(
           continue;
         }
         let selectedFallback: EvaluatedBoundaryFallback | null = null;
-        // Historically this fallback comparison always ran with the implicit
-        // 'due-date-first' default (compareCandidate called with no mode arg)
-        // regardless of the outer mode — 'min-changeover' ([2,3,5,4]) and
-        // 'throughput' ([5,2,3,4]) must keep getting that same
-        // 'due-date-first' ([2,3,4,5]) terminal-boundary comparison, byte-
-        // identical to before this file introduced 'due-date'. Only 'due-date'
-        // itself opts into its own comparator (compareDueDateCandidate) here.
-        const fallbackCompareMode = mode === 'due-date' ? 'due-date' : 'due-date-first';
+        // Complete boundary alternatives use the same mode-aware comparator
+        // as the primary search; never fall back to due-date-first ordering.
+        const fallbackCompareMode = mode;
         for (const candidate of completeFallbacks) {
           if (!selectedFallback || compareBoundaryFallback(candidate, selectedFallback, fallbackCompareMode) < 0) {
             selectedFallback = candidate;
@@ -5038,8 +5092,8 @@ function invalidHorizonResult(
   bounds: Readonly<DueDateFirstBounds>,
   method: SearchDiagnostics['method'],
 ): CandidateResult {
-  const planningStart = timestamp(bounds.planningStart) ?? timestamp(bounds.now);
-  const placementStart = timestamp(bounds.placementStart) ?? timestamp(bounds.now);
+  const planningStart = timestamp(bounds.planningStart);
+  const placementStart = timestamp(bounds.placementStart);
   const horizonEnd = timestamp(bounds.horizonEnd);
   const detail = !planningStart || !placementStart || !horizonEnd
     ? 'The optimizer requires valid planning and horizon timestamps.'
@@ -5074,7 +5128,10 @@ function invalidHorizonResult(
 }
 
 function hasInvalidHorizon(bounds: Readonly<DueDateFirstBounds>): boolean {
-  const placementStart = timestamp(bounds.placementStart) ?? timestamp(bounds.now);
+  // normalizeRunDates always materializes placementStart. Falling back to
+  // `now` here would turn an explicitly malformed placementStart back into a
+  // valid horizon and silently accept a bad detached request.
+  const placementStart = timestamp(bounds.placementStart);
   const horizonEnd = timestamp(bounds.horizonEnd);
   return !placementStart || !horizonEnd || horizonEnd <= placementStart;
 }
@@ -5632,6 +5689,70 @@ export function applyPatchesToSnapshot(tasks: ReadonlyArray<NimbusTask>, patches
   });
 }
 
+/** Attach the complete apply contract to a legacy or repair candidate. These
+ * paths do not run `finalizeCandidate`, but a worker response still needs
+ * detached dispositions and effective firming so Apply can validate it
+ * against the captured read model. */
+export function attachDetachedValidationContext(
+  candidate: CandidateResult,
+  baselineSnapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  effectiveFirmedIds: ReadonlySet<string>,
+): CandidateResult {
+  const snapshot: ScheduleSnapshot = { ...baselineSnapshot, firmedIds: new Set(effectiveFirmedIds) };
+  const patches = new Map(candidate.patches.map(patch => [String(patch.id), patch]));
+  const finalById = new Map(applyPatchesToSnapshot(snapshot.tasks, candidate.patches).map(task => [String(task.id), task]));
+  const dispositions: PlanningDisposition[] = [];
+  const reasonFor = (task: NimbusTask): { code: string; message: string } => (
+    planningDefect(snapshot, bounds, task)
+      ?? { code: 'no_fit_found', message: 'The repair did not produce a valid scheduled interval.' }
+  );
+  for (const task of eligibleTasks(snapshot, bounds)) {
+    const id = String(task.id);
+    const line = String(task.MACHINE);
+    if (taskIsFirmed(snapshot, task)) {
+      dispositions.push({ id, line, status: 'protected' });
+      continue;
+    }
+    const result = finalById.get(id) ?? task;
+    const start = timestamp(result.start_date);
+    const end = timestamp(result.end_date);
+    const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+    const scheduled = result.planning_status !== 'needs_planning'
+      && !!start && !!end && end > start && Number.isFinite(runtimeMinutes) && runtimeMinutes > 0;
+    if (scheduled) {
+      // A legacy patch changes only dates. Clear a stale queued status/reason
+      // when it has nevertheless produced a valid interval, while avoiding a
+      // redundant patch for an unchanged healthy incumbent.
+      if (result.planning_status === 'needs_planning' || result.planning_reason) {
+        patches.set(id, { id, changes: { ...patches.get(id)?.changes, planning_status: 'scheduled', planning_reason: null } });
+      }
+      dispositions.push({ id, line, status: 'scheduled' });
+      continue;
+    }
+    const reason = result.planning_reason?.code ? result.planning_reason : reasonFor(task);
+    patches.set(id, {
+      id,
+      changes: {
+        ...patches.get(id)?.changes,
+        start_date: null,
+        end_date: null,
+        scheduleSegments: [],
+        planning_status: 'needs_planning',
+        planning_reason: reason,
+      },
+    });
+    dispositions.push({ id, line, status: 'needs_planning', reason });
+  }
+  const normalized = {
+    ...candidate,
+    patches: [...patches.values()],
+    dispositions,
+    validationContext: { snapshot, baselineSnapshot, bounds },
+  };
+  return { ...normalized, validationFindings: validateCandidate(snapshot, bounds, normalized) };
+}
+
 /** SAP-only local calendar-day bounds; scheduled finish is never a due-date fallback. */
 export function allowedPlanningWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): { floor: Date | null; ceiling: Date | null; missingDue: boolean } {
   const plant = snapshot.masterData?.plants?.find(row => row.plant === bounds.setup.plant);
@@ -5685,35 +5806,36 @@ function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Due
 }
 
 function eligibleTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): NimbusTask[] {
+  const scopedTaskIds = bounds.scopeTaskIds instanceof Set
+    ? bounds.scopeTaskIds
+    : bounds.scopeTaskIds ? new Set(Array.from(bounds.scopeTaskIds, String)) : null;
   return snapshot.tasks.filter(task => {
     const line = String(task.MACHINE ?? '');
     if (!line || resolveTaskPlant(task, snapshot, bounds.runContext) !== bounds.setup.plant
       || snapshot.lineSettings[line]?.excludeFromOpt
-      || (bounds.lines?.length && !bounds.lines.includes(line))) return false;
+      || (bounds.lines?.length && !bounds.lines.includes(line))
+      || (scopedTaskIds && !scopedTaskIds.has(taskId(task)))) return false;
     // Protected work remains in the detached line model as an immutable
     // occupancy/predecessor boundary even when it sits outside this run's
     // mutable planning window. Unprotected scheduled work is scoped by
-    // interval intersection with [planningStart, horizonEnd); queued or
-    // malformed work is always eligible for repair.
+    // interval intersection with [planningStart, horizonEnd); only queued
+    // demand without a persisted interval is eligible without that scope.
     if (taskIsFirmed(snapshot, task)) return true;
-    if (task.planning_status === 'needs_planning') return true;
     const start = timestamp(task.start_date);
     const end = timestamp(task.end_date);
-    if (!start || !end || end <= start) return true;
-    // A persisted parent can sit exactly on the planning boundary while its
-    // child segments/runtime are stale or incomplete. Treat that malformed
-    // schedule as repairable even though a valid interval ending at the
-    // boundary is wholly outside [planningStart, horizonEnd). This preserves
-    // the strict half-open scope for valid incumbents without stranding a
-    // split-order parent that needs regeneration.
-    const expectedMinutes = Number(task.RUN_TIME) * 60;
-    const actualMinutes = productiveIntervals(task).reduce(
-      (sum, interval) => sum + (interval.end.getTime() - interval.start.getTime()) / 60000,
-      0,
-    );
-    if (!Number.isFinite(expectedMinutes) || expectedMinutes <= 0 || Math.abs(actualMinutes - expectedMinutes) > 0.001) return true;
-    const planningStart = timestamp(bounds.planningStart)?.getTime() ?? +bounds.now;
-    return end.getTime() > planningStart && start.getTime() < +bounds.horizonEnd;
+    const planningStart = timestamp(bounds.planningStart)?.getTime();
+    const horizonEnd = timestamp(bounds.horizonEnd)?.getTime();
+    // Store normalizes newly queued rows to `planning_status: "scheduled"`
+    // even while both dates are null. The absence of an interval is the
+    // authoritative queued shape; do not let that mirror status hide demand
+    // from the detached run.
+    if (!start && !end) return true;
+    // A scheduled row with one or more malformed date boundaries has no
+    // trustworthy interval to intersect. Keep it immutable until an explicit
+    // queue/status repair places it in scope; this prevents historical defects
+    // from being silently rewritten by a later optimizer run.
+    if (!start || !end || end <= start || planningStart === undefined || horizonEnd === undefined) return false;
+    return end.getTime() > planningStart && start.getTime() < horizonEnd;
   });
 }
 
@@ -5967,7 +6089,13 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
   const scopeIds = new Set(result.dispositions?.map(d => d.id));
   const predecessorById = new Map<string, string | null>();
-  const orderedFinal = final.filter(task => scopeIds.has(taskId(task)) && task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((a, b) => ordinalCompare(String(a.MACHINE), String(b.MACHINE)) || +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+  const orderedFinal = final.filter(task => {
+    const start = timestamp(task.start_date);
+    const end = timestamp(task.end_date);
+    return scopeIds.has(taskId(task))
+      && task.planning_status !== 'needs_planning'
+      && start && end && end > start;
+  }).sort((a, b) => ordinalCompare(String(a.MACHINE), String(b.MACHINE)) || +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
   for (let index = 0; index < orderedFinal.length; index++) predecessorById.set(taskId(orderedFinal[index]), index && orderedFinal[index - 1].MACHINE === orderedFinal[index].MACHINE ? taskId(orderedFinal[index - 1]) : null);
   const definition = bounds.setup.definition;
   const unknownStateIds = new Set(orderedFinal.flatMap(task => definition && !stateForOrder(task, definition) ? [taskId(task)] : []));
@@ -6032,7 +6160,10 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     iterationsUsed: result.diagnostics.iterationsUsed ?? result.diagnostics.candidateCount,
     eligibleCount: result.diagnostics.eligibleCount ?? scopeIds.size,
     evaluatedCount: result.diagnostics.evaluatedCount ?? result.diagnostics.candidateCount,
-    placedCount: result.diagnostics.placedCount ?? orderedFinal.length,
+    // This is a final-state count, not the number of patch records emitted by
+    // the primary search. Gap fill can add placements and unchanged incumbents
+    // can be represented without a patch.
+    placedCount: orderedFinal.length,
     unknownTailCount: unknownStateIds.size,
     unknownEdgeCount: unknownEdges,
     exhaustive: result.diagnostics.exhaustive ?? result.diagnostics.termination === 'completed',
@@ -6057,7 +6188,15 @@ export function fillPlanningGaps(
   const dispositions = new Map(candidate.dispositions?.map(d => [d.id, d]));
   const pending = urgencyOrder(snapshot, bounds, '', tasks).filter(task =>
     dispositions.get(taskId(task))?.status === 'needs_planning' && !planningDefect(snapshot, bounds, task));
-  if (!pending.length) return { ...candidate, gapFill: { complete: true, placed: 0, unchecked: 0, runtimeMs: bounds.clock() - started } };
+  if (!pending.length) {
+    // A completed gap check still needs the same final-state accounting pass
+    // as a run that inserted work. The primary candidate may have emitted
+    // fewer patches than the number of already-scheduled tasks in scope.
+    return refreshFinalMetrics(snapshot, bounds, {
+      ...candidate,
+      gapFill: { complete: true, placed: 0, unchecked: 0, runtimeMs: bounds.clock() - started },
+    });
+  }
   const revision = new Map<string, number>();
   const checked = new Map<string, number>();
   const availability = new Map<string, PlacementInterval[]>();
@@ -6078,9 +6217,11 @@ export function fillPlanningGaps(
     const id = taskId(task); const line = String(task.MACHINE);
     const peers = byLine.get(line)!;
     const lineIds = new Set(peers.map(taskId));
-    const accepted = applyPatchesToSnapshot(peers, [...patches.values()]).filter(item =>
-      dispositions.get(taskId(item))?.status !== 'needs_planning' && timestamp(item.start_date) && timestamp(item.end_date),
-    ).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+    const accepted = applyPatchesToSnapshot(peers, [...patches.values()]).filter(item => {
+      const start = timestamp(item.start_date);
+      const end = timestamp(item.end_date);
+      return dispositions.get(taskId(item))?.status !== 'needs_planning' && start && end && end > start;
+    }).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
     if (!availability.has(line)) availability.set(line, freeIntervalsFor(snapshot, line, bounds.setup.plant, bounds.now, bounds.horizonEnd, bounds.runContext));
     const free = availability.get(line)!;
     const transition = (predecessor: NimbusTask | null, successor: NimbusTask): number | null => {
@@ -6194,6 +6335,8 @@ function fragmentObjectiveFacts(candidate: Readonly<DueDateCandidate>): Objectiv
     setupMinutes: candidate.score[5] ?? 0,
     scheduledCount: Math.max(0, -(candidate.score[4] ?? 0)),
     instabilityMinutes: 0,
+    productiveRuntimeKey: candidate.productiveRuntimeKey ?? '',
+    productiveRuntimeMinutes: candidate.productiveRuntimeMinutes ?? 0,
     policyKey: candidate.policyKey,
     sequenceKey: candidate.sequenceKey,
   };
@@ -6211,7 +6354,7 @@ export function compareObjectiveFacts(
   const compareNumber = (leftValue: number, rightValue: number): number => leftValue - rightValue;
   const compare = (leftValue: number | string, rightValue: number | string, descending = false): number => {
     if (typeof leftValue === 'string' && typeof rightValue === 'string') return ordinalCompare(leftValue, rightValue);
-    const result = compareNumber(Number(leftValue), Number(rightValue));
+    const result = compareNumber(Number(leftValue ?? 0), Number(rightValue ?? 0));
     return descending ? -result : result;
   };
   const terms: Array<[keyof ObjectiveFacts, boolean]> = mode === 'min-changeover'
@@ -6228,7 +6371,7 @@ export function compareObjectiveFacts(
       ]
       : mode === 'spt'
         ? [
-          ['hardErrors', false], ['uncoveredEdges', false], ['overCap', false], ['lateCount', false],
+          ['hardErrors', false], ['uncoveredEdges', false], ['productiveRuntimeKey', false], ['overCap', false], ['lateCount', false],
           ['latenessMinutes', false], ['setupMinutes', false], ['scheduledCount', true],
           ['instabilityMinutes', false], ['sequenceKey', false],
         ]
@@ -6244,7 +6387,13 @@ export function compareObjectiveFacts(
             ['setupMinutes', false], ['instabilityMinutes', false], ['sequenceKey', false],
           ];
   for (const [key, descending] of terms) {
-    const delta = compare(left[key], right[key], descending);
+    const leftValue = key === 'productiveRuntimeKey'
+      ? (left.productiveRuntimeKey ?? String(left.productiveRuntimeMinutes ?? 0).padStart(16, '0'))
+      : left[key];
+    const rightValue = key === 'productiveRuntimeKey'
+      ? (right.productiveRuntimeKey ?? String(right.productiveRuntimeMinutes ?? 0).padStart(16, '0'))
+      : right[key];
+    const delta = compare(leftValue, rightValue, descending);
     if (delta) return delta;
   }
   return 0;
@@ -6256,6 +6405,11 @@ export function compareObjectiveFacts(
 export function objectiveFactsForCandidate(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>,
 ): ObjectiveFacts {
+  // Final arbitration may receive the original request bounds, before an
+  // evaluator has attached planningStart/runNow/placementStart and its run
+  // context. Normalize at this read-only boundary so scope and setup facts
+  // are identical during and after evaluation.
+  bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const ids = new Set(eligibleTasks(snapshot, bounds).map(taskId));
   const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
   let lateCount = 0; let lateness = 0; let setupMinutes = 0; let instability = 0;
@@ -6279,7 +6433,11 @@ export function objectiveFactsForCandidate(
   if (definition) for (const line of new Set(tasks.map(task => String(task.MACHINE)))) {
     let state = initialStateForLine(bounds, line, definition.signature_version).state;
     let previous: string | null = null;
-    const ordered = tasks.filter(task => String(task.MACHINE) === line && task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((a,b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+    const ordered = tasks.filter(task => {
+      const start = timestamp(task.start_date);
+      const end = timestamp(task.end_date);
+      return String(task.MACHINE) === line && task.planning_status !== 'needs_planning' && start && end && end > start;
+    }).sort((a,b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
     for (const task of ordered) {
       const successor = stateForOrder(task, definition);
       if (state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
@@ -6289,40 +6447,69 @@ export function objectiveFactsForCandidate(
       state = successor; previous = taskId(task);
     }
   }
-  const uncoveredKeys = new Set(candidate.missingEdges
-    .filter(edge => edge.reason === 'scheduled-without-setup' || edge.reason === UNCOVERED_SETUP_TRANSITION_REASON)
-    .map(missingEdgeKey));
-  const scheduled = tasks.filter(task => task.planning_status !== 'needs_planning'
-    && timestamp(task.start_date) && timestamp(task.end_date));
+  const scheduled = tasks.filter(task => {
+    const start = timestamp(task.start_date);
+    const end = timestamp(task.end_date);
+    return task.planning_status !== 'needs_planning' && start && end && end > start;
+  });
   const lines = [...new Set(scheduled.map(task => String(task.MACHINE)))].sort(ordinalCompare);
   const orderedByLine = lines.map(line => scheduled
     .filter(task => String(task.MACHINE) === line)
     .sort((left, right) => +timestamp(left.start_date)! - +timestamp(right.start_date)! || ordinalCompare(taskId(left), taskId(right))));
+  // Coverage is a fact of the final patched adjacency, never of a rejected
+  // permutation's diagnostics. Rejected alternatives can contain many more
+  // edges than the schedule that will actually be applied, so derive the
+  // count from each final line sequence and carry unknown signatures as an
+  // opaque break in the chain.
+  let uncoveredEdges = 0;
+  if (definition) for (const lineTasks of orderedByLine) {
+    const line = String(lineTasks[0]?.MACHINE ?? '');
+    let predecessorState = initialStateForLine(bounds, line, definition.signature_version).state;
+    let predecessorOrderId: string | null = null;
+    for (const task of lineTasks) {
+      const successorState = stateForOrder(task, definition);
+      if (predecessorState && successorState && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
+        const resolved = resolveSetup({
+          definition,
+          machine: line,
+          predecessorState,
+          successorState,
+          predecessorOrderId,
+          successorOrderId: taskId(task),
+          plantRows: bounds.setup.plant_rows,
+          machineRows: bounds.setup.machine_rows,
+          overrides: bounds.setup.overrides,
+          index: bounds.runContext?.resolutionIndex ?? undefined,
+        });
+        if (!resolved.covered || resolved.effectiveMin === null) uncoveredEdges += 1;
+      }
+      predecessorState = successorState;
+      predecessorOrderId = taskId(task);
+    }
+  }
   const policyKey = orderedByLine.map((lineTasks, index) => (
     `${lines[index]}:${policyKeyForSequence(snapshot, bounds.setup.plant, lines[index], lineTasks, bounds.runContext)}`
   )).join('|');
   const sequenceKey = orderedByLine.map((lineTasks, index) => (
     `${lines[index]}:${lineTasks.map(taskId).join(',')}`
   )).join('|');
-  const scoreUncovered = Number(candidate.score[SCORE_UNCOVERED]);
+  const runtimeOrdered = orderedByLine.flatMap(lineTasks => lineTasks);
   return {
     hardErrors: (candidate.validationFindings ?? []).filter(finding => finding.severity === 'error').length,
     overCap,
     lateCount,
     latenessMinutes: lateness,
-    uncoveredEdges: uncoveredKeys.size || (Number.isFinite(scoreUncovered) ? Math.max(0, scoreUncovered) : 0),
+    uncoveredEdges,
     setupMinutes,
     scheduledCount: scheduled.length,
     instabilityMinutes: instability,
+    productiveRuntimeKey: productiveRuntimeKey(runtimeOrdered),
+    productiveRuntimeMinutes: productiveRuntimeTotal(runtimeOrdered),
     policyKey,
     sequenceKey,
   };
 }
 
-function finalObjective(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>): number[] {
-  const facts = objectiveFactsForCandidate(snapshot, bounds, candidate);
-  return [facts.lateCount, facts.latenessMinutes, facts.setupMinutes, facts.instabilityMinutes, -facts.scheduledCount];
-}
 function compareFinalObjectives(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, left: Readonly<CandidateResult>, right: Readonly<CandidateResult>): number {
   return compareObjectiveFacts(
     objectiveFactsForCandidate(snapshot, bounds, left),

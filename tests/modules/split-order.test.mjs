@@ -231,7 +231,7 @@ test('Calendar.placeWithSetup uses effective calendar fragments and keeps setup 
   }
 });
 
-test('standard scheduling regenerates a logical parent as one split aggregate', () => {
+test('standard scheduling regenerates an in-window logical parent as one split aggregate', () => {
   const plant = 'P-STRATEGY-SPLIT';
   const line = 'L-STRATEGY-SPLIT';
   const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 20]]));
@@ -254,7 +254,11 @@ test('standard scheduling regenerates a logical parent as one split aggregate', 
   Store.setTasks([{
     id: 'strategy-split', plant, PLANT: plant, MACHINE: line, RUN_TIME: 14,
     start_date: new Date(horizonStart.getTime() - 2 * 60 * 60 * 1000),
-    end_date: horizonStart,
+    // The optimizer scope is half-open: a schedule ending exactly at
+    // planningStart is historical and must remain immutable. Keep this
+    // runtime-mismatched parent one hour into the window so regeneration is
+    // exercised without weakening that scope contract.
+    end_date: new Date(horizonStart.getTime() + 60 * 60 * 1000),
   }], 'test');
 
   Engine.runAndApply('spt', {

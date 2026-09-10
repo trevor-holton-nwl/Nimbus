@@ -409,7 +409,7 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
 });
 
 
-test('Engine.runAndApply("spt") leaves an order starting inside the frozen window untouched and never places another order into it (Step 8: legacy walk)', () => {
+test('Engine.runAndApply("spt") leaves an order starting inside the frozen window untouched and never places another order into it (Step 8: setup-aware path)', () => {
   const plant = 'FZ-SPT-PLANT';
   const line = 'FZ-SPT-LINE';
   const priorPlant = Store.selectedPlant;
@@ -421,7 +421,7 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   const ALL_DAY = { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] };
 
   Store.setSelectedPlant(plant, 'unit-test');
-  Store.replaceSetupSnapshot(null, 'unit-test'); // no active setup -- takes the legacy (non-setup-aware) path
+  Store.replaceSetupSnapshot(null, 'unit-test'); // no active setup -- uses the synthetic zero-cost setup-aware path
   Store.setMasterData({
     plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
     lines: [{ machine: line, plant }],
@@ -773,6 +773,38 @@ test('Engine.evaluateSchedule snapshots the live read model without publishing a
   }
 });
 
+test('snapshotSchedule scopes a reused line calendar by the task-resolved plant', () => {
+  const plant = 'SNAPSHOT-TASK-PLANT';
+  const mappedPlant = 'SNAPSHOT-MAPPED-PLANT';
+  const line = 'SNAPSHOT-REUSED-LINE';
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorCalendars = structuredClone(Store.calendars);
+  try {
+    // Master data points the reused machine at another plant, while the task
+    // carries the authoritative plant selected for this candidate. The
+    // detached scheduler makes the same task-level choice.
+    Store.setMasterData({
+      plants: [{ plant }, { plant: mappedPlant }],
+      lines: [{ machine: line, plant: mappedPlant }],
+    }, 'unit-test');
+    Store.replaceCalendars({
+      ...structuredClone(priorCalendars),
+      [line]: { workHours: { 1: [0, 24] } },
+    }, 'unit-test');
+    Store.setTasks([{ id: 'snapshot-reused-task', PLANT: plant, MACHINE: line, RUN_TIME: 1,
+      start_date: null, end_date: null }], 'unit-test');
+
+    const captured = snapshotSchedule(plant);
+    assert.ok(captured.calendars[line],
+      'a direct task plant must retain the line calendar even when line metadata maps elsewhere');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+  }
+});
+
 test('Engine.evaluateSchedule uses setup truth captured in the detached snapshot', () => {
   const plant = 'DETACHED-SETUP-TRUTH';
   const line = 'DETACHED-SETUP-LINE';
@@ -860,6 +892,129 @@ test('Engine.evaluateSchedule keeps planningStart separate from runNow and place
     assert.equal(result.validationContext?.bounds.planningStart.getTime(), planningStart.getTime());
     assert.equal(result.validationContext?.bounds.runNow.getTime(), runNow.getTime());
     assert.equal(result.validationContext?.bounds.placementStart.getTime(), runNow.getTime());
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
+test('Engine setup-aware routing carries respectCalendar into bounds and placement', () => {
+  const plant = 'ENGINE-CALENDAR-CONTRACT';
+  const line = 'ENGINE-CALENDAR-L1';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorBlocks = structuredClone(Store.blocks);
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setCalendar(line, { 1: [8, 18] }, 'unit-test');
+    Store.addBlock({ id: 'engine-calendar-blackout', plant, line, start: new Date('2035-08-06T09:00:00'), end: new Date('2035-08-06T10:00:00') }, 'unit-test');
+    Store.replaceSetupSnapshot({
+      plant, plant_active: true,
+      definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+    Store.setTasks([{ id: 'engine-calendar-order', PLANT: plant, MACHINE: line, COLOR: 'GREEN', RUN_TIME: 2,
+      original_end_date: new Date('2035-08-06T18:00:00'), start_date: null, end_date: null }], 'unit-test');
+
+    const result = Engine.evaluateSchedule('changeover', {
+      plant, respectCalendar: false, planningStart: new Date('2035-08-06T08:00:00'),
+      runNow: new Date('2035-08-06T08:00:00'), endDate: new Date('2035-08-06T12:00:00'),
+    });
+    const patch = result.patches.find(item => item.id === 'engine-calendar-order');
+    assert.equal(result.validationContext?.bounds.respectCalendar, false,
+      'Engine must propagate the calendar contract through the setup-aware route');
+    assert.equal(patch?.changes.start_date?.getTime(), new Date('2035-08-06T08:00:00').getTime(),
+      'calendar-neutral setup-aware placement must ignore a blackout');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.replaceBlocks(priorBlocks, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
+test('Engine rejects invalid date inputs, parses date-only bounds as local wall time, and derives placementStart', () => {
+  const plant = 'ENGINE-DATE-CONTRACT';
+  const line = 'ENGINE-DATE-L1';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    Store.setTasks([{ id: 'engine-date-order', PLANT: plant, MACHINE: line, RUN_TIME: 1,
+      start_date: null, end_date: null }], 'unit-test');
+
+    const result = Engine.evaluateSchedule('changeover', {
+      plant, startDate: '2035-08-06', endDate: '2035-08-07',
+      runNow: '2035-08-06T10:00:00', placementStart: '2035-08-05T00:00:00', respectCalendar: false,
+    });
+    const planningStart = result.validationContext?.bounds.planningStart;
+    const placementStart = result.validationContext?.bounds.placementStart;
+    assert.deepEqual(
+      [planningStart?.getFullYear(), planningStart?.getMonth(), planningStart?.getDate(), planningStart?.getHours()],
+      [2035, 7, 6, 0],
+      'date-only planning input must represent local plant midnight rather than UTC-shifted wall time',
+    );
+    assert.equal(placementStart?.getTime(), new Date('2035-08-06T10:00:00').getTime(),
+      'placementStart is derived as max(planningStart, runNow) and ignores an earlier explicit value');
+    assert.ok(result.patches.find(item => item.id === 'engine-date-order' && item.changes.start_date >= placementStart));
+
+    const invalid = Engine.evaluateSchedule('changeover', {
+      plant, startDate: 'not-a-date', endDate: '2035-08-07', runNow: '2035-08-06T10:00:00',
+    });
+    assert.equal(invalid.status, 'invalid_horizon');
+    assert.deepEqual(invalid.patches, []);
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
+test('legacy optimizer scopes malformed historical intervals before repair eligibility', () => {
+  const plant = 'LEGACY-HORIZON-SCOPE';
+  const line = 'LEGACY-HORIZON-L1';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    const historical = {
+      id: 'legacy-malformed-historical', PLANT: plant, MACHINE: line, RUN_TIME: 1,
+      start_date: new Date('2035-08-04T08:00:00'), end_date: null, planning_status: 'scheduled',
+    };
+    Store.setTasks([historical], 'unit-test');
+    const result = Engine.evaluateSchedule('spt', {
+      plant, respectFirmed: true, respectCalendar: false,
+      planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'),
+      endDate: new Date('2035-08-07T00:00:00'),
+    });
+    assert.equal(result.patches.some(patch => patch.id === historical.id), false,
+      'a malformed interval before the half-open planning scope must remain immutable on the legacy route');
   } finally {
     Store.setTasks(priorTasks, 'unit-test');
     Store.setMasterData(priorMasterData, 'unit-test');
@@ -2947,14 +3102,10 @@ test('Engine.runAndApply replaces stale setup results on synthetic SPT runs', ()
   // must not leave a stale result from an earlier setup-aware run lying
   // around.
   //
-  // B3a (2026-08-21): 'changeover' no longer has a non-setup-aware path at
-  // all — it ALWAYS routes through evaluateSetupAware now (via the real
-  // active-and-matching snapshot, or Engine._syntheticZeroCostSetupSnapshot
-  // otherwise), so it can no longer exercise "a later run that does NOT go
-  // through the setup-aware branch." 'spt' is the one mode B3a left
-  // untouched: it still only takes the setup-aware branch when the plant's
-  // real Store.setupSnapshot is genuinely active-and-matching, so it remains
-  // the correct probe for this invariant.
+  // B3a (2026-08-21): 'changeover' and 'spt' route through evaluateSetupAware
+  // now. A real active-and-matching snapshot is used when available; otherwise
+  // the engine supplies Engine._syntheticZeroCostSetupSnapshot, so both modes
+  // exercise the setup-aware lifecycle and can replace a stale prior result.
   const plant = 'SETUP-STALE-PLANT';
   const line = 'SETUP-STALE-LINE';
   const priorPlant = Store.selectedPlant;
@@ -2963,7 +3114,8 @@ test('Engine.runAndApply replaces stale setup results on synthetic SPT runs', ()
 
   Store.setSelectedPlant(plant, 'unit-test');
   // No Store.replaceSetupSnapshot call: this plant has no active setup
-  // definition, so runAndApply('spt', ...) takes the legacy (non-setup-aware) path.
+  // definition, so runAndApply('spt', ...) uses the synthetic zero-cost
+  // setup-aware path and still replaces the stale result.
   Store.setTasks([
     { id: 'stale-check-a', PLANT: plant, MACHINE: line, RUN_TIME: '1' },
   ], 'unit-test');
@@ -3014,8 +3166,8 @@ test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true,
 
 // ---------------------------------------------------------------------------
 // Engine.runAndApply('changeover', ...) -- respectFirmed must gate the
-// setup-aware branch's ECC-firmed fold, mirroring the legacy walk's
-// `(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed))` guard. Before
+// setup-aware branch's ECC-firmed fold, mirroring the prior per-line
+// protection rule's `(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed))` guard. Before
 // this fix, unchecking "Respect firmed" in the Optimize dialog had no effect
 // on an ECC-firmed order in changeover mode; a frozen-horizon order must stay
 // immovable regardless, since the frozen fold is unconditional.
@@ -3173,7 +3325,7 @@ test("Engine.evaluateSchedule('changeover') due-date push-forward cap is a no-op
 });
 
 
-test("Engine.evaluateSchedule('spt') legacy walk: due-date push-forward cap is a no-op when null vs. a very permissive limit", () => {
+test("Engine.evaluateSchedule('spt') setup-aware path: due-date push-forward cap is a no-op when null vs. a very permissive limit", () => {
   const child = String.raw`
     import { createRequire } from 'node:module';
     const require = createRequire(import.meta.url);
@@ -3187,9 +3339,7 @@ test("Engine.evaluateSchedule('spt') legacy walk: due-date push-forward cap is a
     const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
     const now = new Date('2035-03-01T00:00:00');
     Store.setSelectedPlant(plant, 'child-test');
-    // 'spt' only routes through the setup-aware evaluator when Store.setupSnapshot
-    // is genuinely active-and-matching -- default null here keeps it on the
-    // legacy per-line walk this test targets.
+    // A null setup snapshot selects the synthetic zero-cost setup-aware path.
     Store.replaceSetupSnapshot(null, 'child-test');
     Store.replaceCalendars({ [line]: { workHours: hours } }, 'child-test');
     Store.replacePlants({ [plant]: { workHours: hours } }, 'child-test');
@@ -3299,7 +3449,7 @@ test("Engine.evaluateSchedule('changeover') keeps an already-late order within i
 });
 
 
-test("Engine.evaluateSchedule('spt') legacy walk pulls a near-cap long order ahead of shorter SPT work via capAwareSequence", () => {
+test("Engine.evaluateSchedule('spt') setup-aware path preserves the near-cap SPT ordering", () => {
   const child = String.raw`
     import { createRequire } from 'node:module';
     const require = createRequire(import.meta.url);

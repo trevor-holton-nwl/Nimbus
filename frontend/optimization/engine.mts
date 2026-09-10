@@ -74,7 +74,9 @@ import {
   evaluateSptWithSetup as evaluateSptWithSetupPure,
   evaluateThroughput as evaluateThroughputPure,
   fillPlanningGaps,
+  attachDetachedValidationContext,
   SETUP_AWARE_CONVERGENCE_WINDOW,
+  resolveTaskPlant,
 } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type {
@@ -134,40 +136,34 @@ interface SortTerm {
  * is cloned at the Store boundary so candidate scheduling cannot hold a live
  * reference that a later Store mutation could alter while it is evaluating.
  *
- * `plant` (Phase 2, Pkg D — clone reduction) is optional: when the caller
- * already knows which plant it is about to evaluate, only THAT plant's lines
- * are cloned into `calendars` (derived via Store.getPlantForLine, the same
- * lineSettings/masterData resolution every other line→plant lookup in this
- * file uses) instead of every line the session has ever visited. Every other
- * member stays whole (tasks/firmedIds/alerts/blocks/plantBlocks/plants/
- * lineSettings/masterData/priorityRankMaps) — downstream reads depend on
- * them being unscoped.
- *
- * The filter below only DROPS a line when Store.getPlantForLine positively
- * resolves it to a *different* plant. A line Store can't resolve (no
- * lineSettings/masterData entry) is KEPT rather than dropped: getPlantForLine
- * is lineSettings/masterData-only, but setup-scheduler's resolveTaskPlant
- * also checks each task's own PLANT field, so a line with no master-data
- * plant mapping can still be scheduled for this plant via its tasks' PLANT.
- * Dropping such a line's calendar here would silently starve it of real work
- * hours — freeIntervalsFor falls back to a default 7:00-19:00 window and
- * hasNominalWindow returns false, producing wrongful overlong splits under
- * 'overlong_only'. Confirmed safe otherwise: every ScheduleSnapshot.calendars
- * consumer (setup-scheduler.mts's freeIntervalsFor/jointWindowForDay/
- * hasNominalWindow, and sourceLineWorkHours below) only ever looks up a
- * `line` that already passed the SAME plant's task filter upstream. Omitting
- * `plant` (or passing none) reproduces the prior unscoped behavior exactly. */
+ * `plant` is optional: when the caller already knows which plant it is about
+ * to evaluate, calendars are cloned only for machine lines belonging to that
+ * plant. The line set is resolved from the cloned task, line-settings, and
+ * master-data snapshots with the same resolver used by the detached
+ * scheduler, including a task's direct plant value for reused or mismapped
+ * machine codes. Every other member stays whole because downstream planning
+ * and apply validation depend on the complete snapshot. Omitting `plant`
+ * preserves the unscoped session snapshot. */
 export function snapshotSchedule(plant?: string): ScheduleSnapshot {
   const _pmT0s = performance.now();
   try {
-    const sourceCalendars = plant
-      ? Object.fromEntries(Object.entries(Store.calendars).filter(([line]) => {
-          const p = Store.getPlantForLine(line);
-          return !p || p === plant;
-        }))
+    const tasks = structuredClone(Store.tasksArr);
+    const lineSettings = structuredClone(Store.lineSettings);
+    const masterData = structuredClone(Store.masterData);
+    // Capture calendars from the actual scoped task lines using the same
+    // task-level resolver as the detached scheduler. A reused machine code
+    // may have a direct task plant that differs from line metadata.
+    const scopedLines = plant
+      ? new Set(tasks
+        .filter(task => resolveTaskPlant(task, { lineSettings, masterData }) === plant)
+        .map(task => String(task.MACHINE ?? ''))
+        .filter(Boolean))
+      : null;
+    const sourceCalendars = scopedLines
+      ? Object.fromEntries(Object.entries(Store.calendars).filter(([line]) => scopedLines.has(line)))
       : Store.calendars;
     return {
-      tasks: structuredClone(Store.tasksArr),
+      tasks,
       firmedIds: Array.from(Store.firmedIds), // manual firms only — ECC/frozen derivation joins at the setup-aware fold; do not union here.
       alerts: structuredClone(Store.alerts),
       selectedPlant: Store.selectedPlant,
@@ -175,8 +171,8 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
       plantBlocks: structuredClone(Store.plantBlocks),
       calendars: structuredClone(sourceCalendars),
       plants: structuredClone(Store.plants),
-      lineSettings: structuredClone(Store.lineSettings),
-      masterData: structuredClone(Store.masterData),
+      lineSettings,
+      masterData,
       priorityRankMaps: structuredClone(Store.priorityRankMaps),
       setupSnapshot: structuredClone(Store.setupSnapshot),
       frozenHorizonEnd: Store.frozenHorizonEnd ? new Date(Store.frozenHorizonEnd) : null,
@@ -205,14 +201,14 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
 export function effectiveFirmedIdSet(
   tasks: ReadonlyArray<NimbusTask>,
   baseFirmedIds: ReadonlySet<string> | ReadonlyArray<string>,
-  horizonStart: Date,
+  runNow: Date,
   respectFirmed: boolean,
   frozenHorizonEnd?: Date | null,
 ): Set<string> {
   const ids = new Set<string>(respectFirmed ? Array.from(baseFirmedIds, String) : []);
   const frozenEnd = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
   for (const t of tasks) {
-    if ((respectFirmed && t.ecc_firmed) || Engine.isFrozenHorizon(t, horizonStart, frozenEnd)) ids.add(String(t.id));
+    if ((respectFirmed && t.ecc_firmed) || Engine.isFrozenHorizon(t, runNow, frozenEnd)) ids.add(String(t.id));
   }
   return ids;
 }
@@ -529,6 +525,118 @@ const SETUP_AWARE_ITERATION_CAP = 20000;
 // duplicating the number.
 export const SETUP_AWARE_DEADLINE_MS = 5000;
 
+function parseDateOnlyAsWallClock(value: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+    ? date
+    : null;
+}
+
+/** Project an absolute instant into the naive wall-clock Date convention used
+ * by Calendar and the persisted schedule. Date-only/naive date-time inputs
+ * are already wall-clock values and are handled without this projection. */
+function plantWallClockFromInstant(timezone: string | null | undefined, instant: Date): Date | null {
+  if (!timezone) return new Date(instant);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
+      second: 'numeric', hourCycle: 'h23',
+    }).formatToParts(instant);
+    const values: Record<string, number> = {};
+    for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
+    if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
+    return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, values.second, instant.getMilliseconds());
+  } catch {
+    return null;
+  }
+}
+
+function hasExplicitDate(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+function normalizeOptimizerDate(
+  value: unknown,
+  timezone: string | null | undefined,
+  absolute = false,
+): Date | null {
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) return null;
+    return absolute ? plantWallClockFromInstant(timezone, value) : new Date(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    const instant = new Date(value);
+    return absolute ? plantWallClockFromInstant(timezone, instant) : instant;
+  }
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const text = value.trim();
+  const dateOnly = parseDateOnlyAsWallClock(text);
+  if (dateOnly) return dateOnly;
+  const instant = new Date(text);
+  if (!Number.isFinite(instant.getTime())) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text);
+  // A naive date-time follows the same plant wall-clock convention as a
+  // date-only value. Only an explicit zone (or a Date/number supplied as an
+  // absolute instant above) is projected through the plant timezone.
+  return hasTimezone ? plantWallClockFromInstant(timezone, instant) : instant;
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function finiteDate(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? new Date(value) : null;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+  return null;
+}
+
+interface BacklogRunDates {
+  runAt: Date;
+  now: Date;
+  from: Date;
+  to: Date;
+}
+
+function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>): BacklogRunDates {
+  const timezone = sourceMasterData()?.plants?.find(row => row.plant === plant)?.timezone;
+  if (typeof timezone !== 'string' || !timezone.trim()) {
+    throw new Error(`Remove Backlog requires a configured IANA timezone for plant ${plant}`);
+  }
+  const parseAbsolute = (value: unknown): Date | null => {
+    if (!hasExplicitDate(value)) return null;
+    if (value instanceof Date) return Number.isFinite(value.getTime()) ? new Date(value) : null;
+    if (typeof value === 'number' || typeof value === 'string') {
+      const parsed = new Date(value);
+      return Number.isFinite(parsed.getTime()) ? parsed : null;
+    }
+    return null;
+  };
+  const runAt = parseAbsolute(opts.runAt) ?? (hasExplicitDate(opts.runAt) ? null : new Date());
+  if (!runAt) throw new Error('Remove Backlog requires a valid runAt timestamp');
+  const now = Engine._plantWallNow(timezone, runAt);
+  const from = hasExplicitDate(opts.startDate)
+    ? normalizeOptimizerDate(opts.startDate, timezone)
+    : new Date(now);
+  const to = hasExplicitDate(opts.endDate)
+    ? normalizeOptimizerDate(opts.endDate, timezone)
+    : addLocalDays(now, 35);
+  if (!from || !to || to <= from) throw new Error('Remove Backlog requires a valid From and To date range');
+  return { runAt, now, from, to };
+}
+
 /** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
  * Live optimizer and repair runs retain their existing ErrorLog behavior. */
 export function reportSchedulerDiagnostic(
@@ -564,7 +672,7 @@ export function sourceGetPlantForLine(line: string): string | null {
 function sourceTasksByPlant(plant: string | null): NimbusTask[] {
   if (!_candidateSnapshot) return Store.tasksByPlant(plant);
   if (!plant) return [];
-  return _candidateSnapshot.tasks.filter(task => (task.PLANT || sourceGetPlantForLine(task.MACHINE)) === plant);
+  return _candidateSnapshot.tasks.filter(task => resolveTaskPlant(task, _candidateSnapshot!) === plant);
 }
 
 function sourceTask(id: string): NimbusTask | undefined {
@@ -627,7 +735,6 @@ function detachedCandidateResult(
     ...(backlogResult ? { backlogResult } : {}),
   };
 }
-
 
 /* =============================================================================
    ENGINE — scheduling + optimisation.
@@ -812,8 +919,8 @@ export const Engine = {
    *  authoritative "now" pass it explicitly instead, so this stays
    *  consistent with the rest of that call site's own scoping rather than
    *  splitting into two different clocks in the same run:
-   *  runAndApply's isAged/isOutOfWin (its horizonStart, itself already
-   *  injectedNow-aware for candidate runs) and removeBacklog's plant-local
+   *  runAndApply's isAged/isOutOfWin (its planningStart, with runNow
+   *  injected for candidate runs) and removeBacklog's plant-local
    *  wall-clock `now` (Engine._plantWallNow) both thread their own value
    *  through; autoReflow has no such concept and relies on the default.
    *
@@ -923,8 +1030,10 @@ export const Engine = {
     patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
     tasks: ReadonlyArray<NimbusTask>,
     plant: string | null,
+    masterDataOverride?: NimbusMasterData | null,
   ): { orders: number; lines: number; days: number | null } {
-    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
+    const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
+    const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
     const days = Number.isInteger(value) && (value as number) >= 0 ? (value as number) : null;
     if (days === null) return { orders: 0, lines: 0, days: null };
     const byId = new Map(tasks.map(t => [String(t.id), t]));
@@ -935,7 +1044,7 @@ export const Engine = {
       if (!endDate) continue;
       const task = byId.get(String(patch.id));
       if (!task) continue;
-      const ceiling = Engine.latestAllowedEnd(task, plant);
+      const ceiling = Engine.latestAllowedEnd(task, plant, masterData);
       if (!ceiling) continue;
       if (new Date(endDate).getTime() > ceiling.getTime()) {
         orders += 1;
@@ -1084,22 +1193,7 @@ export const Engine = {
     const plant = (opts.plant as string | undefined) ?? sourceSelectedPlant();
     if (!plant) throw new Error('Remove Backlog requires a selected plant');
     const splitPolicy = Engine.splitOrderPolicyFor(plant);
-    const row = sourceMasterData()?.plants?.find(p => p.plant === plant);
-    const timezone = row?.timezone;
-    if (typeof timezone !== 'string' || !timezone.trim()) {
-      throw new Error(`Remove Backlog requires a configured IANA timezone for plant ${plant}`);
-    }
-    const runAtInput = opts.runAt;
-    const runAtRaw = runAtInput instanceof Date
-      ? runAtInput
-      : (typeof runAtInput === 'string' || typeof runAtInput === 'number') ? new Date(runAtInput) : new Date();
-    const runAt = Number.isFinite(runAtRaw.getTime()) ? runAtRaw : new Date();
-    const now = Engine._plantWallNow(timezone, runAt);
-    const from = opts.startDate ? new Date(opts.startDate as string | number | Date) : new Date(now);
-    const to = opts.endDate ? new Date(opts.endDate as string | number | Date) : new Date(now.getTime() + 35 * Config.MS_DAY);
-    if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
-      throw new Error('Remove Backlog requires valid From and To dates');
-    }
+    const { now, from, to } = normalizeBacklogRunDates(plant, opts);
 
     const diagnostics: RemoveBacklogDiagnostics = {
       backlogFound: 0, moved: 0, firmedMoved: 0, frozenMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
@@ -1115,8 +1209,17 @@ export const Engine = {
         diagnostics.missingStartIds.push(task.id);
         continue;
       }
-      const snapshotStart = new Date(task.start_date);
-      if (snapshotStart < from || snapshotStart > to) continue;
+      const snapshotStart = finiteDate(task.start_date);
+      const snapshotEnd = finiteDate(task.end_date);
+      if (!snapshotStart) {
+        diagnostics.missingStartIds.push(task.id);
+        continue;
+      }
+      // A repair pass may only move a trustworthy existing interval. A
+      // one-sided, reversed, or invalid scheduled row is retained for an
+      // explicit data-repair flow instead of being rewritten from RUN_TIME.
+      if (!snapshotEnd || snapshotEnd <= snapshotStart) continue;
+      if (snapshotStart < from || snapshotStart >= to) continue;
       const line = task.MACHINE || 'Unknown';
       const list = grouped.get(line) || [];
       list.push({ task, snapshotStart });
@@ -1181,7 +1284,7 @@ export const Engine = {
           }
           cursor = end;
           const currentStart = item.snapshotStart.getTime();
-          const currentEnd = item.task.end_date?.getTime() ?? NaN;
+          const currentEnd = finiteDate(item.task.end_date)?.getTime() ?? NaN;
           const segmentsChanged = scheduleSegments !== undefined
             && !Engine._sameScheduleSegments(item.task.scheduleSegments, scheduleSegments);
           if (currentStart === start.getTime() && currentEnd === end.getTime() && !segmentsChanged) continue;
@@ -1709,8 +1812,53 @@ export const Engine = {
     // before priority-term creation so this path cannot accidentally read rank
     // maps, firmed protection, or the day-integrity resequencer.
     if (mode === 'backlog') {
-      const result = Engine.removeBacklog({ ...opts, plant });
-      if (candidateRun) return detachedCandidateResult(result.patches, _pmT0e, 'completed', result);
+      const backlogDates = normalizeBacklogRunDates(plant, opts);
+      const result = Engine.removeBacklog({ ...opts, plant, runAt: backlogDates.runAt });
+      if (candidateRun) {
+        const baselineSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
+        const validationSetup = Engine._syntheticZeroCostSetupSnapshot(plant, baselineSnapshot);
+        const maxPatchedEnd = result.patches.reduce((latest, patch) => {
+          const end = finiteDate(patch.changes.end_date)?.getTime() ?? NaN;
+          return Number.isFinite(end) ? Math.max(latest, end) : latest;
+        }, backlogDates.to.getTime());
+        const validationHorizon = new Date(Math.min(8_640_000_000_000_000, maxPatchedEnd + 1));
+        const allowedLines = Array.isArray(opts.lines) && opts.lines.length
+          ? new Set((opts.lines as unknown[]).map(String)) : null;
+        const scopeTaskIds = baselineSnapshot.tasks
+          .filter(task => resolveTaskPlant(task, baselineSnapshot) === plant)
+          .filter(task => !allowedLines || allowedLines.has(String(task.MACHINE ?? '')))
+          .filter(task => {
+            const start = finiteDate(task.start_date)?.getTime() ?? NaN;
+            const end = finiteDate(task.end_date)?.getTime() ?? NaN;
+            return Number.isFinite(start) && Number.isFinite(end) && end > start && start < validationHorizon.getTime()
+              && Number.isFinite(Number(task.RUN_TIME)) && Number(task.RUN_TIME) > 0;
+          })
+          .map(task => String(task.id));
+        const placementStart = new Date(Math.max(backlogDates.from.getTime(), backlogDates.now.getTime()));
+        const backlogBounds: DueDateFirstBounds = {
+          setup: validationSetup,
+          exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+          iterationCap: SETUP_AWARE_ITERATION_CAP,
+          clock: () => performance.now(),
+          deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
+          now: placementStart,
+          planningStart: backlogDates.from,
+          runNow: backlogDates.now,
+          placementStart,
+          horizonEnd: validationHorizon,
+          lines: Array.isArray(opts.lines) ? (opts.lines as unknown[]).map(String) : undefined,
+          scopeTaskIds,
+          respectCalendar: true,
+          notBefore: () => null,
+          notAfter: () => null,
+        };
+        return attachDetachedValidationContext(
+          detachedCandidateResult(result.patches, _pmT0e, 'completed', result),
+          baselineSnapshot,
+          backlogBounds,
+          new Set(),
+        );
+      }
       Engine.lastBacklogResult = result;
       if (result.patches.length) Store.updateMany(result.patches, 'engine-backlog');
       Store.setLastOptimize(new Date(), 'engine-backlog');
@@ -1735,27 +1883,60 @@ export const Engine = {
     const splitPolicy: SplitOrderPolicy = respectCalendar ? Engine.splitOrderPolicyFor(plant) : 'never';
     const sortTerms = Engine._sortTerms(mode, { plant });
 
-    const optionDate = (value: unknown): Date | null => {
-      const date = value instanceof Date
-        ? new Date(value)
-        : (typeof value === 'string' || typeof value === 'number') ? new Date(value) : null;
-      return date && Number.isFinite(date.getTime()) ? date : null;
+    const plantTimezone = sourceMasterData()?.plants?.find(row => row.plant === plant)?.timezone ?? null;
+    const invalidDateFields: string[] = [];
+    const invalidDate = (): Date => new Date(Number.NaN);
+    const readDate = (value: unknown, field: string, absolute = false): Date | null => {
+      if (!hasExplicitDate(value)) return null;
+      const parsed = normalizeOptimizerDate(value, plantTimezone, absolute);
+      if (!parsed) invalidDateFields.push(field);
+      return parsed;
     };
-    const injectedNow = candidateRun ? optionDate(opts.now) : null;
-    const runNow = optionDate(opts.runNow) ?? optionDate(opts.runAt) ?? injectedNow ?? (() => {
-      const d = new Date(); d.setSeconds(0, 0); return d;
-    })();
-    const planningStart = optionDate(opts.planningStart) ?? optionDate(opts.startDate) ?? new Date(runNow);
-    const placementStart = optionDate(opts.placementStart)
-      ?? new Date(Math.max(planningStart.getTime(), runNow.getTime()));
-    const horizonEnd = optionDate(opts.endDate)
-      ?? new Date(planningStart.getTime() + 35 * 24 * Config.MS_HOUR);
-    // Compatibility alias for the legacy walk: it is the planning scope
-    // lower bound, while `placementStart` is the floor for newly generated
-    // setup/production and `runNow` is the captured wall-clock instant.
-    const horizonStart = planningStart;
+    const liveClock = (): Date => {
+      const now = new Date();
+      now.setSeconds(0, 0);
+      return plantWallClockFromInstant(plantTimezone, now) ?? now;
+    };
+    const injectedNow = candidateRun ? readDate(opts.now, 'now', true) : null;
+    const explicitRunNow = hasExplicitDate(opts.runNow) ? readDate(opts.runNow, 'runNow', true)
+      : hasExplicitDate(opts.runAt) ? readDate(opts.runAt, 'runAt', true)
+        : injectedNow;
+    const runNow = explicitRunNow ?? (invalidDateFields.length ? invalidDate() : liveClock());
+    const explicitPlanning = hasExplicitDate(opts.planningStart) ? readDate(opts.planningStart, 'planningStart')
+      : hasExplicitDate(opts.startDate) ? readDate(opts.startDate, 'startDate')
+        : null;
+    const planningStart = explicitPlanning ?? (invalidDateFields.length ? invalidDate() : new Date(runNow));
+    // placementStart is derived only from planningStart and runNow. A legacy
+    // supplied value is validated for a useful error, then deliberately
+    // ignored so it cannot backdate newly generated work.
+    if (hasExplicitDate(opts.placementStart)) readDate(opts.placementStart, 'placementStart');
+    const placementStart = Number.isFinite(planningStart.getTime()) && Number.isFinite(runNow.getTime())
+      ? new Date(Math.max(planningStart.getTime(), runNow.getTime()))
+      : invalidDate();
+    const explicitHorizonEnd = hasExplicitDate(opts.endDate) ? readDate(opts.endDate, 'endDate') : null;
+    const horizonEnd = explicitHorizonEnd ?? (invalidDateFields.length
+      ? invalidDate()
+      : addLocalDays(planningStart, 35));
+    // The planning scope lower bound, placement floor, and captured wall
+    // clock are separate facts; only the first scopes existing schedules.
     const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < planningStart;
     const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date >= horizonEnd;
+    if (invalidDateFields.length) {
+      const invalid: CandidateResult = {
+        ...detachedCandidateResult([], _pmT0e),
+        status: 'invalid_horizon',
+        explanation: [{ code: 'invalid_horizon', message: `The optimizer received invalid date input(s): ${invalidDateFields.join(', ')}.` }],
+        diagnostics: {
+          ...detachedCandidateResult([], _pmT0e).diagnostics,
+          termination: 'infeasible',
+          runtimeMs: performance.now() - _pmT0e,
+          events: [],
+        },
+      };
+      if (candidateRun) return invalid;
+      Toast.show(invalid.explanation[0].message, 'error');
+      return;
+    }
     if (horizonEnd <= placementStart) {
       const invalid: CandidateResult = {
         ...detachedCandidateResult([], _pmT0e),
@@ -1776,10 +1957,10 @@ export const Engine = {
     // "Include Setup Times in Optimizer" (plants.setup_active, surfaced as
     // SetupSnapshot.plant_active — Workstream D2 relocated this off the
     // vestigial per-signature-version setup_definition.active) routes
-    // spt/changeover through the setup-aware evaluators
-    // (setup-scheduler.mjs) instead of the legacy per-line walk below. Mirrors
-    // the same live gate Engine.autoReflow already reads for incremental
-    // reflow. Search-safety limits are hardcoded (see SETUP_AWARE_* above) —
+    // changeover, duedate, and spt through the setup-aware evaluators
+    // (setup-scheduler.mjs). The internal compatibility allocator below is
+    // retained for callers that bypass this dispatch. Search-safety limits are
+    // hardcoded (see SETUP_AWARE_* above) —
     // the perf-measurement gate this was meant to come from was never run.
     //
     // B3a (2026-08-21): 'changeover' no longer falls through to the legacy
@@ -1793,8 +1974,10 @@ export const Engine = {
     // takes the setup-aware branch, synthesizing the same zero-cost snapshot
     // when the plant has no genuine active-and-matching one, but selects the
     // 'due-date' evaluator mode instead of 'min-changeover'.
-    // 'spt' is untouched: it still only takes this branch when genuinely
-    // active-and-matching, exactly as before B3a.
+    // 'spt' uses the same setup-aware evaluator as the other optimizer modes;
+    // an inactive or mismatched setup snapshot receives the synthetic
+    // zero-cost snapshot above so mode selection cannot silently switch
+    // algorithms between plants.
     const setupSnapshot = _candidateSnapshot?.setupSnapshot !== undefined
       ? _candidateSnapshot.setupSnapshot
       : Store.setupSnapshot;
@@ -1822,7 +2005,7 @@ export const Engine = {
       // in the Optimize dialog must free ECC-firmed orders here too, not just
       // in the legacy per-line path. The frozen-horizon fold is unconditional
       // regardless of respectFirmed, since it is a scheduling-window
-      // constraint, not a firming concept. Passes horizonStart (this run's
+      // constraint, not a firming concept. Passes runNow (this run's
       // own "now", injectedNow-aware for candidate runs) rather than the
       // real-time default, so a detached preview evaluated at a simulated
       // instant agrees with itself. Never written back to the Store — this
@@ -1831,9 +2014,9 @@ export const Engine = {
       const snapshot: ScheduleSnapshot = { ...baseSnapshot, firmedIds: effectiveFirmedIds };
       const bounds: DueDateFirstBounds = {
         // Non-null by construction: this branch is only reached when either
-        // mode === 'changeover' (effectiveSetupSnapshot is always the real
-        // active-and-matching snapshot or the synthetic fallback) or the real
-        // snapshot is genuinely active-and-matching ('spt').
+        // mode is one of the setup-aware modes, so effectiveSetupSnapshot is
+        // always the real active-and-matching snapshot or the synthetic
+        // fallback.
         setup: effectiveSetupSnapshot!,
         exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
         iterationCap: SETUP_AWARE_ITERATION_CAP,
@@ -1851,6 +2034,7 @@ export const Engine = {
         placementStart,
         horizonEnd,
         lines: opts.lines as string[] | undefined,
+        respectCalendar,
         notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData),
         notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData),
         convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
@@ -2019,11 +2203,26 @@ export const Engine = {
       ? new Set<string>(optsLines)
       : null;
 
-    // Group tasks by line using the pre-built plant index (avoids a full tasksArr scan).
+    // Group only immutable boundaries and valid intervals intersecting the
+    // half-open planning scope. A malformed historical row must not become
+    // repairable merely because the legacy walk has no setup-aware
+    // `eligibleTasks` call of its own.
+    const legacyProtected = (task: NimbusTask): boolean => (
+      (respectFirmed && (sourceIsFirmed(task.id) || !!task.ecc_firmed))
+      || Engine.isFrozenHorizon(task, runNow, detachedFrozenHorizonEnd)
+    );
+    const legacyEligible = (task: NimbusTask): boolean => {
+      if (legacyProtected(task)) return true;
+      const start = finiteDate(task.start_date);
+      const end = finiteDate(task.end_date);
+      if (!start && !end) return true;
+      if (!start || !end || end <= start) return false;
+      return end > planningStart && start < horizonEnd;
+    };
     // Skip non-allowed lines at insertion when a line filter is supplied so we don't
     // pay for grouping work that will just be discarded.
     const groups: Record<string, { line: string; tasks: NimbusTask[] }> = {};
-    for (const t of sourceTasksByPlant(plant)) {
+    for (const t of sourceTasksByPlant(plant).filter(legacyEligible)) {
       const line = t.MACHINE || 'Unknown';
       if (allowed && !allowed.has(line)) continue;
       (groups[line] ||= { line, tasks: [] }).tasks.push(t);
@@ -2048,8 +2247,8 @@ export const Engine = {
       // by this split (_dispatchPolicyAware, the SPT walk below) leaves it
       // untouched. Engine.isFrozenHorizon carries its
       // own distinct reason for the UI; this split itself doesn't care why
-      // a task is immovable, only that it is. Passes horizonStart as this
-      // check's "now" — the SAME reference isAged/isOutOfWin already use —
+      // a task is immovable, only that it is. Passes the captured runNow as
+      // this check's "now" — the SAME reference isAged/isOutOfWin already use —
       // so all three agree on one clock for this run instead of splitting.
       // ECC-firmed rides the respectFirmed gate exactly like a manual firm — so
       // 'backlog' mode (which sets respect off / moves firmed by design) may
@@ -2063,9 +2262,9 @@ export const Engine = {
 
       firmedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
 
-      // Cursor floor is max(horizonStart, now): extending "From" backwards
-      // widens eligibility (older orders become free to move) but never
-      // schedules anything in the literal past.
+      // Cursor floor is the derived placementStart (max(planningStart,
+      // runNow)): widening the planning scope backwards never schedules new
+      // work before the captured run clock.
       const now = new Date(runNow);
       now.setSeconds(0, 0);
       const cursorFloor = placementStart.getTime() > now.getTime() ? placementStart : now;
@@ -2080,10 +2279,10 @@ export const Engine = {
         cursor = new Date(cursorFloor);
       }
 
-      // B3a: 'changeover' always exits via the setup-aware branch above —
-      // it can never reach the splitPolicy fork or the plain walk below.
-      // Only 'spt' reaches either of them now (Engine._dispatchPolicyAware
-      // remains 'spt''s split-policy-aware placement mechanism).
+      // B3a: public changeover, duedate, and spt runs exit via the setup-aware
+      // branch above and cannot reach the splitPolicy fork or plain walk below.
+      // The compatibility allocator remains available to callers that
+      // explicitly bypass setup-aware dispatch.
       if (splitPolicy !== 'never') {
         const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
         decorated.sort((a, b) => {
@@ -2191,7 +2390,46 @@ export const Engine = {
       Calendar._endRun();
     }
 
-    if (candidateRun) return detachedCandidateResult(patches, _pmT0e);
+    if (candidateRun) {
+      // Worker responses for the legacy fallback need the same apply-time
+      // contract as setup-aware candidates. Build it from this detached read
+      // model while the exact run clocks and effective firming decisions are
+      // still in scope; never make the main thread reconstruct these facts
+      // from live Store state after the worker returns.
+      const validationSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
+      const storedSetup = validationSnapshot.setupSnapshot;
+      const validationSetup = storedSetup?.plant === plant && storedSetup.plant_active
+        ? storedSetup
+        : Engine._syntheticZeroCostSetupSnapshot(plant, validationSnapshot);
+      const validationFirmedIds = effectiveFirmedIdSet(
+        validationSnapshot.tasks,
+        validationSnapshot.firmedIds,
+        runNow,
+        respectFirmed,
+        validationSnapshot.frozenHorizonEnd,
+      );
+      return attachDetachedValidationContext(
+        detachedCandidateResult(patches, _pmT0e),
+        validationSnapshot,
+        {
+          setup: validationSetup,
+          exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+          iterationCap: SETUP_AWARE_ITERATION_CAP,
+          clock: () => performance.now(),
+          deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
+          now: placementStart,
+          planningStart,
+          runNow,
+          placementStart,
+          horizonEnd,
+          lines: Array.isArray(opts.lines) ? opts.lines as string[] : undefined,
+          respectCalendar,
+          notBefore: task => Engine.earliestAllowedStart(task, plant, validationSnapshot.frozenHorizonEnd, validationSnapshot.masterData),
+          notAfter: task => Engine.latestAllowedEnd(task, plant, validationSnapshot.masterData),
+        },
+        validationFirmedIds,
+      );
+    }
 
     // Due-date push-forward limit (plants.max_push_forward_days): same
     // post-hoc reporting as the setup-aware branch above, using this run's
@@ -2404,13 +2642,61 @@ export function rehydrateOptimizerCandidate(
   snapshot: ScheduleSnapshot,
   serialized?: SerializedOptimizerValidation,
 ): CandidateResult {
-  if (!serialized) return candidate;
+  if (!serialized || typeof serialized !== 'object') {
+    throw new TypeError('Optimizer worker returned no validation metadata.');
+  }
+  const isObject = (value: unknown): value is Record<string, unknown> => (
+    !!value && typeof value === 'object' && !Array.isArray(value)
+  );
+  const isDateFieldValid = (value: unknown): boolean => !!rehydrateDate(value as Date | string | number);
+  const setup = isObject(serialized.setup) ? serialized.setup : null;
+  const definition = setup?.definition;
+  const validDefinition = definition === null || (isObject(definition)
+    && Array.isArray(definition.fields)
+    && definition.fields.every(field => typeof field === 'string')
+    && Number.isInteger(definition.signature_version)
+    && typeof definition.strict_blanks === 'boolean'
+    && typeof definition.active === 'boolean');
+  const validSetup = !!setup
+    && typeof setup.plant === 'string'
+    && typeof setup.plant_active === 'boolean'
+    && validDefinition
+    && Array.isArray(setup.plant_rows)
+    && Array.isArray(setup.machine_rows)
+    && Array.isArray(setup.machine_states)
+    && Array.isArray(setup.overrides);
+  const validDateMap = (value: unknown): value is Record<string, Date | string | number | null> => (
+    isObject(value) && Object.values(value).every(entry => entry === null || !!rehydrateDate(entry as Date | string | number))
+  );
+  if (!validSetup
+    || !Number.isInteger(serialized.exactSearchThreshold) || serialized.exactSearchThreshold < 0
+    || !Number.isInteger(serialized.iterationCap) || serialized.iterationCap <= 0
+    || !Number.isFinite(serialized.deadline)
+    || !Array.isArray(serialized.effectiveFirmedIds)
+    || !serialized.effectiveFirmedIds.every(id => typeof id === 'string')
+    || !validDateMap(serialized.notBeforeById)
+    || !validDateMap(serialized.notAfterById)
+    || (serialized.lines !== undefined && (!Array.isArray(serialized.lines) || !serialized.lines.every(line => typeof line === 'string')))
+    || (serialized.scopeTaskIds !== undefined && (!Array.isArray(serialized.scopeTaskIds) || !serialized.scopeTaskIds.every(id => typeof id === 'string')))
+    || (serialized.respectCalendar !== undefined && typeof serialized.respectCalendar !== 'boolean')
+    || !isDateFieldValid(serialized.now)
+    || !isDateFieldValid(serialized.planningStart)
+    || !isDateFieldValid(serialized.runNow)
+    || !isDateFieldValid(serialized.placementStart)
+    || !isDateFieldValid(serialized.horizonEnd)) {
+    throw new TypeError('Optimizer worker returned malformed validation metadata.');
+  }
+  if (!snapshot.tasks.every(task => Object.prototype.hasOwnProperty.call(serialized.notBeforeById, String(task.id))
+    && Object.prototype.hasOwnProperty.call(serialized.notAfterById, String(task.id)))) {
+    throw new TypeError('Optimizer worker returned incomplete validation metadata.');
+  }
   const now = rehydrateDate(serialized.now);
   const horizonEnd = rehydrateDate(serialized.horizonEnd);
-  if (!now || !horizonEnd) return candidate;
-  const planningStart = rehydrateDate(serialized.planningStart) ?? new Date(now);
-  const runNow = rehydrateDate(serialized.runNow) ?? new Date(now);
-  const placementStart = rehydrateDate(serialized.placementStart) ?? new Date(now);
+  if (!now || !horizonEnd) throw new TypeError('Optimizer worker returned invalid validation metadata dates.');
+  const planningStart = rehydrateDate(serialized.planningStart);
+  const runNow = rehydrateDate(serialized.runNow);
+  const placementStart = rehydrateDate(serialized.placementStart);
+  if (!planningStart || !runNow || !placementStart) throw new TypeError('Optimizer worker returned invalid validation metadata dates.');
   const dateFor = (values: Readonly<Record<string, Date | string | number | null>>, task: NimbusTask): Date | null => (
     rehydrateDate(values[String(task.id)])
   );
@@ -2426,9 +2712,14 @@ export function rehydrateOptimizerCandidate(
     placementStart,
     horizonEnd,
     lines: serialized.lines,
+    scopeTaskIds: serialized.scopeTaskIds,
     respectCalendar: serialized.respectCalendar,
     notBefore: task => dateFor(serialized.notBeforeById, task),
     notAfter: task => dateFor(serialized.notAfterById, task),
   };
-  return { ...candidate, validationContext: { snapshot, baselineSnapshot: snapshot, bounds } };
+  const validationSnapshot: ScheduleSnapshot = {
+    ...snapshot,
+    firmedIds: new Set(serialized.effectiveFirmedIds),
+  };
+  return { ...candidate, validationContext: { snapshot: validationSnapshot, baselineSnapshot: snapshot, bounds } };
 }

@@ -24,6 +24,21 @@ export interface OptimizerWorkerRunOptions {
   workerUrl?: string;
 }
 
+function workerRequestWithRemainingDeadline(request: OptimizerWorkerRequest): OptimizerWorkerRequest {
+  const duration = request.deadlineDurationMs === undefined
+    ? Number.isFinite(request.request.deadlineAt)
+      ? Math.max(0, Number(request.request.deadlineAt) - performance.now())
+      : undefined
+    : request.deadlineDurationMs;
+  if (duration === undefined) return request;
+  if (!Number.isFinite(duration)) throw new TypeError('Optimizer preview received an invalid deadline duration.');
+  return {
+    ...request,
+    deadlineDurationMs: duration,
+    request: { ...request.request, deadlineAt: undefined },
+  };
+}
+
 function abortError(): Error {
   const error = new Error('Optimizer preview was cancelled.');
   error.name = 'AbortError';
@@ -53,6 +68,8 @@ export function runOptimizerPreview(
     return evaluator(request.snapshot, request.request);
   }
 
+  const workerRequest = workerRequestWithRemainingDeadline(request);
+
   return new Promise<CandidateResult>((resolve, reject) => {
     let settled = false;
     const cleanup = (): void => {
@@ -78,9 +95,14 @@ export function runOptimizerPreview(
         finish(() => reject(new Error('Optimizer worker returned no candidate.')));
         return;
       }
-      finish(() => resolve(rehydrateOptimizerCandidate(
-        data.candidate as CandidateResult, request.snapshot, data.validation,
-      )));
+      try {
+        const rehydrated = rehydrateOptimizerCandidate(
+          data.candidate as CandidateResult, request.snapshot, data.validation,
+        );
+        finish(() => resolve(rehydrated));
+      } catch (error) {
+        finish(() => reject(error));
+      }
     };
     worker.onerror = (event): void => finish(() => reject(new Error(event.message || 'Optimizer worker failed.')));
     if (options.signal) {
@@ -91,7 +113,7 @@ export function runOptimizerPreview(
       }
     }
     try {
-      worker.postMessage(request);
+      worker.postMessage(workerRequest);
     } catch (error) {
       finish(() => reject(error));
     }

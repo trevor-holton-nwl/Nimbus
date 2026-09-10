@@ -253,6 +253,22 @@ test('canonical Min Changeover objectives prefer covered edges before setup savi
     'Min Changeover must not trade a known uncovered edge for setup-minute savings');
 });
 
+test('canonical SPT objectives protect coverage before productive-runtime order', () => {
+  const base = {
+    hardErrors: 0, overCap: 0, lateCount: 0, latenessMinutes: 0,
+    setupMinutes: 0, scheduledCount: 2, instabilityMinutes: 0,
+    policyKey: '', sequenceKey: '', productiveRuntimeMinutes: 2,
+  };
+  const covered = { ...base, uncoveredEdges: 0, productiveRuntimeKey: '0000000000000002|0000000000000002' };
+  const uncovered = { ...base, uncoveredEdges: 1, productiveRuntimeKey: '0000000000000001|0000000000000002' };
+  assert.ok(SetupScheduler.compareObjectiveFacts(covered, uncovered, 'spt') < 0,
+    'SPT must compare final coverage before its runtime ordering metric');
+
+  const sameCoverageShortFirst = { ...base, uncoveredEdges: 0, productiveRuntimeKey: '0000000000000001|0000000000000002' };
+  assert.ok(SetupScheduler.compareObjectiveFacts(sameCoverageShortFirst, covered, 'spt') < 0,
+    'SPT must retain productive-runtime ordering after hard feasibility and coverage');
+});
+
 test('final setup-aware results expose canonical objective facts and compatible score slots', () => {
   const result = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([scheduledTask('contract-objective-order', 1, 'GREEN', '2026-08-03T18:00')]),
@@ -302,6 +318,81 @@ test('setup-aware eligibility leaves a scheduled order wholly beyond the horizon
   assert.ok(patchFor(result, 'contract-horizon-in-window'));
 });
 
+test('setup-aware eligibility scopes malformed historical work before repair eligibility', () => {
+  const malformedPast = scheduledTask(
+    'contract-malformed-past', 2, 'GREEN', '2026-08-03T18:00',
+    '2026-08-02T08:00', '2026-08-02T09:00',
+  );
+  const inWindow = scheduledTask('contract-malformed-in-window', 2, 'GREEN', '2026-08-03T18:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([malformedPast, inWindow]),
+    dueDateBounds(setupTruth(), {
+      planningStart: at('2026-08-03T08:00'),
+      now: at('2026-08-03T08:00'),
+      horizonEnd: at('2026-08-04T18:00'),
+    }),
+  );
+
+  assert.equal(result.dispositions.some(disposition => disposition.id === 'contract-malformed-past'), false,
+    'a malformed interval wholly before the half-open planning scope is immutable historical data');
+  assert.equal(patchFor(result, 'contract-malformed-past'), undefined);
+  assert.ok(result.dispositions.some(disposition => disposition.id === 'contract-malformed-in-window'),
+    'a malformed order inside the scope remains eligible for repair');
+});
+
+test('final diagnostics do not count a protected schedule with an invalid boundary as placed', () => {
+  const malformedProtected = scheduledTask(
+    'contract-malformed-protected', 1, 'GREEN', '2026-08-03T18:00',
+    '2026-08-03T10:00', 'not-a-date',
+  );
+  const reversedProtected = scheduledTask(
+    'contract-reversed-protected', 1, 'GREEN', '2026-08-03T18:00',
+    '2026-08-03T12:00', '2026-08-03T11:00',
+  );
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([malformedProtected, reversedProtected], {
+      firmedIds: [malformedProtected.id, reversedProtected.id],
+    }),
+    dueDateBounds(setupTruth()),
+  );
+
+  assert.equal(result.dispositions.find(disposition => disposition.id === malformedProtected.id)?.status, 'protected');
+  assert.equal(result.diagnostics.placedCount, 0,
+    'placedCount must describe valid final intervals, including protected boundaries');
+  assert.equal(result.objective?.scheduledCount, 0,
+    'objective scheduledCount must exclude reversed final intervals too');
+});
+
+test('setup-aware firming follows the effective firmed id set instead of a stale task mirror', () => {
+  const staleMirror = { ...scheduledTask(
+    'contract-stale-firmed-mirror', 1, 'GREEN', '2026-08-03T18:00',
+    '2026-08-03T10:00', '2026-08-03T11:00',
+  ), firmed: true };
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([staleMirror], { firmedIds: [] }),
+    dueDateBounds(setupTruth()),
+  );
+
+  assert.equal(result.dispositions.find(disposition => disposition.id === 'contract-stale-firmed-mirror')?.status, 'scheduled',
+    'task.firmed is only a stale Store mirror and must not override the caller effective set');
+});
+
+test('final objective recomputes known uncovered transitions from the final schedule', () => {
+  const first = scheduledTask('contract-final-edge-red', 1, 'RED', '2026-08-03T18:00', '2026-08-03T08:00', '2026-08-03T09:00');
+  const second = scheduledTask('contract-final-edge-blue', 1, 'BLUE', '2026-08-03T18:00', '2026-08-03T09:00', '2026-08-03T10:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 0)] });
+  const snapshot = setupSnapshot([first, second]);
+  const bounds = dueDateBounds(setup, { respectCalendar: false });
+  const facts = SetupScheduler.objectiveFactsForCandidate(snapshot, bounds, {
+    patches: [], score: [0, 0, 0, 0, 0, 0, 0, 0], explanation: [],
+    diagnostics: { candidateCount: 1, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 0, limitReached: false, events: [] },
+    unchangedLines: [], missingEdges: [],
+  });
+
+  assert.equal(facts.uncoveredEdges, 1,
+    'rejected alternative diagnostics must not decide the final uncovered-edge objective');
+});
+
 test('setup-aware evaluators return a structured invalid_horizon result', () => {
   const snapshot = setupSnapshot([scheduledTask('contract-invalid-horizon', 1, 'GREEN', '2026-08-03T18:00')]);
   const setup = setupTruth();
@@ -339,6 +430,8 @@ test('gap fill finds unused capacity after search expires without moving accepte
   assert.equal(result.unchangedLines.includes('L1'), false, 'recovered lines must not still be reported as guarded/unchanged');
   assert.equal(result.score[4], -2);
   assert.equal(result.searchComplete, false, 'capacity completion is separate from sequence search');
+  assert.equal(result.diagnostics.placedCount, 2, 'placed count reflects the final post-gap schedule');
+  assert.equal(result.diagnostics.unknownTailCount, 0, 'unknown-tail count reflects final scheduled state');
   assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
 });
 
@@ -775,7 +868,7 @@ test('evaluateSchedule produces detached SPT patches without publishing or mutat
     });
 
     assert.deepEqual(scheduledPatches(result).map(patch => patch.id), ['short', 'long'],
-      'the detached result retains legacy SPT productive-runtime ordering');
+      'the detached result retains setup-aware SPT productive-runtime ordering');
     assert.equal(scheduledPatches(result)[0].changes.start_date.getTime(), new Date('2026-08-03T08:00:00').getTime());
     assert.equal(Store.rev(), beforeRevision, 'candidate evaluation must not publish Store mutations');
     assert.deepEqual(Store.tasks, beforeTasks, 'candidate patches must not enter live task state');
@@ -3899,15 +3992,10 @@ test('evaluateDueDateFirst keeps a capped order within its due-date push-forward
     'without a cap, the setup-minimizing RED-then-BLUE order wins, exactly as before this feature existed');
 });
 
-test('evaluateMinChangeover rejects a candidate that pushes an already-late order past its due-date push-forward cap', () => {
-  // The order is late both before (its raw persisted end_date is already
-  // past due) and after (the freshly computed schedule is also past due) —
-  // so the existing 'min-changeover-rejected-lateness' gate does not fire
-  // (afterLate === beforeLate, nothing is newly late). But the raw persisted
-  // end_date sat within the plant's due-date push-forward cap while the
-  // freshly computed schedule (built from bounds.now, weeks after the stale
-  // due date) blows well past it — a newly-over-cap order the dedicated
-  // 'min-changeover-rejected-lateness-cap' gate must catch on its own.
+test('evaluateMinChangeover leaves a one-sided historical interval outside the mutable scope untouched', () => {
+  // A scheduled row with only one usable boundary cannot be repaired safely
+  // by an optimizer run. It is historical data outside the half-open planning
+  // scope until an explicit queue/status repair gives it a valid interval.
   const order = scheduledTask(
     'cap-gate-order', 1, 'RED', '2026-07-20T08:00:00', null, '2026-07-20T09:00:00',
   );
@@ -3919,7 +4007,8 @@ test('evaluateMinChangeover rejects a candidate that pushes an already-late orde
     dueDateBounds(setup, { notAfter }),
   );
 
-  assert.equal(outcomePatchFor(result, 'cap-gate-order').changes.planning_reason.code, 'expired_window');
+  assert.equal(outcomePatchFor(result, 'cap-gate-order'), undefined,
+    'a one-sided historical interval outside the mutable scope remains untouched until explicitly repaired');
   assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
 });
 

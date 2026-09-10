@@ -21,13 +21,13 @@ import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot, validateCandidateForApply } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidateForApply } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest } from './setup-scheduler.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
-import type { NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
+import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
    OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
@@ -897,6 +897,8 @@ interface PreviewExplanationInput {
   /** Plant this candidate was evaluated for — read alongside `tasks` for
    *  `overLatenessCap` (`plants.max_push_forward_days` is per-plant). */
   plant?: string | null;
+  /** Captured master-data snapshot for detached explanation facts. */
+  masterData?: NimbusMasterData | null;
 }
 
 const PREVIEW_REASON_LIMIT = 8;
@@ -1151,7 +1153,7 @@ export const OptimizerPreview = {
       scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
       unplacedOrders: { orders: unplacedOrderIds.size, lines: unplacedLines.size },
       overLatenessCap: input.tasks
-        ? Engine._overCapSummary(candidate.patches, input.tasks, input.plant ?? null)
+        ? Engine._overCapSummary(candidate.patches, input.tasks, input.plant ?? null, input.masterData)
         : { orders: 0, lines: 0, days: null },
       prunes: tallyPrunes(candidate.explanation),
       search: {
@@ -1211,7 +1213,7 @@ export const OptimizerPreview = {
     const plant = OptimizerPreview._plant;
     if (!OptimizerPreview.active || !baseline || !plant) return false;
     const current = taskBaseline(Store.tasksArr.filter(task =>
-      (task.PLANT || Store.getPlantForLine(task.MACHINE)) === plant));
+      resolveTaskPlant(task, { lineSettings: Store.lineSettings, masterData: Store.masterData }) === plant));
     let matches = current.size === baseline.size;
     if (matches) {
       for (const [id, value] of baseline) {
@@ -1325,11 +1327,7 @@ export const OptimizerPreview = {
         // passed this same plant's task filter (see snapshotSchedule's doc
         // comment), so no other plant's calendar entries are ever needed here.
         const candidateSnapshot = snapshotSchedule(plant);
-        const scopedTasks = candidateSnapshot.tasks.filter(task => {
-          const mappedPlant = candidateSnapshot.lineSettings[task.MACHINE]?.plant
-            ?? candidateSnapshot.masterData?.lines.find(row => row.machine === task.MACHINE)?.plant;
-          return (task.PLANT || mappedPlant) === plant;
-        });
+        const scopedTasks = candidateSnapshot.tasks.filter(task => resolveTaskPlant(task, candidateSnapshot) === plant);
         const _snapT0 = performance.now();
         snapshot = structuredClone(scopedTasks);
         // Keep this detached copy only for the Undo entry if the planner applies.
@@ -1392,7 +1390,14 @@ export const OptimizerPreview = {
         OptimizerPreview._previewDiagnostics = [...candidate.diagnostics.events];
         OptimizerPreview._mode     = mode;
         OptimizerPreview._plant    = plant;
-        OptimizerPreview._splitOrderPolicy = Engine.splitOrderPolicyFor(plant);
+        const capturedValidation = candidate.validationContext;
+        const capturedSnapshot = capturedValidation?.snapshot ?? candidateSnapshot;
+        const capturedBounds = capturedValidation?.bounds;
+        const capturedSetup = capturedBounds?.setup
+          ?? (capturedSnapshot.setupSnapshot?.plant === plant ? capturedSnapshot.setupSnapshot : null);
+        const capturedSplitPolicy = capturedSnapshot.masterData?.plants?.find(row => row.plant === plant)?.split_order_policy;
+        OptimizerPreview._splitOrderPolicy = capturedSplitPolicy === 'overlong_only' || capturedSplitPolicy === 'partial_allowed'
+          ? capturedSplitPolicy : 'never';
         OptimizerPreview._backlogResult = mode === 'backlog' ? candidate.backlogResult ?? null : null;
         OptimizerPreview._backlogAudit = mode === 'backlog' ? {
           plant,
@@ -1403,7 +1408,7 @@ export const OptimizerPreview = {
           timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
         } : null;
         OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
-        OptimizerPreview._syntheticSetup = (mode === 'changeover' || mode === 'duedate') && !(Store.setupSnapshot && Store.setupSnapshot.plant === plant && Store.setupSnapshot.plant_active);
+        OptimizerPreview._syntheticSetup = mode !== 'backlog' && capturedBounds?.setup.synthetic === true;
         // B3: the same run-scoped candidate pool used for the KPI comparison
         // (plant, via `scopedTasks` above using the B7 line→plant fallback,
         // plus opts.lines and excludeFromOpt) — NOT the time-windowed
@@ -1413,21 +1418,28 @@ export const OptimizerPreview = {
           .filter(t => !lineSet || lineSet.has(t.MACHINE))
           .filter(t => !candidateSnapshot.lineSettings[t.MACHINE || '']?.excludeFromOpt)
           .map(t => ({ id: String(t.id), line: t.MACHINE || 'Unknown' }));
-        const runNow = opts.startDate ? new Date(opts.startDate) : (() => { const d = new Date(); d.setSeconds(0, 0); return d; })();
+        // Explanations must describe the same detached facts that produced the
+        // candidate. In particular, never recapture live setup/frozen state or
+        // a new wall clock after a worker has returned.
+        const runNow = capturedBounds?.runNow ?? capturedBounds?.now
+          ?? (opts.runNow ? new Date(opts.runNow as Date | string | number) : opts.startDate ? new Date(opts.startDate) : new Date());
+        const explanationFirmedIds = capturedValidation?.snapshot?.firmedIds
+          ?? effectiveFirmedIdSet(candidateSnapshot.tasks, candidateSnapshot.firmedIds, runNow, opts.respectFirmed ?? true, candidateSnapshot.frozenHorizonEnd);
         const explanation = OptimizerPreview.summarizeCandidate(candidate, {
           productionBefore: snapshot.filter(inScope).length,
           productionAfter: postTasks.length,
           preKpis,
           postKpis,
           unplacedCandidates,
-          firmedIds: effectiveFirmedIdSet(candidateSnapshot.tasks, candidateSnapshot.firmedIds, runNow, opts.respectFirmed ?? true),
-          tasks: candidateSnapshot.tasks,
+          firmedIds: explanationFirmedIds,
+          tasks: capturedSnapshot.tasks,
           plant,
+          masterData: capturedSnapshot.masterData,
         });
         const described = OptimizerPreview.describeMissingPairs(
           candidate,
-          candidateSnapshot.tasks,
-          Store.setupSnapshot?.plant === plant ? Store.setupSnapshot : null,
+          capturedSnapshot.tasks,
+          capturedSetup,
         );
         explanation.missingPairs = described.pairs;
         explanation.missingPairsTotal = described.total;

@@ -6,6 +6,9 @@ export interface OptimizerWorkerRequest {
   mode: OptimizerMode;
   snapshot: ScheduleSnapshot;
   request: EvaluationRequest;
+  /** Remaining primary budget measured in the sender's monotonic clock. The
+   * worker converts it to its own performance.now() origin on receipt. */
+  deadlineDurationMs?: number;
 }
 
 /** Clone-safe replacement for the evaluator's function-bearing bounds. The
@@ -17,12 +20,15 @@ export interface SerializedOptimizerValidation {
   iterationCap: number;
   deadline: number;
   now: Date | string | number;
-  planningStart?: Date | string | number;
-  runNow?: Date | string | number;
-  placementStart?: Date | string | number;
+  planningStart: Date | string | number;
+  runNow: Date | string | number;
+  placementStart: Date | string | number;
   horizonEnd: Date | string | number;
   lines?: readonly string[];
+  scopeTaskIds?: readonly string[];
   respectCalendar?: boolean;
+  /** Effective manual + ECC + frozen firmed ids used by evaluation. */
+  effectiveFirmedIds: readonly string[];
   notBeforeById: Record<string, Date | string | number | null>;
   notAfterById: Record<string, Date | string | number | null>;
 }
@@ -45,6 +51,11 @@ export function serializeOptimizerValidation(
   const context = candidate.validationContext;
   if (!context) return undefined;
   const { bounds, snapshot } = context;
+  if (!Number.isFinite(bounds.now.getTime())
+    || !bounds.planningStart || !Number.isFinite(bounds.planningStart.getTime())
+    || !bounds.runNow || !Number.isFinite(bounds.runNow.getTime())
+    || !bounds.placementStart || !Number.isFinite(bounds.placementStart.getTime())
+    || !Number.isFinite(bounds.horizonEnd.getTime())) return undefined;
   const notBeforeById: Record<string, Date | string | number | null> = {};
   const notAfterById: Record<string, Date | string | number | null> = {};
   for (const task of snapshot.tasks) {
@@ -63,7 +74,11 @@ export function serializeOptimizerValidation(
     placementStart: bounds.placementStart,
     horizonEnd: bounds.horizonEnd,
     lines: bounds.lines,
+    scopeTaskIds: bounds.scopeTaskIds === undefined
+      ? undefined
+      : Array.from(bounds.scopeTaskIds, String),
     respectCalendar: bounds.respectCalendar,
+    effectiveFirmedIds: Array.from(snapshot.firmedIds, String),
     notBeforeById,
     notAfterById,
   };
