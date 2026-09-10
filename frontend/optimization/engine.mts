@@ -147,7 +147,9 @@ interface SortTerm {
 export function snapshotSchedule(plant?: string): ScheduleSnapshot {
   const _pmT0s = performance.now();
   try {
-    const tasks = structuredClone(Store.tasksArr);
+    const tasks = plant
+      ? structuredClone(Store.tasksArr.filter(task => resolveTaskPlant(task, { lineSettings: Store.lineSettings, masterData: Store.masterData }) === plant))
+      : structuredClone(Store.tasksArr);
     const lineSettings = structuredClone(Store.lineSettings);
     const masterData = structuredClone(Store.masterData);
     // Capture calendars from the actual scoped task lines using the same

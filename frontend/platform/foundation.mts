@@ -613,8 +613,8 @@ export const Util = {
   },
 
   // Composite KPIs for the optimizer preview. Pure: takes a task array, no Store access.
-  // Returns { changeovers, span_h, late_count, late_h, peak_util_pct }.
-  scheduleKpis(tasks: NimbusTask[], horizonDays: number = 14, utilizationContext?: unknown): { changeovers: number; span_h: number; late_count: number; late_h: number; peak_util_pct: number } {
+  // Returns { changeovers, span_h, late_count, late_h, peak_util_pct, peak_util_pct_frozen, peak_util_pct_open }.
+  scheduleKpis(tasks: NimbusTask[], horizonDays: number = 14, utilizationContext?: unknown, frozenHorizonEnd?: Date | null): { changeovers: number; span_h: number; late_count: number; late_h: number; peak_util_pct: number; peak_util_pct_frozen: number; peak_util_pct_open: number } {
     const changeovers = Util.countChangeovers(tasks);
     let minStart = Infinity, maxEnd = -Infinity;
     let lateCount = 0, lateH = 0;
@@ -627,7 +627,7 @@ export const Util = {
     }
     const span_h = (minStart === Infinity || maxEnd === -Infinity) ? 0 : (maxEnd - minStart) / Config.MS_HOUR;
     // Peak utilization from the existing Utilization matrix (via the injected resolver).
-    let peak = 0;
+    let peak = 0, peakFrozen = 0, peakOpen = 0;
     try {
       if (!_utilizationResolver) throw new Error('utilization resolver not wired');
       const m = _utilizationResolver(new Date(), horizonDays, tasks, utilizationContext);
@@ -635,6 +635,12 @@ export const Util = {
         for (const d of Object.keys(m[ln])) {
           const p = m[ln][d]?.pct || 0;
           if (p > peak) peak = p;
+          const dayDate = new Date(d + 'T12:00:00');
+          if (frozenHorizonEnd && dayDate < frozenHorizonEnd) {
+            if (p > peakFrozen) peakFrozen = p;
+          } else {
+            if (p > peakOpen) peakOpen = p;
+          }
         }
       }
     } catch { /* matrix unavailable — leave peak at 0 */ }
@@ -644,6 +650,8 @@ export const Util = {
       late_count: lateCount,
       late_h:    Math.round(lateH * 10) / 10,
       peak_util_pct: Math.round(peak * 100),
+      peak_util_pct_frozen: Math.round(peakFrozen * 100),
+      peak_util_pct_open: Math.round(peakOpen * 100),
     };
   },
 

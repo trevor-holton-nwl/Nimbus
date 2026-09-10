@@ -816,7 +816,7 @@ type OptimizerKpis = ReturnType<typeof Util.scheduleKpis>;
 
 /** Zero-filled fallback so pre/post KPI reads never need an intermediate
  *  `{}` — every OptimizerKpis field is a required number. */
-const EMPTY_OPTIMIZER_KPIS: OptimizerKpis = { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0 };
+const EMPTY_OPTIMIZER_KPIS: OptimizerKpis = { changeovers: 0, span_h: 0, late_count: 0, late_h: 0, peak_util_pct: 0, peak_util_pct_frozen: 0, peak_util_pct_open: 0 };
 
 /** lowerIsBetter's four states — see the comment inside _render() for the full
  *  semantics of each (true/false/'soft'/null). */
@@ -1354,7 +1354,7 @@ export const OptimizerPreview = {
 
         // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
         const _preKpiT0 = performance.now();
-        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot);
+        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
         PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
 
         // Evaluate the established placement algorithm against a detached read
@@ -1381,7 +1381,7 @@ export const OptimizerPreview = {
         const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
         PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0a);
         const _postKpiT0 = performance.now();
-        const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot);
+        const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
         PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
 
         OptimizerPreview._preKpis  = preKpis;
@@ -1521,7 +1521,7 @@ export const OptimizerPreview = {
                 const _applyPatchesT0b = performance.now();
                 const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
                 PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
-                const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot);
+                const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
                 finalists.push({
                   label: String.fromCharCode(66 + idx), // 'B', 'C', ...
                   mode: altMode, kpis: altKpis,
@@ -1606,6 +1606,16 @@ export const OptimizerPreview = {
         label: Util.t('ui.opt_pv_card_util'), k: 'peak_util_pct', ico: '&#9650;',
         fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
         tip: Util.t('ui.opt_pv_card_util_tip'),
+      },
+      {
+        label: Util.t('ui.opt_pv_card_util_frozen'), k: 'peak_util_pct_frozen', ico: '&#9650;',
+        fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
+        tip: Util.t('ui.opt_pv_card_util_frozen_tip'),
+      },
+      {
+        label: Util.t('ui.opt_pv_card_util_open'), k: 'peak_util_pct_open', ico: '&#9650;',
+        fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
+        tip: Util.t('ui.opt_pv_card_util_open_tip'),
       },
     ];
 
@@ -2013,7 +2023,7 @@ export const OptimizerPreview = {
     const plant = OptimizerPreview._plant;
     const auditDetails = OptimizerPreview._auditDetails;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
-    if (!OptimizerPreview._revalidateTaskBaseline() || !OptimizerPreview.canApply()) {
+    if (!OptimizerPreview.canApply()) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
       return;
     }
