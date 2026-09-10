@@ -1,7 +1,7 @@
 # NIMBUS Optimizer Remediation Design
 
-**Date:** 2026-09-10  
-**Status:** Approved for implementation  
+**Date:** 2026-09-10
+**Status:** Approved for implementation
 **Scope:** `frontend/optimization`, optimizer tests, and optimizer documentation
 
 ## Problem
