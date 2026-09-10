@@ -193,6 +193,42 @@ test('setup-aware diagnostics expose a global budget and heuristic quality', () 
   assert.ok(['exact', 'heuristic'].includes(result.diagnostics.quality));
 });
 
+test('setup-aware placement uses placementStart when planningStart is in the past', () => {
+  const waiting = scheduledTask('contract-past-planning-start', 1, 'GREEN', '2026-08-03T18:00');
+  const setup = setupTruth();
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([waiting]),
+    dueDateBounds(setup, {
+      now: at('2026-08-03T08:00'),
+      planningStart: at('2026-08-03T06:00'),
+      runNow: at('2026-08-03T10:00'),
+      horizonEnd: at('2026-08-03T18:00'),
+    }),
+  );
+
+  assert.ok(patchFor(result, 'contract-past-planning-start'));
+  assert.ok(patchFor(result, 'contract-past-planning-start').changes.start_date >= at('2026-08-03T10:00'),
+    'a past planning window must never backdate a new placement before runNow');
+});
+
+test('setup-aware eligibility leaves a scheduled order wholly beyond the horizon unchanged', () => {
+  const inWindow = scheduledTask('contract-horizon-in-window', 1, 'GREEN', '2026-08-03T18:00');
+  const outside = scheduledTask(
+    'contract-horizon-outside', 1, 'GREEN', '2026-08-03T18:00',
+    '2026-08-03T13:00', '2026-08-03T14:00',
+  );
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([outside, inWindow]),
+    dueDateBounds(setupTruth(), { horizonEnd: at('2026-08-03T12:00') }),
+  );
+
+  assert.equal(result.dispositions.some(disposition => disposition.id === 'contract-horizon-outside'), false,
+    'wholly out-of-window scheduled work is outside optimizer accounting');
+  assert.equal(patchFor(result, 'contract-horizon-outside'), undefined,
+    'wholly out-of-window scheduled work must remain unchanged');
+  assert.ok(patchFor(result, 'contract-horizon-in-window'));
+});
+
 test('gap fill finds unused capacity after search expires without moving accepted production', () => {
   const fixed = scheduledTask('accepted', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T12:00', '2026-08-03T13:00');
   const waiting = scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00');
@@ -1714,7 +1750,10 @@ test('setup-aware evaluators keep every earlier fragment patch when trailing cap
   ]) {
     const result = evaluate(
       setupSnapshot([oldOverlap, fixed, firstTrailing, before], { firmedIds: ['terminal-fixed-blue'] }),
-      dueDateBounds(setup, { horizonEnd: at('2026-08-03T11:30:00') }),
+      // Keep the pre-existing overlap in scope by one minute; an interval
+      // beginning exactly at horizonEnd is intentionally outside optimizer
+      // accounting and must remain untouched.
+      dueDateBounds(setup, { horizonEnd: at('2026-08-03T11:31:00') }),
     );
 
     assert.equal(patchFor(result, 'terminal-fixed-blue'), undefined, `${label} never patches the fixed run`);
@@ -2956,7 +2995,7 @@ test('trailing-fragment tail overflow leaves the order at its current dates with
 
   const result = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([admits, staysPut]),
-    dueDateBounds(setup, { horizonEnd: at('2026-08-03T09:00:00') }),
+    dueDateBounds(setup, { horizonEnd: at('2026-08-03T09:01:00') }),
   );
 
   assert.ok(patchFor(result, 'trail-overflow-a'), 'the order that fits is still placed');
@@ -4129,7 +4168,10 @@ test('hard bounds keep valid incumbent admission when another original interval 
   const snapshot = setupSnapshot([
     scheduledTask('urgent', 6, 'RED', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
     scheduledTask('other', 6, 'BLUE', '2026-08-03T18:00:00'),
-    scheduledTask('invalid-current', 1, 'YELLOW', '2026-08-03T18:00:00', '2026-08-03T19:00:00', '2026-08-03T20:00:00'),
+    // This malformed interval intersects the horizon, so it remains in
+    // optimizer accounting while a wholly future interval would be preserved
+    // outside the run's scope.
+    scheduledTask('invalid-current', 1, 'YELLOW', '2026-08-03T18:00:00', '2026-08-03T17:00:00', '2026-08-03T19:00:00'),
   ]);
   snapshot.masterData.plants[0].max_push_forward_days = 0;
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth(), { iterationCap: 2 }));

@@ -540,6 +540,26 @@ export function buildRunContext(
   };
 }
 
+/** The detached evaluator has three related clocks. `planningStart` defines
+ * which already scheduled work belongs to this run's mutable scope, while
+ * `placementStart` is the earliest instant at which a newly generated setup
+ * or production interval may begin. Legacy callers only provide `now`, so it
+ * remains the fallback for all three values. */
+function normalizeRunDates(bounds: Readonly<DueDateFirstBounds>): Readonly<DueDateFirstBounds> {
+  const legacyNow = timestamp(bounds.now) ?? new Date(0);
+  const planningStart = timestamp(bounds.planningStart) ?? legacyNow;
+  const runNow = timestamp(bounds.runNow) ?? legacyNow;
+  const placementStart = timestamp(bounds.placementStart)
+    ?? new Date(Math.max(+planningStart, +runNow));
+  return {
+    ...bounds,
+    now: new Date(placementStart),
+    planningStart: new Date(planningStart),
+    runNow: new Date(runNow),
+    placementStart: new Date(placementStart),
+  };
+}
+
 /** Builds the run's `SetupRunContext` fresh only when `bounds.runContext` is
  * absent or was built for a different snapshot object, and otherwise reuses
  * it unchanged. Returns the (possibly augmented) bounds to thread below, so
@@ -560,8 +580,9 @@ export function buildRunContext(
 function withRunContext(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): Readonly<DueDateFirstBounds> {
-  if (bounds.runContext && bounds.runContext.snapshot === snapshot) return bounds;
-  return { ...bounds, runContext: buildRunContext(snapshot, bounds) };
+  const normalized = normalizeRunDates(bounds);
+  if (normalized.runContext && normalized.runContext.snapshot === snapshot) return normalized;
+  return { ...normalized, runContext: buildRunContext(snapshot, normalized) };
 }
 
 export interface SetupPolicyThresholds {
@@ -4679,10 +4700,8 @@ export function evaluateSptWithSetup(
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of snapshot.tasks) {
-    const taskPlant = resolveTaskPlant(task, snapshot, bounds.runContext);
+  for (const task of eligibleTasks(snapshot, bounds)) {
     const line = String(task.MACHINE ?? '');
-    if (!line || taskPlant !== plant || snapshot.lineSettings[line]?.excludeFromOpt || (bounds.lines?.length && !bounds.lines.includes(line))) continue;
     const group = byLine.get(line) ?? [];
     group.push(task);
     byLine.set(line, group);
@@ -4861,10 +4880,8 @@ export function evaluateDueDateFirst(
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of snapshot.tasks) {
-    const taskPlant = resolveTaskPlant(task, snapshot, bounds.runContext);
+  for (const task of eligibleTasks(snapshot, bounds)) {
     const line = String(task.MACHINE ?? '');
-    if (!line || taskPlant !== plant || snapshot.lineSettings[line]?.excludeFromOpt || (bounds.lines?.length && !bounds.lines.includes(line))) continue;
     const group = byLine.get(line) ?? [];
     group.push(task);
     byLine.set(line, group);
@@ -5223,7 +5240,21 @@ function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Due
 function eligibleTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): NimbusTask[] {
   return snapshot.tasks.filter(task => {
     const line = String(task.MACHINE ?? '');
-    return line && resolveTaskPlant(task, snapshot) === bounds.setup.plant && !snapshot.lineSettings[line]?.excludeFromOpt && (!bounds.lines?.length || bounds.lines.includes(line));
+    if (!line || resolveTaskPlant(task, snapshot, bounds.runContext) !== bounds.setup.plant
+      || snapshot.lineSettings[line]?.excludeFromOpt
+      || (bounds.lines?.length && !bounds.lines.includes(line))) return false;
+    // Protected work remains in the detached line model as an immutable
+    // occupancy/predecessor boundary even when it sits outside this run's
+    // mutable planning window. Unprotected scheduled work is scoped by
+    // interval intersection with [planningStart, horizonEnd); queued or
+    // malformed work is always eligible for repair.
+    if (taskIsFirmed(snapshot, task)) return true;
+    if (task.planning_status === 'needs_planning') return true;
+    const start = timestamp(task.start_date);
+    const end = timestamp(task.end_date);
+    if (!start || !end || end <= start) return true;
+    const planningStart = timestamp(bounds.planningStart)?.getTime() ?? +bounds.now;
+    return end.getTime() > planningStart && start.getTime() < +bounds.horizonEnd;
   });
 }
 
