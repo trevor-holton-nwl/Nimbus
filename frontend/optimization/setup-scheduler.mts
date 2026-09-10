@@ -719,6 +719,9 @@ export interface ValidationFinding {
   line?: string;
 }
 export interface CandidateResult {
+  /** A malformed or reversed normalized planning horizon is a caller error;
+   * no schedule proposal is produced and Apply must treat this as terminal. */
+  status?: 'invalid_horizon';
   dispositions?: readonly PlanningDisposition[];
   validationFindings?: readonly ValidationFinding[];
   searchComplete?: boolean;
@@ -4696,9 +4699,52 @@ function requireDueDateBounds(bounds: Readonly<DueDateFirstBounds>): void {
   if (typeof bounds.clock !== 'function' || !Number.isFinite(bounds.deadline)) {
     throw new TypeError('Due-date-first evaluation requires an injected clock and deadline.');
   }
-  if (!timestamp(bounds.now) || !timestamp(bounds.horizonEnd) || bounds.horizonEnd <= bounds.now) {
-    throw new TypeError('Due-date-first evaluation requires a valid scheduling horizon.');
-  }
+}
+
+function invalidHorizonResult(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  method: SearchDiagnostics['method'],
+): CandidateResult {
+  const planningStart = timestamp(bounds.planningStart) ?? timestamp(bounds.now);
+  const placementStart = timestamp(bounds.placementStart) ?? timestamp(bounds.now);
+  const horizonEnd = timestamp(bounds.horizonEnd);
+  const detail = !planningStart || !placementStart || !horizonEnd
+    ? 'The optimizer requires valid planning and horizon timestamps.'
+    : `The horizon must end after the effective placement start (${placementStart.toISOString()}); received ${horizonEnd.toISOString()}.`;
+  return {
+    status: 'invalid_horizon',
+    patches: [],
+    score: zeroScore(),
+    explanation: [{ code: 'invalid_horizon', message: detail }],
+    diagnostics: {
+      candidateCount: 0,
+      method,
+      termination: 'infeasible',
+      runtimeMs: 0,
+      limitReached: false,
+      events: [],
+      budgetMs: 0,
+      deadlineAt: Number.isFinite(bounds.deadline) ? bounds.deadline : 0,
+      iterationsUsed: 0,
+      eligibleCount: 0,
+      evaluatedCount: 0,
+      placedCount: 0,
+      exhaustive: false,
+      quality: method.endsWith('exact') ? 'exact' : 'heuristic',
+      respectCalendar: bounds.respectCalendar ?? true,
+    },
+    unchangedLines: [],
+    missingEdges: [],
+    searchComplete: false,
+    validationContext: { snapshot, bounds },
+  };
+}
+
+function hasInvalidHorizon(bounds: Readonly<DueDateFirstBounds>): boolean {
+  const placementStart = timestamp(bounds.placementStart) ?? timestamp(bounds.now);
+  const horizonEnd = timestamp(bounds.horizonEnd);
+  return !placementStart || !horizonEnd || horizonEnd <= placementStart;
 }
 
 /**
@@ -4712,6 +4758,8 @@ export function evaluateSptWithSetup(
   bounds: Readonly<DueDateFirstBounds>,
 ): CandidateResult {
   requireDueDateBounds(bounds);
+  bounds = normalizeRunDates(bounds);
+  if (hasInvalidHorizon(bounds)) return invalidHorizonResult(snapshot, bounds, 'spt-detached');
   const started = bounds.clock();
   // Phase 1a: reuse the caller's run context when it matches this snapshot,
   // otherwise build one fresh — then thread the (possibly augmented) bounds
@@ -4888,6 +4936,8 @@ export function evaluateDueDateFirst(
   mode: Extract<FragmentMode, 'due-date-first' | 'min-changeover' | 'throughput' | 'due-date'> = 'due-date-first',
 ): CandidateResult {
   requireDueDateBounds(bounds);
+  bounds = normalizeRunDates(bounds);
+  if (hasInvalidHorizon(bounds)) return invalidHorizonResult(snapshot, bounds, 'due-date-first-exact');
   const started = bounds.clock();
   // Phase 1a: reuse the caller's run context when it matches this snapshot,
   // otherwise build one fresh — then thread the (possibly augmented) bounds
@@ -5092,6 +5142,9 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
 export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): CandidateResult {
+  requireDueDateBounds(bounds);
+  bounds = normalizeRunDates(bounds);
+  if (hasInvalidHorizon(bounds)) return invalidHorizonResult(snapshot, bounds, 'due-date-first-exact');
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const budget = bounds.searchBudget ?? createSearchBudget(bounds);
   bounds = { ...bounds, searchBudget: budget };
@@ -5172,6 +5225,9 @@ export function evaluateThroughput(
   bounds: Readonly<DueDateFirstBounds>,
   thresholds: Readonly<SetupPolicyThresholds>,
 ): CandidateResult {
+  requireDueDateBounds(bounds);
+  bounds = normalizeRunDates(bounds);
+  if (hasInvalidHorizon(bounds)) return invalidHorizonResult(snapshot, bounds, 'due-date-first-exact');
   if (!Number.isInteger(thresholds.throughputMinSavingsMin) || thresholds.throughputMinSavingsMin < 0) {
     throw new TypeError('Throughput policy requires nonnegative setup-savings minutes.');
   }
@@ -5326,8 +5382,18 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
   const add = (code: string, message: string, task?: NimbusTask, protectedTask = false): void => { findings.push({ code, message, severity: protectedTask ? 'warning' : 'error', ...(task ? { taskId: taskId(task), line: String(task.MACHINE) } : {}) }); };
   if (currentSnapshot) {
     const baselineSnapshot = candidate.validationContext?.baselineSnapshot ?? snapshot;
-    const baseline = JSON.stringify({ ...baselineSnapshot, alerts: [], firmedIds: [...baselineSnapshot.firmedIds].sort() });
-    const current = JSON.stringify({ ...currentSnapshot, alerts: [], firmedIds: [...currentSnapshot.firmedIds].sort() });
+    if (baselineSnapshot.readModelVersion !== undefined
+      && currentSnapshot.readModelVersion !== undefined
+      && baselineSnapshot.readModelVersion !== currentSnapshot.readModelVersion) {
+      add('stale_candidate', 'The read-model revision changed after this proposal was evaluated.');
+    }
+    // The revision gets its own precise diagnostic above. Exclude it from the
+    // structural comparison so one Store mutation does not produce duplicate
+    // stale findings while task/setup/calendar drift still remains visible.
+    const { readModelVersion: _baselineRevision, ...baselineState } = baselineSnapshot;
+    const { readModelVersion: _currentRevision, ...currentState } = currentSnapshot;
+    const baseline = JSON.stringify({ ...baselineState, alerts: [], firmedIds: [...baselineSnapshot.firmedIds].sort() });
+    const current = JSON.stringify({ ...currentState, alerts: [], firmedIds: [...currentSnapshot.firmedIds].sort() });
     if (baseline !== current) add('stale_candidate', 'The schedule or scheduling inputs changed after this proposal was evaluated.');
   }
   const tasks = eligibleTasks(snapshot, bounds);

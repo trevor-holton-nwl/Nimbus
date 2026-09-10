@@ -206,10 +206,12 @@ export function effectiveFirmedIdSet(
   baseFirmedIds: ReadonlySet<string> | ReadonlyArray<string>,
   horizonStart: Date,
   respectFirmed: boolean,
+  frozenHorizonEnd?: Date | null,
 ): Set<string> {
   const ids = new Set<string>(respectFirmed ? Array.from(baseFirmedIds, String) : []);
+  const frozenEnd = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
   for (const t of tasks) {
-    if ((respectFirmed && t.ecc_firmed) || Engine.isFrozenHorizon(t, horizonStart)) ids.add(String(t.id));
+    if ((respectFirmed && t.ecc_firmed) || Engine.isFrozenHorizon(t, horizonStart, frozenEnd)) ids.add(String(t.id));
   }
   return ids;
 }
@@ -733,8 +735,8 @@ export const Engine = {
    *  the one read below, and callers must never assign its result back onto
    *  `Store.setupSnapshot` (Step 6 depends on this staying a local-only
    *  value). */
-  _syntheticZeroCostSetupSnapshot(plant: string): SetupSnapshot {
-    const stored = Store.setupSnapshot;
+  _syntheticZeroCostSetupSnapshot(plant: string, sourceSnapshot?: Readonly<ScheduleSnapshot> | null): SetupSnapshot {
+    const stored = sourceSnapshot?.setupSnapshot !== undefined ? sourceSnapshot.setupSnapshot : Store.setupSnapshot;
     const storedFields = stored && stored.plant === plant ? stored.definition?.fields : undefined;
     const fields = storedFields && storedFields.length ? storedFields : ['colorWheel'];
     return {
@@ -821,8 +823,8 @@ export const Engine = {
    *  "pinned" means in their own context (excluded from the free/movable
    *  set, an obstacle for peers, etc). Manual drags never consult this
    *  (OD-C2c): only optimizer/auto-reflow placement code does. */
-  isFrozenHorizon(task: NimbusTask, now: Date = new Date()): boolean {
-    const end = Engine.frozenHorizonEnd();
+  isFrozenHorizon(task: NimbusTask, now: Date = new Date(), frozenHorizonEnd?: Date | null): boolean {
+    const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
     if (!end || !task.start_date) return false;
     return task.start_date >= now && task.start_date < end;
   },
@@ -845,8 +847,8 @@ export const Engine = {
    *  that isn't itself frozen-pinned. Manual-path code
    *  (manualSchedulePatchFor, Alerts.applyFix) deliberately never calls
    *  this (OD-C2c). */
-  applyFrozenFloor(at: Date): Date {
-    const end = Engine.frozenHorizonEnd();
+  applyFrozenFloor(at: Date, frozenHorizonEnd?: Date | null): Date {
+    const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
     return (end && at < end) ? new Date(end) : at;
   },
 
@@ -862,7 +864,7 @@ export const Engine = {
    *  legacy-walk placement site, so folding the frozen floor in here — rather
    *  than a second, parallel check scattered across those same sites — is the
    *  actual fix. */
-  earliestAllowedStart(task: NimbusTask, plant: string | null): Date | null {
+  earliestAllowedStart(task: NimbusTask, plant: string | null, frozenHorizonEnd?: Date | null): Date | null {
     let floor: Date | null = null;
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
     if (Number.isInteger(value) && (value as number) >= 0) {
@@ -875,7 +877,7 @@ export const Engine = {
         floor.setDate(floor.getDate() - (value as number));
       }
     }
-    const frozenEnd = Engine.frozenHorizonEnd();
+    const frozenEnd = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
     if (frozenEnd && (!floor || frozenEnd > floor)) floor = new Date(frozenEnd);
     return floor;
   },
@@ -1679,6 +1681,10 @@ export const Engine = {
   runAndApply(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
     const candidateRun = opts.__candidateRun === true;
+    // Candidate runs use the frozen-horizon value captured in their immutable
+    // read model. Live runs intentionally leave this undefined so the normal
+    // Store-backed helper remains authoritative.
+    const detachedFrozenHorizonEnd = candidateRun ? _candidateSnapshot?.frozenHorizonEnd : undefined;
     // Mirrors lastBacklogResult's lifecycle: cleared at the top of every real
     // (non-candidate) run so it never goes stale after a later non-setup-aware
     // run, and always reflects the most recent live apply (F8).
@@ -1723,13 +1729,43 @@ export const Engine = {
     const splitPolicy: SplitOrderPolicy = respectCalendar ? Engine.splitOrderPolicyFor(plant) : 'never';
     const sortTerms = Engine._sortTerms(mode, { plant });
 
-    const injectedNow = candidateRun && opts.now instanceof Date ? opts.now : null;
-    const horizonStart = opts.startDate
-      ? new Date(opts.startDate as string | number | Date)
-      : (() => { const d = injectedNow ? new Date(injectedNow) : new Date(); d.setSeconds(0, 0); return d; })();
-    const horizonEnd   = opts.endDate   ? new Date(opts.endDate as string | number | Date) : new Date(horizonStart.getTime() + 35 * 24 * Config.MS_HOUR);
-    const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < horizonStart;
-    const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date > horizonEnd;
+    const optionDate = (value: unknown): Date | null => {
+      const date = value instanceof Date
+        ? new Date(value)
+        : (typeof value === 'string' || typeof value === 'number') ? new Date(value) : null;
+      return date && Number.isFinite(date.getTime()) ? date : null;
+    };
+    const injectedNow = candidateRun ? optionDate(opts.now) : null;
+    const runNow = optionDate(opts.runNow) ?? optionDate(opts.runAt) ?? injectedNow ?? (() => {
+      const d = new Date(); d.setSeconds(0, 0); return d;
+    })();
+    const planningStart = optionDate(opts.planningStart) ?? optionDate(opts.startDate) ?? new Date(runNow);
+    const placementStart = optionDate(opts.placementStart)
+      ?? new Date(Math.max(planningStart.getTime(), runNow.getTime()));
+    const horizonEnd = optionDate(opts.endDate)
+      ?? new Date(planningStart.getTime() + 35 * 24 * Config.MS_HOUR);
+    // Compatibility alias for the legacy walk: it is the planning scope
+    // lower bound, while `placementStart` is the floor for newly generated
+    // setup/production and `runNow` is the captured wall-clock instant.
+    const horizonStart = planningStart;
+    const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < planningStart;
+    const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date >= horizonEnd;
+    if (horizonEnd <= placementStart) {
+      const invalid: CandidateResult = {
+        ...detachedCandidateResult([], _pmT0e),
+        status: 'invalid_horizon',
+        explanation: [{ code: 'invalid_horizon', message: 'The optimizer horizon must end after the effective placement start.' }],
+        diagnostics: {
+          ...detachedCandidateResult([], _pmT0e).diagnostics,
+          termination: 'infeasible',
+          runtimeMs: performance.now() - _pmT0e,
+          events: [],
+        },
+      };
+      if (candidateRun) return invalid;
+      Toast.show('The optimizer horizon must end after the effective placement start.', 'error');
+      return;
+    }
 
     // "Include Setup Times in Optimizer" (plants.setup_active, surfaced as
     // SetupSnapshot.plant_active — Workstream D2 relocated this off the
@@ -1753,10 +1789,13 @@ export const Engine = {
     // 'due-date' evaluator mode instead of 'min-changeover'.
     // 'spt' is untouched: it still only takes this branch when genuinely
     // active-and-matching, exactly as before B3a.
-    const setupSnapshot = Store.setupSnapshot;
+    const setupSnapshot = _candidateSnapshot?.setupSnapshot !== undefined
+      ? _candidateSnapshot.setupSnapshot
+      : Store.setupSnapshot;
     const setupSnapshotActiveAndMatching = !!(setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active);
+    const baseSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
     const effectiveSetupSnapshot: SetupSnapshot | null = (mode === 'changeover' || mode === 'duedate' || mode === 'spt') && !setupSnapshotActiveAndMatching
-      ? Engine._syntheticZeroCostSetupSnapshot(plant)
+      ? Engine._syntheticZeroCostSetupSnapshot(plant, baseSnapshot)
       : setupSnapshot;
     if (mode === 'changeover' || mode === 'duedate' || mode === 'spt' || setupSnapshotActiveAndMatching) {
       const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'duedate' ? 'due-date' : 'min-changeover';
@@ -1766,7 +1805,6 @@ export const Engine = {
       // setup-scheduler.mts, sourceLineWorkHours above) only ever looks up a
       // line that survived this same plant's task filter, so no other
       // plant's lines are ever needed here.
-      const baseSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
       // C2: fold any ECC-firmed or frozen-window order into the SAME firmedIds
       // set the setup-aware evaluators already treat as immovable — Engine.
       // isFrozenHorizon carries its own distinct reason for the UI (never
@@ -1783,7 +1821,7 @@ export const Engine = {
       // real-time default, so a detached preview evaluated at a simulated
       // instant agrees with itself. Never written back to the Store — this
       // fold is run-local only (see effectiveFirmedIdSet).
-      const effectiveFirmedIds = effectiveFirmedIdSet(baseSnapshot.tasks, baseSnapshot.firmedIds, horizonStart, respectFirmed);
+      const effectiveFirmedIds = effectiveFirmedIdSet(baseSnapshot.tasks, baseSnapshot.firmedIds, runNow, respectFirmed, baseSnapshot.frozenHorizonEnd);
       const snapshot: ScheduleSnapshot = { ...baseSnapshot, firmedIds: effectiveFirmedIds };
       const bounds: DueDateFirstBounds = {
         // Non-null by construction: this branch is only reached when either
@@ -1801,10 +1839,13 @@ export const Engine = {
         // not special-cased: the search just terminates immediately with
         // tail placement, which is the existing, safe deadline-exceeded path.
         deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
-        now: horizonStart,
+        now: placementStart,
+        planningStart,
+        runNow,
+        placementStart,
         horizonEnd,
         lines: opts.lines as string[] | undefined,
-        notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant),
+        notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd),
         notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant),
         convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
       };
@@ -1878,6 +1919,15 @@ export const Engine = {
         if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
         unknownSetupOrderIds.add(String(edge.successorOrderId));
         unknownSetupLines.add(edge.line);
+      }
+      // A null successor signature is intentionally kept out of the covered
+      // permutation core. Its deterministic tail placement is a distinct
+      // unresolved-state fact, so include it in the same operator warning
+      // without relabeling the edge as a known uncovered transition.
+      for (const reason of result.explanation) {
+        if (reason.code !== 'unknown-setup-tail-placement' || !reason.taskId || !patchedIds.has(String(reason.taskId))) continue;
+        unknownSetupOrderIds.add(String(reason.taskId));
+        unknownSetupLines.add(reason.line ?? byId.get(String(reason.taskId))?.MACHINE ?? 'Unknown');
       }
       // B3a: a synthetic (fabricated zero-cost) snapshot's matrix is always
       // empty by construction, so its uncovered-but-admitted edges are an
@@ -1999,10 +2049,10 @@ export const Engine = {
       // 'backlog' mode (which sets respect off / moves firmed by design) may
       // move ECC-firmed orders too (confirmed product decision).
       const firmedTasks = tasks.filter(t =>
-        (respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, horizonStart)
+        (respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, horizonStart)
+        !(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
       );
 
       firmedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
@@ -2010,9 +2060,9 @@ export const Engine = {
       // Cursor floor is max(horizonStart, now): extending "From" backwards
       // widens eligibility (older orders become free to move) but never
       // schedules anything in the literal past.
-      const now = injectedNow ? new Date(injectedNow) : new Date();
+      const now = new Date(runNow);
       now.setSeconds(0, 0);
-      const cursorFloor = horizonStart.getTime() > now.getTime() ? horizonStart : now;
+      const cursorFloor = placementStart.getTime() > now.getTime() ? placementStart : now;
 
       let cursor: Date;
       if (respectCalendar) {
@@ -2081,7 +2131,7 @@ export const Engine = {
       for (const t of freeTasks) {
         const durMs = Util.runHours(t) * Config.MS_HOUR;
         if (durMs <= 0) continue;
-        const floor = Engine.earliestAllowedStart(t, plant);
+        const floor = Engine.earliestAllowedStart(t, plant, detachedFrozenHorizonEnd);
         if (floor && cursor < floor) cursor = new Date(floor);
 
         // Alternate between firmed-task collision check and calendar adjustment

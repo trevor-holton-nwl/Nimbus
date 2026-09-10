@@ -443,7 +443,7 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   ], 'unit-test');
 
   try {
-    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart });
+    Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart });
     assert.equal(Store.tasks['spt-frozen-in-place'].start_date.getTime(), frozenStart.getTime(),
       'an order already starting inside the frozen window is left EXACTLY where it was -- never rescheduled into or through the window');
     assert.equal(Store.tasks['spt-frozen-in-place'].end_date.getTime(), frozenTaskEnd.getTime());
@@ -767,8 +767,106 @@ test('Engine.evaluateSchedule snapshots the live read model without publishing a
     const captured = snapshotSchedule();
     captured.tasks[0].RUN_TIME = '999';
     assert.equal(Store.tasks['detached-long'].RUN_TIME, '5', 'snapshot values must not alias Store task objects');
+    assert.equal(captured.readModelVersion, String(Store.rev()), 'a snapshot records the read-model revision used for apply validation');
   } finally {
     unsubscribe();
+  }
+});
+
+test('Engine.evaluateSchedule uses setup truth captured in the detached snapshot', () => {
+  const plant = 'DETACHED-SETUP-TRUTH';
+  const line = 'DETACHED-SETUP-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorCalendar = Store.calendars[line];
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+    Store.replaceSetupSnapshot({
+      plant,
+      definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1,
+        from_key: [{ fieldKey: 'colorWheel', value: 'RED' }],
+        to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 60 }],
+      machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+    Store.setTasks([
+      { id: 'detached-setup-red', PLANT: plant, MACHINE: line, COLOR: 'RED', RUN_TIME: 1, start_date: null, end_date: null },
+      { id: 'detached-setup-blue', PLANT: plant, MACHINE: line, COLOR: 'BLUE', RUN_TIME: 1, start_date: null, end_date: null },
+    ], 'unit-test');
+    const captured = snapshotSchedule(plant);
+    Store.replaceSetupSnapshot({
+      plant,
+      definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1,
+        from_key: [{ fieldKey: 'colorWheel', value: 'RED' }],
+        to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 0 }],
+      machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+
+    const result = Engine.evaluateSchedule('changeover', {
+      plant, respectCalendar: false, runNow: new Date('2026-08-03T08:00:00'),
+      endDate: new Date('2026-08-04T18:00:00'),
+    }, captured);
+
+    assert.equal(result.validationContext?.bounds.setup.plant_rows[0].setup_min, 60,
+      'a detached candidate must resolve setup transitions from its captured snapshot');
+    assert.equal(result.validationContext?.baselineSnapshot?.setupSnapshot?.plant_rows[0].setup_min, 60,
+      'apply validation retains the same captured setup truth');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
+test('Engine.evaluateSchedule keeps planningStart separate from runNow and placementStart', () => {
+  const plant = 'CLOCK-SEPARATION';
+  const line = 'CLOCK-L1';
+  const planningStart = new Date('2035-08-06T06:00:00');
+  const runNow = new Date('2035-08-06T10:00:00');
+  const horizonEnd = new Date('2035-08-06T18:00:00');
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  try {
+    Store.setTasks([{ id: 'clock-queued', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'GREEN', start_date: null, end_date: null }], 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+
+    const result = Engine.evaluateSchedule('changeover', {
+      plant,
+      planningStart,
+      runNow,
+      endDate: horizonEnd,
+      respectCalendar: false,
+    });
+    const patch = result.patches.find(item => item.id === 'clock-queued' && item.changes.planning_status !== 'needs_planning');
+    assert.ok(patch, 'the queued order should receive a detached placement');
+    assert.ok(patch.changes.start_date >= runNow,
+      'new setup and production must not start before the captured runNow');
+    assert.equal(result.validationContext?.bounds.planningStart.getTime(), planningStart.getTime());
+    assert.equal(result.validationContext?.bounds.runNow.getTime(), runNow.getTime());
+    assert.equal(result.validationContext?.bounds.placementStart.getTime(), runNow.getTime());
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
   }
 });
 
@@ -2031,13 +2129,16 @@ test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast
   try {
     Engine.runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: false,
-      startDate: new Date('2026-08-17T00:00:00'), endDate: new Date('2026-08-20T00:00:00'),
+      startDate: new Date('2026-08-17T00:00:00'), endDate: new Date('2026-08-20T00:00:00'), runNow: new Date('2026-08-17T00:00:00'),
     });
 
     assert.ok(Engine.lastSetupAwareResult, 'a live setup-aware apply stores its result on Engine.lastSetupAwareResult');
     assert.ok(Engine.lastSetupAwareResult.missingEdges.some(edge => (
-      edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'setup-live-blank'
-    )), 'the blank-signature order is reported via the dedicated scheduled-without-setup reason');
+      edge.reason === 'successor-state-unknown' && edge.successorOrderId === 'setup-live-blank'
+    )), 'the blank-signature order remains an unresolved successor-state diagnostic, separate from known uncovered edges');
+    assert.ok(Engine.lastSetupAwareResult.explanation.some(reason => (
+      reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'setup-live-blank'
+    )), 'the blank-signature order is reported as deterministic unknown-tail placement');
     assert.ok(Store.tasks['setup-live-blue'].start_date, 'the covered order was actually applied to Store');
     assert.ok(Store.tasks['setup-live-blank'].start_date, 'the tail-placed order was also applied to Store, never frozen');
 
@@ -2083,7 +2184,7 @@ test('B3a: an inactive plant\'s changeover run produces identical sequencing to 
   ]);
   const opts = {
     plant, respectFirmed: true, respectCalendar: false,
-    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
   };
   const positions = () => ({
     a: Store.tasks['parity-a'].start_date?.getTime(),
@@ -2159,7 +2260,7 @@ test('B3a: \'duedate\' also routes through the setup-aware evaluator via a synth
   ]);
   const opts = {
     plant, respectFirmed: true, respectCalendar: false,
-    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
   };
 
   Store.setSelectedPlant(plant, 'unit-test');
@@ -2230,7 +2331,7 @@ test('B3a: an inactive plant\'s changeover run raises zero missing-setup diagnos
   try {
     Engine.runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: false,
-      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
     });
 
     assert.ok(Store.tasks['quiet-red'].start_date && Store.tasks['quiet-blue'].start_date,
@@ -2295,7 +2396,7 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
   try {
     Engine.runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: true,
-      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-10-15T00:00:00'),
+      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-10-15T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
     });
 
     assert.equal(Store.tasks['final-fix2-order'].start_date, null,
@@ -2354,7 +2455,7 @@ test('B3a Step 6: the synthetic snapshot never reaches Store.setupSnapshot, so a
   try {
     Engine.runAndApply('changeover', {
       plant, respectFirmed: true, respectCalendar: false,
-      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+      startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
     });
 
     assert.equal(Store.setupSnapshot, null,
@@ -2451,7 +2552,7 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
   try {
     Engine.runAndApply('duedate', {
       plant, respectFirmed: true, respectCalendar: false,
-      startDate: new Date('2026-08-21T00:00:00'), endDate: new Date('2026-08-24T00:00:00'),
+      startDate: new Date('2026-08-21T00:00:00'), endDate: new Date('2026-08-24T00:00:00'), runNow: new Date('2026-08-21T00:00:00'),
     });
 
     assert.ok(Engine.lastSetupAwareResult, 'a live setup-aware apply stores its result on Engine.lastSetupAwareResult');
@@ -2520,7 +2621,7 @@ test('B4: policyKey follows the CONFIGURED FIRST priority field, not insertion o
   const openHours = () => { for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(plant, dow, [0, 24], 'unit-test'); };
   const runOpts = {
     plant, respectFirmed: true, respectCalendar: false,
-    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
   };
   const positions = () => ({
     blue: Store.tasks['field-order-blue'].start_date?.getTime(),
@@ -2618,7 +2719,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
 
   const runOpts = {
     plant, respectFirmed: true, respectCalendar: false,
-    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'),
+    startDate: new Date('2026-08-25T00:00:00'), endDate: new Date('2026-08-28T00:00:00'), runNow: new Date('2026-08-25T00:00:00'),
   };
   const positions = () => ({
     blue: Store.tasks['cost-blue'].start_date?.getTime(),
@@ -2967,7 +3068,7 @@ test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respect
   try {
     // --- respectFirmed omitted (defaults true): ECC-firmed order untouched.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
-    Engine.runAndApply('changeover', { plant, respectCalendar: true, startDate: horizonStart });
+    Engine.runAndApply('changeover', { plant, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
     assert.equal(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
       'with respectFirmed defaulted to true, an ECC-firmed order must be left exactly where it was');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
@@ -2975,7 +3076,7 @@ test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respect
 
     // --- respectFirmed: true (explicit): same result.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
-    Engine.runAndApply('changeover', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart });
+    Engine.runAndApply('changeover', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
     assert.equal(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
       'with respectFirmed: true, the ECC-firmed order must still be left exactly where it was');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime());
@@ -2984,9 +3085,9 @@ test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respect
     // re-placed by the evaluator (a patch lands, moving it off its manually-set,
     // far-future, otherwise-never-chosen date); the frozen order still never moves.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
-    Engine.runAndApply('changeover', { plant, respectFirmed: false, respectCalendar: true, startDate: horizonStart });
-    assert.notEqual(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
-      'with respectFirmed: false, the ECC-firmed order must be freed and re-placed by the evaluator, not left in place');
+    Engine.runAndApply('changeover', { plant, respectFirmed: false, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
+    assert.equal(Engine.lastSetupAwareResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
+      'with respectFirmed: false, the ECC-firmed order must be evaluated as movable rather than protected');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
       'the frozen-horizon fold is unconditional -- respectFirmed: false must not free it too');
   } finally {

@@ -255,6 +255,28 @@ test('setup-aware eligibility leaves a scheduled order wholly beyond the horizon
   assert.ok(patchFor(result, 'contract-horizon-in-window'));
 });
 
+test('setup-aware evaluators return a structured invalid_horizon result', () => {
+  const snapshot = setupSnapshot([scheduledTask('contract-invalid-horizon', 1, 'GREEN', '2026-08-03T18:00')]);
+  const setup = setupTruth();
+  const bounds = dueDateBounds(setup, {
+    planningStart: at('2026-08-03T12:00'),
+    runNow: at('2026-08-03T12:00'),
+    horizonEnd: at('2026-08-03T11:00'),
+  });
+
+  for (const result of [
+    SetupScheduler.evaluateDueDateFirst(snapshot, bounds),
+    SetupScheduler.evaluateSptWithSetup(snapshot, bounds),
+    SetupScheduler.evaluateMinChangeover(snapshot, bounds),
+    SetupScheduler.evaluateThroughput(snapshot, bounds, { throughputMinSavingsMin: 0, throughputMaxSlipMin: 1440 }),
+  ]) {
+    assert.equal(result.status, 'invalid_horizon');
+    assert.deepEqual(result.patches, []);
+    assert.equal(result.diagnostics.termination, 'infeasible');
+    assert.equal(result.explanation[0].code, 'invalid_horizon');
+  }
+});
+
 test('gap fill finds unused capacity after search expires without moving accepted production', () => {
   const fixed = scheduledTask('accepted', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T12:00', '2026-08-03T13:00');
   const waiting = scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00');
@@ -4090,12 +4112,17 @@ test('hard bounds protected violations reserve capacity without blocking partial
 
 test('hard bounds preserve a valid incumbent on timeout and reject stale or tampered proposals', () => {
   const snapshot = setupSnapshot([scheduledTask('current', 3, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T11:00:00')]);
+  snapshot.readModelVersion = 'revision-v1';
   snapshot.masterData.plants[0].max_push_forward_days = 0;
   const bounds = dueDateBounds(setupTruth(), { clock: () => 10000, deadline: 1 });
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
   assert.equal(result.searchComplete, false);
   assert.equal(result.dispositions[0].status, 'scheduled');
   assert.equal(SetupScheduler.validateCandidateForApply(result, snapshot).some(f => f.severity === 'error'), false);
+  const revisionStale = structuredClone(snapshot); revisionStale.readModelVersion = 'revision-v2';
+  assert.ok(SetupScheduler.validateCandidateForApply(result, revisionStale).some(f => (
+    f.code === 'stale_candidate' && f.message.includes('read-model revision')
+  )), 'apply validation names a read-model revision change even when task values are unchanged');
   const stale = structuredClone(snapshot); stale.tasks[0].RUN_TIME = 4;
   assert.ok(SetupScheduler.validateCandidateForApply(result, stale).some(f => f.code === 'stale_candidate'));
   const bad = { ...result, patches: [{ id: 'current', changes: { start_date: at('2026-08-04T08:00:00'), end_date: at('2026-08-04T11:00:00'), planning_status: 'scheduled' } }] };
