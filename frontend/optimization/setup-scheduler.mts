@@ -423,6 +423,9 @@ export interface DueDateFirstBounds {
   /** Effective lower bound for newly generated setup/production. Defaults to
    * `now` for legacy callers. */
   placementStart?: Date;
+  /** Internal caller-owned primary budget. Nested comparisons reuse this
+   * object so one evaluator run cannot reset its iteration allowance. */
+  searchBudget?: SearchBudget;
   /** True uses line/plant calendars and blackout blocks; false uses
    * continuous capacity. */
   respectCalendar?: boolean;
@@ -824,8 +827,30 @@ function worseTermination(
  * line's search can never exhaust the budget for every other line on the
  * plant; a firmed-boundary fragment run still shares it with every other
  * fragment on the same line. */
-interface SearchBudget {
+export interface SearchBudget {
   remainingIterations: number;
+  iterationsUsed: number;
+  startedAt: number;
+  deadlineAt: number;
+  budgetMs: number;
+}
+
+function createSearchBudget(bounds: Readonly<DueDateFirstBounds>): SearchBudget {
+  const startedAt = bounds.clock();
+  return {
+    remainingIterations: bounds.iterationCap,
+    iterationsUsed: 0,
+    startedAt,
+    deadlineAt: bounds.deadline,
+    budgetMs: Math.max(0, bounds.deadline - startedAt),
+  };
+}
+
+function consumeSearchIteration(budget: SearchBudget): boolean {
+  if (budget.remainingIterations <= 0) return false;
+  budget.remainingIterations -= 1;
+  budget.iterationsUsed += 1;
+  return true;
 }
 
 interface FirmedBoundary {
@@ -2634,11 +2659,10 @@ function exactSearch(
       // A zero-order fragment has no selected occurrence to charge as a
       // traversal edge, but it still evaluates a firmed-boundary transition.
       if (totalTasks === 0) {
-        if (budget.remainingIterations <= 0) {
+        if (!consumeSearchIteration(budget)) {
           termination = 'iteration-cap';
           break;
         }
-        budget.remainingIterations -= 1;
       }
       candidateCount += 1;
       const candidate = candidateForSequence(snapshot, bounds, line, selected, fragment, adjacency, true);
@@ -2671,11 +2695,10 @@ function exactSearch(
     const groupIndex = frame.choices[frame.nextChoice++];
     const choice = nextChoiceForGroup(groupIndex);
     if (!choice) continue;
-    if (budget.remainingIterations <= 0) {
+    if (!consumeSearchIteration(budget)) {
       termination = 'iteration-cap';
       break;
     }
-    budget.remainingIterations -= 1;
     const previousNormalCursor = choice.normalCursorAfter === undefined ? null : normalCursors[groupIndex];
     if (choice.normalCursorAfter !== undefined) normalCursors[groupIndex] = choice.normalCursorAfter;
     remainingCounts[groupIndex] -= 1;
@@ -2747,14 +2770,13 @@ function greedySearch(
       termination = 'deadline';
       return null;
     }
-    if (budget.remainingIterations <= 0) {
+    if (!consumeSearchIteration(budget)) {
       termination = 'iteration-cap';
       return null;
     }
     const key = sequence.map(taskId).join('\u0000');
     if (seen.has(key)) return null;
     seen.add(key);
-    budget.remainingIterations -= 1;
     candidateCount += 1;
     const candidate = candidateForSequence(
       snapshot,
@@ -2966,7 +2988,7 @@ function searchFragment(
     // can no longer be true (A1 admits uncovered mid-sequence transitions
     // instead of rejecting the candidate), so a single evaluation replaces
     // the former retry-with-demotion loop.
-    budget.remainingIterations -= 1;
+    consumeSearchIteration(budget);
     // Due-date push-forward limit: this is a single fixed run-time-ordered
     // walk (no ranking search to steer via score[SCORE_OVER_CAP]), so
     // capAwareSequence pulls a still-savable capped order ahead of the SPT
@@ -2996,8 +3018,8 @@ function searchFragment(
     }
     let candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
     const urgentSequence = orderWithAdjacency(urgencyOrder(snapshot, bounds, line, workingTasks), fragment, adjacency);
-    if (urgentSequence && bounds.clock() < bounds.deadline && budget.remainingIterations > 0) {
-      budget.remainingIterations--;
+    if (urgentSequence && bounds.clock() < bounds.deadline && budget.remainingIterations > 0
+      && consumeSearchIteration(budget)) {
       const urgent = candidateForSequence(snapshot, bounds, line, urgentSequence, fragment, adjacency);
       if (urgent.feasible && (!candidate.feasible || ordinalCompare(urgent.admissionKey ?? '', candidate.admissionKey ?? '') < 0)) candidate = urgent;
     }
@@ -3545,12 +3567,11 @@ function dueDateBoundaryFallbackCursor(
         exhausted = true;
         return null;
       }
-      if (budget.remainingIterations <= 0) {
+      if (!consumeSearchIteration(budget)) {
         termination = 'iteration-cap';
         exhausted = true;
         return null;
       }
-      budget.remainingIterations -= 1;
       const deferredIds = new Set<string>();
       for (const index of subsetIndexes) {
         for (const id of removableComponents[index]) deferredIds.add(id);
@@ -4696,6 +4717,8 @@ export function evaluateSptWithSetup(
   // otherwise build one fresh — then thread the (possibly augmented) bounds
   // to everything below so every hot loop can read `bounds.runContext`.
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
+  const budget = bounds.searchBudget ?? createSearchBudget(bounds);
+  bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
@@ -4720,21 +4743,15 @@ export function evaluateSptWithSetup(
   const score = zeroScore();
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
-  let linesRemaining = orderedLines.length;
   for (const [line, tasks] of orderedLines) {
     // Phase 1.5: a fair share of whatever wall-clock budget remains, so one
     // early line can no longer consume the caller's entire `bounds.deadline`
     // and leave every line behind it with zero — recomputed fresh from the
     // clock each iteration (not decremented by a fixed slice), so a line
     // that finishes early lets its unused share roll forward to the rest.
-    const now = bounds.clock();
-    const remainingMs = Math.max(0, bounds.deadline - now);
-    const lineDeadline = Math.min(bounds.deadline, now + remainingMs / linesRemaining);
-    const lineBounds: Readonly<DueDateFirstBounds> = { ...bounds, deadline: lineDeadline };
-    linesRemaining -= 1;
+    const lineBounds: Readonly<DueDateFirstBounds> = bounds;
     // Part 2b: a fresh per-line budget so one large line's search can never
     // exhaust the iteration cap for every other line on the plant.
-    const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
@@ -4844,14 +4861,14 @@ export function evaluateSptWithSetup(
       runtimeMs: Math.max(0, bounds.clock() - started),
       limitReached: termination === 'deadline' || termination === 'iteration-cap',
       events: [],
-      budgetMs: Math.max(0, bounds.deadline - started),
-      deadlineAt: bounds.deadline,
-      iterationsUsed: candidateCount,
+      budgetMs: budget.budgetMs,
+      deadlineAt: budget.deadlineAt,
+      iterationsUsed: budget.iterationsUsed,
       eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
       evaluatedCount: candidateCount,
       placedCount: patches.length,
-      exhaustive: termination === 'completed',
-      quality: 'exact',
+      exhaustive: false,
+      quality: 'heuristic',
       respectCalendar: bounds.respectCalendar ?? true,
     },
     unchangedLines,
@@ -4876,6 +4893,8 @@ export function evaluateDueDateFirst(
   // otherwise build one fresh — then thread the (possibly augmented) bounds
   // to everything below so every hot loop can read `bounds.runContext`.
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
+  const budget = bounds.searchBudget ?? createSearchBudget(bounds);
+  bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
@@ -4901,21 +4920,15 @@ export function evaluateDueDateFirst(
   const score = zeroScore();
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
-  let linesRemaining = orderedLines.length;
   for (const [line, tasks] of orderedLines) {
     // Phase 1.5: a fair share of whatever wall-clock budget remains, so one
     // early line can no longer consume the caller's entire `bounds.deadline`
     // and leave every line behind it with zero — recomputed fresh from the
     // clock each iteration (not decremented by a fixed slice), so a line
     // that finishes early lets its unused share roll forward to the rest.
-    const now = bounds.clock();
-    const remainingMs = Math.max(0, bounds.deadline - now);
-    const lineDeadline = Math.min(bounds.deadline, now + remainingMs / linesRemaining);
-    const lineBounds: Readonly<DueDateFirstBounds> = { ...bounds, deadline: lineDeadline };
-    linesRemaining -= 1;
+    const lineBounds: Readonly<DueDateFirstBounds> = bounds;
     // Part 2b: a fresh per-line budget so one large line's search can never
     // exhaust the iteration cap for every other line on the plant.
-    const budget: SearchBudget = { remainingIterations: bounds.iterationCap };
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
@@ -5027,13 +5040,13 @@ export function evaluateDueDateFirst(
       runtimeMs: Math.max(0, bounds.clock() - started),
       limitReached: termination === 'deadline' || termination === 'iteration-cap',
       events: [],
-      budgetMs: Math.max(0, bounds.deadline - started),
-      deadlineAt: bounds.deadline,
-      iterationsUsed: candidateCount,
+      budgetMs: budget.budgetMs,
+      deadlineAt: budget.deadlineAt,
+      iterationsUsed: budget.iterationsUsed,
       eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
       evaluatedCount: candidateCount,
       placedCount: patches.length,
-      exhaustive: termination === 'completed',
+      exhaustive: method.endsWith('exact') && termination === 'completed',
       quality: method.endsWith('exact') ? 'exact' : 'heuristic',
       respectCalendar: bounds.respectCalendar ?? true,
     },
@@ -5080,10 +5093,10 @@ export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): CandidateResult {
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
-  const now = bounds.clock();
-  const remainingMs = Math.max(0, bounds.deadline - now);
-  const baseline = evaluateDueDateFirst(snapshot, { ...bounds, deadline: now + remainingMs / 2 });
-  const candidate = evaluateDueDateFirst(snapshot, bounds, 'min-changeover');
+  const budget = bounds.searchBudget ?? createSearchBudget(bounds);
+  bounds = { ...bounds, searchBudget: budget };
+  const baseline = evaluateDueDateFirst(snapshot, { ...bounds, searchBudget: budget });
+  const candidate = evaluateDueDateFirst(snapshot, { ...bounds, searchBudget: budget }, 'min-changeover');
   const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
   const admission = (result: CandidateResult): string => {
     const queued = new Set(result.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id));
@@ -5100,7 +5113,20 @@ export function evaluateMinChangeover(
   return {
     ...chosen,
     searchComplete: !incomplete,
-    diagnostics: { ...chosen.diagnostics, termination, limitReached: incomplete, candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount, runtimeMs: Math.max(0, bounds.clock() - now) },
+    diagnostics: {
+      ...chosen.diagnostics,
+      termination,
+      limitReached: incomplete,
+      candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount,
+      runtimeMs: Math.max(0, bounds.clock() - budget.startedAt),
+      budgetMs: budget.budgetMs,
+      deadlineAt: budget.deadlineAt,
+      iterationsUsed: budget.iterationsUsed,
+      evaluatedCount: (baseline.diagnostics.evaluatedCount ?? baseline.diagnostics.candidateCount)
+        + (candidate.diagnostics.evaluatedCount ?? candidate.diagnostics.candidateCount),
+      exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
+      quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
+    },
     explanation: [...chosen.explanation, { code: chooseCandidate ? 'min-changeover-due-safe' : 'min-changeover-incumbent', message: chooseCandidate ? 'Selected the best validated admission and delivery/setup objective.' : 'Retained the better validated incumbent.' }],
   };
 }
@@ -5156,12 +5182,39 @@ export function evaluateThroughput(
   // function's internal `evaluateDueDateFirst` sweeps (baseline + throughput),
   // instead of each sweep independently rebuilding its own.
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
-  return selectThroughputCandidate(
+  const budget = bounds.searchBudget ?? createSearchBudget(bounds);
+  bounds = { ...bounds, searchBudget: budget };
+  const baseline = evaluateDueDateFirst(snapshot, bounds);
+  const candidate = evaluateDueDateFirst(snapshot, bounds, 'throughput');
+  const selected = selectThroughputCandidate(
     snapshot,
-    evaluateDueDateFirst(snapshot, bounds),
-    evaluateDueDateFirst(snapshot, bounds, 'throughput'),
+    baseline,
+    candidate,
     thresholds,
   );
+  const baselineEvaluated = baseline.diagnostics.evaluatedCount ?? baseline.diagnostics.candidateCount;
+  const candidateEvaluated = candidate.diagnostics.evaluatedCount ?? candidate.diagnostics.candidateCount;
+  const incomplete = baseline.searchComplete === false || candidate.searchComplete === false;
+  return {
+    ...selected,
+    searchComplete: !incomplete,
+    diagnostics: {
+      ...selected.diagnostics,
+      candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount,
+      runtimeMs: Math.max(0, bounds.clock() - budget.startedAt),
+      budgetMs: budget.budgetMs,
+      deadlineAt: budget.deadlineAt,
+      iterationsUsed: budget.iterationsUsed,
+      evaluatedCount: baselineEvaluated + candidateEvaluated,
+      placedCount: selected.patches.length,
+      exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
+      quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
+      termination: incomplete
+        ? (baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline' ? 'deadline' : 'iteration-cap')
+        : selected.diagnostics.termination,
+      limitReached: incomplete,
+    },
+  };
 }
 
 /** Apply a detached patch set to detached task values for before/after

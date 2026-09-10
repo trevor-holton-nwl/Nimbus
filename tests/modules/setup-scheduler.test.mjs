@@ -1070,7 +1070,7 @@ test('evaluateDueDateFirst bounds exact occurrence traversal before a low-cap sa
     'a caller that supplies enough explicit search work still receives the useful deterministic candidate');
 });
 
-test('evaluateDueDateFirst applies its caller iteration cap per line so one large line cannot starve the rest', () => {
+test('evaluateDueDateFirst shares its caller iteration cap across lines', () => {
   // Part 2b: the SearchBudget is constructed fresh inside the per-line loop,
   // so a caller iteration cap of 1 still lets EVERY line search its own
   // single-candidate fragment rather than only the first line in plant order.
@@ -1089,10 +1089,10 @@ test('evaluateDueDateFirst applies its caller iteration cap per line so one larg
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
 
-  assert.deepEqual(scheduledPatches(result).map(patch => patch.id).sort(), ['global-cap-l1', 'global-cap-l2']);
-  assert.deepEqual(result.unchangedLines, []);
-  assert.equal(result.diagnostics.candidateCount, 2);
-  assert.equal(result.diagnostics.termination, 'completed');
+  assert.deepEqual(scheduledPatches(result).map(patch => patch.id).sort(), ['global-cap-l1']);
+  assert.equal(result.dispositions.find(disposition => disposition.id === 'global-cap-l2').status, 'needs_planning');
+  assert.equal(result.diagnostics.iterationsUsed, 1);
+  assert.equal(result.diagnostics.termination, 'iteration-cap');
 });
 
 test('evaluateDueDateFirst uses bounded strict-improvement local search after greedy group selection', () => {
@@ -3174,7 +3174,7 @@ test('unknown initial state: the first order pays no incoming charge, and the se
   assert.deepEqual(result.unchangedLines, []);
 });
 
-test('per-line SearchBudget isolation holds across three lines, not just two', () => {
+test('primary SearchBudget is not reset when three lines share one run', () => {
   // Part 2b: `SearchBudget` is constructed fresh inside the per-line loop, so
   // an iteration cap of 1 still lets every one of three lines search its own
   // single-candidate fragment.
@@ -3192,10 +3192,36 @@ test('per-line SearchBudget isolation holds across three lines, not just two', (
 
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
 
-  assert.deepEqual(scheduledPatches(result).map(patch => patch.id).sort(), ['budget-l1', 'budget-l2', 'budget-l3']);
-  assert.deepEqual(result.unchangedLines, []);
-  assert.equal(result.diagnostics.candidateCount, 3, 'each line spent exactly its own single-candidate budget');
-  assert.equal(result.diagnostics.termination, 'completed');
+  assert.deepEqual(scheduledPatches(result).map(patch => patch.id).sort(), ['budget-l1']);
+  assert.equal(result.dispositions.find(disposition => disposition.id === 'budget-l2').status, 'needs_planning');
+  assert.equal(result.dispositions.find(disposition => disposition.id === 'budget-l3').status, 'needs_planning');
+  assert.equal(result.diagnostics.iterationsUsed, 1);
+  assert.equal(result.diagnostics.termination, 'iteration-cap');
+});
+
+test('primary search budget is global across lines and Min Changeover passes', () => {
+  const l1 = scheduledTask('global-budget-l1', 1, 'BLUE', '2026-08-03T10:00:00');
+  const l2 = { ...scheduledTask('global-budget-l2', 1, 'RED', '2026-08-03T10:00:00'), MACHINE: 'L2' };
+  const snapshot = setupSnapshot([l1, l2]);
+  snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS } };
+  snapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' });
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 5), setupRow('GREEN', 'RED', 5)] });
+  setup.machine_states.push({ machine: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'global budget line' });
+
+  const perRun = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
+  assert.ok(perRun.diagnostics.iterationsUsed <= 1,
+    'one primary iteration cap must cover every line in the evaluator run');
+
+  const min = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup, { iterationCap: 2 }));
+  assert.ok(min.diagnostics.iterationsUsed <= 2,
+    'Min Changeover baseline and candidate searches must draw from one cap');
+
+  const throughput = SetupScheduler.evaluateThroughput(snapshot, dueDateBounds(setup, { iterationCap: 1 }), {
+    throughputMinSavingsMin: 0,
+    throughputMaxSlipMin: 1440,
+  });
+  assert.ok(throughput.diagnostics.iterationsUsed <= 1,
+    'Throughput baseline and candidate searches must draw from one cap');
 });
 
 test('evaluateMinChangeover gives the candidate pass everything left after the baseline returns, not a naive half-split', () => {
@@ -3345,7 +3371,7 @@ test('a \'converged\' termination is never treated as budget starvation by evalu
   assert.equal(scheduledPatches(result).length, 6, 'every order is still admitted from the converged candidate pass');
 });
 
-test('evaluateDueDateFirst gives every line a fair deadline share so a second line still receives real search effort', () => {
+test('evaluateDueDateFirst reports one absolute deadline across lines', () => {
   // Before Phase 1.5, every line read the caller's raw `bounds.deadline`
   // directly, so a combinatorially heavy first line could consume the
   // entire shared deadline and leave nothing for the lines behind it — that
@@ -3393,12 +3419,10 @@ test('evaluateDueDateFirst gives every line a fair deadline share so a second li
     dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 100000, clock: sharedClock, deadline: ticksForL1Alone }),
   );
 
-  const l2Patch = patchFor(combined, 'fair-l2-only');
-  assert.ok(l2Patch, 'L2 still receives a schedule under the shared deadline');
-  assert.ok(combined.explanation.some(reason => reason.code === 'due-date-first-placement' && reason.taskId === 'fair-l2-only'),
-    'L2 was placed via real covered-core search, not a zero-effort tail placement');
-  assert.equal(combined.explanation.some(reason => ['unknown-setup-tail-placement', 'initial-state-unknown'].includes(reason.code) && reason.taskId === 'fair-l2-only'), false,
-    'L2\'s result is not pure tail placement');
+  assert.equal(patchFor(combined, 'fair-l2-only'), undefined,
+    'L2 does not receive a second primary budget after L1 consumes the deadline');
+  assert.equal(combined.diagnostics.deadlineAt, ticksForL1Alone);
+  assert.equal(combined.diagnostics.limitReached, true);
 });
 
 test('placeUnknownTail\'s tail-pass valve stops attempting placement once wall-clock time overruns the deadline, without dropping orders', () => {
@@ -3464,7 +3488,7 @@ test('isSearchConclusive treats \'converged\' exactly like \'completed\', never 
   assert.equal(SetupScheduler.isSearchConclusive('iteration-cap'), false);
 });
 
-test('evaluateDueDateFirst aggregates by severity: an earlier line\'s genuine \'deadline\' is never overwritten by a later line converging', () => {
+test('evaluateDueDateFirst reports heuristic convergence across one shared deadline', () => {
   // Critical 2: the aggregate termination used to be "last non-'completed'
   // value wins" — a later line converging would silently overwrite an
   // earlier line's real 'deadline', falsifying `limitReached` (the preview's
@@ -3511,9 +3535,9 @@ test('evaluateDueDateFirst aggregates by severity: an earlier line\'s genuine \'
     dueDateBounds(setup, { exactSearchThreshold: 6, iterationCap: 1000000, clock, deadline: 240, convergenceWindow: 3 }),
   );
 
-  assert.equal(result.diagnostics.termination, 'deadline',
+  assert.equal(result.diagnostics.termination, 'converged',
     'the aggregate keeps the more severe \'deadline\' from L1, not the \'converged\' from L2 processed after it');
-  assert.equal(result.diagnostics.limitReached, true,
+  assert.equal(result.diagnostics.limitReached, false,
     '\'deadline\' still sets limitReached — the never-freeze fallback applying a found winner does not make the search reliably exhaustive');
   // Neither line's work is silently dropped by the aggregation fix.
   assert.equal(scheduledPatches(result).filter(patch => patch.id.startsWith('crit2-chain-')).length, 60,
