@@ -823,7 +823,10 @@ export const Timeline = {
     if (Timeline._tl) Timeline._vScrollTop = Timeline._getVScroll();
     const all = Store.tasksForSelectedPlant();
     const tasks = all.filter(t => t.start_date && t.end_date);
-    const dropped = all.length - tasks.length;
+    // Queued (needs_planning) rows with no dates are intentionally absent from
+    // the Gantt; only warn for scheduled or one-sided-dated rows.
+    const dropped = all.filter(t => !(t.start_date && t.end_date)
+      && !(t.planning_status === 'needs_planning' && !t.start_date && !t.end_date)).length;
     if (dropped > 0) {
       ErrorLog.warn('timeline',
         `Rebuild: ${dropped} task(s) hidden (missing start/end)`,

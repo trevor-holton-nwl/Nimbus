@@ -2059,7 +2059,7 @@ export const Engine = {
         runNow,
         placementStart,
         horizonEnd,
-        lines: opts.lines as string[] | undefined,
+        lines: Array.isArray(opts.lines) ? opts.lines as string[] : undefined,
         respectCalendar,
         notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData),
         notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData),
@@ -2694,25 +2694,24 @@ export function rehydrateOptimizerCandidate(
   const validDateMap = (value: unknown): value is Record<string, Date | string | number | null> => (
     isObject(value) && Object.values(value).every(entry => entry === null || !!rehydrateDate(entry as Date | string | number))
   );
-  if (!validSetup
-    || !Number.isInteger(serialized.exactSearchThreshold) || serialized.exactSearchThreshold < 0
-    || !Number.isInteger(serialized.iterationCap) || serialized.iterationCap <= 0
-    || !Number.isFinite(serialized.deadline)
-    || !Array.isArray(serialized.effectiveFirmedIds)
-    || !serialized.effectiveFirmedIds.every(id => typeof id === 'string')
-    || !validDateMap(serialized.notBeforeById)
-    || !validDateMap(serialized.notAfterById)
-    || (serialized.lines !== undefined && (!Array.isArray(serialized.lines) || !serialized.lines.every(line => typeof line === 'string')))
-    || (serialized.scopeTaskIds !== undefined && (!Array.isArray(serialized.scopeTaskIds) || !serialized.scopeTaskIds.every(id => typeof id === 'string')))
-    || typeof serialized.respectCalendar !== 'boolean'
-    || (serialized.boundaryTaskIds !== undefined && (!Array.isArray(serialized.boundaryTaskIds) || !serialized.boundaryTaskIds.every(id => typeof id === 'string')))
-    || !isDateFieldValid(serialized.now)
-    || !isDateFieldValid(serialized.planningStart)
-    || !isDateFieldValid(serialized.runNow)
-    || !isDateFieldValid(serialized.placementStart)
-    || !isDateFieldValid(serialized.horizonEnd)) {
-    throw new TypeError('Optimizer worker returned malformed validation metadata.');
-  }
+  const malformed = (field: string): never => { throw new TypeError(`Optimizer worker returned malformed validation metadata: ${field}`); };
+  if (!validSetup) malformed('setup');
+  if (!Number.isInteger(serialized.exactSearchThreshold) || serialized.exactSearchThreshold < 0) malformed('exactSearchThreshold');
+  if (!Number.isInteger(serialized.iterationCap) || serialized.iterationCap <= 0) malformed('iterationCap');
+  if (!Number.isFinite(serialized.deadline)) malformed('deadline');
+  if (!Array.isArray(serialized.effectiveFirmedIds)
+    || !serialized.effectiveFirmedIds.every(id => typeof id === 'string')) malformed('effectiveFirmedIds');
+  if (!validDateMap(serialized.notBeforeById)) malformed('notBeforeById');
+  if (!validDateMap(serialized.notAfterById)) malformed('notAfterById');
+  if (serialized.lines !== undefined && (!Array.isArray(serialized.lines) || !serialized.lines.every(line => typeof line === 'string'))) malformed('lines');
+  if (serialized.scopeTaskIds !== undefined && (!Array.isArray(serialized.scopeTaskIds) || !serialized.scopeTaskIds.every(id => typeof id === 'string'))) malformed('scopeTaskIds');
+  if (typeof serialized.respectCalendar !== 'boolean') malformed('respectCalendar');
+  if (serialized.boundaryTaskIds !== undefined && (!Array.isArray(serialized.boundaryTaskIds) || !serialized.boundaryTaskIds.every(id => typeof id === 'string'))) malformed('boundaryTaskIds');
+  if (!isDateFieldValid(serialized.now)) malformed('now');
+  if (!isDateFieldValid(serialized.planningStart)) malformed('planningStart');
+  if (!isDateFieldValid(serialized.runNow)) malformed('runNow');
+  if (!isDateFieldValid(serialized.placementStart)) malformed('placementStart');
+  if (!isDateFieldValid(serialized.horizonEnd)) malformed('horizonEnd');
   if (!snapshot.tasks.every(task => Object.prototype.hasOwnProperty.call(serialized.notBeforeById, String(task.id))
     && Object.prototype.hasOwnProperty.call(serialized.notAfterById, String(task.id)))) {
     throw new TypeError('Optimizer worker returned incomplete validation metadata.');

@@ -75,7 +75,7 @@ export function serializeOptimizerValidation(
     runNow: bounds.runNow,
     placementStart: bounds.placementStart,
     horizonEnd: bounds.horizonEnd,
-    lines: bounds.lines,
+    lines: bounds.lines ?? undefined,
     scopeTaskIds: bounds.scopeTaskIds === undefined
       ? undefined
       : Array.from(bounds.scopeTaskIds, String),

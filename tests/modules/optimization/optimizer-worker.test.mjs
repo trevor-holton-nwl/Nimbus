@@ -175,6 +175,15 @@ test('real optimizer worker boundary localizes its deadline and round-trips effe
   assert.ok(response.validation, 'the real worker response must include validation metadata');
   assert.deepEqual(new Set(response.validation.effectiveFirmedIds), new Set(['worker-ecc', 'worker-frozen']),
     'ECC and frozen effective firming must survive worker serialization');
+
+  // Plant-scoped runs send `lines: null` (Optimize dialog default). That must
+  // serialize as undefined and rehydrate on the main thread without throwing.
+  const plantScoped = { ...request, runId: 'worker-plant-scope', request: { ...request.request, lines: null } };
+  const plantResponse = buildOptimizerWorkerResponse(plantScoped, () => 5000);
+  assert.equal(plantResponse.validation.lines, undefined,
+    'a null lines scope must not cross the worker boundary as null');
+  assert.doesNotThrow(() => rehydrateOptimizerCandidate(plantResponse.candidate, workerSnapshot, plantResponse.validation),
+    'plant-scoped worker metadata must rehydrate on the main thread');
 });
 
 test('real optimizer worker preserves validation metadata on the legacy fallback path', () => {
