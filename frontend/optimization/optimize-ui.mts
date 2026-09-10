@@ -20,7 +20,7 @@ import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, validateCandidateForApply } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
@@ -979,6 +979,19 @@ function taskBaseline(tasks: ReadonlyArray<NimbusTask>): Map<string, string> {
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
 export const OptimizerPreview = {
+  planningSummary(candidate: CandidateResult, before: ReadonlyArray<NimbusTask>): {
+    scheduled: number; needsPlanning: number; newlyQueued: number; protectedExceptions: number; incomplete: boolean;
+  } {
+    const dispositions = candidate.dispositions ?? [];
+    const priorQueue = new Set(before.filter(task => task.planning_status === 'needs_planning').map(task => task.id));
+    const queued = dispositions.filter(item => item.status === 'needs_planning');
+    const protectedIds = new Set(dispositions.filter(item => item.status === 'protected').map(item => item.id));
+    const protectedExceptions = new Set((candidate.validationFindings ?? [])
+      .filter(item => item.code !== 'missing_setup' && item.taskId && protectedIds.has(item.taskId)).map(item => item.taskId)).size;
+    return { scheduled: dispositions.filter(item => item.status === 'scheduled').length,
+      needsPlanning: queued.length, newlyQueued: queued.filter(item => !priorQueue.has(item.id)).length,
+      protectedExceptions, incomplete: candidate.searchComplete === false };
+  },
   // A detached pre-run copy is needed only if the planner later applies the
   // candidate and wants Ctrl+Z. It is never used to roll a trial back.
   _snapshot: null as NimbusTask[] | null,
@@ -1149,6 +1162,7 @@ export const OptimizerPreview = {
   canApply(): boolean {
     if (!OptimizerPreview.active || OptimizerPreview.stale || !OptimizerPreview._candidate
       || !OptimizerPreview._snapshot || !OptimizerPreview._taskBaseline) return false;
+    if (OptimizerPreview._candidate.validationFindings?.some(finding => finding.severity === 'error')) return false;
     return OptimizerPreview._revalidateTaskBaseline();
   },
 
@@ -1296,6 +1310,7 @@ export const OptimizerPreview = {
         const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
         const inScope = (t: NimbusTask): boolean => {
           if (lineSet && !lineSet.has(t.MACHINE)) return false;
+          if (t.planning_status === 'needs_planning') return true;
           const s = t.start_date ? t.start_date.getTime() : null;
           if (s == null) return false;
           const e = Util.scheduledEnd(t);
@@ -1848,6 +1863,22 @@ export const OptimizerPreview = {
         </div>`;
     }).join('');
 
+    const planning = OptimizerPreview._candidate?.dispositions
+      ? OptimizerPreview.planningSummary(OptimizerPreview._candidate, OptimizerPreview._snapshot ?? []) : null;
+    const protectedIds = new Set(OptimizerPreview._candidate?.dispositions?.filter(item => item.status === 'protected').map(item => item.id));
+    const protectedFindings = (OptimizerPreview._candidate?.validationFindings ?? [])
+      .filter(item => item.code !== 'missing_setup' && item.taskId && protectedIds.has(item.taskId));
+    const orderLabels = new Map((OptimizerPreview._snapshot ?? []).map(task => [task.id, task.PRODUCTION_ORDER || task.ORDER || task.id]));
+    const planningHtml = planning ? `<div class="opt-pv-footer-note" role="status">
+      <strong>${planning.scheduled} scheduled · ${planning.needsPlanning} Needs Planning (${planning.newlyQueued} newly queued)</strong>
+      <div>${planning.protectedExceptions} existing protected exceptions. Review unplaced orders in Orders → Status → Needs Planning.</div>
+      ${protectedFindings.length ? `<details open><summary>Protected orders requiring attention</summary><ul>${protectedFindings.slice(0, 50)
+        .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
+        ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}</details>` : ''}
+      ${planning.incomplete ? '<div>Search incomplete. This is the best validated proposal found within the search budget.</div>' : ''}
+      ${(OptimizerPreview._candidate?.validationFindings ?? []).filter(finding => finding.severity === 'error')
+        .map(finding => `<div>${Util.escapeHtml(finding.message)}</div>`).join('')}
+    </div>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
@@ -1858,6 +1889,7 @@ export const OptimizerPreview = {
         </div>
 
         ${staleHtml}
+        ${planningHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
@@ -1915,6 +1947,14 @@ export const OptimizerPreview = {
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
     if (!OptimizerPreview._revalidateTaskBaseline() || !OptimizerPreview.canApply()) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
+      return;
+    }
+    const findings = validateCandidateForApply(candidate, snapshotSchedule(plant ?? undefined));
+    if (findings.some(finding => finding.severity === 'error')) {
+      candidate.validationFindings = findings;
+      OptimizerPreview._render();
+      OptimizerPreview._syncApplyButton();
+      Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
       return;
     }
     OptimizerPreview._applying = true;
@@ -1975,7 +2015,10 @@ export const OptimizerPreview = {
           lines: scheduledWithoutSetup.lines,
         }), 'warn');
       }
-      if (unplacedOrders.orders) {
+      if (candidate.dispositions?.some(item => item.status === 'needs_planning')) {
+        const count = candidate.dispositions.filter(item => item.status === 'needs_planning').length;
+        Toast.show(`${count} order(s) need planning. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
+      } else if (unplacedOrders.orders && !candidate.dispositions) {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
           lines: unplacedOrders.lines,

@@ -48,7 +48,7 @@ import type { NimbusTask, SetupStateKey, SetupOccurrenceOverride } from '../plat
  *  the union via Engine.firmingStatus. Also the shape Table._applyChipFilter's `patch.status` and
  *  the Dashboard KPI-tile-click callers (still stopgap-typed, reached only via
  *  the loose NIMBUS.Table ambient shim) pass in. */
-type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'firmed';
+type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'firmed' | 'needs_planning';
 
 /** Table._chipFilters — the Orders-tab filter-chip bar's live selection state. */
 interface TableChipFilters {
@@ -189,6 +189,17 @@ interface TableLineEditorParams {
    two-way sync. Uses the transaction API for fast incremental updates.
    ========================================================================== */
 export const Table = {
+  _planningWindowLabel(task: NimbusTask): string {
+    if (!task) return '';
+    const plant = task.PLANT || Store.getPlantForLine(task.MACHINE);
+    const rules = Store.masterData?.plants.find(row => row.plant === plant);
+    const bounded = rules?.max_pull_forward_days != null || rules?.max_push_forward_days != null;
+    const due = Util.sapDueDate(task);
+    if (bounded && (!due || !Number.isFinite(due.getTime()))) return 'SAP due date required';
+    const floor = Engine.earliestAllowedStart(task, plant);
+    const ceiling = Engine.latestAllowedEnd(task, plant);
+    return `${floor ? Util.fmtDTReadable(floor) : 'No start limit'} — ${ceiling ? Util.fmtDTReadable(ceiling) : 'No completion limit'}`;
+  },
   _api:    null as NimbusVendor.AgGridApi | null,
   _colApi: null as unknown,
   _selectedId: null as string | null,  // for the override modal
@@ -450,6 +461,12 @@ export const Table = {
         { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false,
           hide: Table._fieldHidden('COLOR') },
         ...Table._priorityColumns(),
+        { headerName: 'Planning status', field: 'planning_status', minWidth: 150, editable: false,
+          valueGetter: (p: { data: NimbusTask }) => p.data?.planning_status === 'needs_planning' ? 'Needs Planning' : 'Scheduled' },
+        { headerName: 'Planning reason', colId: 'planning_reason', minWidth: 240, editable: false,
+          valueGetter: (p: { data: NimbusTask }) => p.data?.planning_reason?.message ?? '' },
+        { headerName: 'Allowed window', colId: 'planning_window', minWidth: 260, editable: false,
+          valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },
         ...Table._catalogOnlyColumns(),
         { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
           cellClass: 'cell-num', hide: Table._fieldHidden('RUN_TIME'),
@@ -676,6 +693,7 @@ export const Table = {
     const horizonEnd = Store.visibilityHorizonEnd;
     if (horizonEnd && data.start_date && data.start_date.getTime() > horizonEnd.getTime()) return false;
     if (f.status) {
+      if (f.status === 'needs_planning' && data.planning_status !== 'needs_planning') return false;
       if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;
       if (f.status === 'firmed' && !Engine.firmingStatus(data).firmed) return false;
       if (f.status === 'atrisk' || f.status === 'conflict') {
@@ -773,6 +791,7 @@ export const Table = {
     if (!drop) return;
     const cur = Table._chipFilters.status;
     const items: Array<{ v: TableStatusFilter; k: string; d: string }> = [
+      { v: 'needs_planning', k: 'Needs Planning', d: 'Unplaced orders awaiting a legal schedule' },
       { v: 'late',     k: Util.t('ui.late'),        d: Util.t('ui.status_desc_late') },
       { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
       { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
@@ -933,7 +952,7 @@ export const Table = {
         : Util.t('ui.n_colors_filter', { count: f.colors.size }),
       f.colors.size > 0);
 
-    const STATUS_LABEL: Record<TableStatusFilter, string> = { late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
+    const STATUS_LABEL: Record<TableStatusFilter, string> = { needs_planning: 'Needs Planning', late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
     set('tbl-flt-status-btn', 'tbl-flt-status-label',
       f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
       !!f.status);

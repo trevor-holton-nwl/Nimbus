@@ -2,6 +2,10 @@
 
 ## What lives here
 
+Planning exceptions use optional `NimbusTask.planning_status` (missing defaults to scheduled) and structured `planning_reason`. Store normalization clears queue dates/segments, while explicit complete date patches restore scheduled status. `Util.scheduledEnd` never falls back to SAP due for queued orders; overdue queue lateness is measured to now and demand remains visible without scheduled utilization.
+
+Canonical task aggregates carrying `planning_status` retain exact production and segment timestamps during normalization; re-snapping a validated setup interval can invalidate it. Manual date workflows perform their own snapping. Undo restores business/schedule state while preserving the live row version, so an undo after Save can pass the next optimistic concurrency check.
+
 **`foundation.mts`** (1,491 lines) — CQ-1 foundation module; no schedule state, no feature endpoints, no scheduling rules:
 - `Config` — frozen-in-spirit (never mutated at runtime) global constants: `STEP_MS` (15-min snap), `DEFAULT_SHIFT`, `COLORS` (10-line palette), `OVERLOAD_THRESHOLD`/`WARN_THRESHOLD`, `LS_KEY` (`'nimbus.state.v3'`), `SCHEMA_VERSION` (6), `BUILD_ID`, `KNOWN_PLANTS`, `CONCURRENCY_CHECK`, `SESSION_MAX_AGE_MS`, etc.
 - `Util` — pure helpers plus four DI-seam setters (`setPreferenceResolver`, `setActorResolver`, `setUtilizationResolver`, `setChangeoverFieldsResolver`) that replace old direct references into modules living elsewhere (Store, Session, Utilization, Engine). Also owns `fetchTraced` (traced fetch wrapper), `parseBackendError`, i18n resolver `t()`, `fpDatetime` (Flatpickr factory), date/time formatting, `toLocalSeconds` (the UTC-corruption-bug fix), `scheduleKpis`/`countChangeovers`/`latenessHours` (optimizer-preview KPI math — calls the injected utilization resolver, so not stateless), paste-to-checkbox helpers (`renderLineChecklist`, `matchPasteToCheckboxes`, `wirePasteToCheckboxes`) shared by every line-picker across the app.

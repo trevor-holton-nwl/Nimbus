@@ -379,6 +379,8 @@ export const Dashboard = {
 
     // Overdue backlog: every order whose scheduled finish has slipped past its SAP due date.
     const lateCount = tasks.filter(t => Util.latenessHours(t) > 0).length;
+    const queued = tasks.filter(task => task.planning_status === 'needs_planning');
+    const queuedHours = queued.reduce((hours, task) => hours + Math.max(0, Util.runHours(task)), 0);
 
     // Alerts Today tile (kpi.conflicts_pending, action:'alerts-today') must count exactly
     // what its click-through shows -- Table._applyChipFilter({status:'conflict', dateKey:today})
@@ -407,7 +409,8 @@ export const Dashboard = {
     // (alert-summary-count, the firmed-orders list) so nothing is lost, just decluttered.
     const tiles: DashboardKpiTile[] = [
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
-        d: Util.t('kpi.orders_total', { n: tasks.length }),
+        d: Util.t('kpi.orders_total', { n: tasks.length })
+          + (queued.length ? ` · ${queued.length} Needs Planning (${queuedHours.toFixed(1)} h demand)` : ''),
         action: 'orders-today' },
       { k: Util.t('kpi.conflicts_pending'),         v: String(conflictsToday),
         d: conflictsToday === 0 ? Util.t('kpi.none_blocking') : Util.t('kpi.blocking_fix_now'),
@@ -907,7 +910,7 @@ export const Dashboard = {
       for (const dk of days) cells[ln][dk] = { lateHours: 0, lateCount: 0, tasks: [] };
     }
     for (const t of tasks) {
-      const end = Util.scheduledEnd(t);
+      const end = t.planning_status === 'needs_planning' ? new Date() : Util.scheduledEnd(t);
       if (!end) continue;
       const dk = Util.dayKey(end);
       if (dk < startKey || dk > endKey) continue;

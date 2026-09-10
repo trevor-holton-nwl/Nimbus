@@ -48,3 +48,5 @@ python -m pytest tests/test_material_plant_attributes.py tests/test_data_integri
 - If you're tracing "who else can write to `orders`," don't stop at this domain's `/upload` — `sap_sync.sync_object` reaches the exact same `db.upsert_orders` function for the `orders` SAP object, and both routes through the identical `_stamp_order_attributes` seam afterward.
 - The SAP sync engine having zero live connectors today means `POST /sap/interface/sync/{object}` and the scheduled jobs are functionally no-ops in production — don't assume "SAP sync ran" means real SAP data arrived; check `rows_read` in the run record (it will be 0 for every stub transport).
 - `docs/SAP_INTEGRATION_ROADMAP.md` describes the intended live-connector future state — don't confuse it with what's actually implemented (the stub skeleton described here).
+
+Optimizer queue state (`orders.planning_status`/`planning_reason`) is planner-owned and excluded from `_UPSERT_SQL` conflict updates, just like scheduled dates. SAP/Excel refresh updates baselines without restoring a queued schedule.

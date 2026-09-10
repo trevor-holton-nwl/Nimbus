@@ -535,6 +535,7 @@ export const Util = {
 
   // Scheduled finish for a task — user override `end_date` if present, otherwise the SAP baseline.
   scheduledEnd(t: NimbusTask): Date | null {
+    if (t?.planning_status === 'needs_planning') return null;
     return t?.end_date || Util.sapDueDate(t);
   },
 
@@ -559,7 +560,7 @@ export const Util = {
 
   // Hours that scheduled finish slips past the SAP planning date (clamped at 0).
   latenessHours(t: NimbusTask): number {
-    const end = Util.scheduledEnd(t);
+    const end = t.planning_status === 'needs_planning' ? new Date() : Util.scheduledEnd(t);
     const due = Util.sapDueDate(t);
     if (!end || !due) return 0;
     const diff = (end.getTime() - due.getTime()) / Config.MS_HOUR;

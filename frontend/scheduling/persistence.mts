@@ -160,8 +160,14 @@ export const Persistence = {
   // a mismatch means a newer load() has since started and this response is discarded.
   _loadRequest: 0,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
-  _forceIds: new Set<string>(),       // dirty ids written by an authoritative bulk op (optimize) —
-                              // these skip the optimistic-concurrency version check on save
+  _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
+  _syncUnsaved(): void {
+    const badge = typeof document === 'undefined' ? null : document.getElementById('schedule-unsaved');
+    if (!badge) return;
+    const count = Persistence._dirtyIds.size;
+    badge.hidden = count === 0;
+    badge.textContent = count ? `${count} unsaved` : '';
+  },
   // Lazily-set by _writeCacheWithQuotaGuard/_quarantineCache — declared here
   // (rather than left to first assignment) since plain object-literal
   // properties need their type fixed at the literal's declaration.
@@ -421,7 +427,8 @@ export const Persistence = {
         // _snapToWorkingHours detects them via startMoved and skips re-snap. Only tasks
         // where the cached start differs from the cached original baseline are overlaid.
         if (cacheData?.tasks?.length) {
-          Persistence._overlayUserMoves(tasks, cacheData.tasks);
+          const optimizerIds = new Set<string>(cacheData._optimizerDirtyIds ?? []);
+          Persistence._overlayUserMoves(tasks, cacheData.tasks.filter((task: NimbusTask) => !optimizerIds.has(String(task.id))));
         }
 
         // SAP ships date-only starts (00:00) — snap each order to the first
@@ -568,6 +575,12 @@ export const Persistence = {
   },
 
   _prepTask(raw: Record<string, unknown>): NimbusTask {
+    if (raw.planning_status === 'needs_planning') {
+      raw.start_date = null;
+      raw.end_date = null;
+      raw.schedule_segments = [];
+      raw.scheduleSegments = [];
+    }
     raw.scheduleSegments = Persistence._segmentsFromRaw(raw);
     delete raw.schedule_segments;
     // Coerce date-like string fields to Date.
@@ -608,6 +621,7 @@ export const Persistence = {
     const byId = new Map(cachedTasks.map(t => [t.id, t]));
     for (const t of backendTasks) {
       const cached = byId.get(t.id);
+      if (t.planning_status === 'needs_planning' || cached?.planning_status === 'needs_planning') continue;
       if (!cached) continue;
       const cs  = Util.parseDate(cached.start_date);
       const ce  = Util.parseDate(cached.end_date);
@@ -642,6 +656,7 @@ export const Persistence = {
   // CalendarSync._applyConfig relays them; the pre-hydration call from
   // Persistence.load deliberately does not).
   _snapToWorkingHours(tasks: NimbusTask[], plant: string | null): { movedIds: string[]; corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }> } {
+    tasks = tasks.filter(task => task.planning_status !== 'needs_planning');
     const movedIds: string[] = [];
     const corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }> = [];
     if (!_calendarService) return { movedIds, corrections }; // no-op until wired — matches
@@ -989,6 +1004,13 @@ export const Persistence = {
         }
       }
       Store.setTasks(tasks, 'persistence');
+      for (const id of data._optimizerDirtyIds ?? []) {
+        if (Store.tasks[id]) {
+          Persistence._dirtyIds.add(id);
+          Persistence._forceIds.add(id);
+        }
+      }
+      Persistence._syncUnsaved();
       for (const id of Store.firmedIds) {
         const t = Store.tasks[id]; if (t) t.firmed = true;
       }
@@ -1132,8 +1154,10 @@ export const Persistence = {
    *  function guarantees the two snapshots are comparable. */
   _taskEditSnapshot(t: NimbusTask): Record<string, unknown> {
     return {
-      start_date: Util.toLocalSeconds(t.start_date) as NaiveLocalTs,
-      end_date:   Util.toLocalSeconds(t.end_date) as NaiveLocalTs,
+      planning_status: t.planning_status ?? 'scheduled',
+      planning_reason: t.planning_reason ?? null,
+      start_date: t.start_date ? Util.toLocalSeconds(t.start_date) as NaiveLocalTs : null,
+      end_date:   t.end_date ? Util.toLocalSeconds(t.end_date) as NaiveLocalTs : null,
       PRT_01:       t.PRT_01,
       PRT_02:       t.PRT_02,
       PRODUCTION_VERSION: t.PRODUCTION_VERSION,
@@ -1167,26 +1191,25 @@ export const Persistence = {
     Persistence._saveInFlight = true;
     Persistence._saveCache();
 
-    // Only send tasks that changed since the last successful save. The backend
-    // only persists start_date/end_date so firmed/line changes don't need to be
-    // in this payload. tasks:bulk (reload/undo) clears _dirtyIds because Store
-    // state came from a known-good source that doesn't need to be written back.
+    // Send changed task aggregates (dates, planning state, segments and editable
+    // attributes). Reload clears dirty state; undo is a new dependent edit.
     const dirtyTasks = Persistence._dirtyIds.size > 0
       ? Store.tasksArr.filter(t => Persistence._dirtyIds.has(String(t.id)))
       : [];
     // Send only the fields the backend consumes, plus the optimistic-concurrency
-    // token (row_version → base_version). Optimize-dirtied ids carry force=true so an
-    // authoritative reschedule never false-conflicts with a concurrent editor.
+    // token (row_version → base_version). Optimizer edits use atomic validation
+    // and cannot bypass a concurrent editor's version.
     // toLocalSeconds, not a raw Date: JSON.stringify would call Date.toISOString()
     // (UTC), but the orders read path emits bare naive strftime (no Z) which new
     // Date() parses as LOCAL — so a raw Date here round-trips shifted by the
     // client's UTC offset for any non-UTC user. Mirrors _relayDueDateCorrections;
     // see Util.toLocalSeconds and _taskEditSnapshot above.
+    const atomicOptimizer = dirtyTasks.some(t => Persistence._forceIds.has(String(t.id)));
     const taskPayload = dirtyTasks.map(t => ({
       id: t.id,
       ...Persistence._taskEditSnapshot(t),
       base_version: t.row_version ?? null,
-      force:        !Config.CONCURRENCY_CHECK || Persistence._forceIds.has(String(t.id)),
+      force:        atomicOptimizer ? false : !Config.CONCURRENCY_CHECK,
     }));
     // Snapshot of exactly what's being sent for each dirty id, keyed by id — the
     // response handler compares this against the LIVE value at response time
@@ -1196,7 +1219,7 @@ export const Persistence = {
     const sentSnapshot = new Map<string, string>(
       dirtyTasks.map(t => [String(t.id), JSON.stringify(Persistence._taskEditSnapshot(t))])
     );
-    const body = JSON.stringify({ tasks: taskPayload, blocks: Store.blocks, calendars: Store.calendars });
+    const body = JSON.stringify({ tasks: taskPayload, atomic_optimizer: atomicOptimizer, blocks: Store.blocks, calendars: Store.calendars });
 
     // Stable reqId for this save attempt so the rejection log correlates to the
     // backend (fetchTraced reuses an x-request-id we already set).
@@ -1224,6 +1247,12 @@ export const Persistence = {
 
     _post(1)
       .then(result => {
+        if (atomicOptimizer && (result.status === 'error' || (result.persisted ?? 0) !== taskPayload.length
+          || (result.stale || []).length || (result.invalid_ids || []).length || (result.not_found_ids || []).length)) {
+          ErrorLog.warn('persistence', 'Optimizer save rejected; all dependent changes remain unsaved', result);
+          Toast.show('Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.', 'warn', 8000);
+          return;
+        }
         // Re-stamp each persisted task with its NEW row_version so the next edit
         // carries a fresh token — without this the client would self-conflict on its
         // own previous write. Direct field set, no emit (metadata only).
@@ -1292,7 +1321,7 @@ export const Persistence = {
           Toast.show(Util.t('toast.saved_locally'), 'info');
         }
       })
-      .finally(() => { Persistence._saveInFlight = false; });
+      .finally(() => { Persistence._saveInFlight = false; Persistence._syncUnsaved(); Persistence._saveCache(); });
   },
 
   /** Optimistic-concurrency reconciliation: pull the server's current dates +
@@ -1315,8 +1344,12 @@ export const Persistence = {
           if (!tk) continue;
           tk.start_date  = Util.parseDate(row.start_date);
           tk.end_date    = Util.parseDate(row.end_date);
+          const planning = row as unknown as { planning_status?: NimbusTask['planning_status']; planning_reason?: NimbusTask['planning_reason'] };
+          tk.planning_status = planning.planning_status ?? 'scheduled';
+          tk.planning_reason = planning.planning_reason ?? null;
           tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
           tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
+          Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
@@ -1449,6 +1482,7 @@ export const Persistence = {
         _schemaVersion: Config.SCHEMA_VERSION,
         _buildId:       Config.BUILD_ID,
         _savedAt:       new Date().toISOString(),
+        _optimizerDirtyIds: [...Persistence._forceIds].filter(id => Persistence._dirtyIds.has(id)),
         tasks:          Store.tasksArr,
         blocks:         Store.blocks,
         calendars:      Store.calendars,
@@ -1484,7 +1518,7 @@ export const Persistence = {
     // is the correct, honest type for `tiers` — every tier is still a valid
     // (partial) StoredState snapshot, and JSON.stringify/localStorage.setItem
     // below don't care that some tiers omit keys.
-    const tiers: Array<Partial<StoredState>> = [
+    const tiers: Array<Partial<StoredState>> = snapshot._optimizerDirtyIds?.length ? [snapshot] : [
       snapshot,
       { ...snapshot, tasks: snapshot.tasks.slice(-2000) },
       { ...snapshot, tasks: snapshot.tasks.slice(-500) },

@@ -14,6 +14,24 @@ import { Engine } from '../../../frontend/optimization/engine.mjs';
 
 const require = createRequire(import.meta.url);
 
+test('Needs Planning filter retains queued demand within selected machines and excludes scheduled peers', () => {
+  const prior = Table._chipFilters;
+  try {
+    Table._chipFilters = { lines: new Set(['L1']), colors: new Set(), status: 'needs_planning', dateKey: null, poMat: new Set() };
+    const queued = { id: 'q', MACHINE: 'L1', planning_status: 'needs_planning', start_date: null, end_date: null };
+    assert.equal(Table._taskPassesChipFilters(queued), true);
+    assert.equal(Table._taskPassesChipFilters({ ...queued, MACHINE: 'L2' }), false);
+    assert.equal(Table._taskPassesChipFilters({ ...queued, planning_status: 'scheduled' }), false);
+  } finally { Table._chipFilters = prior; }
+});
+
+test('queued demand has no scheduled finish and overdue queue remains in delivery lateness', () => {
+  const due = new Date(Date.now() - 48 * 3600000);
+  const queued = { id: 'q', planning_status: 'needs_planning', start_date: null, end_date: null, original_end_date: due };
+  assert.equal(Util.scheduledEnd(queued), null);
+  assert.ok(Util.latenessHours(queued) >= 48);
+});
+
 // Same split-realm/no-DOM situation documented in
 // tests/modules/schedule-services.test.mjs and schedule-data.test.mjs.
 if (typeof globalThis.document === 'undefined') {

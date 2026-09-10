@@ -6,7 +6,7 @@ docs/architecture/domain-refactor-plan.md §4. These carry the `response_model=`
 contracts pinned by FastAPI's own runtime validation — field/type shapes are
 byte-identical to the originals.
 """
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,6 +29,11 @@ class ScheduleSegmentDTO(BaseModel):
     end_date: str
 
 
+class PlanningReason(BaseModel):
+    code: str
+    message: str
+
+
 class TaskDTO(BaseModel):
     """One row of GET /tasks's `data` array. Field set mirrors the dict literal
     built in get_tasks (backend/scheduling/routes.py, the `data.append({...})` block)
@@ -41,8 +46,8 @@ class TaskDTO(BaseModel):
 
     id: str
     text: str
-    start_date: str
-    end_date: str
+    start_date: str | None
+    end_date: str | None
     original_start_date: str | None = None
     original_end_date: str | None = None
     user_scheduled: bool
@@ -73,6 +78,8 @@ class TaskDTO(BaseModel):
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
+    planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
+    planning_reason: PlanningReason | None = None
 
 
 class TasksResponse(BaseModel):
@@ -128,6 +135,8 @@ class TaskVersionRow(BaseModel):
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
+    planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
+    planning_reason: PlanningReason | None = None
 
 
 class TasksRefreshResponse(BaseModel):
@@ -179,6 +188,8 @@ class TaskDateUpdate(BaseModel):
     schedule_segments: list[ScheduleSegmentInput] | None = None
     base_version: int | None = None
     force: bool = False
+    planning_status: str | None = None
+    planning_reason: dict[str, Any] | None = None
 
 
 class TasksUpdatePayload(BaseModel):
@@ -187,6 +198,7 @@ class TasksUpdatePayload(BaseModel):
     /plant-calendar/* endpoints (backend-authoritative); any blocks/calendars sent
     here are ignored (legacy ride-along, harmless)."""
     tasks: list[TaskDateUpdate] = []
+    atomic_optimizer: bool = False
 
 
 class TaskRefreshPayload(BaseModel):

@@ -367,6 +367,8 @@ export interface EvaluationRequest {
  * production thresholds, iteration caps, or time budgets. */
 export interface DueDateFirstBounds {
   setup: SetupTruthSnapshot;
+  lines?: readonly string[];
+  strategy?: FragmentMode;
   exactSearchThreshold: number;
   iterationCap: number;
   clock: () => number;
@@ -615,7 +617,24 @@ function zeroScore(): number[] {
   return [0, 0, 0, 0, 0, 0, 0, 0];
 }
 
+export interface PlanningDisposition {
+  id: string;
+  line: string;
+  status: 'scheduled' | 'needs_planning' | 'protected';
+  reason?: { code: string; message: string };
+}
+export interface ValidationFinding {
+  code: string;
+  message: string;
+  severity: 'error' | 'warning';
+  taskId?: string;
+  line?: string;
+}
 export interface CandidateResult {
+  dispositions?: readonly PlanningDisposition[];
+  validationFindings?: readonly ValidationFinding[];
+  searchComplete?: boolean;
+  validationContext?: { baselineSnapshot?: Readonly<ScheduleSnapshot>; snapshot: Readonly<ScheduleSnapshot>; bounds: Readonly<DueDateFirstBounds> };
   patches: ReadonlyArray<SchedulePatch>;
   score: readonly number[];
   explanation: ReadonlyArray<CandidateReason>;
@@ -641,6 +660,7 @@ interface DueDateCandidate {
    * lossy numeric encoding. */
   policyKey: string;
   sequenceKey: string;
+  admissionKey?: string;
   /** Orders deliberately deferred from this capacity-bounded fragment. They
    * remain eligible for the next fragment after a firmed boundary. */
   unadmitted: NimbusTask[];
@@ -843,8 +863,7 @@ function timestamp(value: unknown): Date | null {
 }
 
 function dueTimestamp(task: NimbusTask): number {
-  return timestamp(task.original_end_date)?.getTime()
-    ?? timestamp(task.BASIC_FINISH_DATE)?.getTime()
+  return (timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE))?.getTime()
     ?? Number.MAX_SAFE_INTEGER;
 }
 
@@ -1936,7 +1955,14 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // both policyKey and coverage) — routed to its own comparator up front
   // rather than folded into the terms below, since it isn't just a
   // reordering of the mode-permuted `terms` list further down.
+  if (left.feasible !== right.feasible) return left.feasible ? -1 : 1;
+  const admissionDelta = ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
+  if (admissionDelta) return admissionDelta;
   if (mode === 'due-date') return compareDueDateCandidate(left, right);
+  if (mode === 'min-changeover') {
+    for (const index of [0, 2, 3, 5]) { const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0); if (delta) return delta; }
+    return ordinalCompare(left.policyKey, right.policyKey) || ordinalCompare(left.sequenceKey, right.sequenceKey);
+  }
   const hardConstraintDelta = (left.score[0] ?? 0) - (right.score[0] ?? 0);
   if (hardConstraintDelta) return hardConstraintDelta;
   // Ordinal, not localeCompare: policyKey is zero-padded ASCII digits joined
@@ -1971,11 +1997,7 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // lower-order comparison changes: Min Changeover remains due-safe, while
   // Throughput may prefer setup savings and is constrained by its explicit
   // post-evaluation slip gate below.
-  const terms = mode === 'min-changeover'
-    ? [2, 3, 5, 4]
-    : mode === 'throughput'
-      ? [5, 2, 3, 4]
-      : [2, 3, 4, 5];
+  const terms = mode === 'throughput' ? [5, 2, 3, 4] : [2, 3, 4, 5];
   for (const index of terms) {
     const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0);
     if (delta) return delta;
@@ -2023,6 +2045,7 @@ function candidateForSequence(
   // on the feasible return below so `compareCandidate` can minimize it —
   // minimizing uncovered edges is what drives same-signature grouping.
   let uncoveredEdgeCount = 0;
+  const checkpoints: Array<{ task: NimbusTask; predecessorState: SetupStateKey | null; predecessorOrderId: string | null; cursor: Date; setupMinutes: number; lateCount: number; latenessMinutes: number; overCapCount: number; uncoveredEdgeCount: number }> = [];
 
   const constraintFailure = (edge: MissingSetupEdge): DueDateCandidate => ({
     feasible: false,
@@ -2040,15 +2063,12 @@ function candidateForSequence(
 
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
+    const priorCursor = new Date(cursor);
+    const checkpoint = { task, predecessorState, predecessorOrderId, cursor: priorCursor, setupMinutes, lateCount, latenessMinutes, overCapCount, uncoveredEdgeCount };
+    if (planningDefect(snapshot, bounds, task)) { unadmitted.push(task); continue; }
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const successorState = orderState(bounds, task, definition);
-    if (!successorState) {
-      missingEdges.push({ line, predecessorOrderId, successorOrderId: taskId(task), reason: 'successor-state-unknown' });
-      return {
-        feasible: false, patches: [], score: infeasibleScore(), policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
-      };
-    }
     const inactiveOverride = inactiveOverrideForTransition(
       bounds,
       line,
@@ -2070,7 +2090,7 @@ function candidateForSequence(
     // fact, not a reason to reject the whole permutation: place this order
     // via the same zero-minute mechanism as an unknown-tail order, charge
     // nothing into setupMinutes, and keep chaining from its own known state.
-    const unknownPredecessor = predecessorState === null;
+    const unknownPredecessor = predecessorState === null || successorState === null;
     // A1: a known signature whose transition simply has no matrix row is the
     // same shape of missing-data fact as an unknown predecessor (above) — it
     // stays in the covered-core sequence, charged zero setup minutes, rather
@@ -2088,7 +2108,7 @@ function candidateForSequence(
         definition,
         machine: line,
         predecessorState,
-        successorState,
+        successorState: successorState!,
         predecessorOrderId,
         successorOrderId: taskId(task),
         plantRows: bounds.setup.plant_rows,
@@ -2148,54 +2168,15 @@ function candidateForSequence(
           bounds.runContext,
         ),
       } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, fragment.end, bounds.runContext),
+      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext),
       minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
         ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
-      if (placement.kind === 'infeasible' && placement.reason === 'no-feasible-capacity') {
-        const deferred = sequence.slice(taskIndex);
-        if (deferred.some(candidate => (
-          taskId(candidate) === fragment.requiredFirstOrderId || taskId(candidate) === fragment.requiredLastOrderId
-        ))) {
-          return constraintFailure({
-            line,
-            predecessorOrderId,
-            successorOrderId: taskId(task),
-            reason: 'override-inactive',
-          });
-        }
-        unadmitted.push(...deferred);
-        const protectedPairFailure = deferredAdjacencyFailure(line, unadmitted, adjacency);
-        if (protectedPairFailure) return constraintFailure(protectedPairFailure);
-        explanation.push({
-          code: 'due-work-unadmitted',
-          message: `Deferred ${deferred.length} order(s) after available capacity ended in this fragment.`,
-          line,
-          taskId: taskId(task),
-        });
-        break;
-      }
-      // B3a: a NaN/zero/negative RUN_TIME is a data defect, not a genuinely
-      // full calendar — say so explicitly rather than letting it read as an
-      // unfalsifiable "no capacity" complaint.
-      if (placement.kind === 'infeasible' && placement.reason === 'invalid-runtime') {
-        explanation.push({
-          code: 'invalid-runtime-data',
-          message: `${taskId(task)} has an invalid RUN_TIME (missing, zero, or negative) — a data defect, not a capacity shortfall.`,
-          line,
-          taskId: taskId(task),
-        });
-      }
-      missingEdges.push({
-        line,
-        predecessorOrderId,
-        successorOrderId: taskId(task),
-        reason: placement.kind === 'infeasible' ? placement.reason : 'no-feasible-capacity',
-      });
-      return {
-        feasible: false, patches: [], score: infeasibleScore(), policyKey: '', sequenceKey: '', unadmitted: [], explanation, missingEdges,
-      };
+      unadmitted.push(task);
+      cursor = priorCursor;
+      explanation.push({ code: 'due-work-unadmitted', message: `No legal placement found for ${taskId(task)}.`, line, taskId: taskId(task) });
+      continue;
     }
 
     const productiveSegments = placement.productiveSegments;
@@ -2229,10 +2210,30 @@ function candidateForSequence(
         taskId: taskId(task),
       });
     }
+    checkpoints.push(checkpoint);
     cursor = new Date(last.end);
     predecessorState = successorState;
     predecessorOrderId = taskId(task);
   }
+
+  // Only the final admitted predecessor owes the setup into fixed work.
+  // A later bridge may reduce this transition, so do not reject intermediate
+  // occurrences. Backtrack a conflicting suffix into the existing next-fragment retry.
+  while (fragment.nextFirmed?.state && predecessorState && checkpoints.length) {
+    const boundary = fragment.nextFirmed;
+    const outgoing = resolveSetup({ definition, machine: line, predecessorState, successorState: boundary.state!, predecessorOrderId, successorOrderId: taskId(boundary.task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined });
+    if (!outgoing.covered || !outgoing.effectiveMin) break;
+    const setupStart = new Date(+boundary.start - outgoing.effectiveMin * 60000);
+    if (cursor <= setupStart && coversInterval(freeIntervalsFor(snapshot, line, bounds.setup.plant, setupStart, boundary.start, bounds.runContext), { start: setupStart, end: boundary.start })) break;
+    const prior = checkpoints.pop()!;
+    patches.pop(); unadmitted.push(prior.task);
+    predecessorState = prior.predecessorState; predecessorOrderId = prior.predecessorOrderId; cursor = prior.cursor;
+    setupMinutes = prior.setupMinutes; lateCount = prior.lateCount; latenessMinutes = prior.latenessMinutes;
+    overCapCount = prior.overCapCount; uncoveredEdgeCount = prior.uncoveredEdgeCount;
+  }
+
+  const deferredPairFailure = deferredAdjacencyFailure(line, unadmitted, adjacency);
+  if (deferredPairFailure) return constraintFailure(deferredPairFailure);
 
   if (fragment.nextFirmed) {
     const firmed = fragment.nextFirmed;
@@ -2332,6 +2333,7 @@ function candidateForSequence(
     ],
     policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, sequence, bounds.runContext),
     sequenceKey: sequence.map(taskId).join('|'),
+    admissionKey: admissionKey(snapshot, bounds, line, sequence, patches, fragment.end),
     unadmitted,
     explanation,
     missingEdges,
@@ -2813,23 +2815,11 @@ function searchFragment(
   const definition = bounds.setup.definition!;
   const groupsByState = new Map<string, DueDateGroup>();
   const missingEdges: MissingSetupEdge[] = [];
-  // Unknown-state orders are partitioned out here rather than poisoning the
-  // whole fragment (Part 1a): the covered-core search below never sees them,
-  // so the min-changeover objective never charges a fake zero-cost edge for
-  // one. They are appended strictly after the covered core by the caller via
-  // `placeUnknownTail` — never interleaved, because an unknown order
-  // mid-chain would make every downstream covered transition's predecessor
-  // unknown too.
   const unknownTail: NimbusTask[] = [];
   for (const task of tasks) {
     const state = orderState(bounds, task, definition);
-    if (!state) {
-      missingEdges.push({ line, successorOrderId: taskId(task), reason: 'successor-state-unknown' });
-      unknownTail.push(task);
-      continue;
-    }
-    const key = orderStateKey(bounds, task, definition)!;
-    const group = groupsByState.get(key) ?? { key, state, tasks: [] };
+    const key = state ? orderStateKey(bounds, task, definition)! : `unknown:${taskId(task)}`;
+    const group = groupsByState.get(key) ?? { key, state: state ?? [], tasks: [] };
     group.tasks.push(task);
     groupsByState.set(key, group);
   }
@@ -2847,14 +2837,7 @@ function searchFragment(
     };
   }
   const groups = [...groupsByState.values()]
-    .map(group => ({
-      ...group,
-      tasks: mode === 'spt'
-        ? orderedByProductiveRuntime(group.tasks)
-        : mode === 'due-date'
-          ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, group.tasks, bounds.runContext)
-          : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, group.tasks, bounds.runContext),
-    }))
+    .map(group => ({ ...group, tasks: urgencyOrder(snapshot, bounds, line, group.tasks) }))
     .sort((left, right) => left.key.localeCompare(right.key));
   if (mode === 'spt') {
     if (bounds.clock() >= bounds.deadline) {
@@ -2900,7 +2883,13 @@ function searchFragment(
         unknownTail,
       };
     }
-    const candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
+    let candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
+    const urgentSequence = orderWithAdjacency(urgencyOrder(snapshot, bounds, line, workingTasks), fragment, adjacency);
+    if (urgentSequence && bounds.clock() < bounds.deadline && budget.remainingIterations > 0) {
+      budget.remainingIterations--;
+      const urgent = candidateForSequence(snapshot, bounds, line, urgentSequence, fragment, adjacency);
+      if (urgent.feasible && (!candidate.feasible || ordinalCompare(urgent.admissionKey ?? '', candidate.admissionKey ?? '') < 0)) candidate = urgent;
+    }
     return {
       candidateCount: 1,
       method: 'due-date-first-exact',
@@ -3576,7 +3565,7 @@ export function placeUnknownTail(
   initialPredecessorOrderId: string | null = null,
 ): UnknownTailPlacement {
   const ordered = mode === 'spt'
-    ? orderedByProductiveRuntime(tasks)
+    ? urgencyOrder(snapshot, bounds, line, tasks)
     : mode === 'due-date'
       ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, tasks, bounds.runContext)
       : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
@@ -3627,6 +3616,8 @@ export function placeUnknownTail(
       }
       break;
     }
+    if (planningDefect(snapshot, bounds, task)) { deferred.push(task); continue; }
+    const priorCursor = new Date(cursor);
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
@@ -3638,7 +3629,7 @@ export function placeUnknownTail(
       ...(splitPolicy === 'overlong_only' ? {
         isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext),
       } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, capacityEnd, bounds.runContext),
+      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext),
       minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
         ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
@@ -3649,6 +3640,7 @@ export function placeUnknownTail(
       // one behind it would fit), so cursor/previousOrderId intentionally do
       // not advance past a deferred order.
       deferred.push(task);
+      cursor = priorCursor;
       // B3a: an invalid RUN_TIME is a data defect, not a capacity shortfall —
       // say so rather than reporting it as "no capacity" alongside genuine
       // capacity exhaustion.
@@ -4592,14 +4584,14 @@ export function evaluateSptWithSetup(
   // Phase 1a: reuse the caller's run context when it matches this snapshot,
   // otherwise build one fresh — then thread the (possibly augmented) bounds
   // to everything below so every hot loop can read `bounds.runContext`.
-  bounds = withRunContext(snapshot, bounds);
+  bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
   for (const task of snapshot.tasks) {
     const taskPlant = resolveTaskPlant(task, snapshot, bounds.runContext);
     const line = String(task.MACHINE ?? '');
-    if (!line || taskPlant !== plant) continue;
+    if (!line || taskPlant !== plant || snapshot.lineSettings[line]?.excludeFromOpt || (bounds.lines?.length && !bounds.lines.includes(line))) continue;
     const group = byLine.get(line) ?? [];
     group.push(task);
     byLine.set(line, group);
@@ -4676,7 +4668,7 @@ export function evaluateSptWithSetup(
     const initialScheduled = !initial.state && initial.reason === 'initial-state-unknown'
       ? initialScheduledAnchor(tasks, definition)
       : null;
-    const anchor = preservedInitialAnchor(initialScheduled);
+    const anchor = initialScheduled && taskIsFirmed(snapshot, initialScheduled.task) ? preservedInitialAnchor(initialScheduled) : null;
     // Part 1d: an unknown line-initial state (no persisted state, no
     // scheduled anchor) no longer skips the line. Proceed with a null
     // initial state — its diagnostic is retained either way.
@@ -4732,7 +4724,7 @@ export function evaluateSptWithSetup(
     for (let index = 0; index < score.length; index += 1) score[index] += result.score[index] ?? 0;
   }
 
-  return {
+  return finalizeCandidate(snapshot, { ...bounds, strategy: 'spt' }, {
     patches,
     score,
     explanation,
@@ -4746,7 +4738,7 @@ export function evaluateSptWithSetup(
     },
     unchangedLines,
     missingEdges: uniqueMissingEdges(missingEdges),
-  };
+  });
 }
 
 /**
@@ -4765,14 +4757,14 @@ export function evaluateDueDateFirst(
   // Phase 1a: reuse the caller's run context when it matches this snapshot,
   // otherwise build one fresh — then thread the (possibly augmented) bounds
   // to everything below so every hot loop can read `bounds.runContext`.
-  bounds = withRunContext(snapshot, bounds);
+  bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const byLine = new Map<string, NimbusTask[]>();
   for (const task of snapshot.tasks) {
     const taskPlant = resolveTaskPlant(task, snapshot, bounds.runContext);
     const line = String(task.MACHINE ?? '');
-    if (!line || taskPlant !== plant) continue;
+    if (!line || taskPlant !== plant || snapshot.lineSettings[line]?.excludeFromOpt || (bounds.lines?.length && !bounds.lines.includes(line))) continue;
     const group = byLine.get(line) ?? [];
     group.push(task);
     byLine.set(line, group);
@@ -4850,7 +4842,7 @@ export function evaluateDueDateFirst(
     const initialScheduled = !initial.state && initial.reason === 'initial-state-unknown'
       ? initialScheduledAnchor(tasks, definition)
       : null;
-    const anchor = preservedInitialAnchor(initialScheduled);
+    const anchor = initialScheduled && taskIsFirmed(snapshot, initialScheduled.task) ? preservedInitialAnchor(initialScheduled) : null;
     // Part 1d: an unknown line-initial state (no persisted state, no
     // scheduled anchor) no longer skips the line — including the stale
     // signature-incompatible case. Proceed with a null initial state; the
@@ -4908,7 +4900,7 @@ export function evaluateDueDateFirst(
     for (let index = 0; index < score.length; index += 1) score[index] += result.score[index] ?? 0;
   }
 
-  return {
+  return finalizeCandidate(snapshot, { ...bounds, strategy: mode }, {
     patches,
     score,
     explanation,
@@ -4922,7 +4914,7 @@ export function evaluateDueDateFirst(
     },
     unchangedLines,
     missingEdges: uniqueMissingEdges(missingEdges),
-  };
+  });
 }
 
 function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
@@ -4962,70 +4954,30 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
 export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): CandidateResult {
-  // Phase 1a: build the run context ONCE and share it across both of this
-  // function's internal `evaluateDueDateFirst` sweeps (baseline + candidate),
-  // instead of each sweep independently rebuilding its own.
-  bounds = withRunContext(snapshot, bounds);
-  // Part 2a: the baseline pass only gets half of whatever wall-clock remains
-  // right now. The candidate pass runs against the caller's own unmodified
-  // `bounds.deadline` — i.e. everything left in the original budget — rather
-  // than splitting the same window twice.
+  bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const now = bounds.clock();
   const remainingMs = Math.max(0, bounds.deadline - now);
   const baseline = evaluateDueDateFirst(snapshot, { ...bounds, deadline: now + remainingMs / 2 });
-  const candidate = evaluateDueDateFirst(snapshot, { ...bounds, deadline: bounds.deadline }, 'min-changeover');
-  const before = lateOrderFacts(snapshot.tasks, bounds.notAfter);
-  const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
-  const after = lateOrderFacts(afterTasks, bounds.notAfter);
-  const beforeLate = [...before.values()].filter(fact => fact.late).length;
-  const afterLate = [...after.values()].filter(fact => fact.late).length;
-  const newlyLate = [...after.entries()].filter(([id, fact]) => fact.late && !before.get(id)?.late);
-  const beforeOverCap = [...before.values()].filter(fact => fact.overCap).length;
-  const afterOverCap = [...after.values()].filter(fact => fact.overCap).length;
-  const newlyOverCap = [...after.entries()].filter(([id, fact]) => fact.overCap && !before.get(id)?.overCap);
-  const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
-
-  // Starvation guard: a candidate pass that hit its own deadline/iteration
-  // cap and produced no patches (or strictly fewer patched lines than the
-  // baseline) can never beat a non-empty baseline. This also covers a
-  // candidate that terminates 'completed' with zero patches (F6) — that case
-  // creates no new lateness and would otherwise fall through to the
-  // min-changeover-due-safe return below, silently discarding a good baseline.
-  const candidateStarved = (candidate.diagnostics.termination === 'deadline'
-    || candidate.diagnostics.termination === 'iteration-cap')
-    && (candidate.patches.length === 0 || candidate.unchangedLines.length > baseline.unchangedLines.length);
-  if (baseline.patches.length > 0 && (candidateStarved || candidate.patches.length === 0)) {
-    return withPolicyReason(
-      baseline,
-      'min-changeover-starved',
-      'The min-changeover candidate pass was starved of search budget; kept the baseline schedule.',
-    );
-  }
-
-  // Due-date push-forward limit (2026-09-09): a separate rejection branch,
-  // checked before the plain-lateness one — an order already late in both
-  // before/after never trips `newlyLate`/`afterLate > beforeLate`, but can
-  // still newly cross its own push-forward cap, which this catches on its own.
-  if (afterOverCap > beforeOverCap || newlyOverCap.length) {
-    return withPolicyReason(
-      baseline,
-      'min-changeover-rejected-lateness-cap',
-      `Rejected ${savings} setup minutes saved because the alternative would push ${newlyOverCap.length || afterOverCap - beforeOverCap} order(s) past the plant's due-date push-forward limit.`,
-    );
-  }
-
-  if (afterLate > beforeLate || newlyLate.length) {
-    return withPolicyReason(
-      baseline,
-      'min-changeover-rejected-lateness',
-      `Rejected ${savings} setup minutes saved because the alternative would create new lateness.`,
-    );
-  }
-  return withPolicyReason(
-    candidate,
-    'min-changeover-due-safe',
-    `Accepted ${savings} setup minutes saved without creating new lateness.`,
-  );
+  const candidate = evaluateDueDateFirst(snapshot, bounds, 'min-changeover');
+  const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
+  const admission = (result: CandidateResult): string => {
+    const queued = new Set(result.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id));
+    return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join('');
+  };
+  const admissionDelta = ordinalCompare(admission(candidate), admission(baseline));
+  const chooseCandidate = !candidate.validationFindings?.some(f => f.severity === 'error')
+    && (admissionDelta < 0 || (admissionDelta === 0 && compareFinalObjectives(snapshot, { ...bounds, strategy: 'min-changeover' }, candidate, baseline) <= 0));
+  const chosen = chooseCandidate ? candidate : baseline;
+  const incomplete = baseline.searchComplete === false || candidate.searchComplete === false;
+  const termination = incomplete
+    ? (baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline' ? 'deadline' : 'iteration-cap')
+    : chosen.diagnostics.termination;
+  return {
+    ...chosen,
+    searchComplete: !incomplete,
+    diagnostics: { ...chosen.diagnostics, termination, limitReached: incomplete, candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount, runtimeMs: Math.max(0, bounds.clock() - now) },
+    explanation: [...chosen.explanation, { code: chooseCandidate ? 'min-changeover-due-safe' : 'min-changeover-incumbent', message: chooseCandidate ? 'Selected the best validated admission and delivery/setup objective.' : 'Retained the better validated incumbent.' }],
+  };
 }
 
 /** Select between two already-detached candidates. Keeping the guard here
@@ -5078,7 +5030,7 @@ export function evaluateThroughput(
   // Phase 1a: build the run context ONCE and share it across both of this
   // function's internal `evaluateDueDateFirst` sweeps (baseline + throughput),
   // instead of each sweep independently rebuilding its own.
-  bounds = withRunContext(snapshot, bounds);
+  bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   return selectThroughputCandidate(
     snapshot,
     evaluateDueDateFirst(snapshot, bounds),
@@ -5105,4 +5057,321 @@ export function applyPatchesToSnapshot(tasks: ReadonlyArray<NimbusTask>, patches
     const changes = byId.get(String(task.id));
     return changes ? { ...structuredClone(task), ...structuredClone(changes) } : task;
   });
+}
+
+/** SAP-only local calendar-day bounds; scheduled finish is never a due-date fallback. */
+export function allowedPlanningWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): { floor: Date | null; ceiling: Date | null; missingDue: boolean } {
+  const plant = snapshot.masterData?.plants?.find(row => row.plant === bounds.setup.plant);
+  const pull = plant?.max_pull_forward_days;
+  const push = plant?.max_push_forward_days;
+  const hasPull = Number.isInteger(pull) && Number(pull) >= 0;
+  const hasPush = Number.isInteger(push) && Number(push) >= 0;
+  const due = timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE);
+  const day = (offset: number): Date | null => {
+    if (!due) return null;
+    const value = new Date(due); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + offset); return value;
+  };
+  return { floor: hasPull ? day(-Number(pull)) : null, ceiling: hasPush ? day(Number(push) + 1) : null, missingDue: (hasPull || hasPush) && !due };
+}
+
+function hardBounds(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): Readonly<DueDateFirstBounds> {
+  const priorFloor = bounds.notBefore;
+  const priorCeiling = bounds.notAfter;
+  return { ...bounds, notBefore: task => {
+    const own = allowedPlanningWindow(snapshot, bounds, task).floor;
+    const supplied = priorFloor?.(task);
+    return own && supplied ? new Date(Math.max(+own, +supplied)) : own ?? supplied ?? null;
+  }, notAfter: task => {
+    const own = allowedPlanningWindow(snapshot, bounds, task).ceiling;
+    const supplied = priorCeiling?.(task);
+    return own && supplied ? new Date(Math.min(+own, +supplied)) : own ?? supplied ?? null;
+  } };
+}
+
+function completionEnd(bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, end: Date): Date {
+  const ceiling = notAfterFor(bounds, task);
+  return ceiling && ceiling < end ? ceiling : end;
+}
+
+function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): { code: string; message: string } | null {
+  if (allowedPlanningWindow(snapshot, bounds, task).missingDue) return { code: 'missing_due_date', message: 'A SAP due date is required for the configured planning window.' };
+  if (!Number.isFinite(Number(task.RUN_TIME)) || Math.round(Number(task.RUN_TIME) * 60) <= 0) return { code: 'invalid_runtime', message: 'Runtime must be a positive number.' };
+  const ceiling = notAfterFor(bounds, task);
+  const floor = notBeforeFor(bounds, task);
+  if (ceiling && +ceiling <= Math.max(+bounds.now, floor ? +floor : -Infinity)) return { code: 'expired_window', message: 'The allowed completion window ends before available planning time.' };
+  return null;
+}
+
+function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
+  return [...tasks].sort((a, b) => {
+    const deadline = (notAfterFor(bounds, a)?.getTime() ?? Infinity) - (notAfterFor(bounds, b)?.getTime() ?? Infinity);
+    if (deadline && !Number.isNaN(deadline)) return deadline;
+    const priority = ordinalCompare(policyKeyForSequence(snapshot, bounds.setup.plant, line, [a], bounds.runContext), policyKeyForSequence(snapshot, bounds.setup.plant, line, [b], bounds.runContext));
+    return priority || dueTimestamp(a) - dueTimestamp(b) || (timestamp(a.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) - (timestamp(b.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) || ordinalCompare(taskId(a), taskId(b));
+  });
+}
+
+function eligibleTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): NimbusTask[] {
+  return snapshot.tasks.filter(task => {
+    const line = String(task.MACHINE ?? '');
+    return line && resolveTaskPlant(task, snapshot) === bounds.setup.plant && !snapshot.lineSettings[line]?.excludeFromOpt && (!bounds.lines?.length || bounds.lines.includes(line));
+  });
+}
+
+function productiveIntervals(task: NimbusTask): PlacementInterval[] {
+  if (task.scheduleSegments?.length) return task.scheduleSegments.flatMap(segment => {
+    const start = timestamp(segment.startDate); const end = timestamp(segment.endDate);
+    return start && end ? [{ start, end }] : [];
+  });
+  const start = timestamp(task.start_date); const end = timestamp(task.end_date);
+  return start && end ? [{ start, end }] : [];
+}
+
+/** Revalidates the complete proposal. Protected legacy violations are warnings, never a partial-Apply veto. */
+export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>, currentSnapshot?: Readonly<ScheduleSnapshot>): ValidationFinding[] {
+  bounds = hardBounds(snapshot, bounds);
+  const findings: ValidationFinding[] = [];
+  const add = (code: string, message: string, task?: NimbusTask, protectedTask = false): void => { findings.push({ code, message, severity: protectedTask ? 'warning' : 'error', ...(task ? { taskId: taskId(task), line: String(task.MACHINE) } : {}) }); };
+  if (currentSnapshot) {
+    const baselineSnapshot = candidate.validationContext?.baselineSnapshot ?? snapshot;
+    const baseline = JSON.stringify({ ...baselineSnapshot, alerts: [], firmedIds: [...baselineSnapshot.firmedIds].sort() });
+    const current = JSON.stringify({ ...currentSnapshot, alerts: [], firmedIds: [...currentSnapshot.firmedIds].sort() });
+    if (baseline !== current) add('stale_candidate', 'The schedule or scheduling inputs changed after this proposal was evaluated.');
+  }
+  const tasks = eligibleTasks(snapshot, bounds);
+  const ids = new Set(tasks.map(taskId));
+  const patches = new Map<string, SchedulePatch>();
+  for (const patch of candidate.patches) {
+    if (!ids.has(patch.id)) add('scope', `Patch ${patch.id} is outside the requested scope.`);
+    if (patches.has(patch.id)) add('duplicate_patch', `Order ${patch.id} appears twice.`);
+    if (Object.keys(patch.changes).some(key => !['start_date', 'end_date', 'scheduleSegments', 'planning_status', 'planning_reason'].includes(key))) add('business_fields', 'Optimizer patches may only change schedule and planning state.');
+    patches.set(patch.id, patch);
+  }
+  const dispositions = new Map<string, PlanningDisposition>();
+  for (const disposition of candidate.dispositions ?? []) {
+    if (!ids.has(disposition.id) || dispositions.has(disposition.id)) add('accounting', `Invalid or duplicate disposition ${disposition.id}.`);
+    dispositions.set(disposition.id, disposition);
+  }
+  const occupied = new Map<string, { interval: PlacementInterval; task: NimbusTask; protectedTask: boolean }[]>();
+  for (const task of tasks) {
+    const protectedTask = taskIsFirmed(snapshot, task);
+    const patch = patches.get(taskId(task));
+    const result = { ...task, ...patch?.changes };
+    const disposition = dispositions.get(taskId(task));
+    if (!disposition) add('accounting', 'Every scoped order requires one disposition.', task);
+    if (disposition && (disposition.line !== String(task.MACHINE) || (disposition.status === 'protected') !== protectedTask)) add('accounting', 'Disposition line or protected status disagrees with the baseline.', task);
+    if (protectedTask && patch) add('protected_changed', 'Protected orders must be preserved exactly.', task);
+    if (result.planning_status === 'needs_planning') {
+      if (protectedTask) continue;
+      if (result.start_date !== null || result.end_date !== null || result.scheduleSegments?.length || !result.planning_reason?.code) add('queue_shape', 'Queued orders require null dates, no segments and a structured reason.', task);
+      if (disposition?.status !== 'needs_planning') add('accounting', 'Disposition disagrees with queued state.', task);
+      continue;
+    }
+    if (disposition && disposition.status !== (protectedTask ? 'protected' : 'scheduled')) add('accounting', 'Disposition disagrees with scheduled state.', task);
+    const intervals = productiveIntervals(result);
+    const start = timestamp(result.start_date); const end = timestamp(result.end_date);
+    if (!start || !end || !intervals.length || intervals.some(i => i.end <= i.start) || +intervals[0].start !== +start || +intervals.at(-1)!.end !== +end) {
+      add('invalid_schedule', 'Scheduled dates and segments must describe a positive interval.', task, protectedTask); continue;
+    }
+    const defect = planningDefect(snapshot, bounds, task);
+    if (defect) add(defect.code, defect.message, task, protectedTask);
+    const floor = notBeforeFor(bounds, task); const ceiling = notAfterFor(bounds, task);
+    if ((!protectedTask && (+start < +bounds.now || end > bounds.horizonEnd)) || (floor && start < floor) || (ceiling && end > ceiling)) add('date_window', 'Production lies outside its allowed planning window.', task, protectedTask);
+    const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
+    if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
+    const policy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, start, Math.round(Number(task.RUN_TIME) * 60))))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
+    const minimum = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
+    for (let index = 0; index < intervals.length; index++) {
+      const interval = intervals[index];
+      if (index && intervals[index - 1].end > interval.start) add('segments', 'Productive segments overlap or are out of order.', task, protectedTask);
+      if (intervals.length > 1 && (+interval.end - +interval.start) / 60000 < minimum) add('segment_floor', 'A productive segment is below the plant minimum.', task, protectedTask);
+      const free = freeIntervalsFor(snapshot, String(task.MACHINE), bounds.setup.plant, interval.start, interval.end);
+      if (!coversInterval(free, interval)) add('calendar', 'Production overlaps nonworking time or a blackout.', task, protectedTask);
+      const line = String(task.MACHINE); const list = occupied.get(line) ?? []; list.push({ interval, task: result, protectedTask }); occupied.set(line, list);
+    }
+  }
+  for (const list of occupied.values()) {
+    list.sort((a, b) => +a.interval.start - +b.interval.start);
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length && list[j].interval.start < list[i].interval.end; j++) {
+      const reject = list[j].protectedTask ? list[i].task : list[i].protectedTask ? list[j].task : urgencyOrder(snapshot, bounds, String(list[i].task.MACHINE), [list[i].task, list[j].task])[1];
+      add('capacity_overlap', `Orders ${taskId(list[i].task)} and ${taskId(list[j].task)} overlap.`, reject, list[i].protectedTask && list[j].protectedTask);
+    }
+  }
+  // Setup occupies the calendar immediately before each productive start.
+  const proposed = applyPatchesToSnapshot(tasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
+  const lines = new Set(proposed.map(task => String(task.MACHINE)));
+  for (const line of lines) {
+    const lineTasks = proposed.filter(task => String(task.MACHINE) === line).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+    const definition = bounds.setup.definition;
+    let state = definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
+    let predecessor: NimbusTask | null = null;
+    for (const task of lineTasks) {
+      const protectedTask = taskIsFirmed(snapshot, task);
+      const successor = definition ? stateForOrder(task, definition) : null;
+      const resolution = definition && state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line) ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides }) : null;
+      if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: 'A missing setup transition uses zero minutes.', severity: 'warning', taskId: taskId(task), line });
+      const minutes = resolution?.covered ? resolution.effectiveMin ?? 0 : 0;
+      if (minutes > 0) {
+        const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);
+        const floor = notBeforeFor(bounds, task);
+        if ((!protectedTask && start < bounds.now) || (floor && start < floor)) add('setup_floor', 'Setup begins before the allowed placement floor.', task, protectedTask);
+        const free = freeIntervalsFor(snapshot, line, bounds.setup.plant, start, end);
+        if (!coversInterval(free, { start, end })) add('setup_calendar', 'Setup overlaps nonworking time or a blackout.', task, protectedTask);
+        if (predecessor && timestamp(predecessor.end_date)! > start) {
+          const bothProtected = protectedTask && taskIsFirmed(snapshot, predecessor);
+          add('setup_overlap', 'Required setup overlaps preceding production.', protectedTask && !bothProtected ? predecessor : task, bothProtected);
+        }
+      }
+      predecessor = task; state = successor;
+    }
+  }
+  return findings;
+}
+
+export function validateCandidateForApply(candidate: Readonly<CandidateResult>, currentSnapshot: Readonly<ScheduleSnapshot>): ValidationFinding[] {
+  const context = candidate.validationContext;
+  return context ? validateCandidate(context.snapshot, context.bounds, candidate, currentSnapshot) : [];
+}
+
+function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: CandidateResult): CandidateResult {
+  let result = candidate;
+  result = { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
+  for (let attempt = 0; attempt < (result.dispositions?.length ?? 0); attempt++) {
+    const failures = (result.validationFindings ?? []).filter(f => f.severity === 'error' && f.taskId);
+    if (!failures.length) break;
+    const reject = new Set(failures.map(f => f.taskId!));
+    const repairPatches = result.patches.map(patch => reject.has(patch.id) ? { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' } } } : patch);
+    const repaired = (result.dispositions ?? []).map(d => reject.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' } } : d);
+    result = { ...result, patches: repairPatches, dispositions: repaired };
+    result = { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
+  }
+  return result;
+}
+
+function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: CandidateResult): CandidateResult {
+  const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
+  const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
+  const dispositions: PlanningDisposition[] = [];
+  for (const task of eligibleTasks(snapshot, bounds)) {
+    const id = taskId(task); const line = String(task.MACHINE);
+    if (taskIsFirmed(snapshot, task)) { patches.delete(id); dispositions.push({ id, line, status: 'protected' }); continue; }
+    let patch = patches.get(id);
+    const defect = planningDefect(snapshot, bounds, task);
+    if (patch && !defect) {
+      patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
+      dispositions.push({ id, line, status: 'scheduled' });
+    } else {
+      const reason = defect ?? { code: candidate.diagnostics.limitReached ? 'search_limit' : 'no_fit_found', message: candidate.diagnostics.limitReached ? 'Search ended before a legal placement was found.' : 'No fit found within the available capacity and planning window.' };
+      patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
+      dispositions.push({ id, line, status: 'needs_planning', reason });
+    }
+  }
+  let result: CandidateResult = { ...candidate, patches: [...patches.values()], dispositions, searchComplete: !candidate.diagnostics.limitReached, validationContext: { snapshot, bounds } };
+  // Build the incumbent solely from original intervals. Mixing new candidate
+  // placements with restored originals can create artificial overlaps and
+  // incorrectly reject a valid, more urgent baseline admission.
+  const baselinePatches: SchedulePatch[] = result.patches.map(patch => {
+    const original = originals.get(patch.id)!;
+    if (baselineWithinWindow(snapshot, bounds, original)) {
+      return { id: patch.id, changes: { start_date: original.start_date, end_date: original.end_date, scheduleSegments: original.scheduleSegments ?? [], planning_status: 'scheduled', planning_reason: null } };
+    }
+    const reason = planningDefect(snapshot, bounds, original) ?? {
+      code: candidate.diagnostics.limitReached ? 'search_limit' : 'no_fit_found',
+      message: 'No valid current placement is available in this incumbent.',
+    };
+    return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
+  });
+  const baselineById = new Map(baselinePatches.map(patch => [patch.id, patch.changes]));
+  const baselineDispositions: PlanningDisposition[] = dispositions.map(disposition => {
+    if (disposition.status === 'protected') return disposition;
+    const changes = baselineById.get(disposition.id)!;
+    return changes.planning_status === 'scheduled'
+      ? { ...disposition, status: 'scheduled', reason: undefined }
+      : { ...disposition, status: 'needs_planning', reason: changes.planning_reason! };
+  });
+  const incumbent = repairCandidate(snapshot, bounds, { ...result, patches: baselinePatches, dispositions: baselineDispositions });
+  result = repairCandidate(snapshot, bounds, result);
+  const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
+  const admitted = (proposal: CandidateResult): string => { const queued = new Set(proposal.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id)); return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join(''); };
+  if ((admitted(incumbent) < admitted(result) || (admitted(incumbent) === admitted(result) && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !validateCandidate(snapshot, bounds, incumbent).some(f => f.severity === 'error')) result = incumbent;
+  const score = [...result.score]; score[2] = 0; score[3] = 0; score[4] = -(result.dispositions ?? []).filter(d => d.status === 'scheduled').length; score[SCORE_OVER_CAP] = 0;
+  const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
+  const scopeIds = new Set(dispositions.map(d => d.id));
+  for (const task of final.filter(item => scopeIds.has(taskId(item)))) {
+    const due = dueTimestamp(task); const end = timestamp(task.end_date);
+    if (task.planning_status === 'needs_planning') { score[2]++; score[3] += Math.max(0, Math.ceil((+bounds.horizonEnd - due) / 60000)); }
+    else if (end && +end > due) { score[2]++; score[3] += Math.ceil((+end - due) / 60000); }
+  }
+  score[5] = finalObjective(snapshot, bounds, result)[2];
+  const predecessorById = new Map<string, string | null>();
+  const orderedFinal = final.filter(task => scopeIds.has(taskId(task)) && task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((a, b) => ordinalCompare(String(a.MACHINE), String(b.MACHINE)) || +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+  for (let index = 0; index < orderedFinal.length; index++) predecessorById.set(taskId(orderedFinal[index]), index && orderedFinal[index - 1].MACHINE === orderedFinal[index].MACHINE ? taskId(orderedFinal[index - 1]) : null);
+  const actualMissing = (result.validationFindings ?? []).filter(f => f.code === 'missing_setup' && f.taskId).map(f => ({ line: f.line!, predecessorOrderId: predecessorById.get(f.taskId!) ?? null, successorOrderId: f.taskId!, reason: 'scheduled-without-setup' }));
+  const changedPatches = result.patches.filter(patch => {
+    const original = originals.get(patch.id)!;
+    if (patch.changes.planning_status !== 'scheduled' || original.planning_status === 'needs_planning' || original.planning_reason) return true;
+    return +timestamp(original.start_date)! !== +timestamp(patch.changes.start_date)! || +timestamp(original.end_date)! !== +timestamp(patch.changes.end_date)! || JSON.stringify(original.scheduleSegments ?? []) !== JSON.stringify(patch.changes.scheduleSegments ?? []);
+  });
+  score[0] = (result.validationFindings ?? []).filter(f => f.severity === 'error').length;
+  score[1] = [...new Set(orderedFinal.map(task => String(task.MACHINE)))].reduce((sum, line) => sum + policyScore(snapshot, bounds.setup.plant, line, orderedFinal.filter(task => String(task.MACHINE) === line), bounds.runContext), 0);
+  score[SCORE_UNCOVERED] = actualMissing.length;
+  return { ...result, patches: changedPatches, score, missingEdges: uniqueMissingEdges([...result.missingEdges.filter(edge => edge.reason !== 'scheduled-without-setup'), ...actualMissing]) };
+}
+
+function baselineWithinWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): boolean {
+  if (task.planning_status === 'needs_planning' || planningDefect(snapshot, bounds, task)) return false;
+  const start = timestamp(task.start_date); const end = timestamp(task.end_date);
+  const floor = notBeforeFor(bounds, task); const ceiling = notAfterFor(bounds, task);
+  return !!(start && end && end > start && start >= bounds.now && (!floor || start >= floor) && (!ceiling || end <= ceiling));
+}
+function admissionKey(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, sequence: ReadonlyArray<NimbusTask>, patches: readonly SchedulePatch[], fragmentEnd: Date): string {
+  const ids = new Set(patches.map(patch => patch.id));
+  return urgencyOrder(snapshot, bounds, line, sequence).map(task => ids.has(taskId(task)) || (fragmentEnd < bounds.horizonEnd && (notAfterFor(bounds, task)?.getTime() ?? Infinity) > +fragmentEnd) ? '0' : '1').join('');
+}
+
+function finalObjective(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>): number[] {
+  const ids = new Set(eligibleTasks(snapshot, bounds).map(taskId));
+  const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
+  let lateCount = 0; let lateness = 0; let setupMinutes = 0; let instability = 0; let completion = 0;
+  const original = new Map(snapshot.tasks.map(task => [taskId(task), task]));
+  for (const task of tasks) {
+    const end = timestamp(task.end_date); const due = dueTimestamp(task);
+    if (task.planning_status === 'needs_planning') { lateCount++; lateness += Math.max(0, (+bounds.horizonEnd - due) / 60000); }
+    else if (end && +end > due) { lateCount++; lateness += (+end - due) / 60000; }
+    if (end) completion += (+end - +bounds.now) / 60000;
+    const before = timestamp(original.get(taskId(task))?.start_date); const after = timestamp(task.start_date);
+    if (before && after) instability += Math.abs(+after - +before) / 60000;
+  }
+  const definition = bounds.setup.definition;
+  if (definition) for (const line of new Set(tasks.map(task => String(task.MACHINE)))) {
+    let state = initialStateForLine(bounds, line, definition.signature_version).state;
+    let previous: string | null = null;
+    const ordered = tasks.filter(task => String(task.MACHINE) === line && task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((a,b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+    for (const task of ordered) {
+      const successor = stateForOrder(task, definition);
+      if (state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
+        const resolved = resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides });
+        if (resolved.covered) setupMinutes += resolved.effectiveMin ?? 0;
+      }
+      state = successor; previous = taskId(task);
+    }
+  }
+  return [lateCount, lateness, setupMinutes, instability, completion];
+}
+function compareFinalObjectives(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, left: Readonly<CandidateResult>, right: Readonly<CandidateResult>): number {
+  const a = finalObjective(snapshot, bounds, left); const b = finalObjective(snapshot, bounds, right);
+  const indices = bounds.strategy === 'spt' ? [4, 0, 1, 2] : [0, 1, 2];
+  for (const index of indices) if (a[index] !== b[index]) return a[index] - b[index];
+  const priority = (proposal: Readonly<CandidateResult>): string => {
+    const tasks = applyPatchesToSnapshot(eligibleTasks(snapshot, bounds), proposal.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((x, y) => ordinalCompare(String(x.MACHINE), String(y.MACHINE)) || +timestamp(x.start_date)! - +timestamp(y.start_date)! || ordinalCompare(taskId(x), taskId(y)));
+    return tasks.map(task => policyKeyForSequence(snapshot, bounds.setup.plant, String(task.MACHINE), [task], bounds.runContext)).join(' ');
+  };
+  return ordinalCompare(priority(left), priority(right)) || a[3] - b[3];
+}
+
+function coversInterval(free: readonly PlacementInterval[], interval: PlacementInterval): boolean {
+  let cursor = +interval.start;
+  for (const slot of free) { if (+slot.start > cursor) return false; cursor = Math.max(cursor, +slot.end); if (cursor >= +interval.end) return true; }
+  return false;
 }

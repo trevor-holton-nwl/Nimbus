@@ -17,6 +17,19 @@ import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 const require = createRequire(import.meta.url);
 
+test('preview separates scheduled demand, new queue, protected exceptions and incomplete search', () => {
+  const candidate = { dispositions: [
+    { id: 'a', status: 'scheduled', line: 'L1' },
+    { id: 'b', status: 'needs_planning', line: 'L1' },
+    { id: 'c', status: 'needs_planning', line: 'L1' },
+    { id: 'p', status: 'protected', line: 'L1' },
+    { id: 'p2', status: 'protected', line: 'L1' },
+  ], validationFindings: [{ severity: 'warning', taskId: 'p', code: 'protected-window', message: 'Existing violation.' },
+    { severity: 'warning', taskId: 'p2', code: 'missing_setup', message: 'Missing transition uses zero minutes.' }], searchComplete: false };
+  assert.deepEqual(OptimizerPreview.planningSummary(candidate, [{ id: 'c', planning_status: 'needs_planning' }]),
+    { scheduled: 1, needsPlanning: 2, newlyQueued: 1, protectedExceptions: 1, incomplete: true });
+});
+
 // Same split-realm/no-DOM situation documented in
 // tests/modules/schedule-services.test.mjs and schedule-data.test.mjs.
 if (typeof globalThis.document === 'undefined') {
