@@ -193,6 +193,39 @@ test('setup-aware diagnostics expose a global budget and heuristic quality', () 
   assert.ok(['exact', 'heuristic'].includes(result.diagnostics.quality));
 });
 
+test('setup-aware heuristic modes use deterministic seeds and bounded local search', () => {
+  const colors = ['RED', 'BLUE', 'YELLOW', 'BLACK', 'WHITE', 'ORANGE', 'PURPLE', 'TEAL'];
+  const tasks = colors.map((color, index) => scheduledTask(
+    `quality-${index + 1}`,
+    index % 3 + 1,
+    color,
+    `2026-08-03T${18 - index}:00`,
+  ));
+  const snapshot = setupSnapshot(tasks);
+  const setup = setupTruth();
+  const bounds = dueDateBounds(setup, {
+    exactSearchThreshold: 0,
+    iterationCap: 1000,
+    convergenceWindow: 1000,
+  });
+
+  const dueDate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
+  const spt = SetupScheduler.evaluateSptWithSetup(snapshot, bounds);
+  const minChangeover = SetupScheduler.evaluateMinChangeover(snapshot, bounds);
+
+  for (const [name, result] of [['Due Date', dueDate], ['SPT', spt], ['Min Changeover', minChangeover]]) {
+    assert.ok((result.diagnostics.seedCount ?? 0) >= 3, `${name} should report its deterministic seed set`);
+    assert.ok((result.diagnostics.localMoveCount ?? 0) > 0, `${name} should report bounded local moves`);
+  }
+
+  const repeat = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
+  assert.deepEqual(
+    repeat.patches.map(patch => [patch.id, patch.changes.start_date?.getTime(), patch.changes.end_date?.getTime()]),
+    dueDate.patches.map(patch => [patch.id, patch.changes.start_date?.getTime(), patch.changes.end_date?.getTime()]),
+    'mode-specific seed ordering must remain deterministic',
+  );
+});
+
 test('canonical Min Changeover objectives prefer covered edges before setup savings', () => {
   const base = {
     hardErrors: 0, overCap: 0, lateCount: 0, latenessMinutes: 0,

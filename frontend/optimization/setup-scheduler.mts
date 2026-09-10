@@ -634,6 +634,10 @@ export interface SearchDiagnostics {
   exhaustive?: boolean;
   quality?: 'exact' | 'heuristic';
   respectCalendar?: boolean;
+  /** Number of deterministic starting sequences considered by heuristic search. */
+  seedCount?: number;
+  /** Number of bounded insertion/swap neighborhood moves attempted. */
+  localMoveCount?: number;
 }
 
 export interface MissingSetupEdge {
@@ -782,6 +786,9 @@ interface SearchRun {
    * interleaved: an unknown order mid-chain would make every downstream
    * covered transition's predecessor unknown too. */
   unknownTail: NimbusTask[];
+  /** Heuristic-search accounting; exact runs may leave these at zero. */
+  seedCount?: number;
+  localMoveCount?: number;
 }
 
 /** True when a `SearchRun` reached a real, trustworthy conclusion — either it
@@ -902,6 +909,8 @@ interface LineSearchResult {
   method: 'due-date-first-exact' | 'due-date-first-greedy';
   termination: SearchRun['termination'];
   unchanged: boolean;
+  seedCount?: number;
+  localMoveCount?: number;
 }
 
 type FragmentMode = 'due-date-first' | 'spt' | 'min-changeover' | 'throughput' | 'due-date';
@@ -1750,6 +1759,200 @@ function orderedByProductiveRuntime(tasks: ReadonlyArray<NimbusTask>): NimbusTas
   return [...tasks].sort((left, right) => (
     productiveRuntimeMinutes(left) - productiveRuntimeMinutes(right) || taskId(left).localeCompare(taskId(right))
   ));
+}
+
+/** Keep heuristic search broad enough to find a useful route while making its
+ * work visible and bounded. Exact fragments still enumerate their declared
+ * search space; these limits apply only after a fragment is large enough to
+ * use the greedy path. */
+const HEURISTIC_INSERTION_LIMIT = 16;
+const HEURISTIC_SWAP_LIMIT = 16;
+
+function sequenceIdentity(sequence: ReadonlyArray<NimbusTask>): string {
+  return sequence.map(taskId).join('\u0000');
+}
+
+/** Stable runtime ordering keeps source order for equal runtimes before using
+ * the task id as the final tie-break. This gives SPT a reproducible current
+ * order seed without changing its primary productive-runtime rule. */
+function orderedByRuntimeThenCurrent(
+  tasks: ReadonlyArray<NimbusTask>,
+): NimbusTask[] {
+  const sourceOrder = new Map(tasks.map((task, index) => [taskId(task), index]));
+  return [...tasks].sort((left, right) => (
+    productiveRuntimeMinutes(left) - productiveRuntimeMinutes(right)
+    || (sourceOrder.get(taskId(left)) ?? Number.MAX_SAFE_INTEGER)
+      - (sourceOrder.get(taskId(right)) ?? Number.MAX_SAFE_INTEGER)
+    || taskId(left).localeCompare(taskId(right))
+  ));
+}
+
+/** Earliest slack first is the Due Date mode's second independent view of a
+ * fragment. Slack uses the effective due/cap instant minus productive runtime
+ * so a long order with the same deadline is considered before a short one. */
+function orderedBySlack(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+): NimbusTask[] {
+  const decorated = tasks.map(task => {
+    const deadline = notAfterFor(bounds, task)?.getTime() ?? dueTimestamp(task);
+    const slack = Number.isFinite(deadline)
+      ? deadline - productiveRuntimeMinutes(task) * 60 * 1000
+      : Number.MAX_SAFE_INTEGER;
+    return { task, slack, policy: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext) };
+  });
+  decorated.sort((left, right) => (
+    left.slack - right.slack
+    || ordinalCompare(left.policy, right.policy)
+    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || taskId(left.task).localeCompare(taskId(right.task))
+  ));
+  return decorated.map(entry => entry.task);
+}
+
+/** Build a deterministic setup-nearest seed by repeatedly selecting the
+ * lowest covered transition from the current fragment predecessor. Missing
+ * transitions sort after covered ones and then by setup minutes, while the
+ * canonical comparator remains responsible for the final winner. */
+function orderedBySetupNearest(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+): NimbusTask[] {
+  const definition = bounds.setup.definition;
+  if (!definition) return [...tasks];
+  const remaining = [...tasks];
+  const result: NimbusTask[] = [];
+  let predecessorState = fragment.predecessorState;
+  let predecessorOrderId = fragment.predecessorOrderId;
+  while (remaining.length) {
+    const ranked = remaining.map(task => {
+      const successorState = orderState(bounds, task, definition);
+      const resolution = predecessorState && successorState
+        ? resolveSetup({
+          definition,
+          machine: line,
+          predecessorState,
+          successorState,
+          predecessorOrderId,
+          successorOrderId: taskId(task),
+          plantRows: bounds.setup.plant_rows,
+          machineRows: bounds.setup.machine_rows,
+          overrides: bounds.setup.overrides,
+          index: bounds.runContext?.resolutionIndex ?? undefined,
+        })
+        : null;
+      return {
+        task,
+        covered: !resolution || resolution.covered ? 0 : 1,
+        minutes: resolution?.covered ? resolution.effectiveMin ?? 0 : Number.MAX_SAFE_INTEGER,
+        policy: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext),
+      };
+    });
+    ranked.sort((left, right) => (
+      left.covered - right.covered
+      || left.minutes - right.minutes
+      || ordinalCompare(left.policy, right.policy)
+      || dueTimestamp(left.task) - dueTimestamp(right.task)
+      || taskId(left.task).localeCompare(taskId(right.task))
+    ));
+    const next = ranked[0].task;
+    result.push(next);
+    remaining.splice(remaining.findIndex(task => taskId(task) === taskId(next)), 1);
+    predecessorState = orderState(bounds, next, definition);
+    predecessorOrderId = taskId(next);
+  }
+  return result;
+}
+
+/** Return deterministic seed orders for one covered fragment. Each strategy
+ * starts with the ordering that expresses its mode, then considers stable
+ * orders that expose a different admission/setup tradeoff. The caller still
+ * enforces active adjacency and the shared SearchBudget for every sequence. */
+function heuristicSeedOrders(
+  snapshot: Readonly<ScheduleSnapshot>,
+  bounds: Readonly<DueDateFirstBounds>,
+  line: string,
+  tasks: ReadonlyArray<NimbusTask>,
+  groups: ReadonlyArray<DueDateGroup>,
+  fragment: Readonly<FragmentContext>,
+  mode: FragmentMode,
+): NimbusTask[][] {
+  const policy = orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
+  const due = orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
+  const urgent = mode === 'due-date-first' ? urgencyOrder(snapshot, bounds, line, tasks) : [];
+  const runtime = orderedByProductiveRuntime(tasks);
+  const runtimeThenCurrent = orderedByRuntimeThenCurrent(tasks);
+  const slack = mode === 'due-date' ? orderedBySlack(snapshot, bounds, line, tasks) : [];
+  const setupNearest = mode === 'due-date-first' || mode === 'min-changeover' || mode === 'throughput'
+    ? orderedBySetupNearest(snapshot, bounds, line, tasks, fragment)
+    : [];
+  const grouped = groups.flatMap(group => group.tasks);
+  const source = [...tasks];
+  const seeds = mode === 'spt'
+    ? [runtime, due, policy, runtimeThenCurrent, source]
+    : mode === 'due-date'
+      ? [due, slack, runtime, policy, source]
+      : mode === 'min-changeover' || mode === 'throughput'
+        ? [setupNearest, grouped, policy, runtime]
+        : [policy, urgent, setupNearest, runtime];
+  const seen = new Set<string>();
+  return seeds.filter(seed => {
+    const key = sequenceIdentity(seed);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Generate one bounded insertion and one bounded swap neighborhood. A move
+ * is normalized through `orderWithAdjacency`, so active overrides and fixed
+ * boundary endpoints remain hard constraints for every evaluated candidate. */
+function boundedLocalMoveSequences(
+  seed: ReadonlyArray<NimbusTask>,
+  fragment: Readonly<FragmentContext>,
+  adjacency: Readonly<FragmentAdjacency>,
+): NimbusTask[][] {
+  const result: NimbusTask[][] = [];
+  const seen = new Set<string>([sequenceIdentity(seed)]);
+  const add = (raw: NimbusTask[]): boolean => {
+    const normalized = orderWithAdjacency(raw, fragment, adjacency);
+    if (!normalized) return false;
+    const key = sequenceIdentity(normalized);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    result.push(normalized);
+    return true;
+  };
+
+  let insertionMoves = 0;
+  outerInsertion: for (let from = 0; from < seed.length; from += 1) {
+    for (let to = 0; to < seed.length; to += 1) {
+      if (from === to) continue;
+      const moved = [...seed];
+      const [task] = moved.splice(from, 1);
+      moved.splice(to, 0, task);
+      add(moved);
+      insertionMoves += 1;
+      if (insertionMoves >= HEURISTIC_INSERTION_LIMIT) break outerInsertion;
+    }
+  }
+
+  let swapMoves = 0;
+  outerSwap: for (let left = 0; left < seed.length - 1; left += 1) {
+    for (let right = left + 1; right < seed.length; right += 1) {
+      const swapped = [...seed];
+      [swapped[left], swapped[right]] = [swapped[right], swapped[left]];
+      add(swapped);
+      swapMoves += 1;
+      if (swapMoves >= HEURISTIC_SWAP_LIMIT) break outerSwap;
+    }
+  }
+  return result;
 }
 
 function taskIsFirmed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): boolean {
@@ -2756,6 +2959,8 @@ function greedySearch(
   ));
   const orderedTasks = decoratedTasks.map(entry => entry.task);
   let candidateCount = 0;
+  let seedCount = 0;
+  let localMoveCount = 0;
   let termination: SearchRun['termination'] = 'completed';
   let winner: DueDateCandidate | null = null;
   // Phase 1e: see the matching declarations in exactSearch.
@@ -2828,29 +3033,57 @@ function greedySearch(
       winner: null,
       missingEdges: [inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
       unknownTail: [],
+      seedCount,
+      localMoveCount,
     };
   }
-  let currentOrder = protectedOrder;
-  let current = evaluate(currentOrder);
-  let improved = true;
-  while (improved && termination === 'completed') {
-    improved = false;
-    for (let index = 0; index < currentOrder.length - 1; index += 1) {
-      const neighbor = [...currentOrder];
-      [neighbor[index], neighbor[index + 1]] = [neighbor[index + 1], neighbor[index]];
-      const candidate = evaluate(neighbor);
-      if (termination !== 'completed') break;
-      if (candidate && current && compareCandidate(candidate, current, mode) < 0) {
-        currentOrder = neighbor;
-        current = candidate;
-        improved = true;
-        break;
+  // Two-state fragments retain the historical adjacent-swap walk so its
+  // small candidate counts and tie behavior stay compatible. Larger greedy
+  // fragments use several mode-specific starts and a bounded insertion/swap
+  // neighborhood; every move still flows through the same evaluator and
+  // shared budget.
+  if (groups.length < 3) {
+    seedCount = 1;
+    let currentOrder = protectedOrder;
+    let current = evaluate(currentOrder);
+    let improved = true;
+    while (improved && termination === 'completed') {
+      improved = false;
+      for (let index = 0; index < currentOrder.length - 1; index += 1) {
+        const neighbor = [...currentOrder];
+        [neighbor[index], neighbor[index + 1]] = [neighbor[index + 1], neighbor[index]];
+        localMoveCount += 1;
+        const candidate = evaluate(neighbor);
+        if (termination !== 'completed') break;
+        if (candidate && current && compareCandidate(candidate, current, mode) < 0) {
+          currentOrder = neighbor;
+          current = candidate;
+          improved = true;
+          break;
+        }
+        if (candidate && !current) {
+          currentOrder = neighbor;
+          current = candidate;
+          improved = true;
+          break;
+        }
       }
-      if (candidate && !current) {
-        currentOrder = neighbor;
-        current = candidate;
-        improved = true;
-        break;
+    }
+  } else {
+    const seeds = heuristicSeedOrders(
+      snapshot, bounds, line, groups.flatMap(group => group.tasks), groups, fragment, mode,
+    );
+    for (const seed of seeds) {
+      if (termination !== 'completed') break;
+      const normalized = orderWithAdjacency(seed, fragment, adjacency);
+      if (!normalized) continue;
+      seedCount += 1;
+      evaluate(normalized);
+      if (termination !== 'completed') break;
+      for (const move of boundedLocalMoveSequences(normalized, fragment, adjacency)) {
+        localMoveCount += 1;
+        evaluate(move);
+        if (termination !== 'completed') break;
       }
     }
   }
@@ -2862,6 +3095,8 @@ function greedySearch(
     winner,
     missingEdges,
     unknownTail: [],
+    seedCount,
+    localMoveCount,
   };
 }
 
@@ -2989,11 +3224,89 @@ function searchFragment(
       };
     }
     const workingTasks = groups.flatMap(group => group.tasks);
-    // A4: the coverage-demotion backstop (Part 1b) is gone — `allUncoveredTransitions`
-    // can no longer be true (A1 admits uncovered mid-sequence transitions
-    // instead of rejecting the candidate), so a single evaluation replaces
-    // the former retry-with-demotion loop.
-    consumeSearchIteration(budget);
+    const workingIds = new Set(workingTasks.map(taskId));
+    const sourceOrder = tasks.filter(task => workingIds.has(taskId(task)));
+    const allSeeds = heuristicSeedOrders(snapshot, bounds, line, sourceOrder, groups, fragment, mode);
+    const seeds = groups.length >= 3 ? allSeeds : allSeeds.slice(0, 2);
+    // SPT keeps its runtime-first candidate as the incumbent, then explores
+    // deterministic due/policy/current-order seeds and bounded local moves.
+    // The shared budget and admission-only replacement rule prevent setup
+    // ranking from becoming a hidden SPT objective.
+    let candidateCount = 0;
+    let seedCount = 0;
+    let localMoveCount = 0;
+    let termination: SearchRun['termination'] = 'completed';
+    let winner: DueDateCandidate | null = null;
+    const seen = new Set<string>();
+    const addMissingEdges = (evaluated: Readonly<DueDateCandidate>): void => {
+      for (const edge of evaluated.missingEdges) {
+        if (edge.reason !== UNCOVERED_SETUP_TRANSITION_REASON) continue;
+        const key = missingEdgeKey(edge);
+        if (!missingEdges.some(existing => missingEdgeKey(existing) === key)) missingEdges.push(edge);
+      }
+    };
+    const isBetterSptCandidate = (left: Readonly<DueDateCandidate>, right: Readonly<DueDateCandidate> | null): boolean => {
+      if (!right || left.feasible !== right.feasible) return left.feasible;
+      if (!left.feasible) return false;
+      // SPT keeps productive-runtime order as its primary objective. An
+      // alternate seed may replace it only when it admits more urgent work;
+      // equal-admission ties retain the first (runtime) seed.
+      return ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '') < 0;
+    };
+    const normalizeSptSequence = (base: ReadonlyArray<NimbusTask>): NimbusTask[] | null => (
+      orderWithAdjacency(
+        capAwareSequence(
+          base,
+          fragment.start.getTime(),
+          task => notAfterFor(bounds, task)?.getTime() ?? null,
+          task => productiveRuntimeMinutes(task) * 60 * 1000,
+        ),
+        fragment,
+        adjacency,
+      )
+    );
+    const evaluate = (base: ReadonlyArray<NimbusTask>): DueDateCandidate | null => {
+      const sequence = normalizeSptSequence(base);
+      if (!sequence) return null;
+      const key = sequenceIdentity(sequence);
+      if (seen.has(key)) return null;
+      if (bounds.clock() >= bounds.deadline) {
+        termination = 'deadline';
+        return null;
+      }
+      if (!consumeSearchIteration(budget)) {
+        termination = 'iteration-cap';
+        return null;
+      }
+      seen.add(key);
+      candidateCount += 1;
+      const evaluated = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
+      if (!evaluated.feasible) {
+        missingEdges.push(...evaluated.missingEdges);
+      } else {
+        addMissingEdges(evaluated);
+      }
+      if (isBetterSptCandidate(evaluated, winner)) winner = evaluated;
+      return evaluated;
+    };
+    for (const seed of seeds) {
+      if (termination !== 'completed') break;
+      const normalized = normalizeSptSequence(seed);
+      if (!normalized) continue;
+      seedCount += 1;
+      evaluate(normalized);
+      if (termination !== 'completed') break;
+      if (groups.length >= 3) {
+        for (const move of boundedLocalMoveSequences(normalized, fragment, adjacency)) {
+          localMoveCount += 1;
+          evaluate(move);
+          if (termination !== 'completed') break;
+        }
+      }
+    }
+    if (!seeds.length || (!winner && candidateCount === 0 && termination === 'completed')) {
+      missingEdges.push(inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency)));
+    }
     // Due-date push-forward limit: this is a single fixed run-time-ordered
     // walk (no ranking search to steer via score[SCORE_OVER_CAP]), so
     // capAwareSequence pulls a still-savable capped order ahead of the SPT
@@ -3001,40 +3314,15 @@ function searchFragment(
     // start. A no-op when no task in this fragment has a ceiling
     // (bounds.notAfter absent/null) — capAwareSequence returns its input
     // unchanged in that case.
-    const sequence = orderWithAdjacency(
-      capAwareSequence(
-        orderedByProductiveRuntime(workingTasks),
-        fragment.start.getTime(),
-        task => notAfterFor(bounds, task)?.getTime() ?? null,
-        task => productiveRuntimeMinutes(task) * 60 * 1000,
-      ),
-      fragment,
-      adjacency,
-    );
-    if (!sequence) {
-      return {
-        candidateCount: 1,
-        method: 'due-date-first-exact',
-        termination: 'completed',
-        winner: null,
-        missingEdges: [...missingEdges, inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
-        unknownTail,
-      };
-    }
-    let candidate = candidateForSequence(snapshot, bounds, line, sequence, fragment, adjacency);
-    const urgentSequence = orderWithAdjacency(urgencyOrder(snapshot, bounds, line, workingTasks), fragment, adjacency);
-    if (urgentSequence && bounds.clock() < bounds.deadline && budget.remainingIterations > 0
-      && consumeSearchIteration(budget)) {
-      const urgent = candidateForSequence(snapshot, bounds, line, urgentSequence, fragment, adjacency);
-      if (urgent.feasible && (!candidate.feasible || ordinalCompare(urgent.admissionKey ?? '', candidate.admissionKey ?? '') < 0)) candidate = urgent;
-    }
     return {
-      candidateCount: 1,
+      candidateCount,
       method: 'due-date-first-exact',
-      termination: 'completed',
-      winner: candidate.feasible ? candidate : null,
-      missingEdges: candidate.feasible ? missingEdges : [...missingEdges, ...candidate.missingEdges],
+      termination,
+      winner,
+      missingEdges,
       unknownTail,
+      seedCount,
+      localMoveCount,
     };
   }
 
@@ -4084,11 +4372,15 @@ function evaluateLineWithFirmedBoundaries(
   const explanation: CandidateReason[] = [...baseExplanation];
   const missingEdges: MissingSetupEdge[] = [...baseMissingEdges];
   let candidateCount = 0;
+  let seedCount = 0;
+  let localMoveCount = 0;
   let method: LineSearchResult['method'] = 'due-date-first-exact';
   let termination: SearchRun['termination'] = 'completed';
 
   const recordRun = (run: Readonly<SearchRun>): void => {
     candidateCount += run.candidateCount;
+    seedCount += run.seedCount ?? 0;
+    localMoveCount += run.localMoveCount ?? 0;
     if (run.method === 'due-date-first-greedy') method = run.method;
     termination = worseTermination(termination, run.termination);
   };
@@ -4594,7 +4886,7 @@ function evaluateLineWithFirmedBoundaries(
         });
         return {
           patches: [], score: zeroScore(), explanation, missingEdges,
-          candidateCount, method, termination, unchanged: true,
+          candidateCount, method, termination, unchanged: true, seedCount, localMoveCount,
         };
       }
       // A4: no arbitrated fallback route won this fragment, and it is not an
@@ -4668,7 +4960,7 @@ function evaluateLineWithFirmedBoundaries(
       explanation.push({ code: 'setup-sequence-infeasible', message: 'No covered feasible setup sequence was found.', line });
       return {
         patches: [], score: zeroScore(), explanation, missingEdges,
-        candidateCount, method, termination, unchanged: true,
+        candidateCount, method, termination, unchanged: true, seedCount, localMoveCount,
       };
     }
     // Budget exhaustion or unresolved coverage before any covered sequence
@@ -4687,7 +4979,10 @@ function evaluateLineWithFirmedBoundaries(
       taskId: taskId(task),
     });
   }
-  return { patches, score, explanation, missingEdges, candidateCount, method, termination, unchanged: false };
+  return {
+    patches, score, explanation, missingEdges, candidateCount, method, termination, unchanged: false,
+    seedCount, localMoveCount,
+  };
 }
 
 function requireDueDateBounds(bounds: Readonly<DueDateFirstBounds>): void {
@@ -4750,10 +5045,11 @@ function hasInvalidHorizon(bounds: Readonly<DueDateFirstBounds>): boolean {
 }
 
 /**
- * Pure setup-aware SPT evaluation. Productive runtime is the only order key:
- * setup is always reserved as capacity after that order is chosen, never used
- * as a hidden changeover sort term. A missing SPT transition leaves the line
- * unchanged instead of selecting a different, covered sequence.
+ * Pure setup-aware SPT evaluation. Productive runtime supplies the primary
+ * seed and equal-admission ties retain it; deterministic due/policy/current
+ * seeds may replace it only when they admit more urgent work. Setup is always
+ * reserved as capacity after an order is chosen, never used as a hidden
+ * changeover sort term. A missing SPT transition remains a visible warning.
  */
 export function evaluateSptWithSetup(
   snapshot: Readonly<ScheduleSnapshot>,
@@ -4780,6 +5076,8 @@ export function evaluateSptWithSetup(
   }
 
   let candidateCount = 0;
+  let seedCount = 0;
+  let localMoveCount = 0;
   // Narrower than SearchDiagnostics['termination'] (excludes 'no-plant' /
   // 'infeasible', which this per-line aggregation never produces — every
   // value here comes from a LineSearchResult, whose termination type is
@@ -4886,6 +5184,8 @@ export function evaluateSptWithSetup(
       'spt',
     );
     candidateCount += result.candidateCount;
+    seedCount += result.seedCount ?? 0;
+    localMoveCount += result.localMoveCount ?? 0;
     termination = worseTermination(termination, result.termination);
     if (result.unchanged) {
       unchangedLines.push(line);
@@ -4917,6 +5217,8 @@ export function evaluateSptWithSetup(
       eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
       evaluatedCount: candidateCount,
       placedCount: patches.length,
+      seedCount,
+      localMoveCount,
       exhaustive: false,
       quality: 'heuristic',
       respectCalendar: bounds.respectCalendar ?? true,
@@ -4958,6 +5260,8 @@ export function evaluateDueDateFirst(
   }
 
   let candidateCount = 0;
+  let seedCount = 0;
+  let localMoveCount = 0;
   let method: SearchDiagnostics['method'] = 'due-date-first-exact';
   // Narrower than SearchDiagnostics['termination'] (excludes 'no-plant' /
   // 'infeasible', which this per-line aggregation never produces — every
@@ -5067,6 +5371,8 @@ export function evaluateDueDateFirst(
       mode,
     );
     candidateCount += result.candidateCount;
+    seedCount += result.seedCount ?? 0;
+    localMoveCount += result.localMoveCount ?? 0;
     if (result.method === 'due-date-first-greedy') method = result.method;
     termination = worseTermination(termination, result.termination);
     if (result.unchanged) {
@@ -5098,6 +5404,8 @@ export function evaluateDueDateFirst(
       eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
       evaluatedCount: candidateCount,
       placedCount: patches.length,
+      seedCount,
+      localMoveCount,
       exhaustive: method.endsWith('exact') && termination === 'completed',
       quality: method.endsWith('exact') ? 'exact' : 'heuristic',
       respectCalendar: bounds.respectCalendar ?? true,
@@ -5179,6 +5487,8 @@ export function evaluateMinChangeover(
       iterationsUsed: budget.iterationsUsed,
       evaluatedCount: (baseline.diagnostics.evaluatedCount ?? baseline.diagnostics.candidateCount)
         + (candidate.diagnostics.evaluatedCount ?? candidate.diagnostics.candidateCount),
+      seedCount: (baseline.diagnostics.seedCount ?? 0) + (candidate.diagnostics.seedCount ?? 0),
+      localMoveCount: (baseline.diagnostics.localMoveCount ?? 0) + (candidate.diagnostics.localMoveCount ?? 0),
       exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
       quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
     },
@@ -5264,6 +5574,8 @@ export function evaluateThroughput(
       deadlineAt: budget.deadlineAt,
       iterationsUsed: budget.iterationsUsed,
       evaluatedCount: baselineEvaluated + candidateEvaluated,
+      seedCount: (baseline.diagnostics.seedCount ?? 0) + (candidate.diagnostics.seedCount ?? 0),
+      localMoveCount: (baseline.diagnostics.localMoveCount ?? 0) + (candidate.diagnostics.localMoveCount ?? 0),
       placedCount: selected.patches.length,
       exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
       quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
