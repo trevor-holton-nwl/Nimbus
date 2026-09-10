@@ -4,6 +4,7 @@
 
 - **`routes.py`** (505 lines) — every `GET/POST /task(s)*` route:
   - `GET /tasks` (`get_tasks`) — the task-list read path with finish-to-start links and diagnostics metadata; plant/machine scoping, `?limit=`/`?offset=` paging, per-user `role_plants` enforcement.
+  - `GET /tasks/horizons` (`get_task_horizons`) — meta-only horizon probe: resolved visibility/frozen horizon instants and alert-flag horizon minutes without the task list.
   - `POST /task/update` (`update_task`) — single-task schedule/attribute edit.
   - `POST /task/note` (`update_task_note`) — free-text note persistence (max 500 chars).
   - `POST /tasks/update` (`tasks_update`) — the frontend's bulk explicit-save path, payload `{ tasks, blocks?, calendars? }` (only `tasks` is consumed).

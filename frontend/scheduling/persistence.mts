@@ -159,6 +159,18 @@ export const Persistence = {
   // captured before the async work starts, and compared after each response resolves;
   // a mismatch means a newer load() has since started and this response is discarded.
   _loadRequest: 0,
+  // Counts /tasks fetches currently in flight. Incremented right before the
+  // fetch in load() is issued, decremented via a trailing .finally() once
+  // that fetch chain settles (success, the stale-generation discard branch,
+  // or the cache/demo fallback in .catch) — never incremented for the
+  // early-return "no plant selected" path, which never calls fetch. Consumed
+  // by the Gantt's loading mask (Timeline.hideLoadingMask is gated on
+  // isLoading()) so the mask stays up through a plant switch's reload rather
+  // than flickering hidden between the outgoing and incoming plant's fetches.
+  _loadsInFlight: 0,
+  // Throttle for refreshHorizons() below, keyed by plant: last Date.now() a
+  // /tasks/horizons fetch for that plant actually resolved (success or not).
+  _horizonsFetchedAt: {} as Record<string, number>,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
   _syncUnsaved(): void {
@@ -221,6 +233,10 @@ export const Persistence = {
   },
 
   stats(): LoadStats { return { ...Persistence._lastLoad }; },
+
+  /** True while a /tasks fetch is in flight — see the `_loadsInFlight` field
+   *  comment above for exactly which paths increment/decrement it. */
+  isLoading(): boolean { return Persistence._loadsInFlight > 0; },
 
   load({ force = false, plant = null }: { force?: boolean; plant?: string | null } = {}): Promise<void> {
     // Captured before any async work starts; every continuation below that would
@@ -291,6 +307,7 @@ export const Persistence = {
     }
 
     const tasksUrl = `${Config.API_BASE}/tasks?plant=${encodeURIComponent(plant)}`;
+    Persistence._loadsInFlight++;
     return fetch(tasksUrl, { signal: AbortSignal.timeout(8000) })
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status} from /tasks`);
@@ -533,6 +550,97 @@ export const Persistence = {
             ErrorLog.warn('persistence', `Reconnect watcher failed to start: ${(e as Error).message}`);
           }
         }
+      })
+      // Settles exactly once per fetch chain, covering every terminal path above:
+      // the success .then's normal completion, its stale-generation discard
+      // branch, and this .catch's cache/demo fallback — see the `_loadsInFlight`
+      // field comment for what this counter gates.
+      .finally(() => { Persistence._loadsInFlight = Math.max(0, Persistence._loadsInFlight - 1); });
+  },
+
+  /** Lightweight meta-only refresh of a plant's horizon instants (visibility,
+   *  frozen) plus its alert-horizon-band minutes, via `GET /tasks/horizons`.
+   *
+   *  Why this exists: `Store.visibilityHorizonEnd`/`frozenHorizonEnd` and the
+   *  plant row's `alt_flag_horizon` are only ever set from a /tasks response's
+   *  `meta` (see load() above) or the admin Plant Settings save — they go
+   *  stale the moment an admin edits the horizon settings, or the daily
+   *  horizon roll advances past midnight, without a fresh /tasks load to
+   *  refresh them. A full load()/reload() would fix that too, but it has no
+   *  dirty guard — re-running it every time the user re-enters the Gantt tab
+   *  would silently clobber unsaved edits. This deliberately does NOT call
+   *  load()/reload()/Store.setTasks and touches nothing task-shaped; it only
+   *  ever patches the three horizon-shaped fields below.
+   *
+   *  Deliberately does NOT: toast on failure (a frontend deployed ahead of
+   *  the backend's /tasks/horizons rollout must silently no-op forever, not
+   *  nag), retry, or run more than once per plant per 10s (rapid tab flipping
+   *  between Gantt/Orders must not become a request storm).
+   *
+   *  Resolves `true` iff something was actually applied — the caller
+   *  (App.gotoGanttSub) uses that to trigger Timeline._scheduleRebuild() only
+   *  when the horizon bands actually moved. */
+  refreshHorizons(plant: string | null): Promise<boolean> {
+    if (!plant) return Promise.resolve(false);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return Promise.resolve(false);
+    if (Date.now() - (Persistence._horizonsFetchedAt[plant] ?? 0) < 10_000) return Promise.resolve(false);
+
+    // Same generation idiom as load()'s loadGeneration: if a full load() has
+    // started for a different plant by the time this resolves, that load's
+    // own /tasks meta is authoritative and this response must be discarded.
+    const gen = Persistence._loadRequest;
+    return fetch(`${Config.API_BASE}/tasks/horizons?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
+      .then(r => {
+        if (!r.ok) {
+          // Silent by design — see the doc comment above. Most likely cause is
+          // a frontend deployed ahead of a backend that doesn't have this
+          // route yet, not a real error worth ErrorLog.warn/Toast. Record the
+          // throttle timestamp here too (matches the `_horizonsFetchedAt`
+          // field comment's "success or not") so a backend that 404s this
+          // route forever doesn't turn every Gantt tab flip into a request.
+          Persistence._horizonsFetchedAt[plant] = Date.now();
+          ErrorLog.info('persistence', `Horizons refresh: HTTP ${r.status} from /tasks/horizons (plant=${plant}) — ignoring`);
+          return false;
+        }
+        return (r.json() as Promise<{
+          visibility_horizon_end: string | null;
+          frozen_horizon_end: string | null;
+          alert_horizon_minutes: number | null;
+        }>).then(json => {
+          // The user has since switched plants, or a newer load() has since
+          // started (its own /tasks meta will win) — discard this response.
+          if (Store.selectedPlant !== plant || Persistence._loadRequest !== gen) return false;
+          Persistence._horizonsFetchedAt[plant] = Date.now();
+
+          let changed = false;
+
+          const v = json.visibility_horizon_end ? new Date(json.visibility_horizon_end) : null;
+          if ((v?.getTime() ?? null) !== (Store.visibilityHorizonEnd?.getTime() ?? null)) {
+            Store.setVisibilityHorizonEnd(v, 'persistence');
+            changed = true;
+          }
+
+          const f = json.frozen_horizon_end ? new Date(json.frozen_horizon_end) : null;
+          if ((f?.getTime() ?? null) !== (Store.frozenHorizonEnd?.getTime() ?? null)) {
+            Store.setFrozenHorizonEnd(f, 'persistence');
+            changed = true;
+          }
+
+          // Direct in-memory patch of the live masterData plant row — the same
+          // thing the admin Plant Settings save does. No Store setter/emit
+          // exists for this one field (see types.mts's alt_flag_horizon comment).
+          const row = Store.masterData?.plants?.find(p => p.plant === plant);
+          if (row && typeof json.alert_horizon_minutes === 'number' && row.alt_flag_horizon !== json.alert_horizon_minutes) {
+            row.alt_flag_horizon = json.alert_horizon_minutes;
+            changed = true;
+          }
+
+          return changed;
+        });
+      })
+      .catch(e => {
+        ErrorLog.warn('persistence', `Horizons refresh failed (plant=${plant}): ${(e as Error).message}`);
+        return false;
       });
   },
 

@@ -4545,6 +4545,37 @@ body.dark .cw-active-card {
    this higher-specificity rule restores correct hide behaviour. */
 .timeline-empty-overlay[hidden] { display: none; }
 .timeline-wrap { position: relative; }
+/* Loading mask over the Gantt while it re-renders on tab entry / plant switch
+   (Timeline.showLoadingMask/hideLoadingMask). Absolute so it takes no flex
+   space — #vis-timeline's size and vis-timeline's autoResize are untouched.
+   inset:0 deliberately covers the #timeline-nav minimap too (it repaints on the
+   same entry). z-index must clear #dep-overlay (10) or dependency lines would
+   draw through the mask; the marquee (1000) / hover card (1100) only exist
+   during pointer gestures and stay above by design. Opaque surface token, not
+   white, so dark mode gets its dark surface rather than a white flash. */
+.timeline-loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--bg-elev);
+  color: var(--fg-mute);
+  font-size: 13px;
+  z-index: 11;
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity 160ms ease-out;
+}
+.timeline-loading-overlay .cw-spin {
+  width: 28px; height: 28px;
+  border-width: 3px;
+  margin-right: 0;
+}
+.timeline-loading-overlay.is-hiding { opacity: 0; pointer-events: none; }
+/* Same specificity trick as .timeline-empty-overlay[hidden] above. */
+.timeline-loading-overlay[hidden] { display: none; }
 
 /* Overlay for the Orders table when no plant is selected. */
 .table-empty-overlay {
@@ -6255,6 +6286,7 @@ body.dark .sap-kind-orders { color: var(--accent); }
 }
 @media (prefers-reduced-motion: reduce) {
   .sap-tabbody, .sap-map-row, .sap-wire-fill { animation: none !important; }
+  .timeline-loading-overlay { transition: none; }
 }
 
 /* Derived setup: routine setup is a NEUTRAL steel hatch (it's expected, not a

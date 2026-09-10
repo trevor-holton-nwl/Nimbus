@@ -41,9 +41,26 @@ function _makeVisTimelineContainerStub() {
   };
 }
 
+const _loadingOverlay = (() => {
+  const classes = new Set();
+  return {
+    hidden: true,
+    _classes: classes,
+    classList: {
+      add(c) { classes.add(c); },
+      remove(c) { classes.delete(c); },
+      contains(c) { return classes.has(c); },
+    },
+  };
+})();
+
 if (typeof globalThis.document === 'undefined') {
   globalThis.document = {
-    getElementById(id) { return id === 'vis-timeline' ? _makeVisTimelineContainerStub() : null; },
+    getElementById(id) {
+      if (id === 'vis-timeline') return _makeVisTimelineContainerStub();
+      if (id === 'timeline-loading-overlay') return _loadingOverlay;
+      return null;
+    },
     addEventListener(type) { _docListenerCounts.set(type, _docListenerCount(type) + 1); },
     removeEventListener(type) { _docListenerCounts.set(type, _docListenerCount(type) - 1); },
     createElement() {
@@ -90,6 +107,144 @@ test('Timeline._vScrollTop starts at 0 (replaces the old one-shot _initialVertic
   // on every rebuild() (re-applied after _fitHeight) rather than a guard
   // that only ever fired once.
   assert.equal(typeof Timeline._vScrollTop, 'number');
+});
+
+test('Timeline.saveVScroll records scroll position and sets restore flag when laid out', () => {
+  const priorTl = Timeline._tl;
+  const priorVisEl = Timeline._visEl;
+  const priorVScrollTop = Timeline._vScrollTop;
+  const priorRestorePending = Timeline._vScrollRestorePending;
+  let scrollPos = 42;
+  Timeline._tl = {
+    _getScrollTop() { return scrollPos; },
+    _setScrollTop() {},
+  };
+  Timeline._visEl = { clientHeight: 800 };
+  Timeline._vScrollTop = 0;
+  Timeline._vScrollRestorePending = false;
+  try {
+    Timeline.saveVScroll();
+    assert.equal(Timeline._vScrollTop, 42, 'saveVScroll must record _getScrollTop into _vScrollTop');
+    assert.equal(Timeline._vScrollRestorePending, true, 'saveVScroll must set _vScrollRestorePending');
+  } finally {
+    Timeline._tl = priorTl;
+    Timeline._visEl = priorVisEl;
+    Timeline._vScrollTop = priorVScrollTop;
+    Timeline._vScrollRestorePending = priorRestorePending;
+  }
+});
+
+test('Timeline.saveVScroll sets flag without capturing when not laid out', () => {
+  const priorTl = Timeline._tl;
+  const priorVisEl = Timeline._visEl;
+  const priorVScrollTop = Timeline._vScrollTop;
+  const priorRestorePending = Timeline._vScrollRestorePending;
+  Timeline._tl = { _getScrollTop() { throw new Error('should not read scroll'); } };
+  Timeline._visEl = { clientHeight: 0 };
+  Timeline._vScrollTop = 99;
+  Timeline._vScrollRestorePending = false;
+  try {
+    Timeline.saveVScroll();
+    assert.equal(Timeline._vScrollTop, 99, 'saveVScroll must leave _vScrollTop untouched when not laid out');
+    assert.equal(Timeline._vScrollRestorePending, true, 'saveVScroll must still set flag even when not laid out');
+  } finally {
+    Timeline._tl = priorTl;
+    Timeline._visEl = priorVisEl;
+    Timeline._vScrollTop = priorVScrollTop;
+    Timeline._vScrollRestorePending = priorRestorePending;
+  }
+});
+
+test('Timeline.resetVScroll clears to top and sets flag', () => {
+  const priorVScrollTop = Timeline._vScrollTop;
+  const priorRestorePending = Timeline._vScrollRestorePending;
+  Timeline._vScrollTop = 42;
+  Timeline._vScrollRestorePending = false;
+  try {
+    Timeline.resetVScroll();
+    assert.equal(Timeline._vScrollTop, 0, 'resetVScroll must set _vScrollTop to 0');
+    assert.equal(Timeline._vScrollRestorePending, true, 'resetVScroll must set _vScrollRestorePending');
+  } finally {
+    Timeline._vScrollTop = priorVScrollTop;
+    Timeline._vScrollRestorePending = priorRestorePending;
+  }
+});
+
+test('Timeline.scrollToLine navigates by negative offset and sets _vScrollTop', () => {
+  const priorTl = Timeline._tl;
+  const priorVisibleLines = Timeline._visibleLines;
+  const priorVScrollTop = Timeline._vScrollTop;
+  const setScrollTops = [];
+  Timeline._tl = {
+    _setScrollTop(top) { setScrollTops.push(top); },
+    _getScrollTop() { return 0; },
+  };
+  Timeline._visibleLines = () => ['L1', 'L2'];
+  const priorQuerySelector = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = () => [
+    { getBoundingClientRect: () => ({ height: 30 }) },
+    { getBoundingClientRect: () => ({ height: 30 }) },
+  ];
+  try {
+    Timeline._vScrollTop = 0;
+    const result = Timeline.scrollToLine('L2');
+    assert.equal(result, true, 'scrollToLine must return true for a valid line');
+    assert.deepEqual(setScrollTops, [-30], 'scrollToLine must pass a negative offset to _setScrollTop');
+    assert.equal(Timeline._vScrollTop, -30, 'scrollToLine must set _vScrollTop to the negative offset');
+
+    // Test invalid line
+    setScrollTops.length = 0;
+    const resultNone = Timeline.scrollToLine('nope');
+    assert.equal(resultNone, false, 'scrollToLine must return false for a non-existent line');
+    assert.deepEqual(setScrollTops, [], 'scrollToLine must not call _setScrollTop for invalid line');
+  } finally {
+    Timeline._tl = priorTl;
+    Timeline._visibleLines = priorVisibleLines;
+    Timeline._vScrollTop = priorVScrollTop;
+    delete globalThis.document.querySelectorAll;
+    if (priorQuerySelector) globalThis.document.querySelectorAll = priorQuerySelector;
+  }
+});
+
+test('Timeline loading mask: show sets hidden=false and clears is-hiding; hide adds is-hiding, then after 180ms sets hidden=true and removes is-hiding', async () => {
+  const priorLoadingMaskTimer = Timeline._loadingMaskTimer;
+  const priorLoadingMaskHideTimer = Timeline._loadingMaskHideTimer;
+  _loadingOverlay.hidden = true;
+  _loadingOverlay._classes.clear();
+  try {
+    // Show the mask
+    Timeline.showLoadingMask();
+    assert.equal(_loadingOverlay.hidden, false, 'showLoadingMask must set hidden=false');
+    assert.equal(_loadingOverlay._classes.has('is-hiding'), false, 'showLoadingMask must remove is-hiding class');
+
+    // Hide should add is-hiding immediately
+    Timeline.hideLoadingMask();
+    assert.equal(_loadingOverlay.hidden, false, 'hideLoadingMask must leave hidden=false initially');
+    assert.equal(_loadingOverlay._classes.has('is-hiding'), true, 'hideLoadingMask must add is-hiding immediately');
+
+    // Wait for the 180ms timer
+    await new Promise(r => setTimeout(r, 220));
+    assert.equal(_loadingOverlay.hidden, true, 'after 180ms, hideLoadingMask must set hidden=true');
+    assert.equal(_loadingOverlay._classes.has('is-hiding'), false, 'after 180ms, hideLoadingMask must remove is-hiding');
+
+    // Show again should cancel the hide
+    Timeline.showLoadingMask();
+    Timeline.hideLoadingMask();
+    Timeline.showLoadingMask();
+    await new Promise(r => setTimeout(r, 220));
+    assert.equal(_loadingOverlay.hidden, false, 'a re-show before hide completes must cancel the hide and keep overlay visible');
+
+    // Final hide and wait to ensure no timer leak
+    Timeline.hideLoadingMask();
+    await new Promise(r => setTimeout(r, 220));
+    if (Timeline._loadingMaskTimer !== null) clearTimeout(Timeline._loadingMaskTimer);
+    if (Timeline._loadingMaskHideTimer !== null) clearTimeout(Timeline._loadingMaskHideTimer);
+  } finally {
+    Timeline._loadingMaskTimer = priorLoadingMaskTimer;
+    Timeline._loadingMaskHideTimer = priorLoadingMaskHideTimer;
+    _loadingOverlay.hidden = true;
+    _loadingOverlay._classes.clear();
+  }
 });
 
 test('Timeline._itemForTask: className reflects firming status (order-firmed for a manually-firmed task, order-standard otherwise)', () => {

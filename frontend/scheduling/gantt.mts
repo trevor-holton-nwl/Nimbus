@@ -177,7 +177,70 @@ export const Timeline = {
   // Part B's alert focus) overwrites this directly so a subsequent rebuild
   // restores to the just-navigated position instead of fighting it.
   _vScrollTop: 0,
+  // Set whenever _vScrollTop has been pinned to a value that the NEXT visible
+  // rebuild must re-apply verbatim, rather than overwriting it by capturing
+  // vis's current (possibly hidden-clamped) scroll position first. Set by
+  // saveVScroll() (pane about to be hidden) and resetVScroll() (plant change);
+  // cleared once the rAF at the end of rebuild() has actually re-applied it.
+  _vScrollRestorePending: false,
   _itemIdsByTask: {} as Record<string, string[]>,
+
+  // True only once the Gantt pane has real layout (clientHeight > 0). A hidden
+  // tab (display:none) or a not-yet-attached container reports 0 and would
+  // make any scroll read/write meaningless (vis clamps to a 0-height range).
+  _vScrollLaidOut(): boolean {
+    return (Timeline._visEl?.clientHeight ?? 0) > 0;
+  },
+
+  // Called by the shell (App._saveScroll) right before the timeline pane is
+  // hidden — capture the real position now, while still laid out, and mark it
+  // for verbatim restoration on the next visible rebuild instead of letting
+  // that rebuild's own capture read vis's hidden-clamped value.
+  saveVScroll(): void {
+    if (Timeline._tl && Timeline._vScrollLaidOut()) Timeline._vScrollTop = Timeline._getVScroll();
+    Timeline._vScrollRestorePending = true;
+  },
+
+  // Plant change: start the Gantt at the top, same as every other pane.
+  resetVScroll(): void {
+    Timeline._vScrollTop = 0;
+    Timeline._vScrollRestorePending = true;
+  },
+
+  _loadingMaskTimer: null as ReturnType<typeof setTimeout> | null,
+  _loadingMaskHideTimer: null as ReturnType<typeof setTimeout> | null,
+
+  // Shown by the shell (App.gotoGanttSub) synchronously on every Timeline-pane
+  // entry, so the first paint after the pane flips is the mask rather than a
+  // half-laid-out Gantt, and by _onStore's plant:selected branch when the
+  // Gantt is active, so the mask stays up through the new plant's /tasks
+  // load. Hidden by rebuild()'s rAF once the scroll restore has been applied
+  // and Persistence.isLoading() is false. Always self-clears after 8s —
+  // matching Persistence.load's own fetch timeout — so a load that never
+  // calls back (network drop, etc.) can't leave the mask stuck over the
+  // whole Gantt indefinitely.
+  showLoadingMask(): void {
+    const el = document.getElementById('timeline-loading-overlay');
+    if (!el) return;
+    if (Timeline._loadingMaskHideTimer) { clearTimeout(Timeline._loadingMaskHideTimer); Timeline._loadingMaskHideTimer = null; }
+    el.hidden = false;
+    el.classList.remove('is-hiding');
+    if (Timeline._loadingMaskTimer) clearTimeout(Timeline._loadingMaskTimer);
+    Timeline._loadingMaskTimer = setTimeout(() => Timeline.hideLoadingMask(), 8000);
+  },
+
+  hideLoadingMask(): void {
+    const el = document.getElementById('timeline-loading-overlay');
+    if (!el) return;
+    if (Timeline._loadingMaskTimer) { clearTimeout(Timeline._loadingMaskTimer); Timeline._loadingMaskTimer = null; }
+    if (el.hidden) return;
+    el.classList.add('is-hiding');
+    Timeline._loadingMaskHideTimer = setTimeout(() => {
+      el.hidden = true;
+      el.classList.remove('is-hiding');
+      Timeline._loadingMaskHideTimer = null;
+    }, 180);
+  },
 
   init(): void {
     const container = document.getElementById('vis-timeline');
@@ -212,7 +275,11 @@ export const Timeline = {
       itemsAlwaysDraggable: { item: true },
       snap: (d: Date) => Util.snap(d),
       groupOrder: (a: TimelineGroupData, b: TimelineGroupData) => (a.order ?? 0) - (b.order ?? 0),
-      orientation: { axis: 'top' },
+      // item:'top' too — Core._updateScrollTop bottom-anchors scrollTop whenever
+      // orientation.item != 'top' (shifts it by the change in scroll range on every
+      // redraw), which is what threw the Gantt to the bottom on tab re-entry and on
+      // first load. item:'top' makes scrollTop a stable "px from top of content".
+      orientation: { axis: 'top', item: 'top' },
       zoomMin: 15 * 60 * 1000,           // 15 min
       zoomMax: 30 * 24 * 3600 * 1000,    // 30 days
       zoomKey: 'ctrlKey',
@@ -427,7 +494,15 @@ export const Timeline = {
     }
 
     if (evt.type === 'plant:selected') {
+      // Mirrors App._scrollMemory.clear() on plant change — start the new
+      // plant's Gantt at the top rather than wherever the old plant left off.
+      Timeline.resetVScroll();
       if (Timeline._ganttActive()) {
+        // The mask stays up through the plant's /tasks load — hide is gated
+        // on Persistence.isLoading() in rebuild's rAF, which runs after the
+        // shell's Persistence.loadForPlant subscriber has already started
+        // the load for this same event.
+        Timeline.showLoadingMask();
         Timeline.rebuild();
       } else {
         Timeline._renderEmptyOverlay();
@@ -817,10 +892,18 @@ export const Timeline = {
     // Capture whatever vertical position the user is actually at right now
     // (before the group/item diff below can shrink content and clamp it) —
     // this is what _vScrollTop gets re-applied to at the end of rebuild(),
-    // so a plain re-render preserves position same as before. An explicit
-    // navigation between now and the restore below (scrollToLine et al.)
-    // overwrites _vScrollTop directly and wins, since it runs later.
-    if (Timeline._tl) Timeline._vScrollTop = Timeline._getVScroll();
+    // so a plain re-render preserves position same as before. Only capture
+    // when the Gantt is actually laid out: a hidden rebuild (e.g. App's
+    // _repaintDisplayFormat running from another tab, or Inspector's
+    // _refreshSetupTruth) would otherwise read vis's hidden-clamped 0 and
+    // clobber a good remembered value. And skip it entirely when a
+    // save-on-leave/reset has already pinned _vScrollTop to the value the
+    // next visible rebuild must restore — an explicit navigation between now
+    // and the restore below (scrollToLine et al.) still overwrites _vScrollTop
+    // directly and wins, since it runs later.
+    if (Timeline._tl && !Timeline._vScrollRestorePending && Timeline._vScrollLaidOut()) {
+      Timeline._vScrollTop = Timeline._getVScroll();
+    }
     const all = Store.tasksForSelectedPlant();
     const tasks = all.filter(t => t.start_date && t.end_date);
     // Queued (needs_planning) rows with no dates are intentionally absent from
@@ -1212,13 +1295,16 @@ export const Timeline = {
     // larger value would just get silently clamped anyway, so clamp here
     // for clarity. This replaces the old one-shot _resetInitialVerticalScroll
     // guard — "start at the top" is just the initial _vScrollTop = 0, now
-    // honoured on every rebuild instead of only the first.
-    if (visibleLines.length) {
-      requestAnimationFrame(() => {
-        if (!Timeline._tl) return;
-        Timeline._setVScroll(Timeline._vScrollTop);
-      });
-    }
+    // honoured on every rebuild instead of only the first. Always scheduled
+    // (not gated on visibleLines.length) because the mask-hide/pending-clear
+    // below must run on every rebuild, hidden or not — a hidden rebuild bails
+    // inside the rAF itself instead.
+    requestAnimationFrame(() => {
+      if (!Timeline._tl || !Timeline._vScrollLaidOut()) return; // hidden rebuild: don't apply, don't clear the flag, don't touch the mask
+      if (visibleLines.length) Timeline._setVScroll(Timeline._vScrollTop);
+      Timeline._vScrollRestorePending = false;
+      if (!Persistence.isLoading()) Timeline.hideLoadingMask(); // a rebuild during an in-flight /tasks load leaves the mask up until the tasks:bulk rebuild that follows
+    });
     PerfMonitor.record('Timeline.rebuild', performance.now() - _pmT0t);
   },
 
@@ -1459,8 +1545,12 @@ export const Timeline = {
     // so a rebuild triggered shortly after this (e.g. GanttFilter revealing
     // a previously-hidden line) re-applies THIS position rather than
     // whatever _getVScroll() happened to read before the reveal.
-    Timeline._vScrollTop = targetY;
-    Timeline._setVScroll(targetY);
+    // vis's _setScrollTop convention is NEGATIVE (0 = top; any positive value
+    // is clamped straight to the top), so targetY — a positive "px down from
+    // top" — must be negated, or this always lands on the top row regardless
+    // of lineIdx.
+    Timeline._vScrollTop = -targetY;
+    Timeline._setVScroll(-targetY);
     return true;
   },
 

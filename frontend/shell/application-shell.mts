@@ -2251,9 +2251,9 @@ const App = {
         return out;
       }
       case 'gantt:timeline': {
-        // The Gantt's own horizontal/vertical timeline scroll is handled
-        // separately by Timeline._vScrollTop (Part A3) — this is only the
-        // sidebar line list next to it.
+        // The Gantt's own vertical timeline scroll is saved by Timeline.saveVScroll()
+        // from App._saveScroll and restored by Timeline.rebuild() — this target list
+        // is only the sidebar line list next to it.
         const el = document.getElementById('hierarchy');
         return el ? [{ el, vl: () => Hierarchy._vl }] : [];
       }
@@ -2273,6 +2273,12 @@ const App = {
   // Save the outgoing pane's scroll offset(s) before a tab/sub switch.
   _saveScroll(key: string | null): void {
     if (!key) return;
+    // The vis-timeline vertical scroller isn't a plain scroll container (it is
+    // read/written through Timeline._setVScroll/_getVScroll), so it is saved
+    // here explicitly rather than via _paneScrollTargets. Runs before the pane
+    // is hidden (display:none zeroes vis's scroll range), which is the only
+    // moment the read is accurate; Timeline.rebuild() restores it on re-entry.
+    if (key === 'gantt:timeline') Timeline.saveVScroll();
     App._paneScrollTargets(key).forEach((t, i) => {
       const vl = t.vl ? t.vl() : null;
       const top = vl ? vl.saveTop() : t.el.scrollTop;
@@ -2391,12 +2397,23 @@ const App = {
         requestAnimationFrame(() => App._restoreScroll('gantt:orders'));
       }, 30);
     } else {
+      // Mask the entry re-render synchronously (before the 30 ms timeout) so the
+      // first paint after the pane flips is the mask, not a half-laid-out Gantt.
+      // Timeline.rebuild() hides it once the restore has been applied.
+      Timeline.showLoadingMask();
       setTimeout(() => {
         Timeline.redraw(); Timeline.rebuild(); Hierarchy.render();
         GanttFilter._apply!();
         TimelineNav.render();
         if (DependencyOverlay._enabled) DependencyOverlay.render();
         requestAnimationFrame(() => App._restoreScroll('gantt:timeline'));
+        // Frozen/visibility horizon instants come only from /tasks meta and go
+        // stale after an admin change or the daily roll; a full reload has no
+        // unsaved-edit guard, so refresh just the meta and re-derive the bands
+        // if anything moved. Throttled + race-guarded inside refreshHorizons.
+        Persistence.refreshHorizons(Store.selectedPlant).then(changed => {
+          if (changed && App._currentTab === 'gantt' && App._ganttSub === 'timeline') Timeline._scheduleRebuild();
+        });
       }, 30);
     }
   },

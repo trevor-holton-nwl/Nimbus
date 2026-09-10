@@ -567,3 +567,106 @@ test('Persistence._loadDemo clears stale visibility/frozen horizon state from a 
     'demo orders belong to no real plant, so any retained frozen horizon is categorically wrong for them');
 });
 
+test('Persistence.isLoading() returns false at rest', () => {
+  // Reset _loadsInFlight state in case previous async tests left it non-zero
+  const priorLoadsInFlight = Persistence._loadsInFlight;
+  Persistence._loadsInFlight = 0;
+  try {
+    assert.equal(Persistence.isLoading(), false, 'isLoading must return false when no loads are in flight');
+  } finally {
+    Persistence._loadsInFlight = priorLoadsInFlight;
+  }
+});
+
+test('Persistence.refreshHorizons(null) resolves false without calling fetch', async () => {
+  const priorFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = () => { fetchCalled = true; return Promise.reject(new Error('should not be called')); };
+  try {
+    const result = await Persistence.refreshHorizons(null);
+    assert.equal(result, false, 'refreshHorizons(null) must resolve false');
+    assert.equal(fetchCalled, false, 'refreshHorizons(null) must not call fetch');
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+});
+
+test('Persistence.refreshHorizons happy path: fetches horizons, applies changes to Store, patches masterData, and respects throttle', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorSelectedPlant = Store.selectedPlant;
+  const priorVisibilityHorizonEnd = Store.visibilityHorizonEnd;
+  const priorFrozenHorizonEnd = Store.frozenHorizonEnd;
+  const priorMasterData = Store.masterData;
+  let fetchCount = 0;
+
+  // Set up Store state
+  Store.setSelectedPlant('P1', 'unit-test');
+  Store.setMasterData({
+    plants: [{ plant: 'P1', alt_flag_horizon: 100 }],
+    lines: [],
+  }, 'unit-test');
+
+  globalThis.fetch = async () => {
+    fetchCount++;
+    return {
+      ok: true,
+      json: async () => ({
+        visibility_horizon_end: '2026-10-01T00:00:00',
+        frozen_horizon_end: '2026-09-20T00:00:00',
+        alert_horizon_minutes: 250,
+      }),
+    };
+  };
+
+  try {
+    // Delete throttle entry to allow the call
+    delete Persistence._horizonsFetchedAt['P1'];
+
+    const result = await Persistence.refreshHorizons('P1');
+    assert.equal(result, true, 'refreshHorizons should resolve true when changes are applied');
+    assert.equal(fetchCount, 1, 'should have called fetch once');
+    assert.equal(Store.frozenHorizonEnd?.getTime(), new Date('2026-09-20T00:00:00').getTime(), 'frozenHorizonEnd should be set');
+    assert.equal(Store.visibilityHorizonEnd?.getTime(), new Date('2026-10-01T00:00:00').getTime(), 'visibilityHorizonEnd should be set');
+    assert.equal(Store.masterData.plants[0].alt_flag_horizon, 250, 'alt_flag_horizon should be patched');
+
+    // Call again immediately — should be throttled
+    const result2 = await Persistence.refreshHorizons('P1');
+    assert.equal(result2, false, 'refreshHorizons within 10s throttle should resolve false');
+    assert.equal(fetchCount, 1, 'should not call fetch again within throttle window');
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setSelectedPlant(priorSelectedPlant, 'unit-test');
+    Store.setVisibilityHorizonEnd(priorVisibilityHorizonEnd, 'unit-test');
+    Store.setFrozenHorizonEnd(priorFrozenHorizonEnd, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    delete Persistence._horizonsFetchedAt['P1'];
+  }
+});
+
+test('Persistence.refreshHorizons non-OK response resolves false and does not apply changes', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorSelectedPlant = Store.selectedPlant;
+  const priorFrozenHorizonEnd = Store.frozenHorizonEnd;
+  const priorVisibilityHorizonEnd = Store.visibilityHorizonEnd;
+
+  Store.setSelectedPlant('P2', 'unit-test');
+  Store.setFrozenHorizonEnd(new Date('2026-08-01T00:00:00'), 'unit-test');
+  Store.setVisibilityHorizonEnd(new Date('2026-09-01T00:00:00'), 'unit-test');
+
+  globalThis.fetch = async () => ({ ok: false, status: 404 });
+
+  try {
+    delete Persistence._horizonsFetchedAt['P2'];
+    const result = await Persistence.refreshHorizons('P2');
+    assert.equal(result, false, 'refreshHorizons should resolve false on non-OK response');
+    assert.equal(Store.frozenHorizonEnd?.getTime(), new Date('2026-08-01T00:00:00').getTime(), 'frozenHorizonEnd should remain unchanged');
+    assert.equal(Store.visibilityHorizonEnd?.getTime(), new Date('2026-09-01T00:00:00').getTime(), 'visibilityHorizonEnd should remain unchanged');
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setSelectedPlant(priorSelectedPlant, 'unit-test');
+    Store.setFrozenHorizonEnd(priorFrozenHorizonEnd, 'unit-test');
+    Store.setVisibilityHorizonEnd(priorVisibilityHorizonEnd, 'unit-test');
+    delete Persistence._horizonsFetchedAt['P2'];
+  }
+});
+

@@ -96,6 +96,14 @@ class TasksResponse(BaseModel):
     meta: dict[str, Any]
 
 
+class HorizonsResponse(BaseModel):
+    """GET /tasks/horizons — the plant's resolved horizon instants (ISO strings, naive plant-local
+    like GET /tasks' meta) plus the alert-flag horizon in minutes; every field None when off/unknown."""
+    visibility_horizon_end: str | None
+    frozen_horizon_end: str | None
+    alert_horizon_minutes: int | None
+
+
 class TaskUpdateResult(BaseModel):
     """Response for POST /task/update (singular). Narrower than the bulk
     shape — this endpoint also raises 404/400 (response_model only applies

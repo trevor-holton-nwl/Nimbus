@@ -23,6 +23,7 @@ from backend.scheduling.models import (
     BaselineCorrectResult,
     BulkUpdateResult,
     DueDateCorrectionPayload,
+    HorizonsResponse,
     TaskDateUpdate,
     TaskRefreshPayload,
     TasksRefreshResponse,
@@ -248,6 +249,26 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
     return {"data": data, "links": links, "meta": meta}
+
+
+@router.get("/tasks/horizons", response_model=HorizonsResponse)
+def get_task_horizons(plant: str,
+                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """
+    Meta-only probe: the plant's resolved visibility/frozen horizon instants and
+    alert-flag horizon minutes — the same values GET /tasks carries in `meta`,
+    without the task list. The Gantt calls this on timeline re-entry so its
+    horizon bands refresh after an admin change or the daily roll without a
+    full /tasks reload (which would clobber unsaved planner edits).
+    """
+    if allowed_plants is not None and plant not in allowed_plants:
+        raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
+    h = db.plant_horizons(plant)
+    return {
+        "visibility_horizon_end": h["visibility_horizon_end"].isoformat() if h["visibility_horizon_end"] else None,
+        "frozen_horizon_end": h["frozen_horizon_end"].isoformat() if h["frozen_horizon_end"] else None,
+        "alert_horizon_minutes": h["alert_horizon_minutes"],
+    }
 
 
 def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None,

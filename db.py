@@ -460,6 +460,32 @@ def _horizon_bounds_for_plant(cur, plant: str) -> tuple[datetime | None, datetim
     return visibility_end, frozen_end
 
 
+def plant_horizons(plant: str) -> dict:
+    """Meta-only horizon probe for one plant (GET /tasks/horizons) — the same
+    resolved instants GET /tasks ships in `meta`, without the task payload.
+    Exists so the Gantt can refresh its frozen/visibility-horizon bands on tab
+    re-entry without a full /tasks reload (which has no unsaved-edit guard).
+    Reuses the exact compute_* clock as _horizon_bounds_for_plant; unknown
+    plant -> every value None."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT visibility_horizon_days, horizon_roll_hour_utc, timezone, "
+            "frozen_horizon_days, alt_flag_horizon "
+            "FROM plants WHERE plant = %s LIMIT 1",
+            (plant,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {"visibility_horizon_end": None, "frozen_horizon_end": None, "alert_horizon_minutes": None}
+    visibility_horizon_days, horizon_roll_hour_utc, timezone_name, frozen_horizon_days, alt_flag_horizon = row
+    now_utc = datetime.now(timezone.utc)
+    return {
+        "visibility_horizon_end": compute_visibility_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, visibility_horizon_days),
+        "frozen_horizon_end": compute_frozen_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days),
+        "alert_horizon_minutes": int(alt_flag_horizon) if alt_flag_horizon is not None else None,
+    }
+
+
 # Shared projection for the orders read path. Column aliases are the contract the
 # frontend/brain.py rely on; user scheduling overrides take precedence over the
 # SAP-source dates via COALESCE so callers only ever see one start/end per order.

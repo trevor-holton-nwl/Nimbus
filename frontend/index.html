@@ -1466,6 +1466,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div id="vis-timeline"></div>
         <!-- Empty-state overlay shown when no plant is selected -->
         <div id="timeline-empty-overlay" class="timeline-empty-overlay" hidden></div>
+        <!-- Loading mask shown while the Gantt re-renders on tab entry / plant switch (Timeline.showLoadingMask) -->
+        <div id="timeline-loading-overlay" class="timeline-loading-overlay" role="status" hidden><span class="cw-spin" aria-hidden="true"></span><span data-i18n="ui.loading">Loading…</span></div>
       </div>
 
       <aside class="side side-right" id="right-sidebar">
