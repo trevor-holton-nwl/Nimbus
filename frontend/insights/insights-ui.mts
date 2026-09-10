@@ -618,6 +618,12 @@ export const Dashboard = {
     return Dashboard._filterLines.size === 0 ? keys : keys.filter(l => Dashboard._filterLines.has(l));
   },
 
+  // Plant line list narrowed to the global header line filter (empty filter = all lines).
+  _selectedPlantLines(): string[] {
+    const all = Store.linesForSelectedPlant();
+    return Dashboard._filterLines.size === 0 ? all : all.filter(l => Dashboard._filterLines.has(l));
+  },
+
   _renderHeatmap(matrix?: DashboardUtilMatrix): void {
     const container = document.getElementById('util-heatmap-panel');
     if (!container) return;
@@ -752,7 +758,7 @@ export const Dashboard = {
     const now   = new Date();
 
     const byLine: Record<string, NimbusTask[]> = {};
-    for (const l of Store.linesForSelectedPlant()) byLine[l] = [];  // idle lines show up with zero rows
+    for (const l of Dashboard._selectedPlantLines()) byLine[l] = [];  // idle lines show up with zero rows
     for (const tk of tasks) { const l = tk.MACHINE || 'Unknown'; (byLine[l] ||= []).push(tk); }
     const lines = Object.keys(byLine).sort();
 
@@ -903,7 +909,7 @@ export const Dashboard = {
     const endKey   = Util.dayKey(Util.startOfDay(endDate));
 
     // Build line × day map: line → dayKey → { lateHours, lateCount, lineLabel }
-    const allLines = [...new Set([...Store.linesForSelectedPlant(), ...tasks.map(t => t.MACHINE || 'Unknown')])].sort();
+    const allLines = [...new Set([...Dashboard._selectedPlantLines(), ...tasks.map(t => t.MACHINE || 'Unknown')])].sort();
     const days: string[]  = [];
     {
       const d = Util.startOfDay(new Date())!;
