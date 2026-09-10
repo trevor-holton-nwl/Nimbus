@@ -1121,27 +1121,16 @@ cleared on both Save and Discard.
 
 Three items surfaced by the final whole-branch review of the optimizer-speedup effort
 (`docs/architecture/optimizer-dispatch.md` → "Search controls") that were deliberately **not** built
-in that fix wave — recorded here so they aren't silently forgotten.
+in that fix wave. The worker item shipped in the 2026-09-10 optimizer remediation; the remaining
+historical note is retained here so it is not silently forgotten.
 
-- **Worker offload of the pure setup-aware evaluator.** `web/setup-scheduler.mts`'s search
-  (`evaluateDueDateFirst`/`evaluateSptWithSetup`/`evaluateMinChangeover`/`evaluateThroughput`) still
-  runs entirely on the main thread — unlike Alerts/Utilization compute, it is not delegated to
-  `nimbus-worker.js`/`nimbus-compute-core.js`. A multi-second `SETUP_AWARE_DEADLINE_MS` search (5000 ms
-  default, and the deferred Plan B run now gets the same full window — see "The deferred Plan B run" in
-  `optimizer-dispatch.md`) is real main-thread jank risk on a large plant. **Recommended approach: a real
-  Worker offload, not cooperative chunking** (breaking the search into `setTimeout`/`requestIdleCallback`
-  slices) — cooperative chunking still contends with the main thread for every slice and is materially
-  harder to reason about for a search that already tracks its own wall-clock budget internally
-  (`bounds.deadline`, `bounds.clock`). **Blocker:** `setup-scheduler.mts` is not currently importable in
-  isolation — its `evaluateSchedule` export (line ~4820) is a thin adapter that calls straight back into
-  `Engine.evaluateSchedule` (`import { Engine, ... } from './schedule-services.mjs'`), and `Engine` is a
-  live, Store/DOM-coupled singleton that cannot run inside a Worker. That adapter — used only by the
-  `'spt'`-mode-via-setup-aware-evaluator legacy-walk delegation path — would need to be split out of
-  `setup-scheduler.mts`'s import graph (e.g. into a separate adapter module that the main thread composes,
-  while the Worker only ever sees the pure `evaluateDueDateFirst`/`evaluateSptWithSetup`/
-  `evaluateMinChangeover`/`evaluateThroughput` family plus their `ScheduleSnapshot`/`DueDateFirstBounds`
-  inputs) before the module as a whole could be `importScripts`'d or ES-imported into a Worker the way
-  `nimbus-compute-core.js` already is.
+- **Worker offload of the pure setup-aware evaluator (resolved 2026-09-10).**
+  `frontend/optimization/optimizer-worker.mts` now runs the detached
+  (`evaluateDueDateFirst`/`evaluateSptWithSetup`/`evaluateMinChangeover`/`evaluateThroughput`) path
+  in a cancellable Worker. The client sends the remaining primary budget, and the worker localizes its
+  own monotonic deadline before evaluating. Synchronous evaluation remains available for tests and
+  non-UI callers; apply-time validation uses the serialized detached snapshot and effective firming
+  context returned with each candidate.
 - **Duplicate unknown-state diagnostics when a trailing search has no winner (pre-existing, reproducible
   on `main`, not introduced by this branch).** In both `evaluateLineWithFixedBoundaries` and
   `evaluateLineWithFixedBoundariesSpt`, when the fragment's final `trailing` search
