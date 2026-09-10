@@ -3130,7 +3130,11 @@ function greedySearch(
     return {
       candidateCount: 0,
       method: 'due-date-first-greedy',
-      termination: 'completed',
+      // The bounded greedy route could not construct even its protected seed;
+      // it did not exhaust the legal search space, so completion would be a
+      // false exact-search claim. Preserve the conflict edge while reporting
+      // the heuristic conclusion honestly.
+      termination: 'converged',
       winner: null,
       missingEdges: [inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency))],
       unknownTail: [],
@@ -6226,7 +6230,10 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   for (let index = 0; index < orderedFinal.length; index++) predecessorById.set(taskId(orderedFinal[index]), index && orderedFinal[index - 1].MACHINE === orderedFinal[index].MACHINE ? taskId(orderedFinal[index - 1]) : null);
   const definition = bounds.setup.definition;
   const opaqueTasks = definition
-    ? mutableTasks.filter(task => !stateForOrder(task, definition))
+    ? mutableTasks.filter(task => (
+      !taskIsEvaluationProtected(snapshot, bounds, task)
+      && !stateForOrder(task, definition)
+    ))
     : [];
   const unknownStateIds = new Set(opaqueTasks.map(taskId));
   const missingFindingIds = new Set((result.validationFindings ?? [])

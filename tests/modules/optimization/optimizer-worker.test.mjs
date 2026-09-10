@@ -313,21 +313,33 @@ test('optimizer worker runs in a real worker_threads realm with clone round-trip
     globalThis.postMessage = value => parentPort.postMessage(value);
     Object.defineProperty(globalThis, 'onmessage', {
       configurable: true,
-      set(handler) { parentPort.on('message', data => handler({ data })); },
+      set(handler) { parentPort.on('message', data => {
+        parentPort.postMessage({ type: 'worker-clock', now: performance.now() });
+        handler({ data });
+      }); },
     });
     await import(${JSON.stringify(workerPath)});
   `;
   const worker = new Worker(bridge, { eval: true, type: 'module' });
   let ticked = false;
+  let workerClock;
   const tick = new Promise(resolveTick => setImmediate(() => { ticked = true; resolveTick(); }));
   const response = await new Promise((resolveResponse, reject) => {
     const timer = setTimeout(() => reject(new Error('real optimizer worker timed out')), 5000);
-    worker.once('message', value => { clearTimeout(timer); resolveResponse(value); });
+    worker.on('message', value => {
+      if (value?.type === 'worker-clock') {
+        workerClock = value.now;
+        return;
+      }
+      clearTimeout(timer);
+      resolveResponse(value);
+    });
     worker.once('error', error => { clearTimeout(timer); reject(error); });
     worker.postMessage({
       runId: 'runtime-worker-round-trip', mode: 'spt', snapshot: workerSnapshot,
       deadlineDurationMs: 1000,
       request: { mode: 'spt', plant: 'P', respectCalendar: false,
+        deadlineAt: -1000000000,
         planningStart: new Date('2035-08-07T08:00:00'), runNow: new Date('2035-08-07T08:00:00'),
         endDate: new Date('2035-08-08T00:00:00') },
     });
@@ -336,6 +348,11 @@ test('optimizer worker runs in a real worker_threads realm with clone round-trip
   assert.equal(response.runId, 'runtime-worker-round-trip');
   assert.ok(response.validation, 'structured-cloned worker response must retain validation metadata');
   assert.equal(response.validation.respectCalendar, false);
+  assert.equal(typeof workerClock, 'number');
+  const workerDeadline = response.candidate?.diagnostics?.deadlineAt;
+  assert.equal(typeof workerDeadline, 'number');
+  assert.ok(workerDeadline - workerClock >= 500 && workerDeadline - workerClock <= 2000,
+    'the worker must use the localized duration instead of the expired foreign absolute deadline');
   assert.equal(ticked, true, 'the main event loop must remain responsive while the worker evaluates');
   await worker.terminate();
 });

@@ -188,6 +188,53 @@ test('unknown-tail diagnostics exclude opaque protected occupancy boundaries', (
   assert.equal(result.diagnostics.unknownTailUnplacedCount, 0);
 });
 
+test('unknown-tail diagnostics exclude opaque protected work inside the horizon', () => {
+  const protectedOpaque = scheduledTask(
+    'contract-unknown-protected-in-window', 1, '', '2026-08-03T18:00',
+    '2026-08-03T10:00', '2026-08-03T11:00',
+  );
+  const mutable = scheduledTask('contract-known-mutable-in-window', 1, 'GREEN', '2026-08-03T18:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([protectedOpaque, mutable], { firmedIds: [protectedOpaque.id] }),
+    dueDateBounds(setupTruth(), { horizonEnd: at('2026-08-03T12:00') }),
+  );
+
+  assert.equal(result.dispositions.find(disposition => disposition.id === protectedOpaque.id)?.status, 'protected');
+  assert.equal(result.diagnostics.unknownTailCount, 0,
+    'opaque firmed work inside the horizon is protected occupancy, not unknown demand');
+  assert.equal(result.diagnostics.unknownTailPlacedCount, 0);
+  assert.equal(result.diagnostics.unknownTailUnplacedCount, 0);
+});
+
+test('greedy required-final adjacency dead ends report heuristic convergence', () => {
+  const predecessor = scheduledTask('diagnostic-required-final-predecessor', 1, 'RED', '2026-08-03T08:30');
+  const requiredFinal = scheduledTask('diagnostic-required-final-order', 1, 'BLUE', '2026-08-03T09:00');
+  const unrelated = scheduledTask('diagnostic-required-final-unrelated', 1, 'YELLOW', '2026-08-03T10:00');
+  const fixed = scheduledTask(
+    'diagnostic-required-final-boundary', 1, 'ORANGE', '2026-08-03T12:00',
+    '2026-08-03T12:00', '2026-08-03T13:00',
+  );
+  const setup = setupTruth({ overrides: [
+    { id: 'diagnostic-required-final-boundary-override', machine: 'L1', signature_version: 1,
+      predecessor_order_id: requiredFinal.id, successor_order_id: fixed.id,
+      predecessor_state_key: setupState('BLUE'), successor_state_key: setupState('ORANGE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'required final fixture' },
+    { id: 'diagnostic-required-final-chain', machine: 'L1', signature_version: 1,
+      predecessor_order_id: predecessor.id, successor_order_id: requiredFinal.id,
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'required final fixture' },
+  ] });
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([predecessor, requiredFinal, unrelated, fixed], { firmedIds: [fixed.id] }),
+    dueDateBounds(setup, { exactSearchThreshold: 0 }),
+  );
+
+  assert.equal(result.diagnostics.termination, 'converged',
+    'a greedy fragment that cannot place its required final adjacency is not exact completion');
+  assert.equal(result.diagnostics.quality, 'heuristic');
+  assert.equal(result.diagnostics.exhaustive, false);
+});
+
 test('setup-aware respectCalendar controls blackout placement for production and setup', () => {
   const waiting = scheduledTask('contract-calendar-order', 2, 'GREEN', '2026-08-03T18:00');
   const setup = setupTruth({ rows: [setupRow('GREEN', 'GREEN', 0)] });
