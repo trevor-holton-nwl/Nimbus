@@ -1412,7 +1412,7 @@ export const OptimizerPreview = {
         const altModeMap: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
           changeover: ['spt', 'duedate'],
           spt: ['changeover', 'duedate'],
-          duedate: ['changeover'],
+          duedate: ['spt', 'changeover'],
         };
         const altModes = altModeMap[mode] ?? [];
         OptimizerPreview._finalists = null;
