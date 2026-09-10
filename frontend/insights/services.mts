@@ -637,20 +637,23 @@ export const Utilization = {
       ? structuredClone(Array.from(taskList))
       : taskList as NimbusTask[];
 
-    // Reproduce the exact line set the inline builder used: task lines, plus (when this
-    // is NOT a filtered subset) either the selected plant's lines or every visited
-    // calendar line. Passed explicitly so the core pins the same set.
+    // Reproduce the exact line set the inline builder used: task lines, plus either the
+    // selected plant's lines or every visited calendar line. Always applied (not just for
+    // srcTasks===null) so a caller-supplied task subset (e.g. Dashboard's filtered view)
+    // still surfaces plant lines that have zero orders, instead of silently dropping them.
+    // Safe for the detached-snapshot optimizer-preview KPI path too (optimize-ui.mts's
+    // Util.scheduleKpis calls): that consumer's peak_util_pct takes a running Math.max
+    // over pct, and a padded-in idle line always contributes pct===0, so it can never
+    // raise the peak. Re-check this comment if that consumer ever changes to an average/sum.
     const lineSet = new Set(taskList.map(t => t.MACHINE || 'Unknown'));
-    if (srcTasks === null) {
-      if (utilizationSnapshot && selectedPlant) {
-        for (const [line, settings] of Object.entries(lineSettings)) {
-          const mappedPlant = settings.plant
-            ?? masterData?.lines.find(row => row.machine === line)?.plant;
-          if (mappedPlant === selectedPlant) lineSet.add(line);
-        }
-      } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
-      else Object.keys(calendars).forEach(l => lineSet.add(l));
-    }
+    if (utilizationSnapshot && selectedPlant) {
+      for (const [line, settings] of Object.entries(lineSettings)) {
+        const mappedPlant = settings.plant
+          ?? masterData?.lines.find(row => row.machine === line)?.plant;
+        if (mappedPlant === selectedPlant) lineSet.add(line);
+      }
+    } else if (!utilizationSnapshot && Store.selectedPlant) Store.linesForSelectedPlant().forEach(l => lineSet.add(l));
+    else if (!utilizationSnapshot) Object.keys(calendars).forEach(l => lineSet.add(l));
     // Detached candidate snapshots deliberately do not retain setup truth;
     // never reach back into Store while rendering one. Live paths resolve once
     // and hand the core only the resulting plant/line-scoped observations.

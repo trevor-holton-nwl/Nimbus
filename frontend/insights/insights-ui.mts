@@ -394,7 +394,7 @@ export const Dashboard = {
     // Reuse the matrix built once in render() when provided; recompute standalone otherwise.
     if (matrix7 === undefined) matrix7 = Utilization.computeMatrix(new Date(), 7, tasks);
     let pctSum = 0, pctN = 0;
-    for (const ln of Object.keys(matrix7)) {
+    for (const ln of Dashboard._visibleLines(matrix7)) {
       for (const d of Object.keys(matrix7[ln])) {
         const cell = matrix7[ln][d];
         if (cell && cell.capacity > 0) { pctSum += cell.pct ?? 0; pctN++; }
@@ -610,13 +610,21 @@ export const Dashboard = {
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   },
 
+  // A companion computeMatrix fix now always pads the matrix with every plant line
+  // (including zero-order ones), so the Dashboard's own line-filter chips must be
+  // re-applied here to narrow the display back down when the user has one active.
+  _visibleLines(matrix: DashboardUtilMatrix): string[] {
+    const keys = Object.keys(matrix);
+    return Dashboard._filterLines.size === 0 ? keys : keys.filter(l => Dashboard._filterLines.has(l));
+  },
+
   _renderHeatmap(matrix?: DashboardUtilMatrix): void {
     const container = document.getElementById('util-heatmap-panel');
     if (!container) return;
 
     // Reuse the 7-day matrix built once in render() when provided; recompute standalone otherwise.
     if (matrix === undefined) matrix = Utilization.computeMatrix(new Date(), 7, Dashboard._filteredTasks());
-    const lines = Object.keys(matrix).sort();
+    const lines = Dashboard._visibleLines(matrix).sort();
 
     if (!lines.length) {
       container.innerHTML = `<div class="empty-state">${Util.t('empty.no_util_data')}</div>`;
