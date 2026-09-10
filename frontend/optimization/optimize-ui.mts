@@ -19,9 +19,10 @@ import { Sandbox } from './sandbox.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { applyPatchesToSnapshot, validateCandidateForApply } from './setup-scheduler.mjs';
-import type { CandidateDiagnostic, CandidateReason, CandidateResult } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest } from './setup-scheduler.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
@@ -76,6 +77,26 @@ interface OptimizerRunOptions {
   respectCalendar?: boolean;
   auditDetails?: OptimizationAuditDetails;
   [key: string]: unknown;
+}
+
+function previewEvaluationRequest(
+  mode: OptimizerMode, opts: OptimizerRunOptions, plant: string, deadlineAt: number,
+): EvaluationRequest {
+  return {
+    mode,
+    plant: opts.plant ?? plant,
+    lines: opts.lines,
+    startDate: opts.startDate,
+    endDate: opts.endDate,
+    respectFirmed: opts.respectFirmed,
+    respectCalendar: opts.respectCalendar,
+    now: opts.now instanceof Date ? opts.now : undefined,
+    runNow: opts.runNow as EvaluationRequest['runNow'],
+    runAt: opts.runAt as EvaluationRequest['runAt'],
+    planningStart: opts.planningStart as EvaluationRequest['planningStart'],
+    placementStart: opts.placementStart as EvaluationRequest['placementStart'],
+    deadlineAt,
+  };
 }
 
 export const OptimizeDialog = (() => {
@@ -1039,6 +1060,10 @@ export const OptimizerPreview = {
    *  schedule time and bails silently if it no longer matches (a newer run
    *  started) or the preview is no longer active (applied/discarded/closed). */
   _runSeq: 0,
+  /** Cancels the dedicated worker when a preview is superseded, discarded, or
+   *  abandoned by the modal. The synchronous fallback remains available when
+   *  the browser has no Worker implementation. */
+  _workerAbortController: null as AbortController | null,
 
   /** Open the preview modal with a loading skeleton. Safe to call as soon as
    *  the user clicks Run, before any await/fetch — gives instant feedback so
@@ -1266,6 +1291,9 @@ export const OptimizerPreview = {
   runWithPreview(mode: OptimizerMode = 'changeover', opts: OptimizerRunOptions = {}) {
     // Phase 2 (Pkg D): monotonic run token, captured by the deferred Plan B
     // callback below so it can detect a superseding run and bail silently.
+    OptimizerPreview._workerAbortController?.abort();
+    const workerAbortController = typeof AbortController === 'function' ? new AbortController() : null;
+    OptimizerPreview._workerAbortController = workerAbortController;
     const runSeq = ++OptimizerPreview._runSeq;
     OptimizerPreview._previewDiagnostics = [];
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
@@ -1286,7 +1314,7 @@ export const OptimizerPreview = {
     // block the main thread with the optimizer. Single rAF schedules a frame
     // but synchronous work afterward can still preempt the paint.
     let snapshot: NimbusTask[] | null = null;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
+    requestAnimationFrame(() => requestAnimationFrame(async () => {
       const _optTotalT0 = performance.now();
       try {
         // Snapshot every task in the plant — the optimizer may touch any of
@@ -1339,7 +1367,15 @@ export const OptimizerPreview = {
         // budget, no behavior change, but the option now exists so the
         // (deferred) alt run below no longer inherits a full fresh one.
         const _evalPrimaryT0 = performance.now();
-        const candidate = evaluateSchedule(candidateSnapshot, { mode, ...opts, deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS });
+        const deadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+        const primaryEvaluation = runOptimizerPreview({
+          runId: `optimizer-preview-${runSeq}-primary`, mode, snapshot: candidateSnapshot,
+          request: previewEvaluationRequest(mode, opts, plant, deadlineAt),
+        }, {
+          signal: workerAbortController?.signal,
+          syncEvaluator: evaluateSchedule,
+        });
+        const candidate = primaryEvaluation instanceof Promise ? await primaryEvaluation : primaryEvaluation;
         PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
 
         // Post-KPIs are calculated from detached patched task values.
@@ -1442,7 +1478,7 @@ export const OptimizerPreview = {
               OptimizerPreview._render();
               return;
             }
-            requestAnimationFrame(() => setTimeout(() => {
+            requestAnimationFrame(() => setTimeout(async () => {
               // Race safety: bail silently — touching neither _finalists nor
               // _finalistsPending — unless this preview is still the one the
               // user is looking at. `active` catches apply/discard/abandon
@@ -1460,17 +1496,15 @@ export const OptimizerPreview = {
               const altMode = altModes[idx];
               try {
                 const _evalAltT0 = performance.now();
-                const altCandidate = evaluateSchedule(candidateSnapshot, {
-                  mode: altMode, plant: opts.plant, lines: opts.lines,
-                  startDate: opts.startDate, endDate: opts.endDate,
-                  respectFirmed: opts.respectFirmed, respectCalendar: opts.respectCalendar,
-                  // Controller ruling: each alt is deferred off the click path,
-                  // so background time is acceptable — give it the SAME full
-                  // SETUP_AWARE_DEADLINE_MS window as the primary run rather
-                  // than a reduced budget (previously ALT_PLAN_BUDGET_MS,
-                  // removed — it silently handicapped the comparison).
-                  deadlineAt: performance.now() + SETUP_AWARE_DEADLINE_MS,
+                const altDeadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+                const altEvaluation = runOptimizerPreview({
+                  runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
+                  request: previewEvaluationRequest(altMode, opts, plant, altDeadlineAt),
+                }, {
+                  signal: workerAbortController?.signal,
+                  syncEvaluator: evaluateSchedule,
                 });
+                const altCandidate = altEvaluation instanceof Promise ? await altEvaluation : altEvaluation;
                 PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
                 const _applyPatchesT0b = performance.now();
                 const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
@@ -1488,6 +1522,12 @@ export const OptimizerPreview = {
           runNextAlt(0);
         }
       } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          // A newer preview or an explicit discard owns the modal now. Do not
+          // replace its state with an obsolete worker cancellation error.
+          if (OptimizerPreview._runSeq === runSeq && OptimizerPreview.active) OptimizerPreview._clear();
+          return;
+        }
         const errMsg = err instanceof Error ? err.message : undefined;
         OptimizerPreview._previewDiagnostics = [{
           level: 'error',
@@ -2079,6 +2119,9 @@ export const OptimizerPreview = {
   },
 
   _clear(keepPreviewDiagnostics: boolean = false) {
+    const workerAbortController = OptimizerPreview._workerAbortController;
+    OptimizerPreview._workerAbortController = null;
+    workerAbortController?.abort();
     OptimizerPreview._stopTaskWatch();
     OptimizerPreview._snapshot = null;
     OptimizerPreview._taskBaseline = null;

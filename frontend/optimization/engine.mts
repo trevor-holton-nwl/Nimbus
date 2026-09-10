@@ -91,6 +91,7 @@ import type {
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
+import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 // Structurally identical to the copy in calendar/calendar-engine.mjs and
@@ -864,9 +865,13 @@ export const Engine = {
    *  legacy-walk placement site, so folding the frozen floor in here — rather
    *  than a second, parallel check scattered across those same sites — is the
    *  actual fix. */
-  earliestAllowedStart(task: NimbusTask, plant: string | null, frozenHorizonEnd?: Date | null): Date | null {
+  earliestAllowedStart(
+    task: NimbusTask, plant: string | null, frozenHorizonEnd?: Date | null,
+    masterDataOverride?: NimbusMasterData | null,
+  ): Date | null {
     let floor: Date | null = null;
-    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
+    const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
+    const value = masterData?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
     if (Number.isInteger(value) && (value as number) >= 0) {
       const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
       const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
@@ -890,8 +895,9 @@ export const Engine = {
    *  pull-forward floor: manual moves, Alerts fixes, autoReflow and Remove
    *  Backlog never consult it. Unlike earliestAllowedStart this is NOT maxed
    *  with the frozen horizon — the two floors/ceilings are independent. */
-  latestAllowedEnd(task: NimbusTask, plant: string | null): Date | null {
-    const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
+  latestAllowedEnd(task: NimbusTask, plant: string | null, masterDataOverride?: NimbusMasterData | null): Date | null {
+    const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
+    const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
     if (!Number.isInteger(value) || (value as number) < 0) return null;
     const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
       const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
@@ -1845,8 +1851,8 @@ export const Engine = {
         placementStart,
         horizonEnd,
         lines: opts.lines as string[] | undefined,
-        notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd),
-        notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant),
+        notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData),
+        notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData),
         convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
       };
       let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
@@ -2382,4 +2388,47 @@ Store.subscribe(evt => {
 export function evaluateSchedule(snapshot: Readonly<ScheduleSnapshot>, request: EvaluationRequest = {}): CandidateResult {
   const { mode = 'changeover', ...opts } = request;
   return Engine.evaluateSchedule(mode, opts, snapshot);
+}
+
+function rehydrateDate(value: Date | string | number | null | undefined): Date | null {
+  if (value == null) return null;
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+/** Reattach the function-bearing validation seam after a worker response.
+ * Every date lookup was captured by the worker from its detached bounds, so
+ * this reconstruction does not consult live master data or setup state. */
+export function rehydrateOptimizerCandidate(
+  candidate: CandidateResult,
+  snapshot: ScheduleSnapshot,
+  serialized?: SerializedOptimizerValidation,
+): CandidateResult {
+  if (!serialized) return candidate;
+  const now = rehydrateDate(serialized.now);
+  const horizonEnd = rehydrateDate(serialized.horizonEnd);
+  if (!now || !horizonEnd) return candidate;
+  const planningStart = rehydrateDate(serialized.planningStart) ?? new Date(now);
+  const runNow = rehydrateDate(serialized.runNow) ?? new Date(now);
+  const placementStart = rehydrateDate(serialized.placementStart) ?? new Date(now);
+  const dateFor = (values: Readonly<Record<string, Date | string | number | null>>, task: NimbusTask): Date | null => (
+    rehydrateDate(values[String(task.id)])
+  );
+  const bounds: DueDateFirstBounds = {
+    setup: serialized.setup,
+    exactSearchThreshold: serialized.exactSearchThreshold,
+    iterationCap: serialized.iterationCap,
+    clock: () => performance.now(),
+    deadline: serialized.deadline,
+    now,
+    planningStart,
+    runNow,
+    placementStart,
+    horizonEnd,
+    lines: serialized.lines,
+    respectCalendar: serialized.respectCalendar,
+    notBefore: task => dateFor(serialized.notBeforeById, task),
+    notAfter: task => dateFor(serialized.notAfterById, task),
+  };
+  return { ...candidate, validationContext: { snapshot, baselineSnapshot: snapshot, bounds } };
 }

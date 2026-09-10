@@ -28,6 +28,9 @@ frontend/security/session.mjs
 frontend/scheduling/gantt.mjs
 frontend/scheduling/orders.mjs
 frontend/optimization/optimize-ui.mjs
+frontend/optimization/optimizer-worker-client.mjs
+frontend/optimization/optimizer-worker-contract.mjs
+frontend/optimization/optimizer-worker.mjs
 frontend/insights/insights-ui.mjs
 frontend/priority-lists/viewers.mjs
 frontend/calendar/edit-calendar.mjs

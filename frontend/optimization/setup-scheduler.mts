@@ -386,10 +386,12 @@ export interface EvaluationRequest {
   respectFirmed?: boolean;
   respectCalendar?: boolean;
   /** Tests and callers that need deterministic candidate placement supply this. */
-  now?: Date;
+  now?: Date | string | number | null;
   /** Explicit wall-clock instant; unlike `startDate`, this is never the
    * planning-window lower bound. */
-  runNow?: Date;
+  runNow?: Date | string | number | null;
+  /** Alias for runNow used by audit/replay callers. */
+  runAt?: Date | string | number | null;
   /** Explicit planning-window lower bound. `startDate` remains its alias. */
   planningStart?: Date | string | number | null;
   /** Normalized effective placement floor, primarily for detached callers. */
