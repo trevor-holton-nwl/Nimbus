@@ -155,6 +155,21 @@ test('setup-aware diagnostics identify strict-blank orders as an unknown tail', 
   )), false, 'a null signature is not a known uncovered matrix transition');
 });
 
+test('unknown-tail diagnostics count opaque demand even when placement remains unserved', () => {
+  const unknown = scheduledTask('contract-unknown-unplaced', 2, '', '2026-08-03T18:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([unknown]),
+    dueDateBounds(setupTruth(), { horizonEnd: at('2026-08-03T09:00') }),
+  );
+
+  assert.equal(result.diagnostics.unknownTailCount, 1,
+    'unknown-tail count must include every eligible opaque order');
+  assert.equal(result.diagnostics.unknownTailPlacedCount, 0);
+  assert.equal(result.diagnostics.unknownTailUnplacedCount, 1,
+    'opaque placement accounting must expose its unplaced remainder');
+  assert.equal(result.diagnostics.unplacedCount, 1);
+});
+
 test('setup-aware respectCalendar controls blackout placement for production and setup', () => {
   const waiting = scheduledTask('contract-calendar-order', 2, 'GREEN', '2026-08-03T18:00');
   const setup = setupTruth({ rows: [setupRow('GREEN', 'GREEN', 0)] });
@@ -231,6 +246,10 @@ test('setup-aware heuristic modes use deterministic seeds and bounded local sear
     assert.ok((result.diagnostics.seedCount ?? 0) >= 3, `${name} should report its deterministic seed set`);
     assert.ok((result.diagnostics.localMoveCount ?? 0) > 0, `${name} should report bounded local moves`);
   }
+  assert.equal(dueDate.diagnostics.termination, 'converged',
+    'a bounded greedy search must report convergence rather than exact completion');
+  assert.equal(dueDate.searchComplete, false,
+    'heuristic convergence cannot claim exhaustive search completeness');
 
   const repeat = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
   assert.deepEqual(
@@ -316,6 +335,47 @@ test('setup-aware eligibility leaves a scheduled order wholly beyond the horizon
   assert.equal(patchFor(result, 'contract-horizon-outside'), undefined,
     'wholly out-of-window scheduled work must remain unchanged');
   assert.ok(patchFor(result, 'contract-horizon-in-window'));
+});
+
+test('setup-aware eligibility keeps out-of-window firmed work as occupancy only', () => {
+  const outside = scheduledTask(
+    'contract-horizon-firmed-boundary', 1, 'GREEN', '2026-08-03T18:00',
+    '2026-08-03T13:00', '2026-08-03T14:00',
+  );
+  const inWindow = scheduledTask('contract-horizon-mutable', 1, 'GREEN', '2026-08-03T18:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([outside, inWindow], { firmedIds: [outside.id] }),
+    dueDateBounds(setupTruth(), { horizonEnd: at('2026-08-03T12:00') }),
+  );
+
+  assert.equal(result.dispositions.some(disposition => disposition.id === outside.id), false,
+    'a protected boundary outside the planning horizon must not receive a disposition');
+  assert.equal(patchFor(result, outside.id), undefined,
+    'a protected boundary must remain immutable');
+  assert.equal(result.diagnostics.placedCount, 1,
+    'final placement counts must describe mutable scope only');
+  assert.equal(result.objective?.scheduledCount, 1,
+    'objective facts must exclude occupancy-only boundary work');
+});
+
+test('needs-planning status admits stale malformed dates as queue demand', () => {
+  const stale = {
+    ...scheduledTask(
+      'contract-queued-stale-interval', 1, 'GREEN', '2026-08-03T18:00',
+      '2026-08-03T12:00', '2026-08-03T11:00',
+    ),
+    planning_status: 'needs_planning',
+    planning_reason: { code: 'stale_interval', message: 'stale imported dates' },
+  };
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([stale]),
+    dueDateBounds(setupTruth(), { horizonEnd: at('2026-08-03T18:00') }),
+  );
+
+  assert.ok(result.dispositions.some(disposition => disposition.id === stale.id),
+    'explicit queue status must be admitted before scheduled interval validation');
+  assert.ok(patchFor(result, stale.id),
+    'queued demand with stale dates should be normalized and placed when capacity exists');
 });
 
 test('setup-aware eligibility scopes malformed historical work before repair eligibility', () => {

@@ -637,6 +637,35 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
   return { runAt, now, from, to };
 }
 
+/** Reproduce Remove Backlog's immutable selection boundary for detached Apply
+ * validation. The mutable set is exactly the positive existing intervals
+ * whose snapshot start is in [from, to); every other valid interval on the
+ * selected line is occupancy only, so a moved backlog order cannot overlap it
+ * without admitting that collision during final validation. */
+function backlogValidationScope(
+  snapshot: Readonly<ScheduleSnapshot>, plant: string, lines: ReadonlySet<string> | null,
+  from: Date, to: Date,
+): { scopeTaskIds: string[]; boundaryTaskIds: string[] } {
+  const candidates = snapshot.tasks.filter(task => {
+    const line = String(task.MACHINE ?? 'Unknown');
+    return resolveTaskPlant(task, snapshot) === plant
+      && (!lines || lines.has(line))
+      && !snapshot.lineSettings[line]?.excludeFromOpt;
+  });
+  const valid = candidates.flatMap(task => {
+    const start = finiteDate(task.start_date);
+    const end = finiteDate(task.end_date);
+    return start && end && end > start ? [{ task, start }] : [];
+  });
+  const selected = new Set(valid
+    .filter(({ start }) => start >= from && start < to)
+    .map(({ task }) => String(task.id)));
+  return {
+    scopeTaskIds: valid.filter(({ task }) => selected.has(String(task.id))).map(({ task }) => String(task.id)),
+    boundaryTaskIds: valid.filter(({ task }) => !selected.has(String(task.id))).map(({ task }) => String(task.id)),
+  };
+}
+
 /** Keep candidate-only warnings/errors out of ErrorLog's IndexedDB/backend path.
  * Live optimizer and repair runs retain their existing ErrorLog behavior. */
 export function reportSchedulerDiagnostic(
@@ -1824,16 +1853,9 @@ export const Engine = {
         const validationHorizon = new Date(Math.min(8_640_000_000_000_000, maxPatchedEnd + 1));
         const allowedLines = Array.isArray(opts.lines) && opts.lines.length
           ? new Set((opts.lines as unknown[]).map(String)) : null;
-        const scopeTaskIds = baselineSnapshot.tasks
-          .filter(task => resolveTaskPlant(task, baselineSnapshot) === plant)
-          .filter(task => !allowedLines || allowedLines.has(String(task.MACHINE ?? '')))
-          .filter(task => {
-            const start = finiteDate(task.start_date)?.getTime() ?? NaN;
-            const end = finiteDate(task.end_date)?.getTime() ?? NaN;
-            return Number.isFinite(start) && Number.isFinite(end) && end > start && start < validationHorizon.getTime()
-              && Number.isFinite(Number(task.RUN_TIME)) && Number(task.RUN_TIME) > 0;
-          })
-          .map(task => String(task.id));
+        const backlogScope = backlogValidationScope(
+          baselineSnapshot, plant, allowedLines, backlogDates.from, backlogDates.to,
+        );
         const placementStart = new Date(Math.max(backlogDates.from.getTime(), backlogDates.now.getTime()));
         const backlogBounds: DueDateFirstBounds = {
           setup: validationSetup,
@@ -1847,7 +1869,8 @@ export const Engine = {
           placementStart,
           horizonEnd: validationHorizon,
           lines: Array.isArray(opts.lines) ? (opts.lines as unknown[]).map(String) : undefined,
-          scopeTaskIds,
+          scopeTaskIds: backlogScope.scopeTaskIds,
+          boundaryTaskIds: backlogScope.boundaryTaskIds,
           respectCalendar: true,
           notBefore: () => null,
           notAfter: () => null,
@@ -2678,7 +2701,8 @@ export function rehydrateOptimizerCandidate(
     || !validDateMap(serialized.notAfterById)
     || (serialized.lines !== undefined && (!Array.isArray(serialized.lines) || !serialized.lines.every(line => typeof line === 'string')))
     || (serialized.scopeTaskIds !== undefined && (!Array.isArray(serialized.scopeTaskIds) || !serialized.scopeTaskIds.every(id => typeof id === 'string')))
-    || (serialized.respectCalendar !== undefined && typeof serialized.respectCalendar !== 'boolean')
+    || typeof serialized.respectCalendar !== 'boolean'
+    || (serialized.boundaryTaskIds !== undefined && (!Array.isArray(serialized.boundaryTaskIds) || !serialized.boundaryTaskIds.every(id => typeof id === 'string')))
     || !isDateFieldValid(serialized.now)
     || !isDateFieldValid(serialized.planningStart)
     || !isDateFieldValid(serialized.runNow)
@@ -2713,6 +2737,7 @@ export function rehydrateOptimizerCandidate(
     horizonEnd,
     lines: serialized.lines,
     scopeTaskIds: serialized.scopeTaskIds,
+    boundaryTaskIds: serialized.boundaryTaskIds,
     respectCalendar: serialized.respectCalendar,
     notBefore: task => dateFor(serialized.notBeforeById, task),
     notAfter: task => dateFor(serialized.notAfterById, task),

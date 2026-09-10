@@ -26,7 +26,8 @@ export interface SerializedOptimizerValidation {
   horizonEnd: Date | string | number;
   lines?: readonly string[];
   scopeTaskIds?: readonly string[];
-  respectCalendar?: boolean;
+  boundaryTaskIds?: readonly string[];
+  respectCalendar: boolean;
   /** Effective manual + ECC + frozen firmed ids used by evaluation. */
   effectiveFirmedIds: readonly string[];
   notBeforeById: Record<string, Date | string | number | null>;
@@ -52,6 +53,7 @@ export function serializeOptimizerValidation(
   if (!context) return undefined;
   const { bounds, snapshot } = context;
   if (!Number.isFinite(bounds.now.getTime())
+    || typeof bounds.respectCalendar !== 'boolean'
     || !bounds.planningStart || !Number.isFinite(bounds.planningStart.getTime())
     || !bounds.runNow || !Number.isFinite(bounds.runNow.getTime())
     || !bounds.placementStart || !Number.isFinite(bounds.placementStart.getTime())
@@ -77,6 +79,9 @@ export function serializeOptimizerValidation(
     scopeTaskIds: bounds.scopeTaskIds === undefined
       ? undefined
       : Array.from(bounds.scopeTaskIds, String),
+    boundaryTaskIds: bounds.boundaryTaskIds === undefined
+      ? undefined
+      : Array.from(bounds.boundaryTaskIds, String),
     respectCalendar: bounds.respectCalendar,
     effectiveFirmedIds: Array.from(snapshot.firmedIds, String),
     notBeforeById,

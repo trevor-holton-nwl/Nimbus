@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { Worker } from 'node:worker_threads';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { runOptimizerPreview } from '../../../frontend/optimization/optimizer-worker-client.mjs';
 import {
   buildOptimizerWorkerResponse,
@@ -125,6 +128,9 @@ test('worker transport sends remaining budget and rejects missing or malformed v
   assert.throws(() => rehydrateOptimizerCandidate(candidate('bad-setup'), snapshot, {
     ...validation, setup: { plant: 'P', plant_active: true },
   }), /validation metadata/, 'incomplete setup truth must not cross the worker boundary');
+  assert.throws(() => rehydrateOptimizerCandidate(candidate('missing-calendar-flag'), snapshot, {
+    ...validation, respectCalendar: undefined,
+  }), /validation metadata/, 'worker validation must carry the explicit calendar contract');
 });
 
 test('real optimizer worker boundary localizes its deadline and round-trips effective firming', () => {
@@ -204,7 +210,12 @@ test('real optimizer worker preserves validation metadata for backlog candidates
     calendars: { L1: { workHours: Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]])) } },
     tasks: [{ id: 'backlog-worker-task', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 1,
       start_date: new Date('2035-08-05T07:00:00'), end_date: new Date('2035-08-05T08:00:00'),
-      planning_status: 'scheduled' }],
+      planning_status: 'scheduled' },
+      { id: 'backlog-worker-post-window', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 1,
+        start_date: new Date('2035-08-06T12:30:00'), end_date: new Date('2035-08-06T13:30:00'),
+        planning_status: 'scheduled' },
+      { id: 'backlog-worker-unselected-queue', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 1,
+        start_date: null, end_date: null, planning_status: 'needs_planning' }],
   };
   const response = buildOptimizerWorkerResponse({
     runId: 'backlog-worker', mode: 'backlog', snapshot: backlogSnapshot,
@@ -215,9 +226,16 @@ test('real optimizer worker preserves validation metadata for backlog candidates
   assert.ok(response.validation, 'backlog worker candidates must also carry apply metadata');
   assert.ok(Array.isArray(response.candidate?.dispositions));
   assert.deepEqual(response.validation.effectiveFirmedIds, []);
+  assert.deepEqual(response.validation.scopeTaskIds, ['backlog-worker-task'],
+    'worker validation scope must match Remove Backlog selection exactly');
+  assert.deepEqual(response.validation.boundaryTaskIds, ['backlog-worker-post-window'],
+    'post-window collisions belong to occupancy context without dispositions');
+  assert.equal(response.candidate.dispositions.some(disposition => disposition.id === 'backlog-worker-unselected-queue'), false,
+    'queued rows outside Remove Backlog selection must not receive dispositions');
   const rehydrated = rehydrateOptimizerCandidate(response.candidate, backlogSnapshot, response.validation);
-  assert.equal(validateCandidateForApply(rehydrated, backlogSnapshot).some(finding => finding.severity === 'error'), false,
-    'backlog metadata must validate against the same detached baseline at apply time');
+  const applyFindings = validateCandidateForApply(rehydrated, backlogSnapshot);
+  assert.ok(applyFindings.some(finding => finding.code === 'capacity_overlap' && finding.severity === 'error'),
+    'post-window occupancy collisions must be rejected at apply without dispositioning the boundary');
 });
 
 test('optimizer preview cancellation terminates the worker and rejects promptly', async () => {
@@ -240,4 +258,68 @@ test('optimizer preview cancellation terminates the worker and rejects promptly'
   controller.abort();
   await assert.rejects(resultPromise, error => error?.name === 'AbortError');
   assert.equal(worker.terminated, true);
+});
+
+test('optimizer worker runs in a real worker_threads realm with clone round-trip and independent clock', async () => {
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const workerSnapshot = {
+    ...snapshot,
+    selectedPlant: 'P',
+    tasks: [{ id: 'runtime-worker-task', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 1,
+      original_end_date: new Date('2035-08-07T18:00:00'), start_date: null, end_date: null,
+      planning_status: 'needs_planning' }],
+    calendars: { L1: { workHours: hours } }, plants: { P: { workHours: hours } },
+    masterData: { plants: [{ plant: 'P' }], lines: [{ plant: 'P', machine: 'L1' }] },
+  };
+  const workerPath = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
+  const bridge = `
+    import { parentPort } from 'node:worker_threads';
+    globalThis.postMessage = value => parentPort.postMessage(value);
+    Object.defineProperty(globalThis, 'onmessage', {
+      configurable: true,
+      set(handler) { parentPort.on('message', data => handler({ data })); },
+    });
+    await import(${JSON.stringify(workerPath)});
+  `;
+  const worker = new Worker(bridge, { eval: true, type: 'module' });
+  let ticked = false;
+  const tick = new Promise(resolveTick => setImmediate(() => { ticked = true; resolveTick(); }));
+  const response = await new Promise((resolveResponse, reject) => {
+    const timer = setTimeout(() => reject(new Error('real optimizer worker timed out')), 5000);
+    worker.once('message', value => { clearTimeout(timer); resolveResponse(value); });
+    worker.once('error', error => { clearTimeout(timer); reject(error); });
+    worker.postMessage({
+      runId: 'runtime-worker-round-trip', mode: 'spt', snapshot: workerSnapshot,
+      deadlineDurationMs: 1000,
+      request: { mode: 'spt', plant: 'P', respectCalendar: false,
+        planningStart: new Date('2035-08-07T08:00:00'), runNow: new Date('2035-08-07T08:00:00'),
+        endDate: new Date('2035-08-08T00:00:00') },
+    });
+  });
+  await tick;
+  assert.equal(response.runId, 'runtime-worker-round-trip');
+  assert.ok(response.validation, 'structured-cloned worker response must retain validation metadata');
+  assert.equal(response.validation.respectCalendar, false);
+  assert.equal(ticked, true, 'the main event loop must remain responsive while the worker evaluates');
+  await worker.terminate();
+});
+
+test('real optimizer worker can be cancelled before returning a response', async () => {
+  const workerPath = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
+  const bridge = `
+    import { parentPort } from 'node:worker_threads';
+    globalThis.postMessage = value => parentPort.postMessage(value);
+    Object.defineProperty(globalThis, 'onmessage', {
+      configurable: true,
+      set(handler) { parentPort.on('message', data => handler({ data })); },
+    });
+    await import(${JSON.stringify(workerPath)});
+  `;
+  const worker = new Worker(bridge, { eval: true, type: 'module' });
+  let response = false;
+  worker.on('message', () => { response = true; });
+  worker.postMessage({ runId: 'runtime-worker-cancel', mode: 'spt', snapshot,
+    deadlineDurationMs: 5000, request: { mode: 'spt', respectCalendar: false } });
+  await worker.terminate();
+  assert.equal(response, false, 'terminating the real worker must prevent a stale response');
 });

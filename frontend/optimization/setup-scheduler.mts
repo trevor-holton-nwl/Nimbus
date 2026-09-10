@@ -418,6 +418,10 @@ export interface DueDateFirstBounds {
    * keep malformed/out-of-window records out of the apply accounting while
    * retaining only the task ids that the repair actually promises to assess. */
   scopeTaskIds?: readonly string[] | ReadonlySet<string>;
+  /** Optional immutable occupancy ids supplied by a repair mode. These rows
+   * constrain capacity and setup while remaining outside disposition and
+   * objective accounting. */
+  boundaryTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
   iterationCap: number;
@@ -584,6 +588,7 @@ function normalizeRunDates(bounds: Readonly<DueDateFirstBounds>): Readonly<DueDa
     planningStart: new Date(planningStart),
     runNow: new Date(runNow),
     placementStart: new Date(placementStart),
+    respectCalendar: bounds.respectCalendar ?? true,
   };
 }
 
@@ -651,7 +656,10 @@ export interface SearchDiagnostics {
   eligibleCount?: number;
   evaluatedCount?: number;
   placedCount?: number;
+  unplacedCount?: number;
   unknownTailCount?: number;
+  unknownTailPlacedCount?: number;
+  unknownTailUnplacedCount?: number;
   unknownEdgeCount?: number;
   exhaustive?: boolean;
   quality?: 'exact' | 'heuristic';
@@ -3184,7 +3192,7 @@ function greedySearch(
   return {
     candidateCount,
     method: 'due-date-first-greedy',
-    termination,
+    termination: termination === 'completed' && winner ? 'converged' : termination,
     winner,
     missingEdges,
     unknownTail: [],
@@ -3409,7 +3417,7 @@ function searchFragment(
     return {
       candidateCount,
       method: 'due-date-first-exact',
-      termination,
+      termination: termination === 'completed' && winner ? 'converged' : termination,
       winner,
       missingEdges,
       unknownTail,
@@ -4288,9 +4296,9 @@ function placeWholeLineAsTail(
   tasks: ReadonlyArray<NimbusTask>,
   mode: FragmentMode,
 ): { patches: SchedulePatch[]; explanation: CandidateReason[]; missingEdges: MissingSetupEdge[] } {
-  const free = tasks.filter(task => !taskIsFirmed(snapshot, task));
+  const free = tasks.filter(task => !taskIsEvaluationProtected(snapshot, bounds, task));
   const firmedWindows = tasks
-    .filter(task => taskIsFirmed(snapshot, task))
+    .filter(task => taskIsEvaluationProtected(snapshot, bounds, task))
     .flatMap(task => {
       const start = timestamp(task.start_date);
       const end = timestamp(task.end_date);
@@ -4387,7 +4395,7 @@ function evaluateLineWithFirmedBoundaries(
     );
   }
   const firmed: FirmedBoundary[] = [];
-  for (const task of tasks.filter(task => taskIsFirmed(snapshot, task))) {
+  for (const task of tasks.filter(task => taskIsEvaluationProtected(snapshot, bounds, task))) {
     const start = timestamp(task.start_date);
     const end = timestamp(task.end_date);
     // An equal-start firmed run remains the terminal incoming boundary: its
@@ -4426,7 +4434,7 @@ function evaluateLineWithFirmedBoundaries(
   }
   firmed.sort((left, right) => left.start.getTime() - right.start.getTime() || taskId(left.task).localeCompare(taskId(right.task)));
 
-  const free = tasks.filter(task => !taskIsFirmed(snapshot, task));
+  const free = tasks.filter(task => !taskIsEvaluationProtected(snapshot, bounds, task));
   const locks = boundaryOverrideLocks(bounds, line, firmed, free, initialState, initial.predecessorOrderId);
   const initialFreeLock = initialFreeOverrideLock(
     bounds, line, free, initialState, initial.predecessorOrderId,
@@ -5159,8 +5167,9 @@ export function evaluateSptWithSetup(
   bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
+  const mutableTaskCount = eligibleTasks(snapshot, bounds).length;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of eligibleTasks(snapshot, bounds)) {
+  for (const task of evaluationTasks(snapshot, bounds)) {
     const line = String(task.MACHINE ?? '');
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -5229,7 +5238,8 @@ export function evaluateSptWithSetup(
     const initialScheduled = !initial.state && initial.reason === 'initial-state-unknown'
       ? initialScheduledAnchor(tasks, definition)
       : null;
-    const anchor = initialScheduled && taskIsFirmed(snapshot, initialScheduled.task) ? preservedInitialAnchor(initialScheduled) : null;
+    const anchor = initialScheduled && taskIsEvaluationProtected(snapshot, bounds, initialScheduled.task)
+      ? preservedInitialAnchor(initialScheduled) : null;
     // Part 1d: an unknown line-initial state (no persisted state, no
     // scheduled anchor) no longer skips the line. Proceed with a null
     // initial state — its diagnostic is retained either way.
@@ -5301,7 +5311,7 @@ export function evaluateSptWithSetup(
       budgetMs: budget.budgetMs,
       deadlineAt: budget.deadlineAt,
       iterationsUsed: budget.iterationsUsed,
-      eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
+      eligibleCount: mutableTaskCount,
       evaluatedCount: candidateCount,
       placedCount: patches.length,
       seedCount,
@@ -5338,8 +5348,9 @@ export function evaluateDueDateFirst(
   bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
+  const mutableTaskCount = eligibleTasks(snapshot, bounds).length;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of eligibleTasks(snapshot, bounds)) {
+  for (const task of evaluationTasks(snapshot, bounds)) {
     const line = String(task.MACHINE ?? '');
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -5409,7 +5420,8 @@ export function evaluateDueDateFirst(
     const initialScheduled = !initial.state && initial.reason === 'initial-state-unknown'
       ? initialScheduledAnchor(tasks, definition)
       : null;
-    const anchor = initialScheduled && taskIsFirmed(snapshot, initialScheduled.task) ? preservedInitialAnchor(initialScheduled) : null;
+    const anchor = initialScheduled && taskIsEvaluationProtected(snapshot, bounds, initialScheduled.task)
+      ? preservedInitialAnchor(initialScheduled) : null;
     // Part 1d: an unknown line-initial state (no persisted state, no
     // scheduled anchor) no longer skips the line — including the stale
     // signature-incompatible case. Proceed with a null initial state; the
@@ -5483,7 +5495,7 @@ export function evaluateDueDateFirst(
       budgetMs: budget.budgetMs,
       deadlineAt: budget.deadlineAt,
       iterationsUsed: budget.iterationsUsed,
-      eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
+      eligibleCount: mutableTaskCount,
       evaluatedCount: candidateCount,
       placedCount: patches.length,
       seedCount,
@@ -5552,8 +5564,11 @@ export function evaluateMinChangeover(
     && (admissionDelta < 0 || (admissionDelta === 0 && compareFinalObjectives(snapshot, { ...bounds, strategy: 'min-changeover' }, candidate, baseline) <= 0));
   const chosen = chooseCandidate ? candidate : baseline;
   const incomplete = baseline.searchComplete === false || candidate.searchComplete === false;
-  const termination = incomplete
-    ? (baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline' ? 'deadline' : 'iteration-cap')
+  const deadlineCutoff = baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline';
+  const iterationCutoff = baseline.diagnostics.termination === 'iteration-cap' || candidate.diagnostics.termination === 'iteration-cap';
+  const budgetCutoff = deadlineCutoff || iterationCutoff;
+  const termination = budgetCutoff
+    ? (deadlineCutoff ? 'deadline' : 'iteration-cap')
     : chosen.diagnostics.termination;
   return {
     ...chosen,
@@ -5561,7 +5576,7 @@ export function evaluateMinChangeover(
     diagnostics: {
       ...chosen.diagnostics,
       termination,
-      limitReached: incomplete,
+      limitReached: budgetCutoff,
       candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount,
       runtimeMs: Math.max(0, bounds.clock() - budget.startedAt),
       budgetMs: budget.budgetMs,
@@ -5645,6 +5660,9 @@ export function evaluateThroughput(
   const baselineEvaluated = baseline.diagnostics.evaluatedCount ?? baseline.diagnostics.candidateCount;
   const candidateEvaluated = candidate.diagnostics.evaluatedCount ?? candidate.diagnostics.candidateCount;
   const incomplete = baseline.searchComplete === false || candidate.searchComplete === false;
+  const deadlineCutoff = baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline';
+  const iterationCutoff = baseline.diagnostics.termination === 'iteration-cap' || candidate.diagnostics.termination === 'iteration-cap';
+  const budgetCutoff = deadlineCutoff || iterationCutoff;
   return {
     ...selected,
     searchComplete: !incomplete,
@@ -5661,10 +5679,10 @@ export function evaluateThroughput(
       placedCount: selected.patches.length,
       exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
       quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
-      termination: incomplete
-        ? (baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline' ? 'deadline' : 'iteration-cap')
+      termination: budgetCutoff
+        ? (deadlineCutoff ? 'deadline' : 'iteration-cap')
         : selected.diagnostics.termination,
-      limitReached: incomplete,
+      limitReached: budgetCutoff,
     },
   };
 }
@@ -5805,38 +5823,112 @@ function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Due
   });
 }
 
-function eligibleTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): NimbusTask[] {
-  const scopedTaskIds = bounds.scopeTaskIds instanceof Set
-    ? bounds.scopeTaskIds
-    : bounds.scopeTaskIds ? new Set(Array.from(bounds.scopeTaskIds, String)) : null;
-  return snapshot.tasks.filter(task => {
+interface TaskScope {
+  /** Orders that receive patches, dispositions, and objective facts. */
+  mutable: NimbusTask[];
+  /** Immutable occupancy/predecessor rows used during evaluation and apply
+   * validation. They are deliberately absent from mutable accounting. */
+  boundaries: NimbusTask[];
+  /** The physical line model: mutable orders plus immutable boundaries. */
+  evaluation: NimbusTask[];
+}
+
+function idSet(value: readonly string[] | ReadonlySet<string> | undefined): ReadonlySet<string> | null {
+  if (value instanceof Set) return value;
+  return value ? new Set(Array.from(value, String)) : null;
+}
+
+function normalizedQueuedTask(task: NimbusTask): NimbusTask {
+  return {
+    ...task,
+    start_date: null,
+    end_date: null,
+    scheduleSegments: [],
+    planning_status: 'needs_planning',
+  };
+}
+
+function buildTaskScope(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): TaskScope {
+  const scopedTaskIds = idSet(bounds.scopeTaskIds);
+  const boundaryTaskIds = idSet(bounds.boundaryTaskIds);
+  const planningStart = timestamp(bounds.planningStart)?.getTime();
+  const horizonEnd = timestamp(bounds.horizonEnd)?.getTime();
+  const mutable: NimbusTask[] = [];
+  const boundaries: NimbusTask[] = [];
+  for (const task of snapshot.tasks) {
     const line = String(task.MACHINE ?? '');
     if (!line || resolveTaskPlant(task, snapshot, bounds.runContext) !== bounds.setup.plant
       || snapshot.lineSettings[line]?.excludeFromOpt
-      || (bounds.lines?.length && !bounds.lines.includes(line))
-      || (scopedTaskIds && !scopedTaskIds.has(taskId(task)))) return false;
-    // Protected work remains in the detached line model as an immutable
-    // occupancy/predecessor boundary even when it sits outside this run's
-    // mutable planning window. Unprotected scheduled work is scoped by
-    // interval intersection with [planningStart, horizonEnd); only queued
-    // demand without a persisted interval is eligible without that scope.
-    if (taskIsFirmed(snapshot, task)) return true;
+      || (bounds.lines?.length && !bounds.lines.includes(line))) continue;
+    const id = taskId(task);
+    const explicitlyScoped = !scopedTaskIds || scopedTaskIds.has(id);
+    const explicitlyBoundary = boundaryTaskIds?.has(id) === true;
     const start = timestamp(task.start_date);
     const end = timestamp(task.end_date);
-    const planningStart = timestamp(bounds.planningStart)?.getTime();
-    const horizonEnd = timestamp(bounds.horizonEnd)?.getTime();
-    // Store normalizes newly queued rows to `planning_status: "scheduled"`
-    // even while both dates are null. The absence of an interval is the
-    // authoritative queued shape; do not let that mirror status hide demand
-    // from the detached run.
-    if (!start && !end) return true;
-    // A scheduled row with one or more malformed date boundaries has no
-    // trustworthy interval to intersect. Keep it immutable until an explicit
-    // queue/status repair places it in scope; this prevents historical defects
-    // from being silently rewritten by a later optimizer run.
-    if (!start || !end || end <= start || planningStart === undefined || horizonEnd === undefined) return false;
-    return end.getTime() > planningStart && start.getTime() < horizonEnd;
-  });
+    const validInterval = !!start && !!end && end > start;
+    const queued = task.planning_status === 'needs_planning' || (!start && !end);
+    const intersects = validInterval && planningStart !== undefined && horizonEnd !== undefined
+      && end!.getTime() > planningStart && start!.getTime() < horizonEnd;
+    const protectedTask = taskIsFirmed(snapshot, task);
+
+    // A caller-owned boundary set is authoritative for repair modes such as
+    // Remove Backlog: selected rows are mutable, every other valid row named
+    // as a boundary is occupancy only, even if it overlaps the horizon.
+    if (explicitlyBoundary) {
+      if (validInterval) boundaries.push(task);
+      continue;
+    }
+    // An explicit repair scope is exact. A protected valid interval that falls
+    // outside the planning window remains an automatic occupancy boundary;
+    // every other unselected row, including queued demand, stays out.
+    if (scopedTaskIds && !explicitlyScoped) {
+      if (protectedTask && validInterval && !intersects) boundaries.push(task);
+      continue;
+    }
+    // Queue status is checked before any stale-date interval test. Imported
+    // rows can retain one-sided/reversed dates while explicitly asking for
+    // planning; normalize that stale shape to a detached queue row.
+    if (queued) {
+      mutable.push(normalizedQueuedTask(task));
+      continue;
+    }
+    // A protected interval remains a physical obstacle even when a caller
+    // supplies only the mutable ids. This keeps an omitted boundary list from
+    // allowing a selected repair to overlap firmed/ECC/frozen work.
+    if (protectedTask && validInterval && !intersects) {
+      boundaries.push(task);
+      continue;
+    }
+    if (scopedTaskIds && !explicitlyScoped) continue;
+    if (scopedTaskIds?.has(id) || intersects) {
+      mutable.push(task);
+      continue;
+    }
+    // Keep malformed protected rows in the mutable accounting seam for
+    // compatibility with the existing protected-data diagnostics. They have
+    // no usable occupancy interval and therefore cannot affect placement.
+    if (protectedTask && !validInterval) {
+      mutable.push(task);
+      continue;
+    }
+    // A valid protected row outside [planningStart, horizonEnd) is an
+    // immutable physical boundary. It constrains line placement/setup but is
+    // never assigned a disposition or counted as scheduled optimizer work.
+    if (protectedTask && validInterval) boundaries.push(task);
+  }
+  return { mutable, boundaries, evaluation: [...mutable, ...boundaries] };
+}
+
+function eligibleTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): NimbusTask[] {
+  return buildTaskScope(snapshot, bounds).mutable;
+}
+
+function evaluationTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): NimbusTask[] {
+  return buildTaskScope(snapshot, bounds).evaluation;
+}
+
+function taskIsEvaluationProtected(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): boolean {
+  return taskIsFirmed(snapshot, task) || (idSet(bounds.boundaryTaskIds)?.has(taskId(task)) ?? false);
 }
 
 function productiveIntervals(task: NimbusTask): PlacementInterval[] {
@@ -5869,8 +5961,11 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     const current = JSON.stringify({ ...currentState, alerts: [], firmedIds: [...currentSnapshot.firmedIds].sort() });
     if (baseline !== current) add('stale_candidate', 'The schedule or scheduling inputs changed after this proposal was evaluated.');
   }
-  const tasks = eligibleTasks(snapshot, bounds);
+  const taskScope = buildTaskScope(snapshot, bounds);
+  const tasks = taskScope.mutable;
+  const occupancyTasks = taskScope.evaluation;
   const ids = new Set(tasks.map(taskId));
+  const boundaryIds = new Set(taskScope.boundaries.map(taskId));
   const patches = new Map<string, SchedulePatch>();
   for (const patch of candidate.patches) {
     if (!ids.has(patch.id)) add('scope', `Patch ${patch.id} is outside the requested scope.`);
@@ -5884,11 +5979,27 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     dispositions.set(disposition.id, disposition);
   }
   const occupied = new Map<string, { interval: PlacementInterval; task: NimbusTask; protectedTask: boolean }[]>();
-  for (const task of tasks) {
-    const protectedTask = taskIsFirmed(snapshot, task);
+  for (const task of occupancyTasks) {
+    const boundaryOnly = boundaryIds.has(taskId(task)) && !ids.has(taskId(task));
+    const protectedTask = taskIsFirmed(snapshot, task) || boundaryOnly;
     const patch = patches.get(taskId(task));
     const result = { ...task, ...patch?.changes };
     const disposition = dispositions.get(taskId(task));
+    if (boundaryOnly) {
+      // Occupancy rows are outside the mutable contract. They cannot create a
+      // disposition or a scope error, and their historical calendar/runtime
+      // defects must not veto the selected repair. A usable interval still
+      // reserves physical capacity for overlap/setup checks below.
+      const intervals = productiveIntervals(result);
+      const start = timestamp(result.start_date); const end = timestamp(result.end_date);
+      if (!start || !end || end <= start || !intervals.length
+        || intervals.some(interval => interval.end <= interval.start)
+        || +intervals[0].start !== +start || +intervals.at(-1)!.end !== +end) continue;
+      const line = String(task.MACHINE); const list = occupied.get(line) ?? [];
+      for (const interval of intervals) list.push({ interval, task: result, protectedTask: true });
+      occupied.set(line, list);
+      continue;
+    }
     if (!disposition) add('accounting', 'Every scoped order requires one disposition.', task);
     if (disposition && (disposition.line !== String(task.MACHINE) || (disposition.status === 'protected') !== protectedTask)) add('accounting', 'Disposition line or protected status disagrees with the baseline.', task);
     if (protectedTask && patch) add('protected_changed', 'Protected orders must be preserved exactly.', task);
@@ -5930,7 +6041,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     }
   }
   // Setup occupies the calendar immediately before each productive start.
-  const proposed = applyPatchesToSnapshot(tasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
+  const proposed = applyPatchesToSnapshot(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
   const lines = new Set(proposed.map(task => String(task.MACHINE)));
   for (const line of lines) {
     const lineTasks = proposed.filter(task => String(task.MACHINE) === line).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
@@ -5938,7 +6049,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     let state = definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
     let predecessor: NimbusTask | null = null;
     for (const task of lineTasks) {
-      const protectedTask = taskIsFirmed(snapshot, task);
+      const protectedTask = taskIsEvaluationProtected(snapshot, bounds, task);
       const successor = definition ? stateForOrder(task, definition) : null;
       const resolution = definition && state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line) ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides }) : null;
       if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: 'A missing setup transition uses zero minutes.', severity: 'warning', taskId: taskId(task), line });
@@ -5950,7 +6061,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
         const free = freeIntervalsFor(snapshot, line, bounds.setup.plant, start, end, bounds.runContext);
         if (!coversInterval(free, { start, end })) add('setup_calendar', 'Setup overlaps nonworking time or a blackout.', task, protectedTask);
         if (predecessor && timestamp(predecessor.end_date)! > start) {
-          const bothProtected = protectedTask && taskIsFirmed(snapshot, predecessor);
+          const bothProtected = protectedTask && taskIsEvaluationProtected(snapshot, bounds, predecessor);
           add('setup_overlap', 'Required setup overlaps preceding production.', protectedTask && !bothProtected ? predecessor : task, bothProtected);
         }
       }
@@ -5995,7 +6106,7 @@ function retainCompatiblePlacements(
   const patches = new Map(preferred.patches.map(patch => [patch.id, patch]));
   const dispositions = new Map(preferred.dispositions?.map(d => [d.id, d]));
   const byLine = new Map<string, NimbusTask[]>();
-  for (const item of eligibleTasks(snapshot, bounds)) {
+  for (const item of evaluationTasks(snapshot, bounds)) {
     const line = String(item.MACHINE);
     const tasks = byLine.get(line) ?? []; tasks.push(item); byLine.set(line, tasks);
   }
@@ -6015,7 +6126,10 @@ function retainCompatiblePlacements(
         const proposal = {
           ...preferred,
           patches: tasks.flatMap(peer => taskId(peer) === id ? [placement] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
-          dispositions: tasks.map(peer => taskId(peer) === id ? disposition : dispositions.get(taskId(peer))!),
+          dispositions: tasks.flatMap(peer => {
+            const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
+            return value ? [value] : [];
+          }),
         };
         const errors = validateCandidate(localSnapshot, localBounds, proposal).filter(f => f.severity === 'error');
         if (!errors.length) {
@@ -6051,7 +6165,13 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
   }
-  let result: CandidateResult = { ...candidate, patches: [...patches.values()], dispositions, searchComplete: !candidate.diagnostics.limitReached, validationContext: { snapshot, bounds } };
+  let result: CandidateResult = {
+    ...candidate,
+    patches: [...patches.values()],
+    dispositions,
+    searchComplete: candidate.diagnostics.exhaustive === true && candidate.diagnostics.termination === 'completed',
+    validationContext: { snapshot, bounds },
+  };
   // Build the incumbent solely from original intervals. Mixing new candidate
   // placements with restored originals can create artificial overlaps and
   // incorrectly reject a valid, more urgent baseline admission.
@@ -6087,7 +6207,8 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   const explanations = [...result.explanation];
   const score = [...result.score];
   const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
-  const scopeIds = new Set(result.dispositions?.map(d => d.id));
+  const mutableTasks = eligibleTasks(snapshot, bounds);
+  const scopeIds = new Set(mutableTasks.map(taskId));
   const predecessorById = new Map<string, string | null>();
   const orderedFinal = final.filter(task => {
     const start = timestamp(task.start_date);
@@ -6098,7 +6219,10 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   }).sort((a, b) => ordinalCompare(String(a.MACHINE), String(b.MACHINE)) || +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
   for (let index = 0; index < orderedFinal.length; index++) predecessorById.set(taskId(orderedFinal[index]), index && orderedFinal[index - 1].MACHINE === orderedFinal[index].MACHINE ? taskId(orderedFinal[index - 1]) : null);
   const definition = bounds.setup.definition;
-  const unknownStateIds = new Set(orderedFinal.flatMap(task => definition && !stateForOrder(task, definition) ? [taskId(task)] : []));
+  const opaqueTasks = definition
+    ? mutableTasks.filter(task => !stateForOrder(task, definition))
+    : [];
+  const unknownStateIds = new Set(opaqueTasks.map(taskId));
   const missingFindingIds = new Set((result.validationFindings ?? [])
     .filter(finding => finding.code === 'missing_setup' && finding.taskId)
     .map(finding => finding.taskId!));
@@ -6158,15 +6282,19 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     budgetMs: result.diagnostics.budgetMs ?? Math.max(0, bounds.deadline),
     deadlineAt: result.diagnostics.deadlineAt ?? bounds.deadline,
     iterationsUsed: result.diagnostics.iterationsUsed ?? result.diagnostics.candidateCount,
-    eligibleCount: result.diagnostics.eligibleCount ?? scopeIds.size,
+    eligibleCount: result.diagnostics.eligibleCount ?? mutableTasks.length,
     evaluatedCount: result.diagnostics.evaluatedCount ?? result.diagnostics.candidateCount,
     // This is a final-state count, not the number of patch records emitted by
     // the primary search. Gap fill can add placements and unchanged incumbents
     // can be represented without a patch.
     placedCount: orderedFinal.length,
+    unplacedCount: Math.max(0, mutableTasks.length - orderedFinal.length),
     unknownTailCount: unknownStateIds.size,
+    unknownTailPlacedCount: opaqueTasks.filter(task => orderedFinal.some(finalTask => taskId(finalTask) === taskId(task))).length,
+    unknownTailUnplacedCount: Math.max(0, unknownStateIds.size
+      - opaqueTasks.filter(task => orderedFinal.some(finalTask => taskId(finalTask) === taskId(task))).length),
     unknownEdgeCount: unknownEdges,
-    exhaustive: result.diagnostics.exhaustive ?? result.diagnostics.termination === 'completed',
+    exhaustive: result.diagnostics.exhaustive ?? searchExhaustive(result.diagnostics.method, result.diagnostics.termination),
     quality: result.diagnostics.quality ?? searchQuality(result.diagnostics.method, result.diagnostics.termination),
     respectCalendar: result.diagnostics.respectCalendar ?? (bounds.respectCalendar ?? true),
   };
@@ -6184,6 +6312,7 @@ export function fillPlanningGaps(
   const expired = (): boolean => bounds.clock() - started >= budgetMs;
   bounds = withRunContext(snapshot, hardBounds(snapshot, { ...bounds, runContext: undefined }));
   const tasks = eligibleTasks(snapshot, bounds);
+  const occupancyTasks = evaluationTasks(snapshot, bounds);
   const patches = new Map(candidate.patches.map(p => [p.id, p]));
   const dispositions = new Map(candidate.dispositions?.map(d => [d.id, d]));
   const pending = urgencyOrder(snapshot, bounds, '', tasks).filter(task =>
@@ -6201,7 +6330,7 @@ export function fillPlanningGaps(
   const checked = new Map<string, number>();
   const availability = new Map<string, PlacementInterval[]>();
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of tasks) {
+  for (const task of occupancyTasks) {
     const line = String(task.MACHINE);
     const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
   }
@@ -6272,9 +6401,12 @@ export function fillPlanningGaps(
               scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
               planning_status: 'scheduled', planning_reason: null } };
             const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
-            const trial = { ...candidate,
+          const trial = { ...candidate,
               patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
-              dispositions: peers.map(peer => taskId(peer) === id ? disposition : dispositions.get(taskId(peer))!),
+              dispositions: peers.flatMap(peer => {
+                const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
+                return value ? [value] : [];
+              }),
             };
             if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line] }, trial).some(f => f.severity === 'error')) {
               patches.set(id, patch); dispositions.set(id, disposition); placed++;
