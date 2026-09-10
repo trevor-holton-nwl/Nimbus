@@ -64,7 +64,7 @@
 // list did not include (the adapter used to live IN setup-scheduler.mts, so
 // it referenced this locally-defined type without an import).
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
-import { Store } from '../platform/store.mjs';
+import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import {
@@ -858,7 +858,9 @@ export const Engine = {
     let floor: Date | null = null;
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
     if (Number.isInteger(value) && (value as number) >= 0) {
-      const due = Util.sapDueDate(task);
+      const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
+      const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
+      const due = parsedDue && Number.isFinite(+parsedDue) ? parsedDue : null;
       if (due) {
         floor = new Date(due);
         floor.setHours(0, 0, 0, 0);
@@ -881,7 +883,9 @@ export const Engine = {
   latestAllowedEnd(task: NimbusTask, plant: string | null): Date | null {
     const value = sourceMasterData()?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
     if (!Number.isInteger(value) || (value as number) < 0) return null;
-    const due = Util.sapDueDate(task);
+    const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
+      const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
+      const due = parsedDue && Number.isFinite(+parsedDue) ? parsedDue : null;
     if (!due) return null;
     const ceiling = new Date(due);
     ceiling.setHours(0, 0, 0, 0);
@@ -1743,10 +1747,10 @@ export const Engine = {
     // active-and-matching, exactly as before B3a.
     const setupSnapshot = Store.setupSnapshot;
     const setupSnapshotActiveAndMatching = !!(setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active);
-    const effectiveSetupSnapshot: SetupSnapshot | null = (mode === 'changeover' || mode === 'duedate') && !setupSnapshotActiveAndMatching
+    const effectiveSetupSnapshot: SetupSnapshot | null = (mode === 'changeover' || mode === 'duedate' || mode === 'spt') && !setupSnapshotActiveAndMatching
       ? Engine._syntheticZeroCostSetupSnapshot(plant)
       : setupSnapshot;
-    if (mode === 'changeover' || mode === 'duedate' || setupSnapshotActiveAndMatching) {
+    if (mode === 'changeover' || mode === 'duedate' || mode === 'spt' || setupSnapshotActiveAndMatching) {
       const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'duedate' ? 'due-date' : 'min-changeover';
       // Phase 2 (Pkg D): scope the fallback snapshot's calendars to this run's
       // plant — every consumer of ScheduleSnapshot.calendars in this path
@@ -1791,11 +1795,13 @@ export const Engine = {
         deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
         now: horizonStart,
         horizonEnd,
+        lines: opts.lines as string[] | undefined,
         notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant),
         notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant),
         convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
       };
       let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
+      if (result.validationContext) result.validationContext = { ...result.validationContext, baselineSnapshot: baseSnapshot };
       // The setup-aware evaluators group every line for the plant with no
       // opts.lines/excludeFromOpt filter of their own (unlike the legacy walk
       // below) — apply both as a post-filter over the returned patches so a
@@ -1818,6 +1824,14 @@ export const Engine = {
         };
       }
       if (candidateRun) return result;
+      if (result.validationFindings?.some(finding => finding.severity === 'error')) {
+        Engine.lastSetupAwareResult = result;
+        return result;
+      }
+      if (result.patches.length) {
+        const undoTasks = structuredClone(snapshot.tasks.filter(task => result.patches.some(patch => patch.id === String(task.id))));
+        UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks));
+      }
       applySchedulePatches(result.patches);
       Engine.lastSetupAwareResult = result;
       Store.setLastOptimize(new Date(), 'engine');
@@ -1840,7 +1854,7 @@ export const Engine = {
       // derived from the applied patches, never the whole-run diagnostics, so
       // a line-scoped/excludeFromOpt run only reports what it actually
       // touched.
-      const patchedIds = new Set(result.patches.map(patch => String(patch.id)));
+      const patchedIds = new Set(result.patches.filter(patch => patch.changes.planning_status !== 'needs_planning').map(patch => String(patch.id)));
       const unknownSetupOrderIds = new Set<string>();
       const unknownSetupLines = new Set<string>();
       // 'scheduled-without-setup' (F1) is the single dedicated reason for an
@@ -1926,10 +1940,7 @@ export const Engine = {
         unplacedLines.add(line);
       }
       if (unplacedCount) {
-        Toast.show(Util.t('toast.optimize_orders_left_in_place', {
-          orders: unplacedCount,
-          lines: unplacedLines.size,
-        }), 'warn');
+        Toast.show(`${unplacedCount} order(s) on ${unplacedLines.size} line(s) need planning. These orders have no committed schedule dates.`, 'warn');
       }
       if (result.unchangedLines.length) {
         Toast.show(Util.t('toast.optimize_lines_guarded', { count: result.unchangedLines.length }), 'warn');

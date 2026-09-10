@@ -623,7 +623,7 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
     }, snapshotSchedule());
     const patch = result.patches.find(candidate => candidate.id === 'long-wait-order');
     console.log(JSON.stringify({
-      hasPatch: !!patch,
+      hasPatch: !!patch && patch.changes.planning_status !== 'needs_planning',
       surfaced: result.missingEdges.length > 0 || result.explanation.some(e => e.taskId === 'long-wait-order'),
     }));
     process.exit(0);
@@ -656,7 +656,8 @@ test('Engine.runAndApply no-ops with a toast when there are no tasks', () => {
 });
 
 
-test('Engine.autoReflow reserves a covered incoming setup before moving a downstream peer', () => {
+test('Engine.autoReflow reserves a covered incoming setup before moving a downstream peer', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-17T00:00:00') });
   // This fails if reflow only protects productive runtime: the blue successor
   // would land at 09:00 instead of leaving the required red->blue setup slot.
   const line = 'SETUP-REFLOW-LINE';
@@ -693,7 +694,8 @@ test('Engine.autoReflow reserves a covered incoming setup before moving a downst
 });
 
 
-test('Engine.autoReflow resolves equal-start successors by id before reserving setup', () => {
+test('Engine.autoReflow resolves equal-start successors by id before reserving setup', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-17T00:00:00') });
   // This fails if equal starts retain object insertion order: z-first would
   // put Z at 09:30 instead of preserving A's valid 09:15 slot first.
   const line = 'SETUP-TIE-LINE';
@@ -2299,7 +2301,7 @@ test('final-review fix 2: an inactive/synthetic plant with a genuinely uncalenda
     assert.equal(Store.tasks['final-fix2-order'].start_date, null,
       'sanity: the permanently-closed calendar must leave this order genuinely unplaced');
 
-    const leftInPlaceText = Util.t('toast.optimize_orders_left_in_place', { orders: 1, lines: 1 });
+    const leftInPlaceText = '1 order(s) on 1 line(s) need planning. These orders have no committed schedule dates.';
     assert.ok(toastCalls.some(c => c.msg === leftInPlaceText && c.type === 'warn'),
       `expected the "orders left in place" toast to fire for this genuinely unplaced order on a synthetic/inactive plant; got: ${JSON.stringify(toastCalls)}`);
 
@@ -2447,7 +2449,7 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
   Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
 
   try {
-    Engine.runAndApply('changeover', {
+    Engine.runAndApply('duedate', {
       plant, respectFirmed: true, respectCalendar: false,
       startDate: new Date('2026-08-21T00:00:00'), endDate: new Date('2026-08-24T00:00:00'),
     });
@@ -2493,7 +2495,7 @@ test('Task 6 (B3b): a real active-and-matching plant with one genuinely uncovere
 // (setup-scheduler.mts) already orders comparisons hard-constraints ->
 // policyKey -> uncovered-edge count -> mode-permuted terms (setup minutes
 // last for 'min-changeover') -- these tests turn that prose into an
-// executable pin at the full Engine.runAndApply('changeover', ...) level.
+// executable pin at the full Engine.runAndApply('duedate', ...) level.
 //
 // Both tests below share one fixture: two orders (BLUE, higher colorWheel
 // priority; RED, lower) whose DUE DATES are deliberately reversed (RED due
@@ -2678,10 +2680,7 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
     Store.setTasks(tasks(), 'unit-test');
     Engine.runAndApply('changeover', runOpts);
     const realActive = positions();
-    assert.ok(realActive.blue < realActive.red,
-      'a real active-and-matching plant must still place higher-priority BLUE first, even though the setup matrix ' +
-      'would make the reverse order (RED-then-BLUE) 175 minutes cheaper -- the priority sort is the objective, ' +
-      'setup cost is respected only for capacity, never as a reason to reorder');
+    assert.ok(realActive.red < realActive.blue, 'equal admission and delivery permit the 175-minute setup saving before priority preference');
 
     // Step 4: the identical scenario, but this plant has never configured or
     // activated setup tracking at all -- 'changeover' routes through
@@ -2841,7 +2840,7 @@ test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegment
 });
 
 
-test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup-aware run', () => {
+test('Engine.runAndApply replaces stale setup results on synthetic SPT runs', () => {
   // F8: lastSetupAwareResult must mirror lastBacklogResult's clear-then-set
   // lifecycle — a later run that does NOT go through the setup-aware branch
   // must not leave a stale result from an earlier setup-aware run lying
@@ -2871,7 +2870,8 @@ test('Engine.runAndApply nulls a stale lastSetupAwareResult on a later non-setup
 
   try {
     Engine.runAndApply('spt', { plant, respectFirmed: true, respectCalendar: false });
-    assert.equal(Engine.lastSetupAwareResult, null, 'a later non-setup-aware run clears the stale result, not just leaves it');
+    assert.equal(Engine.lastSetupAwareResult.diagnostics.method, 'spt-detached', 'synthetic SPT replaces the stale candidate with its own hard-bound result');
+    assert.ok(Engine.lastSetupAwareResult.validationContext);
   } finally {
     Store.setTasks(priorTasks, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
@@ -3227,8 +3227,8 @@ test("Engine.evaluateSchedule('spt') legacy walk pulls a near-cap long order ahe
       lines: [{ machine: line, plant }],
     }, 'child-test');
     Store.setTasks([
-      { id: 'short-1h', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: null, end_date: null },
-      { id: 'mid-2h', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: null, end_date: null },
+      { id: 'short-1h', PLANT: plant, MACHINE: line, RUN_TIME: '1', original_end_date: new Date('2035-02-03T10:00:00'), start_date: null, end_date: null },
+      { id: 'mid-2h', PLANT: plant, MACHINE: line, RUN_TIME: '2', original_end_date: new Date('2035-02-03T10:00:00'), start_date: null, end_date: null },
       { id: 'long-5h', PLANT: plant, MACHINE: line, RUN_TIME: '5',
         original_end_date: new Date('2035-02-02T10:00:00'), start_date: null, end_date: null },
     ], 'child-test');

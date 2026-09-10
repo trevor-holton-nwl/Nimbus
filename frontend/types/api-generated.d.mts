@@ -239,6 +239,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/purge/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Purge Preview
+         * @description Read-only dry run for POST /purge, sharing its validation
+         *     (_parse_purge_scope) and plant-scope guard so the previewed count can never
+         *     describe a different row set than the real delete. Deliberately a separate
+         *     route rather than a `dry_run` flag on /purge: brain.py's
+         *     _ADMIN_WRITE_OPERATIONS maps by route path, so a flag would file every
+         *     preview under the same orders.purge audit operation as a real delete.
+         *     Not registered in _ADMIN_WRITE_OPERATIONS and carries no require_api_key —
+         *     it changes nothing and is safe to call freely as the admin edits the form.
+         *
+         *     Payload: { plant: str, start_date: ISO, end_date: ISO, machines?: string[] }
+         *     Response: { status, plant, total, planner_overridden }
+         */
+        post: operations["purge_preview_purge_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/purge": {
         parameters: {
             query?: never;
@@ -250,10 +280,16 @@ export interface paths {
         put?: never;
         /**
          * Purge Orders
-         * @description payload: { start_date: ISO, end_date: ISO } — both inclusive.
-         *     Deletes orders where effective end date falls in the range. Stateless:
-         *     no in-memory frame to refresh afterward. (Sync handler → runs in the
-         *     threadpool, so the blocking DELETE doesn't stall the event loop.)
+         * @description payload: { plant: str, start_date: ISO, end_date: ISO, machines?: string[] }
+         *     Deletes one plant's orders where effective end date falls in the range
+         *     (both inclusive). Stateless: no in-memory frame to refresh afterward.
+         *     (Sync handler → runs in the threadpool, so the blocking DELETE doesn't
+         *     stall the event loop.)
+         *
+         *     Plant-scoped and role_plants-checked (_assert_purge_plant_allowed) — a
+         *     plant-restricted admin must not be able to delete another plant's orders,
+         *     the same reasoning /master-data/resync-order-attributes already applies to
+         *     its strictly less destructive UPDATE.
          */
         post: operations["purge_orders_purge_post"];
         delete?: never;
@@ -1417,7 +1453,7 @@ export interface paths {
         put?: never;
         /**
          * Md Set Plant Max Push Forward Days
-         * @description Persist a nullable, non-negative whole-calendar-day scheduling ceiling.
+         * @description Persist a nullable, non-negative whole-calendar-day lateness ceiling.
          */
         post: operations["md_set_plant_max_push_forward_days_master_data_plants__plant__max_push_forward_days_post"];
         delete?: never;
@@ -1512,6 +1548,32 @@ export interface paths {
          *     single-container pilot.
          */
         post: operations["security_login_security_login_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/security/client-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Security Client Config
+         * @description Public, unauthenticated by design (no Depends(...) at all) -- see
+         *     backend/security/CLAUDE.md's NIMBUS_API_KEY note. Lets the SPA learn the
+         *     current deployment-config stopgap key at boot so it can echo it back as
+         *     X-API-Key on every subsequent request (see Util.setApiKey/fetchTraced in
+         *     frontend/platform/foundation.mts). The key is not a secret from browser
+         *     clients -- it only needs to be unknown to anonymous non-SPA callers that
+         *     never load this page, which is NIMBUS_API_KEY's whole documented purpose.
+         */
+        get: operations["security_client_config_security_client_config_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2316,6 +2378,16 @@ export interface components {
             role_plants: number;
         };
         /**
+         * ClientConfigResult
+         * @description GET /security/client-config's shape -- lets the SPA learn the current
+         *     NIMBUS_API_KEY deployment-config stopgap value so it can echo it back as
+         *     X-API-Key on subsequent requests. Empty string when the key is unset.
+         */
+        ClientConfigResult: {
+            /** Apikey */
+            apiKey: string;
+        };
+        /**
          * DueDateCorrection
          * @description One order's due-date-baseline correction, computed client-side by
          *     Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
@@ -2416,6 +2488,13 @@ export interface components {
         OkResult: {
             /** Ok */
             ok: boolean;
+        };
+        /** PlanningReason */
+        PlanningReason: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
         };
         /**
          * PlantConstraintsResult
@@ -2591,9 +2670,9 @@ export interface components {
             /** Text */
             text: string;
             /** Start Date */
-            start_date: string;
+            start_date: string | null;
             /** End Date */
-            end_date: string;
+            end_date: string | null;
             /** Original Start Date */
             original_start_date?: string | null;
             /** Original End Date */
@@ -2657,6 +2736,13 @@ export interface components {
              * @default false
              */
             runtime_schedule_mismatch: boolean;
+            /**
+             * Planning Status
+             * @default scheduled
+             * @enum {string}
+             */
+            planning_status: "scheduled" | "needs_planning";
+            planning_reason?: components["schemas"]["PlanningReason"] | null;
         };
         /**
          * TaskDateUpdate
@@ -2691,6 +2777,12 @@ export interface components {
              * @default false
              */
             force: boolean;
+            /** Planning Status */
+            planning_status?: string | null;
+            /** Planning Reason */
+            planning_reason?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * TaskRefreshPayload
@@ -2744,6 +2836,13 @@ export interface components {
              * @default false
              */
             runtime_schedule_mismatch: boolean;
+            /**
+             * Planning Status
+             * @default scheduled
+             * @enum {string}
+             */
+            planning_status: "scheduled" | "needs_planning";
+            planning_reason?: components["schemas"]["PlanningReason"] | null;
         };
         /** TasksRefreshResponse */
         TasksRefreshResponse: {
@@ -2784,6 +2883,11 @@ export interface components {
              * @default []
              */
             tasks: components["schemas"]["TaskDateUpdate"][];
+            /**
+             * Atomic Optimizer
+             * @default false
+             */
+            atomic_optimizer: boolean;
         };
         /**
          * UpdateOwnNameResult
@@ -3206,6 +3310,41 @@ export interface operations {
             };
         };
     };
+    purge_preview_purge_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     purge_orders_purge_post: {
         parameters: {
             query?: never;
@@ -3215,7 +3354,7 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": {
                     [key: string]: unknown;
@@ -5397,6 +5536,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    security_client_config_security_client_config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientConfigResult"];
                 };
             };
         };

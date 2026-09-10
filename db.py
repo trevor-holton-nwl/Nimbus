@@ -471,8 +471,10 @@ _ORDERS_SELECT = f"""
         material_description  AS "MATERIAL_DESCRIPTION",
         o.machine              AS "MACHINE",
         o.plant                AS "PLANT",
-        COALESCE(seg.first_start, scheduled_start, basic_start_date) AS "BASIC_START_DATE",
-        COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) AS "BASIC_FINISH_DATE",
+        CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.first_start, scheduled_start, basic_start_date) END AS "BASIC_START_DATE",
+        CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS "BASIC_FINISH_DATE",
+        o.planning_status AS "PLANNING_STATUS",
+        o.planning_reason AS "PLANNING_REASON",
         basic_start_date      AS "ORIGINAL_START_DATE",
         basic_finish_date     AS "ORIGINAL_END_DATE",
         (seg.segment_count >= 2 OR scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
@@ -571,7 +573,8 @@ def query_orders(plant: str | None = None, line: str | None = None,
     with _pool.connection() as conn, conn.cursor() as cur:
         horizon_end, frozen_end = _horizon_bounds_for_plant(cur, plant) if plant else (None, None)
         if horizon_end is not None:
-            where.append('COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s')
+            where.append("(o.planning_status = 'needs_planning' OR "
+                         "COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s)")
             params.append(horizon_end)
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -617,7 +620,8 @@ def count_orders(plant: str | None = None, line: str | None = None,
     with _pool.connection() as conn, conn.cursor() as cur:
         horizon_end, _frozen_end = _horizon_bounds_for_plant(cur, plant) if plant else (None, None)
         if horizon_end is not None:
-            where.append('COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s')
+            where.append("(o.planning_status = 'needs_planning' OR "
+                         "COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s)")
             params.append(horizon_end)
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -760,12 +764,12 @@ def get_task_versions(ids: list[str]) -> list[dict]:
         return []
     sql = f"""
         SELECT o.id,
-               COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) AS eff_start,
-               COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) AS eff_end,
+               CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END AS eff_start,
+               CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS eff_end,
                o.xmin::text::bigint AS row_version,
                seg.schedule_segments,
                {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
-               o.plant
+               o.plant, o.planning_status, o.planning_reason
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -782,6 +786,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "schedule_segments": r[4] or [],
             "runtime_schedule_mismatch": bool(r[5]),
             "plant": r[6],
+            "planning_status": r[7],
+            "planning_reason": r[8],
         }
         for r in rows
     ]
@@ -843,7 +849,7 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
     if end_date is not None:
         sets.append("scheduled_end = %s")
         params.append(end_date)
-    sets.append("updated_at = NOW()")
+    sets.extend(["planning_status = 'scheduled'", "planning_reason = NULL", "updated_at = NOW()"])
     params.append(task_id)
     sql = f"UPDATE orders SET {', '.join(sets)} WHERE id = %s"
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -853,7 +859,8 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
     return {"status": "ok", "updated": updated}
 
 
-def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None) -> dict:
+def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None,
+                           *, atomic_optimizer: bool = False) -> dict:
     """
     Persist parent schedule aggregates and allowlisted order attributes in one
     transaction.  A schedule_segments field is an all-or-nothing replacement
@@ -897,8 +904,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
         cur.execute(
             f"""
             SELECT o.id,
-                   COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) AS eff_start,
-                   COALESCE(seg.last_end, {_EFF_END_SQL}) AS eff_end,
+                   CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END AS eff_start,
+                   CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_SQL}) END AS eff_end,
                    o.run_time,
                    o.xmin::text::bigint AS row_version,
                    seg.segment_count,
@@ -906,6 +913,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             WHERE o.id = ANY(%s)
+            ORDER BY o.id
             FOR UPDATE OF o
             """,
             (ids,),
@@ -937,8 +945,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             }
             has_segments = "schedule_segments" in it
             has_runtime = "RUN_TIME" in it
+            has_planning = "planning_status" in it
+            planning_status = it.get("planning_status")
+            planning_reason = it.get("planning_reason")
+            queued = planning_status == "needs_planning"
             if (not tid or tid in seen_ids or
-                    (start is None and end is None and not attrs and not has_segments and not has_runtime)):
+                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_planning)):
                 invalid_ids.append(tid)
                 continue
             seen_ids.add(tid)
@@ -952,8 +964,21 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             cur_start, cur_end, cur_ver = current["start"], current["end"], current["row_version"]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
+            if has_planning and (planning_status not in ("scheduled", "needs_planning") or
+                    (queued and (not isinstance(planning_reason, dict) or
+                                 not isinstance(planning_reason.get("code"), str) or
+                                 not isinstance(planning_reason.get("message"), str))) or
+                    (planning_status == "scheduled" and planning_reason is not None)):
+                invalid_ids.append(tid)
+                continue
+            if queued and (start is not None or end is not None or it.get("schedule_segments")):
+                invalid_ids.append(tid)
+                continue
             base_version = it.get("base_version")
-            if not it.get("force") and base_version is not None and base_version != cur_ver:
+            if atomic_optimizer and base_version is None:
+                invalid_ids.append(tid)
+                continue
+            if (atomic_optimizer or not it.get("force")) and base_version is not None and base_version != cur_ver:
                 stale.append(tid)   # someone else wrote since the client's read
                 continue
 
@@ -963,7 +988,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             runtime_changed = has_runtime and requested_runtime_minutes != current_runtime_minutes
             segment_rows: list[dict] | None = None
 
-            if has_segments:
+            if queued:
+                new_start = new_end = None
+                segment_rows = []
+            elif has_segments:
                 raw_segments = it.get("schedule_segments")
                 if not isinstance(raw_segments, list):
                     invalid_ids.append(tid)
@@ -1002,26 +1030,47 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 invalid_ids.append(tid)
                 continue
 
+            if (not queued and (has_planning or start is not None or end is not None or has_segments)
+                    and (new_start is None or new_end is None)):
+                invalid_ids.append(tid)
+                continue
+
             update_rows.append({
                 "id": tid,
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,
+                "queued": queued,
+                "planning_status": planning_status if has_planning else (
+                    "scheduled" if start is not None or end is not None or has_segments else None),
+                "planning_reason": planning_reason if queued else None,
                 "run_time": requested_runtime,
                 "has_runtime": has_runtime,
                 "segments": segment_rows,
                 "clear_runtime_mismatch": has_segments or start is not None or end is not None,
             })
 
+        if atomic_optimizer and (invalid_ids or not_found_ids or stale):
+            conn.rollback()
+            return {"applied": 0, "persisted": 0, "failed": len(items),
+                    "invalid": len(invalid_ids), "not_found": len(not_found_ids),
+                    "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
+                    "stale": stale, "versions": {}}
+
         if update_rows:
             try:
                 for row in update_rows:
                     sets: list[str] = []
                     params: list = []
-                    if row["start"] is not None:
+                    if row["planning_status"] is not None:
+                        sets.extend(["planning_status = %s", "planning_reason = %s"])
+                        params.extend([row["planning_status"], Jsonb(row["planning_reason"]) if row["planning_reason"] else None])
+                    if row["queued"]:
+                        sets.extend(["scheduled_start = NULL", "scheduled_end = NULL"])
+                    if row["start"] is not None and not row["queued"]:
                         sets.append("scheduled_start = %s")
                         params.append(row["start"])
-                    if row["end"] is not None:
+                    if row["end"] is not None and not row["queued"]:
                         sets.append("scheduled_end = %s")
                         params.append(row["end"])
                     if row["has_runtime"]:

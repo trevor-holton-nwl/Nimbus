@@ -2078,12 +2078,11 @@ const App = {
        during conflict reconciliation, so writing them back would be a pointless echo. */
     Store.subscribe(evt => { if (evt.source !== 'refresh') Persistence._autosave(); }, 'Persistence.autosave');
 
-    /* Track which tasks need to be written to the backend on next saveAll(). Optimize
-       ('engine' source) marks its ids force so the authoritative reschedule bypasses
-       the version check. 'refresh' is ignored — _refreshTasks already reconciled those. */
+    /* Optimizer and undo edits are dependent: mark them for atomic version-checked save.
+       'refresh' is ignored because those rows have already been reconciled. */
     Store.subscribe(evt => {
       if (evt.source === 'refresh') return;
-      const force = evt.source === 'engine';
+      const force = evt.source === 'engine' || evt.source === 'undo';
       if (evt.type === 'task:update') {
         Persistence._dirtyIds.add(String(evt.id));
         if (force) Persistence._forceIds.add(String(evt.id));
@@ -2093,6 +2092,7 @@ const App = {
         if (force) Persistence._forceIds.add(String(id));
       });
       if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+      Persistence._syncUnsaved();
     }, 'Persistence.dirty');
 
     /* Reload tasks when the user switches to a different plant */

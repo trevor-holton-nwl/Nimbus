@@ -14,6 +14,100 @@ import assert from 'node:assert/strict';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Config } from '../../../frontend/platform/foundation.mjs';
+import { UndoStack } from '../../../frontend/platform/store.mjs';
+
+test('Needs Planning survives API hydration, cached moves, normalization and undo with no committed dates', () => {
+  const due = new Date('2026-09-09T18:00:00');
+  const raw = { id: 'queued', MACHINE: 'L1', RUN_TIME: 6, planning_status: 'needs_planning',
+    planning_reason: { code: 'no_fit_found', message: 'No fit found within the allowed window.' },
+    original_end_date: due, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T14:00:00',
+    schedule_segments: [{ sequence: 1, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T11:00:00' },
+      { sequence: 2, start_date: '2026-09-09T12:00:00', end_date: '2026-09-09T15:00:00' }] };
+  const task = Persistence._prepTask(raw);
+  assert.equal(task.start_date, null);
+  assert.equal(task.end_date, null);
+  assert.deepEqual(task.scheduleSegments, []);
+  Persistence._overlayUserMoves([task], [{ id: 'queued', start_date: '2026-09-10T08:00:00',
+    end_date: '2026-09-10T14:00:00', original_start_date: '2026-09-09T00:00:00' }]);
+  assert.equal(task.start_date, null);
+  Store.setTasks([task], 'unit-test');
+  const snapshot = UndoStack.snapshotTasks(['queued']);
+  Store.updateTask('queued', { start_date: new Date('2026-09-10T08:00:00'),
+    end_date: new Date('2026-09-10T14:00:00') }, 'table');
+  assert.equal(Store.tasks.queued.planning_status, 'scheduled');
+  assert.equal(Store.tasks.queued.planning_reason, null);
+  UndoStack.restoreTasks(snapshot);
+  assert.equal(Store.tasks.queued.planning_status, 'needs_planning');
+  assert.equal(Store.tasks.queued.start_date, null);
+  assert.equal(Store.tasks.queued.original_end_date.getTime(), due.getTime());
+});
+
+test('optimizer save is atomic without force and a conflict leaves every dependent edit unsaved', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'atomic-a', MACHINE: 'L1', RUN_TIME: 6, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T14:00:00') },
+  { id: 'atomic-b', MACHINE: 'L1', RUN_TIME: 6, row_version: 5,
+    planning_status: 'needs_planning', planning_reason: { code: 'no_fit_found', message: 'No fit found.' },
+    start_date: null, end_date: null }], 'unit-test');
+  for (const id of ['atomic-a', 'atomic-b']) { Persistence._dirtyIds.add(id); Persistence._forceIds.add(id); }
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: JSON.parse(opts.body) });
+    return { ok: true, json: async () => ({ status: 'ok', updated: 2, persisted: 0, stale: ['atomic-a'], versions: {} }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls[0].body.atomic_optimizer, true);
+    assert.ok(calls[0].body.tasks.every(task => task.force === false && task.base_version === 5));
+    const queued = calls[0].body.tasks.find(task => task.id === 'atomic-b');
+    assert.equal(queued.planning_status, 'needs_planning');
+    assert.equal(queued.start_date, null);
+    assert.deepEqual(queued.schedule_segments, []);
+    assert.deepEqual([...Persistence._dirtyIds].sort(), ['atomic-a', 'atomic-b']);
+    assert.equal(calls.length, 1, 'atomic conflict must not overwrite one local row via refresh');
+  } finally { globalThis.fetch = original; Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+});
+
+test('offline reload preserves dependent optimizer dirty state and cannot trim part of the cached group', () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  const tasks = [{ id: 'offline-queue', MACHINE: 'L1', RUN_TIME: 6, row_version: 7,
+    planning_status: 'needs_planning', start_date: null, end_date: null }];
+  Store.setTasks(tasks, 'unit-test');
+  Persistence._dirtyIds.add('offline-queue'); Persistence._forceIds.add('offline-queue');
+  Persistence._saveCache();
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  assert.equal(Persistence._loadCache(), true);
+  assert.ok(Persistence._dirtyIds.has('offline-queue'));
+  assert.ok(Persistence._forceIds.has('offline-queue'));
+  assert.equal(Store.tasks['offline-queue'].start_date, null);
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  globalThis.localStorage.removeItem(Config.LS_KEY);
+});
+
+test('undo after a successful save retains the latest row version for its atomic save', () => {
+  Store.setTasks([{ id: 'undo-version', MACHINE: 'L1', RUN_TIME: 1, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00') }], 'unit-test');
+  const before = UndoStack.snapshotTasks(['undo-version']);
+  Store.updateTask('undo-version', { planning_status: 'needs_planning', start_date: null, end_date: null }, 'engine');
+  Store.tasks['undo-version'].row_version = 6;
+  UndoStack.restoreTasks(before);
+  assert.equal(Store.tasks['undo-version'].row_version, 6);
+  assert.equal(Store.tasks['undo-version'].planning_status, 'scheduled');
+});
+
+test('optimizer minute precision survives Apply and reload without quarter-hour snapping', () => {
+  Store.setTasks([{ id: 'minute-plan', MACHINE: 'L1', RUN_TIME: 1, start_date: null, end_date: null }], 'unit-test');
+  const changes = { planning_status: 'scheduled', planning_reason: null,
+    start_date: new Date('2026-09-09T08:17:00'), end_date: new Date('2026-09-09T09:17:00') };
+  Store.updateMany([{ id: 'minute-plan', changes }], 'engine');
+  assert.equal(Store.tasks['minute-plan'].start_date.getMinutes(), 17);
+  const reloaded = Persistence._prepTask(JSON.parse(JSON.stringify(Store.tasks['minute-plan'])));
+  Store.setTasks([reloaded], 'persistence');
+  assert.equal(Store.tasks['minute-plan'].start_date.getMinutes(), 17);
+  assert.equal(Store.tasks['minute-plan'].end_date.getMinutes(), 17);
+});
 
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {

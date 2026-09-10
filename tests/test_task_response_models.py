@@ -59,6 +59,8 @@ SAMPLE_TASK_ROW = {
         {"sequence": 2, "start_date": "2026-08-02T07:00:00", "end_date": "2026-08-02T09:00:00"},
     ],
     "runtime_schedule_mismatch": False,
+    "planning_status": "scheduled",
+    "planning_reason": None,
 }
 
 

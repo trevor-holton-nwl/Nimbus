@@ -159,7 +159,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
 
     # Drop rows with no usable start date (query can't enforce this without
     # losing the NULL diagnostic), then color-merge the scoped subset.
-    df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
+    df = df[df["BASIC_START_DATE"].notna() |
+            (df.get("PLANNING_STATUS", pd.Series("scheduled", index=df.index)) == "needs_planning")].reset_index(drop=True)
     pre_merge_count = len(df)
 
     df, cm_stats = plcache.apply_priority_merge(df, plant=plant)
@@ -183,8 +184,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
             data.append({
                 "id": task_id,
                 "text": task_text,
-                "start_date": row["BASIC_START_DATE"].strftime("%Y-%m-%dT%H:%M:%S"),
-                "end_date": row["BASIC_FINISH_DATE"].strftime("%Y-%m-%dT%H:%M:%S"),
+                "start_date": row["BASIC_START_DATE"].strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(row["BASIC_START_DATE"]) else None,
+                "end_date": row["BASIC_FINISH_DATE"].strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(row["BASIC_FINISH_DATE"]) else None,
                 "original_start_date": orig_start.strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(orig_start) else None,
                 "original_end_date":   orig_end.strftime("%Y-%m-%dT%H:%M:%S")   if pd.notna(orig_end)   else None,
                 "user_scheduled": bool(row.get("USER_SCHEDULED")),
@@ -217,8 +218,12 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
                 "schedule_segments": _schedule_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
                 "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
+                "planning_status": row.get("PLANNING_STATUS") or "scheduled",
+                "planning_reason": row.get("PLANNING_REASON"),
             })
 
+            if row.get("PLANNING_STATUS") == "needs_planning":
+                continue
             if prev_task_id:
                 links.append({
                     "id": link_id_counter,
@@ -245,7 +250,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     return {"data": data, "links": links, "meta": meta}
 
 
-def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None) -> dict:
+def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None,
+                             *, atomic_optimizer: bool = False) -> dict:
     """
     Normalize schedule/attribute edits and persist them write-through to Postgres
     in a single transaction (db.update_task_dates_bulk). No in-memory frame to
@@ -269,10 +275,12 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     """
     norm: list[dict] = []
     invalid = 0
+    invalid_ids = []
     attribute_fields = ("PRT_01", "PRT_02", "PRODUCTION_VERSION")
     for it in items:
         if not it.id:
             invalid += 1
+            invalid_ids.append(it.id)
             continue
         start_dt = _to_pydt(it.start_date) if it.start_date else None
         end_dt   = _to_pydt(it.end_date)   if it.end_date   else None
@@ -284,6 +292,11 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             for field in attribute_fields
             if field in supplied
         }
+        has_planning = "planning_status" in supplied or "planning_reason" in supplied
+        if (it.start_date and start_dt is None) or (it.end_date and end_dt is None):
+            invalid += 1
+            invalid_ids.append(it.id)
+            continue
         has_runtime = "RUN_TIME" in supplied
         has_segments = "schedule_segments" in supplied
         segments: list[dict] | None = None
@@ -294,6 +307,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             # to replace.
             if it.schedule_segments is None:
                 invalid += 1
+                invalid_ids.append(it.id)
                 continue
             segments = []
             for segment in it.schedule_segments:
@@ -301,6 +315,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 segment_end = _to_pydt(segment.end_date)
                 if segment_start is None or segment_end is None:
                     invalid += 1
+                    invalid_ids.append(it.id)
                     segments = None
                     break
                 segments.append({
@@ -310,16 +325,27 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 })
             if segments is None:
                 continue
-        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_segments:
+        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_segments and not has_planning:
+            if atomic_optimizer:
+                invalid += 1
+                invalid_ids.append(it.id)
             continue
         item = {"id": it.id, "start": start_dt, "end": end_dt,
                 **attrs,
                 "base_version": it.base_version, "force": it.force}
+        if has_planning:
+            item["planning_status"] = it.planning_status
+            item["planning_reason"] = it.planning_reason
         if has_runtime:
             item["RUN_TIME"] = it.RUN_TIME
         if has_segments:
             item["schedule_segments"] = segments
         norm.append(item)
+
+    if atomic_optimizer and invalid:
+        return {"applied": 0, "persisted": 0, "failed": len(items), "invalid": invalid,
+                "not_found": 0, "invalid_ids": invalid_ids, "not_found_ids": [],
+                "stale": [], "versions": {}}
 
     if not norm:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid,
@@ -327,7 +353,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 "stale": [], "versions": {}}
 
     try:
-        res = db.update_task_dates_bulk(norm, allowed_plants=allowed_plants)
+        res = db.update_task_dates_bulk(norm, allowed_plants=allowed_plants,
+                                        **({"atomic_optimizer": True} if atomic_optimizer else {}))
     except Exception as e:
         error_code = (db.translate_db_error(e).get("error_code")
                       if isinstance(e, psycopg.Error) else "db.error")
@@ -343,6 +370,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 "status": "error", "error_code": error_code,
                 "cause": "Bulk task update persist failed (transaction rolled back)"}
     res["invalid"] = res.get("invalid", 0) + invalid
+    res["invalid_ids"] = res.get("invalid_ids", []) + invalid_ids
     return res
 
 
@@ -406,7 +434,8 @@ def tasks_update(payload: TasksUpdatePayload,
     Response: { status, updated, persisted, failed, invalid, not_found,
                 invalid_ids, not_found_ids, stale, versions }
     """
-    res = _apply_task_date_updates(payload.tasks, allowed_plants=allowed_plants)
+    res = _apply_task_date_updates(payload.tasks, allowed_plants=allowed_plants,
+                                   atomic_optimizer=payload.atomic_optimizer)
     total = len(payload.tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:

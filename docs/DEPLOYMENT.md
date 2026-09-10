@@ -26,7 +26,12 @@ the URL can use it).
 
 **Single replica is required:** the color-wheel cache and the in-memory log ring buffer are per-process.
 
+## Optimizer planning exceptions release
+
+Apply `migrations/2026-09-09_optimizer_planning_exceptions.sql` through the migration ledger before releasing the dependent application. The application now reads `planning_status` and `planning_reason` on every task query. Queued orders preserve SAP baselines but have no committed dates or segments. Older application versions do not understand this state and can reconstruct dates from SAP baselines, so a rollback after orders enter Needs Planning must retain queue-aware application code. Build the frontend and bump `NIMBUS_BUILD_ID` as part of the application release. Verify a queued order and a scheduled peer together through Save/reload, and verify that a stale optimizer save persists neither row.
+
 ## Prerequisites
+
 - Azure CLI (`winget install --exact --id Microsoft.AzureCLI`), `az login`, and **Contributor on `rg-nimbus-dev`**.
 - If `az` isn't found in a shell opened before the install, refresh PATH from the registry:
   ```powershell

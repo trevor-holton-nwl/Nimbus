@@ -33,6 +33,8 @@
  */
 export interface NimbusTask {
   id: string;
+  planning_status?: 'scheduled' | 'needs_planning';
+  planning_reason?: { code: string; message: string } | null;
   text?: string;
   MACHINE: string;
   PLANT?: string;
@@ -500,6 +502,8 @@ export interface LiveState {
  *  smaller tiers (last 2000 / last 500 / none) on QuotaExceededError. See
  *  docs/archive/typescript_migration.md §G. */
 export interface StoredState {
+  /** Dependent optimizer edits must survive offline hydration as one atomic save. */
+  _optimizerDirtyIds?: string[];
   _schemaVersion: number;
   _buildId: string | null;
   _savedAt: string;

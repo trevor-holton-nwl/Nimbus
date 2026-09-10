@@ -64,3 +64,7 @@ Run: `python -m pytest tests/test_to_pydt.py tests/test_task_response_models.py 
 - Don't trust the `TaskVersionRow` docstring's `db.py:437-445` citation for `get_task_versions`'s shape — that function is at line 747 in this worktree. Line numbers drift across phases; re-grep before citing.
 - `brain.py`'s own comments (around its `backend.scheduling.*` imports) explain the re-export pattern exists specifically so pre-refactor test files that still say `import brain` keep working without edits — this is intentional back-compat scaffolding, not leftover duplication to clean up.
 - `response_model=` is only wired for this domain's routes (`GET /tasks` and the whole task-date-update family) — per the root `CLAUDE.md`, no other endpoint family in the app has it yet, so don't assume the same runtime-validation safety net exists elsewhere.
+
+## Optimizer planning exceptions (2026-09-09)
+
+`orders.planning_status` is `scheduled` or `needs_planning`; `planning_reason` is a nullable `{code,message}` JSON object. Queued rows retain SAP baselines but expose null effective dates, have no child segments, and remain in scoped horizon-filtered query/count results. Date edits restore scheduled status. `/tasks/update` accepts opt-in `atomic_optimizer: true`: every row must have a current `base_version`, force is ignored, and any invalid/not-found/stale row prevents the entire batch from writing. Default and flat-list callers retain best-effort semantics. Apply migration `2026-09-09_optimizer_planning_exceptions.sql` before deploying dependent code.
