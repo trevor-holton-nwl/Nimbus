@@ -2969,15 +2969,15 @@ test('evaluateMinChangeover\'s starvation guard never reverts to an equally-empt
 test('a plateaued search terminates \'converged\' with the same winner an un-windowed run would produce', () => {
   // The full 6-order (3 RED + 3 BLUE) exact search below explores the
   // interleaving space exhaustively (20 leaf candidates) and always finds its
-  // global optimum on the very first leaf evaluated (BLUE-then-RED, given
-  // these due dates) — so a small `bounds.convergenceWindow` should let the
+  // global optimum on the very first leaf evaluated (all BLUE orders have
+  // earlier due dates than RED) — so a small `bounds.convergenceWindow` should let the
   // search stop after just a handful of non-improving evaluations instead of
   // exploring all 20, while still producing the identical winning schedule.
   const reds = Array.from({ length: 3 }, (_, index) => (
-    scheduledTask(`converge-red-${index}`, 0.25, 'RED', `2026-08-03T1${index}:00:00`)
+    scheduledTask(`converge-red-${index}`, 0.25, 'RED', `2026-08-03T1${index + 2}:00:00`)
   ));
   const blues = Array.from({ length: 3 }, (_, index) => (
-    scheduledTask(`converge-blue-${index}`, 0.25, 'BLUE', `2026-08-03T1${index}:30:00`)
+    scheduledTask(`converge-blue-${index}`, 0.25, 'BLUE', `2026-08-03T10:${index}0:00`)
   ));
   const setup = setupTruth({ rows: [
     setupRow('GREEN', 'RED', 5), setupRow('GREEN', 'BLUE', 5),
@@ -3958,4 +3958,76 @@ test('hard bounds do not retain a donor placement that breaks setup capacity aro
   assert.equal(result.dispositions.find(d => d.id === 'tuesday-hour').status, 'needs_planning');
   assert.doesNotMatch(result.dispositions.find(d => d.id === 'tuesday-hour').reason.message, /incumbent/i);
   assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+});
+
+test('Due Date finds September capacity for the three queued orders on machine 700', () => {
+  // The supplied full machine list, with its one-hour runtimes and SAP dates.
+  // Calendar/setup are not in the grid export: use working weekdays 07-19
+  // and zero setup to isolate search ordering from unavailable capacity.
+  const rows = [
+    ['1994343884', 'RUBY', '09-11', '09-11T07:00'],
+    ['1977020090', 'RACING RED', '09-11', '09-11T07:00'],
+    ['1987588030', 'RACING RED', '09-11', '09-11T07:00'],
+    ['2014359434', 'RACING RED', '10-19', '10-12T07:00'],
+    ['1984969285', 'RUBY', '10-12', '09-16T06:15'],
+    ['1976666438', 'BLACK', '10-12', '09-16T06:15'],
+    ['1986342625', 'BLACK', '10-12', '09-16T06:15'],
+    ['1980458601', 'RACING RED', '10-15', '10-09T13:00'],
+    ['1978145551', 'CLEAR', '10-16', '10-09T07:00'],
+    ['2014753668', 'CLEAR', '09-23', '09-21T09:00'],
+    ['1976670515', 'CLEAR', '09-23', '09-21T10:00'],
+    ['1982861213', 'RACING RED', '09-25', '09-28T09:00'],
+    ['2000711637', 'RUBY', '09-25', '09-29T12:00'],
+    ['2001956538', 'RUBY', '09-14', '09-14T07:00'],
+    ['2022516338', 'BALSAM', '09-14', '09-14T07:00'],
+    ['2022516620', 'MAPLE', '09-14', '09-14T07:00'],
+    ['2022516713', 'MAPLE', '09-14', '09-14T07:00'],
+    ['1974596522', 'RUBY', '09-14', '09-14T07:00'],
+    ['1974676793', 'RUBY', '09-14', '09-14T07:00'],
+    ['1978146468', 'WHITE', '09-17', '09-17T07:00'],
+    ['1978145053', 'RACING RED', '09-17', '09-17T07:00'],
+    ['1974676179', 'RUBY', '09-17', '09-17T07:00'],
+    ['2029706296', 'RACING RED', '09-21', '09-28T08:00'],
+    ['1997183440', 'WHITE', '09-21', null],
+    ['1983178131', 'WHITE', '09-21', null],
+    ['1994529274', 'RUBY', '09-21', null],
+    ['2029706297', 'RACING RED', '09-29', '09-28T10:00'],
+    ['2001944433', 'TEAL', '09-30', '09-29T16:00'],
+    ['1997183591', 'BLACK', '10-01', '09-24T07:00'],
+    ['1984088601', 'RACING RED', '10-02', '09-28T11:00'],
+    ['2017039900', 'CLEAR', '10-05', '09-28T07:00'],
+    ['1979293486', 'RACING RED', '10-05', '09-28T12:00'],
+    ['2027199137', 'WHITE', '10-05', '09-29T10:00'],
+    ['2000507995', 'RUBY', '10-05', '09-29T13:00'],
+    ['1984968232', 'RUBY', '10-05', '09-29T14:00'],
+    ['1973892015', 'RUBY', '10-05', '09-29T15:00'],
+  ];
+  const floor = at('2026-09-19T00:00:00');
+  const tasks = rows.map(([id, color, due, start]) => {
+    const item = scheduledTask(id, 1, color, `2026-${due}T19:00:00`, start ? `2026-${start}:00` : null);
+    item.MACHINE = '700';
+    item.end_date = item.start_date ? new Date(+item.start_date + 3600000) : null;
+    item.planning_status = start ? 'scheduled' : 'needs_planning';
+    return item;
+  });
+  const snapshot = setupSnapshot(tasks, { firmedIds: tasks.filter(item => item.start_date && item.start_date < floor).map(item => item.id) });
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, day === 0 || day === 6 ? null : [7, 19]]));
+  snapshot.calendars = { '700': { workHours: hours } };
+  snapshot.plants.P1.workHours = hours;
+  snapshot.masterData.lines = [{ plant: 'P1', machine: '700' }];
+  Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 7, max_push_forward_days: 7 });
+  const setup = setupTruth({ current: null });
+  const bounds = dueDateBounds(setup, { exactSearchThreshold: 8, iterationCap: 20000,
+    now: at('2026-09-09T08:00:00'), horizonEnd: at('2026-10-14T18:00:00'), notBefore: () => floor });
+  for (const iterationCap of [64, 20000]) {
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, { ...bounds, iterationCap }, 'due-date');
+    for (const id of ['1997183440', '1983178131', '1994529274']) {
+      const disposition = result.dispositions.find(d => d.id === id);
+      assert.equal(disposition.status, 'scheduled', JSON.stringify({ disposition, diagnostics: result.diagnostics }));
+      const placed = outcomePatchFor(result, id).changes;
+      assert.ok(placed.start_date >= floor && placed.end_date <= at('2026-09-23T00:00:00'), id);
+    }
+    assert.equal(result.dispositions.filter(d => d.status === 'needs_planning').length, 0);
+    assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+  }
 });

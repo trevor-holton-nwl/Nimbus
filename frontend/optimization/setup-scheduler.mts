@@ -2444,6 +2444,11 @@ function exactSearch(
   * BLUE(12), rather than flattening every BLUE order into one block. */
   const remainingCounts = groups.map(group => group.tasks.length);
   const totalTasks = remainingCounts.reduce((total, count) => total + count, 0);
+  // A bounded DFS must reach a useful delivery sequence before exploring
+  // color-group alternatives. Alphabetical group order can spend the whole
+  // budget on late-due prefixes and never try open capacity for urgent work.
+  const urgencyRank = new Map(urgencyOrder(snapshot, bounds, line, groups.flatMap(group => group.tasks))
+    .map((item, index) => [taskId(item), index]));
   const selected: NimbusTask[] = [];
   const selectedIds = new Set<string>();
   const constrained = adjacency.predecessorBySuccessor.size > 0
@@ -2508,7 +2513,10 @@ function exactSearch(
   const makeFrame = (selectedGroupIndex: number | null, selectedTask: NimbusTask | null): ExactFrame => ({
     choices: selected.length === totalTasks
       ? []
-      : groups.flatMap((_, index) => nextChoiceForGroup(index) ? [index] : []),
+      : groups.flatMap((_, index) => {
+        const choice = nextChoiceForGroup(index);
+        return choice ? [{ index, rank: urgencyRank.get(taskId(choice.task))! }] : [];
+      }).sort((a, b) => a.rank - b.rank).map(choice => choice.index),
     nextChoice: 0,
     selectedGroupIndex,
     selectedTask,
