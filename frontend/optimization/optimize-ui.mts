@@ -1932,14 +1932,20 @@ export const OptimizerPreview = {
     const planningHtml = planning ? `<div class="opt-pv-footer-note" role="status">
       <strong>${planning.scheduled} scheduled · ${planning.needsPlanning} Needs Planning (${planning.newlyQueued} newly queued)</strong>
       <div>${planning.protectedExceptions} existing protected exceptions. Review unplaced orders in Orders → Status → Needs Planning.</div>
-      ${protectedFindings.length ? `<details open><summary>Protected orders requiring attention</summary><ul>${protectedFindings.slice(0, 50)
-        .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
-        ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}</details>` : ''}
       ${planning.incomplete ? '<div>Search incomplete. This is the best validated proposal found within the search budget.</div>' : ''}
       ${OptimizerPreview._candidate?.gapFill ? `<div>${Util.escapeHtml(OptimizerPreview.gapFillSummary(OptimizerPreview._candidate))}</div>` : ''}
       ${(OptimizerPreview._candidate?.validationFindings ?? []).filter(finding => finding.severity === 'error')
         .map(finding => `<div>${Util.escapeHtml(finding.message)}</div>`).join('')}
     </div>` : '';
+
+    const protectedHtml = protectedFindings.length ? `<details class="opt-pv-section">
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Protected orders requiring attention</span><span class="opt-pv-section-badge">${protectedFindings.length}</span></summary>
+      <div class="opt-pv-section-body">
+        <ul>${protectedFindings.slice(0, 50)
+          .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
+        ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
+      </div>
+    </details>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
@@ -1976,6 +1982,7 @@ export const OptimizerPreview = {
           ${whyHtml}
           ${gapsHtml}
           ${diagHtml}
+          ${protectedHtml}
         </div>
 
         <div class="opt-pv-footer-note">
