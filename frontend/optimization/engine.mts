@@ -177,6 +177,9 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
       lineSettings: structuredClone(Store.lineSettings),
       masterData: structuredClone(Store.masterData),
       priorityRankMaps: structuredClone(Store.priorityRankMaps),
+      setupSnapshot: structuredClone(Store.setupSnapshot),
+      frozenHorizonEnd: Store.frozenHorizonEnd ? new Date(Store.frozenHorizonEnd) : null,
+      readModelVersion: String(Store.rev()),
     };
   } finally {
     PerfMonitor.record('Optimize.snapshotSchedule', performance.now() - _pmT0s);

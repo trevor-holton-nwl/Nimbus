@@ -342,6 +342,39 @@ export interface ScheduleSnapshot {
   lineSettings: Readonly<Record<string, NimbusLineSetting>>;
   masterData: NimbusMasterData | null;
   priorityRankMaps: PriorityRankMaps;
+  /** Captured setup truth for detached evaluation. Optional for legacy
+   * callers that provide `DueDateFirstBounds.setup` separately. */
+  setupSnapshot?: SetupTruthSnapshot | null;
+  /** Frozen-horizon value captured with the rest of the read model. */
+  frozenHorizonEnd?: Date | null;
+  /** Store/read-model revision used to reject stale Apply operations. */
+  readModelVersion?: string;
+}
+
+export interface OptimizerRunContext {
+  plant: string;
+  planningStart: Date;
+  runNow: Date;
+  placementStart: Date;
+  horizonEnd: Date;
+  respectCalendar: boolean;
+  respectFirmed: boolean;
+  lines: readonly string[] | null;
+  deadlineAt: number;
+  readModelVersion: string;
+}
+
+export interface ObjectiveFacts {
+  hardErrors: number;
+  overCap: number;
+  lateCount: number;
+  latenessMinutes: number;
+  uncoveredEdges: number;
+  setupMinutes: number;
+  scheduledCount: number;
+  instabilityMinutes: number;
+  policyKey: string;
+  sequenceKey: string;
 }
 
 export interface EvaluationRequest {
@@ -354,6 +387,13 @@ export interface EvaluationRequest {
   respectCalendar?: boolean;
   /** Tests and callers that need deterministic candidate placement supply this. */
   now?: Date;
+  /** Explicit wall-clock instant; unlike `startDate`, this is never the
+   * planning-window lower bound. */
+  runNow?: Date;
+  /** Explicit planning-window lower bound. `startDate` remains its alias. */
+  planningStart?: Date | string | number | null;
+  /** Normalized effective placement floor, primarily for detached callers. */
+  placementStart?: Date | string | number | null;
   /** Phase 2 (Pkg D): an absolute performance.now() timestamp overriding the
    *  setup-aware evaluators' default SETUP_AWARE_DEADLINE_MS search window
    *  (schedule-services.mts). Used by the optimizer preview's deferred Plan B
@@ -375,6 +415,17 @@ export interface DueDateFirstBounds {
   deadline: number;
   now: Date;
   horizonEnd: Date;
+  /** User-selected planning lower bound. Defaults to `now` for legacy
+   * detached callers. */
+  planningStart?: Date;
+  /** Captured wall-clock instant. Defaults to `now` for legacy callers. */
+  runNow?: Date;
+  /** Effective lower bound for newly generated setup/production. Defaults to
+   * `now` for legacy callers. */
+  placementStart?: Date;
+  /** True uses line/plant calendars and blackout blocks; false uses
+   * continuous capacity. */
+  respectCalendar?: boolean;
   /** Optional plant rule supplied by the live engine; absent retains detached legacy behavior. */
   notBefore?: (task: NimbusTask) => Date | null;
   /** Optional plant rule: latest allowed END for a task (due-date push-forward
@@ -415,6 +466,7 @@ export interface SetupRunContext {
    *  through unconditionally. */
   resolutionIndex: SetupResolutionIndex | null;
   plant: string;
+  respectCalendar: boolean;
   /** Hoisted once: identical for every candidate this run evaluates. */
   activePriorityKeys: ReadonlyArray<string>;
   splitOrderPolicy: SplitOrderPolicy;
@@ -471,8 +523,9 @@ export function buildRunContext(
     snapshot,
     resolutionIndex,
     plant,
+    respectCalendar: bounds.respectCalendar ?? true,
     activePriorityKeys: activePriorityKeys(snapshot, plant),
-    splitOrderPolicy: splitOrderPolicyForSnapshot(snapshot, plant),
+    splitOrderPolicy: bounds.respectCalendar === false ? 'never' : splitOrderPolicyForSnapshot(snapshot, plant),
     minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, plant),
     _stateForOrder: new Map(),
     _stateSignatureKey: new Map(),
@@ -544,6 +597,17 @@ export interface SearchDiagnostics {
   runtimeMs: number;
   limitReached: boolean;
   events: ReadonlyArray<CandidateDiagnostic>;
+  budgetMs?: number;
+  deadlineAt?: number;
+  iterationsUsed?: number;
+  eligibleCount?: number;
+  evaluatedCount?: number;
+  placedCount?: number;
+  unknownTailCount?: number;
+  unknownEdgeCount?: number;
+  exhaustive?: boolean;
+  quality?: 'exact' | 'heuristic';
+  respectCalendar?: boolean;
 }
 
 export interface MissingSetupEdge {
@@ -638,6 +702,7 @@ export interface CandidateResult {
   validationContext?: { baselineSnapshot?: Readonly<ScheduleSnapshot>; snapshot: Readonly<ScheduleSnapshot>; bounds: Readonly<DueDateFirstBounds> };
   patches: ReadonlyArray<SchedulePatch>;
   score: readonly number[];
+  objective?: ObjectiveFacts;
   explanation: ReadonlyArray<CandidateReason>;
   diagnostics: SearchDiagnostics;
   unchangedLines: readonly string[];
@@ -1848,6 +1913,9 @@ function freeIntervalsFor(
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
   if (through <= from) return [];
+  if (ctx?.respectCalendar === false) {
+    return [{ start: new Date(from), end: new Date(through) }];
+  }
 
   const result: PlacementInterval[] = [];
   const day = new Date(from);
@@ -2827,7 +2895,15 @@ function searchFragment(
   const unknownTail: NimbusTask[] = [];
   for (const task of tasks) {
     const state = orderState(bounds, task, definition);
-    const key = state ? orderStateKey(bounds, task, definition)! : `unknown:${taskId(task)}`;
+    // A null successor signature is opaque: retaining it in the permutation
+    // core would let a later known order appear to have a trustworthy
+    // predecessor. Keep known-but-uncovered matrix transitions in the core;
+    // only the order's own unresolved signature belongs in the tail.
+    if (!state) {
+      unknownTail.push(task);
+      continue;
+    }
+    const key = orderStateKey(bounds, task, definition)!;
     const group = groupsByState.get(key) ?? { key, state: state ?? [], tasks: [] };
     group.tasks.push(task);
     groupsByState.set(key, group);
@@ -2848,6 +2924,12 @@ function searchFragment(
   const groups = [...groupsByState.values()]
     .map(group => ({ ...group, tasks: urgencyOrder(snapshot, bounds, line, group.tasks) }))
     .sort((left, right) => left.key.localeCompare(right.key));
+  unknownTail.sort((left, right) => {
+    const ordered = urgencyOrder(snapshot, bounds, line, [left, right]);
+    if (taskId(ordered[0]) === taskId(left)) return -1;
+    if (taskId(ordered[0]) === taskId(right)) return 1;
+    return ordinalCompare(taskId(left), taskId(right));
+  });
   if (mode === 'spt') {
     if (bounds.clock() >= bounds.deadline) {
       return {
@@ -4744,6 +4826,15 @@ export function evaluateSptWithSetup(
       runtimeMs: Math.max(0, bounds.clock() - started),
       limitReached: termination === 'deadline' || termination === 'iteration-cap',
       events: [],
+      budgetMs: Math.max(0, bounds.deadline - started),
+      deadlineAt: bounds.deadline,
+      iterationsUsed: candidateCount,
+      eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
+      evaluatedCount: candidateCount,
+      placedCount: patches.length,
+      exhaustive: termination === 'completed',
+      quality: 'exact',
+      respectCalendar: bounds.respectCalendar ?? true,
     },
     unchangedLines,
     missingEdges: uniqueMissingEdges(missingEdges),
@@ -4920,6 +5011,15 @@ export function evaluateDueDateFirst(
       runtimeMs: Math.max(0, bounds.clock() - started),
       limitReached: termination === 'deadline' || termination === 'iteration-cap',
       events: [],
+      budgetMs: Math.max(0, bounds.deadline - started),
+      deadlineAt: bounds.deadline,
+      iterationsUsed: candidateCount,
+      eligibleCount: byLine.size ? [...byLine.values()].reduce((sum, lineTasks) => sum + lineTasks.length, 0) : 0,
+      evaluatedCount: candidateCount,
+      placedCount: patches.length,
+      exhaustive: termination === 'completed',
+      quality: method.endsWith('exact') ? 'exact' : 'heuristic',
+      respectCalendar: bounds.respectCalendar ?? true,
     },
     unchangedLines,
     missingEdges: uniqueMissingEdges(missingEdges),
@@ -5138,7 +5238,7 @@ function productiveIntervals(task: NimbusTask): PlacementInterval[] {
 
 /** Revalidates the complete proposal. Protected legacy violations are warnings, never a partial-Apply veto. */
 export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>, currentSnapshot?: Readonly<ScheduleSnapshot>): ValidationFinding[] {
-  bounds = hardBounds(snapshot, bounds);
+  bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const findings: ValidationFinding[] = [];
   const add = (code: string, message: string, task?: NimbusTask, protectedTask = false): void => { findings.push({ code, message, severity: protectedTask ? 'warning' : 'error', ...(task ? { taskId: taskId(task), line: String(task.MACHINE) } : {}) }); };
   if (currentSnapshot) {
@@ -5189,13 +5289,13 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
     if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
     const policy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
-    if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, start, Math.round(Number(task.RUN_TIME) * 60))))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
+    if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, start, Math.round(Number(task.RUN_TIME) * 60), bounds.runContext)))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
     const minimum = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
     for (let index = 0; index < intervals.length; index++) {
       const interval = intervals[index];
       if (index && intervals[index - 1].end > interval.start) add('segments', 'Productive segments overlap or are out of order.', task, protectedTask);
       if (intervals.length > 1 && (+interval.end - +interval.start) / 60000 < minimum) add('segment_floor', 'A productive segment is below the plant minimum.', task, protectedTask);
-      const free = freeIntervalsFor(snapshot, String(task.MACHINE), bounds.setup.plant, interval.start, interval.end);
+      const free = freeIntervalsFor(snapshot, String(task.MACHINE), bounds.setup.plant, interval.start, interval.end, bounds.runContext);
       if (!coversInterval(free, interval)) add('calendar', 'Production overlaps nonworking time or a blackout.', task, protectedTask);
       const line = String(task.MACHINE); const list = occupied.get(line) ?? []; list.push({ interval, task: result, protectedTask }); occupied.set(line, list);
     }
@@ -5225,7 +5325,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);
         const floor = notBeforeFor(bounds, task);
         if ((!protectedTask && start < bounds.now) || (floor && start < floor)) add('setup_floor', 'Setup begins before the allowed placement floor.', task, protectedTask);
-        const free = freeIntervalsFor(snapshot, line, bounds.setup.plant, start, end);
+        const free = freeIntervalsFor(snapshot, line, bounds.setup.plant, start, end, bounds.runContext);
         if (!coversInterval(free, { start, end })) add('setup_calendar', 'Setup overlaps nonworking time or a blackout.', task, protectedTask);
         if (predecessor && timestamp(predecessor.end_date)! > start) {
           const bothProtected = protectedTask && taskIsFirmed(snapshot, predecessor);
@@ -5365,6 +5465,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
 
 function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, result: CandidateResult): CandidateResult {
   const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
+  const explanations = [...result.explanation];
   const score = [...result.score]; score[2] = 0; score[3] = 0; score[4] = -(result.dispositions ?? []).filter(d => d.status === 'scheduled').length; score[SCORE_OVER_CAP] = 0;
   const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
   const scopeIds = new Set(result.dispositions?.map(d => d.id));
@@ -5377,7 +5478,48 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   const predecessorById = new Map<string, string | null>();
   const orderedFinal = final.filter(task => scopeIds.has(taskId(task)) && task.planning_status !== 'needs_planning' && timestamp(task.start_date)).sort((a, b) => ordinalCompare(String(a.MACHINE), String(b.MACHINE)) || +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
   for (let index = 0; index < orderedFinal.length; index++) predecessorById.set(taskId(orderedFinal[index]), index && orderedFinal[index - 1].MACHINE === orderedFinal[index].MACHINE ? taskId(orderedFinal[index - 1]) : null);
-  const actualMissing = (result.validationFindings ?? []).filter(f => f.code === 'missing_setup' && f.taskId).map(f => ({ line: f.line!, predecessorOrderId: predecessorById.get(f.taskId!) ?? null, successorOrderId: f.taskId!, reason: 'scheduled-without-setup' }));
+  const definition = bounds.setup.definition;
+  const unknownStateIds = new Set(orderedFinal.flatMap(task => definition && !stateForOrder(task, definition) ? [taskId(task)] : []));
+  const missingFindingIds = new Set((result.validationFindings ?? [])
+    .filter(finding => finding.code === 'missing_setup' && finding.taskId)
+    .map(finding => finding.taskId!));
+  const edgeReasons = new Map<string, 'successor-state-unknown' | 'scheduled-without-setup' | 'initial-state-unknown'>();
+  for (const line of new Set(orderedFinal.map(task => String(task.MACHINE)))) {
+    const lineTasks = orderedFinal.filter(task => String(task.MACHINE) === line);
+    let previousState = definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
+    let previousUnknown = false;
+    for (const task of lineTasks) {
+      const successorState = definition ? stateForOrder(task, definition) : null;
+      if (missingFindingIds.has(taskId(task))) {
+        edgeReasons.set(taskId(task), !successorState || previousUnknown
+          ? 'successor-state-unknown'
+          : previousState ? 'scheduled-without-setup' : 'initial-state-unknown');
+      }
+      previousUnknown = !successorState;
+      previousState = successorState;
+    }
+  }
+  const actualMissing = (result.validationFindings ?? []).filter(f => f.code === 'missing_setup' && f.taskId).map(f => {
+    const predecessorOrderId = predecessorById.get(f.taskId!) ?? null;
+    return { line: f.line!, predecessorOrderId, successorOrderId: f.taskId!, reason: edgeReasons.get(f.taskId!) ?? 'scheduled-without-setup' };
+  });
+  const knownUncovered = actualMissing.filter(edge => edge.reason === 'scheduled-without-setup');
+  const unknownEdges = actualMissing.length - knownUncovered.length;
+  const overCap = orderedFinal.filter(task => {
+    const ceiling = notAfterFor(bounds, task);
+    return ceiling && timestamp(task.end_date) && +timestamp(task.end_date)! > +ceiling;
+  }).length;
+  for (const task of orderedFinal) {
+    if (!unknownStateIds.has(taskId(task))) continue;
+    if (!explanations.some(reason => reason.code === 'unknown-setup-tail-placement' && reason.taskId === taskId(task))) {
+      explanations.push({
+        code: 'unknown-setup-tail-placement',
+        message: `Placed ${taskId(task)} after the known setup sequence because its signature is unresolved.`,
+        line: String(task.MACHINE),
+        taskId: taskId(task),
+      });
+    }
+  }
   const changedPatches = result.patches.filter(patch => {
     const original = originals.get(patch.id)!;
     if (patch.changes.planning_status !== 'scheduled' || original.planning_status === 'needs_planning' || original.planning_reason) return true;
@@ -5385,8 +5527,23 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   });
   score[0] = (result.validationFindings ?? []).filter(f => f.severity === 'error').length;
   score[1] = [...new Set(orderedFinal.map(task => String(task.MACHINE)))].reduce((sum, line) => sum + policyScore(snapshot, bounds.setup.plant, line, orderedFinal.filter(task => String(task.MACHINE) === line), bounds.runContext), 0);
-  score[SCORE_UNCOVERED] = actualMissing.length;
-  return { ...result, patches: changedPatches, score, missingEdges: uniqueMissingEdges([...result.missingEdges.filter(edge => edge.reason !== 'scheduled-without-setup'), ...actualMissing]) };
+  score[SCORE_UNCOVERED] = knownUncovered.length;
+  score[SCORE_OVER_CAP] = overCap;
+  const diagnostics: SearchDiagnostics = {
+    ...result.diagnostics,
+    budgetMs: result.diagnostics.budgetMs ?? Math.max(0, bounds.deadline),
+    deadlineAt: result.diagnostics.deadlineAt ?? bounds.deadline,
+    iterationsUsed: result.diagnostics.iterationsUsed ?? result.diagnostics.candidateCount,
+    eligibleCount: result.diagnostics.eligibleCount ?? scopeIds.size,
+    evaluatedCount: result.diagnostics.evaluatedCount ?? result.diagnostics.candidateCount,
+    placedCount: result.diagnostics.placedCount ?? orderedFinal.length,
+    unknownTailCount: unknownStateIds.size,
+    unknownEdgeCount: unknownEdges,
+    exhaustive: result.diagnostics.exhaustive ?? result.diagnostics.termination === 'completed',
+    quality: result.diagnostics.quality ?? (result.diagnostics.method.endsWith('exact') ? 'exact' : 'heuristic'),
+    respectCalendar: result.diagnostics.respectCalendar ?? (bounds.respectCalendar ?? true),
+  };
+  return { ...result, patches: changedPatches, score, diagnostics, explanation: explanations, missingEdges: uniqueMissingEdges([...result.missingEdges.filter(edge => !['scheduled-without-setup', 'successor-state-unknown', 'initial-state-unknown'].includes(edge.reason)), ...actualMissing]) };
 }
 
 /** One final insertion pass, shared across all selected lines. Accepted production

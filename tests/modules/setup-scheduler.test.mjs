@@ -134,6 +134,65 @@ function gapFillFixture(tasks, setup = setupTruth(), overrides = {}) {
   return { snapshot, bounds, candidate };
 }
 
+test('setup-aware diagnostics identify strict-blank orders as an unknown tail', () => {
+  const known = scheduledTask('contract-known-blue', 1, 'BLUE', '2026-08-03T18:00');
+  const unknown = scheduledTask('contract-unknown-blank', 1, '', '2026-08-03T18:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 5)] });
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([known, unknown]),
+    dueDateBounds(setup),
+  );
+
+  assert.equal(result.diagnostics.unknownTailCount, 1,
+    'an unresolved successor signature must be counted as an opaque tail order');
+  assert.equal(result.diagnostics.unknownEdgeCount, 1,
+    'unknown setup edges must remain distinct from known uncovered matrix edges');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'unknown-setup-tail-placement' && reason.taskId === 'contract-unknown-blank'
+  )));
+  assert.equal(result.missingEdges.some(edge => (
+    edge.successorOrderId === 'contract-unknown-blank' && edge.reason === 'scheduled-without-setup'
+  )), false, 'a null signature is not a known uncovered matrix transition');
+});
+
+test('setup-aware respectCalendar controls blackout placement for production and setup', () => {
+  const waiting = scheduledTask('contract-calendar-order', 2, 'GREEN', '2026-08-03T18:00');
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'GREEN', 0)] });
+  const snapshot = setupSnapshot([waiting]);
+  snapshot.blocks = [{
+    id: 'contract-calendar-blackout', line: 'L1',
+    start: at('2026-08-03T09:00'), end: at('2026-08-03T10:00'),
+  }];
+
+  const respecting = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, {
+    respectCalendar: true,
+    horizonEnd: at('2026-08-03T12:00'),
+  }));
+  const ignoring = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, {
+    respectCalendar: false,
+    horizonEnd: at('2026-08-03T12:00'),
+  }));
+
+  assert.equal(+patchFor(respecting, 'contract-calendar-order').changes.start_date, +at('2026-08-03T10:00'),
+    'calendar-respecting placement must avoid the blackout');
+  assert.equal(+patchFor(ignoring, 'contract-calendar-order').changes.start_date, +at('2026-08-03T08:00'),
+    'calendar-neutral placement must use continuous capacity');
+  assert.equal(ignoring.diagnostics.respectCalendar, false);
+});
+
+test('setup-aware diagnostics expose a global budget and heuristic quality', () => {
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([scheduledTask('contract-diagnostics-order', 1, 'GREEN', '2026-08-03T18:00')]),
+    dueDateBounds(setupTruth()),
+  );
+
+  assert.equal(typeof result.diagnostics.budgetMs, 'number');
+  assert.equal(typeof result.diagnostics.deadlineAt, 'number');
+  assert.equal(typeof result.diagnostics.iterationsUsed, 'number');
+  assert.equal(typeof result.diagnostics.exhaustive, 'boolean');
+  assert.ok(['exact', 'heuristic'].includes(result.diagnostics.quality));
+});
+
 test('gap fill finds unused capacity after search expires without moving accepted production', () => {
   const fixed = scheduledTask('accepted', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T12:00', '2026-08-03T13:00');
   const waiting = scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00');
@@ -1066,9 +1125,9 @@ test('evaluateDueDateFirst never freezes a line with an incomplete (strict-blank
   assert.ok(result.explanation.some(reason => (
     reason.line === 'L1' && ['unknown-setup-tail-placement', 'initial-state-unknown'].includes(reason.code) && reason.taskId === 'incomplete-state'
   )));
-  // F1/F12: reported via the dedicated 'scheduled-without-setup' reason.
+  // Unknown signatures remain separate from known uncovered transitions.
   assert.ok(result.missingEdges.some(edge => (
-    edge.line === 'L1' && edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'incomplete-state'
+    edge.line === 'L1' && edge.reason === 'successor-state-unknown' && edge.successorOrderId === 'incomplete-state'
   )));
 });
 
@@ -2001,7 +2060,7 @@ test('setup-aware evaluators do not skip an earlier scheduled order with an unus
     assert.deepEqual(result.unchangedLines, []);
     assert.ok(result.missingEdges.some(edge => (
       edge.successorOrderId === 'unknown-state-unusable-first'
-      && edge.reason === 'initial-state-unknown'
+      && edge.reason === 'successor-state-unknown'
     )), `${label} identifies the actual first scheduled order as the unresolved physical boundary`);
   }
 });
@@ -2850,10 +2909,9 @@ test('the unknown tail is placed back-to-back with no setup gap and charges no s
     );
   }
   assert.equal(result.score[5], 0, 'no setup minutes are charged for unknown-tail placement');
-  // F1/F12: every placed tail order reports via the dedicated
-  // 'scheduled-without-setup' reason, chained predecessor-to-successor.
+  // Unknown signatures stay separate from known uncovered matrix transitions.
   for (const id of ['gap-check-a', 'gap-check-b', 'gap-check-c']) {
-    assert.ok(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup' && edge.successorOrderId === id));
+    assert.ok(result.missingEdges.some(edge => edge.reason === 'successor-state-unknown' && edge.successorOrderId === id));
   }
 });
 
@@ -3606,8 +3664,8 @@ test('a blank-signature (unresolvable-state) firmed boundary never freezes the l
     reason.code === 'firmed-boundary-state-unknown' && reason.taskId === 'blank-state-firmed'
   )), 'the unresolvable firmed state is reported via firmed-boundary-state-unknown');
   assert.ok(result.missingEdges.some(edge => (
-    edge.reason === 'initial-state-unknown' && edge.successorOrderId === 'blank-state-firmed'
-  )), 'an initial-state-unknown edge is retained for the blank-signature boundary');
+    edge.reason === 'successor-state-unknown' && edge.successorOrderId === 'blank-state-firmed'
+  )), 'an unknown-state edge is retained for the blank-signature boundary');
 });
 
 test('a firmed boundary starting exactly at bounds.now schedules cleanly with no patch before the horizon start', () => {
