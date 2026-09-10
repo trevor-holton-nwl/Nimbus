@@ -1603,11 +1603,6 @@ export const OptimizerPreview = {
         tip: Util.t('ui.opt_pv_card_lateness_tip'),
       },
       {
-        label: Util.t('ui.opt_pv_card_util'), k: 'peak_util_pct', ico: '&#9650;',
-        fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
-        tip: Util.t('ui.opt_pv_card_util_tip'),
-      },
-      {
         label: Util.t('ui.opt_pv_card_util_frozen'), k: 'peak_util_pct_frozen', ico: '&#9650;',
         fmt: (v) => String(v), unit: '%', lowerIsBetter: 'soft',
         tip: Util.t('ui.opt_pv_card_util_frozen_tip'),
