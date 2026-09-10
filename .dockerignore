@@ -40,6 +40,10 @@ tests
 *.xlsx
 *.XLSX
 
+# Local runtime data (e.g. color-wheel upload audit log) that can accumulate
+# at repo root during dev/testing — not build input, never ships in the image.
+data/
+
 # Ad-hoc local documents (specs, notes) — not runtime content, and can be
 # locked by Office while open, which breaks the ACR build's tar-upload step.
 *.docx
