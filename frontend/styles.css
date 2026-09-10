@@ -1138,6 +1138,14 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-label { background: var(--bg-subtle); }
 .vis-group { border-bottom: 1px solid var(--line); }
 .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
+/* vis-timeline's own internal "background vertical" scaffold panel (nested-group
+   indentation shading — a feature this app never uses; every row is flat,
+   level-0). Live-inspection-confirmed fully transparent, with no colored
+   descendants, so hiding it removes no real content. Hiding it is the one
+   action confirmed (live, in the browser) to clear a floating grey-bar render
+   artifact near the Gantt's first row — newly visible now that the Gantt
+   defaults to starting scrolled to the top instead of the bottom. */
+.vis-panel.vis-background.vis-vertical { display: none; }
 .vis-current-time {
   background: var(--accent) !important;
   width: 2px !important;
