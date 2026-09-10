@@ -361,6 +361,17 @@ test('real optimizer worker can be cancelled before returning a response', async
     await import(${JSON.stringify(workerPath)});
   `;
   const worker = new Worker(bridge, { eval: true, type: 'module' });
+  const colors = ['RED', 'BLUE', 'YELLOW', 'BLACK', 'WHITE', 'ORANGE', 'PURPLE', 'TEAL'];
+  const cancellationSnapshot = {
+    ...snapshot,
+    selectedPlant: 'P',
+    masterData: { plants: [{ plant: 'P' }], lines: [{ plant: 'P', machine: 'L1' }] },
+    tasks: Array.from({ length: 256 }, (_, index) => ({
+      id: `runtime-worker-cancel-${index}`,
+      PLANT: 'P', MACHINE: 'L1', COLOR: colors[index % colors.length], RUN_TIME: 1,
+      start_date: null, end_date: null, planning_status: 'needs_planning',
+    })),
+  };
   let response = false;
   let resolveStarted;
   let rejectStarted;
@@ -377,7 +388,7 @@ test('real optimizer worker can be cancelled before returning a response', async
       response = true;
     }
   });
-  worker.postMessage({ runId: 'runtime-worker-cancel', mode: 'spt', snapshot,
+  worker.postMessage({ runId: 'runtime-worker-cancel', mode: 'spt', snapshot: cancellationSnapshot,
     deadlineDurationMs: 5000, request: { mode: 'spt', respectCalendar: false } });
   await started;
   await worker.terminate();
