@@ -193,6 +193,20 @@ test('setup-aware diagnostics expose a global budget and heuristic quality', () 
   assert.ok(['exact', 'heuristic'].includes(result.diagnostics.quality));
 });
 
+test('heuristic no-fit dispositions use an incomplete-search reason', () => {
+  const fixed = scheduledTask('diagnostic-full-day', 10, 'GREEN', '2026-08-03T18:00', '2026-08-03T08:00', '2026-08-03T18:00');
+  const waiting = scheduledTask('diagnostic-waiting', 1, 'GREEN', '2026-08-03T18:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([fixed, waiting], { firmedIds: ['diagnostic-full-day'] }),
+    dueDateBounds(setupTruth({ rows: [setupRow('GREEN', 'GREEN', 0)] }), { exactSearchThreshold: 0 }),
+  );
+
+  assert.equal(result.diagnostics.quality, 'heuristic');
+  assert.equal(result.diagnostics.exhaustive, false);
+  assert.equal(result.dispositions.find(disposition => disposition.id === 'diagnostic-waiting').reason.code, 'search_incomplete',
+    'a heuristic search cannot prove that no alternate legal sequence exists');
+});
+
 test('setup-aware heuristic modes use deterministic seeds and bounded local search', () => {
   const colors = ['RED', 'BLUE', 'YELLOW', 'BLACK', 'WHITE', 'ORANGE', 'PURPLE', 'TEAL'];
   const tasks = colors.map((color, index) => scheduledTask(
@@ -3392,6 +3406,10 @@ test('a plateaued search terminates \'converged\' with the same winner an un-win
 
   const windowed = SetupScheduler.evaluateDueDateFirst(snapshot(), bounds({ convergenceWindow: 3 }));
   assert.equal(windowed.diagnostics.termination, 'converged');
+  assert.equal(windowed.diagnostics.exhaustive, false,
+    'a converged exact search is not exhaustive after it stops on a heuristic plateau');
+  assert.equal(windowed.diagnostics.quality, 'heuristic',
+    'convergence must be reported as heuristic quality');
   assert.ok(windowed.diagnostics.candidateCount < full.diagnostics.candidateCount,
     'the plateau exit stops well short of the full 20-candidate enumeration');
   assert.deepEqual(

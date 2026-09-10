@@ -811,6 +811,47 @@ export function isSearchConclusive(termination: SearchRun['termination']): boole
   return termination === 'completed' || termination === 'converged';
 }
 
+/** A completed exact enumeration is the only search that can honestly claim
+ * exhaustive quality. Convergence is a deliberate heuristic stop even when
+ * the underlying traversal uses the exact-search method label. */
+function searchQuality(
+  method: SearchDiagnostics['method'], termination: SearchDiagnostics['termination'],
+): 'exact' | 'heuristic' {
+  return method === 'due-date-first-exact' && termination === 'completed' ? 'exact' : 'heuristic';
+}
+
+function searchExhaustive(
+  method: SearchDiagnostics['method'], termination: SearchDiagnostics['termination'],
+): boolean {
+  return searchQuality(method, termination) === 'exact';
+}
+
+/** Queue reasons preserve the distinction between a proof of no fit, a hard
+ * budget cutoff, and a completed heuristic that did not enumerate every
+ * legal sequence. Callers that construct legacy diagnostics without the new
+ * fields retain the historic no-fit fallback. */
+function noFitReason(
+  candidate: Readonly<CandidateResult>,
+  completeMessage = 'No fit found within the available capacity and planning window.',
+): { code: string; message: string } {
+  if (candidate.diagnostics.limitReached) {
+    return { code: 'search_limit', message: 'Search ended before a legal placement was found.' };
+  }
+  // A one-order search has no alternate sequence to discover. Preserve a
+  // proven no-fit result for that trivial case even when the surrounding
+  // strategy is structurally heuristic (SPT always reports heuristic quality).
+  const hasAlternateSequence = (candidate.diagnostics.eligibleCount ?? 2) > 1;
+  if (hasAlternateSequence && (candidate.diagnostics.quality === 'heuristic'
+    || candidate.diagnostics.exhaustive === false
+    || candidate.diagnostics.termination === 'converged')) {
+    return {
+      code: 'search_incomplete',
+      message: 'The heuristic search completed without proving that no alternate legal sequence exists.',
+    };
+  }
+  return { code: 'no_fit_found', message: completeMessage };
+}
+
 /** Severity ranking used to aggregate multiple line/fragment `SearchRun`
  * terminations into one overall value: the WORST (most severe) one wins,
  * never simply "the last one seen". Without this, a later line/fragment that
@@ -834,11 +875,10 @@ function worseTermination(
   return TERMINATION_SEVERITY[next] > TERMINATION_SEVERITY[current] ? next : current;
 }
 
-/** A per-line counter. Constructed fresh inside the per-line loop of both
- * `evaluateDueDateFirst` and `evaluateSptWithSetup` (Part 2b) so one large
- * line's search can never exhaust the budget for every other line on the
- * plant; a firmed-boundary fragment run still shares it with every other
- * fragment on the same line. */
+/** One evaluator-wide counter. Constructed once by each top-level evaluator
+ * and threaded through every selected line, fragment, fallback, and internal
+ * baseline/candidate comparison so no nested search can reset the primary
+ * budget. */
 export interface SearchBudget {
   remainingIterations: number;
   iterationsUsed: number;
@@ -3307,13 +3347,8 @@ function searchFragment(
     if (!seeds.length || (!winner && candidateCount === 0 && termination === 'completed')) {
       missingEdges.push(inactiveOverrideEdge(line, null, requiredFirstOrderId(fragment, adjacency)));
     }
-    // Due-date push-forward limit: this is a single fixed run-time-ordered
-    // walk (no ranking search to steer via score[SCORE_OVER_CAP]), so
-    // capAwareSequence pulls a still-savable capped order ahead of the SPT
-    // head when the head would otherwise push it past its latest allowed
-    // start. A no-op when no task in this fragment has a ceiling
-    // (bounds.notAfter absent/null) — capAwareSequence returns its input
-    // unchanged in that case.
+    // Each seed remains cap-aware: a capped order is pulled ahead only when
+    // the runtime-first walk would otherwise exceed its latest allowed start.
     return {
       candidateCount,
       method: 'due-date-first-exact',
@@ -5028,7 +5063,7 @@ function invalidHorizonResult(
       evaluatedCount: 0,
       placedCount: 0,
       exhaustive: false,
-      quality: method.endsWith('exact') ? 'exact' : 'heuristic',
+      quality: searchQuality(method, 'infeasible'),
       respectCalendar: bounds.respectCalendar ?? true,
     },
     unchangedLines: [],
@@ -5092,14 +5127,9 @@ export function evaluateSptWithSetup(
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   for (const [line, tasks] of orderedLines) {
-    // Phase 1.5: a fair share of whatever wall-clock budget remains, so one
-    // early line can no longer consume the caller's entire `bounds.deadline`
-    // and leave every line behind it with zero — recomputed fresh from the
-    // clock each iteration (not decremented by a fixed slice), so a line
-    // that finishes early lets its unused share roll forward to the rest.
+    // Every line reuses this run-scoped wall-clock budget and deadline.
     const lineBounds: Readonly<DueDateFirstBounds> = bounds;
-    // Part 2b: a fresh per-line budget so one large line's search can never
-    // exhaust the iteration cap for every other line on the plant.
+    // The iteration cap is shared across this evaluator's lines and fragments.
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
@@ -5277,14 +5307,9 @@ export function evaluateDueDateFirst(
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   for (const [line, tasks] of orderedLines) {
-    // Phase 1.5: a fair share of whatever wall-clock budget remains, so one
-    // early line can no longer consume the caller's entire `bounds.deadline`
-    // and leave every line behind it with zero — recomputed fresh from the
-    // clock each iteration (not decremented by a fixed slice), so a line
-    // that finishes early lets its unused share roll forward to the rest.
+    // Every line reuses this run-scoped wall-clock budget and deadline.
     const lineBounds: Readonly<DueDateFirstBounds> = bounds;
-    // Part 2b: a fresh per-line budget so one large line's search can never
-    // exhaust the iteration cap for every other line on the plant.
+    // The iteration cap is shared across this evaluator's lines and fragments.
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
@@ -5406,8 +5431,8 @@ export function evaluateDueDateFirst(
       placedCount: patches.length,
       seedCount,
       localMoveCount,
-      exhaustive: method.endsWith('exact') && termination === 'completed',
-      quality: method.endsWith('exact') ? 'exact' : 'heuristic',
+      exhaustive: searchExhaustive(method, termination),
+      quality: searchQuality(method, termination),
       respectCalendar: bounds.respectCalendar ?? true,
     },
     unchangedLines,
@@ -5887,7 +5912,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
       dispositions.push({ id, line, status: 'scheduled' });
     } else {
-      const reason = defect ?? { code: candidate.diagnostics.limitReached ? 'search_limit' : 'no_fit_found', message: candidate.diagnostics.limitReached ? 'Search ended before a legal placement was found.' : 'No fit found within the available capacity and planning window.' };
+      const reason = defect ?? noFitReason(candidate);
       patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
@@ -5901,10 +5926,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     if (baselineWithinWindow(snapshot, bounds, original)) {
       return { id: patch.id, changes: { start_date: original.start_date, end_date: original.end_date, scheduleSegments: original.scheduleSegments ?? [], planning_status: 'scheduled', planning_reason: null } };
     }
-    const reason = planningDefect(snapshot, bounds, original) ?? {
-      code: candidate.diagnostics.limitReached ? 'search_limit' : 'no_fit_found',
-      message: candidate.diagnostics.limitReached ? 'Search ended before a legal placement was found.' : 'No fit found within the available capacity and planning window.',
-    };
+    const reason = planningDefect(snapshot, bounds, original) ?? noFitReason(candidate);
     return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
   });
   const baselineById = new Map(baselinePatches.map(patch => [patch.id, patch.changes]));
@@ -6002,7 +6024,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     unknownTailCount: unknownStateIds.size,
     unknownEdgeCount: unknownEdges,
     exhaustive: result.diagnostics.exhaustive ?? result.diagnostics.termination === 'completed',
-    quality: result.diagnostics.quality ?? (result.diagnostics.method.endsWith('exact') ? 'exact' : 'heuristic'),
+    quality: result.diagnostics.quality ?? searchQuality(result.diagnostics.method, result.diagnostics.termination),
     respectCalendar: result.diagnostics.respectCalendar ?? (bounds.respectCalendar ?? true),
   };
   return { ...result, patches: changedPatches, score, objective, diagnostics, explanation: explanations, missingEdges: finalMissingEdges };
