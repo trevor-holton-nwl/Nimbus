@@ -638,10 +638,12 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
 }
 
 /** Reproduce Remove Backlog's immutable selection boundary for detached Apply
- * validation. The mutable set is exactly the positive existing intervals
- * whose snapshot start is in [from, to); every other valid interval on the
- * selected line is occupancy only, so a moved backlog order cannot overlap it
- * without admitting that collision during final validation. */
+ * validation. The mutable set is exactly the positive-runtime existing
+ * intervals whose snapshot start is in [from, to); every other valid interval
+ * on the selected line is occupancy only, so a moved backlog order cannot
+ * overlap it without admitting that collision during final validation. Rows
+ * skipped by Remove Backlog for invalid runtime remain boundary-only and never
+ * receive a fabricated disposition or clearing patch. */
 function backlogValidationScope(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, lines: ReadonlySet<string> | null,
   from: Date, to: Date,
@@ -655,10 +657,11 @@ function backlogValidationScope(
   const valid = candidates.flatMap(task => {
     const start = finiteDate(task.start_date);
     const end = finiteDate(task.end_date);
-    return start && end && end > start ? [{ task, start }] : [];
+    const runtimeHours = Number(task.RUN_TIME);
+    return start && end && end > start ? [{ task, start, usableRuntime: Number.isFinite(runtimeHours) && runtimeHours > 0 }] : [];
   });
   const selected = new Set(valid
-    .filter(({ start }) => start >= from && start < to)
+    .filter(({ start, usableRuntime }) => usableRuntime && start >= from && start < to)
     .map(({ task }) => String(task.id)));
   return {
     scopeTaskIds: valid.filter(({ task }) => selected.has(String(task.id))).map(({ task }) => String(task.id)),

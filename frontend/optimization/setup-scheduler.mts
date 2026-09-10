@@ -3192,7 +3192,7 @@ function greedySearch(
   return {
     candidateCount,
     method: 'due-date-first-greedy',
-    termination: termination === 'completed' && winner ? 'converged' : termination,
+    termination: termination === 'completed' ? 'converged' : termination,
     winner,
     missingEdges,
     unknownTail: [],
@@ -3295,10 +3295,16 @@ function searchFragment(
   if (adjacency.issue) {
     // An active-override conflict is an explicit user assertion and stays
     // fail-closed (Part 1f); it is not a missing-data fact to route around.
+    // SPT and over-threshold Due Date fragments are still heuristic runs even
+    // when the hard adjacency check prevents the first candidate from being
+    // evaluated. Reserve `completed` for an exhaustive exact traversal; a
+    // bounded heuristic that found no winner has converged on its explored
+    // search space.
+    const heuristic = mode === 'spt' || groupsByState.size > bounds.exactSearchThreshold;
     return {
       candidateCount: 0,
       method: 'due-date-first-exact',
-      termination: 'completed',
+      termination: heuristic ? 'converged' : 'completed',
       winner: null,
       missingEdges: [...missingEdges, adjacency.issue],
       unknownTail,
@@ -3417,7 +3423,7 @@ function searchFragment(
     return {
       candidateCount,
       method: 'due-date-first-exact',
-      termination: termination === 'completed' && winner ? 'converged' : termination,
+      termination: termination === 'completed' ? 'converged' : termination,
       winner,
       missingEdges,
       unknownTail,

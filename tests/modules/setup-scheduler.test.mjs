@@ -170,6 +170,24 @@ test('unknown-tail diagnostics count opaque demand even when placement remains u
   assert.equal(result.diagnostics.unplacedCount, 1);
 });
 
+test('unknown-tail diagnostics exclude opaque protected occupancy boundaries', () => {
+  const protectedBoundary = scheduledTask(
+    'contract-unknown-protected-boundary', 1, '', '2026-08-03T18:00',
+    '2026-08-03T13:00', '2026-08-03T14:00',
+  );
+  const mutable = scheduledTask('contract-known-mutable', 1, 'GREEN', '2026-08-03T18:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([protectedBoundary, mutable], { firmedIds: [protectedBoundary.id] }),
+    dueDateBounds(setupTruth(), { horizonEnd: at('2026-08-03T12:00') }),
+  );
+
+  assert.equal(result.dispositions.some(disposition => disposition.id === protectedBoundary.id), false,
+    'an opaque protected boundary is occupancy context, not mutable demand');
+  assert.equal(result.diagnostics.unknownTailCount, 0,
+    'unknown-tail counts must exclude opaque protected boundaries outside the horizon');
+  assert.equal(result.diagnostics.unknownTailUnplacedCount, 0);
+});
+
 test('setup-aware respectCalendar controls blackout placement for production and setup', () => {
   const waiting = scheduledTask('contract-calendar-order', 2, 'GREEN', '2026-08-03T18:00');
   const setup = setupTruth({ rows: [setupRow('GREEN', 'GREEN', 0)] });
@@ -218,8 +236,38 @@ test('heuristic no-fit dispositions use an incomplete-search reason', () => {
 
   assert.equal(result.diagnostics.quality, 'heuristic');
   assert.equal(result.diagnostics.exhaustive, false);
+  assert.equal(result.diagnostics.termination, 'converged',
+    'a bounded greedy search must converge even when no candidate wins');
   assert.equal(result.dispositions.find(disposition => disposition.id === 'diagnostic-waiting').reason.code, 'search_incomplete',
     'a heuristic search cannot prove that no alternate legal sequence exists');
+});
+
+test('greedy and SPT no-winner searches report converged heuristic termination', () => {
+  const first = scheduledTask('diagnostic-no-winner-first', 1, 'RED', '2026-08-03T18:00');
+  const second = scheduledTask('diagnostic-no-winner-second', 1, 'BLUE', '2026-08-03T18:00');
+  const third = scheduledTask('diagnostic-no-winner-third', 1, 'YELLOW', '2026-08-03T18:00');
+  const snapshot = setupSnapshot([first, second, third]);
+  const setup = setupTruth({ overrides: [
+    { id: 'diagnostic-conflicting-override-one', machine: 'L1', signature_version: 1,
+      predecessor_order_id: first.id, successor_order_id: second.id,
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'conflicting fixture one' },
+    { id: 'diagnostic-conflicting-override-two', machine: 'L1', signature_version: 1,
+      predecessor_order_id: first.id, successor_order_id: third.id,
+      predecessor_state_key: setupState('RED'), successor_state_key: setupState('YELLOW'),
+      standard_min: 0, remaining_min: 0, status: 'active', reason: 'conflicting fixture two' },
+  ] });
+  const bounds = dueDateBounds(setup, { exactSearchThreshold: 0 });
+
+  const dueDate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
+  const spt = SetupScheduler.evaluateSptWithSetup(snapshot, bounds);
+  for (const [mode, result] of [['greedy', dueDate], ['spt', spt]]) {
+    assert.equal(result.diagnostics.termination, 'converged', `${mode} no-winner search should converge`);
+    assert.equal(result.diagnostics.quality, 'heuristic', `${mode} remains heuristic`);
+    assert.equal(result.diagnostics.exhaustive, false, `${mode} cannot claim exhaustive completion`);
+    assert.ok(result.patches.every(patch => patch.changes.planning_status === 'needs_planning'),
+      `${mode} fixture intentionally has no scheduled winner`);
+  }
 });
 
 test('setup-aware heuristic modes use deterministic seeds and bounded local search', () => {

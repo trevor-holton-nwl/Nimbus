@@ -136,10 +136,10 @@ test('worker transport sends remaining budget and rejects missing or malformed v
 test('real optimizer worker boundary localizes its deadline and round-trips effective firming', () => {
   const localized = localizeOptimizerDeadline({
     runId: 'deadline-boundary', mode: 'spt', snapshot,
-    request: { mode: 'spt', deadlineAt: 999999 }, deadlineDurationMs: 250,
+    request: { mode: 'spt', deadlineAt: 12 }, deadlineDurationMs: 250,
   }, () => 1000);
   assert.equal(localized.request.deadlineAt, 1250,
-    'the worker must construct its own monotonic deadline at message receipt');
+    'the duration must override a conflicting absolute deadline from another realm');
 
   const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
   const workerSnapshot = {
@@ -238,6 +238,42 @@ test('real optimizer worker preserves validation metadata for backlog candidates
     'post-window occupancy collisions must be rejected at apply without dispositioning the boundary');
 });
 
+test('detached Remove Backlog leaves skipped invalid-runtime work unchanged', () => {
+  const invalidRuntime = {
+    ...snapshot,
+    selectedPlant: 'P',
+    setupSnapshot: null,
+    masterData: {
+      plants: [{ plant: 'P', timezone: 'America/New_York' }],
+      lines: [{ plant: 'P', machine: 'L1' }],
+    },
+    calendars: { L1: { workHours: Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]])) } },
+    tasks: [{ id: 'backlog-invalid-runtime', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 'not-a-number',
+      start_date: new Date('2035-08-05T07:00:00'), end_date: new Date('2035-08-05T08:00:00'),
+      planning_status: 'scheduled' }],
+  };
+  const response = buildOptimizerWorkerResponse({
+    runId: 'backlog-invalid-runtime', mode: 'backlog', snapshot: invalidRuntime,
+    request: { mode: 'backlog', plant: 'P', startDate: new Date('2035-08-04T00:00:00'),
+      endDate: new Date('2035-08-06T00:00:00'), runAt: new Date('2035-08-06T12:00:00') },
+    deadlineDurationMs: 250,
+  }, () => 7000);
+
+  assert.ok(response.validation);
+  assert.equal(response.validation.scopeTaskIds.includes('backlog-invalid-runtime'), false,
+    'invalid-runtime work skipped by Remove Backlog must not enter mutable validation scope');
+  assert.ok(response.validation.boundaryTaskIds.includes('backlog-invalid-runtime'),
+    'skipped valid intervals remain occupancy boundaries for detached validation');
+  assert.equal(response.candidate?.patches.some(patch => patch.id === 'backlog-invalid-runtime'), false,
+    'detached preview must not fabricate a needs-planning patch for skipped work');
+  assert.equal(response.candidate?.dispositions.some(disposition => disposition.id === 'backlog-invalid-runtime'), false,
+    'detached preview must not emit a disposition for skipped work');
+
+  const rehydrated = rehydrateOptimizerCandidate(response.candidate, invalidRuntime, response.validation);
+  assert.equal(rehydrated.patches.some(patch => patch.id === 'backlog-invalid-runtime'), false);
+  assert.equal(rehydrated.dispositions.some(disposition => disposition.id === 'backlog-invalid-runtime'), false);
+});
+
 test('optimizer preview cancellation terminates the worker and rejects promptly', async () => {
   const controller = new AbortController();
   let worker;
@@ -305,21 +341,45 @@ test('optimizer worker runs in a real worker_threads realm with clone round-trip
 });
 
 test('real optimizer worker can be cancelled before returning a response', async () => {
+  // Run-id stale-response filtering is a main-thread client responsibility:
+  // the client owns the active run and rejects unrelated worker messages, as
+  // covered by the fake-worker test above. This boundary test instead proves
+  // that a dedicated worker can be stopped after it has begun this request.
   const workerPath = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
   const bridge = `
     import { parentPort } from 'node:worker_threads';
     globalThis.postMessage = value => parentPort.postMessage(value);
     Object.defineProperty(globalThis, 'onmessage', {
       configurable: true,
-      set(handler) { parentPort.on('message', data => handler({ data })); },
+      set(handler) { parentPort.on('message', data => {
+        setImmediate(() => {
+          parentPort.postMessage({ type: 'started', runId: data.runId });
+          handler({ data });
+        });
+      }); },
     });
     await import(${JSON.stringify(workerPath)});
   `;
   const worker = new Worker(bridge, { eval: true, type: 'module' });
   let response = false;
-  worker.on('message', () => { response = true; });
+  let resolveStarted;
+  let rejectStarted;
+  const started = new Promise((resolvePromise, rejectPromise) => {
+    resolveStarted = resolvePromise;
+    rejectStarted = rejectPromise;
+  });
+  const timer = setTimeout(() => rejectStarted(new Error('real optimizer worker did not acknowledge receipt')), 5000);
+  worker.on('message', value => {
+    if (value?.type === 'started') {
+      clearTimeout(timer);
+      resolveStarted();
+    } else {
+      response = true;
+    }
+  });
   worker.postMessage({ runId: 'runtime-worker-cancel', mode: 'spt', snapshot,
     deadlineDurationMs: 5000, request: { mode: 'spt', respectCalendar: false } });
+  await started;
   await worker.terminate();
-  assert.equal(response, false, 'terminating the real worker must prevent a stale response');
+  assert.equal(response, false, 'terminating the acknowledged worker must prevent a stale response');
 });
