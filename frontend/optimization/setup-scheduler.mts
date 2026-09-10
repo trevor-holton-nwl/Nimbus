@@ -5249,6 +5249,59 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
   return result;
 }
 
+/** Keep compatible placements from the other validated proposal without moving
+ * or evicting any order in the preferred admission. Validate additions per line:
+ * unrelated lines cannot invalidate them, and the expired search is not rerun. */
+function retainCompatiblePlacements(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
+  preferred: CandidateResult, alternative: CandidateResult,
+): CandidateResult {
+  const preferredStatus = new Map(preferred.dispositions?.map(d => [d.id, d.status]));
+  const additions = new Map(alternative.patches.filter(patch =>
+    patch.changes.planning_status === 'scheduled' && preferredStatus.get(patch.id) === 'needs_planning',
+  ).map(patch => [patch.id, patch]));
+  if (!additions.size) return preferred;
+  const patches = new Map(preferred.patches.map(patch => [patch.id, patch]));
+  const dispositions = new Map(preferred.dispositions?.map(d => [d.id, d]));
+  const byLine = new Map<string, NimbusTask[]>();
+  for (const item of eligibleTasks(snapshot, bounds)) {
+    const line = String(item.MACHINE);
+    const tasks = byLine.get(line) ?? []; tasks.push(item); byLine.set(line, tasks);
+  }
+  for (const [line, tasks] of byLine) {
+    let pending = urgencyOrder(snapshot, bounds, line, tasks).filter(item => additions.has(taskId(item)));
+    if (!pending.length) continue;
+    const localSnapshot = { ...snapshot, tasks };
+    const localBounds = { ...bounds, lines: [line] };
+    let progressed = true;
+    while (pending.length && progressed) {
+      progressed = false;
+      const retry: NimbusTask[] = [];
+      for (const item of pending) {
+        const id = taskId(item);
+        const placement = additions.get(id)!;
+        const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
+        const proposal = {
+          ...preferred,
+          patches: tasks.flatMap(peer => taskId(peer) === id ? [placement] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+          dispositions: tasks.map(peer => taskId(peer) === id ? disposition : dispositions.get(taskId(peer))!),
+        };
+        const errors = validateCandidate(localSnapshot, localBounds, proposal).filter(f => f.severity === 'error');
+        if (!errors.length) {
+          patches.set(id, placement); dispositions.set(id, disposition); progressed = true;
+        } else if (errors.every(f => f.code.startsWith('setup_'))) {
+          // Another accepted addition can supply a setup bridge. Production
+          // overlaps and window failures cannot be repaired by adding orders.
+          retry.push(item);
+        }
+      }
+      pending = retry;
+    }
+  }
+  const result = { ...preferred, patches: [...patches.values()], dispositions: [...dispositions.values()] };
+  return { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
+}
+
 function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: CandidateResult): CandidateResult {
   const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
@@ -5278,7 +5331,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     }
     const reason = planningDefect(snapshot, bounds, original) ?? {
       code: candidate.diagnostics.limitReached ? 'search_limit' : 'no_fit_found',
-      message: 'No valid current placement is available in this incumbent.',
+      message: candidate.diagnostics.limitReached ? 'Search ended before a legal placement was found.' : 'No fit found within the available capacity and planning window.',
     };
     return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
   });
@@ -5294,7 +5347,10 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   result = repairCandidate(snapshot, bounds, result);
   const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
   const admitted = (proposal: CandidateResult): string => { const queued = new Set(proposal.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id)); return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join(''); };
-  if ((admitted(incumbent) < admitted(result) || (admitted(incumbent) === admitted(result) && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !validateCandidate(snapshot, bounds, incumbent).some(f => f.severity === 'error')) result = incumbent;
+  const preferIncumbent = (admitted(incumbent) < admitted(result) || (admitted(incumbent) === admitted(result) && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !incumbent.validationFindings?.some(f => f.severity === 'error');
+  result = preferIncumbent
+    ? retainCompatiblePlacements(snapshot, bounds, incumbent, result)
+    : retainCompatiblePlacements(snapshot, bounds, result, incumbent);
   const score = [...result.score]; score[2] = 0; score[3] = 0; score[4] = -(result.dispositions ?? []).filter(d => d.status === 'scheduled').length; score[SCORE_OVER_CAP] = 0;
   const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
   const scopeIds = new Set(dispositions.map(d => d.id));

@@ -3914,3 +3914,48 @@ test('hard bounds admit an urgent order when a later bridge reduces setup into f
   assert.equal(outcomePatchFor(result, 'bridge-blue').changes.start_date.getTime(), at('2026-08-03T14:00:00').getTime());
   assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
 });
+
+test('hard bounds retain a found one-hour Tuesday placement when restoring an urgent Monday incumbent', () => {
+  for (const strategy of ['due-date', 'min-changeover', 'spt']) for (const separateLine of [false, true]) {
+    const snapshot = setupSnapshot([
+      scheduledTask('urgent-monday', 6, 'RED', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
+      scheduledTask('other-monday', 6, 'BLUE', '2026-08-03T18:00:00'),
+      scheduledTask('tuesday-hour', 1, 'BLUE', '2026-08-04T18:00:00'),
+    ]);
+    const setup = setupTruth();
+    if (separateLine) {
+      snapshot.tasks[2].MACHINE = 'L2';
+      snapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' });
+      snapshot.calendars.L2 = { workHours: OPEN_HOURS };
+      setup.machine_states.push({ ...setup.machine_states[0], machine: 'L2' });
+    }
+    Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 0, max_push_forward_days: 0 });
+    const bounds = dueDateBounds(setup, {
+      iterationCap: 2, horizonEnd: at('2026-08-04T18:00:00'),
+    });
+    const result = strategy === 'spt' ? SetupScheduler.evaluateSptWithSetup(snapshot, bounds)
+      : SetupScheduler.evaluateDueDateFirst(snapshot, bounds, strategy);
+    assert.equal(result.dispositions.find(d => d.id === 'urgent-monday').status, 'scheduled');
+    assert.equal(result.dispositions.find(d => d.id === 'other-monday').status, 'needs_planning');
+    assert.equal(result.dispositions.find(d => d.id === 'tuesday-hour').status, 'scheduled',
+      JSON.stringify(result.dispositions));
+    assert.equal(outcomePatchFor(result, 'tuesday-hour').changes.start_date.getTime(), at('2026-08-04T08:00:00').getTime());
+    assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+  }
+});
+
+test('hard bounds do not retain a donor placement that breaks setup capacity around the incumbent', () => {
+  const snapshot = setupSnapshot([
+    scheduledTask('urgent-monday', 6, 'RED', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
+    scheduledTask('other-monday', 6, 'BLUE', '2026-08-03T18:00:00'),
+    scheduledTask('tuesday-hour', 1, 'BLUE', '2026-08-04T18:00:00'),
+  ]);
+  Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 0, max_push_forward_days: 0 });
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth({ rows: [setupRow('RED', 'BLUE', 120)] }), {
+    iterationCap: 2, horizonEnd: at('2026-08-04T18:00:00'),
+  }));
+  assert.equal(result.dispositions.find(d => d.id === 'urgent-monday').status, 'scheduled');
+  assert.equal(result.dispositions.find(d => d.id === 'tuesday-hour').status, 'needs_planning');
+  assert.doesNotMatch(result.dispositions.find(d => d.id === 'tuesday-hour').reason.message, /incumbent/i);
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+});
