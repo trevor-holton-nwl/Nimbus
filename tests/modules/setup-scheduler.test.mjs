@@ -4893,16 +4893,26 @@ test('unknownSetupPolicy plantDefaultMinutes is inert on a synthetic zero-cost s
 });
 
 test('fragment search charges instability for moved starts instead of a hardcoded zero', () => {
-  const stable = { feasible: true, patches: [], score: [0,0,0,0,0,0,0,0], policyKey: '', sequenceKey: 'a|b',
+  // sequenceKey is deliberately the OPPOSITE of what a pre-fix (hardcoded-0)
+  // tie-break would already prefer: with both fragments reporting
+  // instabilityMinutes 0, the sequenceKey term alone would pick `shuffled`
+  // ('a|b' sorts before 'b|a'), so this only passes once instabilityMinutes
+  // (compared earlier in the term list) is actually wired through.
+  const stable = { feasible: true, patches: [], score: [0,0,0,0,0,0,0,0], policyKey: '', sequenceKey: 'b|a',
     unadmitted: [], explanation: [], missingEdges: [], instabilityMinutes: 0 };
-  const shuffled = { ...stable, sequenceKey: 'b|a', instabilityMinutes: 120 };
-  assert.ok(SetupScheduler.compareObjectiveFacts(
-    SetupScheduler.fragmentObjectiveFactsForTest(stable),
-    SetupScheduler.fragmentObjectiveFactsForTest(shuffled), 'min-changeover') < 0,
-    'a fragment that moved starts must lose the instability tie-break');
-  // Incumbent order in due sequence: a run that keeps it carries zero instability.
-  const first = scheduledTask('stab-a', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T08:00', '2026-08-03T09:00');
-  const second = scheduledTask('stab-b', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T09:00', '2026-08-03T10:00');
-  const result = SetupScheduler.evaluateMinChangeover(setupSnapshot([second, first]), dueDateBounds(setupTruth()));
-  assert.equal(result.objective?.instabilityMinutes, 0, 'the incumbent order carries zero instability');
+  const shuffled = { ...stable, sequenceKey: 'a|b', instabilityMinutes: 120 };
+  for (const mode of ['min-changeover', 'spt']) {
+    assert.ok(SetupScheduler.compareObjectiveFacts(
+      SetupScheduler.fragmentObjectiveFactsForTest(stable),
+      SetupScheduler.fragmentObjectiveFactsForTest(shuffled), mode) < 0,
+      `a fragment that moved starts must lose the instability tie-break (${mode})`);
+  }
+  // fragmentObjectiveFacts must read candidate.instabilityMinutes (not a
+  // hardcoded 0), including the `?? 0` fallback when the field is absent.
+  const candidateShape = { feasible: true, patches: [], score: [0,0,0,0,0,0,0,0], policyKey: '', sequenceKey: 'x',
+    unadmitted: [], explanation: [], missingEdges: [] };
+  assert.equal(SetupScheduler.fragmentObjectiveFactsForTest({ ...candidateShape, instabilityMinutes: 45 }).instabilityMinutes, 45,
+    'fragmentObjectiveFacts must surface a non-zero instabilityMinutes from the candidate');
+  assert.equal(SetupScheduler.fragmentObjectiveFactsForTest(candidateShape).instabilityMinutes, 0,
+    'fragmentObjectiveFacts falls back to 0 when instabilityMinutes is absent');
 });
