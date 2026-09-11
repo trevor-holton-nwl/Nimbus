@@ -1138,14 +1138,19 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-label { background: var(--bg-subtle); }
 .vis-group { border-bottom: 1px solid var(--line); }
 .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
-/* vis-timeline's own internal "background vertical" scaffold panel (nested-group
-   indentation shading — a feature this app never uses; every row is flat,
-   level-0). Live-inspection-confirmed fully transparent, with no colored
-   descendants, so hiding it removes no real content. Hiding it is the one
-   action confirmed (live, in the browser) to clear a floating grey-bar render
-   artifact near the Gantt's first row — newly visible now that the Gantt
-   defaults to starting scrolled to the top instead of the bottom. */
-.vis-panel.vis-background.vis-vertical { display: none; }
+/* vis-timeline's own internal "background vertical" panel hosts two unrelated
+   things: the "now" line (.vis-current-time, appended directly onto this
+   panel by CurrentTime.redraw()) and a nested-group indentation scaffold (a
+   feature this app never uses; every row is flat, level-0) one level deeper,
+   inside a .vis-axis child. The scaffold's ".vis-group" divs are fully
+   transparent with no colored descendants, but were still producing a
+   floating grey-bar render artifact near the Gantt's first row — newly
+   visible now that the Gantt defaults to starting scrolled to the top
+   instead of the bottom. Hide only .vis-axis, confirmed live to clear the
+   grey bar with no visual loss — hiding the whole panel (an earlier version
+   of this fix) also hid the "now" line, since it's this panel's own direct
+   sibling child, not a descendant of .vis-axis. */
+.vis-panel.vis-background.vis-vertical > .vis-axis { display: none; }
 .vis-current-time {
   background: var(--accent) !important;
   width: 2px !important;
