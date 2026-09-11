@@ -25,6 +25,7 @@ import type {
   SetupSnapshot as SetupTruthSnapshot,
   SetupStateKey,
   SplitOrderPolicy,
+  UnknownSetupPolicy,
   WorkHours,
 } from '../platform/types.mjs';
 
@@ -488,6 +489,13 @@ export interface SetupRunContext {
   activePriorityKeys: ReadonlyArray<string>;
   splitOrderPolicy: SplitOrderPolicy;
   minProductiveSegmentMinutes: number;
+  unknownSetupPolicy: UnknownSetupPolicy;
+  unknownSetupDefaultMinutes: number;
+  /** N8: taskId -> planning reason for orders this run refused to admit under
+   *  'excludeFromSearch'; read by finalizeCandidate/normalizer when the order
+   *  ends the run queued, so the planner sees the missing transition instead
+   *  of a generic no_fit_found. */
+  _setupExclusions: Map<string, { code: string; message: string }>;
   /** Lazy per-task-id memos. */
   _stateForOrder: Map<string, SetupStateKey | null>;
   _stateSignatureKey: Map<string, string | null>;
@@ -544,6 +552,9 @@ export function buildRunContext(
     activePriorityKeys: activePriorityKeys(snapshot, plant),
     splitOrderPolicy: bounds.respectCalendar === false ? 'never' : splitOrderPolicyForSnapshot(snapshot, plant),
     minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, plant),
+    unknownSetupPolicy: unknownSetupPolicyForSnapshot(snapshot, plant),
+    unknownSetupDefaultMinutes: unknownSetupDefaultMinutesForSnapshot(snapshot, plant),
+    _setupExclusions: new Map(),
     _stateForOrder: new Map(),
     _stateSignatureKey: new Map(),
     _notBefore: new Map(),
@@ -2311,6 +2322,25 @@ function minProductiveSegmentMinutesForSnapshot(snapshot: Readonly<ScheduleSnaps
   return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
 }
 
+/** N8: mirrors splitOrderPolicyForSnapshot — Store-free read of the plant's
+ * unknown-setup policy; absent/malformed → 'zero' (today's behavior). */
+function unknownSetupPolicyForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): UnknownSetupPolicy {
+  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupPolicy;
+  return value === 'plantDefaultMinutes' || value === 'excludeFromSearch' ? value : 'zero';
+}
+function unknownSetupDefaultMinutesForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): number {
+  const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupDefaultMinutes;
+  return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : 0;
+}
+/** Minutes to charge for a resolution under the run's unknown-setup policy:
+ * covered rows are always their own minutes; an uncovered row (or no row at
+ * all) is 0 or the plant default. Shared by admission, gap-fill, validation
+ * and final facts so the four never disagree. */
+function chargedSetupMinutes(ctx: Readonly<SetupRunContext> | undefined, resolved: { covered: boolean; effectiveMin: number | null } | null): number {
+  if (resolved?.covered && resolved.effectiveMin !== null) return resolved.effectiveMin;
+  return ctx?.unknownSetupPolicy === 'plantDefaultMinutes' ? ctx.unknownSetupDefaultMinutes : 0;
+}
+
 /** The Task 2 overlong decision is based on nominal line/plant operating
  * windows, not dated blackouts. Keep that same 90-day bounded definition in
  * the detached snapshot evaluator so policy routing remains Store-free. */
@@ -2530,10 +2560,11 @@ function candidateForSequence(
       // disabled|fail so the preview stamps the order accepted.
       // All three admission sites (candidateForSequence + preambles) use the
       // shared helper to ensure wording consistency.
+      effectiveSetupMinutes = chargedSetupMinutes(bounds.runContext, null);
       if (!suppressExplanations) {
-        explanation.push(admittedStateUnrecordedReason(line, task));
+        explanation.push(admittedStateUnrecordedReason(line, task, effectiveSetupMinutes));
       }
-      setupRequirement = { kind: 'resolved', minutes: 0 };
+      setupRequirement = { kind: 'resolved', minutes: effectiveSetupMinutes };
     } else {
       const resolved = resolveSetup({
         definition,
@@ -2548,6 +2579,20 @@ function candidateForSequence(
         index: bounds.runContext?.resolutionIndex ?? undefined,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
+        const ctx = bounds.runContext;
+        if (ctx?.unknownSetupPolicy === 'excludeFromSearch') {
+          // N8: refuse to admit here; the order stays eligible for later
+          // fragments/sequences where its predecessor may be covered. Only if
+          // it is never placed does this reason surface (finalizeCandidate).
+          const label = (state: SetupStateKey | null) => state?.map(part => part.value).join(' · ') || '?';
+          ctx._setupExclusions.set(taskId(task), {
+            code: 'setup_transition_unrecorded',
+            message: `No setup transition is recorded from ${label(predecessorState)} to ${label(successorState)} on ${line}; this plant excludes such orders from automatic placement.`,
+          });
+          unadmitted.push(task);
+          cursor = priorCursor;
+          continue;
+        }
         uncoveredAdmission = true;
         uncoveredEdgeCount += 1;
         // Reuse 'scheduled-without-setup' (F1) — the single existing authority
@@ -2567,15 +2612,16 @@ function candidateForSequence(
         // (schedule-workbench.mts) regex-matches those tokens to stamp
         // outcome:'rejected', and this order was accepted, not rejected. Not
         // added to PRUNE_BUCKET_BY_CODE for the same reason.
+        effectiveSetupMinutes = chargedSetupMinutes(ctx, resolved);
         if (!suppressExplanations) {
           explanation.push({
             code: 'admitted-without-setup',
-            message: `Admitted ${taskId(task)} into the covered sequence without a matching setup transition; charged zero setup minutes.`,
+            message: `Admitted ${taskId(task)} into the covered sequence without a matching setup transition; charged ${effectiveSetupMinutes} setup minutes.`,
             line,
             taskId: taskId(task),
           });
         }
-        setupRequirement = { kind: 'resolved', minutes: 0 };
+        setupRequirement = { kind: 'resolved', minutes: effectiveSetupMinutes };
       } else {
         effectiveSetupMinutes = resolved.effectiveMin;
         setupRequirement = { kind: 'resolved', minutes: resolved.effectiveMin };
@@ -3542,10 +3588,10 @@ function unknownInitialStateReason(line: string, task: Readonly<NimbusTask> | nu
   };
 }
 
-function admittedStateUnrecordedReason(line: string, task: Readonly<NimbusTask>): CandidateReason {
+function admittedStateUnrecordedReason(line: string, task: Readonly<NimbusTask>, minutes = 0): CandidateReason {
   return {
     code: 'admitted-state-unrecorded',
-    message: `Admitted ${taskId(task)} as the line's first order; the line's current setup state is not recorded, so zero setup minutes were charged.`,
+    message: `Admitted ${taskId(task)} as the line's first order; the line's current setup state is not recorded, so charged ${minutes} setup minutes.`,
     line,
     taskId: taskId(task),
   };
@@ -4173,6 +4219,12 @@ export function placeUnknownTail(
       break;
     }
     if (planningDefect(snapshot, bounds, task)) { deferred.push(task); continue; }
+    // N8: an order this run refused to admit under 'excludeFromSearch' (both
+    // states known, no matrix row) never gets the zero-cost tail fallback
+    // either — that would silently defeat the policy. It stays deferred; its
+    // recorded _setupExclusions reason surfaces only if it ends the run
+    // unplaced everywhere (finalizeCandidate/normalizer).
+    if (bounds.runContext?._setupExclusions.has(taskId(task))) { deferred.push(task); continue; }
     const priorCursor = new Date(cursor);
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
@@ -5785,7 +5837,9 @@ export function attachDetachedValidationContext(
       dispositions.push({ id, line, status: 'scheduled' });
       continue;
     }
-    const reason = result.planning_reason?.code ? result.planning_reason : reasonFor(task);
+    const reason = result.planning_reason?.code
+      ? result.planning_reason
+      : (planningDefect(snapshot, bounds, task) ?? bounds.runContext?._setupExclusions.get(id) ?? reasonFor(task));
     patches.set(id, {
       id,
       changes: {
@@ -6091,7 +6145,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const successor = definition ? stateForOrder(task, definition) : null;
       const resolution = definition && state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line) ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides }) : null;
       if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: 'A missing setup transition uses zero minutes.', severity: 'warning', taskId: taskId(task), line });
-      const minutes = resolution?.covered ? resolution.effectiveMin ?? 0 : 0;
+      const minutes = chargedSetupMinutes(bounds.runContext, resolution ?? null);
       if (minutes > 0) {
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);
         const floor = notBeforeFor(bounds, task);
@@ -6198,7 +6252,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
       dispositions.push({ id, line, status: 'scheduled' });
     } else {
-      const reason = defect ?? noFitReason(candidate);
+      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? noFitReason(candidate);
       patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
@@ -6403,7 +6457,8 @@ export function fillPlanningGaps(
         predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
         plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
         index: bounds.runContext?.resolutionIndex ?? undefined });
-      return resolution.covered ? resolution.effectiveMin ?? 0 : 0;
+      if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null;
+      return chargedSetupMinutes(bounds.runContext, resolution);
     };
     let cursor = +bounds.now;
     let predecessor: NimbusTask | null = null;
@@ -6615,7 +6670,7 @@ export function objectiveFactsForCandidate(
       const successor = stateForOrder(task, definition);
       if (state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
         const resolved = resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined });
-        if (resolved.covered) setupMinutes += resolved.effectiveMin ?? 0;
+        setupMinutes += chargedSetupMinutes(bounds.runContext, resolved);
       }
       state = successor; previous = taskId(task);
     }

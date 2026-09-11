@@ -91,6 +91,8 @@ export interface OrderScheduleSegment {
 
 export type SplitOrderPolicy = 'never' | 'overlong_only' | 'partial_allowed';
 
+export type UnknownSetupPolicy = 'zero' | 'plantDefaultMinutes' | 'excludeFromSearch';
+
 export interface NimbusBlock {
   id: string;
   /** null = all lines in the plant. Internal Store field name kept as `line`
@@ -279,6 +281,16 @@ export interface NimbusMasterPlant {
    *  computed server-side and sent down per-request instead of duplicating
    *  this plus a "now" into a client copy of the same clock math). */
   frozen_horizon_days?: number | null;
+  /** N8 (2026-09): plants.setup_policy_config JSONB sidecar, attached by
+   *  master_data.list_rows like split_order_policy. Only the unknown-setup
+   *  keys are read client-side; Stage 2 keys ride along untouched. Version 1
+   *  rows lack both keys → readers default to 'zero'/0 (today's behavior). */
+  setup_policy_config?: {
+    unknownSetupPolicy?: UnknownSetupPolicy;
+    unknownSetupDefaultMinutes?: number;
+    version?: number;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface NimbusMasterData {

@@ -4763,3 +4763,52 @@ test('admission diagnostics distinguish an unrecorded line state from an uncover
     assert.equal(rejected.test(`${r.code} ${r.message}`), false, `"${r.code}" must not trigger rejected regex`);
   });
 });
+
+function policySnapshot(tasks, config) {
+  const snapshot = setupSnapshot(tasks);
+  snapshot.masterData = { plants: [{ plant: 'P1', setup_policy_config: config }], lines: [{ plant: 'P1', machine: 'L1' }] };
+  return snapshot;
+}
+const UNCOVERED = () => setupTruth({ current: 'GREEN', rows: [setupRow('GREEN', 'BLUE', 5)] }); // GREEN->RED has no row
+
+test('unknownSetupPolicy zero is byte-identical to the default', () => {
+  const red = () => scheduledTask('n8-red', 1, 'RED', '2026-08-03T12:00');
+  const a = SetupScheduler.evaluateDueDateFirst(setupSnapshot([red()]), dueDateBounds(UNCOVERED()));
+  const b = SetupScheduler.evaluateDueDateFirst(policySnapshot([red()], { unknownSetupPolicy: 'zero', version: 2 }), dueDateBounds(UNCOVERED()));
+  assert.deepEqual(b.patches, a.patches);
+  assert.deepEqual(b.explanation.map(r => r.code), a.explanation.map(r => r.code));
+});
+
+test('unknownSetupPolicy plantDefaultMinutes charges the configured minutes and keeps the N6 code', () => {
+  const red = scheduledTask('n8-red', 1, 'RED', '2026-08-03T12:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([red], { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 45, version: 2 }),
+    dueDateBounds(UNCOVERED()),
+  );
+  assert.equal(patchFor(result, 'n8-red').changes.start_date.getTime(), at('2026-08-03T08:45').getTime(),
+    '45 setup minutes precede the first productive minute');
+  assert.equal(result.objective?.setupMinutes, 45);
+  assert.ok(result.explanation.some(r => r.code === 'admitted-without-setup' && r.taskId === 'n8-red'));
+  assert.ok(result.missingEdges.some(e => e.reason === 'scheduled-without-setup' && e.successorOrderId === 'n8-red'));
+});
+
+test('unknownSetupPolicy excludeFromSearch queues the order with a setup_transition_unrecorded reason and never freezes the line', () => {
+  // Task ids are chosen (not 'n8-red'/'n8-blue') so the search's deterministic
+  // sequenceKey tie-break (ordinalCompare over joined task ids — see
+  // compareDueDateCandidate) settles on evaluating 'n8-red' as the line's
+  // first order in the winning candidate, i.e. against the line's actual
+  // recorded current state (GREEN), not against a chain state produced by
+  // whichever order happens to sort first.
+  const red = scheduledTask('n8-red', 1, 'RED', '2026-08-03T12:00');
+  const blue = scheduledTask('n8-zblue', 1, 'BLUE', '2026-08-03T12:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([red, blue], { unknownSetupPolicy: 'excludeFromSearch', version: 2 }),
+    dueDateBounds(UNCOVERED()),
+  );
+  assert.ok(patchFor(result, 'n8-zblue'), 'the covered order is still placed (no line freeze)');
+  const queued = result.dispositions.find(d => d.id === 'n8-red');
+  assert.equal(queued?.status, 'needs_planning');
+  assert.equal(queued?.reason?.code, 'setup_transition_unrecorded');
+  assert.match(queued.reason.message, /GREEN/); assert.match(queued.reason.message, /RED/);
+  assert.deepEqual(result.unchangedLines, []);
+});
