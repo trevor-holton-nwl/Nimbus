@@ -4812,3 +4812,67 @@ test('unknownSetupPolicy excludeFromSearch queues the order with a setup_transit
   assert.match(queued.reason.message, /GREEN/); assert.match(queued.reason.message, /RED/);
   assert.deepEqual(result.unchangedLines, []);
 });
+
+test('unknownSetupPolicy plantDefaultMinutes never charges a setup-incompatible line (validation and objective facts agree at zero)', () => {
+  // A setup-incompatible line is tail-placed via placeWholeLineAsTail
+  // (never-freeze), but must never be charged the plant default: chargeable
+  // is gated on line compatibility, not just the configured policy.
+  const disabledLineOrder = scheduledTask('n8-compat-disabled-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const snapshot = setupSnapshot([disabledLineOrder]);
+  snapshot.masterData = {
+    plants: [{
+      plant: 'P1',
+      setup_policy_config: { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 45, version: 2 },
+    }],
+    lines: [{
+      plant: 'P1', machine: 'L1', setup_compatible: false,
+      setup_compatibility_reason: 'Tooling signature differs on this line',
+    }],
+  };
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(UNCOVERED()));
+
+  assert.ok(patchFor(result, 'n8-compat-disabled-blue'), 'still tail-placed (never freeze)');
+  assert.equal(result.validationFindings.some(f => f.code === 'setup_overlap'), false);
+  assert.equal(result.validationFindings.some(f => f.code === 'setup_floor'), false);
+  assert.equal(result.objective?.setupMinutes, 0);
+});
+
+test('unknownSetupPolicy plantDefaultMinutes reserves the charged minutes in a tail placement so validation and objective facts agree with it', () => {
+  // Two orders with an unresolvable (blank) own state are diverted straight
+  // to placeUnknownTail, not the covered-core admission path. Under
+  // plantDefaultMinutes each must now actually reserve the charged minutes
+  // in its placed interval (not just report them), so the reservation and
+  // the facts/validation that describe it never disagree.
+  const a = scheduledTask('n8-tail-a', 1, '', '2026-08-03T09:00:00');
+  const b = scheduledTask('n8-tail-b', 1, '', '2026-08-03T09:30:00');
+  const snapshot = policySnapshot([a, b], { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 30, version: 2 });
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth({ rows: [] })));
+
+  const [first, second] = ['n8-tail-a', 'n8-tail-b']
+    .map(id => patchFor(result, id))
+    .sort((x, y) => x.changes.start_date.getTime() - y.changes.start_date.getTime());
+  assert.ok(first && second, 'both tail orders are placed');
+  assert.equal(
+    second.changes.start_date.getTime() - first.changes.end_date.getTime(),
+    30 * 60 * 1000,
+    'the second tail order actually reserves the charged 30 minutes after the first',
+  );
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false,
+    'the optimizer never flags its own reserved tail setup as a conflict');
+  assert.ok((result.objective?.setupMinutes ?? 0) >= 30, 'objective facts count the reserved minutes');
+});
+
+test('unknownSetupPolicy plantDefaultMinutes is inert on a synthetic zero-cost snapshot (byte-identical to zero)', () => {
+  const red = () => scheduledTask('n8-synthetic-red', 1, 'RED', '2026-08-03T12:00');
+  const synthetic = { ...UNCOVERED(), synthetic: true };
+  const a = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([red()], { unknownSetupPolicy: 'zero', version: 2 }),
+    dueDateBounds(synthetic),
+  );
+  const b = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([red()], { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 45, version: 2 }),
+    dueDateBounds(synthetic),
+  );
+  assert.deepEqual(b.patches, a.patches);
+  assert.deepEqual(b.explanation.map(r => r.code), a.explanation.map(r => r.code));
+});

@@ -552,7 +552,11 @@ export function buildRunContext(
     activePriorityKeys: activePriorityKeys(snapshot, plant),
     splitOrderPolicy: bounds.respectCalendar === false ? 'never' : splitOrderPolicyForSnapshot(snapshot, plant),
     minProductiveSegmentMinutes: minProductiveSegmentMinutesForSnapshot(snapshot, plant),
-    unknownSetupPolicy: unknownSetupPolicyForSnapshot(snapshot, plant),
+    // N8 fix-up: a synthetic zero-cost snapshot (setup inactive or
+    // signature-mismatched — see Engine._syntheticZeroCostSetupSnapshot)
+    // never charges the plant default, mirroring how splitOrderPolicy is
+    // forced to 'never' when respectCalendar === false just above.
+    unknownSetupPolicy: bounds.setup.synthetic ? 'zero' : unknownSetupPolicyForSnapshot(snapshot, plant),
     unknownSetupDefaultMinutes: unknownSetupDefaultMinutesForSnapshot(snapshot, plant),
     _setupExclusions: new Map(),
     _stateForOrder: new Map(),
@@ -2332,13 +2336,31 @@ function unknownSetupDefaultMinutesForSnapshot(snapshot: Readonly<ScheduleSnapsh
   const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupDefaultMinutes;
   return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : 0;
 }
+/** Whether an unresolved (unrecorded-state or uncovered-row) transition on
+ * this line may ever be charged the plant's configured
+ * `plantDefaultMinutes`: the plant must have a real setup definition and the
+ * line must not be marked setup-incompatible (the same check
+ * `validateCandidate` already applies before calling `resolveSetup`). A
+ * synthetic zero-cost snapshot (`bounds.setup.synthetic`) is handled
+ * upstream — `buildRunContext` forces `unknownSetupPolicy` to `'zero'` for
+ * it — so this predicate only needs to gate the definition/compatibility
+ * case; `chargedSetupMinutes` combines both gates. */
+function setupChargeableOnLine(bounds: Readonly<DueDateFirstBounds>, snapshot: Readonly<ScheduleSnapshot>, line: string): boolean {
+  return !!bounds.setup.definition && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line);
+}
 /** Minutes to charge for a resolution under the run's unknown-setup policy:
  * covered rows are always their own minutes; an uncovered row (or no row at
- * all) is 0 or the plant default. Shared by admission, gap-fill, validation
- * and final facts so the four never disagree. */
-function chargedSetupMinutes(ctx: Readonly<SetupRunContext> | undefined, resolved: { covered: boolean; effectiveMin: number | null } | null): number {
+ * all) is 0 unless `chargeable` (the line has a real definition and is
+ * setup-compatible), in which case it is the plant default. Shared by
+ * admission, gap-fill, `placeUnknownTail`, validation and final facts so
+ * none of them ever disagree about what a placement actually reserved. */
+function chargedSetupMinutes(
+  ctx: Readonly<SetupRunContext> | undefined,
+  resolved: { covered: boolean; effectiveMin: number | null } | null,
+  chargeable: boolean,
+): number {
   if (resolved?.covered && resolved.effectiveMin !== null) return resolved.effectiveMin;
-  return ctx?.unknownSetupPolicy === 'plantDefaultMinutes' ? ctx.unknownSetupDefaultMinutes : 0;
+  return chargeable && ctx?.unknownSetupPolicy === 'plantDefaultMinutes' ? ctx.unknownSetupDefaultMinutes : 0;
 }
 
 /** The Task 2 overlong decision is based on nominal line/plant operating
@@ -2560,7 +2582,7 @@ function candidateForSequence(
       // disabled|fail so the preview stamps the order accepted.
       // All three admission sites (candidateForSequence + preambles) use the
       // shared helper to ensure wording consistency.
-      effectiveSetupMinutes = chargedSetupMinutes(bounds.runContext, null);
+      effectiveSetupMinutes = chargedSetupMinutes(bounds.runContext, null, setupChargeableOnLine(bounds, snapshot, line));
       if (!suppressExplanations) {
         explanation.push(admittedStateUnrecordedReason(line, task, effectiveSetupMinutes));
       }
@@ -2612,7 +2634,7 @@ function candidateForSequence(
         // (schedule-workbench.mts) regex-matches those tokens to stamp
         // outcome:'rejected', and this order was accepted, not rejected. Not
         // added to PRUNE_BUCKET_BY_CODE for the same reason.
-        effectiveSetupMinutes = chargedSetupMinutes(ctx, resolved);
+        effectiveSetupMinutes = chargedSetupMinutes(ctx, resolved, setupChargeableOnLine(bounds, snapshot, line));
         if (!suppressExplanations) {
           explanation.push({
             code: 'admitted-without-setup',
@@ -4172,6 +4194,13 @@ export function placeUnknownTail(
       ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, tasks, bounds.runContext)
       : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, tasks, bounds.runContext);
   const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+  // N8 fix-up: a tail placement reserves the same chargeable minutes
+  // validateCandidate/objectiveFactsForCandidate expect for this line, so
+  // the three never disagree about what the placement actually occupies.
+  // Definition-less/setup-incompatible lines (chargeable === false) or the
+  // 'zero'/default-'excludeFromSearch' policies still reserve zero, exactly
+  // as before.
+  const tailChargeableMinutes = chargedSetupMinutes(bounds.runContext, null, setupChargeableOnLine(bounds, snapshot, line));
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
   const missingEdges: MissingSetupEdge[] = [];
@@ -4232,7 +4261,7 @@ export function placeUnknownTail(
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
-      setup: { kind: 'resolved', minutes: 0 },
+      setup: { kind: 'resolved', minutes: tailChargeableMinutes },
       policy: splitPolicy,
       ...(splitPolicy === 'overlong_only' ? {
         isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext),
@@ -5342,7 +5371,10 @@ export function evaluateSptWithSetup(
         // N6: when a task is attached and incoming state is unrecorded,
         // emit the admitted code. The shared helper ensures consistent wording
         // across all three emission sites.
-        initialDiagnosticReasons.push(admittedStateUnrecordedReason(line, initialScheduled.task));
+        initialDiagnosticReasons.push(admittedStateUnrecordedReason(
+          line, initialScheduled.task,
+          chargedSetupMinutes(bounds.runContext, null, setupChargeableOnLine(bounds, snapshot, line)),
+        ));
       } else {
         initialDiagnosticReasons.push(unknownInitialStateReason(line, null));
       }
@@ -5529,7 +5561,10 @@ export function evaluateDueDateFirst(
         // N6: when a task is attached and incoming state is unrecorded,
         // emit the admitted code. The shared helper ensures consistent wording
         // across all three emission sites.
-        initialDiagnosticReasons.push(admittedStateUnrecordedReason(line, initialScheduled.task));
+        initialDiagnosticReasons.push(admittedStateUnrecordedReason(
+          line, initialScheduled.task,
+          chargedSetupMinutes(bounds.runContext, null, setupChargeableOnLine(bounds, snapshot, line)),
+        ));
       } else {
         initialDiagnosticReasons.push(unknownInitialStateReason(line, null));
       }
@@ -6138,14 +6173,22 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
   for (const line of lines) {
     const lineTasks = proposed.filter(task => String(task.MACHINE) === line).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
     const definition = bounds.setup.definition;
+    // N8 fix-up: a definition-less or setup-incompatible line never charges
+    // the plant default (this is the same gate resolveSetup's own callers
+    // already applied); an unrecorded initial/order state on an otherwise
+    // chargeable line still resolves through chargedSetupMinutes below via a
+    // null resolution.
+    const chargeable = setupChargeableOnLine(bounds, snapshot, line);
     let state = definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
     let predecessor: NimbusTask | null = null;
     for (const task of lineTasks) {
       const protectedTask = taskIsEvaluationProtected(snapshot, bounds, task);
       const successor = definition ? stateForOrder(task, definition) : null;
-      const resolution = definition && state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line) ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides }) : null;
+      const resolution = chargeable && state && successor
+        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides })
+        : null;
       if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: 'A missing setup transition uses zero minutes.', severity: 'warning', taskId: taskId(task), line });
-      const minutes = chargedSetupMinutes(bounds.runContext, resolution ?? null);
+      const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
       if (minutes > 0) {
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);
         const floor = notBeforeFor(bounds, task);
@@ -6452,13 +6495,20 @@ export function fillPlanningGaps(
       const from = predecessor ? state(predecessor) : definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
       const to = state(successor);
       if (definition && inactiveOverrideForTransition(bounds, line, from, to, predecessor ? taskId(predecessor) : null, taskId(successor), lineIds, true)) return null;
-      if (!definition || !from || !to || setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) return 0;
-      const resolution = resolveSetup({ definition, machine: line, predecessorState: from, successorState: to,
+      const chargeable = setupChargeableOnLine(bounds, snapshot, line);
+      // N8 fix-up: no definition / setup-incompatible line never charges,
+      // regardless of policy. An unrecorded predecessor/successor state is
+      // otherwise the same "unresolved transition" shape as an uncovered row
+      // below, so it goes through the same chargedSetupMinutes gate rather
+      // than a hardcoded zero.
+      if (!chargeable) return 0;
+      if (!from || !to) return chargedSetupMinutes(bounds.runContext, null, true);
+      const resolution = resolveSetup({ definition: definition!, machine: line, predecessorState: from, successorState: to,
         predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
         plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
         index: bounds.runContext?.resolutionIndex ?? undefined });
       if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null;
-      return chargedSetupMinutes(bounds.runContext, resolution);
+      return chargedSetupMinutes(bounds.runContext, resolution, true);
     };
     let cursor = +bounds.now;
     let predecessor: NimbusTask | null = null;
@@ -6659,6 +6709,11 @@ export function objectiveFactsForCandidate(
   }
   const definition = bounds.setup.definition;
   if (definition) for (const line of new Set(tasks.map(task => String(task.MACHINE)))) {
+    // N8 fix-up: setup-incompatible lines never charge, regardless of
+    // policy; an unrecorded predecessor/successor state on an otherwise
+    // chargeable line still resolves through chargedSetupMinutes below via a
+    // null resolution, rather than being silently skipped.
+    const chargeable = !setupCompatibilityForLine(snapshot, bounds.setup.plant, line);
     let state = initialStateForLine(bounds, line, definition.signature_version).state;
     let previous: string | null = null;
     const ordered = tasks.filter(task => {
@@ -6668,9 +6723,11 @@ export function objectiveFactsForCandidate(
     }).sort((a,b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
     for (const task of ordered) {
       const successor = stateForOrder(task, definition);
-      if (state && successor && !setupCompatibilityForLine(snapshot, bounds.setup.plant, line)) {
-        const resolved = resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined });
-        setupMinutes += chargedSetupMinutes(bounds.runContext, resolved);
+      if (chargeable) {
+        const resolved = state && successor
+          ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
+          : null;
+        setupMinutes += chargedSetupMinutes(bounds.runContext, resolved, true);
       }
       state = successor; previous = taskId(task);
     }
