@@ -516,9 +516,27 @@ export const Alerts = {
  *  entirely — a scoped merge retains untouched lines' stale (dismissal-
  *  filtered) alert lists as-is, so a cleared dismissal on an untouched line
  *  would otherwise never re-surface until some later full recompute. */
+// N: same placeholder set as nimbus-compute-core.js's tool-conflict rule
+// (`TOOL_PLACEHOLDERS`, ~line 391) — kept in sync deliberately, not shared,
+// since the core module has no import boundary into this one.
+const _TOOL_PLACEHOLDERS = new Set(['', '-', '0', 'N/A', 'NONE', 'NULL']);
+
+/** True when `task` carries a real (non-placeholder) PRT_01/PRT_02 tool id.
+ *  Used to decide whether an incremental alert recompute must escalate to a
+ *  full recompute — see `scheduleAlertsForPatches`'s header comment. */
+export function taskCarriesTool(task: NimbusTask | undefined | null): boolean {
+  if (!task) return false;
+  for (const key of ['PRT_01', 'PRT_02'] as const) {
+    const v = String(task[key] ?? '').trim();
+    if (v && !_TOOL_PLACEHOLDERS.has(v.toUpperCase())) return true;
+  }
+  return false;
+}
+
 export function scheduleAlertsForPatches(
   patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
   resolveLine: (id: string) => string | undefined,
+  resolveTask?: (id: string) => NimbusTask | undefined,
 ): void {
   // No patches to scope to (e.g. an apply that changed nothing) — fall back
   // to a full recompute rather than silently skip one.
@@ -528,6 +546,12 @@ export function scheduleAlertsForPatches(
     if ('MACHINE' in p.changes) { Alerts.scheduleRecompute(); return; }
     const line = resolveLine(p.id);
     if (!line) { Alerts.scheduleRecompute(); return; }
+    // `tool-conflict` is emitted on the LATER order's line, which can differ
+    // from the line any moved task actually lives on — a scoped recompute
+    // could miss creating/clearing that alert on the other line. Any moved
+    // task carrying a real PRT_01/PRT_02 tool id forces a full recompute
+    // instead of trusting the line scope.
+    if (resolveTask && taskCarriesTool(resolveTask(p.id))) { Alerts.scheduleRecompute(); return; }
     lines.add(line);
   }
   Alerts.scheduleRecomputeLines(lines);

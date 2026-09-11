@@ -1245,13 +1245,15 @@ export const AlertsUIAdapter = {
 
     // -------- Categorize alerts
     const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
-    // Partial: AlertType now also carries tool-conflict + the setup-diagnostic types,
-    // which intentionally have no UI category yet (see comment below) and fall
-    // through to 'exceptions' at the lookup site.
+    // Partial: AlertType also carries the setup-diagnostic types, which
+    // intentionally have no UI category yet (see comment below) and fall
+    // through to 'exceptions' at the lookup site. tool-conflict files with
+    // 'conflicts' (same bucket as overlap), not the exceptions fallback.
     const CAT_MAP: Partial<Record<AlertType, string>> = {
       overload:             'capacity',
       'near-capacity':      'capacity',
       overlap:              'conflicts',
+      'tool-conflict':      'conflicts',
       blackout:             'calendar',
       closed:               'calendar',
       'firmed-closed':       'calendar',

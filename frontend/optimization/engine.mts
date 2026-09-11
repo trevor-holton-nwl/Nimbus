@@ -66,7 +66,7 @@
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
-import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
+import { Alerts, scheduleAlertsForPatches, taskCarriesTool } from '../insights/services.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
   evaluateDueDateFirst as evaluateDueDateFirstPure,
@@ -2113,7 +2113,7 @@ export const Engine = {
       // recompute. A pending full recompute already wins over a scoped one by
       // design, so force it whenever there was something to clear.
       if (hadDismissed) Alerts.scheduleRecompute();
-      else scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE || 'Unknown');
+      else scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
       // Surface the never-freeze fallbacks that actually landed in this apply:
       // orders scheduled without a resolvable setup transition (no changeover
       // bar) and, separately, any line still guarded off entirely (only
@@ -2572,7 +2572,12 @@ export const Engine = {
         Calendar._endRun();
       }
       if (patches.length) Store.updateMany(patches, 'engine');
-      Alerts.scheduleRecomputeLines(new Set([line]));
+      // A `tool-conflict` alert is emitted on the LATER order's line, which
+      // can be a different line than this reflow's own `line` — a moved
+      // task carrying a real PRT_01/PRT_02 tool id forces a full recompute
+      // instead of trusting the single-line scope.
+      if (taskCarriesTool(changed) || patches.some(p => taskCarriesTool(Store.tasks[p.id]))) Alerts.scheduleRecompute();
+      else Alerts.scheduleRecomputeLines(new Set([line]));
       return;
     }
     for (const p of peers) {
@@ -2614,8 +2619,12 @@ export const Engine = {
       predecessor = { ...p, ...changes };
     }
     if (patches.length) Store.updateMany(patches, 'engine');
-    // Reflow only ever shifts dates within `line`, so scope the alert recompute to it.
-    Alerts.scheduleRecomputeLines(new Set([line]));
+    // Reflow only ever shifts dates within `line`, so scope the alert recompute to it —
+    // unless a moved task carries a real PRT_01/PRT_02 tool id: `tool-conflict` is
+    // emitted on the LATER order's (possibly different) line, so that case forces a
+    // full recompute instead of trusting the single-line scope.
+    if (taskCarriesTool(changed) || patches.some(p => taskCarriesTool(Store.tasks[p.id]))) Alerts.scheduleRecompute();
+    else Alerts.scheduleRecomputeLines(new Set([line]));
   }
 };
 

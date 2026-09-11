@@ -1022,7 +1022,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     rollback. `strict_conflicts=True` is honored only together with
     `atomic_optimizer`: a non-empty scan rolls the whole batch back and returns
     status 'error' / error_code 'schedule.conflicts'; a scan failure under strict
-    mode propagates instead of being swallowed.
+    mode propagates instead of being swallowed. The window is bounded on the
+    neighbour's effective START (index-servable), so an order that began more
+    than a day before the window and runs into it is not scanned;
+    `conflicts == []` is not proof of no overlap.
 
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
     not_found_ids, stale, versions}. invalid_ids / not_found_ids carry the actual ids

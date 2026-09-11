@@ -1165,6 +1165,14 @@ historical note is retained here so it is not silently forgotten.
   assumption this specific is exactly the kind of thing a future change can invalidate without anyone
   noticing.
 
+## Optimizer `_setupExclusions` scoping — deferred fix (2026-09-11, N8b)
+
+**Optimizer `_setupExclusions` is run-scoped and last-write-wins across losing candidates**
+(2026-09-11, N8b): a task refused under `excludeFromSearch` in a losing arrangement keeps its
+exclusion in the winner, so `placeUnknownTail` skips it and it can be queued with
+`setup_transition_unrecorded` when the winning arrangement would have placed it. Fix: per-candidate
+exclusion map merged on the winner. Only affects plants that opt into `excludeFromSearch`.
+
 ## Domain refactor — deferred backend data-layer split (2026-08-31)
 
 The domain refactor plan (`docs/architecture/domain-refactor-plan.md`, v2) deliberately scopes the

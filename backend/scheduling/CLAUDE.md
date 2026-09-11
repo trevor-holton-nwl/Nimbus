@@ -40,6 +40,7 @@ Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `sele
 - **An explicit aggregate replacement is required, not implied.** `_apply_task_date_updates` treats a JSON `null` for `schedule_segments` as invalid (increments `invalid`, does not silently erase durable productive pieces) — a client must send `[]` explicitly to clear segments.
 - **Never a whole-batch 4xx for `/tasks/update`/`/tasks/bulk_update`.** Both are best-effort and report per-row counts in the body (`persisted`/`failed`/`invalid`/`not_found`/`stale`/`versions`, plus `invalid_ids`/`not_found_ids` so the frontend can distinguish terminal rejections from transient loss). A whole-transaction rollback (a raised `psycopg.Error`) is reported as `{"status": "error", "error_code": ..., "cause": ...}` inside a 200, not as an HTTP 5xx.
 - **`GET /tasks` refuses an unscoped, unbounded pull** — no `?plant=`, no `?machine=`, no `?limit=` raises 400. Plant is the scaling unit; this is deliberate given the production-scale roadmap (50+ plants).
+- **Save path reports `conflicts` (N3).** The bulk-save path returns a `conflicts` list — plant+machine-scoped strict overlaps found among the orders just written, scanned under `SAVEPOINT conflict_scan` inside the same save transaction. Advisory by default (rows are already persisted); becomes hard rejection only when the save is also `strict_conflicts` with `atomic_optimizer` (`status:'error'`, `error_code:'schedule.conflicts'`, still inside a 200).
 
 ## Integration points
 

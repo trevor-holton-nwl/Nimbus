@@ -352,6 +352,33 @@ test('scheduleAlertsForPatches scopes to exactly the resolved lines for normal p
   });
 });
 
+test('scheduleAlertsForPatches escalates to a full recompute when a moved task carries a real PRT tool id', () => {
+  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
+    const patches = [
+      { id: 'tooled', changes: { start_date: new Date('2026-08-21T08:00:00') } },
+    ];
+    const taskById = { tooled: { id: 'tooled', MACHINE: 'L1', PRT_01: 'MOLD-7' } };
+    scheduleAlertsForPatches(patches, id => taskById[id]?.MACHINE, id => taskById[id]);
+    assert.equal(getFullCalls(), 1,
+      'a moved task carrying a non-blank PRT_01/PRT_02 must force a full recompute, since tool-conflict alerts can land on a different line');
+    assert.equal(getLinesCalls().length, 0);
+  });
+});
+
+
+test('scheduleAlertsForPatches still scopes to lines when no moved task carries a tool', () => {
+  withMockedAlertScheduling(({ getFullCalls, getLinesCalls }) => {
+    const patches = [
+      { id: 'untooled', changes: { start_date: new Date('2026-08-21T08:00:00') } },
+    ];
+    const taskById = { untooled: { id: 'untooled', MACHINE: 'L1', PRT_01: '-', PRT_02: 'N/A' } };
+    scheduleAlertsForPatches(patches, id => taskById[id]?.MACHINE, id => taskById[id]);
+    assert.equal(getFullCalls(), 0, 'blank/placeholder tool ids must not force a full recompute');
+    assert.equal(getLinesCalls().length, 1);
+    assert.deepEqual(new Set(getLinesCalls()[0]), new Set(['L1']));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // effectiveFirmedIdSet -- the single fold the setup-aware branch of
 // runAndApply uses to decide which orders are immovable for a run, and the

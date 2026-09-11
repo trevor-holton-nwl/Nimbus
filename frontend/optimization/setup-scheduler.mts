@@ -2556,6 +2556,10 @@ function candidateForSequence(
   const adjacencyFailure = sequenceAdjacencyFailure(line, sequence, fragment, adjacency);
   if (adjacencyFailure) return constraintFailure(adjacencyFailure);
 
+  // `line` is invariant across this loop — hoist the chargeable-minutes lookup
+  // out of the per-task hot path instead of recomputing it at both call sites below.
+  const lineChargeable = setupChargeableOnLine(bounds, snapshot, line);
+
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
     const priorCursor = new Date(cursor);
@@ -2604,7 +2608,7 @@ function candidateForSequence(
       // disabled|fail so the preview stamps the order accepted.
       // All three admission sites (candidateForSequence + preambles) use the
       // shared helper to ensure wording consistency.
-      effectiveSetupMinutes = chargedSetupMinutes(bounds.runContext, null, setupChargeableOnLine(bounds, snapshot, line));
+      effectiveSetupMinutes = chargedSetupMinutes(bounds.runContext, null, lineChargeable);
       if (!suppressExplanations) {
         explanation.push(admittedStateUnrecordedReason(line, task, effectiveSetupMinutes));
       }
@@ -2656,7 +2660,7 @@ function candidateForSequence(
         // (schedule-workbench.mts) regex-matches those tokens to stamp
         // outcome:'rejected', and this order was accepted, not rejected. Not
         // added to PRUNE_BUCKET_BY_CODE for the same reason.
-        effectiveSetupMinutes = chargedSetupMinutes(ctx, resolved, setupChargeableOnLine(bounds, snapshot, line));
+        effectiveSetupMinutes = chargedSetupMinutes(ctx, resolved, lineChargeable);
         if (!suppressExplanations) {
           explanation.push({
             code: 'admitted-without-setup',
@@ -4191,10 +4195,14 @@ export interface UnknownTailPlacement {
 
 /**
  * Place unknown/uncovered orders at the tail of a fragment, strictly after
- * its covered core (Part 1c). Setup is charged as zero minutes purely as a
- * `placeWithSetup` placement mechanism — never a real changeover, and never
- * added to `score[5]`/setupMinutes — so no fake bar is ever charged for a
- * transition nobody actually knows. Capacity, the split policy, and
+ * its covered core (Part 1c). Setup is charged via `chargedSetupMinutes(...)`
+ * — zero by default, or the plant's configured default under the
+ * `plantDefaultMinutes` unknown-setup policy — purely as a `placeWithSetup`
+ * placement mechanism; never a real changeover, and never added to
+ * `score[5]`/setupMinutes. That reservation is counted in
+ * `objectiveFactsForCandidate` so validation and the objective never disagree
+ * about what the placement actually occupies (see the N8 fix-up comment on
+ * `tailChargeableMinutes` below). Capacity, the split policy, and
  * `bounds.notBefore` are the real, unmodified mechanisms used elsewhere.
  *
  * Note (F10): this function does not contribute to `score[2]`/`score[3]`
@@ -6219,7 +6227,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const resolution = chargeable && state && successor
         ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides })
         : null;
-      if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: 'A missing setup transition uses zero minutes.', severity: 'warning', taskId: taskId(task), line });
+      if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
       const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
       if (minutes > 0) {
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);

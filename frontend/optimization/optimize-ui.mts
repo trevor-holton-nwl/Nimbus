@@ -2159,7 +2159,7 @@ export const OptimizerPreview = {
       Alerts.scheduleRecompute();
     } else {
       const byId = new Map(snap.map(t => [String(t.id), t]));
-      scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE || 'Unknown');
+      scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
     }
   },
 
