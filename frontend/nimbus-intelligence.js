@@ -1237,6 +1237,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     }
   };
 
+  // Snapshot/diff encoding of a split order: sorted [startMs, endMs] pairs, or
+  // null for a continuous (unsplit) order. Snapshots written before this field
+  // existed have no key at all; Diff.compute treats "absent" as unknown.
+  function snapshotSegments(t) {
+    const segs = Array.isArray(t.scheduleSegments) ? t.scheduleSegments : [];
+    if (segs.length < 2) return null;
+    const ms = v => (v instanceof Date ? v.getTime() : (v ? new Date(v).getTime() : NaN));
+    return segs
+      .map(s => [ms(s.startDate ?? s.start_date), ms(s.endDate ?? s.end_date)])
+      .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a)
+      .sort((a, b) => a[0] - b[0]);
+  }
+
   /* ==========================================================================
      TIME MACHINE — durable IndexedDB snapshot history
      ========================================================================== */
@@ -1283,6 +1296,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           COLOR:            t.COLOR     || '',
           FORM_SIZE:        t.FORM_SIZE || '',
           FIRMED:           !!t.firmed,
+          scheduleSegments: snapshotSegments(t),
         }))
       };
       IntelDB.put('snapshots', snap).then(id => {
@@ -2291,6 +2305,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           COLOR:            t.COLOR    || '',
           FORM_SIZE:        t.FORM_SIZE || '',
           FIRMED:           !!t.firmed,
+          scheduleSegments: snapshotSegments(t),
         }));
         const d = Diff.compute(snap.tasks, curr);
         document.getElementById('ni-diff-out').innerHTML = Diff._renderResults(d);
