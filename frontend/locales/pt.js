@@ -1144,7 +1144,8 @@ window.__NIMBUS_LOCALES.pt = {
   'tip.filter_by_scope':               'Filtrar por escopo',
   'tip.no_wheel_loaded':               'Nenhuma roda carregada',
   'tip.spt_mode':                      'Menor processamento primeiro — minimizar tempo médio de conclusão',
-  'tip.changeover_mode':               'Sequência diária — pedidos do dia na ordem da roda de cores; preenche capacidade livre por correspondência de cor',
+  'tip.changeover_mode':               'Min Changeover — the plant\'s priority lists rank first, then fewest orders over the push-forward limit, then fewest late orders and least late hours (never making an already-late order much later), then setup savings. Honors the pull-forward and push-forward limits.', // MISSING TRANSLATION
+  'tip.duedate_mode':                  'Due Date — lateness ranks first: fewest orders over the push-forward limit, then fewest late orders, then least late hours and smallest worst-case lateness. Only then do priority lists and color/setup grouping break ties. Never starts an order before its pull-forward limit.', // MISSING TRANSLATION
   'tip.refresh':                       'Atualizar',
   'tip.inspect_storage':               'Inspecionar chaves localStorage',
   'tip.diag_export_bundle':            'Baixar pacote de diagnósticos para suporte',

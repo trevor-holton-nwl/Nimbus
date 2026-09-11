@@ -282,6 +282,18 @@ test('Command Palette (cmdp.*) keys exist in all 5 locales', () => {
   }
 });
 
+test('Optimizer mode tips exist in all 5 locales', () => {
+  // N5d: tip.duedate_mode and tip.changeover_mode document the per-plant
+  // "priority tiers vs. lateness" tradeoff chosen by mode; added in Step 2.
+  const REQUIRED_MODE_TIPS = ['tip.duedate_mode', 'tip.changeover_mode'];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_MODE_TIPS) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {
