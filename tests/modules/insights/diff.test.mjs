@@ -24,7 +24,7 @@ const row = (over = {}) => ({
 test('Diff.compute reports a finish-only change as one moved row of kind finish', () => {
   const d = Diff.compute([row()], [row({ end_date: T0 + 6 * H })]);
   assert.equal(d.moved.length, 1);
-  assert.equal(JSON.stringify(d.moved[0].kinds), JSON.stringify(['finish']));
+  assert.deepEqual(Array.from(d.moved[0].kinds), ['finish']);
   assert.equal(d.moved[0].startDelta, 0);
   assert.equal(d.moved[0].endDelta, 2 * H);
   assert.equal(d.lineImpact.L1.moved, 1);
@@ -35,7 +35,7 @@ test('Diff.compute reports a re-segmentation with identical envelope as kind spl
   const b = row({ scheduleSegments: [[T0, T0 + 1 * H], [T0 + 2 * H, T0 + 4 * H]] });
   const d = Diff.compute([a], [b]);
   assert.equal(d.moved.length, 1);
-  assert.equal(JSON.stringify(d.moved[0].kinds), JSON.stringify(['split']));
+  assert.deepEqual(Array.from(d.moved[0].kinds), ['split']);
 });
 
 test('Diff.compute reports nothing for identical snapshots', () => {
@@ -57,9 +57,21 @@ test('Diff.compute keeps start and machine detection unchanged and sorts by the 
     [row({ id: 'a', start_date: T0 + 1 * H, end_date: T0 + 5 * H }), row({ id: 'b', MACHINE: 'L2' })],
   );
   const byId = Object.fromEntries(d.moved.map(m => [m.id, m]));
-  assert.equal(JSON.stringify(byId.a.kinds), JSON.stringify(['start']));          // pure move: finish shifts with start, not a finish change
+  assert.deepEqual(Array.from(byId.a.kinds), ['start']);          // pure move: finish shifts with start, not a finish change
   assert.equal(byId.a.delta, 1 * H);
-  assert.equal(JSON.stringify(byId.b.kinds), JSON.stringify(['machine']));
+  assert.deepEqual(Array.from(byId.b.kinds), ['machine']);
   assert.equal(byId.b.lineChanged, true);
   assert.equal(d.lineImpact.L2.moved, 1);
+});
+
+test('Diff.compute reports a finish change when end_date appears with an unchanged start', () => {
+  const a = row({ id: 'c', end_date: null });
+  const b = row({ id: 'c', end_date: T0 + 4 * H });
+  const d = Diff.compute([a], [b]);
+  assert.equal(d.moved.length, 1);
+  assert.deepEqual(Array.from(d.moved[0].kinds), ['finish']);
+  assert.equal(d.moved[0].startDelta, 0);
+  assert.equal(d.moved[0].endDelta, 0);
+  assert.equal(d.moved[0].oldEnd, null);
+  assert.equal(d.moved[0].newEnd, T0 + 4 * H);
 });

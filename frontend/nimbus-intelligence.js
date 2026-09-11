@@ -2149,7 +2149,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (startChanged) kinds.push('start');
         // A pure move shifts finish by the same amount as start; only a duration or
         // finish-only change earns the 'finish' kind.
-        if (endChanged && endDelta !== startDelta) kinds.push('finish');
+        if (endChanged && (!isNum(A.end_date) || !isNum(B.end_date) || endDelta !== startDelta)) kinds.push('finish');
         if (lineChanged) kinds.push('machine');
         if (segmentsChanged) kinds.push('split');
         if (!kinds.length) return;
