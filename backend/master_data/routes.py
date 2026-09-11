@@ -39,6 +39,7 @@ from backend.master_data.models import (
     PlantConstraintsResult,
     PlantFrozenHorizonDaysResult,
     PlantMaxPullForwardDaysResult,
+    PlantUnknownSetupPolicyResult,
     PlantMaxPushForwardDaysResult,
     PlantMinProductiveSegmentMinutesResult,
     PlantSplitOrderPolicyResult,
@@ -501,6 +502,24 @@ def md_set_plant_frozen_horizon_days(plant: str, request: Request, body: dict = 
             subnetwork=body.get("subnetwork", ""),
             plant=plant,
             value=body.get("frozen_horizon_days"),
+            user_email=request.headers.get("x-user-email"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/master-data/plants/{plant}/unknown-setup-policy", response_model=PlantUnknownSetupPolicyResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_set_plant_unknown_setup_policy(plant: str, request: Request, body: dict = Body(default={})):
+    """N8: per-plant treatment of orders whose setup transition has no data —
+    zero | plantDefaultMinutes | excludeFromSearch — stored in the
+    plants.setup_policy_config JSONB sidecar (never freezes a line)."""
+    try:
+        return md.set_plant_unknown_setup_policy(
+            subnetwork=body.get("subnetwork", ""),
+            plant=plant,
+            policy=body.get("unknown_setup_policy", ""),
+            default_minutes=body.get("unknown_setup_default_minutes", 0),
             user_email=request.headers.get("x-user-email"),
         )
     except ValueError as e:

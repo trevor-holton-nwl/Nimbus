@@ -598,6 +598,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/min-productive-segment-minutes": "plant.min_productive_segment_minutes_update",
     "/master-data/plants/{plant}/visibility-horizon": "plant.visibility_horizon_update",
     "/master-data/plants/{plant}/frozen-horizon-days": "plant.frozen_horizon_update",
+    "/master-data/plants/{plant}/unknown-setup-policy": "plant.unknown_setup_policy_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/system-settings": "system_settings.update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",

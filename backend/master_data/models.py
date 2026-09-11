@@ -175,6 +175,12 @@ class PlantFrozenHorizonDaysResult(BaseModel):
     frozen_horizon_days: int | None = None
 
 
+class PlantUnknownSetupPolicyResult(BaseModel):
+    status: str
+    plant: str
+    setup_policy_config: dict
+
+
 class RolePageAccessResult(BaseModel):
     status: str
     role: str

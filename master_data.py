@@ -323,7 +323,8 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         #     all three as of 2026-08-21, their Scheduling Rules rows removed.
         #   unregistered (read-only here, written by a dedicated route):
         #     constraints, split_order_policy, max_pull_forward_days,
-        #     max_push_forward_days, frozen_horizon_days, min_productive_segment_minutes.
+        #     max_push_forward_days, frozen_horizon_days, min_productive_segment_minutes,
+        #     setup_policy_config.
         # Scope the fetch to the plants on this page so a paged/filtered request
         # never re-scans the whole table.
         if table == 'plants':
@@ -333,17 +334,17 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                     cur.execute(
                         "SELECT subnetwork, plant, constraints, split_order_policy, max_pull_forward_days, "
                         "max_push_forward_days, setup_active, visibility_horizon_days, horizon_roll_hour_utc, "
-                        "frozen_horizon_days, min_productive_segment_minutes "
+                        "frozen_horizon_days, min_productive_segment_minutes, setup_policy_config "
                         "FROM plants WHERE plant = ANY(%s)",
                         (page_plants,),
                     )
-                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10]) for r in cur.fetchall()}
+                    cmap = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11]) for r in cur.fetchall()}
                     for row in rows:
                         (constraints, policy, max_pull_forward_days, max_push_forward_days, setup_active,
                          visibility_horizon_days, horizon_roll_hour_utc, frozen_horizon_days,
-                         min_productive_segment_minutes) = cmap.get(
+                         min_productive_segment_minutes, setup_policy_config) = cmap.get(
                             (row.get('subnetwork'), row.get('plant')),
-                            (None, 'never', None, None, False, None, 19, None, 30)
+                            (None, 'never', None, None, False, None, 19, None, 30, None)
                         )
                         row['constraints'] = constraints
                         row['split_order_policy'] = policy or 'never'
@@ -356,6 +357,7 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                         row['min_productive_segment_minutes'] = (
                             min_productive_segment_minutes if min_productive_segment_minutes is not None else 30
                         )
+                        row['setup_policy_config'] = setup_policy_config or {}
             except psycopg.errors.UndefinedColumn:
                 pass  # column not migrated yet — leave it absent (expected)
             except Exception:
@@ -1552,6 +1554,47 @@ def set_plant_frozen_horizon_days(subnetwork: str, plant: str, value: int | None
         )
         conn.commit()
     return {"status": "ok", "plant": plant, "frozen_horizon_days": value}
+
+
+UNKNOWN_SETUP_POLICIES = ("zero", "plantDefaultMinutes", "excludeFromSearch")
+
+
+def set_plant_unknown_setup_policy(subnetwork: str, plant: str, policy: str, default_minutes: int | None = 0,
+                                   user_email: str | None = None) -> dict:
+    """N8 (2026-09): persist how the setup-aware optimizer treats an order whose
+    setup transition has no data, into the per-plant JSONB sidecar
+    plants.setup_policy_config (schema.sql ~:268, unwired until now). A JSONB
+    merge (||) keeps the Stage 2 keys already in the column; version bumps to 2.
+    'zero' is today's behavior for every plant."""
+    if not plant:
+        raise ValueError("plant is required")
+    clean = str(policy or "").strip()
+    if clean not in UNKNOWN_SETUP_POLICIES:
+        raise ValueError("unknown_setup_policy must be zero, plantDefaultMinutes, or excludeFromSearch")
+    minutes = 0 if default_minutes is None else default_minutes
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes < 0:
+        raise ValueError("unknown_setup_default_minutes must be a non-negative integer")
+
+    patch = {"unknownSetupPolicy": clean, "unknownSetupDefaultMinutes": minutes, "version": 2}
+    params: list = [Jsonb(patch), plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET setup_policy_config = setup_policy_config || %s, updated_at = NOW() WHERE {where}",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_unknown_setup_policy', %s, %s)",
+            (Jsonb({"plant": plant, **patch}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "setup_policy_config": patch}
 
 
 def set_plant_setup_active(plant: str, active: bool, subnetwork: str | None = None,

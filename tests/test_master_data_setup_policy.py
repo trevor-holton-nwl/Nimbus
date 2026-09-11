@@ -170,3 +170,30 @@ def test_get_plant_setup_active_reads_the_persisted_column(monkeypatch):
     monkeypatch.setattr(md, "_pool", _Pool(cursor))
 
     assert md.get_plant_setup_active("5512") is True
+
+
+def test_unknown_setup_policy_write_merges_jsonb_and_audits(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "plantDefaultMinutes", 45, "owner@example.com")
+
+    assert result["status"] == "ok" and result["plant"] == "5512"
+    assert result["setup_policy_config"] == {
+        "unknownSetupPolicy": "plantDefaultMinutes", "unknownSetupDefaultMinutes": 45, "version": 2,
+    }
+    update = next((item for item in cursor.executed if "UPDATE plants SET setup_policy_config" in item[0]), None)
+    assert update is not None
+    assert "setup_policy_config || %s" in update[0]
+    assert update[1][1:] == ["5512", "SN"]
+    assert any("set_unknown_setup_policy" in statement for statement, _ in cursor.executed)
+
+
+def test_unknown_setup_policy_rejects_invalid_values():
+    for policy, minutes in (("freeze", 0), ("zero", -1), ("zero", 1.5), ("zero", True), ("plantDefaultMinutes", "45")):
+        try:
+            md.set_plant_unknown_setup_policy("SN", "5512", policy, minutes)
+        except ValueError as error:
+            assert "unknown_setup" in str(error)
+        else:
+            raise AssertionError(f"{policy!r}/{minutes!r} must be rejected")
