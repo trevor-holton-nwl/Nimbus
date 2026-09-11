@@ -147,6 +147,70 @@ test('a save response carrying conflicts toasts a count and emits schedule:confl
   }
 });
 
+test('a strict-rollback optimizer save (error_code schedule.conflicts) toasts the conflict-specific message, never re-stamps, and never emits schedule:conflicts', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'strict-a', MACHINE: 'L1', RUN_TIME: 2, row_version: 3,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T10:00:00') }], 'unit-test');
+  Persistence._dirtyIds.add('strict-a'); Persistence._forceIds.add('strict-a');
+  const originalFetch = globalThis.fetch;
+  const originalToast = Toast.show;
+  globalThis.window = globalThis.window || {};
+  const originalLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.optimizer_conflicts': 'STRICT {{count}} conflict(s)' } };
+  const toasts = []; const events = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  const unsub = Store.subscribe(evt => { if (evt.type === 'schedule:conflicts') events.push(evt); }, 'test-strict-conflicts');
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({
+    status: 'error', error_code: 'schedule.conflicts', cause: 'overlap detected',
+    updated: 1, persisted: 0, failed: 1, invalid: 0, not_found: 0,
+    invalid_ids: [], not_found_ids: [], stale: [], versions: {},
+    conflicts: [{ machine: 'L1', plant: 'P1', order_a: 'cf-a', order_b: 'cf-b', overlap_minutes: 60 }],
+  }) });
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(events.length, 0, 'the strict branch returns before the advisory schedule:conflicts block');
+    assert.ok(toasts.some(t => t.type === 'warn' && /STRICT 1 conflict/.test(t.msg)),
+      'a warn toast using the conflict-specific optimizer_conflicts wording');
+    assert.equal(Store.tasks['strict-a'].row_version, 3, 'a strict rollback must never re-stamp row_version');
+  } finally {
+    globalThis.fetch = originalFetch; Toast.show = originalToast;
+    globalThis.window.__NIMBUS_LOCALES = originalLocales;
+    if (typeof unsub === 'function') unsub();
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  }
+});
+
+test('a generic atomic-optimizer rejection (non-conflicts error_code) still shows the pre-existing generic message', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'generic-a', MACHINE: 'L1', RUN_TIME: 2, row_version: 3,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T10:00:00') }], 'unit-test');
+  Persistence._dirtyIds.add('generic-a'); Persistence._forceIds.add('generic-a');
+  const originalFetch = globalThis.fetch;
+  const originalToast = Toast.show;
+  const toasts = []; const events = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  const unsub = Store.subscribe(evt => { if (evt.type === 'schedule:conflicts') events.push(evt); }, 'test-generic-rejection');
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({
+    status: 'error', error_code: 'atomic.stale', cause: 'concurrency conflict',
+    updated: 1, persisted: 0, failed: 1, invalid: 0, not_found: 0,
+    invalid_ids: [], not_found_ids: [], stale: [], versions: {},
+  }) });
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(events.length, 0);
+    assert.ok(toasts.some(t => t.type === 'warn'
+      && t.msg === 'Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.'),
+      'the branch split must not have touched the pre-existing generic wording');
+    assert.equal(Store.tasks['generic-a'].row_version, 3);
+  } finally {
+    globalThis.fetch = originalFetch; Toast.show = originalToast;
+    if (typeof unsub === 'function') unsub();
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  }
+});
+
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') {
   globalThis.document = {
