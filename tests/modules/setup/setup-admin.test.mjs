@@ -53,9 +53,10 @@ test('SetupAdmin bounds missing-setup review data and reserves the editor for wr
   const pairs = Array.from({ length: 14 }, (_, index) => ({
     line: 'L-1', predecessorOrderId: `before-${index}`, successorOrderId: `after-${index}`,
     fromState: 'colorWheel=RED', toState: 'colorWheel=BLUE', reason: 'matrix-missing',
+    remedy: 'Add a setup matrix row for this transition',
   }));
   const csv = SetupAdmin.missingPairsCsv('5512', pairs);
-  assert.match(csv, /Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason/);
+  assert.match(csv, /Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason,Remedy/);
   assert.equal(csv.trim().split('\n').length, 13, 'the review export caps rows at the preview boundary');
   assert.equal(SetupAdmin.reviewAction({ matrixWrite: true }), 'editor');
   assert.equal(SetupAdmin.reviewAction({ matrixWrite: false }), 'copy-export');

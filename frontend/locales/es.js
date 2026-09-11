@@ -1321,6 +1321,13 @@ window.__NIMBUS_LOCALES.es = {
   'modal.ls_inventory_top_keys':       'Principales claves por tamaño:',
 
   /* ── Keys added in en.js after last locale sync — MISSING TRANSLATION ── */
+  'ui.setup_col_remedy':                  'Remedy',                                                    // MISSING TRANSLATION
+  'ui.setup_missing_remedy_state':        'Record this line\'s current setup state',                   // MISSING TRANSLATION
+  'ui.setup_missing_remedy_row':          'Add a setup matrix row for this transition',                // MISSING TRANSLATION
+  'ui.opt_pv_scheduled_state_unrecorded': '{{orders}} order(s) on {{lines}} machine(s) were scheduled as the line\'s first order without a recorded current setup state — record the line state to charge their setup.', // MISSING TRANSLATION
+  'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION
+  'ui.setup_review_filter_state':         'Line state not recorded',                                   // MISSING TRANSLATION
+  'ui.setup_review_filter_row':           'Matrix row absent',                                         // MISSING TRANSLATION
   'ui.pool_unavailable':               'Pool unavailable',                          // MISSING TRANSLATION
   'ui.not_loaded':                     'Not loaded',                                // MISSING TRANSLATION
   'ui.backend_unreachable':            'Backend unreachable',                       // MISSING TRANSLATION

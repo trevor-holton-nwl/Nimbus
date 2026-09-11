@@ -844,7 +844,7 @@ interface PreviewExplanation {
   };
   reasons: Array<{ code: string; message: string; line?: string; taskId?: string; outcome: 'accepted' | 'rejected' }>;
   constraints: string[];
-  missingPairs: Array<{ line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string }>;
+  missingPairs: Array<{ line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string; remedy: string }>;
   missingPairsTotal: number;
   unchangedLines: string[];
   /** Tally of orders actually placed in this candidate without a resolvable
@@ -857,6 +857,10 @@ interface PreviewExplanation {
    *  `candidate.patches`, so a rejected/unplaced edge never inflates this
    *  count (see `missingPairs` for the full uncovered-transition list). */
   scheduledWithoutSetup: { orders: number; lines: number };
+  /** N6 twin of scheduledWithoutSetup for `'initial-state-unknown'` edges whose
+   *  successor was actually patched — orders admitted as a line's first order
+   *  with no recorded line state. */
+  scheduledStateUnrecorded: { orders: number; lines: number };
   /** B3: orders in scope for this run (plant + line filter + excludeFromOpt)
    *  that ended up with neither a patch nor a firmed/pinned exemption — i.e.
    *  "not scheduled". Derived by set difference against `candidate.patches`,
@@ -903,6 +907,14 @@ interface PreviewExplanationInput {
 
 const PREVIEW_REASON_LIMIT = 8;
 const PREVIEW_MISSING_PAIR_LIMIT = 12;
+
+/** N6: map a MissingSetupEdge.reason to the planner's remedy. Only the two
+ * admitted-at-zero reasons have a remedy; rejection reasons return null. */
+export function remedyKeyForEdgeReason(reason: string): 'ui.setup_missing_remedy_state' | 'ui.setup_missing_remedy_row' | null {
+  if (reason === 'initial-state-unknown') return 'ui.setup_missing_remedy_state';
+  if (reason === 'scheduled-without-setup') return 'ui.setup_missing_remedy_row';
+  return null;
+}
 
 /** Reason codes that represent a genuine exclusion (order/line left out of the
  *  plan), keyed to the §4.3 prune buckets. Codes not listed here are placement
@@ -1117,11 +1129,15 @@ export const OptimizerPreview = {
     // 'successor-state-unknown'/'initial-state-unknown' partition edges
     // avoids double-counting a rejected permutation's edge that happens to
     // name the same patched id.
+    const stateUnrecordedOrders = new Set<string>();
+    const stateUnrecordedLines = new Set<string>();
     for (const edge of candidate.missingEdges) {
-      if (edge.reason !== 'scheduled-without-setup') continue;
       if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
-      scheduledWithoutSetupOrders.add(String(edge.successorOrderId));
-      scheduledWithoutSetupLines.add(edge.line);
+      if (edge.reason === 'scheduled-without-setup') {
+        scheduledWithoutSetupOrders.add(String(edge.successorOrderId)); scheduledWithoutSetupLines.add(edge.line);
+      } else if (edge.reason === 'initial-state-unknown') {
+        stateUnrecordedOrders.add(String(edge.successorOrderId)); stateUnrecordedLines.add(edge.line);
+      }
     }
     // B3: derive the unplaced set by difference from candidate.patches, not
     // from a threaded CandidateResult field — see the interface comment on
@@ -1151,6 +1167,7 @@ export const OptimizerPreview = {
       missingPairsTotal: 0,
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
       scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
+      scheduledStateUnrecorded: { orders: stateUnrecordedOrders.size, lines: stateUnrecordedLines.size },
       unplacedOrders: { orders: unplacedOrderIds.size, lines: unplacedLines.size },
       overLatenessCap: input.tasks
         ? Engine._overCapSummary(candidate.patches, input.tasks, input.plant ?? null, input.masterData)
@@ -1183,6 +1200,7 @@ export const OptimizerPreview = {
         fromState: text(definition && predecessor ? stateForOrder(predecessor, definition) : lineState),
         toState: text(definition && successor ? stateForOrder(successor, definition) : null),
         reason: edge.reason,
+        remedy: (() => { const key = remedyKeyForEdgeReason(edge.reason); return key ? Util.t(key) : ''; })(),
       };
     });
     return { pairs, total: candidate.missingEdges.length };
@@ -1190,8 +1208,8 @@ export const OptimizerPreview = {
 
   missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
     const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    return ['Line,Predecessor order,Successor order,From setup state,To setup state,Reason', ...pairs.map(pair =>
-      [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.fromState, pair.toState, pair.reason].map(quote).join(','))].join('\n');
+    return ['Line,Predecessor order,Successor order,From setup state,To setup state,Reason,Remedy', ...pairs.map(pair =>
+      [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.fromState, pair.toState, pair.reason, pair.remedy].map(quote).join(','))].join('\n');
   },
 
   canApply(): boolean {
@@ -1780,7 +1798,7 @@ export const OptimizerPreview = {
         : '';
       const canReview = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { canReviewMissingPairs?: (plant: string) => boolean } } }).NIMBUS?.SetupAdmin?.canReviewMissingPairs?.(plant) === true;
       const body = pairCount
-        ? `${truncatedNote}<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${Util.escapeHtml(Util.t('ui.setup_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_from'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_to'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_reason'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${Util.escapeHtml(pair.line)}</td><td>${Util.escapeHtml(pair.fromState || '—')}</td><td>${Util.escapeHtml(pair.toState || '—')}</td><td>${Util.escapeHtml(pair.reason)}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note">${canReview ? `<button class="btn btn-primary sm" data-opt-review-missing>${Util.escapeHtml(Util.t('btn.opt_fill_setup_matrix'))}</button> ` : ''}<button class="btn btn-ghost sm" data-opt-copy-missing>${Util.escapeHtml(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${Util.escapeHtml(Util.t('btn.setup_export_missing'))}</button></div>`
+        ? `${truncatedNote}<div class="setup-table-wrap"><table class="setup-table"><thead><tr><th>${Util.escapeHtml(Util.t('ui.setup_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_from'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_to'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_reason'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_col_remedy'))}</th></tr></thead><tbody>${explanation.missingPairs.map(pair => `<tr><td>${Util.escapeHtml(pair.line)}</td><td>${Util.escapeHtml(pair.fromState || '—')}</td><td>${Util.escapeHtml(pair.toState || '—')}</td><td>${Util.escapeHtml(pair.reason)}</td><td>${Util.escapeHtml(pair.remedy || '—')}</td></tr>`).join('')}</tbody></table></div><div class="opt-pv-footer-note">${canReview ? `<button class="btn btn-primary sm" data-opt-review-missing>${Util.escapeHtml(Util.t('btn.opt_fill_setup_matrix'))}</button> ` : ''}<button class="btn btn-ghost sm" data-opt-copy-missing>${Util.escapeHtml(Util.t('btn.setup_copy_missing'))}</button> <button class="btn btn-ghost sm" data-opt-export-missing>${Util.escapeHtml(Util.t('btn.setup_export_missing'))}</button></div>`
         : `<p class="opt-pv-section-empty">${Util.escapeHtml(Util.t('ui.setup_missing_pairs_none'))}</p>`;
       const badge = pairCount ? `<span class="opt-pv-section-badge">${isTruncated ? Util.t('ui.opt_pv_gaps_badge', { count: totalPairs }) : pairCount}</span>` : '';
       return `<details class="opt-pv-section">
@@ -1847,6 +1865,15 @@ export const OptimizerPreview = {
       ? `<div class="opt-pv-backlog-warning">${Util.escapeHtml(Util.t('ui.opt_pv_scheduled_without_setup', {
           orders: explanation.scheduledWithoutSetup.orders,
           lines: explanation.scheduledWithoutSetup.lines,
+        }))}</div>`
+      : '';
+
+    // N6 twin banner — 'initial-state-unknown' admissions (the line's current
+    // setup state was never recorded), invisible in the row-only banner above.
+    const scheduledStateUnrecordedHtml = (explanation && explanation.scheduledStateUnrecorded.orders > 0)
+      ? `<div class="opt-pv-backlog-warning">${Util.escapeHtml(Util.t('ui.opt_pv_scheduled_state_unrecorded', {
+          orders: explanation.scheduledStateUnrecorded.orders,
+          lines: explanation.scheduledStateUnrecorded.lines,
         }))}</div>`
       : '';
 
@@ -1980,6 +2007,8 @@ export const OptimizerPreview = {
         ${backlogHtml}
 
         ${scheduledWithoutSetupHtml}
+
+        ${scheduledStateUnrecordedHtml}
 
         ${overLatenessCapHtml}
 

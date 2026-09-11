@@ -112,7 +112,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
 
 type SetupPermissions = { read: boolean; copy: boolean; export: boolean; definitionWrite: boolean; matrixWrite: boolean; stateWrite: boolean };
 type EffectiveSetupRow = SetupMatrixRow & { inherited: boolean; inheritedFromPlant: boolean };
-type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string };
+type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string; remedy?: string };
 type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
 type SetupReviewNavigation = { selectPlant: boolean; openMasterData: boolean; masterSub: 'plant'; plantTab: 'settings'; renderAfterNavigation: boolean };
 
@@ -143,6 +143,11 @@ export const SetupAdmin = (() => {
   let _coverageByPlant: Record<string, { observed?: { total_pairs: number; missing_pairs: number }; reachable?: { total_pairs: number; missing_pairs: number } }> = {};
   let _lineScope = '';
   let _missingReview: { plant: string; pairs: MissingSetupReviewPair[] } | null = null;
+  // N6b: the missing-setup review chip's per-reason filter — 'all' shows
+  // both admitted-at-zero reasons, 'state' narrows to unrecorded line state,
+  // 'row' narrows to an absent matrix row. Reset whenever the review is
+  // (re)started or cleared.
+  let _missingReviewFilter: 'all' | 'state' | 'row' = 'all';
   let _lastTarget: HTMLElement | null = null;
   // Grid state (Setup Standard's from-state x to-state editor). Rebuilt every
   // renderSnapshot() call, same full-repaint model as the rest of this module.
@@ -475,8 +480,8 @@ export const SetupAdmin = (() => {
   function missingPairsCsv(plant: string, pairs: ReadonlyArray<MissingSetupReviewPair>): string {
     const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const rows = pairs.slice(0, 12).map(pair => [plant, pair.line, pair.predecessorOrderId, pair.successorOrderId,
-      pair.fromState, pair.toState, pair.reason].map(quote).join(','));
-    return ['Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason', ...rows].join('\n');
+      pair.fromState, pair.toState, pair.reason, pair.remedy].map(quote).join(','));
+    return ['Plant,Line,Predecessor order,Successor order,From setup state,To setup state,Reason,Remedy', ...rows].join('\n');
   }
 
   function reviewAction(permissions: Pick<SetupPermissions, 'matrixWrite'>): 'editor' | 'copy-export' {
@@ -513,6 +518,7 @@ export const SetupAdmin = (() => {
   function reviewMissingPairs(plant: string | null, pairs: ReadonlyArray<MissingSetupReviewPair>): boolean {
     if (!plant || !canReviewMissingPairs(plant)) return false;
     _missingReview = { plant, pairs: pairs.slice(0, 12).map(pair => ({ ...pair })) };
+    _missingReviewFilter = 'all';
     // The review affordance (axis narrowing + missing-cell highlight) lives
     // entirely inside paintGrid, so this flow has to land on the Matrix view
     // regardless of which view was last selected. The List view structurally
@@ -911,7 +917,12 @@ export const SetupAdmin = (() => {
     // collapses to a filter chip on the grid — not the OptimizerPreview
     // modal's own copy of this table (schedule-workbench.mts), which is a
     // separate surface (the run-time comparison dialog) left untouched.
-    const missingChipHtml = review ? `<span class="setup-review-chip">${Util.escapeHtml(Util.t('ui.setup_review_chip', { count: review.pairs.length }))}<button type="button" class="setup-review-chip-clear" data-setup-review-clear aria-label="${Util.escapeHtml(Util.t('btn.setup_review_clear'))}">&times;</button></span>` : '';
+    const missingReviewFilterOptions = [
+      ['all', Util.t('ui.setup_review_filter_all')],
+      ['state', Util.t('ui.setup_review_filter_state')],
+      ['row', Util.t('ui.setup_review_filter_row')],
+    ] as const;
+    const missingChipHtml = review ? `<span class="setup-review-chip">${Util.escapeHtml(Util.t('ui.setup_review_chip', { count: review.pairs.length }))}<select data-setup-review-filter aria-label="${Util.escapeHtml(Util.t('ui.setup_review_missing_title'))}">${missingReviewFilterOptions.map(([value, label]) => `<option value="${value}"${_missingReviewFilter === value ? ' selected' : ''}>${Util.escapeHtml(label)}</option>`).join('')}</select><button type="button" class="setup-review-chip-clear" data-setup-review-clear aria-label="${Util.escapeHtml(Util.t('btn.setup_review_clear'))}">&times;</button></span>` : '';
     const totalPairs = coverage?.reachable?.total_pairs ?? 0;
     const missingPairs = coverage?.reachable?.missing_pairs ?? 0;
     const coverageInlineHtml = coverage
@@ -1081,6 +1092,12 @@ export const SetupAdmin = (() => {
     });
     target.querySelector<HTMLButtonElement>('[data-setup-review-clear]')?.addEventListener('click', () => {
       _missingReview = null;
+      _missingReviewFilter = 'all';
+      renderSnapshot(target, snapshot);
+    });
+    target.querySelector<HTMLSelectElement>('[data-setup-review-filter]')?.addEventListener('change', event => {
+      const value = (event.target as HTMLSelectElement).value;
+      _missingReviewFilter = value === 'state' || value === 'row' ? value : 'all';
       renderSnapshot(target, snapshot);
     });
     target.querySelector<HTMLButtonElement>('[data-setup-signature-edit]')?.addEventListener('click', () => {
@@ -1543,8 +1560,11 @@ export const SetupAdmin = (() => {
     // review is active, narrow both axes to only the states its pairs touch,
     // instead of rendering the review's own separate 4-column table.
     const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
-    const reviewSigs = review
-      ? new Set(review.pairs.flatMap(pair => [reviewStateSigFromText(pair.fromState), reviewStateSigFromText(pair.toState)]).filter((sig): sig is string => sig !== null))
+    const reviewPairs = review ? review.pairs.filter(pair => _missingReviewFilter === 'all'
+      || (_missingReviewFilter === 'state' && pair.reason === 'initial-state-unknown')
+      || (_missingReviewFilter === 'row' && pair.reason === 'scheduled-without-setup')) : null;
+    const reviewSigs = reviewPairs
+      ? new Set(reviewPairs.flatMap(pair => [reviewStateSigFromText(pair.fromState), reviewStateSigFromText(pair.toState)]).filter((sig): sig is string => sig !== null))
       : null;
     const preFilterRowStates = reviewSigs ? _gridModel.rowStates.filter(s => reviewSigs.has(s.sig)) : _gridModel.rowStates;
     const preFilterColStates = reviewSigs ? _gridModel.colStates.filter(s => reviewSigs.has(s.sig)) : _gridModel.colStates;

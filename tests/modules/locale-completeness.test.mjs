@@ -39,6 +39,20 @@ test('every constraint.<field> key exists in all 5 locales', () => {
   }
 });
 
+test('N6 missing-setup remedy keys exist in all 5 locales', () => {
+  // ui.setup_missing_remedy_state / _row back the per-reason remedy text
+  // surfaced in the Optimize preview table, both CSV exports, the
+  // never-freeze banner and the Setup Matrix review chip filter (N6b).
+  const REQUIRED = ['ui.setup_missing_remedy_state', 'ui.setup_missing_remedy_row', 'ui.opt_pv_scheduled_state_unrecorded',
+    'ui.setup_col_remedy', 'ui.setup_review_filter_state', 'ui.setup_review_filter_row', 'ui.setup_review_filter_all'];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('Stage 0 setup-matrix administration keys exist in all 5 locales', () => {
   // ui.setup_matrix_observation, btn.setup_export_csv, and btn.setup_delete_override
   // were retired as dead i18n keys (docs/Setup_matrix_redesign.md §10/§15) — the

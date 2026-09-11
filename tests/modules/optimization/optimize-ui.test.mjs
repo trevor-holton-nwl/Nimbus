@@ -317,24 +317,56 @@ test('OptimizerPreview derives and exports real setup states for bounded missing
   // states) prevents a matrix editor from acting on the reported pair.
   const candidate = {
     patches: [], explanation: [], diagnostics: { candidateCount: 1, method: 'spt-detached', termination: 'completed', runtimeMs: 1, limitReached: false, events: [] },
-    unchangedLines: [], missingEdges: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', reason: 'matrix-missing' }],
+    unchangedLines: [], missingEdges: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', reason: 'scheduled-without-setup' }],
   };
   const setup = {
     plant: '5512', definition: { plant: '5512', fields: ['colorWheel'], strict_blanks: true, signature_version: 1, active: false }, plant_active: false,
     plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
   };
-  const pairs = OptimizerPreview.describeMissingPairs(candidate, [
-    { id: 'red-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'RED' },
-    { id: 'blue-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'BLUE' },
-  ], setup);
-  assert.deepEqual(pairs, {
-    pairs: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'RED', toState: 'BLUE', reason: 'matrix-missing' }],
-    total: 1,
-  });
-  const csv = OptimizerPreview.missingPairsCsv(pairs.pairs);
-  assert.match(csv, /From setup state,To setup state/);
-  assert.match(csv, /"RED"/);
-  assert.match(csv, /"BLUE"/);
+  // Util.t() reads bare `window.__NIMBUS_LOCALES` (no locale files are loaded
+  // in this ES-module test realm — see tests/modules/scheduling/persistence.test.mjs's
+  // identical pattern) — stub just the key describeMissingPairs's remedy needs
+  // so it interpolates real text instead of falling back to the literal key.
+  globalThis.window = globalThis.window || {};
+  const originalLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'ui.setup_missing_remedy_row': 'Add a setup matrix row for this transition' } };
+  try {
+    const pairs = OptimizerPreview.describeMissingPairs(candidate, [
+      { id: 'red-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'RED' },
+      { id: 'blue-order', PLANT: '5512', MACHINE: 'L-1', COLOR: 'BLUE' },
+    ], setup);
+    assert.deepEqual(pairs, {
+      pairs: [{ line: 'L-1', predecessorOrderId: 'red-order', successorOrderId: 'blue-order', fromState: 'RED', toState: 'BLUE', reason: 'scheduled-without-setup', remedy: 'Add a setup matrix row for this transition' }],
+      total: 1,
+    });
+    const csv = OptimizerPreview.missingPairsCsv(pairs.pairs);
+    assert.match(csv, /From setup state,To setup state/);
+    assert.match(csv, /Reason,Remedy/);
+    assert.match(csv, /"RED"/);
+    assert.match(csv, /"BLUE"/);
+  } finally {
+    globalThis.window.__NIMBUS_LOCALES = originalLocales;
+  }
+});
+
+const MINIMAL_INPUT = {
+  productionBefore: 10, productionAfter: 10, preKpis: { changeovers: 8, span_h: 20, late_count: 4, late_h: 6, peak_util_pct: 92 },
+  postKpis: { changeovers: 6, span_h: 18, late_count: 2, late_h: 3, peak_util_pct: 88 },
+};
+
+test('summarizeCandidate tallies unrecorded-state and uncovered-row admissions separately', () => {
+  const candidate = {
+    patches: [{ id: 'a', changes: {} }, { id: 'b', changes: {} }], explanation: [], unchangedLines: [],
+    diagnostics: { candidateCount: 1, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 1, limitReached: false, events: [] },
+    missingEdges: [
+      { line: 'L1', predecessorOrderId: null, successorOrderId: 'a', reason: 'initial-state-unknown' },
+      { line: 'L1', predecessorOrderId: 'a', successorOrderId: 'b', reason: 'scheduled-without-setup' },
+      { line: 'L2', predecessorOrderId: 'x', successorOrderId: 'zzz-not-patched', reason: 'scheduled-without-setup' },
+    ],
+  };
+  const explanation = OptimizerPreview.summarizeCandidate(candidate, MINIMAL_INPUT);
+  assert.deepEqual(explanation.scheduledWithoutSetup, { orders: 1, lines: 1 });
+  assert.deepEqual(explanation.scheduledStateUnrecorded, { orders: 1, lines: 1 });
 });
 
 test('Persistence setup writes stale an open preview without applying or rerunning it', () => {
