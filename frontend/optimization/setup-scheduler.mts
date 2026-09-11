@@ -370,6 +370,10 @@ export interface ObjectiveFacts {
   overCap: number;
   lateCount: number;
   latenessMinutes: number;
+  /** Largest single-order lateness in minutes (N5, 2026-09). Compared right
+   * after `latenessMinutes` in every mode so equal totals prefer the schedule
+   * that does not make one already-late order much later. */
+  maxLatenessMinutes: number;
   uncoveredEdges: number;
   setupMinutes: number;
   scheduledCount: number;
@@ -812,6 +816,11 @@ interface DueDateCandidate {
   missingEdges: MissingSetupEdge[];
   productiveRuntimeKey?: string;
   productiveRuntimeMinutes?: number;
+  /** N5: per-fragment maxima/sums carried beside `score[]` rather than as new
+   * score slots — the score vector is pinned 8-wide and is SUMMED across lines
+   * (a maximum must not be). Combined with Math.max at fragment concatenation. */
+  maxLatenessMinutes?: number;
+  instabilityMinutes?: number;
   /** The predecessor identity/state this covered core actually ended on, set
    * only on a feasible result. A subsequent `placeUnknownTail` call or a
    * firmed boundary's incoming-setup reservation chains from this rather than
@@ -2410,6 +2419,8 @@ function compareDueDateCandidate(left: DueDateCandidate, right: DueDateCandidate
   if (lateCountDelta) return lateCountDelta;
   const latenessDelta = (left.score[3] ?? 0) - (right.score[3] ?? 0);
   if (latenessDelta) return latenessDelta;
+  const maxLatenessDelta = (left.maxLatenessMinutes ?? 0) - (right.maxLatenessMinutes ?? 0);
+  if (maxLatenessDelta) return maxLatenessDelta;
   const policyDelta = ordinalCompare(left.policyKey, right.policyKey);
   if (policyDelta) return policyDelta;
   const coverageDelta = (left.score[SCORE_UNCOVERED] ?? 0) - (right.score[SCORE_UNCOVERED] ?? 0);
@@ -2472,6 +2483,10 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   for (const index of terms) {
     const delta = (left.score[index] ?? 0) - (right.score[index] ?? 0);
     if (delta) return delta;
+    if (index === 3) {
+      const maxLatenessDelta = (left.maxLatenessMinutes ?? 0) - (right.maxLatenessMinutes ?? 0);
+      if (maxLatenessDelta) return maxLatenessDelta;
+    }
   }
   return ordinalCompare(left.sequenceKey, right.sequenceKey);
 }
@@ -2505,6 +2520,7 @@ function candidateForSequence(
   let setupMinutes = 0;
   let lateCount = 0;
   let latenessMinutes = 0;
+  let maxLatenessMinutes = 0;
   // Due-date push-forward limit: count of orders in this sequence whose
   // simulated end exceeds `bounds.notAfter(task)`. Rolled into
   // score[SCORE_OVER_CAP] on the feasible return below; compareCandidate
@@ -2516,7 +2532,7 @@ function candidateForSequence(
   // on the feasible return below so `compareCandidate` can minimize it —
   // minimizing uncovered edges is what drives same-signature grouping.
   let uncoveredEdgeCount = 0;
-  const checkpoints: Array<{ task: NimbusTask; predecessorState: SetupStateKey | null; predecessorOrderId: string | null; cursor: Date; setupMinutes: number; lateCount: number; latenessMinutes: number; overCapCount: number; uncoveredEdgeCount: number }> = [];
+  const checkpoints: Array<{ task: NimbusTask; predecessorState: SetupStateKey | null; predecessorOrderId: string | null; cursor: Date; setupMinutes: number; lateCount: number; latenessMinutes: number; maxLatenessMinutes: number; overCapCount: number; uncoveredEdgeCount: number }> = [];
 
   const constraintFailure = (edge: MissingSetupEdge): DueDateCandidate => ({
     feasible: false,
@@ -2537,7 +2553,7 @@ function candidateForSequence(
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
     const priorCursor = new Date(cursor);
-    const checkpoint = { task, predecessorState, predecessorOrderId, cursor: priorCursor, setupMinutes, lateCount, latenessMinutes, overCapCount, uncoveredEdgeCount };
+    const checkpoint = { task, predecessorState, predecessorOrderId, cursor: priorCursor, setupMinutes, lateCount, latenessMinutes, maxLatenessMinutes, overCapCount, uncoveredEdgeCount };
     if (planningDefect(snapshot, bounds, task)) { unadmitted.push(task); continue; }
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
@@ -2696,8 +2712,10 @@ function candidateForSequence(
     setupMinutes += effectiveSetupMinutes;
     const due = dueTimestamp(task);
     if (Number.isFinite(due) && last.end.getTime() > due) {
+      const lateMinutes = Math.ceil((last.end.getTime() - due) / (60 * 1000));
       lateCount += 1;
-      latenessMinutes += Math.ceil((last.end.getTime() - due) / (60 * 1000));
+      latenessMinutes += lateMinutes;
+      maxLatenessMinutes = Math.max(maxLatenessMinutes, lateMinutes);
     }
     const ceiling = notAfterFor(bounds, task);
     if (ceiling && last.end.getTime() > ceiling.getTime()) overCapCount += 1;
@@ -2728,6 +2746,7 @@ function candidateForSequence(
     patches.pop(); unadmitted.push(prior.task);
     predecessorState = prior.predecessorState; predecessorOrderId = prior.predecessorOrderId; cursor = prior.cursor;
     setupMinutes = prior.setupMinutes; lateCount = prior.lateCount; latenessMinutes = prior.latenessMinutes;
+    maxLatenessMinutes = prior.maxLatenessMinutes;
     overCapCount = prior.overCapCount; uncoveredEdgeCount = prior.uncoveredEdgeCount;
   }
 
@@ -2838,6 +2857,7 @@ function candidateForSequence(
     missingEdges,
     productiveRuntimeKey: productiveRuntimeKey(sequence),
     productiveRuntimeMinutes: productiveRuntimeTotal(sequence),
+    maxLatenessMinutes,
     finalState: predecessorState,
     finalPredecessorOrderId: predecessorOrderId,
   };
@@ -4122,6 +4142,7 @@ function completeFinalBoundaryCandidate(
     missingEdges: [...preFirmed.missingEdges, ...continuation.missingEdges],
     productiveRuntimeKey: productiveRuntimeKey(orderedTasks),
     productiveRuntimeMinutes: productiveRuntimeTotal(orderedTasks),
+    maxLatenessMinutes: Math.max(preFirmed.maxLatenessMinutes ?? 0, continuation.maxLatenessMinutes ?? 0),
   };
 }
 
@@ -6609,6 +6630,7 @@ function fragmentObjectiveFacts(candidate: Readonly<DueDateCandidate>): Objectiv
     overCap: candidate.score[SCORE_OVER_CAP] ?? 0,
     lateCount: candidate.score[2] ?? 0,
     latenessMinutes: candidate.score[3] ?? 0,
+    maxLatenessMinutes: candidate.maxLatenessMinutes ?? 0,
     uncoveredEdges: candidate.score[SCORE_UNCOVERED] ?? 0,
     setupMinutes: candidate.score[5] ?? 0,
     scheduledCount: Math.max(0, -(candidate.score[4] ?? 0)),
@@ -6637,31 +6659,31 @@ export function compareObjectiveFacts(
   };
   const terms: Array<[keyof ObjectiveFacts, boolean]> = mode === 'min-changeover'
     ? [
-      ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false],
+      ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false],
       ['uncoveredEdges', false], ['setupMinutes', false], ['policyKey', false],
       ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
     ]
     : mode === 'due-date'
       ? [
-        ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false],
+        ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false],
         ['policyKey', false], ['uncoveredEdges', false], ['setupMinutes', false],
         ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
       ]
       : mode === 'spt'
         ? [
           ['hardErrors', false], ['uncoveredEdges', false], ['productiveRuntimeKey', false], ['overCap', false], ['lateCount', false],
-          ['latenessMinutes', false], ['setupMinutes', false], ['scheduledCount', true],
+          ['latenessMinutes', false], ['maxLatenessMinutes', false], ['setupMinutes', false], ['scheduledCount', true],
           ['instabilityMinutes', false], ['sequenceKey', false],
         ]
         : mode === 'throughput'
           ? [
             ['hardErrors', false], ['overCap', false], ['uncoveredEdges', false], ['setupMinutes', false],
-            ['lateCount', false], ['latenessMinutes', false], ['policyKey', false],
+            ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false], ['policyKey', false],
             ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
           ]
           : [
             ['hardErrors', false], ['policyKey', false], ['overCap', false], ['uncoveredEdges', false],
-            ['lateCount', false], ['latenessMinutes', false], ['scheduledCount', true],
+            ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false], ['scheduledCount', true],
             ['setupMinutes', false], ['instabilityMinutes', false], ['sequenceKey', false],
           ];
   for (const [key, descending] of terms) {
@@ -6690,17 +6712,23 @@ export function objectiveFactsForCandidate(
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const ids = new Set(eligibleTasks(snapshot, bounds).map(taskId));
   const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
-  let lateCount = 0; let lateness = 0; let setupMinutes = 0; let instability = 0;
+  let lateCount = 0; let lateness = 0; let maxLateness = 0; let setupMinutes = 0; let instability = 0;
   let overCap = 0;
   const original = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   for (const task of tasks) {
     const end = timestamp(task.end_date); const due = dueTimestamp(task);
     if (task.planning_status === 'needs_planning') {
       lateCount++;
-      if (Number.isFinite(due)) lateness += Math.max(0, (+bounds.horizonEnd - due) / 60000);
+      if (Number.isFinite(due)) {
+        const orderLateness = Math.max(0, (+bounds.horizonEnd - due) / 60000);
+        lateness += orderLateness;
+        maxLateness = Math.max(maxLateness, orderLateness);
+      }
     } else if (end && Number.isFinite(due) && +end > due) {
       lateCount++;
-      lateness += (+end - due) / 60000;
+      const orderLateness = (+end - due) / 60000;
+      lateness += orderLateness;
+      maxLateness = Math.max(maxLateness, orderLateness);
     }
     const ceiling = notAfterFor(bounds, task);
     if (end && ceiling && +end > +ceiling) overCap++;
@@ -6784,6 +6812,7 @@ export function objectiveFactsForCandidate(
     overCap,
     lateCount,
     latenessMinutes: lateness,
+    maxLatenessMinutes: maxLateness,
     uncoveredEdges,
     setupMinutes,
     scheduledCount: scheduled.length,

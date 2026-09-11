@@ -383,6 +383,21 @@ test('canonical SPT objectives protect coverage before productive-runtime order'
     'SPT must retain productive-runtime ordering after hard feasibility and coverage');
 });
 
+test('objective facts prefer the smaller worst-case lateness when late count and total lateness tie', () => {
+  const base = {
+    hardErrors: 0, overCap: 0, lateCount: 2, latenessMinutes: 120, uncoveredEdges: 0,
+    setupMinutes: 0, scheduledCount: 2, instabilityMinutes: 0, policyKey: '00', sequenceKey: 'A|B',
+  };
+  const balanced = { ...base, maxLatenessMinutes: 60 };
+  const lopsided = { ...base, maxLatenessMinutes: 110 };
+  for (const mode of ['due-date-first', 'due-date', 'min-changeover', 'spt', 'throughput']) {
+    assert.ok(SetupScheduler.compareObjectiveFacts(balanced, lopsided, mode) < 0,
+      `${mode} must rank worst-case lateness immediately after total lateness`);
+  }
+  // Legacy facts without the field compare as 0 — never NaN.
+  assert.equal(SetupScheduler.compareObjectiveFacts(base, base, 'due-date'), 0);
+});
+
 test('final setup-aware results expose canonical objective facts and compatible score slots', () => {
   const result = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([scheduledTask('contract-objective-order', 1, 'GREEN', '2026-08-03T18:00')]),
