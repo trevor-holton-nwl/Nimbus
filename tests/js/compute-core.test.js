@@ -247,6 +247,46 @@ test('computeAlerts recognizes predecessor-state-unknown/successor-state-unknown
   }, 'each of the six setup diagnostic types must resolve its documented severity, not a blanket default');
 });
 
+test('computeAlerts downgrades setup severity to warn only when the plant setup_active flag is truly off', () => {
+  const time = new Date(Date.now() + 24 * 3600000);
+  const workHours = allDays([0, 24]);
+  const fixture = (setupActive) => ({
+    tasks: [], blocks: [], plantBlocks: [], calendars: { L: { workHours } }, plants: {},
+    lineSettings: { L: { plant: 'P' } },
+    masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: setupActive === undefined ? [] : [{ plant: 'P', setup_active: setupActive }] },
+    dismissed: [], opts: {},
+    setup: {
+      intervals: [{
+        line: 'L', predecessorOrderId: 'previous', successorOrderId: 'next', scope: 'P/L',
+        start: time, end: new Date(time.getTime() + 60 * 60000), requiredMinutes: 60, availableMinutes: 20,
+      }],
+      diagnostics: [
+        { type: 'setup-uncovered', line: 'L', scope: 'P/L', pairKey: 'RED->BLUE', successorOrderId: 'later-blue', time },
+        { type: 'predecessor-state-unknown', line: 'L', scope: 'P/L', predecessorOrderId: 'mid', successorOrderId: 'after-mid', time },
+        { type: 'successor-state-unknown', line: 'L', scope: 'P/L', predecessorOrderId: 'before', successorOrderId: 'unknown-successor', time },
+        { type: 'override-inactive', line: 'L', scope: 'P/L', successorOrderId: 'override-line', time },
+      ],
+    },
+  });
+
+  const sevOf = (alerts, type) => alerts.find(alert => alert.type === type)?.sev;
+
+  const off = Core.computeAlerts(fixture(false)).alerts;
+  assert.equal(sevOf(off, 'setup-violated'), 'warn');
+  assert.equal(sevOf(off, 'setup-uncovered'), 'warn');
+  assert.equal(sevOf(off, 'predecessor-state-unknown'), 'warn');
+  assert.equal(sevOf(off, 'successor-state-unknown'), 'warn');
+  assert.equal(sevOf(off, 'override-inactive'), 'warn', 'an already-warn diagnostic type must not be affected either way');
+
+  for (const on of [Core.computeAlerts(fixture(true)).alerts, Core.computeAlerts(fixture(undefined)).alerts]) {
+    assert.equal(sevOf(on, 'setup-violated'), 'err');
+    assert.equal(sevOf(on, 'setup-uncovered'), 'err');
+    assert.equal(sevOf(on, 'predecessor-state-unknown'), 'err');
+    assert.equal(sevOf(on, 'successor-state-unknown'), 'err');
+    assert.equal(sevOf(on, 'override-inactive'), 'warn');
+  }
+});
+
 test('computeAlerts ignores malformed setup diagnostics', () => {
   // This fails if an invalid observation payload can crash the normal alert
   // path instead of remaining fail-safe and diagnostic-only.

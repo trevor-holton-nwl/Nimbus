@@ -345,6 +345,7 @@
     _wwCache = new Map();
     _plantMemo = new Map();
     const plantOf = line => getPlantForLine(line, lineSettings, masterData);
+    const setupActiveForLine = line => masterData?.plants?.find(p => p.plant === plantOf(line))?.setup_active !== false;
 
     const alerts = [];
     const taskById = new Map(tasks.map(task => [String(task.id), task]));
@@ -649,7 +650,7 @@
       setupSeen.add(key);
       const shortMinutes = requiredMinutes - availableMinutes;
       alerts.push({
-        id: `setup-violated-${key}`, sev: 'err', type: 'setup-violated',
+        id: `setup-violated-${key}`, sev: setupActiveForLine(interval.line) ? 'err' : 'warn', type: 'setup-violated',
         msg: `Not enough changeover time before order "${orderNumberForId(interval.successorOrderId)}" on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
         taskId: interval.successorOrderId, line: interval.line, time: interval.start,
         requiredMinutes, availableMinutes, shortMinutes,
@@ -684,8 +685,10 @@
       const time = parseDate(diagnostic.time) || new Date();
       const pair = diagnostic.pairKey ? ` for ${formatSetupPairKey(diagnostic.pairKey)}` : '';
       const defaultMsg = SETUP_DIAGNOSTIC_DEFAULT_MSG[diagnostic.type];
+      const baseSev = SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err';
+      const sev = baseSev === 'err' && !setupActiveForLine(diagnostic.line) ? 'warn' : baseSev;
       alerts.push({
-        id: `${diagnostic.type}-${key}`, sev: SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err', type: diagnostic.type,
+        id: `${diagnostic.type}-${key}`, sev, type: diagnostic.type,
         msg: diagnostic.message || (defaultMsg ? defaultMsg(diagnostic, pair) : `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`),
         taskId: diagnostic.successorOrderId, line: diagnostic.line, time,
       });

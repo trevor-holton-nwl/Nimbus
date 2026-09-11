@@ -4474,6 +4474,29 @@ test('hard bounds pull floor includes setup and excluded lines keep every field 
   assert.ok(SetupScheduler.validateCandidateForApply(tampered, snapshot).some(f => f.code === 'scope'));
 });
 
+test('setup timing findings downgrade to warning only when the plant setup flag is truly off', () => {
+  const snapshot = setupSnapshot([scheduledTask('floor', 1, 'RED', '2026-08-04T18:00:00')]);
+  snapshot.masterData.plants[0].max_pull_forward_days = 0;
+  const bounds = dueDateBounds(setupTruth({ rows: [setupRow('GREEN', 'RED', 60)] }), { horizonEnd: at('2026-08-05T18:00:00') });
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  // Push the placement to the day before the legal (pull-forward) floor so its setup window also starts before the floor.
+  const violated = { ...result, patches: result.patches.map(p => p.id === 'floor'
+    ? { ...p, changes: { ...p.changes, start_date: at('2026-08-03T23:00:00'), end_date: at('2026-08-04T00:00:00') } }
+    : p) };
+
+  snapshot.masterData.plants[0].setup_active = false;
+  const off = SetupScheduler.validateCandidateForApply(violated, snapshot);
+  assert.ok(off.some(f => f.code === 'setup_floor' && f.severity === 'warning'));
+
+  snapshot.masterData.plants[0].setup_active = true;
+  const on = SetupScheduler.validateCandidateForApply(violated, snapshot);
+  assert.ok(on.some(f => f.code === 'setup_floor' && f.severity === 'error'));
+
+  snapshot.masterData.plants = [];
+  const absent = SetupScheduler.validateCandidateForApply(violated, snapshot);
+  assert.ok(absent.some(f => f.code === 'setup_floor' && f.severity === 'error'));
+});
+
 test('hard bounds null limits permit missing due and continuous production crossing midnight', () => {
   const snapshot = setupSnapshot([scheduledTask('unbounded', 26, 'GREEN', null)]);
   const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));

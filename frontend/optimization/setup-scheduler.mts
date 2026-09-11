@@ -5953,8 +5953,9 @@ function productiveIntervals(task: NimbusTask): PlacementInterval[] {
 /** Revalidates the complete proposal. Protected legacy violations are warnings, never a partial-Apply veto. */
 export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>, currentSnapshot?: Readonly<ScheduleSnapshot>): ValidationFinding[] {
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
+  const plantSetupReallyActive = snapshot.masterData?.plants?.find(row => row.plant === bounds.setup.plant)?.setup_active !== false;
   const findings: ValidationFinding[] = [];
-  const add = (code: string, message: string, task?: NimbusTask, protectedTask = false): void => { findings.push({ code, message, severity: protectedTask ? 'warning' : 'error', ...(task ? { taskId: taskId(task), line: String(task.MACHINE) } : {}) }); };
+  const add = (code: string, message: string, task?: NimbusTask, protectedTask = false, setupRelated = false): void => { findings.push({ code, message, severity: protectedTask || (setupRelated && !plantSetupReallyActive) ? 'warning' : 'error', ...(task ? { taskId: taskId(task), line: String(task.MACHINE) } : {}) }); };
   if (currentSnapshot) {
     const baselineSnapshot = candidate.validationContext?.baselineSnapshot ?? snapshot;
     // `readModelVersion` is recorded for diagnostics only and is deliberately
@@ -6067,12 +6068,12 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       if (minutes > 0) {
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);
         const floor = notBeforeFor(bounds, task);
-        if ((!protectedTask && start < bounds.now) || (floor && start < floor)) add('setup_floor', 'Setup begins before the allowed placement floor.', task, protectedTask);
+        if ((!protectedTask && start < bounds.now) || (floor && start < floor)) add('setup_floor', 'Setup begins before the allowed placement floor.', task, protectedTask, true);
         const free = freeIntervalsFor(snapshot, line, bounds.setup.plant, start, end, bounds.runContext);
-        if (!coversInterval(free, { start, end })) add('setup_calendar', 'Setup overlaps nonworking time or a blackout.', task, protectedTask);
+        if (!coversInterval(free, { start, end })) add('setup_calendar', 'Setup overlaps nonworking time or a blackout.', task, protectedTask, true);
         if (predecessor && timestamp(predecessor.end_date)! > start) {
           const bothProtected = protectedTask && taskIsEvaluationProtected(snapshot, bounds, predecessor);
-          add('setup_overlap', 'Required setup overlaps preceding production.', protectedTask && !bothProtected ? predecessor : task, bothProtected);
+          add('setup_overlap', 'Required setup overlaps preceding production.', protectedTask && !bothProtected ? predecessor : task, bothProtected, true);
         }
       }
       predecessor = task; state = successor;
