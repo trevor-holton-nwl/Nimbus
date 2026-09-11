@@ -709,6 +709,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.welcome_subtitle':               'Please select a Plant to begin.',
   'ui.no_plant_data_loaded':           'No plant data loaded',
   'ui.what_if_title':                  'What-If',
+  'ui.concurrency_off_banner':         '⚠ Concurrency guard is OFF — saves overwrite other planners\' edits without warning (Config.CONCURRENCY_CHECK)',
   'ui.what_if_sub':                    '— changes not saved',
   'ui.what_if_default_name':           'What-If Scenario',
   'ui.discard_btn':                    '✕ Discard',

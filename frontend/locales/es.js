@@ -391,6 +391,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.welcome_title':                  '¡Hola! Bienvenido a NIMBUS',
   'ui.welcome_subtitle':               'Por favor, seleccione una Planta para comenzar.',
   'ui.what_if_title':                  'Hipótesis',
+  'ui.concurrency_off_banner':         '⚠ Protección de concurrencia DESACTIVADA — guardar sobrescribe cambios de otros planificadores sin aviso (Config.CONCURRENCY_CHECK)',
   'ui.what_if_sub':                    '— cambios no guardados',
   'ui.what_if_default_name':           'Escenario Hipotético',
   'ui.discard_btn':                    '✕ Descartar',

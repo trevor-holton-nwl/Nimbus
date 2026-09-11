@@ -444,6 +444,19 @@ const NIMBUS = (function () {
     // so once is behaviorally equivalent).
     SessionUIAdapter.init();
     SessionUIAdapter._applyGates();
+    // N2: Config.CONCURRENCY_CHECK=false makes every manual save force:true
+    // (last-write-wins). Documented escape hatch, but nobody should run the
+    // pilot in that mode without seeing it. Logged once per boot + a
+    // persistent banner (same chrome band as the What-If sandbox banner).
+    if (Config.CONCURRENCY_CHECK === false) {
+      ErrorLog.warn('concurrency', 'Config.CONCURRENCY_CHECK is false — task saves run last-write-wins');
+      const _ccBanner = document.getElementById('concurrency-banner');
+      if (_ccBanner) {
+        _ccBanner.textContent = Util.t('ui.concurrency_off_banner');
+        _ccBanner.hidden = false;
+        document.body.classList.add('concurrency-off');
+      }
+    }
     // Hydrate per-user settings + role defaults from the cached session blob so the
     // app reflects the user's prefs immediately AND works offline. Session.refresh()
     // below overwrites these with DB truth from /security/me when the network is up.

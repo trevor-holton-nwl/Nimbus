@@ -387,6 +387,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.welcome_title':                  'Olá! Bem-vindo ao NIMBUS',
   'ui.welcome_subtitle':               'Por favor, selecione uma Planta para começar.',
   'ui.what_if_title':                  'Hipótese',
+  'ui.concurrency_off_banner':         '⚠ Proteção de concorrência DESLIGADA — salvar sobrescreve alterações de outros planejadores sem aviso (Config.CONCURRENCY_CHECK)',
   'ui.what_if_sub':                    '— alterações não salvas',
   'ui.what_if_default_name':           'Cenário Hipotético',
   'ui.discard_btn':                    '✕ Descartar',

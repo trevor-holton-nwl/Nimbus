@@ -387,6 +387,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.welcome_title':                  'Hallo! Willkommen bei NIMBUS',
   'ui.welcome_subtitle':               'Bitte wählen Sie ein Werk aus, um zu beginnen.',
   'ui.what_if_title':                  'Was-wäre-wenn',
+  'ui.concurrency_off_banner':         '⚠ Gleichzeitigkeitsschutz AUS — Speichern überschreibt Änderungen anderer Planer ohne Warnung (Config.CONCURRENCY_CHECK)',
   'ui.what_if_sub':                    '— Änderungen nicht gespeichert',
   'ui.what_if_default_name':           'Was-wäre-wenn-Szenario',
   'ui.discard_btn':                    '✕ Verwerfen',

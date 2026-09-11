@@ -387,6 +387,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.welcome_title':                  'Bonjour ! Bienvenue dans NIMBUS',
   'ui.welcome_subtitle':               'Veuillez sélectionner une Usine pour commencer.',
   'ui.what_if_title':                  'Hypothèse',
+  'ui.concurrency_off_banner':         '⚠ Protection de concurrence DÉSACTIVÉE — l\'enregistrement écrase les modifications des autres planificateurs sans avertissement (Config.CONCURRENCY_CHECK)',
   'ui.what_if_sub':                    '— modifications non enregistrées',
   'ui.what_if_default_name':           'Scénario Hypothétique',
   'ui.discard_btn':                    '✕ Annuler',
