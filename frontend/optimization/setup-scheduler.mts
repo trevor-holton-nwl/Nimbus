@@ -2521,6 +2521,12 @@ function candidateForSequence(
   let lateCount = 0;
   let latenessMinutes = 0;
   let maxLatenessMinutes = 0;
+  // N5c: Σ|Δstart| in minutes across this fragment's own placements, against
+  // each task's pre-patch `start_date` (the same baseline
+  // `objectiveFactsForCandidate` reads via `timestamp(...)`). Carried beside
+  // `score[]` like `maxLatenessMinutes`, but summed (not maxed) at fragment
+  // concatenation since it is already a per-fragment total, not a maximum.
+  let instabilityMinutes = 0;
   // Due-date push-forward limit: count of orders in this sequence whose
   // simulated end exceeds `bounds.notAfter(task)`. Rolled into
   // score[SCORE_OVER_CAP] on the feasible return below; compareCandidate
@@ -2532,7 +2538,7 @@ function candidateForSequence(
   // on the feasible return below so `compareCandidate` can minimize it —
   // minimizing uncovered edges is what drives same-signature grouping.
   let uncoveredEdgeCount = 0;
-  const checkpoints: Array<{ task: NimbusTask; predecessorState: SetupStateKey | null; predecessorOrderId: string | null; cursor: Date; setupMinutes: number; lateCount: number; latenessMinutes: number; maxLatenessMinutes: number; overCapCount: number; uncoveredEdgeCount: number }> = [];
+  const checkpoints: Array<{ task: NimbusTask; predecessorState: SetupStateKey | null; predecessorOrderId: string | null; cursor: Date; setupMinutes: number; lateCount: number; latenessMinutes: number; maxLatenessMinutes: number; instabilityMinutes: number; overCapCount: number; uncoveredEdgeCount: number }> = [];
 
   const constraintFailure = (edge: MissingSetupEdge): DueDateCandidate => ({
     feasible: false,
@@ -2553,7 +2559,7 @@ function candidateForSequence(
   for (let taskIndex = 0; taskIndex < sequence.length; taskIndex += 1) {
     const task = sequence[taskIndex];
     const priorCursor = new Date(cursor);
-    const checkpoint = { task, predecessorState, predecessorOrderId, cursor: priorCursor, setupMinutes, lateCount, latenessMinutes, maxLatenessMinutes, overCapCount, uncoveredEdgeCount };
+    const checkpoint = { task, predecessorState, predecessorOrderId, cursor: priorCursor, setupMinutes, lateCount, latenessMinutes, maxLatenessMinutes, instabilityMinutes, overCapCount, uncoveredEdgeCount };
     if (planningDefect(snapshot, bounds, task)) { unadmitted.push(task); continue; }
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
@@ -2709,6 +2715,8 @@ function candidateForSequence(
           : [],
       },
     });
+    const priorStart = timestamp(task.start_date);
+    if (priorStart) instabilityMinutes += Math.abs(first.start.getTime() - priorStart.getTime()) / 60000;
     setupMinutes += effectiveSetupMinutes;
     const due = dueTimestamp(task);
     if (Number.isFinite(due) && last.end.getTime() > due) {
@@ -2747,6 +2755,7 @@ function candidateForSequence(
     predecessorState = prior.predecessorState; predecessorOrderId = prior.predecessorOrderId; cursor = prior.cursor;
     setupMinutes = prior.setupMinutes; lateCount = prior.lateCount; latenessMinutes = prior.latenessMinutes;
     maxLatenessMinutes = prior.maxLatenessMinutes;
+    instabilityMinutes = prior.instabilityMinutes;
     overCapCount = prior.overCapCount; uncoveredEdgeCount = prior.uncoveredEdgeCount;
   }
 
@@ -2858,6 +2867,7 @@ function candidateForSequence(
     productiveRuntimeKey: productiveRuntimeKey(sequence),
     productiveRuntimeMinutes: productiveRuntimeTotal(sequence),
     maxLatenessMinutes,
+    instabilityMinutes,
     finalState: predecessorState,
     finalPredecessorOrderId: predecessorOrderId,
   };
@@ -4143,6 +4153,7 @@ function completeFinalBoundaryCandidate(
     productiveRuntimeKey: productiveRuntimeKey(orderedTasks),
     productiveRuntimeMinutes: productiveRuntimeTotal(orderedTasks),
     maxLatenessMinutes: Math.max(preFirmed.maxLatenessMinutes ?? 0, continuation.maxLatenessMinutes ?? 0),
+    instabilityMinutes: (preFirmed.instabilityMinutes ?? 0) + (continuation.instabilityMinutes ?? 0),
   };
 }
 
@@ -6634,7 +6645,7 @@ function fragmentObjectiveFacts(candidate: Readonly<DueDateCandidate>): Objectiv
     uncoveredEdges: candidate.score[SCORE_UNCOVERED] ?? 0,
     setupMinutes: candidate.score[5] ?? 0,
     scheduledCount: Math.max(0, -(candidate.score[4] ?? 0)),
-    instabilityMinutes: 0,
+    instabilityMinutes: candidate.instabilityMinutes ?? 0,
     productiveRuntimeKey: candidate.productiveRuntimeKey ?? '',
     productiveRuntimeMinutes: candidate.productiveRuntimeMinutes ?? 0,
     policyKey: candidate.policyKey,
@@ -6837,3 +6848,5 @@ function coversInterval(free: readonly PlacementInterval[], interval: PlacementI
   for (const slot of free) { if (+slot.start > cursor) return false; cursor = Math.max(cursor, +slot.end); if (cursor >= +interval.end) return true; }
   return false;
 }
+
+export const fragmentObjectiveFactsForTest = fragmentObjectiveFacts;

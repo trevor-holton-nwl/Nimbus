@@ -4891,3 +4891,18 @@ test('unknownSetupPolicy plantDefaultMinutes is inert on a synthetic zero-cost s
   assert.deepEqual(b.patches, a.patches);
   assert.deepEqual(b.explanation.map(r => r.code), a.explanation.map(r => r.code));
 });
+
+test('fragment search charges instability for moved starts instead of a hardcoded zero', () => {
+  const stable = { feasible: true, patches: [], score: [0,0,0,0,0,0,0,0], policyKey: '', sequenceKey: 'a|b',
+    unadmitted: [], explanation: [], missingEdges: [], instabilityMinutes: 0 };
+  const shuffled = { ...stable, sequenceKey: 'b|a', instabilityMinutes: 120 };
+  assert.ok(SetupScheduler.compareObjectiveFacts(
+    SetupScheduler.fragmentObjectiveFactsForTest(stable),
+    SetupScheduler.fragmentObjectiveFactsForTest(shuffled), 'min-changeover') < 0,
+    'a fragment that moved starts must lose the instability tie-break');
+  // Incumbent order in due sequence: a run that keeps it carries zero instability.
+  const first = scheduledTask('stab-a', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T08:00', '2026-08-03T09:00');
+  const second = scheduledTask('stab-b', 1, 'GREEN', '2026-08-03T18:00', '2026-08-03T09:00', '2026-08-03T10:00');
+  const result = SetupScheduler.evaluateMinChangeover(setupSnapshot([second, first]), dueDateBounds(setupTruth()));
+  assert.equal(result.objective?.instabilityMinutes, 0, 'the incumbent order carries zero instability');
+});
