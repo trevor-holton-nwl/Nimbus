@@ -1015,9 +1015,14 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     [min new start - 1 day, max new end + 1 day] (start-indexed via
     idx_orders_machine_eff_start; queued rows excluded). Pairs involving at least
     one written id are returned in `conflicts` — advisory by default (commit and
-    report). `strict_conflicts=True` is honored only together with
-    `atomic_optimizer`: a non-empty scan rolls the batch back and returns
-    status 'error' / error_code 'schedule.conflicts'.
+    report). The advisory scan runs under its own SAVEPOINT: on any failure
+    (Python-side or a server-side error that aborts the transaction) it is rolled
+    back to that savepoint so the batch's own writes are unaffected and the
+    following commit is a real commit, not a COMMIT-on-aborted-transaction silent
+    rollback. `strict_conflicts=True` is honored only together with
+    `atomic_optimizer`: a non-empty scan rolls the whole batch back and returns
+    status 'error' / error_code 'schedule.conflicts'; a scan failure under strict
+    mode propagates instead of being swallowed.
 
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
     not_found_ids, stale, versions}. invalid_ids / not_found_ids carry the actual ids
@@ -1253,20 +1258,29 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                                     for segment in row["segments"]
                                 ],
                             )
+                cur.execute("SAVEPOINT conflict_scan")
                 try:
                     conflicts = _scan_conflicts_for_rows(cur, update_rows, eff)
+                    cur.execute("RELEASE SAVEPOINT conflict_scan")
                 except Exception:
                     # The conflict scan is an advisory diagnostic layered on top of
-                    # an otherwise-valid save; a bug in the scan (a malformed
-                    # segment object, an unexpected datetime rendering, a stray SQL
-                    # error) must never roll back writes that already succeeded. In
-                    # strict mode the caller explicitly asked the scan to gate the
-                    # commit, so there we let it propagate to the outer handler
-                    # (which rolls back and reports status: error) instead of
-                    # silently treating a broken scan as "no conflicts found".
+                    # an otherwise-valid save. In strict mode the caller explicitly
+                    # asked the scan to gate the commit, so there we let it
+                    # propagate to the outer handler (which rolls back the whole
+                    # transaction and reports status: error) instead of silently
+                    # treating a broken scan as "no conflicts found".
                     if strict_conflicts and atomic_optimizer:
                         raise
-                    log.warning("Schedule-conflict scan failed; treating as no "
+                    # Advisory: a server-side failure (deadlock, statement timeout,
+                    # a malformed segment object driving a bad query) leaves the
+                    # transaction aborted, and Postgres executes a COMMIT on an
+                    # aborted transaction as a silent ROLLBACK — which would discard
+                    # this batch's writes while still reporting persisted/versions
+                    # as if they landed. Roll back only the scan's own statements
+                    # via the savepoint so the batch's UPDATEs survive and the
+                    # conn.commit() below is a real commit.
+                    cur.execute("ROLLBACK TO SAVEPOINT conflict_scan")
+                    log.warning("Schedule-conflict scan failed; committing without "
                                 "conflicts (advisory only, save proceeds)",
                                 exc_info=True, extra={"category": "scheduling"})
                     conflicts = []

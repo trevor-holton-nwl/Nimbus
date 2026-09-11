@@ -213,16 +213,20 @@ class _FakeSegmentCursor:
 class _FakeSegmentPool:
     def __init__(self, cursor):
         self.cursor_value = cursor
+        self.last_connection = None
 
     @contextmanager
     def connection(self):
-        yield _FakeSegmentConnection(self.cursor_value)
+        conn = _FakeSegmentConnection(self.cursor_value)
+        self.last_connection = conn
+        yield conn
 
 
 class _FakeSegmentConnection:
     def __init__(self, cursor):
         self.cursor_value = cursor
         self.committed = False
+        self.rolled_back = False
 
     @contextmanager
     def cursor(self):
@@ -232,7 +236,7 @@ class _FakeSegmentConnection:
         self.committed = True
 
     def rollback(self):
-        pass
+        self.rolled_back = True
 
 
 def _segment_batch_item(order_id):
@@ -317,6 +321,7 @@ def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(mon
     assert "o.plant = ANY(%s)" in scan_sql
     assert scan_params[0] == ["L1"]
     assert scan_params[1] == ["PLANT-A"]
+    assert any("RELEASE SAVEPOINT conflict_scan" in s for s, _ in cursor.executed)
 
 
 def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_optimizer(monkeypatch):
@@ -366,6 +371,31 @@ def test_update_task_dates_bulk_advisory_scan_failure_does_not_block_a_valid_sav
     assert result["persisted"] == 1
     assert result["conflicts"] == []
     assert result.get("status") != "error"
+    statements = [s for s, _ in cursor.executed]
+    assert any("SAVEPOINT conflict_scan" in s and "RELEASE" not in s and "ROLLBACK" not in s
+               for s in statements)
+    assert any("ROLLBACK TO SAVEPOINT conflict_scan" in s for s in statements)
+    assert not any("RELEASE SAVEPOINT" in s for s in statements)
+
+
+def test_update_task_dates_bulk_strict_conflicts_scan_failure_propagates_and_rolls_back(monkeypatch):
+    """Under strict mode the scan is expected to gate the commit, so a scan
+    failure must propagate (never silently swallowed into 'no conflicts') and
+    the whole transaction must roll back — never a COMMIT on a transaction the
+    failed scan may have left aborted."""
+    t = lambda h: datetime(2026, 8, 17, h, 0)
+    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    cursor = _FakeScanErrorCursor(eff_rows, plant_rows=[])
+    pool = _FakeSegmentPool(cursor)
+    monkeypatch.setattr(brain.db, "_pool", pool)
+
+    with pytest.raises(RuntimeError, match="conflict scan blew up"):
+        brain.db.update_task_dates_bulk(
+            [{"id": "mv-a", "start": t(8), "end": t(10), "base_version": 100}],
+            atomic_optimizer=True, strict_conflicts=True,
+        )
+
+    assert pool.last_connection.rolled_back is True
 
 
 def test_openapi_schema_includes_new_components():
