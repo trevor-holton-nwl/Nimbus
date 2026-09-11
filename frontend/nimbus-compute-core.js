@@ -376,7 +376,59 @@
             id:  `ovl-${prev.task.id}-${cur.task.id}`,
             sev: 'err', type: 'overlap',
             msg: `Orders "${orderNumber(prev.task)}" and "${orderNumber(cur.task)}" overlap on ${line}.`,
-            taskId: cur.task.id, line, time: cur.start
+            taskId: cur.task.id, peerId: prev.task.id, line, time: cur.start
+          });
+        }
+      }
+    }
+
+    /* 1b. TOOL CONFLICT — one physical tool (PRT_01 / PRT_02 identify a unique tool,
+       confirmed with the pilot plant 2026-09-11) scheduled on two DIFFERENT lines at
+       the same instant. Same-line adjacency is a changeover, not a conflict.
+       The peer pool is horizon-filtered but NOT line-filtered: an incremental
+       recompute for L1 must still see the peer on L2. The alert attaches to the
+       later order, on its own line, and is emitted only when that line is in scope. */
+    const TOOL_PLACEHOLDERS = new Set(['', '-', '0', 'N/A', 'NONE', 'NULL']);
+    const toolIds = task => {
+      const out = [];
+      for (const key of ['PRT_01', 'PRT_02']) {
+        const v = String(task?.[key] ?? '').trim();
+        if (!TOOL_PLACEHOLDERS.has(v.toUpperCase())) out.push(v);
+      }
+      return out;
+    };
+    const byTool = {};
+    for (const t of tasks) {
+      if (t.end_date && t.end_date < todayStart) continue;
+      for (const tool of toolIds(t)) {
+        for (const interval of scheduleIntervals(t)) {
+          (byTool[tool] ||= []).push({ task: t, start: interval.start, end: interval.end });
+        }
+      }
+    }
+    const toolConflictIds = new Set();
+    for (const tool of Object.keys(byTool)) {
+      const arr = byTool[tool].slice().sort((a, b) => a.start - b.start);
+      for (let i = 1; i < arr.length; i++) {
+        const cur = arr[i];
+        const curLine = cur.task.MACHINE || 'Unknown';
+        if (onlyLines && !onlyLines.has(curLine)) continue;
+        // Ends are not monotone in start order, so every earlier interval is a candidate.
+        for (let j = i - 1; j >= 0; j--) {
+          const prev = arr[j];
+          if (prev.task.id === cur.task.id) continue;
+          if (prev.end <= cur.start) continue;                 // touching is not overlapping
+          const prevLine = prev.task.MACHINE || 'Unknown';
+          if (prevLine === curLine) continue;                  // rule 1's territory
+          const id = `toolc-${prev.task.id}|${cur.task.id}`;
+          if (toolConflictIds.has(id)) continue;               // split segments of the same pair
+          toolConflictIds.add(id);
+          const vars = { tool, a: orderNumber(prev.task), b: orderNumber(cur.task), lineA: prevLine, lineB: curLine };
+          alerts.push({
+            id, sev: 'err', type: 'tool-conflict',
+            msg: `Tool "${tool}" is needed by "${vars.a}" on ${prevLine} and "${vars.b}" on ${curLine} at the same time.`,
+            msgKey: 'alert.tool_conflict', msgVars: vars,
+            taskId: cur.task.id, peerId: prev.task.id, line: curLine, time: cur.start,
           });
         }
       }

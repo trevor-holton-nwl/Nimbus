@@ -412,3 +412,60 @@ test('computeAlerts and computeUtilization produce correct results with many tas
     }
   }
 });
+
+test('computeAlerts raises one tool-conflict for the same PRT_01 on two lines at once', () => {
+  const base = Date.now() + 24 * 3600000;
+  const a = { id: 'x-1', PRODUCTION_ORDER: 'PO-A', MACHINE: 'L1', RUN_TIME: 2, PRT_01: 'MOLD-7',
+    start_date: new Date(base + 1 * 3600000), end_date: new Date(base + 3 * 3600000) };
+  const b = { id: 'y-2', PRODUCTION_ORDER: 'PO-B', MACHINE: 'L2', RUN_TIME: 2, PRT_02: 'MOLD-7',
+    start_date: new Date(base + 2 * 3600000), end_date: new Date(base + 4 * 3600000) };
+  const res = Core.computeAlerts({
+    tasks: [a, b], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  const hits = res.alerts.filter(al => al.type === 'tool-conflict');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].id, 'toolc-x-1|y-2');
+  assert.equal(hits[0].taskId, 'y-2');
+  assert.equal(hits[0].peerId, 'x-1');
+  assert.equal(hits[0].line, 'L2');
+  assert.equal(hits[0].msgKey, 'alert.tool_conflict');
+  assert.equal(hits[0].msgVars.tool, 'MOLD-7');
+});
+
+test('computeAlerts does not raise tool-conflict for the same tool on one line (that is a changeover)', () => {
+  const base = Date.now() + 24 * 3600000;
+  const a = { id: 'a', MACHINE: 'L1', RUN_TIME: 2, PRT_01: 'MOLD-7',
+    start_date: new Date(base + 1 * 3600000), end_date: new Date(base + 3 * 3600000) };
+  const b = { id: 'b', MACHINE: 'L1', RUN_TIME: 2, PRT_01: 'MOLD-7',
+    start_date: new Date(base + 2 * 3600000), end_date: new Date(base + 4 * 3600000) };
+  const res = Core.computeAlerts({
+    tasks: [a, b], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  assert.equal(res.alerts.filter(al => al.type === 'tool-conflict').length, 0);
+  assert.equal(res.alerts.filter(al => al.type === 'overlap').length, 1);   // still an overlap
+});
+
+test('computeAlerts skips blank and placeholder tool ids', () => {
+  const base = Date.now() + 24 * 3600000;
+  const mk = (id, line, prt) => ({ id, MACHINE: line, RUN_TIME: 2, PRT_01: prt,
+    start_date: new Date(base + 1 * 3600000), end_date: new Date(base + 3 * 3600000) });
+  const res = Core.computeAlerts({
+    tasks: [mk('a', 'L1', ''), mk('b', 'L2', ''), mk('c', 'L3', '-'), mk('d', 'L4', '-'), mk('e', 'L5', 'n/a'), mk('f', 'L6', 'N/A')],
+    blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  assert.equal(res.alerts.filter(al => al.type === 'tool-conflict').length, 0);
+});
+
+test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
+  const base = Date.now() + 24 * 3600000;
+  const t1 = { id: 'a', MACHINE: 'L', RUN_TIME: 2, start_date: new Date(base + 1 * 3600000), end_date: new Date(base + 3 * 3600000) };
+  const t2 = { id: 'b', MACHINE: 'L', RUN_TIME: 2, start_date: new Date(base + 2 * 3600000), end_date: new Date(base + 4 * 3600000) };
+  const res = Core.computeAlerts({ tasks: [t1, t2], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {} });
+  const ovl = res.alerts.find(a => a.type === 'overlap');
+  assert.equal(ovl.id, 'ovl-a-b');      // id format is pinned; peerId is additive
+  assert.equal(ovl.peerId, 'a');
+});

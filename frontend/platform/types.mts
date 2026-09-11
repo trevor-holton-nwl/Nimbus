@@ -421,7 +421,9 @@ export type OptimizerMode = 'spt' | 'changeover' | 'duedate' | 'backlog';
 export type AlertType =
   | 'overlap' | 'overload' | 'near-capacity' | 'closed'
   | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours'
-  | 'runtime-schedule-mismatch';
+  | 'runtime-schedule-mismatch' | 'tool-conflict'
+  | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged'
+  | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown';
 
 export type AlertSev = 'err' | 'warn';
 

@@ -26,9 +26,16 @@ declare global {
     id: string;
     sev: 'err' | 'warn';
     type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours' | 'runtime-schedule-mismatch'
-      | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive';
+      | 'tool-conflict'
+      | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
+      | 'predecessor-state-unknown' | 'successor-state-unknown';
     msg: string;
+    /** Optional localized form; the drawer prefers Util.t(msgKey, msgVars) when present. */
+    msgKey?: string;
+    msgVars?: Record<string, string>;
     taskId?: string;
+    /** The other order in a pairwise alert (overlap, tool-conflict). Prefer this over parsing `id`. */
+    peerId?: string;
     line: string;
     time: Date;
     requiredMinutes?: number;
@@ -45,6 +52,10 @@ declare global {
     end_date?: Date | null;
     firmed?: boolean; // manual firm mirror
     runtime_schedule_mismatch?: boolean;
+    PRT_01?: string;
+    PRT_02?: string;
+    PRODUCTION_ORDER?: string;
+    ORDER?: string;
     scheduleSegments?: Array<{
       sequence: number;
       startDate?: Date | null;
