@@ -464,11 +464,12 @@ export const Table = {
         { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false,
           hide: Table._fieldHidden('COLOR') },
         ...Table._priorityColumns(),
-        { headerName: 'Planning status', field: 'planning_status', minWidth: 150, editable: false,
-          valueGetter: (p: { data: NimbusTask }) => p.data?.planning_status === 'needs_planning' ? 'Needs Planning' : 'Scheduled' },
-        { headerName: 'Planning reason', colId: 'planning_reason', minWidth: 240, editable: false,
+        { headerName: Util.t('col.planning_status'), field: 'planning_status', minWidth: 150, editable: false,
+          valueGetter: (p: { data: NimbusTask }) => p.data?.planning_status === 'needs_planning'
+            ? Util.t('ui.needs_planning') : Util.t('ui.planning_status_scheduled') },
+        { headerName: Util.t('col.planning_reason'), colId: 'planning_reason', minWidth: 240, editable: false,
           valueGetter: (p: { data: NimbusTask }) => p.data?.planning_reason?.message ?? '' },
-        { headerName: 'Allowed window', colId: 'planning_window', minWidth: 260, editable: false,
+        { headerName: Util.t('col.planning_window'), colId: 'planning_window', minWidth: 260, editable: false,
           valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),
           tooltipValueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },
         ...Table._catalogOnlyColumns(),
@@ -795,7 +796,7 @@ export const Table = {
     if (!drop) return;
     const cur = Table._chipFilters.status;
     const items: Array<{ v: TableStatusFilter; k: string; d: string }> = [
-      { v: 'needs_planning', k: 'Needs Planning', d: 'Unplaced orders awaiting a legal schedule' },
+      { v: 'needs_planning', k: Util.t('ui.needs_planning'), d: Util.t('ui.status_desc_needs_planning') },
       { v: 'late',     k: Util.t('ui.late'),        d: Util.t('ui.status_desc_late') },
       { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
       { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
@@ -956,7 +957,7 @@ export const Table = {
         : Util.t('ui.n_colors_filter', { count: f.colors.size }),
       f.colors.size > 0);
 
-    const STATUS_LABEL: Record<TableStatusFilter, string> = { needs_planning: 'Needs Planning', late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
+    const STATUS_LABEL: Record<TableStatusFilter, string> = { needs_planning: Util.t('ui.needs_planning'), late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
     set('tbl-flt-status-btn', 'tbl-flt-status-label',
       f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
       !!f.status);

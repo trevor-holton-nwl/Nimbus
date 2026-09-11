@@ -206,6 +206,9 @@ window.__NIMBUS_LOCALES.de = {
   'col.min_lot_size':                  'Mindestlosgröße',
   'col.incremental_lot_size':          'Losgrößenzuschlag',
   'col.default_machine':               'Standardmaschine',
+  'col.planning_status':               'Planungsstatus',
+  'col.planning_reason':               'Planungsgrund',
+  'col.planning_window':               'Zulässiges Fenster',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Sperrzeit hinzufügen',
@@ -366,6 +369,9 @@ window.__NIMBUS_LOCALES.de = {
   'ui.status_desc_conflict':           'hat Fehleralarm',
   'ui.status_desc_atrisk':             'hat Warnalarm',
   'ui.status_desc_firmed':             'für Optimierer gesperrt',
+  'ui.needs_planning':                 'Planung erforderlich',
+  'ui.planning_status_scheduled':      'Eingeplant',
+  'ui.status_desc_needs_planning':     'nicht platzierte Aufträge ohne gültigen Termin',
   'ui.today':                          'Heute',
   'ui.tomorrow':                       'Morgen',
   'ui.late':                           'Verspätet',

@@ -208,6 +208,9 @@ window.__NIMBUS_LOCALES.en = {
   'col.min_lot_size':                  'Minimum Lot Size',
   'col.incremental_lot_size':          'Incremental Lot Size',
   'col.default_machine':               'Default Machine',
+  'col.planning_status':               'Planning status',
+  'col.planning_reason':               'Planning reason',
+  'col.planning_window':               'Allowed window',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Add blackout block',
@@ -372,6 +375,9 @@ window.__NIMBUS_LOCALES.en = {
   'ui.status_desc_conflict':           'has error alert',
   'ui.status_desc_atrisk':             'has warning alert',
   'ui.status_desc_firmed':             'locked from optimiser',
+  'ui.needs_planning':                 'Needs Planning',
+  'ui.planning_status_scheduled':      'Scheduled',
+  'ui.status_desc_needs_planning':     'unplaced orders awaiting a legal schedule',
   'ui.today':                          'Today',
   'ui.tomorrow':                       'Tomorrow',
   'ui.late':                           'Late',

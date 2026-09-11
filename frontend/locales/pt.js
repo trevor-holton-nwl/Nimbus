@@ -206,6 +206,9 @@ window.__NIMBUS_LOCALES.pt = {
   'col.min_lot_size':                  'Tamanho de Lote Mínimo',
   'col.incremental_lot_size':          'Tamanho de Lote Incremental',
   'col.default_machine':               'Máquina Padrão',
+  'col.planning_status':               'Status de planejamento',
+  'col.planning_reason':               'Motivo de planejamento',
+  'col.planning_window':               'Janela permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
   'btn.add_blackout':                  '+ Adicionar paralisação',
@@ -366,6 +369,9 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.status_desc_conflict':           'tem alerta de erro',
   'ui.status_desc_atrisk':             'tem alerta de aviso',
   'ui.status_desc_firmed':             'bloqueado para o otimizador',
+  'ui.needs_planning':                 'Precisa de planejamento',
+  'ui.planning_status_scheduled':      'Programada',
+  'ui.status_desc_needs_planning':     'ordens não posicionadas aguardando programação válida',
   'ui.today':                          'Hoje',
   'ui.tomorrow':                       'Amanhã',
   'ui.late':                           'Atrasado',
