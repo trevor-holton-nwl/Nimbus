@@ -1,411 +1,303 @@
-# NIMBUS Comprehensive Code Review & Architecture Audit — 2026-09-01
+# NIMBUS Strategic Review — 2026-09-01, verified and prioritized 2026-09-11
 
-**Method:** Seven scoped review passes over non-overlapping slices (backend platform; backend scheduling/setup/calendars; backend master-data/integration/priority-lists/labor; frontend platform/shell; frontend scheduling/optimization; remaining frontend domains; cross-stack wiring + schema + tests), followed by direct verification of every P0-level claim against live code. Read-only — no code was modified. ~90 API routes cross-matched against every frontend call site; ~70k lines reviewed.
+## 0. How to read this doc
 
-**Legend:** Priority P0 (critical) → P3 (nice-to-have). Confidence High/Med/Low. Every finding cites file:line evidence.
+**What it is.** A strategic assessment of NIMBUS's scheduling model was written on 2026-09-01 (eight themes plus an investment order). On 2026-09-11 every claim in it was checked against the live working tree and against the existing design docs, the user's direction and constraints were captured, and the result was restructured into this execution roadmap.
+
+**Audience.** The NIMBUS owner and Claude Code. Each "Now" workstream is written to be handed straight to an implementation session: why, steps, files, acceptance, tests, risks.
+
+**Method.** Three parallel read-only verification passes (claims 1–3; claims 4–8; existing-roadmap overlap across `docs/`, `PRODUCT.md`, and every domain `CLAUDE.md`). No code was modified, no tests were run. All `file:line` references are from the 2026-09-11 working tree; several line references in the original assessment had drifted and are corrected here.
+
+**Legend.** Verdicts: CONFIRMED · PARTIAL · REFUTED · DECIDED (already settled by a design of record). Buckets: **Now** (weeks, schema-free, pilot hardening) · **Deferred** (held back by effort, a design decision, or the schema-redesign freeze; **none is security-gated**) · **Later / discovery** (needs a plant-side answer or an external dependency first) · **Dropped**.
+
+**The active roadmap is Section 5 only.** Sections 6 and 7 exist so the reasoning is not lost, not as a queue.
+
+**A note on Entra.** An earlier draft of this doc parked five items as "Entra-dependent." On reflection that was wrong: none of them needs the Entra migration for security or technical reasons. What actually holds them back is effort, missing plant data, or the owner's schema-redesign freeze, which happens to be timed to Entra. Entra would improve *who-did-it* attribution for two of them (publication ledger, shared scenarios), but the pilot already records the same spoofable identity in its upload audit, audit log, and `setup_release_evidence.ownerEmail`, and that is an accepted pilot risk. Section 6 states the real reason for each.
 
 ---
 
-## 0.5 Review remediation pass — 2026-09-03 (authoritative latest status)
+## 1. Executive summary
 
-This addendum supersedes older inline statuses below, which are retained as the historical record of earlier review passes. The four waves in the current remediation plan are implemented on `main`:
+- The assessment's structural diagnosis is correct: NIMBUS models one order on one machine, evaluates lines independently, has no shared-resource reservation, saves rows without validating the resulting schedule, and has no server-side scenarios or multi-shift calendars.
+- Most of those gaps are **already known and explicitly deferred** in the design of record (`docs/changeover_matrix.md §14`, `docs/MIGRATION.md`), and two of the assessment's themes (schedule stability, unknown-vs-zero setup) are **largely built** already. The assessment under-credited existing work.
+- Three claims are **wrong or inverted**: optimizer saves are the strictest path, not a `force` bypass; lateness depth *is* scored; and the shell does not intercept browser zoom keys. The timezone claim is **correct**: `plants.timezone` exists and drives the optimizer's Remove Backlog window and setup captures, while order dates and calendar math stay browser-local. The first verification pass refuted it on the strength of a stale code comment and has been corrected.
+- Given the direction (pilot plants are mostly single-operation, shared tooling is the real gap, horizon is weeks, no schema redesign before Entra), the operation/routing model is **demoted to discovery**, shared resources are **reframed as tooling on the existing model**, and this month's work is eight schema-free hardening items.
+- Five larger items (tooling as a hard constraint, a publication ledger, multi-shift calendars, server-side scenarios, plant-time consistency) are **deferred by effort or design, not by security**. None needs Entra. Each carries a one-line sketch and the real reason it waits. One item first thought to need a schema change (per-plant unknown-setup policy) fits an existing unwired JSONB column and is promoted to Now as N8.
+- **Decision for the owner:** the "no schema redesign until Entra" constraint was applied in the first draft to *any* schema touch. This repo treats additive nullable columns and new tables via dated idempotent migrations as routine (the `plants` table alone has about fifteen such additive columns). If additive changes are acceptable, X1, X2, and X5 lose their schema blocker and are gated only by effort and data. If the freeze covers additive changes too, they stay Deferred as written.
+- The highest value-per-effort items are: fix the snapshot diff, close the two real `force` exposures, return schedule conflicts from the save path, and add a cross-line shared-tooling alert.
 
-| Wave | Status | Evidence |
+---
+
+## 2. Direction and constraints (confirmed 2026-09-11)
+
+| Question | Answer | Consequence |
 |---|---|---|
-| Optimizer preview concurrency (P1-7) | RESOLVED | `7c14aa3`, `895ef5b`; baseline/event/revalidation guards and stale-preview regression tests |
-| Setup coverage bounds (P1-9) | PARTIAL by design | `26f82d3`, `08ff97e`; coverage and missing-pairs CSV use bounded reads, while `GET /setup/{plant}` remains the complete optimizer snapshot contract and needs a separate lazy-snapshot redesign |
-| Integration and database verification | IMPLEMENTED; live Postgres run pending (since verified — see §0.6) | `72f06de`, `2ccfa9f`, `c18962a`, `870bed9`, `5e53ce8`, `9a463db`; DB-free ingest/purge/route tests, `ZZTEST_*` Postgres fixtures, required-CI DB gating, and schema smoke idempotence/fingerprint checks |
-| What-If sandbox side effects | RESOLVED | `0d2ad4f`, `98a50b1`, `6e518b2`, `8aa0906`; discard restores task state, `Store.lastOptimize`, alert dismissals, and Confidence before recomputation; Promote retains the trial state |
+| Audience | Execution roadmap for owner + Claude Code | Workstreams carry steps, files, acceptance criteria |
+| Plant reality | Mostly single-operation lines; **shared tooling is the real issue** | Theme 1 (operation model) → Later / discovery. Theme 2 → tooling-as-finite-resource on the order-on-machine model |
+| Horizon | **Weeks: harden the pilot** | "Now" = schema-free items only; redesigns are Deferred or Later |
+| Hard constraint | **No schema redesign until Entra auth lands; Entra is some time away** | Read as: no change to existing persisted contracts (the orders row, the `work_hours` shape). Additive nullable columns and new tables are routine in this repo and are **not** assumed blocked; see the owner decision in Section 1. Nothing in this doc is gated on Entra for security reasons |
 
-Corrections to stale statuses: P1-8 is RESOLVED at both the SAP-sync and order-upload capture call sites; `/purge` remains intentionally unscoped because its date-range contract has no plant input. `GET /master-data/{table}` authentication is RESOLVED (`283ec30`) after the frontend identity-header migration (`e2f4cdb`).
-
-No schema migration or Azure deployment was part of this remediation. Local PostgreSQL is unavailable because the configured local server does not pass the repository's connection probe; the DB guard was not bypassed. CI runs the Postgres suite with `NIMBUS_REQUIRE_TEST_DB=1` and runs the schema smoke against the service database. The smoke explicitly reports and excludes frozen legacy/hand-applied cutover migrations rather than claiming to verify the entire historical ledger.
-
-The Entra/Easy Auth migration remains explicitly deferred. The pilot's identity boundary still trusts the spoofable `X-User` header; this is an accepted pilot risk and is not represented as fixed by the remediation above.
-
-## 0. Remediation Status — 2026-09-02
-
-All three P0s and eleven of the twelve P1s are now fixed on `main` (10 commits, `242a632`..`32371e6`). Every finding below carries an inline **✅ RESOLVED** / **⏳ OPEN** marker with the commit that addressed it. Two things are **not** code fixes and remain genuinely open:
-
-- **P0-2's env-var check** (`NIMBUS_API_KEY`/`NIMBUS_ALLOWED_ORIGINS` on `ca-nimbus-dev`) — manually verified in the Azure Portal 2026-09-02: `NIMBUS_ALLOWED_ORIGINS` was already set (manual entry, not `*`) — the browser-based, zero-knowledge CORS exploit path was already closed. `NIMBUS_API_KEY` was **not** set — confirmed live-exposed, then remediated same day via `az containerapp update --set-env-vars`; re-verified present in `properties.template.containers[0].env[]`. This closes the operational half of P0-2. The structural half (identity resolves from a spoofable `X-User` header) is unchanged and still awaits the Entra migration.
-- **The DB-backed tests are written but unverified by an actual run** — no local Postgres was reachable in the environment that did this work, and the repo's own DB-safety guard correctly refuses to run against the live Azure host. `tests/test_rbac_plant_scoping.py` (fully mocked) **is** verified passing (12/12). `tests/test_task_concurrency.py` and `scripts/schema_bootstrap_smoke.py` need a human with local Postgres to actually execute (since run and passed — see §0.6).
-
-| Commit | Covers |
-|---|---|
-| `242a632` | P0-1, P1-1, P1-4 — task/labor route auth + plant scoping, `/task/note` xmin fix |
-| `3ba7382` | P0-3 — schema.sql bootstrap-order fix + `migrations/2026-09-02-orders-plant-column.sql` |
-| `ed2f16d` | P1-2, P1-3, P1-11, part of P1-6 — XSS fixes, shared `Util.escapeHtml()`, `cascade_preview` roles branch + frontend fail-closed, master-data table-switch race guard |
-| `28ed077` | P1-5, rest of P1-6 — `Persistence.load`/`saveAll` race + lock, labor-planning plant-switch race |
-| `f305947` | P1-10, P1-12 — login hardening (8-char min, throttling, timing-safe unknown-user path), `GET /plant-calendar` auth |
-| `7012b53` | P1-8 (partial — see note below) — setup-state capture scoped at the one call site where a plant list is actually derivable |
-| `bc7875f` | Testing Gaps #1, #3, #4 — new test files (status above) |
-
-**A real correction found during implementation, worth recording here rather than only in the plan file:** P1-8's fix could only be applied at `backend/integration/sap_sync.py`'s call site. `backend/integration/routes.py`'s `/upload` call runs *before* the file is parsed (no plant known yet — would need `db.ingest_orders_from_excel` restructured to expose a plant-extraction pass first, left as a follow-up) and `/purge`'s payload has no plant concept at all (date-range delete only) — both are correctly left unscoped, not overlooked.
-
-Also found and fixed one thing **not** in the original P1-11 write-up: the fail-open cascade-preview bug existed in *two* places in `frontend/master-data/admin-ui.mts` (the single-delete path the finding named, plus an equally-bad bulk-delete path that had no confirm dialog at all on preview failure) — both fixed in `ed2f16d`.
-
-Findings not addressed by the first pass (deferred at the time): P0-2's structural half (still a spoofable header — Entra migration is the plan of record), P1-7, P1-9, and everything in §5–§9 (P2/P3 code quality, performance, architecture, dead code).
-
-### 0.1 Second remediation pass — 2026-09-02 (polish batch)
-
-A follow-up pass picked off the highest-value, lowest-risk items from the P2/P3 backlog in §5–§9 that the first pass explicitly deferred — small, self-contained fixes that don't touch the frozen auth-trust-model internals or the xmin concurrency contract. Done in an isolated worktree/branch (`chore/code-review-polish-2026-09-02`), verified (`npm run build`/`typecheck`/`lint`/`test`, `check:static-assets`, `check:legacy-surface`, `python -m pytest`), then fast-forward-merged into `main` and the worktree pruned. Zero new test regressions — the JS suite's same 5 pre-existing failures (unrelated: `Engine.autoReflow`/`OptimizerPreview` setup-placement tests) reproduce identically on unmodified `main`; the Python suite passed 286/286 (104 skipped, Postgres-gated, unchanged).
-
-| Commit | Covers |
-|---|---|
-| `e9f3fa3` | Bootstrap-admin default, `require_admin`/`whoami` grace-period logging, `POST /audit/log` auth gate, `/health` raw-exception redaction, `COLOR_WHEEL_DIR` repo-relative default |
-| `ada40ec` | Dropped redundant `idx_setup_matrix_plant_machine_version` index (schema.sql + dated migration) |
-| `a4ddd6c` | Firmed-order no-op guard `end` comparison, `DependencyOverlay` cycle guard, `PerfMonitor.subscribe` unsubscribe return, `Modal.confirm` reentrancy guard, missing-key-column toast + new i18n key, `SystemConfig` toast tone typo, stale `viewers.mts` comment, and the full remaining `Util.escapeHtml()` migration (14 files, ~30 call sites) |
-
-One live-code correction found during verification, not caught in the original write-up: several local `esc`/`_esc` helpers across the codebase escaped `&<>"` but not `'` — migrating them to `Util.escapeHtml()` (which does escape `'`) was treated as a safe, one-directional fix (HTML-entity-escaping an additional character can only prevent it being interpreted as syntax, never break correct rendering) rather than left alone to "preserve behavior." A few files (`viewers.mts`, several `insights-ui.mts`/`orders.mts`/`setup-admin.mts` call sites) had this exact gap and are now closed.
-
-**Process note worth recording:** the first attempt at this batch dispatched ~15 parallel subagents into one shared worktree; one agent ran `git stash`/`stash pop` mid-task to isolate its own build output, which silently reverted roughly ten other agents' completed edits (files reverted to their pre-batch `main` state) while leaving one stray scratch file behind. This was caught by re-diffing every file each agent claimed to have touched against what was actually on disk before committing anything — about a third of the batch's fixes had to be redone by hand rather than trusted from agent self-reports. No destructive git command was used to recover; the redo was applied directly. Worth remembering: don't run `git stash` inside a worktree other agents are concurrently editing.
-
-Findings not addressed this pass (deferred, unchanged): P0-2's structural half, P1-7, P1-9, legacy color-wheel plant-scoping (**since resolved — see §0.2**; the note above about the setup domain's *upload-validation* looseness being intentional back-compat is a separate, still-valid decision — the plant-*scoping* gap this line originally referred to was an oversight, not that decision, and is now fixed), `GET /master-data/{table}` auth (**since resolved — see §0.4**, once the frontend fetch-header migration removed the reason it was originally dropped from §0.2), a uniform `require_api_key` sweep across admin routes (**since resolved — see §0.2**), capacity-math triplication consolidation (**since resolved — see §0.4**), the single-replica architecture note (**since documented — see §0.4**), and a newly-noticed (not yet written up) `forEach`/`return` early-exit bug adjacent to the missing-key-column toast in `master-data/admin-ui.mts`'s save-validation loop (**since resolved — see §0.4**).
-
-### 0.2 Third remediation pass — 2026-09-02 (legacy color-wheel scoping + require_api_key sweep)
-
-A follow-up pass (commit `700daab`) closed two items this doc's own §7/§11 had flagged as higher-impact than their filed P2 severity suggested, now that `NIMBUS_API_KEY` is confirmed live in production (see the P0-2 update above) and the RBAC-fix pattern was fresh:
-
-- **Legacy color-wheel plant scoping** — `GET`/`POST`/`DELETE /color-wheel/{plant}` (`backend/priority_lists/routes.py`) now call `md._assert_plant_allowed` exactly as every sibling route in the file already does. **A real correction found during implementation:** the backend fix alone would have been inert — the only frontend caller (`ColorWheelViewer._load()`, `frontend/priority-lists/viewers.mts`) used a bare `fetch()` sending no identity header, the exact same trap already hit and fixed once before for `Persistence.loadPriorityRankMaps`. Fixed by switching to `Util.fetchTraced()`. Three new DB-free tests added to `tests/test_priority_lists.py`.
-- **`require_api_key` sweep** — 12 admin-gated routes across `admin_ops`, `master_data`, `integration`, and `calendars` routers that had `require_admin` but no `require_api_key` now have both. Per explicit user decision, this included four routes (`GET /admin/tables`, `GET /admin/tables/{table}`, `GET /admin/tables/{table}/export.csv`, `GET /master-data/_schema-export`) documented in-code and in `master_data/CLAUDE.md` as OD-E2/OD-E3's "admin-role-alone" posture — investigation confirmed OD-E2/OD-E3's actual rationale is about *why these skip plant-scoping* (no single-plant version of a catalog-wide browser exists), not about the API key, so adding the key doesn't override that decision; the doc's "gated on admin role alone" phrasing was updated for accuracy since it would otherwise read as stale. `backend/calendars/routes.py` needed a new `require_api_key` import — it had zero uses of it anywhere in the file, a second, undocumented instance of this same finding beyond the two routes originally named. Negative tests (missing-key → 401) added to `tests/test_logs_endpoints.py`, `tests/test_admin_tables.py`, and two new files (`tests/test_plant_calendar_routes.py`, `tests/test_integration_routes.py`).
-- **`GET /master-data/{table}` auth was investigated and deliberately dropped from this pass** — research showed `require_authenticated` would 401 several currently-working frontend paths that send zero identity header today, most notably the core scheduling-board bootstrap fetch in `Persistence.load` (`frontend/scheduling/persistence.mts:274-275,345-346,475-476`) plus several `master-data/admin-ui.mts` bare-`fetch` call sites. Fixing this properly requires migrating those call sites to `Util.fetchTraced` first — tracked as a separate, larger follow-up, not attempted here.
-
-Verification: full Python suite (302 passed, 104 skipped — Postgres-gated, unchanged), `npm run build`/`typecheck`/`lint` clean (0 errors), JS module suite (459 passed, 6 failed — all pre-existing, unrelated `Engine.autoReflow`/`OptimizerPreview`/setup-scheduler failures, confirmed by file scope: none of the 6 failing tests touch any file this pass modified).
-
-### 0.3 Performance remediation pass — 2026-09-02
-
-A follow-up pass (commit `27810fe`) closed six targeted performance/scale findings identified in §6 and the original action plan, merging into `main` after full verification (`npm run build`/`typecheck`/`lint`/`test`, Python suite, `check:static-assets`/`check:legacy-surface`). All new test code was verified by direct run, not merely written — an important distinction this document has drawn for other findings.
-
-| Commit | Covers |
-|---|---|
-| `27810fe` | Upload size caps (413 on `/upload`, `/bom/upload`, `/priority-list/{plant}/{field_key}`, `/color-wheel/{plant}` — configurable `NIMBUS_MAX_UPLOAD_BYTES` env var, default 50MB); `known_material_plant_pairs()` scoped to upload-file plants; `syncLineSettings` plant-keyed `machine` cache; `/upload` call site of `capture_setup_states_before_schedule_mutation` scoped via `db.extract_upload_plants()`; two O(n²) loops in `nimbus-compute-core.js` (blackout violations, utilization matrix) now bucket/range-limit via `_indexCapacityBlocks` pattern; regression-guard test added to `compute-core.test.js`. New/updated tests: `tests/test_integration_routes.py` (2 upload-size-cap tests), `tests/test_priority_lists.py` (2 upload-size-cap tests), `tests/test_setup_data.py` (updated `test_upload_captures_observation_before_ingesting_replacement` for new scoped-capture sequence + new `test_extract_upload_plants_reads_plant_column`). All verified passing. |
-
-**Bounding `GET /setup/{plant}` matrix snapshot (P1-9, action-plan item 13) was investigated and deliberately not implemented.** Reason: `resolveSetup` (called from `frontend/scheduling/orders.mts`) consumes the full `snapshot.machine_rows`/`plant_rows` to resolve changeover minutes for each task's machine — a Gantt board displays tasks across every machine simultaneously. Truncating/paginating the matrix payload would silently produce wrong or missing changeover times for any machine outside the truncated page, with no visible error. This is a correctness regression, not a performance win. Needs real redesign (e.g., lazy per-machine matrix fetching integrated into `resolveSetup`'s index building), not a quick bound — stays open per original plan.
-
-Verification: `npm run build`/`typecheck`/`lint` clean (0 errors); Python suite 307 passed, 104 skipped (Postgres-gated, unchanged); JS suite 460 passed, 5 failed (same pre-existing `Engine.autoReflow`/`OptimizerPreview` setup-placement failures documented elsewhere in this file, confirmed unrelated by file scope — none of the 5 failing tests touch any file this pass modified); `check:static-assets`/`check:legacy-surface` both clean.
-
-### 0.4 Fourth remediation pass — 2026-09-02/03
-
-A follow-up pass closed the never-numbered save-validation bug, the `GET /master-data/{table}` auth gap, `bulk_apply` batching, and all four architecture-cleanup sub-items deferred in §0.1's trailing line, across 9 commits on `main`. Every claim below was re-verified directly against live code before implementation (not trusted from the original review's citations, several of which had already drifted) — see the planning session's own "Revisions" note for what changed between the initial investigation and the final plan.
-
-| Commit | Covers |
-|---|---|
-| `e2f4cdb` | `_save()`'s `forEach`/`return` bug (only skipped one invalid row instead of aborting the save) fixed via a plain `for...of` loop; every remaining bare `fetch()` targeting `/master-data/*` in `admin-ui.mts`/`scheduling/persistence.mts` migrated to `Util.fetchTraced` |
-| `283ec30` | `Depends(auth.require_authenticated)` added to `GET /master-data/{table}` — the migration above means every real caller now sends the identity header this depends on |
-| `0adedea` | `master_data.bulk_apply`'s per-row upsert loop batched via `executemany(..., returning=True)`, grouped by resolved column-set; new mock `executemany`/`nextset` support in `tests/test_master_data.py` plus 4 new batching tests |
-| `ca476b2` | Single-replica scope of `PLANT_LISTS`/`POST /reload` documented (doc-only) |
-| `4b70ce7` | `Calendar._indexCapacityBlocks`/`dailyCapacityHours` (calendar-engine.mts) delegated to `NimbusComputeCore`, closing the remaining half of the capacity-math triplication — a second, previously-unnamed duplicate pair (`_indexCapacityBlocks`) was found alongside the already-known `mergedOverlapHours` one |
-| `480cb04` | `response_model=` added to all 47 routes across `backend/security`/`backend/setup`/`backend/master_data` (new `models.py` per domain); `frontend/types/api-generated.d.mts` regenerated |
-| `7f616b1` | CommandPalette's visible strings (63 keys) routed through `Util.t()`; `en.js` + 4-locale mirror with `// MISSING TRANSLATION` markers; new locale-completeness test block |
-| `1d447f9` | 5 confirmed-dead routes deleted (`GET /security/bootstrap-status`, `GET /master-data/_audit`, `GET /color-wheels`, plain `GET /diagnostics`, `POST /master-data/plants/{plant}/visibility-horizon`) plus 2 now-orphaned data-layer functions and 3 dead Gantt guard branches (`Modal.openEdit`/`ContextMenu.openCanvas`) |
-
-**Real corrections found during implementation, worth recording here rather than only in the plan file:**
-- The capacity-math dedup is broader than originally scoped: `_indexCapacityBlocks` was a second, previously-unnamed duplicate pair on top of the already-known `mergedOverlapHours` one, and `frontend/calendar/CLAUDE.md`'s own Gotchas section asserted "no `Calendar` method left duplicates the math" — true only after this fix, not before it (corrected in the same commit).
-- `Calendar.dailyCapacityHours`'s delegate deliberately reads `Store.*` directly rather than the `sourceBlocks()`/`sourcePlantBlocks()`/`sourceGetPlantForLine()` candidate-snapshot-aware accessors most sibling functions in that file use — this preserves pre-existing behavior exactly (verified by direct read) but is a separate, un-investigated correctness question (Sandbox what-if capacity math) this pass deliberately did not decide or fix as a side effect.
-- Deleting `POST /master-data/plants/{plant}/visibility-horizon` also orphaned `master_data.list_audit()` and `master_data.set_plant_visibility_horizon()` (zero remaining callers, confirmed by grep) — removed alongside their routes rather than left as new dead code from this same pass.
-- A live bug was found and fixed as an unavoidable side effect of the `require_authenticated` gate: `POST /master-data/{table}/cascade-preview` was already `require_admin`-gated but the frontend sent it with zero identity header, meaning a real (post-bootstrap-grace) admin likely got a spurious 403 today — fixed by the same fetch migration.
-- `tests/test_static_delivery.py` and `tests/test_material_plant_attributes.py` each had one assertion that depended on the exact pre-fix behavior (an anonymous 404 on `/master-data/not-a-real-table`; `_audit`'s presence in the route-ordering list) and needed updating to match the corrected/removed behavior — not pre-existing failures, but the expected fallout of intentionally changing what they were pinning.
-- `response_model=` for `backend/setup` and `backend/master_data`'s grid endpoints uses permissive `extra="allow"` envelope models rather than fully-closed schemas, since their result shapes are either branch-dependent (`get_setup_snapshot`) or genuinely per-table dynamic (`column_metadata`-driven, Add-Column-wizard-extensible) — a deliberate, documented trade-off, not partial completion.
-- `bulk_apply`'s batching has one accepted trade-off, flagged rather than silently absorbed: a constraint violation inside a multi-row `executemany` batch no longer identifies which row caused it (only which column/constraint) — unverified against a real Postgres instance, since none was reachable in this environment; the mocked-cursor tests pin the intended contract, not a live-DB-confirmed one.
-
-Findings not addressed this pass (deferred, unchanged): P0-2's structural half, P1-7, P1-9 (bounding the setup matrix snapshot).
-
-Verification per commit: `npm run build`/`typecheck`/`lint` (0 errors throughout), `check:static-assets`/`check:legacy-surface` clean, full Python suite (313 passed, 104 skipped — Postgres-gated, unchanged) and JS module suite (460 passed, 6 failed — the same pre-existing `Engine.autoReflow`/`OptimizerPreview`/changeover-scheduler cluster this document's prior passes have repeatedly recorded as unrelated; 3 of the 6 were directly re-confirmed pre-existing via git-stash bisection during this pass, none of the files behind the other 3 were touched here) both clean at the end of the batch. `npm run generate:api-types` run twice (after the `response_model=` sweep and again after the dead-route deletions).
+Product framing that supports these calls: `PRODUCT.md` names exactly four constraints NIMBUS holds at once (due-date, calendar, blackout, changeover), makes due dates the north star, describes the user as a plant scheduler dragging orders on a Gantt, and positions scale (50+ plants, 3,500+ lines) as the differentiator rather than modeling depth.
 
 ---
 
-## 0.6 Fifth remediation pass — 2026-09-04 (real-Postgres verification)
+## 3. Claim verification ledger
 
-The two items §0/§10/§12 have repeatedly flagged as "written but never actually run against a real database" were run for real this pass, against a local Postgres instance with a fully-loaded schema, from an isolated worktree (`.claude/worktrees/code-review-verification-triage`).
-
-- **`tests/test_task_concurrency.py`** (Testing Gaps item 1, the P0-equivalent gap) — **✅ VERIFIED PASSING.** All 3 tests (stale-write rejection, `force=True` bypass, `allowed_plants` scoping) pass against real Postgres under `NIMBUS_TEST_DB=1`. See §2 P1 findings, Testing Gaps item 1, for the updated status line.
-- **`scripts/schema_bootstrap_smoke.py`** (Testing Gaps item 4) — **✅ VERIFIED PASSING, after fixing a real bug it caught.** The script's first real run found a genuine fresh-bootstrap failure in `schema.sql`: `CREATE TABLE column_metadata` was declared ~140 lines *after* the first `INSERT INTO column_metadata` (the `workcenter_mapping` seed) — the exact P0-3 bug class (a statement depending on an object that doesn't exist yet on a truly empty database), just a different statement pair than the original `orders.plant` regression. Fixed by relocating the `CREATE TABLE` to immediately before its first use. See §2 Testing Gaps item 4 for the full detail; the fix commit is part of this pass.
-- **New:** running the **full** Python suite with `NIMBUS_TEST_DB=1` (not attempted end-to-end in any prior pass — earlier passes' "313 passed, 104 skipped" figures were all with the DB opt-in *off*) surfaced one **pre-existing, unrelated** failure: `tests/test_schema_idempotent.py::TestHorizonMigrationIdempotent` (both its tests) errors in fixture setup — its seed `INSERT INTO subnetworks (code) VALUES (...)` omits `name`, which `schema.sql` declares `NOT NULL` with no default. This is not caused by, and was not touched by, this verification pass — it predates it and is a **new backlog item** (not yet triaged to a priority tier), not a regression introduced here. Confirmed reproducing on the current `main` tip (89fb484), not an artifact of any stale state: 465 passed, 1 skipped, 2 errors (all other `pg`-marked tests ran clean).
-- **Environment note for future runs:** the shared repo `.env`'s `PG_HOST` resolves to a non-local host (confirmed via a boolean-only `python-dotenv` check — no value inspected or printed). This pass did **not** edit `.env` — `PG_HOST`/`PG_PORT`/`PG_DB`/`PG_USER`/`PG_PASS`/`NIMBUS_TEST_DB` were passed as real process environment variables on each command, which `load_dotenv()`'s default `override=False` never overrides. A local Postgres with a fully-loaded `nimbus` schema was already present on this machine; no `schema.sql` bootstrap was needed to run these tests.
-
----
-
-## 1. Executive Summary
-
-NIMBUS is in materially better shape than its own audit trail suggests. The wiring between frontend and backend is essentially complete — **no frontend call targets a nonexistent endpoint, no method mismatches, no orphaned features mid-migration**. The Store/reactive platform layer is disciplined, the setup domain's optimistic-concurrency design is sound, SQL is parameterized throughout (no injection surface found), password hashing is strong, and several historically "open" defects are confirmed **already fixed** (the four 2026-07-03 setup-scheduler defects were resolved by architectural replacement; the saveAll timezone corruption fix is durable; the ×1440 schema landmine is genuinely removed, not just guarded).
-
-The real risk is concentrated in **three places**:
-
-1. **The authorization model is a client-spoofable HTTP header, and the highest-blast-radius write surface (the `/tasks` family) has no auth at all.** Anyone who can reach the live Azure pilot can reschedule any order in any plant with zero credentials, and anyone who knows an admin username (one is hardcoded in source) can do everything else. CORS defaulting to `*` makes this browser-exploitable from any webpage unless the env allowlist is set. This is partially a known/accepted pilot posture (Entra migration is the plan of record), but the task-route gap is worse than the documented posture — those routes don't even have the spoofable-header floor.
-2. **`schema.sql` cannot bootstrap a fresh database**: an index on `orders(plant, …)` is created 269 lines before the `plant` column is added, and the `orders.plant` column itself exists in no migration file — so both provisioning paths (fresh `schema.sql`, or ledger-only migrations) produce a broken or incomplete schema. Existing environments are unaffected, which is why nobody has noticed.
-3. **The three highest-risk behaviors have zero server-side test coverage**: the xmin save-concurrency contract on `/tasks/update`, the Excel/BOM ingest path, and RBAC/plant scoping. All three have already produced (or nearly produced) production data bugs historically.
-
-Below those, the findings are the normal texture of a fast-moving codebase: a handful of unescaped-`innerHTML` XSS holes where a module skipped its own escaping convention, several stale-response races on rapid plant/table switching, a system-wide N+1 in setup-state capture, i18n gaps clustered in the oldest surfaces, and a small amount of genuinely dead code.
-
-**Top 8 most important findings:**
-
-| # | Finding | Priority | Status |
+| # | Original claim | Verdict | Evidence / correction |
 |---|---|---|---|
-| 1 | `/task*`/`/tasks/*` write routes: no authentication, no plant scoping | P0 | ✅ RESOLVED (`242a632`) |
-| 2 | Entire auth boundary = spoofable `X-User` header on a live system; CORS defaults `*` | P0 | 🟡 PARTIAL — env vars verified 2026-09-02: `NIMBUS_ALLOWED_ORIGINS` already set, `NIMBUS_API_KEY` was missing and is now set; header-trust model itself still awaits Entra |
-| 3 | `schema.sql` fresh-bootstrap failure (index before column); `orders.plant` in no migration | P0 | ✅ RESOLVED (`3ba7382`) |
-| 4 | Zero server-side tests for save concurrency, ingest, and RBAC | P1 | ✅ RESOLVED — RBAC, concurrency, and ingest-data-layer tests all written AND verified passing against real Postgres (2026-09-04, §0.6) |
-| 5 | Stored XSS via blackout `reason` in calendar; 2 more unescaped-HTML holes | P1 | ✅ RESOLVED (`ed2f16d`) |
-| 6 | Stale-response races: `Persistence.load()` plant switch, master-data table switch, labor plan | P1 | ✅ RESOLVED (`ed2f16d`, `28ed077`) |
-| 7 | Overlapping `saveAll()` can silently drop the newest edit; `/task/note` breaks the version contract | P1 | ✅ RESOLVED (`28ed077`, `242a632`) |
-| 8 | `capture_setup_states_before_schedule_mutation` scans all plants/machines on every single-plant ingest | P1 | 🟡 PARTIAL (`7012b53`) — fixed at the sap_sync call site only; see note in §0 |
+| 1 | No operation/routing model; generated links are per-machine chains | CONFIRMED | `schema.sql:34-88` is one flat row per order with a single `machine`. Links at `backend/scheduling/routes.py:175-237` are chronological chains per machine, regenerated on every read, never persisted, `type:"0"` hardcoded. Segments (`schema.sql:102-109`) are time slices of one order on one machine with no machine column. |
+| 2 | No shared tool/crew reservation; PRT influences sort only | CONFIRMED | `ScheduleSnapshot` (`frontend/optimization/setup-scheduler.mts:328-350`) has no tool pool, mold inventory, or crew roster. Evaluator loops per line (`:5204-5230`); the only cross-line coupling is the wall-clock budget. PRT fields (`:1165-1169`) feed `rankForTask` → lexicographic sort key. Labor planning warns (`frontend/labor/labor-planning.mts:842`) but never constrains. Only physical-tool column anywhere: `line_setup_state.physical_mold_id`. |
+| 3a | Save validates rows, not the resulting schedule | CONFIRMED | `db.py:889-1075` (`update_task_dates_bulk`) checks ranges, segment shape, xmin, plant scope per row. No cross-order overlap or calendar-feasibility check server-side. Overlap detection is client-only (`frontend/insights/services.mts`, `Core.computeAlerts` in `nimbus-compute-core.js`). Same-instant overlaps are intentional (`frontend/scheduling/persistence.mts:754-758`). |
+| 3b | Optimizer saves bypass version conflicts via `force` | **REFUTED (inverted)** | Optimizer saves set `force:false, atomic_optimizer:true` (`persistence.mts:1315-1330`); `db.py:1004-1008` ignores `force` under `atomic_optimizer` and rolls back the whole batch on any stale row. The **real** exposures are `Config.CONCURRENCY_CHECK` (`frontend/platform/foundation.mts:143`, a documented last-write-wins kill-switch) and `POST /tasks/bulk_update` (`routes.py:453-459` region) which honors an external `force:true` without `atomic_optimizer`. |
+| 4a | Configured priority tiers can outrank lateness | CONFIRMED except `due-date` mode | `compareCandidate` (`setup-scheduler.mts:2372-2424`, not 1836): `policyKey` at `:2392` precedes lateness at `:2420`. `compareDueDateCandidate` (`:2352-2370`) inverts this. The per-plant choice already exists. |
+| 4b | Protecting late-order *count* does not protect already-late orders | **REFUTED as stated** | `latenessMinutes` is compared immediately after `lateCount` (`:2357-2360`, `:2420`). The narrower true gap: no per-order max-lateness term, and lateness is unweighted. |
+| 4c | No schedule-stability term | PARTIAL | `ObjectiveFacts.instabilityMinutes` exists (`:375`, Σ\|Δstart\| at `:6576`) and is in every mode's list, but only as the second-to-last tie-break and **hardcoded to 0 in `fragmentObjectiveFacts` (`:6483`)**, so it is inert during fragment search. No sequence-disruption or machine-reassignment term. The stability *policy* itself shipped (`docs/superpowers/specs/2026-08-18-optimizer-reason-codes-stability-design.md`). |
+| 4d | No business-weighted lateness | CONFIRMED | Zero `weight` occurrences in `setup-scheduler.mts` or `engine.mts`. |
+| 4e | CP-SAT worth benchmarking | DECIDED (excluded) | `docs/changeover_matrix.md:489` and `docs/archive/changeover_matrix_stage_2.md:35` list a global mathematical solver under explicitly deferred/excluded. |
+| 5 | Missing transitions and unknown initial states admitted at zero setup minutes | CONFIRMED and DECIDED | `setup-scheduler.mts:2514-2571`: unknown state → `unknownInitialStateEdge`, minutes 0; known signatures with no row → `uncoveredEdgeCount`, explanation `admitted-without-setup`, minutes 0. Covered alternatives preferred (`:1941-1948`; `SCORE_UNCOVERED` tier). Known-zero (`source:'implicit-zero'`, `frontend/setup/setup-domain.mts:395-405`) is already distinct from uncovered (`:304-313`). This is the approved 2026-08-18 never-freeze decision. No prohibited-transition concept exists. |
+| 6 | SAP connectors return empty; no execution feedback | CONFIRMED | `backend/integration/sap_sync.py:326-391`: all connectors `return []`, `test_connection` reports stub. No confirmations object in `SAP_OBJECTS`. Direction is read-only from SAP by decision (`docs/SAP_INTEGRATION_ROADMAP.md`). A `source:'actual'` seam is reserved (`docs/changeover_matrix.md:164`). |
+| 7a | Snapshot diff misses finish-only and split-segment changes | CONFIRMED | `Diff.compute` (`frontend/nimbus-intelligence.js:2107-2131`) compares only `start_date` delta and `MACHINE`. `end_date` is enriched (`:2097`) but never compared; segments are not in the enriched shape. |
+| 7b | Shell intercepts browser zoom shortcuts | **REFUTED** | No ctrl/meta handlers for `+ - = 0` in `frontend/shell/` or `app.js`. Only vis-timeline's `zoomKey:'ctrlKey'` (`frontend/scheduling/gantt.mts:285`) captures Ctrl+wheel while over the Gantt canvas, which is standard timeline behavior. |
+| 8a | Snapshots live only in browser IndexedDB | CONFIRMED | `indexedDB.open('nimbus-intel', 1)` (`nimbus-intelligence.js:352-362`) with `snapshots`/`scenarios`/`patterns` stores. No server table or route. |
+| 8b | Calendar model is one working interval per weekday | CONFIRMED | `WorkHours = Record<number,[number,number]\|null>` (`frontend/platform/types.mts:118`), mirrored in `schema.sql:725-752` for `plants.work_hours` and `machine_calendar.work_hours`. No multi-shift or overnight representation. |
+| 8c | Scheduling mixes plant-aware and browser-local time math | CONFIRMED (an earlier draft of this doc wrongly refuted it) | `plants.timezone` exists (`schema.sql:150,165`) and **is** consumed: the optimizer's Remove Backlog window (`frontend/optimization/engine.mts:616-636`, `:1914-1926`, which throws without a plant timezone), the dashboard's plant-hour (`frontend/insights/insights-ui.mts:563`), and backend setup-state captures (`backend/setup/data.py:434-445`, `:510-527`). Meanwhile order dates are wire-encoded naive browser-local via `Util.toLocalSeconds` (`persistence.mts:1015-1314`) and the calendar engine runs in browser-local time. That is exactly the mix the assessment described. The `store.mts:825-829` comment ("NO plants timezone column yet") is stale; it concerns per-plant *user-setting* regional defaults, not the column. MIGRATION.md's "do not unify the two time schemes" decision (`:892-913`) is the design constraint any fix must respect. |
 
 ---
 
-## 2. Critical Findings (P0/P1)
+## 4. Priority matrix
 
-### P0-1 — Task read/write routes have no authentication and no plant scoping
-- **Location:** `backend/scheduling/routes.py:344-505` (`update_task`, `update_task_note`, `tasks_update`, `bulk_update`, `tasks_refresh`, `baseline_correct`); `db.py:849` (`update_task_dates_bulk`), `db.py:1064`, `db.py:1185`
-- **Problem:** None of the six task-mutation handlers declare any `Depends(...)` guard — verified directly. `brain.py` has no global auth middleware. `get_tasks` is the only handler in the domain that consults `allowed_plants`; every write path accepts bare order ids with no check that the order's plant is in the caller's `role_plants` scope.
-- **Evidence:** `@router.post("/task/update")` → `def update_task(task: TaskDateUpdate):` — no dependencies. `db.update_task_dates_bulk` filters only by id (`WHERE o.id = ANY(%s) FOR UPDATE OF o`).
-- **Impact:** Any network client that can reach the API — no header, no login — can reschedule any order in any plant, edit priority fields, clear notes, and rewrite due-date baselines. A plant-A-restricted user can write to plant B–Z orders by id (ids are stable MD5s, visible in exports). This is the single most consequential write surface in the app and it sits below even the weak header-based floor every other domain has.
-- **Recommendation:** Add `Depends(auth.require_authenticated)` to all six routes and thread `allowed_plants` through `_apply_task_date_updates` / `update_task_dates_bulk` / `correct_due_date_baselines` / `update_task_note` / `get_task_versions`, rejecting out-of-scope ids the way `get_tasks` already filters reads.
-- **Priority:** P0 · **Confidence:** High (verified) · **Category:** Security / Data Integrity
-- **Status: ✅ RESOLVED (`242a632`, 2026-09-02).** All six routes gated with `Depends(auth.require_authenticated)` + `get_allowed_plants_for_request`; `allowed_plants` threaded through `db.update_task_dates_bulk` (piggybacks on the `plant` already fetched into its `eff` dict), a new `db.get_order_plant()` for `/task/note`, an extended `db.get_task_versions` for `/tasks/refresh`, and a WHERE-clause scope on `db.correct_due_date_baselines`. Verified with a new 12-test mocked `TestClient` suite (`tests/test_rbac_plant_scoping.py`, passing).
-
-### P0-2 — The entire authorization boundary is a client-supplied header; CORS defaults to `*`
-- **Location:** `backend/security/auth.py:480-536` (`_actor_email`, `require_admin`); `brain.py:354-367` (CORS)
-- **Problem:** Identity resolves solely from `request.headers.get("x-user-email")`/`X-User` — no cookie, signature, or server session. Any client can claim any username; if it maps to `role='admin'`, that's full admin (password resets for any user, DB maintenance, master-data mutation). `NIMBUS_API_KEY` gates only the destructive subset of admin routes and is opt-in/unset by default. Compounding it: `NIMBUS_ALLOWED_ORIGINS` defaults to `"*"` with `allow_headers=["*"]`, and since the "auth" is a custom header (not a cookie), **any third-party webpage's JavaScript can set it** — the wildcard makes header-spoofing a remotely triggerable, browser-based exploit, not just a curl-based one. The default bootstrap admin username is also hardcoded in source (`auth.py:618`, `"PJ29587"`), handing an attacker a known-good admin identity.
-- **Impact:** Full system takeover for anyone with network access to the live pilot, if the two env vars aren't set. This is a documented/accepted pilot gap pending the Entra migration — but "planned to fix" doesn't reduce present exposure, and the live URL has been public since 2026-06-30.
-- **Recommendation:** (1) **Verify today** that `NIMBUS_API_KEY` and `NIMBUS_ALLOWED_ORIGINS` are actually set on `ca-nimbus-dev` — this is a 5-minute check with the highest risk-reduction-per-effort in this report. (2) Apply `require_api_key` uniformly to *all* admin routes, not just destructive ones. (3) Change the bootstrap-admin default to something generic. (4) Keep the Entra migration the top structural priority.
-- **Priority:** P0 (code-level exposure High confidence; live exploitability depends on unverified env config) · **Category:** Security
-- **Status: 🟡 PARTIAL.** Recommendation (1) — **done, 2026-09-02**: manually checked in the Azure Portal (CLI access to `ca-nimbus-dev` is blocked by an RBAC gap — even the account that performs deploys gets `AuthorizationFailed` on `containerapp show`, a separate access issue worth resolving on its own). Findings: `NIMBUS_ALLOWED_ORIGINS` was already set to a manual (non-`*`) value — the browser-JS CORS exploit path was already closed. `NIMBUS_API_KEY` was **not** set, confirmed live-exposed — remediated same day via `az containerapp update --set-env-vars "NIMBUS_API_KEY=..."` and re-verified present. Functional gate test against the live `POST /maintenance/analyze` route confirmed all three cases: no key → `401`, correct key + admin identity → `{"ok": true, ...}`, wrong key → `401` (not merely checking presence). The gate is live and working correctly. This closes the "operational stopgap" layer (the ~35 routes gated by `require_api_key` — DDL, purge, VACUUM, password resets, SAP config — now require a second shared secret beyond the spoofable admin header). Recommendations (2) and (4) remain structural/deferred to the Entra migration, deliberately not re-scoped here (see `docs/DEPLOYMENT.md`, `Entra_Auth_Migration.md`) — setting the API key does **not** fix identity resolution itself; `X-User` is still spoofable and still the sole determinant of *who* is acting, just now with one more secret gating the worst subset of actions. **(3) ✅ RESOLVED (`e9f3fa3`, 2026-09-02)** — the hardcoded `"PJ29587"` bootstrap-admin default is now `"admin"` (`auth.py`, env-overridable via `NIMBUS_BOOTSTRAP_ADMIN_USERNAME` as before). `auth.py`'s actual trust-model *logic* (identity resolution, access-control decisions) remains intentionally untouched — only this one default constant and, separately, some grace-path logging (§7) changed.
-
-### P0-3 — `schema.sql` cannot bootstrap a fresh database; `orders.plant` exists in no migration
-- **Location:** `schema.sql:81-82` (index) vs `schema.sql:34-60` (CREATE TABLE — verified: no `plant` column) vs `schema.sql:350` (ALTER adds `plant`); `migrations/` (no file adds `orders.plant`)
-- **Problem:** `CREATE INDEX idx_orders_plant_eff_start ON orders(plant, …)` runs at line 81; `orders.plant` isn't added until the `ALTER TABLE` at line 350. On a truly fresh database, line 81 throws `column "plant" does not exist` — without `ON_ERROR_STOP` the script limps on and the index is silently never created; with it, bootstrap aborts. Separately, no `migrations/*.sql` file adds `orders.plant` (the 2026-08-20 migration creates the *index* but not the column), contradicting the "deploys apply `migrations/`, never `schema.sql`" rule — a ledger-only rebuild of the Azure DB would silently lack the column that fixes the documented multi-plant mis-attribution bug.
-- **Impact:** Every new environment (new dev machine, DR rebuild, prod promotion) hits this. Existing environments are unaffected, which is why it's latent.
-- **Recommendation:** Move the `ALTER TABLE orders ADD COLUMN IF NOT EXISTS plant` block above line 81 (or move the index below it), and add a dated migration for `orders.plant` + backfill so the ledger path is self-sufficient. Add a CI smoke test that applies `schema.sql` to a scratch Postgres with `ON_ERROR_STOP=1`, and one that applies only `migrations/` and diffs the result.
-- **Priority:** P0 · **Confidence:** High (verified) · **Category:** Bug / Data Integrity
-- **Status: ✅ RESOLVED (`3ba7382`, 2026-09-02).** The `ALTER TABLE orders ADD COLUMN IF NOT EXISTS plant TEXT` statement now runs immediately after `CREATE TABLE orders`, before any index references it; the backfill UPDATE and its two indexes stay in their original location (they genuinely need the `machine` table, created well before that point). Added `migrations/2026-09-02-orders-plant-column.sql` so a ledger-only rebuild is self-sufficient. **Correction from the original recommendation:** the CI smoke test can't be "apply `migrations/` alone" as literally written — no migration file creates the base tables (`orders`, `machine`, etc.), so that comparison isn't valid. `scripts/schema_bootstrap_smoke.py` instead diffs `schema.sql`-alone vs. `schema.sql`-then-full-ledger; written but **unverified by an actual run** (no local Postgres reachable in this environment) — a human needs to run it.
-
-### P1 findings
-
-**P1-1 — Labor Plan endpoints: zero auth, zero plant scoping** — `backend/labor/routes.py:16-57` (verified: no `Depends` on any of the four routes). Any caller can read or overwrite any plant's labor-hours plan. Add `allowed_plants` + `_assert_plant_allowed` matching the master-data pattern. *(Security, High)* — **✅ RESOLVED (`242a632`).** All four routes now call `md._assert_plant_allowed` with the same `PlantNotAllowed`→403/`ValueError`→400 pattern used elsewhere; the two POSTs also require `auth.require_authenticated`. Verified via `tests/test_rbac_plant_scoping.py`.
-
-**P1-2 — Stored XSS via blackout `reason`/`line`** — `frontend/calendar/calendar-admin.mts:135-136` (verified: `${b.reason || …}` straight into `innerHTML`). Any user who can create a blackout can persist `<img onerror=…>` that fires for every user opening Calendar for that plant. Same render path also interpolates `b.id` into an inline `onclick` (line 138). Route through the `esc()` helper used elsewhere. *(Security, High)* — **✅ RESOLVED (`ed2f16d`).** `b.reason`/`b.line` now go through the new `Util.escapeHtml()`; the inline `onclick` was replaced with a `data-block-id` attribute + delegated listener, removing that injection surface entirely rather than just escaping it.
-
-**P1-3 — Two more unescaped-`innerHTML` holes** — `frontend/admin-ops/admin-ui.mts:1889-1902` (`_dbLockChain` injects raw `pg_stat_activity` query text — application data literals inside SQL text can carry markup into the admin DB view); `frontend/insights/insights-ui.mts:658,668` (machine/line names unescaped in heatmap attributes + inline `onclick`, while the sibling lateness heatmap escapes the same values); `frontend/master-data/admin-ui.mts:2794` (backend `err.message` into `innerHTML`). Each file has a working escape helper it uses elsewhere — these are skipped-convention holes, not missing infrastructure. *(Security, High)* — **✅ RESOLVED (`ed2f16d`).** All three fixed using each file's own existing local escape helper (or the new shared `Util.escapeHtml()` where none existed) — no new escape-helper reimplementations introduced. The broader ~14-file local-`esc()`-reimplementation cleanup itself remains a separate, larger P2 item (§5), not attempted here.
-
-**P1-4 — `/task/note` bypasses the xmin version contract** — `backend/scheduling/routes.py:363-380`, `db.py:1185-1192`. The note UPDATE bumps xmin but returns no new version, so the client's next real schedule save on that task spuriously lands in `stale`. Return `RETURNING id, xmin::text::bigint` and surface it as `versions`, mirroring `update_task_dates_bulk`. *(Bug/Data Integrity, High)* — **✅ RESOLVED (`242a632`).** `db.update_task_note` now does `RETURNING id, xmin::text::bigint AS new_version` and returns `versions`, exactly as recommended.
-
-**P1-5 — Overlapping `saveAll()` can silently drop the newest edit** — `frontend/scheduling/persistence.mts:1091-1211`. No in-flight lock; the success handler clears `_dirtyIds` by id alone, so an edit made after the payload snapshot but before the response gets its dirty flag cleared without ever being sent. Add an in-flight lock and clear dirty only when sent value == current value. *(Bug, Med)* — **✅ RESOLVED (`28ed077`).** Added a `_saveInFlight` latch and a per-id sent-value snapshot; an id is only cleared from `_dirtyIds` if the current live value still matches what was actually sent.
-
-**P1-6 — Plant-switch race in `Persistence.load()`** — `frontend/scheduling/persistence.mts:203-473`. No generation guard (unlike `loadSetupSnapshot`, which has exactly this protection); switching A→B fast can let A's slow response overwrite B's board and reset `_currentLoadedPlant`. Apply the same generation-counter pattern. Two siblings of the same race: master-data table switching (`admin-ui.mts:2759-2798`, missing the staleness guard its own sibling modules have) and Labor Planning plant switches (`labor-planning.mts:941-1010`, no render token). *(Bug, High)* — **✅ RESOLVED (`28ed077`, `ed2f16d`).** All three sites now carry a generation-counter guard mirroring `loadSetupSnapshot`'s pattern.
-
-**P1-7 — Optimize preview→apply doesn't detect concurrent task edits** — `frontend/optimization/optimize-ui.mts:1141-1361, 1764-1842`. `OptimizerPreview.stale` is set only by setup-data writes; a remote `tasks:bulkUpdate` while the preview is open is silently clobbered by Apply, bypassing the xmin contract the domain otherwise honors. Re-diff snapshot task versions against Store state before enabling Apply. *(Bug/Architecture, Med)* — **✅ RESOLVED (`7c14aa3`, `895ef5b` — see §0.5).** This inline status line was stale (still said "⏳ OPEN" after §0.5 had already recorded it resolved) — corrected 2026-09-04 while investigating whether it was genuinely still open before a planned re-ask checkpoint. Verified directly against current code: `optimize-ui.mts` now has `PREVIEW_TASK_CHANGE_EVENTS` (includes `tasks:bulkUpdate`), `OptimizerPreview._startTaskWatch()` subscribes to it, `_revalidateTaskBaseline()` re-diffs the preview-plant task set against a detached baseline on every matching event, and `canApply()` calls it before allowing Apply — exactly the fix this finding recommended.
-
-**P1-8 — System-wide N+1 in setup-state capture on every ingest** — `backend/setup/data.py:501-524`. `capture_setup_states_before_schedule_mutation` takes no plant parameter: one plant's upload re-derives machine state for **every** plant/machine with a setup definition, one query + transaction per machine (~3,500 sequential queries at target scale). Add a `plants=` filter derived from the upload. *(Performance, High)* — **✅ RESOLVED (`7012b53`, `27810fe`).** Added the `plants=` filter and wired it at both call sites: `sap_sync.py` (plants known post-`map_records`) and `backend/integration/routes.py`'s `/upload` handler (`plants=upload_plants`, around line 63-66), the follow-up this entry originally flagged as outstanding. `/purge`'s payload has no plant concept at all (date-range delete only) and stays permanently unscoped by design.
-
-**P1-9 — `GET /setup/{plant}` still does the unbounded O(states²) full-matrix fetch** — `backend/setup/data.py:656-711` (`get_setup_snapshot`). The exact pattern `matrix-rows` was built to avoid; the frontend uses `matrix-rows` correctly, but this endpoint remains the complete optimizer snapshot contract and is still called on Setup admin loads. `/coverage` and the missing-pairs CSV, which this entry originally also flagged, now use bounded reads (`26f82d3`, `08ff97e`) and are resolved. Bound the matrix portion or drop it from the snapshot payload. *(Performance/Architecture, Med)* — **✅ RESOLVED (`1495a48`, `dbead1e`, 2026-09-04).** `get_setup_snapshot` now scopes `machine_rows`/`machine_states`/`overrides` to the plant's live machine roster — registered machines, or machines with at least one retained order (which may still include a renamed/decommissioned code for as long as its historical orders remain in the database — a materially tighter bound than every setup-matrix row ever recorded, even if not a perfectly current one). `plant_rows` stay unscoped (single fallback tier). Literal per-call lazy fetching inside `resolveSetup` was investigated and rejected as infeasible (`resolveSetup` is a pure synchronous function, and the Gantt shows every plant machine simultaneously, so "not yet needed" never actually applies within a loaded plant) — see `docs/superpowers/plans/2026-09-04-p1-9-setup-snapshot-machine-scoping.md` for the investigation and the confirmed-alternative shape.
-
-**P1-10 — Login endpoint: no rate limiting, 4-char password minimum, timing-based username enumeration** — `backend/security/routes.py:19-25`, `auth.py:287-296`. Unthrottled `/security/login` + `len(raw_password) < 4` + fast-path returns for unknown usernames. Raise the minimum to 8+, add per-username/IP backoff, compute a dummy hash for unknown users. *(Security, High)* — **✅ RESOLVED (`f305947`).** Minimum raised to 8 (server-side source of truth in `set_user_password`, mirrored client-side and in all 5 locales); added an in-process sliding-window throttle (8 failures/5 min, appropriate for this single-replica pilot — no distributed limiter built); `authenticate()` now runs the same constant-time hash-verification path for unknown usernames via a fixed dummy hash, removing the timing tell. `auth.py`'s frozen trust-model internals (`_actor_email`, `require_authenticated`, `require_admin`) were not touched.
-
-**P1-11 — `cascade_preview` reports "0 rows affected" for role deletions that actually cascade** — `master_data.py:665-727`. No branch for `roles` (or `machine`/`workcenter_mapping`), so the confirm dialog shows zeros while `role_plants` rows are silently cascade-deleted — an admin can strip a role's entire plant scoping unknowingly. Compounded on the frontend: `admin-ui.mts:3320-3339` swallows cascade-preview fetch failures (`catch {}`) and proceeds to an ordinary confirm indistinguishable from "zero dependents." *(Data Integrity, High)* — **✅ RESOLVED (`ed2f16d`).** Added the `roles` branch (keyed on `d.get("role")`, per `_KEY_COLUMNS['roles']` — not `"code"`, which is the `subnetworks` branch's field name). The frontend now fails closed on a cascade-preview fetch error instead of proceeding to an indistinguishable-from-safe confirm — and this same bug was found in a **second** spot not named in the original write-up (the bulk-delete path, which had no confirm dialog at all on preview failure), also fixed.
-
-**P1-12 — `GET /plant-calendar` fully unauthenticated** — `backend/calendars/routes.py:19-30`. Not even the spoofable-header floor. Low-sensitivity data, but add `require_authenticated` for consistency. *(Security, High)* — **✅ RESOLVED (`f305947`).** Added `Depends(require_authenticated)`, matching the `require_admin` gating already on the other four routes in the file.
+| Bucket | Item | Theme | Impact | Effort | Schema | Blocker |
+|---|---|---|---|---|---|---|
+| **Now** | N1 Snapshot diff correctness | 7a | High (trust in comparisons) | S | none | — |
+| **Now** | N2 Close the two real `force` exposures | 3b | High (data integrity) | S | none | — |
+| **Now** | N3 Return schedule conflicts from the save path | 3a | High | M | none | — |
+| **Now** | N4 Cross-line shared-tooling conflict alert | 2 | High (the user's stated gap) | M | none | Confirm `PRT_01` identifies a physical tool |
+| **Now** | N5 Objective tuning, cheap slice | 4b/4c/4a | Medium | M | none | — |
+| **Now** | N6 Split unknown-setup diagnostics | 5 | Medium | S | none | — |
+| **Now** | N7 Surface what is already built | 7 | Medium | S–M | none | — |
+| **Now** | N8 Per-plant unknown-setup placement policy (promoted from X3) | 5 | Medium | M | none (existing `plants.setup_policy_config` JSONB, currently unwired) | N6 first |
+| **Deferred** | X1 Tooling as optimizer admission constraint + tool catalog | 2 | High | L | additive new table | Effort; N4 must confirm `PRT_01` is a physical tool; no material→line eligibility data. Not Entra |
+| **Deferred** | X2 Publication step with published-revision ledger | 3 | High | L | additive new table | Effort; N3 first. Attribution is at pilot identity trust, same as existing audit logs. Entra improves it, does not block it |
+| **Deferred** | X4a Plant-time consistency for remote schedulers | 8c | Medium | M–L | none (column exists) | Design: must honor MIGRATION.md's "do not unify the two time schemes"; decide which paths become plant-aware. Not Entra |
+| **Deferred** | X4b Multi-shift and overnight `WorkHours` | 8b | Medium–High | L | contract redesign (JSONB shape, backend + worker mirror) | The one item the schema-redesign freeze genuinely covers. Not Entra |
+| **Deferred** | X5 Server-side named scenarios | 8a | Medium | L | additive new table | Effort and unproven demand; same attribution note as X2. Not Entra |
+| **Later** | L1 Operation/routing model | 1 | Unknown for pilot plants | XL | yes | PP discovery |
+| **Later** | L2 SAP execution feedback | 6 | High once live | L | yes | Live SAP connector; read-only decision |
+| **Later** | L3 Crew as a finite resource | 2 | Medium | L | likely | `labor_plan_line` integration design |
+| **Later** | L4 Business-weighted lateness | 4d | Medium | M | maybe | Needs a weight source; tier-weighting is a cheap proxy |
+| **Dropped** | Zoom-shortcut interception | 7b | — | — | — | Refuted |
+| **Dropped** | CP-SAT benchmark | 4e | — | — | — | Excluded by design of record |
 
 ---
 
-## 3. Missing / Broken Wiring
+## 5. Workstreams — Now (weeks, schema-free)
 
-The cross-match of ~90 backend routes against every frontend call site found **no broken links in the frontend→backend direction** — every fetch targets a real route with the right method. Gaps are all backend-side or contract-level:
+### N1 · Snapshot diff correctness
 
-| Item | Location | Status | Priority |
-|---|---|---|---|
-| `/security/bootstrap-status` — no frontend caller, but a comment on `/security/me` asserts "the frontend calls it" | `backend/security/routes.py:28,36` | Backend exists / frontend missing, misleading comment | P2 |
-| `/setup/{plant}/missing-pairs.csv` — documented in `frontend/setup/CLAUDE.md:38` as a UI caller; UI actually builds CSVs client-side | `backend/setup/routes.py:179` | Backend exists / frontend missing (doc wrong) | P3 |
-| `/master-data/_audit`, `/color-wheels` (paginated) — no caller anywhere | `master_data/routes.py:94`; `priority_lists/routes.py:537` | Backend exists / frontend missing | P3 |
-| Plain `/diagnostics` — superseded by `/deep` and `/db`, both wired | `admin_ops/routes.py:30` | Vestigial | P3 |
-| **Type contracts:** only `backend/scheduling/routes.py` declares `response_model=`. Security, setup, and master-data routers emit `unknown` into `api-generated.d.mts` — those types are "in sync" only because there's no contract to drift from. A backend field rename in auth/config/CRUD responses is invisible to `npm run typecheck` and surfaces as a runtime `undefined` | `backend/security/routes.py`, `backend/setup/routes.py`, `backend/master_data/routes.py` | Contract gap | P2 |
-| AG Grid ↔ Gantt selection sync wired via one-shot `setTimeout(…, 80)` check on `Table._api`; on a slow client it silently never wires for the session | `frontend/scheduling/gantt.mts:3934-3964` | Fragile wiring | P2 |
-| Optimizer audit-log POSTs use `.catch(() => {})` — apply proceeds and shows success even when no audit record was written | `frontend/optimization/optimize-ui.mts:1775-1814` | Silent failure | P2 |
-| Double-click / Enter-to-edit on Gantt orders gated behind `Modal.openEdit`/`ContextMenu.openCanvas`, which don't exist — self-documented as always-false dead branches | `frontend/scheduling/gantt.mts:2611-2624, 3444-3461` | Dead wiring (or missing feature) | P2 |
-| Unsaved SAP field-mapping edits: dirty state tracked in memory with a badge, nothing intercepts tab switch/reload | `frontend/integration/sap-interface-ui.mts:540-663` | Incomplete wiring | P2 |
+**Why.** Time Machine and What-If comparisons silently miss any change that keeps the start time and machine fixed: a duration change, a finish-only shift, or a split-order re-segmentation. Schedulers reading "no changes" will trust a comparison that is wrong.
 
-**Verified intentional (not flagged):** `/livez` (ACA probe), `/reload` (manual ops), `/tasks/bulk_update` (documented external/Postman alias), `/setup/{plant}/active` (documented vestigial, superseded).
+**Steps.**
+1. In `Diff._enrich` (`frontend/nimbus-intelligence.js:2092-2105`) carry `scheduleSegments` (normalize to `[[startMs,endMs],…]`, empty array when absent).
+2. In `Diff.compute` (`:2107-2131`) add `endDelta = end_date(B) − end_date(A)` and `segmentsChanged = !sameSegments(A,B)`. Treat a row as changed when any of start delta, end delta, machine change, or segments change is non-zero.
+3. Attach a `kinds` array per moved row: `'start' | 'finish' | 'machine' | 'split'`, and sort by the larger of |start delta| and |end delta|.
+4. Update the diff renderer to show the kind badges and the finish delta alongside the start delta. Route any new badge text through `data-i18n`/`Util.t()` with keys in `frontend/locales/`.
+5. Keep `lineImpact` (`:2134+`) semantics unchanged except that finish-only and split changes now count as changes.
+
+**Files.** `frontend/nimbus-intelligence.js` (Diff object and its renderer); `frontend/locales/*.json` for new badge keys.
+
+**Acceptance.** Two snapshots that differ only in `end_date` report one moved row of kind `finish`. Two snapshots identical except segment boundaries report kind `split`. Existing start/machine cases unchanged.
+
+**Tests.** Extend the existing intelligence tests under `tests/js/` with three cases (finish-only, split-only, unchanged). No new suite.
+
+**Risks.** Snapshots persisted before this change have no `scheduleSegments`; treat a missing array as "unknown, not changed" so old snapshots do not all light up as split changes.
 
 ---
 
-## 4. Feature-by-Feature Audit
+### N2 · Close the two real `force` exposures
 
-| Feature | UI | API | Backend | DB | End-to-end verdict |
+**Why.** The assessment blamed the optimizer, but the optimizer is the strict path. The genuine last-write-wins doors are the client kill-switch and the external flat-list route. Either can overwrite another planner's edits without a `stale` signal.
+
+**Steps.**
+1. In `POST /tasks/bulk_update` (`backend/scheduling/routes.py`, the flat-list alias after `tasks_update`): stop honoring a caller-supplied `force`. Either strip `force` before calling `_apply_task_date_updates`, or require `require_api_key` for any payload containing `force:true`, and log the caller through `_log_event`.
+2. In `_apply_task_date_updates`, add a warn-level `_log_event` whenever a row is written with `force=True` and `atomic_optimizer=False`, including the request id, so forced writes are auditable in the `_BACKEND_LOG` ring buffer.
+3. On the client, when `Config.CONCURRENCY_CHECK` is false, log once via `ErrorLog` at boot and show a persistent banner or toast so nobody runs the pilot in last-write-wins mode unknowingly. Do not remove the switch; it is a documented escape hatch.
+4. Correct `backend/scheduling/CLAUDE.md`'s "Key invariants" bullet, which still says `force=True` is set by the optimizer's bulk reschedules. It is not; the optimizer uses `atomic_optimizer`.
+
+**Files.** `backend/scheduling/routes.py`; `frontend/platform/foundation.mts` or the boot path in `frontend/shell/`; `backend/scheduling/CLAUDE.md`.
+
+**Acceptance.** A `bulk_update` payload with `force:true` and a stale `base_version` returns that id in `stale` and does not write (or is rejected without an API key). A forced write from any path leaves a log line with the request id. Running with `CONCURRENCY_CHECK=false` is visibly flagged in the UI.
+
+**Tests.** Add one route test alongside the existing concurrency tests in `tests/test_task_concurrency.py` (Postgres-gated) or a mocked variant next to `tests/test_task_response_models.py`. Repair-only scope.
+
+**Risks.** Any external tooling relying on `bulk_update` + `force` breaks. Search the repo and `scripts/` for callers first; the alias comment says "external tooling" without naming any.
+
+---
+
+### N3 · Return schedule conflicts from the save path
+
+**Why.** Two planners can each pass their own xmin check and jointly produce an overlapping machine. Today only the client that happens to recompute Alerts sees it. The server already holds every affected row inside one transaction and can report the resulting overlaps cheaply.
+
+**Steps.**
+1. After the row updates in `db.update_task_dates_bulk` (`db.py:889-1075`) and before commit, collect the distinct machines touched. For each, select scheduled orders on that machine (parent envelope, or segments where present) within the touched time range ±1 day and detect pairwise overlaps in SQL or Python.
+2. Return `conflicts: [{machine, order_a, order_b, overlap_minutes}]` in the result dict. Extend `BulkUpdateResult` and `TaskUpdateResult` in `backend/scheduling/models.py` with an optional `conflicts` list (default empty) so the `response_model` does not drop it.
+3. Default behavior is **advisory**: commit and report. Add an opt-in `strict_conflicts: true` payload flag, honored only together with `atomic_optimizer`, that rolls back if `conflicts` is non-empty. Same-instant overlaps from raw SAP midnight snaps are intentional (`persistence.mts:754-758`); do not make strict mode the default for manual saves.
+4. In `frontend/scheduling/persistence.mts` `saveAll`, read `conflicts` from the response; if non-empty, toast a count and call `Alerts.scheduleRecomputeLines` for the affected lines so the existing overlap alerts appear immediately.
+5. Log conflict counts through `_log_event` for pilot observability.
+
+**Files.** `db.py`; `backend/scheduling/models.py`; `backend/scheduling/routes.py` (pass-through); `frontend/scheduling/persistence.mts`; `frontend/platform/types.mts` for the response type.
+
+**Acceptance.** Saving order B into a slot already held by order A on the same machine returns `conflicts` naming A and B with a positive overlap. With `strict_conflicts` and `atomic_optimizer`, the same save rolls back with `status:'error'` inside a 200, per the never-4xx contract. Manual saves are never blocked.
+
+**Tests.** One Postgres-gated case in `tests/test_task_concurrency.py`; one pure-logic test for the overlap helper if it is extracted as a function.
+
+**Risks.** Query cost on large machines: bound the window to the touched range, and index use on `(machine, scheduled_start)` should already exist; verify with `EXPLAIN` before shipping. Keep the never-4xx contract.
+
+---
+
+### N4 · Cross-line shared-tooling conflict alert
+
+**Why.** This is the user's stated real gap. Two individually feasible line schedules can require the same physical mold at the same time. NIMBUS cannot reserve tooling yet, but it can *see* the collision with data it already has and tell the scheduler.
+
+**Steps.**
+1. **Validate the assumption first**: confirm with the pilot plant that `PRT_01` (or `PRT_02`) on an order identifies a unique physical tool, not a tool type with multiple copies. If it is a type, this alert needs a quantity and becomes X1. Record the answer in this doc.
+2. Add an `alerts` rule `tool-conflict` in `Core.computeAlerts` (`frontend/nimbus-compute-core.js`, the shared logic behind both the worker and the sync fallback): group scheduled orders in the selected plant by tool id, sort by start, and flag any pair on **different** machines whose intervals overlap. Same-machine adjacency is a changeover, not a conflict.
+3. Mirror any type additions in `nimbus-compute-core.d.ts`, and extend the alert type union in `frontend/platform/types.mts`.
+4. Add a fix affordance in `Alerts.applyFix` (`frontend/insights/services.mts:394+`): reuse the existing overlap path (search from the peer's end on the same line) so the later order slides right on its own line.
+5. Add i18n strings for the alert title/description. Filter by the global line filter like the other rules.
+
+**Files.** `frontend/nimbus-compute-core.js` + `.d.ts`; `frontend/insights/services.mts`; `frontend/platform/types.mts`; `frontend/locales/*.json`.
+
+**Acceptance.** Two orders with the same tool id, overlapping in time, on different lines in one plant produce one `tool-conflict` alert; the same pair on one line produces none; applying the fix moves the later order to the next available slot on its own line.
+
+**Tests.** Extend `tests/js/compute-core.test.js` parity pins with two cases (conflict, same-line non-conflict). No new suite.
+
+**Risks.** Blank or placeholder tool ids must be skipped, otherwise every untooled order collides with every other. Scale: grouping by tool id within one plant is O(n log n), fine for 70 machines.
+
+---
+
+### N5 · Objective tuning, cheap slice
+
+**Why.** The stability term exists but is inert where it matters, already-late orders have no protection against becoming *much* later, and the priority-vs-lateness question is already answerable by mode selection. None of these need a new solver.
+
+**Steps.**
+1. In `fragmentObjectiveFacts` (`setup-scheduler.mts:6483`) compute `instabilityMinutes` from the fragment's own tasks instead of hardcoding 0, or leave a comment explaining why fragment-level instability is intentionally ignored. Measure the runtime effect against the deadline-bound search budget before keeping it.
+2. Add `maxLatenessMinutes` (largest single-order lateness) to `ObjectiveFacts` (`:375`) and place it immediately after `latenessMinutes` in every mode's comparison list (`:6510-6533`) and in `compareCandidate`/`compareDueDateCandidate`.
+3. Document in `frontend/optimization/CLAUDE.md` and the Optimize dialog hint text that `due-date` mode ranks lateness ahead of configured priority tiers, and the other modes do the reverse. This is the per-plant tradeoff the assessment asked for; it already exists.
+4. Defer weighted lateness (L4). If a cheap proxy is wanted later, weight `latenessMinutes` by the order's policy tier rank; no new data required.
+
+**Files.** `frontend/optimization/setup-scheduler.mts`; `frontend/optimization/CLAUDE.md`; Optimize dialog hint in `frontend/optimization/optimize-ui.mts` with an i18n key.
+
+**Acceptance.** Two candidates with equal late count and equal total lateness but different worst-case lateness prefer the smaller worst case. Fragment search no longer reports 0 instability when starts moved. No change to the five pre-existing test failures noted in the repo (they reproduce identically before and after).
+
+**Tests.** Extend `tests/modules/setup-scheduler.test.mjs` with one comparator case per new term. Repair-only scope; run that file, not the full sweep.
+
+**Risks.** Any comparator change can reorder existing golden outputs. Run the scheduler test file before and after and diff failures rather than asserting from memory.
+
+---
+
+### N6 · Split unknown-setup diagnostics
+
+**Why.** Two different situations currently produce the same "charged zero setup minutes" story: the machine's initial state is unknown, or both states are known but no matrix row exists. The remedy differs (record the line's state vs. fill a matrix cell), so the message should too.
+
+**Steps.**
+1. In the admission block (`setup-scheduler.mts:2514-2571`) emit distinct explanation codes: `admitted-unknown-state` and `admitted-uncovered-row` (keep `admitted-without-setup` as the legacy alias for one release).
+2. Carry the distinction into the missing-setup CSV and the "Review missing setups" action in the setup admin UI so the two lists can be filtered separately.
+3. Update the preview's amber bucket copy to name the remedy per code.
+
+**Files.** `frontend/optimization/setup-scheduler.mts`; `frontend/setup/setup-admin.mts` (CSV/review action); `frontend/optimization/optimize-ui.mts` copy; locales.
+
+**Acceptance.** A run with one unknown-state edge and one uncovered edge shows two different codes in diagnostics and two filterable rows in the review list.
+
+**Tests.** Extend the existing setup-scheduler explanation tests with one case each. The per-plant *policy* for how unknowns place is N8.
+
+---
+
+### N7 · Surface what is already built
+
+**Why.** NIMBUS's own APO gap analysis (`docs/SAP_APO_Opportunities.md`) already notes that reason codes shipped, the `needs_planning` queue exists in data, and the Ripple Preview overlay is fully built but permanently disabled. The assessment asked for an exception worklist and before/after views. Most of that is a discoverability problem, not a build problem.
+
+**Steps.**
+1. Expose the `planning_status='needs_planning'` rows (with `planning_reason`) as a ranked worklist in the existing Alerts panel or the Orders grid filter, linked to the Gantt and Inspector. Reuse the grid; do not add a new tab.
+2. Decide on Ripple Preview: re-enable behind a user setting, or delete the dead code. Record the decision here.
+3. Only after N1 and N3 land, evaluate whether an "affected orders before/after" table is still needed or whether the corrected snapshot diff plus save-time conflicts already answer it.
+
+**Files.** `frontend/insights/insights-ui.mts`; `frontend/scheduling/orders.mts`; `frontend/nimbus-intelligence.js` (Ripple Preview).
+
+**Acceptance.** A scheduler can list every `needs_planning` order for the selected plant, see its reason, and jump to it on the Gantt in two clicks.
+
+**Risks.** Lean scope: do not build an affected-orders table or resource-conflict explainer until the surfaced items are used and found insufficient.
+
+---
+
+### N8 · Per-plant unknown-setup placement policy (promoted from the deferred list)
+
+**Why.** Today every plant gets the same treatment for an unknown setup: admit at zero minutes, tail-place, alert. The assessment's one genuinely new idea in theme 5 was letting each plant choose. An earlier draft of this doc deferred it as needing a new column. It does not: `plants.setup_policy_config` (`schema.sql:268-269`) is a per-plant JSONB policy sidecar created for exactly this class of optimizer policy, and no runtime code reads or writes it yet.
+
+**Steps.**
+1. After N6 lands, add `unknownSetupPolicy: 'zero' | 'plantDefaultMinutes' | 'excludeFromSearch'` plus `unknownSetupDefaultMinutes` to the `setup_policy_config` JSON shape, defaulting to `zero` so every existing plant keeps today's behavior.
+2. Add a validated write route beside the existing per-plant policy routes in `master_data.py` (pattern: `POST /master-data/plants/{plant}/split-order-policy` and `.../frozen-horizon-days`), and read the value into `Store.masterData.plants[*]` with the other plant fields.
+3. Consume it in the admission block at `setup-scheduler.mts:2514-2571`: `zero` unchanged; `plantDefaultMinutes` charges the configured minutes and keeps the `admitted-unknown-state` / `admitted-uncovered-row` code from N6; `excludeFromSearch` routes the order to the `needs_planning` queue with a `planning_reason` naming the missing transition.
+4. Expose the three choices in the plant's setup admin page as a dropdown with a hint line, per the repo's uncluttered-modal convention. i18n all strings.
+
+**Files.** `master_data.py` (read/write); `backend/master_data/routes.py`; `frontend/setup/setup-admin.mts`; `frontend/optimization/setup-scheduler.mts`; `frontend/platform/types.mts` (`NimbusMasterPlant`).
+
+**Acceptance.** With `plantDefaultMinutes: 45`, an uncovered edge charges 45 minutes in the preview and the diagnostics still show the N6 code. With `excludeFromSearch`, the order lands in the `needs_planning` list with a readable reason. With `zero`, output is byte-identical to today.
+
+**Tests.** One mocked-pool route test next to `tests/test_master_data_setup_policy.py`; one scheduler case per policy value in `tests/modules/setup-scheduler.test.mjs`.
+
+**Risks.** The never-freeze decision of 2026-08-18 must survive: `excludeFromSearch` queues the order, it never freezes the line. Existing JSONB defaults hold `version: 1`; bump to 2 and read either.
+
+---
+
+## 6. Deferred — by effort or design, not by Entra
+
+**Status: not planned, and not security-gated.** An earlier draft parked these five items as Entra-dependent. That was a mistake in reasoning: the owner's schema-redesign freeze is *timed* to Entra, but none of these items needs Entra to be safe or correct. Three of them need only an additive table, which this repo ships routinely through dated idempotent migrations. One (X4b) is a genuine contract redesign and is the only item the freeze really covers. Two (X2, X5) would record who did something, and that attribution would be exactly as trustworthy as the pilot's existing upload audit and audit log, which is an accepted risk today. The sketches are kept so the reasoning survives.
+
+**Revisit trigger:** a Now item exposes the need (N3 conflicts prove insufficient → X2; N4 alerts fire often → X1; remote schedulers join the pilot → X4a), or the owner lifts the freeze for additive changes.
+
+| ID | Item | Why it is deferred (real reason) | Entra relevance | Sketch (for the record) | Schema touch |
 |---|---|---|---|---|---|
-| Login / session | `session.mts`, shell login screen | `/security/login`, `/security/me` | `security/routes.py` + `auth.py` | `user_security`, `user_settings` | **Implemented + Wired** — but auth is header-trust (P0-2), no login throttle (P1-10) |
-| Gantt / orders scheduling + explicit save | `gantt.mts`, `orders.mts`, `persistence.mts` | `/tasks`, `/tasks/update`, `/tasks/refresh`, `/tasks/baseline-correct` | `scheduling/routes.py`, `db.py` | `orders` (xmin versioning) | **Implemented + Wired** — concurrency design sound; routes unguarded (P0-1); save/load races (P1-5/6); `/task/note` contract hole (P1-4) |
-| Optimizer (incl. setup-aware, preview, sandbox) | `engine.mts`, `optimize-ui.mts`, `sandbox.mts`, `setup-scheduler.mts` | same task endpoints + `/audit/log` | — (client-side engine) | `orders` | **Implemented + Wired** — the four 2026-07 defects confirmed resolved by replacement; preview staleness gap resolved (P1-7, §0.5); sandbox side-effect restoration on discard also resolved (§0.5) |
-| Setup matrix / changeover | `setup-admin.mts`, `setup-domain.mts` | `/setup/{plant}/*` (15 routes) | `setup/routes.py`, `setup/data.py` | `setup_*` tables, `signature_version` | **Implemented + Wired** — strongest domain; UI correctly uses `matrix-rows`; server snapshot/coverage still unbounded (P1-9); ingest-time state capture N+1 (P1-8) |
-| Calendar / blackouts | `calendar-admin.mts`, `edit-calendar.mts`, `calendar-sync.mts` | `/plant-calendar/*` | `calendars/routes.py` | `plant_calendar*`, blackout tables | **Implemented + Wired** — stored XSS (P1-2), unauthenticated GET (P1-12), Flatpickr instance leak, line filter not synced with global `Store.selectedLines` |
-| Insights / alerts / utilization | `insights-ui.mts`, `services.mts`, worker | none (off-thread compute only) | — | — | **Implemented + Wired** — heatmap XSS (P1-3); O(tasks×blocks) loops masked by the worker; capacity math duplicated in 3 places (§8) |
-| Master data CRUD/DDL | `admin-ui.mts`, `admin-tables.mts`, `material-grids.mts` | `/master-data/*`, `/admin/tables/*` | `master_data/routes.py`, `master_data.py` | 9 `ALLOWED_TABLES` | **Implemented + Wired** — DDL identifier safety genuinely solid; cascade-preview gap (P1-11); stale table-switch race (P1-6); unauthenticated reads (accepted pilot posture); unscoped full `machine` fetch (§6) |
-| Excel/BOM ingest + purge | `admin-ui.mts` upload flows | `/upload`, `/bom/upload`, `/purge` | `integration/routes.py`, `db.py`/`master_data.py` | `orders`, `bom_items`, `upload_audit` | **Implemented + Wired** — zero test coverage (§10); no upload size cap; per-row upsert loops; per-chunk commits mean "failed" ≠ "rolled back" |
-| SAP sync | `sap-interface-ui.mts` | `/sap/interface/*` (8 routes) | `sap_sync.py` | `sap_sync_*` tables | **Partially Implemented (by design)** — full config/mapping/run plumbing wired end-to-end, but all three connectors' `extract()` return `[]`; every run reports `rows_read: 0`. A skeleton awaiting real connectors, correctly documented |
-| Priority lists / color wheel | `viewers.mts`, `admin-ui.mts` | `/priority-list/*`, `/color-wheel/*` | `priority_lists/routes.py` | `priority_list`, `color_wheel` | **Implemented + Wired** — legacy color-wheel GETs skip plant scoping (§7); in-process cache breaks at >1 replica (§8) |
-| Labor plan | `labor-planning.mts` | `/labor-plan`, `/labor-plan/line` | `labor/routes.py` | labor tables | **Implemented + Wired** — but zero auth (P1-1), plant-switch race, additive-only client cache never prunes server-side deletions, no loading states, big i18n gap |
-| Security admin (users/roles/plants) | `security-admin.mts` | `/security/users*`, `/master-data/roles*`, `role_plants` | `security/routes.py`, `auth.py` | `user_security`, `roles`, `role_plants` | **Implemented + Wired** — last-admin lockout guard verified; unbounded plant-chip display violates scale mandate at 50+ plants |
-| Admin ops / diagnostics | `admin-ops/admin-ui.mts` | `/health`, `/diagnostics/*`, `/maintenance/*`, `/logs/*` | `admin_ops/routes.py` | — | **Implemented + Wired** — lock-chain XSS (P1-3); per-table VACUUM fires with no confirmation; `/health` leaks raw DB error text unauthenticated |
-| Command palette / intelligence | `nimbus-intelligence.js` | `/audit/log` | — | — | **Implemented + Wired** — entirely unlocalized, invisible to the locale-completeness test |
+| X1 | Tooling as an optimizer admission constraint | Large effort (cross-line coupling breaks the per-line evaluator); no material→line eligibility data exists (`docs/MIGRATION.md:847`); `PRT_01` semantics unconfirmed until N4 | None | Tool catalog per plant (id, quantity, eligible machines). Add a plant-scoped tool reservation map to `ScheduleSnapshot`; admission rejects a placement when all copies are busy. This introduces cross-line coupling, so partition the evaluator by tool-connected machine groups rather than per line. Prior art: `docs/changeover_matrix.md §14`, `docs/MIGRATION.md:847,851`. | New `plant_tools` table; optional FK from `line_setup_state.physical_mold_id` |
+| X2 | Publication step with revision ledger | Large effort; should wait until N3's advisory conflicts prove insufficient. A draft-vs-published distinction changes the scheduler's workflow and needs plant buy-in | Improves "who published" attribution; today it would record the same spoofable `X-User` the audit log already records. Not a blocker | `POST /schedule/publish` runs the N3 conflict check in strict mode across the plant, checks the proposal's baseline `readModelVersion` against current, commits atomically, and writes a `schedule_revisions` row (plant, user, baseline, resulting versions). Drafts stay flexible; "published" gains meaning. | New `schedule_revisions` table |
+| X3 | Per-plant unknown-setup placement policy | **Promoted to N8.** Fits the existing unwired `plants.setup_policy_config` JSONB; no schema change | None | See N8 | none |
+| X4a | Plant-time consistency for remote schedulers | Design decision first: `docs/MIGRATION.md:892-913` says the naive-local order scheme and the UTC blackout scheme are deliberately separate and must not be unified. Deciding which paths become plant-aware (display only? calendar math? wire encoding?) is the work; the `plants.timezone` column already exists and the optimizer already uses it | None | Inventory the `Util.toLocalSeconds` sites (`persistence.mts:1015-1314`) and the calendar engine's day boundaries; choose display-only projection through `plants.timezone` first (lowest risk), reusing `Engine._plantWallNow`. Fix the stale `store.mts:825-829` comment while there. Resolve the historical-offset repair in the same window | none |
+| X4b | Multi-shift and overnight `WorkHours` | The one item the schema-redesign freeze genuinely covers: `WorkHours` changes shape from one `[open,close]` pair per weekday to a list with overnight wrap, mirrored in `schema.sql:725-752`, `calendar-engine.mts`, `nimbus-compute-core.js`, and every capacity test | None | Change `WorkHours` to `Record<day, Array<[start,end]>>`; write a one-time JSONB data migration wrapping existing pairs; update the calendar UI's day editor; re-pin `tests/js/compute-core.test.js` parity | JSONB shape change (contract redesign) |
+| X5 | Server-side named scenarios | Large effort against unproven demand; the browser-local Time Machine and What-If cover single-scheduler use. Wait for a second scheduler per plant to ask for shared scenarios | Improves owner attribution only; same note as X2 | Persist the IndexedDB `snapshots`/`scenarios` stores server-side per plant with a constraint snapshot (calendars, blackouts, setup snapshot version) so a scenario can be refreshed against changed data before adoption. Reuse the N1 diff for comparison. | New `scenarios` table |
 
 ---
 
-## 5. Code Quality Findings
+## 7. Later / discovery
 
-**Bugs (beyond §2):**
-- `Modal.confirm()` is not reentrant — `foundation.mts:1465-1490`. Concurrent confirms cross-fire listeners: one click can resolve both pending promises, executing an action the user never saw confirmed. P2/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** A module-level busy flag + queue now serializes concurrent `confirm()` calls instead of double-attaching listeners.
-- Labor `_lineData` cache is merge-only — `labor-planning.mts:216-235`. Server-side-cleared overrides keep rendering and feeding exception math until full plant reselect. P2/Med.
-- `SystemConfig._save` failure toast uses tone `'err'` where every other call site uses `'error'` — `admin-ops/admin-ui.mts:2807-2810`; the save-failure signal renders unstyled. P2/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).**
-- Firmed-order no-op guard compares `start`/`group` but not `end` — `gantt.mts:3489-3501`; asymmetric with the non-firmed check below it. P3/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).**
-- `DependencyOverlay` critical-path recursion has no cycle guard — `gantt.mts:1739-1761`; cyclic dependency data stack-overflows on every pan/zoom. P3/Med. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** Added a per-DFS-path `visiting` set; previously it failed safe via a top-level `try/catch` (returned 0 on `RangeError`) rather than actually crashing, but wasted recursion.
-- Missing-key-column toast always says "no plant selected" even for non-plant-keyed tables — `admin-ui.mts:3376-3381`. P3/High. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02)** — new `toast.missing_required_key` i18n key. **Not fixed:** the `forEach`/`return` right next to it only skips one row instead of aborting the whole save — a separate, still-open bug, deliberately not folded into this fix.
-- KPI-tile → table filter navigation relies on a blind `setTimeout(…, 120)` — `insights-ui.mts:487-522`; silently no-ops on slow first tab mount. P3/Med.
-- `calendar-engine.mts:308-405`: three day-walk loops share a hardcoded 90-day cap; two of three exhaustion paths return silently with no diagnostic. P3/Med.
+**L1 · Operation/routing model.** The pilot plants are mostly single-operation, so this is not a live gap. Before any design work, run a discovery with production planning: for each pilot and next-wave plant, how many SAP operations per order actually need independent scheduling in NIMBUS, and do any have min/max time relationships (cooling, holding)? If the answer stays "one", record that here and close the theme. If not, the design must replace the atomic-order assumption in ingest (`routes.py:175-237`), the optimizer, and split-order segments together; it cannot be added incrementally.
 
-**Less-optimal (works, but materially better implementation exists):**
-- `Engine.runAndApply` is ~250 lines interleaving four dispatch modes accumulated via dated patches — `engine.mts:1611-1862`. Extract `_runSetupAware`/`_runLegacyWalk`. P2.
-- `setup-scheduler.mts` (~4,900 lines) is annotated in phase codes ("A1", "B3a", "Phase 1e") with no glossary — high archaeology cost, real reintroduction risk. Add a top-of-file glossary. P2.
-- `Selection` never self-prunes against task-list changes; the only reconciliation lives in `Timeline.rebuild()`, so a user solely on the Orders tab can carry stale selection ids. P2.
-- The completion-time `COALESCE(...)` formula is duplicated verbatim 3× inside one SQL statement — `backend/setup/data.py:462-498`; the codebase has already been bitten once by exactly this duplication pattern. P2.
-- Flatpickr re-instantiated per cell per render, never destroyed — `calendar-admin.mts:100-101`; slow leak on repeated filter switching. P2.
-- No loading/busy state during `/tasks` fetch or `saveAll()`; grid stays fully editable mid-flight, compounding the race findings. P2.
-- Platform exports no shared `escapeHtml()` — at least four local `esc()`/`_esc()`/`_htmlEsc()` reimplementations; `Modal.confirm`'s `detail` is documented as raw HTML with no guardrail. Centralize. P2. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** `Util.escapeHtml()` (added `ed2f16d`) is now used everywhere — the remaining ~14 files / ~30 call sites found during the first pass's grep are all migrated, and each now-dead local helper removed. Several local helpers didn't escape a single quote; migrating closes that gap. `Modal.confirm`'s raw-HTML `detail` param itself is unchanged (still accepts trusted HTML by design) — not a guardrail gap, just documented behavior.
-- i18n gaps cluster in: master-data delete/paste modals, Labor Planning KPI/Inputs/Capacity tabs, the entire CommandPalette (~40 strings, invisible to the locale-completeness test), Gantt hover-card labels, Optimize dialog tooltips, setup machine-state editor, SAP config UI. P2 collectively — the repo's own stated convention is being bypassed on its most-used surfaces.
-- `PerfMonitor.subscribe()` returns no unsubscribe, unlike `Store`/`ErrorLog` — an API trap. P3. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** Now returns an unsubscribe closure, matching `Store`/`ErrorLog`; its one caller (`admin-ops/admin-ui.mts:556`) already ignored the return value, so this is a backward-compatible widening.
-- `FactoryScene` (~650 lines of decorative login-canvas code) inlined in the boot-critical `application-shell.mts`; lazy-load it. P3.
+**L2 · SAP execution feedback.** Blocked on a live connector (`sap_sync.py` is a stub) and on the read-only-from-SAP decision. The `source:'actual'` seam in the setup domain is the intended landing point. The "machine failed at 10:15, propose the smallest repair" workflow depends on this plus X2 and the stability term, so it sequences after both.
+
+**L3 · Crew as a finite resource.** `labor_plan_line` exists but nothing in `Engine.runAndApply` reads it. Design question: does a crew constraint apply to setup windows only (the assessment's 30-minute example) or to unattended production too? Answer with the plant before modeling.
+
+**L4 · Business-weighted lateness.** No weight source exists. The cheap proxy (weight by policy tier) is noted under N5; a real version needs a customer or order-priority attribute from SAP.
 
 ---
 
-## 6. Performance Findings
+## 8. Corrected claims (kept so the original reasoning is not lost)
 
-| Finding | Location | What happens / why it matters | Worth doing |
-|---|---|---|---|
-| Setup-state capture scans all plants (P1-8) | `backend/setup/data.py:501-524` | ~3,500 sequential queries per single-plant upload at target scale | **Now** — small change, large win; ✅ RESOLVED (`27810fe`) — the `/upload` call site is now also scoped (the remaining gap from the `7012b53` partial fix) |
-| Unbounded setup snapshot/coverage (P1-9) | `setup/data.py:656-711` | O(states²) rows per request at 70+ machines/plant | Now (server-side bound) |
-| Per-row `cur.execute` in `bulk_apply` upserts | `master_data.py:823-910` | BOM ingest ("tens of thousands of rows") = one round-trip per row inside one transaction; timeout risk | Next — batch via `executemany`/multi-row VALUES |
-| `known_material_plant_pairs()` loads the whole table per BOM upload | `master_data.py:2461-2468` | Rebuild of full cross-plant set per upload; scope to plants present in the file | Next; ✅ RESOLVED (`27810fe`) — now accepts an optional `plants=` filter, scoped at its one call site to the plants present in the uploaded file |
-| `ingest_bom_from_excel` uses `df.iterrows()` | `master_data.py:2526` | Slowest pandas iteration on the largest expected input | Later, with the batching change |
-| Full unscoped `machine` table fetch to patch one line | `frontend/master-data/admin-ui.mts:3659-3671` | Direct scale-mandate violation; 3,500+ rows for a one-field edit | Next; ✅ RESOLVED (`27810fe`) |
-| Blackout-violation loop O(tasks×blocks); utilization loop O(tasks×horizon-days) | `nimbus-compute-core.js:483-513, 698-754` | Masked off-thread today; a ceiling at scale. Adjacent code already has the bucketing helper | Later — reuse `_indexCapacityBlocks`; ✅ RESOLVED (`27810fe`) |
-| Excel uploads read fully into memory, no size cap | `integration/routes.py:47,97`; `priority_lists/routes.py:331,462` | Memory exhaustion risk on oversized files (admin-gated, so bounded likelihood) | Next — cheap header check; ✅ RESOLVED (`27810fe`) |
-| VACUUM runs under the pool's 30s statement timeout | `db.py:1627-1652` | Admin maintenance fails on large tables at scale | Later |
-| Auth dependency = 3 sequential DB round-trips per gated request | `auth.py:502-524` | Marginal today; consolidate to one JOIN if it lands on a hot path | Later / if profiled |
-| Freeze watchdog + heap sampling run 1 Hz / 30s for every user | `app.js:513-552` | Small permanent tick cost; gate behind admin/debug | Optional |
+| Original statement | What is actually true |
+|---|---|
+| "Optimizer saves can bypass version conflicts through force." | Optimizer saves use `atomic_optimizer:true`, under which `force` is ignored and any stale row rolls back the batch. The bypass paths are the client `CONCURRENCY_CHECK` switch and the external `bulk_update` alias (see N2). |
+| "Protecting the number of late orders does not protect already-late orders from becoming substantially later." | Total lateness minutes is scored right after late count. The remaining gap is a per-order worst-case term (see N5). |
+| "The shell also intercepts browser zoom shortcuts." | It does not. Only the vis-timeline Ctrl+wheel zoom over the Gantt canvas exists, which is the library's standard behavior. |
+| "Scheduling paths mix plant-aware and browser-local calculations." | **Correct, and the first draft of this doc wrongly refuted it.** `plants.timezone` exists and is used by the optimizer's Remove Backlog window, the dashboard's plant hour, and setup captures, while order dates and calendar math are browser-local. The stale `store.mts:825-829` comment misled the first verification pass. See X4a. |
+| "Represent known-zero, nonzero, estimated, unknown, prohibited separately." | Known-zero (`implicit-zero`) and unknown (`uncovered`) are already separate sources. Estimated and prohibited do not exist; "estimated" is N8's `plantDefaultMinutes`, "prohibited" has no demand recorded yet. |
+| (First draft of this doc) "X1–X5 are hard-parked because they depend on the Entra migration." | None of them does. They are held by effort, missing plant data, a design decision, or the owner's schema-redesign freeze. Entra would only improve attribution on X2 and X5. |
+| Line references 171, 331, 856, 1836, 1951, 2117, 1243, 118 | Now 175-237, 328-350, 889-1075, 2372, 2514, 2107, 352, 118 respectively. |
 
 ---
 
-## 7. Security Findings
+## 9. Cross-references
 
-Covered in §2: P0-1 (unguarded task routes), P0-2 (header auth + CORS `*` + hardcoded bootstrap admin), P1-1 (labor), P1-2/P1-3 (XSS), P1-10 (login hardening), P1-12 (calendar GET). Additional:
-
-- **Admin routes inconsistently API-key-gated** — `security/routes.py`, `admin_ops/routes.py:30-246`: `/diagnostics/db` and `/logs/backend` (full structured log incl. tracebacks, slow-query text) are `require_admin`-only, while destructive siblings also require the API key. Uniform `require_api_key` when set. P2/Med. — **✅ RESOLVED (`700daab`, 2026-09-02 — see §0.2).** A full sweep (not just the two named here) found 12 gaps total: `GET /diagnostics/db`, `GET /logs/backend` (`admin_ops/routes.py`); `POST /audit/log/clear`, `GET /master-data/_schema-export`, `GET /admin/tables`, `GET /admin/tables/{table}`, `GET /admin/tables/{table}/export.csv` (`master_data/routes.py` — the last four were a *documented* no-key posture per OD-E2/OD-E3, deliberately overridden here per explicit user decision; the doc comment and `master_data/CLAUDE.md` were updated to match, since OD-E2/OD-E3's actual rationale is about plant-scoping, not the API key, so this doesn't contradict that decision); `POST /upload/audit/clear` (`integration/routes.py`); and all four `POST /plant-calendar/*` routes (`calendars/routes.py`, which had zero `require_api_key` usage anywhere in the file before this). All 12 now require `Depends(require_api_key)` alongside their existing `require_admin`. Negative tests (missing-key → 401) added to `tests/test_logs_endpoints.py`, `tests/test_admin_tables.py`, and two new files, `tests/test_plant_calendar_routes.py` and `tests/test_integration_routes.py`.
-- **Legacy color-wheel GETs skip plant scoping** — `priority_lists/routes.py:498-561`: a plant-restricted user can read other plants' priority data via the legacy endpoint even though the generic endpoint for the same data enforces scoping. P2/High. — **✅ RESOLVED (`700daab`, 2026-09-02 — see §0.2).** Added the same `_assert_plant_allowed`/`PlantNotAllowed`→403/`ValueError`→400 pattern every sibling route in this file already carries, to all three color-wheel routes (`GET`/`POST`/`DELETE /color-wheel/{plant}` — the POST/DELETE pair wasn't explicitly named in the original finding but had the identical gap). **A real correction found during implementation:** the backend fix alone would have been inert in production — the only frontend caller, `ColorWheelViewer._load()` (`frontend/priority-lists/viewers.mts`), used a bare `fetch()` that sends no identity header at all, so the server would always see an unscoped caller regardless of the new check. Fixed by switching that call to `Util.fetchTraced()`, the exact precedent already set once before for this same trap (`Persistence.loadPriorityRankMaps`, see the comment at `tests/test_priority_lists.py:1137-1141`). Three new tests added mirroring the existing `test_priority_rank_maps_*` trio.
-- **`GET /master-data/{table}` fully unauthenticated** — documented, deliberate pilot posture, but any anonymous caller enumerates all master data cross-plant (incl. `roles`, `role_plants`). Require `require_authenticated` before pilot scope expands. P2/High. — **✅ RESOLVED (`283ec30`, see §0.4).** The blast-radius concern flagged here — that `require_authenticated` would 401 currently-working frontend paths sending zero identity header, including the core scheduling-board bootstrap fetch in `Persistence.load` — was closed by first migrating those bare-`fetch` call sites to `Util.fetchTraced` (`e2f4cdb`), then adding `Depends(auth.require_authenticated)` to the route (`283ec30`).
-- **`admin_exists()` grace period is unbounded** — `auth.py:527-536`: any state where zero admin rows exist (partial restore, migration race) leaves `require_admin` fully open to everyone, indefinitely, silently. Log loudly and continuously. P2/Med. — **🟡 PARTIAL (`e9f3fa3`, 2026-09-02).** `require_admin`/`whoami` now log a warning whenever the grace path grants access. The grace period itself is still unbounded by design (unchanged access-control logic, per `auth.py`'s frozen-pending-Entra convention) — this closes the "silently" half, not the "unbounded" half.
-- **`POST /audit/log` is open and unvalidated** — `master_data/routes.py:58-64`: anyone can append arbitrary JSON (spoofed user/action, unbounded growth). P3/Med. — **🟡 PARTIAL (`e9f3fa3`, 2026-09-02).** Gated with `Depends(auth.require_authenticated)` — no longer fully open to anonymous callers. The body is still an unvalidated bare `dict` (no Pydantic model) — that half is unaddressed.
-- **`/health` returns raw exception text unauthenticated** — `admin_ops/routes.py:36-59`: could leak internal hostnames/ports on DB failure. Redact. P3/Med. — **✅ RESOLVED (`e9f3fa3`, 2026-09-02).** Confirmed both `db.get_health_stats()` and `db.get_pool_stats()` genuinely did `"error": str(e)` on failure (not hypothetical). Redacted to a generic string inside the `/health` handler only — `db.py`'s two functions and the admin-gated `/diagnostics/db` deep-dive (which needs the real text) are untouched.
-- **Client-side password minimum mirrors the weak 4-char server rule** — `security-admin.mts:426,463` + `auth.py:287-296`. Fix server-side first. P3.
-- **Latent escaping traps** — `_optTag()` label unescaped (`application-shell.mts:365-368`), `EmptyState.render()` raw interpolation (`:1520-1531`), BOM scope bar (`admin-ui.mts:2818`): safe with current callers, no contract stopping the next caller. Fold into the shared-escape-helper work. P3.
-
-**Verified clean:** no SQL injection anywhere (all dynamic identifiers via `psycopg.sql.Identifier` or fixed literals; the f-string `WHERE` fragments in `master_data.py:1280-1543` interpolate only hardcoded strings — flagged P2 as a convention inconsistency, not a vulnerability). PBKDF2-HMAC-SHA256 @ 600k iterations with constant-time compare. `.env` excluded from git and Docker context. Non-root container. SAP secret keys never logged or returned raw. `NUMERIC` precision injection already fixed.
-
----
-
-## 8. Architecture Findings
-
-- **Single-replica assumptions vs. the scale roadmap** — `brain.py:4-7` claims stateless multi-replica readiness; the Dockerfile pins one worker *because* the priority-list cache (`backend/priority_lists/cache.py`) and `_BACKEND_LOG` ring buffer are in-process, and `POST /reload` refreshes only the calling replica. Scale-out silently reintroduces cross-replica cache staleness. Document as a hard single-replica constraint or move the cache to a shared store before scale-out. P2/High.
-- **Capacity math triplicated** — `nimbus-compute-core.js:108-130` vs `platform/foundation.mts:303-326` vs `calendar-engine.mts:232-264` (`mergedOverlapHours` ×3), plus `_indexCapacityBlocks` duplicated. Byte-equivalent today; the domain doc claims delegation that doesn't exist. Any single-copy fix silently drifts worker vs. main-thread capacity. Delegate to `NimbusComputeCore` or pin with a parity test. P2/High.
-- **`Sandbox.enter()` snapshot is incomplete** — `sandbox.mts:44-51`: discarding a What-If that included a trial Optimize leaves `Store.lastOptimize` and cleared alert dismissals permanently mutated. P2/Med.
-- **Admin audit map is a static dict keyed by route template** — `brain.py:580-640`: new admin routes silently skip audit logging; no test cross-checks `require_admin` routes against `_ADMIN_WRITE_OPERATIONS`. Add the assertion. P3/Med.
-- **`list_rows` orders by positional column luck** — `master_data.py:291-293`: self-documented in sibling functions as "only works by seed-order luck"; apply their explicit key-membership filter. P3/Med.
-- **Calendar's line filter ignores the global `Store.selectedLines`** — `calendar-admin.mts:23`: inconsistent with the app-wide filter convention every other tab follows. P3.
-- **Non-emitting Store setters** (`store.mts:203-266`) — correct and well-commented, but only comments enforce the exception. Informational.
-- **Redundant index** — `schema.sql:1201-1202`: `idx_setup_matrix_plant_machine_version` is a strict prefix of the table's PK. P3/Low. — **✅ RESOLVED (`ada40ec`, 2026-09-02).** Dropped from `schema.sql`; `migrations/2026-09-02-drop-redundant-setup-matrix-index.sql` added so the ledger-only rebuild path (deploys apply `migrations/`, never `schema.sql`) also drops it on the live Azure DB.
-- **Intentional soft-FK convention verified** — `workcenter_mapping`/`color_wheel`/`priority_list` deliberately carry no FK to `plants`/`machine` (supports ingest-before-master-data ordering, explicitly commented). Not a defect; recorded so future audits don't re-flag it.
-
----
-
-## 9. Dead / Orphaned Code
-
-- Gantt double-click/Enter edit branches gated on nonexistent `Modal.openEdit`/`ContextMenu.openCanvas` — self-documented always-false. Decide: wire a real edit modal or delete. `gantt.mts:2611-2624, 3444-3461, 3805-3812`. P2.
-- `Interaction.uninstall()` — never called, only reverses 4 of ~10 listener categories. `gantt.mts:2967-2974`. P3.
-- `/security/bootstrap-status`, `/master-data/_audit`, `/color-wheels`, plain `/diagnostics`, dedicated `visibility-horizon` POST — uncalled endpoints (§3). P3.
-- `setup_definition.active` — self-documented vestigial column. P3.
-- `RemoveBacklogDiagnostics.movedRuntimeHours` — populated, never consumed by its only reader. P3.
-- `COLOR_WHEEL_DIR` defaults to a hardcoded personal Windows path — `priority_lists/audit_log.py:30`. Silently degrades audit durability on any other machine. P3. — **✅ RESOLVED (`e9f3fa3`, 2026-09-02).** Fallback is now repo-relative (`data/color_wheels`, auto-created via `os.makedirs(..., exist_ok=True)`); the `COLOR_WHEEL_DIR` env-var override is unchanged for deployments that set it.
-- Stale comment in `viewers.mts:252-258` claiming no identity header is sent (fetchTraced auto-attaches it). P3. — **✅ RESOLVED (`a4ddd6c`, 2026-09-02).** Also corrected the file location in this doc: it's `frontend/priority-lists/viewers.mts`, not a scheduling-domain file.
-- **Stale project memory/docs:** the four 2026-07-03 setup-scheduler defects (multi-day window bypass, force-place off-by-one, SPT non-determinism, force-place/fixed overlap) are recorded as "shipped unfixed" but the `_dispatchDayIntegrity` path they lived in is fully removed — they are resolved by replacement. Update the records.
-
----
-
-## 10. Testing Gaps
-
-Ranked by value; per project convention, these are targeted additions, not new suites everywhere.
-
-1. **`/tasks/update` real-DB xmin conflict** — no test drives two competing writes through real Postgres on the primary save path (the only real-DB stale-version test covers priority attributes on a different endpoint; `persistence.test.mjs` mocks fetch). This is NIMBUS's primary data-corruption surface and the bug class that has already fired twice. **P0-equivalent gap.** — **✅ VERIFIED PASSING (2026-09-04).** `tests/test_task_concurrency.py`'s 3 tests (stale-write rejection, `force=True` bypass, `allowed_plants` scoping) run for real against local Postgres (`NIMBUS_TEST_DB=1`) — all pass. Full suite also run with `NIMBUS_TEST_DB=1`: 414 passed, 1 skipped, 2 errors — the 2 errors are `tests/test_schema_idempotent.py::TestHorizonMigrationIdempotent` (both tests), a pre-existing fixture bug unrelated to this test (`subnetworks.name` is `NOT NULL` in `schema.sql:141` with no default; the fixture's seed INSERT only supplies `code`) — not caused by, or touched by, this verification pass; tracked as a new backlog item, not fixed here (out of scope for this plan).
-2. **`backend/integration/` has zero coverage** — Excel ingest, BOM ingest, purge-and-replace: the widest bulk-write blast radius in the app. `tests/modules/integration/` covers only the SAP UI skeleton. — **✅ RESOLVED (2026-09-04).** `tests/test_ingest_data_layer.py` added — 4 tests driving the real (non-mocked) parsing/upsert logic in `db.ingest_orders_from_excel`, `master_data.ingest_bom_from_excel`, and `db.purge_orders_by_date` against real Postgres: insert-then-reupload-updates-same-row (not a duplicate), missing-required-column rejection, per-row BOM rejection on an unknown material/component pair (without failing the rest of the upload), and date-range purge selectivity. All 4 verified passing. One real bug surfaced and fixed along the way (not in the ingest functions themselves): the test's own `PLANT` sentinel for the BOM case was 16 characters against `material_plants.plant`'s `VARCHAR(10)` column — shortened to fit. `/purge`'s route-level behavior (payload validation, capture-before-delete) was already covered by `tests/test_integration_routes.py`; this file closes the gap at the actual SQL/parsing layer underneath it.
-3. **Auth/RBAC has zero server-side coverage** — nothing hits `/security/login` or asserts a plant-A-scoped user can't read/write plant B. Directly relevant to P0-1/P1-1; a fix for those without a test will regress. — **✅ RESOLVED.** `tests/test_rbac_plant_scoping.py` (fully mocked `TestClient` + `dependency_overrides`, no DB needed) — 12/12 passing, confirmed by direct run.
-4. **Schema bootstrap smoke test** — apply `schema.sql` to scratch Postgres with `ON_ERROR_STOP=1`; apply `migrations/` alone and diff. Would have caught P0-3 immediately. — **✅ VERIFIED PASSING (2026-09-04), after fixing a real bug the script itself caught.** `scripts/schema_bootstrap_smoke.py` run for real against local Postgres. First run failed a fresh bootstrap with `ERROR: relation "column_metadata" does not exist` at the `workcenter_mapping` seed INSERT (schema.sql:340 in the pre-fix line numbering) — `column_metadata`'s own `CREATE TABLE` didn't exist yet at that point in the file (it was declared ~140 lines later). This is the identical P0-3 bug *class* (a statement depending on an object not yet created during a fresh bootstrap), just a different pair of statements than the original `orders.plant` regression. **Fixed** by moving `CREATE TABLE IF NOT EXISTS column_metadata` to just before its first use (immediately before the `workcenter_mapping` column_metadata seed). After the fix: exit 0 — first and second migration-ledger replay succeed, `orders` column shape, the bounded structural fingerprint (tables/columns/indexes/constraints), and the bounded deterministic data/ledger contract (schema_migrations IDs, column_metadata, system_settings, sentinel order) all match the `schema.sql`-alone baseline.
-5. **Optimizer wall-clock regression guard** — `engine.test.mjs` verifies placement but nothing pins a time/iteration bound; the previously fixed 5–30s freeze has no guard.
-6. **OpenAPI ↔ `api-generated.d.mts` CI check** — `tests/contracts/` holds one data fixture, no contract test; pairs with adding `response_model=` to the three untyped routers.
-7. **Worker/main-thread capacity parity test** — pins the three `mergedOverlapHours` copies until they're consolidated (§8).
-8. **Client stale-response reconciliation** — all "stale" assertions check request shape only; none prove the UI reconciles to server truth after a real 409 (the drag-spring-back failure mode).
-
----
-
-## 11. Recommended Action Plan
-
-**Fix immediately (P0 — hours, not days):**
-1. Verify `NIMBUS_API_KEY` and `NIMBUS_ALLOWED_ORIGINS` are set on the live Container App (5-minute check; highest risk-reduction in this report). — ✅ **DONE, 2026-09-02.** `NIMBUS_ALLOWED_ORIGINS` was already set; `NIMBUS_API_KEY` was missing and has been added via `az containerapp update --set-env-vars`, then reverified present.
-2. Add `Depends(auth.require_authenticated)` to the six task routes and the four labor routes (P0-1, P1-1). This is additive and low-risk. — ✅ **DONE (`242a632`).**
-3. Fix `schema.sql` statement ordering + add the `orders.plant` migration (P0-3). — ✅ **DONE (`3ba7382`).**
-4. Escape the calendar blackout render path (P1-2) — a two-line fix for the one stored-XSS hole reachable by non-admin users. — ✅ **DONE (`ed2f16d`).**
-
-**Fix next (P1 — this sprint):**
-5. Thread `allowed_plants` through the task-write and labor DB paths (completes P0-1/P1-1; depends on item 2's auth identity being present). — ✅ **DONE (`242a632`).**
-6. `/task/note` returns fresh xmin (P1-4). Small, self-contained. — ✅ **DONE (`242a632`).**
-7. `saveAll()` in-flight lock + precise dirty-clearing; generation guard on `Persistence.load()`; staleness guards on master-data table switch and labor renders (P1-5/6 — all the same pattern, one concept applied four places). — ✅ **DONE (`28ed077`, `ed2f16d`).**
-8. Remaining XSS holes + export a shared `Util.escapeHtml()` and migrate the local helpers (P1-3 + latent traps, one change). — 🟡 **DONE for the 3 real XSS holes (`ed2f16d`); the full 14-file local-helper migration and the "latent traps" (§7's `_optTag`/`EmptyState`/BOM-scope-bar) were correctly scoped as separate P2/P3 cleanup, not attempted here.**
-9. `cascade_preview` roles branch + frontend fail-closed on preview failure (P1-11). — ✅ **DONE (`ed2f16d`).**
-10. Plant-filter `capture_setup_states_before_schedule_mutation` (P1-8). — ✅ **DONE (`7012b53` + `27810fe`) — both call sites (sap_sync.py and /upload) now scoped; /purge remains permanently unscoped by design.**
-11. Login hardening: 8-char minimum, throttling, constant-time unknown-user path (P1-10). — ✅ **DONE (`f305947`).**
-12. Tests 1–4 from §10 — write the RBAC test *with* items 2/5 so the fix lands guarded. — 🟡 **PARTIAL (`bc7875f`) — RBAC test written and verified passing; xmin-conflict and schema-bootstrap tests written but unverified (no local Postgres); ingest coverage (§10 item 2) not attempted.**
-
-**Refactor afterward (P2):**
-13. Bound the setup snapshot/coverage endpoints (P1-9) — coordinate with the frontend snapshot consumer. — ✅ **DONE (`1495a48`, `dbead1e`, 2026-09-04)** — `get_setup_snapshot` scoped to the plant's live machine roster; see the P1-9 finding entry in §2 for detail.
-14. Optimize-preview task-staleness detection (P1-7). — ✅ **DONE (`7c14aa3`, `895ef5b`, see §0.5)** — corrected 2026-09-04, this line had gone stale after §0.5 already recorded it resolved.
-15. Consolidate capacity math to one implementation (or add the parity test first, then consolidate). — ✅ **DONE (`4b70ce7`, see §0.4)** — both remaining duplicate pairs (`mergedOverlapHours`, and a second, previously-unnamed one, `_indexCapacityBlocks`) now delegate to `NimbusComputeCore`; no parity test needed since delegation makes divergence structurally impossible.
-16. Add `response_model=` to security/setup/master-data routers + regenerate types + contract CI check. — 🟡 **PARTIAL (`480cb04`, see §0.4)** — all 47 routes typed, types regenerated; the contract CI check itself (pinning OpenAPI ↔ `api-generated.d.mts` in CI) is still open.
-17. `Modal.confirm` reentrancy; sandbox snapshot completeness; `Engine.runAndApply` extraction; setup-scheduler phase-code glossary. — 🟡 **PARTIAL** — `Modal.confirm` reentrancy done (`a4ddd6c`, §0.1); sandbox snapshot completeness, `Engine.runAndApply` extraction, and the phase-code glossary remain open.
-18. ~~Uniform `require_api_key` across all admin routes~~ — ✅ **DONE (2026-09-02, see §0.2).** Single-replica constraint documented (**✅ DONE, `ca476b2`, see §0.4** — `PLANT_LISTS`/`POST /reload` scope now documented; the cache is not externalized, which was always the accepted alternative, not a gap).
-
-**Optimize afterward:**
-19. Batch `bulk_apply` upserts + scope `known_material_plant_pairs` (do together — same ingest path). — ✅ **DONE (`27810fe` + `0adedea`, see §0.3/§0.4)** — `known_material_plant_pairs` scoping and `bulk_apply`'s executemany batching are both now shipped (the batching was deliberately split into its own later pass, not silently dropped — see §0.3's own write-up at the time).
-20. Upload size caps; scoped machine fetch in `syncLineSettings`; compute-core loop bucketing. — ✅ **DONE (`27810fe`, 2026-09-02).**
-
-**Optional cleanup (P3):**
-21. i18n sweep (CommandPalette first — extend the locale-completeness test to cover it so the gap can't silently regrow), dead endpoints/branches, and the stale memory/doc records about the four resolved scheduler defects. — `COLOR_WHEEL_DIR` default, bootstrap-admin username default, redundant index, and stale comments are **✅ DONE (`e9f3fa3`/`ada40ec`/`a4ddd6c`, 2026-09-02)** — see §0.1. CommandPalette i18n **✅ DONE (`7f616b1`, see §0.4)**. Dead endpoints/branches **✅ DONE (`1d447f9`, see §0.4)** — 5 routes + 3 Gantt guard branches deleted; the memory/doc records about the four resolved scheduler defects remain unaddressed (a project-memory correction, not a code change, still open).
-
-**Dependencies worth noting:** items 2→5→12 form a chain (auth identity must exist before scoping can use it; the test should land with the fix). Item 8 (shared escape helper) should precede any further XSS point-fixes so they're done once. Item 15's parity test should precede consolidation so behavior is pinned.
-
----
-
-## 12. Overall Assessment
-
-## 🟢 (for the pilot's stated scope) — up from 🟡; see 2026-09-04 update below
-
-*(Original 2026-09-01 assessment reproduced below for the record; updated assessment follows.)*
-
-> ~~🟠 Significant Technical Debt — but narrowly concentrated, with a healthy core~~
->
-> The engineering fundamentals are genuinely good: complete frontend↔backend wiring with zero broken links, disciplined SQL parameterization, a sound optimistic-concurrency design, careful DDL safety, correct transaction discipline in the write paths that matter, and a platform layer whose past bugs have been fixed *and stayed fixed*. Several defects this audit expected to find open were confirmed resolved. That is not the profile of a high-risk codebase.
->
-> What earns the orange rating is that the debt sits exactly where the stakes are highest: **a live, internet-reachable production pilot whose authorization is a spoofable header, whose most consequential write surface has no auth at all, whose schema cannot bootstrap a fresh environment, and whose three riskiest behaviors have zero server-side test coverage.** Every one of those has a bounded, well-understood fix — the P0 list is roughly a day of work plus one env-var verification — and the Entra migration already on the books resolves the structural half. Executing items 1–4 of the action plan moves this to 🟡 Needs Attention; landing the P1 list and the four core tests moves it to 🟢 for the pilot's scope.
-
-**Update, 2026-09-02:** Items 1–12 of the action plan have landed except item 1 itself (the env-var check) and the parts of item 8/10/12 explicitly noted as partial above. Concretely: every code-fixable P0 is fixed (task-route auth, schema bootstrap), 10 of 12 P1s are fixed outright, one (P1-8) is fixed at its one fixable call site, and one (P1-7, deliberately) stays open as correctly-scoped future work. The RBAC test — the one most likely to have masked a regression in this exact remediation — is written *and verified passing*.
-
-**Update, 2026-09-02 (later same day):** Item 1 of the action plan is now also done — the Azure env-var check was performed directly in the Portal (CLI access to the Container App is itself blocked by an unrelated RBAC gap, worth resolving separately). `NIMBUS_ALLOWED_ORIGINS` was already set; `NIMBUS_API_KEY` was not and has been added and reverified live. This closes the live-exploitability half of P0-2's browser-based/zero-secret attack paths — what remains open in P0-2 is purely structural (the `X-User` header itself stays spoofable pending Entra), which was always understood as a separate, longer-lead fix, not something this check was expected to close.
-
-What's keeping this from 🟢 now is narrower: the xmin-conflict test and schema-bootstrap smoke script are written correctly but have never actually been run against a real Postgres — "the test exists" and "the test passes" are different claims, and only the DB-free RBAC suite can honestly claim the latter right now. One `NIMBUS_TEST_DB=1` pytest run plus one `psql` script run on a machine with local Postgres is what moves this the rest of the way to 🟢 for the pilot's scope (Entra remains the separate, longer-horizon item that P0-2's structural half depends on, and doesn't gate the 🟢 rating for this pilot's stated scope).
-
-**Update, 2026-09-03 (§0.4):** A fourth pass closed the remaining P2/P3 items this doc had explicitly deferred as "not yet written up" or "still open": the `forEach`/`return` save-abort bug, `GET /master-data/{table}` auth (now unblocked by the fetch-header migration that was the reason it was dropped from §0.2), `bulk_apply` batching, the remaining half of capacity-math triplication, the single-replica doc gap, all 47 routers' `response_model=` typing gap, CommandPalette's i18n gap, and 5 confirmed-dead routes plus 3 dead Gantt branches. This doesn't change the rating computed above — none of it is P0/P1-tier — but it means the P2/P3 backlog this document tracks (§5–§9, §11 items 13–21) is now substantially smaller than when this doc was written. Remaining open items are listed inline against each §11 action-plan line above, not repeated here.
-
-**Update, 2026-09-04 (§0.6):** The two items the previous update named as the last things separating 🟡 from 🟢 are now both done for real: `tests/test_task_concurrency.py`'s 3 tests and `scripts/schema_bootstrap_smoke.py` both ran against real local Postgres and pass. The smoke script's first real run was not a clean pass — it caught a live, previously-undetected P0-3-class bug (`schema.sql`'s `column_metadata` table was referenced by an `INSERT` ~140 lines before its own `CREATE TABLE`, an identical bootstrap-ordering failure to the original `orders.plant` regression, just a different statement pair) — fixed by relocating the `CREATE TABLE` to before its first use; the second run passed clean. Additionally, this pass closed §10 Testing Gaps item 2 (`backend/integration/`'s previously-zero real-data-layer coverage) with `tests/test_ingest_data_layer.py`, 4 new tests against real Postgres, all passing. One unrelated, pre-existing, not-caused-by-this-pass bug was newly discovered by running the full suite with `NIMBUS_TEST_DB=1` for the first time end-to-end: `tests/test_schema_idempotent.py::TestHorizonMigrationIdempotent`'s fixture violates `subnetworks.name`'s `NOT NULL` constraint — tracked as a new, untriaged backlog item, not fixed here (out of scope for this pass). This moves the rating to 🟢 for the pilot's stated scope: every item this document identified as gating that rating is now either fixed-and-verified or is the Entra migration itself, which was always understood as the separate, longer-horizon item that does not gate this rating.
+- `docs/changeover_matrix.md` §14 (explicitly deferred: shared molds, crew constraints, global solver) and lines 512-516 (a covered matrix does not prove tool availability).
+- `docs/MIGRATION.md` deferred items: 797 (line-calendar last-writer-wins), 847 (cross-line rebalancing blocked on eligibility data), 851 (labor capacity never consulted), 878 (setup straddling shift close), 883 (crew on changeover), 892-913 (timezone historical exposure).
+- `docs/superpowers/specs/2026-08-18-optimizer-reason-codes-stability-design.md` and `docs/superpowers/specs/2026-09-10-optimizer-remediation-design.md` (tie-break chain including instability).
+- `docs/SAP_INTEGRATION_ROADMAP.md` (read-only direction; lead-operation work-center mapping) and `docs/SAP_APO_Opportunities.md` (built-but-hidden inventory).
+- `PRODUCT.md` (four constraints, due dates as north star, scale as differentiator) and root `CLAUDE.md` Production Scale Roadmap.
+- `Entra_Auth_Migration.md` (design-only). It gates nothing in this doc for security reasons; it would improve who-did-it attribution for X2 and X5 and is the owner's chosen timing for lifting the schema-redesign freeze.
+- Approved decision 2026-08-18: setup-aware optimizer never freezes a line for missing setup data (basis for treating theme 5 as decided).
