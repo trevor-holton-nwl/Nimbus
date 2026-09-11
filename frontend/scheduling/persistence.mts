@@ -1358,7 +1358,11 @@ export const Persistence = {
         if (atomicOptimizer && (result.status === 'error' || (result.persisted ?? 0) !== taskPayload.length
           || (result.stale || []).length || (result.invalid_ids || []).length || (result.not_found_ids || []).length)) {
           ErrorLog.warn('persistence', 'Optimizer save rejected; all dependent changes remain unsaved', result);
-          Toast.show('Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.', 'warn', 8000);
+          if (result.error_code === 'schedule.conflicts') {
+            Toast.show(Util.t('toast.optimizer_conflicts', { count: (result.conflicts || []).length }), 'warn', 8000);
+          } else {
+            Toast.show('Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.', 'warn', 8000);
+          }
           return;
         }
         // Re-stamp each persisted task with its NEW row_version so the next edit
@@ -1404,6 +1408,17 @@ export const Persistence = {
           ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
           Persistence._refreshTasks(stale);
           Toast.show(Util.t('toast.concurrent_edit_conflict', { count: stale.length }), 'warn', 7000);
+        }
+        // N3: the server scanned the written machines inside the save
+        // transaction. Advisory — rows are persisted; surface the overlaps now
+        // instead of waiting for the next full alert recompute. Emitted as a
+        // Store event because this file must never import insights/services.
+        const conflicts = result.conflicts || [];
+        if (conflicts.length) {
+          const lines = [...new Set(conflicts.map(c => c.machine))];
+          ErrorLog.warn('persistence', `Save produced ${conflicts.length} schedule conflict(s)`, conflicts);
+          Toast.show(Util.t('toast.save_conflicts', { count: conflicts.length }), 'warn', 7000);
+          Store.emit({ type: 'schedule:conflicts', lines, source: 'persistence' });
         }
         const persisted = result.persisted ?? 0;
         const total     = result.updated   ?? 0;

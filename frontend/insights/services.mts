@@ -541,6 +541,11 @@ export function scheduleAlertsForPatches(
 // the same way.
 Store.subscribe(evt => {
   if (evt.type === 'schedule:hydrated') Alerts.scheduleRecompute();
+  // N3: server-reported save conflicts — scoped recompute for just those lines.
+  if (evt.type === 'schedule:conflicts') {
+    const lines = (evt as { lines?: string[] }).lines;
+    if (lines?.length) Alerts.scheduleRecomputeLines(new Set(lines)); else Alerts.scheduleRecompute();
+  }
 }, 'insights-services.hydrated');
 
 /** Phase 2 (Pkg D) clone-base reuse: `Utilization.computeMatrix`'s preview

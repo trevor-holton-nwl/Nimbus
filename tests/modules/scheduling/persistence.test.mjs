@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Config } from '../../../frontend/platform/foundation.mjs';
+import { Config, Toast } from '../../../frontend/platform/foundation.mjs';
 import { UndoStack } from '../../../frontend/platform/store.mjs';
 
 test('Needs Planning survives API hydration, cached moves, normalization and undo with no committed dates', () => {
@@ -107,6 +107,44 @@ test('optimizer minute precision survives Apply and reload without quarter-hour 
   Store.setTasks([reloaded], 'persistence');
   assert.equal(Store.tasks['minute-plan'].start_date.getMinutes(), 17);
   assert.equal(Store.tasks['minute-plan'].end_date.getMinutes(), 17);
+});
+
+test('a save response carrying conflicts toasts a count and emits schedule:conflicts for the machines', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'cf-a', MACHINE: 'L1', RUN_TIME: 2, row_version: 3,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T10:00:00') }], 'unit-test');
+  Persistence._dirtyIds.add('cf-a');
+  const originalFetch = globalThis.fetch;
+  const originalToast = Toast.show;
+  // Util.t() reads bare `window.__NIMBUS_LOCALES` (no locale files are loaded
+  // in this ES-module test realm — see tests/modules/foundation.test.mjs's
+  // identical pattern) — stub just the key this test needs so the toast
+  // message actually interpolates {{count}} instead of falling back to the
+  // literal key.
+  globalThis.window = globalThis.window || {};
+  const originalLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.save_conflicts': '{{count}} conflict(s)' } };
+  const toasts = []; const events = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  const unsub = Store.subscribe(evt => { if (evt.type === 'schedule:conflicts') events.push(evt); }, 'test-conflicts');
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({
+    status: 'ok', updated: 1, persisted: 1, failed: 0, invalid: 0, not_found: 0,
+    invalid_ids: [], not_found_ids: [], stale: [], versions: { 'cf-a': 4 },
+    conflicts: [{ machine: 'L1', order_a: 'cf-a', order_b: 'cf-b', overlap_minutes: 60 }],
+  }) });
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0].lines, ['L1']);
+    assert.ok(toasts.some(t => t.type === 'warn' && /1/.test(t.msg)), 'a warn toast naming the conflict count');
+    assert.equal(Store.tasks['cf-a'].row_version, 4, 'advisory conflicts never block the re-stamp');
+  } finally {
+    globalThis.fetch = originalFetch; Toast.show = originalToast;
+    globalThis.window.__NIMBUS_LOCALES = originalLocales;
+    if (typeof unsub === 'function') unsub();
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  }
 });
 
 globalThis.window = globalThis.window || {};

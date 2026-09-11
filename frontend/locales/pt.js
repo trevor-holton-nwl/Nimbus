@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.saved_to_backend':            'Salvo no servidor',
   'toast.partial_db_save':             '⚠ Apenas {{persisted}}/{{total}} ordens chegaram ao banco de dados — verifique os registros',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} ordem(ns) foram alteradas por outra pessoa — atualizadas para a versão mais recente',
+  'toast.save_conflicts':              '⚠ Salvo, mas {{count}} ordem(ns) agora se sobrepõem a outra ordem na mesma máquina — ver Alertas',
+  'toast.optimizer_conflicts':         'Alterações do otimizador não foram salvas: {{count}} conflito(s) de máquina detectado(s). Execute o otimizador novamente.',
   'toast.backend_zero_orders':         'Servidor retornou zero ordens — verifique o registro do brain.py',
   'toast.backend_unreachable_cache':   '⚠ Servidor inacessível — exibindo dados em cache. Algumas ordens podem estar faltando.',
   'toast.backend_recovered':           'Servidor recuperado — recarregando dados',

@@ -449,7 +449,7 @@ export type StoreEventType =
   | 'firmed:change' | 'calendar:change' | 'blocks:change' | 'plantBlocks:change'
   | 'lineSettings:change' | 'plant:selected' | 'lines:selected' | 'alerts:change' | 'settings:change'
   | 'master-data-changed' | 'undo:pushed' | 'sandbox:entered' | 'sandbox:exited'
-  | 'sandbox:reverted' | 'schedule:hydrated' | 'session:changed'
+  | 'sandbox:reverted' | 'schedule:hydrated' | 'schedule:conflicts' | 'session:changed'
   | 'setup-snapshot:replace' | 'order-field-visibility:changed'
   // NOTE: no 'priority-rank-maps:updated' member. Store.setPriorityRankMaps
   // deliberately does not emit (see its comment in schedule-state.mts), and the

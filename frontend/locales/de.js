@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.saved_to_backend':            'Auf dem Server gespeichert',
   'toast.partial_db_save':             '⚠ Nur {{persisted}}/{{total}} Aufträge in der Datenbank gespeichert — Backend-Protokoll prüfen',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} Auftrag/Aufträge wurden von jemand anderem geändert — auf die neueste Version aktualisiert',
+  'toast.save_conflicts':              '⚠ Gespeichert, aber {{count}} Auftrag/Aufträge überlappen nun einen anderen Auftrag auf derselben Maschine — siehe Warnungen',
+  'toast.optimizer_conflicts':         'Optimierer-Änderungen nicht gespeichert: {{count}} Maschinenkonflikt(e) erkannt. Optimierer erneut ausführen.',
   'toast.backend_zero_orders':         'Server hat null Aufträge zurückgegeben — brain.py-Protokoll prüfen',
   'toast.backend_unreachable_cache':   '⚠ Server nicht erreichbar — Cache-Daten werden angezeigt. Einige Aufträge könnten fehlen.',
   'toast.backend_recovered':           'Server wiederhergestellt — Daten werden neu geladen',

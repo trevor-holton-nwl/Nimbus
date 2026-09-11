@@ -73,6 +73,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.saved_to_backend':            'Saved to backend',
   'toast.partial_db_save':             '⚠ Only {{persisted}}/{{total}} orders reached the DB — check backend logs',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} order(s) were changed by someone else — refreshed to the latest version',
+  'toast.save_conflicts':              '⚠ Saved, but {{count}} order(s) now overlap another order on the same machine — see Alerts',
+  'toast.optimizer_conflicts':         'Optimizer changes were not saved: {{count}} machine conflict(s) detected. Re-run the optimizer.',
   'toast.backend_zero_orders':         'Backend returned zero orders — check brain.py log',
   'toast.backend_unreachable_cache':   '⚠ Backend unreachable — showing cached data. Some orders may be missing.',
   'toast.backend_recovered':           'Backend recovered — reloading data',

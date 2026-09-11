@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.saved_to_backend':            'Enregistré sur le serveur',
   'toast.partial_db_save':             '⚠ Seulement {{persisted}}/{{total}} ordres ont atteint la base de données — vérifiez les journaux',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} ordre(s) ont été modifiés par quelqu’un d’autre — actualisés vers la dernière version',
+  'toast.save_conflicts':              '⚠ Enregistré, mais {{count}} ordre(s) chevauchent maintenant un autre ordre sur la même machine — voir Alertes',
+  'toast.optimizer_conflicts':         'Modifications de l\'optimiseur non enregistrées : {{count}} conflit(s) machine détecté(s). Relancez l\'optimiseur.',
   'toast.backend_zero_orders':         'Le serveur a retourné zéro ordre — vérifiez le journal brain.py',
   'toast.backend_unreachable_cache':   '⚠ Serveur inaccessible — affichage des données en cache. Certains ordres peuvent manquer.',
   'toast.backend_recovered':           'Serveur rétabli — rechargement des données',
