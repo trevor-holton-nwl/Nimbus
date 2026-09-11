@@ -286,6 +286,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-diff-stat.moved  .ni-diff-stat-num { color:var(--warn,#b57a0a); }
 .ni-diff-stat.added  .ni-diff-stat-num { color:var(--ok,#2f7a4d); }
 .ni-diff-stat.removed .ni-diff-stat-num { color:var(--err,#b1362a); }
+.ni-diff-kind { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em;
+  padding:1px 5px; border-radius:3px; background:var(--bg-subtle); color:var(--fg-mute); margin-right:4px; }
+.ni-diff-kind.finish, .ni-diff-kind.split { background:color-mix(in srgb,var(--warn,#b57a0a) 16%,transparent); color:var(--warn,#b57a0a); }
+.ni-diff-finish { font-size:11px; color:var(--fg-mute); margin-left:6px; }
 /* results area */
 .ni-diff-results { max-height:400px; overflow-y:auto; margin-top:12px;
   scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
@@ -2213,14 +2217,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           : `<span class="ni-diff-line-chip">${esc(m.lineTo)}</span>`;
         const wasStr = Diff._fmtShort(m.oldStart);
         const nowStr = Diff._fmtShort(m.newStart);
+        const kinds = (m.kinds || []).map(k => `<span class="ni-diff-kind ${k}">${esc(t('ui.diff_kind_' + k))}</span>`).join('');
+        const shift = m.startDelta
+          ? `<span class="ni-diff-shift ${dir}">${arrow} ${esc(Diff._fmtDelta(m.delta))}</span>` : '';
+        const finish = (m.kinds || []).includes('finish') && m.endDelta
+          ? `<span class="ni-diff-finish">${esc(t('ui.diff_finish_delta', { delta: Diff._fmtDelta(m.endDelta) }))}</span>` : '';
         return `<div class="ni-diff-row ni-diff-row-moved">
           <div class="ni-diff-row-top">
             <span class="ni-diff-po">${esc(m.PRODUCTION_ORDER)}</span>
             <span class="ni-diff-desc">${esc(m.text)}</span>
-            <span class="ni-diff-shift ${dir}">${arrow} ${esc(Diff._fmtDelta(m.delta))}</span>
+            ${shift}${finish}
           </div>
           <div class="ni-diff-row-bottom">
-            ${linePart}
+            ${kinds}${linePart}
             <span class="ni-diff-dates">Was: ${esc(wasStr)} → Now: ${esc(nowStr)}</span>
           </div>
         </div>`;
