@@ -2528,15 +2528,10 @@ function candidateForSequence(
       // summarizeCandidate's rejected-token regex; this code and message
       // deliberately avoid unavailable|unknown|uncovered|infeasible|missing|
       // disabled|fail so the preview stamps the order accepted.
-      // The per-line preamble sites (evaluateSptWithSetup and evaluateDueDateFirst)
-      // now use admittedStateUnrecordedReason when a task is attached.
+      // All three admission sites (candidateForSequence + preambles) use the
+      // shared helper to ensure wording consistency.
       if (!suppressExplanations) {
-        explanation.push({
-          code: 'admitted-state-unrecorded',
-          message: `Admitted ${taskId(task)} as the line's first order; the line's current setup state is not recorded, so zero setup minutes were charged.`,
-          line,
-          taskId: taskId(task),
-        });
+        explanation.push(admittedStateUnrecordedReason(line, task));
       }
       setupRequirement = { kind: 'resolved', minutes: 0 };
     } else {
