@@ -288,6 +288,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.edit_note':                     'Edit note',
   'tip.add_note':                      'Add note',
   'tip.click_view_alerts':             'Click to view alerts',
+  'tip.tile_needs_planning':           'Open Orders table filtered to orders awaiting a legal schedule',
   'tip.user_settings':                 'User settings',
   'tip.lang_switcher':                 'Language / Idioma',
 
@@ -1343,6 +1344,8 @@ window.__NIMBUS_LOCALES.en = {
   'kpi.no_data':                       'no data',
   'kpi.firmed_orders':                 'Firmed orders',
   'kpi.locked_from_optimiser':         'locked from optimiser',
+  'kpi.needs_planning':                'Needs Planning',
+  'kpi.needs_planning_demand':         '{{h}} h unplaced demand',
   // Empty states & loading
   'ui.select_plant_hours':             'Select a plant in the top bar to manage its hours.',
   'ui.select_plant_labor':             'Select a plant in the top bar to view labor planning.',

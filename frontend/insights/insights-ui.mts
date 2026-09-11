@@ -43,7 +43,7 @@ const VL_LS_ROW_H = 36;
 type DashboardUtilMatrix = ReturnType<typeof Utilization.computeMatrix>;
 
 /** _renderKPIs' `tiles` array — one action-oriented KPI strip tile. */
-type DashboardTileAction = 'orders-today' | 'alerts-today' | 'late' | 'headroom';
+type DashboardTileAction = 'orders-today' | 'alerts-today' | 'late' | 'headroom' | 'needs-planning';
 interface DashboardKpiTile {
   k: string;
   v: string;
@@ -409,8 +409,7 @@ export const Dashboard = {
     // (alert-summary-count, the firmed-orders list) so nothing is lost, just decluttered.
     const tiles: DashboardKpiTile[] = [
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
-        d: Util.t('kpi.orders_total', { n: tasks.length })
-          + (queued.length ? ` · ${queued.length} Needs Planning (${queuedHours.toFixed(1)} h demand)` : ''),
+        d: Util.t('kpi.orders_total', { n: tasks.length }),
         action: 'orders-today' },
       { k: Util.t('kpi.conflicts_pending'),         v: String(conflictsToday),
         d: conflictsToday === 0 ? Util.t('kpi.none_blocking') : Util.t('kpi.blocking_fix_now'),
@@ -426,6 +425,14 @@ export const Dashboard = {
         d: pctN > 0 ? Util.t('kpi.avg_used', { p: Math.round(avgUtil * 100) }) : Util.t('kpi.no_data'),
         cls: headroomSev === 'err' ? 'err' : headroomSev === 'warn' ? 'warn' : '',
         action: 'headroom' },
+      // Fifth tile only while the queue is non-empty: the row stays at four calm
+      // tiles in steady state and gains a red action tile exactly when a
+      // scheduler has unplaced demand to deal with.
+      ...(queued.length ? [{
+        k: Util.t('kpi.needs_planning'), v: String(queued.length),
+        d: Util.t('kpi.needs_planning_demand', { h: queuedHours.toFixed(1) }),
+        cls: 'err', action: 'needs-planning' as DashboardTileAction,
+      }] : []),
     ];
 
     Dashboard._lastSituation = { todayCount: todayOrders.length, attention: conflictsToday + lateCount };
@@ -481,6 +488,7 @@ export const Dashboard = {
       case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
       case 'alerts-today': return 'Open Orders table filtered to conflicting orders due today';
       case 'headroom':     return 'Jump to utilization heatmap';
+      case 'needs-planning': return Util.t('tip.tile_needs_planning');
       default: return '';
     }
   },
@@ -520,6 +528,15 @@ export const Dashboard = {
       case 'headroom': {
         const hm = document.getElementById('util-heatmap-panel');
         if (hm) hm.closest('.panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        break;
+      }
+      case 'needs-planning': {
+        NIMBUS!.App!.goto!('table');
+        setTimeout(() => {
+          if (NIMBUS!.Table && NIMBUS!.Table!._applyChipFilter) {
+            NIMBUS!.Table!._applyChipFilter!({ status: 'needs_planning' });
+          }
+        }, 120);
         break;
       }
     }

@@ -283,6 +283,7 @@ window.__NIMBUS_LOCALES.fr = {
   'tip.edit_note':                     'Modifier la note',
   'tip.add_note':                      'Ajouter une note',
   'tip.click_view_alerts':             'Cliquez pour voir les alertes',
+  'tip.tile_needs_planning':           'Ouvrir la table des ordres filtrée sur les ordres à planifier',
   'tip.user_settings':                 'Paramètres utilisateur',
   'tip.lang_switcher':                 'Langue / Language',
 
@@ -1343,6 +1344,8 @@ window.__NIMBUS_LOCALES.fr = {
   'kpi.no_data':                       'no data',                                   // MISSING TRANSLATION
   'kpi.firmed_orders':                 'Firmed orders',                             // MISSING TRANSLATION
   'kpi.locked_from_optimiser':         'locked from optimiser',                     // MISSING TRANSLATION
+  'kpi.needs_planning':                'À planifier',
+  'kpi.needs_planning_demand':         '{{h}} h de demande non placée',
   // Empty states & loading
   'ui.select_plant_hours':             'Select a plant in the top bar to manage its hours.',  // MISSING TRANSLATION
   'ui.select_plant_labor':             'Select a plant in the top bar to view labor planning.',  // MISSING TRANSLATION
