@@ -2528,6 +2528,8 @@ function candidateForSequence(
       // summarizeCandidate's rejected-token regex; this code and message
       // deliberately avoid unavailable|unknown|uncovered|infeasible|missing|
       // disabled|fail so the preview stamps the order accepted.
+      // The per-line preamble sites (evaluateSptWithSetup and evaluateDueDateFirst)
+      // now use admittedStateUnrecordedReason when a task is attached.
       if (!suppressExplanations) {
         explanation.push({
           code: 'admitted-state-unrecorded',
@@ -3542,6 +3544,15 @@ function unknownInitialStateReason(line: string, task: Readonly<NimbusTask> | nu
       : 'No usable current setup state or scheduled first order is available for this line.',
     line,
     ...(id ? { taskId: id } : {}),
+  };
+}
+
+function admittedStateUnrecordedReason(line: string, task: Readonly<NimbusTask>): CandidateReason {
+  return {
+    code: 'admitted-state-unrecorded',
+    message: `Admitted ${taskId(task)} as the line's first order; the line's current setup state is not recorded, so zero setup minutes were charged.`,
+    line,
+    taskId: taskId(task),
   };
 }
 
@@ -5274,16 +5285,20 @@ export function evaluateSptWithSetup(
           ? unknownInitialStateEdge(line, initialScheduled?.task)
           : { line, predecessorOrderId: null, reason: initial.reason },
       );
-      initialDiagnosticReasons.push({
-        code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
-        message: initial.reason === 'signature-incompatible'
-          ? 'The line state uses a different setup-signature version.'
-          : unknownInitialStateReason(line, initialScheduled?.task).message,
-        line,
-        ...(initial.reason === 'initial-state-unknown' && initialScheduled?.task
-          ? { taskId: taskId(initialScheduled.task) }
-          : {}),
-      });
+      if (initial.reason === 'signature-incompatible') {
+        initialDiagnosticReasons.push({
+          code: 'setup-signature-incompatible',
+          message: 'The line state uses a different setup-signature version.',
+          line,
+        });
+      } else if (initialScheduled?.task) {
+        // N6: when a task is attached and incoming state is unrecorded,
+        // emit the admitted code. The shared helper ensures consistent wording
+        // across all three emission sites.
+        initialDiagnosticReasons.push(admittedStateUnrecordedReason(line, initialScheduled.task));
+      } else {
+        initialDiagnosticReasons.push(unknownInitialStateReason(line, null));
+      }
     }
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
     const result = evaluateLineWithFirmedBoundaries(
@@ -5457,16 +5472,20 @@ export function evaluateDueDateFirst(
           ? unknownInitialStateEdge(line, initialScheduled?.task)
           : { line, predecessorOrderId: null, reason: initial.reason },
       );
-      initialDiagnosticReasons.push({
-        code: initial.reason === 'signature-incompatible' ? 'setup-signature-incompatible' : 'initial-state-unknown',
-        message: initial.reason === 'signature-incompatible'
-          ? 'The line state uses a different setup-signature version.'
-          : unknownInitialStateReason(line, initialScheduled?.task).message,
-        line,
-        ...(initial.reason === 'initial-state-unknown' && initialScheduled?.task
-          ? { taskId: taskId(initialScheduled.task) }
-          : {}),
-      });
+      if (initial.reason === 'signature-incompatible') {
+        initialDiagnosticReasons.push({
+          code: 'setup-signature-incompatible',
+          message: 'The line state uses a different setup-signature version.',
+          line,
+        });
+      } else if (initialScheduled?.task) {
+        // N6: when a task is attached and incoming state is unrecorded,
+        // emit the admitted code. The shared helper ensures consistent wording
+        // across all three emission sites.
+        initialDiagnosticReasons.push(admittedStateUnrecordedReason(line, initialScheduled.task));
+      } else {
+        initialDiagnosticReasons.push(unknownInitialStateReason(line, null));
+      }
     }
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
 

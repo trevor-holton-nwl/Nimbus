@@ -2663,7 +2663,7 @@ test('fixed-boundary failure retains preserved-anchor and stale-override diagnos
       && edge.reason === 'override-inactive'
     )), `${label} keeps the stale override diagnostic`);
     assert.ok(result.explanation.some(reason => (
-      reason.code === 'initial-state-unknown' && reason.taskId === 'early-exit-anchor-blue'
+      reason.code === 'admitted-state-unrecorded' && reason.taskId === 'early-exit-anchor-blue'
     )), `${label} keeps the preserved-anchor explanation`);
     assert.ok(result.explanation.some(reason => reason.code === 'override-inactive'),
       `${label} keeps the stale override explanation`);
@@ -4725,15 +4725,22 @@ test('Due Date finds September capacity for the three queued orders on machine 7
 test('admission diagnostics distinguish an unrecorded line state from an uncovered matrix row', () => {
   const rejected = /(?:unavailable|unknown|uncovered|infeasible|missing|disabled|fail)/i; // optimize-ui.mts summarizeCandidate
   // Case 1: line state unrecorded (current: null) — first order admitted at zero.
+  // The order-level 'admitted-state-unrecorded' comes from candidateForSequence.
   const stateless = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([scheduledTask('n6-first', 1, 'RED', '2026-08-03T10:00')]),
     dueDateBounds(setupTruth({ current: null, rows: [setupRow('GREEN', 'RED', 5)] })),
   );
   const stateReason = stateless.explanation.find(r => r.code === 'admitted-state-unrecorded' && r.taskId === 'n6-first');
-  assert.ok(stateReason, 'unknown incoming state gets its own admitted code');
+  assert.ok(stateReason, 'unknown incoming state gets its own admitted code from candidateForSequence');
   assert.equal(rejected.test(`${stateReason.code} ${stateReason.message}`), false, 'must not be stamped rejected in the preview');
-  assert.equal(stateless.explanation.some(r => r.code === 'initial-state-unknown' && r.taskId === 'n6-first'), false);
+  assert.equal(stateless.explanation.some(r => r.code === 'initial-state-unknown' && r.taskId === 'n6-first'), false, 'no task-specific initial-state-unknown');
   assert.ok(stateless.missingEdges.some(e => e.reason === 'initial-state-unknown'), 'edge reason is unchanged');
+  // Verify all explanations for this task avoid the rejected regex
+  const taskExplanations = stateless.explanation.filter(r => r.taskId === 'n6-first');
+  assert.ok(taskExplanations.length > 0);
+  taskExplanations.forEach(r => {
+    assert.equal(rejected.test(`${r.code} ${r.message}`), false, `"${r.code}" must not trigger rejected regex`);
+  });
   // Case 2: both states known, no row — existing code still fires.
   const uncovered = SetupScheduler.evaluateDueDateFirst(
     setupSnapshot([scheduledTask('n6-red', 1, 'RED', '2026-08-03T10:00')]),
@@ -4743,4 +4750,16 @@ test('admission diagnostics distinguish an unrecorded line state from an uncover
   assert.ok(rowReason);
   assert.equal(rejected.test(`${rowReason.code} ${rowReason.message}`), false);
   assert.ok(uncovered.missingEdges.some(e => e.reason === 'scheduled-without-setup' && e.successorOrderId === 'n6-red'));
+  // Case 3: per-line preamble (SPT) emits admitted-state-unrecorded for first-order admission.
+  const sptPreamble = SetupScheduler.evaluateSptWithSetup(
+    setupSnapshot([scheduledTask('n6-spt', 1, 'RED', '2026-08-03T10:00')]),
+    dueDateBounds(setupTruth({ current: null, rows: [setupRow('GREEN', 'RED', 5)] })),
+  );
+  const sptExplanations = sptPreamble.explanation.filter(r => r.taskId === 'n6-spt');
+  assert.ok(sptExplanations.length > 0, 'SPT includes explanation for first task');
+  const sptStateReason = sptExplanations.find(r => r.code === 'admitted-state-unrecorded');
+  assert.ok(sptStateReason, 'SPT emits admitted-state-unrecorded from candidateForSequence');
+  sptExplanations.forEach(r => {
+    assert.equal(rejected.test(`${r.code} ${r.message}`), false, `"${r.code}" must not trigger rejected regex`);
+  });
 });
