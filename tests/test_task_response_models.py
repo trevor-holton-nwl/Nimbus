@@ -306,3 +306,53 @@ def test_tasks_endpoint_response_validates_live(client):
     if body["data"]:
         row = body["data"][0]
         assert "id" in row and "start_date" in row and "row_version" in row
+
+
+from backend.scheduling import routes as scheduling_routes
+
+
+def test_bulk_update_alias_strips_a_caller_supplied_force_flag(monkeypatch):
+    """N2: the flat-list alias is the one route where an external caller could
+    send force:true and overwrite another planner's edit. It must reach the db
+    layer as force=False regardless of the payload."""
+    captured = {}
+
+    def fake_update(items, allowed_plants=None):
+        captured["items"] = items
+        return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
+                "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+                "stale": [], "versions": {"abc123": 43}}
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    result = scheduling_routes.bulk_update(
+        [brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                              end_date="2026-08-01T15:00:00", base_version=42, force=True)],
+        allowed_plants=None,
+    )
+
+    assert result["persisted"] == 1
+    assert captured["items"][0]["force"] is False
+
+
+def test_apply_task_date_updates_logs_a_forced_non_atomic_write(monkeypatch):
+    """Every force=True write NOT under atomic_optimizer leaves an auditable
+    warn line in the _BACKEND_LOG ring buffer."""
+    events = []
+    monkeypatch.setattr(scheduling_routes, "_log_event",
+                        lambda level, category, msg, **ctx: events.append((level, category, msg, ctx)))
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk",
+                        lambda items, allowed_plants=None: {
+                            "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
+                            "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+                            "stale": [], "versions": {"abc123": 43}})
+
+    scheduling_routes._apply_task_date_updates([
+        brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                             end_date="2026-08-01T15:00:00", base_version=42, force=True),
+    ])
+
+    forced = [e for e in events if e[3].get("event") == "forced_write"]
+    assert len(forced) == 1
+    assert forced[0][0] == "warn"
+    assert forced[0][3]["count"] == 1
+    assert forced[0][3]["ids"] == ["abc123"]

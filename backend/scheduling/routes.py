@@ -282,7 +282,9 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     Inverted ranges are validated against each row's effective current dates and
     counted as `invalid`; unknown ids are counted as `not_found`. Edits whose
     `base_version` no longer matches the row (a concurrent write landed first) are
-    rejected and reported in `stale` unless `force` is set.
+    rejected and reported in `stale` unless `force` is set — which only the
+    /tasks/update path can do (client CONCURRENCY_CHECK=false, non-atomic), and
+    which is logged as a warn `forced_write` event. /tasks/bulk_update strips it.
 
     `allowed_plants` (None for an unrestricted/admin caller) is threaded through
     to db.update_task_dates_bulk, which treats an out-of-scope row identically
@@ -362,6 +364,13 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
         if has_segments:
             item["schedule_segments"] = segments
         norm.append(item)
+
+    forced_ids = [it["id"] for it in norm if it.get("force")]
+    if forced_ids and not atomic_optimizer:
+        # Auditable trail for every last-write-wins write (the client's
+        # Config.CONCURRENCY_CHECK=false path). rid is attached by _log_event.
+        _log_event("warn", "db", "Forced task write bypasses the base_version check",
+                   event="forced_write", count=len(forced_ids), ids=forced_ids[:20])
 
     if atomic_optimizer and invalid:
         return {"applied": 0, "persisted": 0, "failed": len(items), "invalid": invalid,
@@ -490,11 +499,16 @@ def bulk_update(tasks: list[TaskDateUpdate],
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-    Payload: [{ id, start_date?, end_date?, base_version?, force? }]
+    Payload: [{ id, start_date?, end_date?, base_version? }]
     Response: { status, updated, persisted, failed, invalid, not_found,
                 invalid_ids, not_found_ids, stale, versions }
+
+    `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
+    external caller may not bypass the base_version check. A stale row is
+    reported in `stale`, never overwritten.
     """
-    res = _apply_task_date_updates(tasks, allowed_plants=allowed_plants)
+    stripped = [it.model_copy(update={"force": False}) if it.force else it for it in tasks]
+    res = _apply_task_date_updates(stripped, allowed_plants=allowed_plants)
     total = len(tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:

@@ -34,7 +34,7 @@ Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `sele
 ## Key invariants & hazards
 
 - **`orders.xmin` is `base_version`.** Any `UPDATE orders` — even on a column no UI reads yet — bumps xmin for every row touched, so those ids come back in the next save's `stale` list and the frontend discards its unsaved edit via last-writer-loses reconciliation (`POST /tasks/refresh`). Before adding any new `UPDATE orders` statement anywhere in the codebase, ask what it does to in-flight planner edits.
-- **A version conflict is never a 4xx.** Under `SELECT … FOR UPDATE`, a `base_version` mismatch reports the id in a `stale` list inside a 200 response (see `TaskUpdateResult`/`BulkUpdateResult`), never an HTTP error. `force=True` (set by the optimizer's authoritative bulk reschedules, or when `Config.CONCURRENCY_CHECK` is false client-side) bypasses the check entirely.
+- **A version conflict is never a 4xx.** Under `SELECT … FOR UPDATE`, a `base_version` mismatch reports the id in a `stale` list inside a 200 response (see `TaskUpdateResult`/`BulkUpdateResult`), never an HTTP error. `force=True` bypasses the check only on `/tasks/update` in non-atomic mode (the client sends it when `Config.CONCURRENCY_CHECK` is false) and is logged as a warn `forced_write` event. The optimizer never uses `force` — it uses `atomic_optimizer`, under which `force` is ignored. `/tasks/bulk_update` strips `force` from every item.
 - **Split-order segments:** `order_schedule_segments` (`(order_id, segment_no)`) is a durable multi-segment schedule aggregate handled by `_schedule_segments_to_wire`/`TaskDateUpdate.schedule_segments`. **Parent `orders.xmin` is the sole concurrency token** — segment rows are never independently exposed or updated by this API. Gated per plant by `plants.split_order_policy` (`never` | `overlong_only` | `partial_allowed`); an absent/malformed value keeps the continuous-order scheduler unchanged.
 - **`orders.runtime_schedule_mismatch`** flags an ingest-side `RUN_TIME` change that would otherwise make prior NIMBUS timing look valid; surfaced on `TaskDTO`/`TaskVersionRow` as `runtime_schedule_mismatch`.
 - **An explicit aggregate replacement is required, not implied.** `_apply_task_date_updates` treats a JSON `null` for `schedule_segments` as invalid (increments `invalid`, does not silently erase durable productive pieces) — a client must send `[]` explicitly to clear segments.
@@ -56,7 +56,7 @@ Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `sele
 
 - `tests/test_to_pydt.py` — pure-logic tests for `_to_pydt`'s naive-local timezone contract (no DB required).
 - `tests/test_task_response_models.py` — `TaskDTO` field-set regression guard (no live DB; builds a synthetic dict).
-- No test file imports `backend.scheduling.*` directly by name today (grep-verified) — coverage goes through `brain` (back-compat re-exports) or a live `TestClient` hitting the registered routes.
+- `tests/test_planning_exceptions.py` and `tests/test_task_response_models.py` import `backend.scheduling.models`/`backend.scheduling.routes` directly; older files go through `brain` (back-compat re-exports) or a live `TestClient`.
 
 Run: `python -m pytest tests/test_to_pydt.py tests/test_task_response_models.py -q`
 

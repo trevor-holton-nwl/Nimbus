@@ -183,8 +183,11 @@ class TaskDateUpdate(BaseModel):
 
     Optimistic concurrency: `base_version` is the xmin the client last saw for this
     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
-    unless `force` is set. `force=True` is used for authoritative bulk reschedules
-    (the optimizer), which intentionally overwrite regardless of concurrent edits.
+    unless `force` is set. The optimizer does NOT use `force` — it sends
+    `atomic_optimizer: true` on /tasks/update, under which `force` is ignored and any
+    stale row rolls back the whole batch. `force` is honored only by /tasks/update in
+    non-atomic mode (the client's Config.CONCURRENCY_CHECK=false escape hatch) and is
+    stripped by /tasks/bulk_update.
     """
     id: str
     start_date: str | None = None
