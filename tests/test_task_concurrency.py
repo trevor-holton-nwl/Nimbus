@@ -36,6 +36,9 @@ class TestUpdateTaskDatesBulkXminConflict:
         self.oid = db_.make_id(self.ORDER, self.MATERIAL)
         self.start = now + dt.timedelta(days=1)
         self.end = self.start + dt.timedelta(hours=4)
+        self.oid2 = db_.make_id(self.ORDER + "_B", self.MATERIAL)
+        self.start2 = self.start + dt.timedelta(hours=6)
+        self.end2 = self.start + dt.timedelta(hours=10)
 
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM orders WHERE id = %s", (self.oid,))
@@ -44,10 +47,17 @@ class TestUpdateTaskDatesBulkXminConflict:
                 "basic_start_date, basic_finish_date) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                 (self.oid, self.ORDER, self.MATERIAL, self.MACHINE, self.PLANT, self.start, self.end),
             )
+            cur.execute("DELETE FROM orders WHERE id = %s", (self.oid2,))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (self.oid2, self.ORDER + "_B", self.MATERIAL, self.MACHINE, self.PLANT, self.start2, self.end2),
+            )
             conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM orders WHERE id = %s", (self.oid,))
+            cur.execute("DELETE FROM orders WHERE id = %s", (self.oid2,))
             conn.commit()
 
     def _current_version(self, db_):
@@ -137,3 +147,24 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert result["persisted"] == 0
         assert result["not_found_ids"] == [self.oid]
         assert result["stale"] == []
+
+    def test_saving_into_an_occupied_slot_reports_the_conflict_and_strict_atomic_rolls_back(self, pg):
+        db_ = pg
+        base = self._current_version(db_)
+        new_start = self.start + dt.timedelta(hours=7)   # inside oid2's 6h-10h window
+        new_end = new_start + dt.timedelta(hours=2)
+
+        advisory = db_.update_task_dates_bulk([
+            {"id": self.oid, "start": new_start, "end": new_end, "base_version": base},
+        ])
+        assert advisory["persisted"] == 1
+        assert [(c["order_a"], c["order_b"]) for c in advisory["conflicts"]] == [tuple(sorted((self.oid, self.oid2)))]
+        assert advisory["conflicts"][0]["overlap_minutes"] == 120
+
+        base = self._current_version(db_)
+        strict = db_.update_task_dates_bulk([
+            {"id": self.oid, "start": new_start + dt.timedelta(minutes=30), "end": new_end + dt.timedelta(minutes=30),
+             "base_version": base},
+        ], atomic_optimizer=True, strict_conflicts=True)
+        assert strict["status"] == "error" and strict["error_code"] == "schedule.conflicts"
+        assert db_.get_task_versions([self.oid])[0]["start_date"] == new_start.strftime("%Y-%m-%dT%H:%M:%S")

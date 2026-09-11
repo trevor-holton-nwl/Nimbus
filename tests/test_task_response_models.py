@@ -79,7 +79,7 @@ def test_bulk_update_result_round_trips_db_shape():
     sample = {
         "status": "ok", "updated": 3, "persisted": 3, "failed": 0, "invalid": 0,
         "not_found": 0, "invalid_ids": [], "not_found_ids": [], "stale": [],
-        "versions": {"abc123": 43}, "error_code": None, "cause": None,
+        "versions": {"abc123": 43}, "conflicts": [], "error_code": None, "cause": None,
     }
     out = brain.BulkUpdateResult(**sample).model_dump()
     assert out == sample
@@ -254,7 +254,7 @@ def test_update_task_dates_bulk_rejects_sub_default_segment_for_a_plant_with_no_
     """B3 review fix (2026-08-21): existing behavior preserved — a plant that
     never configured plants.min_productive_segment_minutes still enforces the
     hardcoded 30-minute floor, so the 20-minute second piece is rejected."""
-    eff_rows = [("seg-default", None, None, 1.0, 100, 0, "PLANT-A")]
+    eff_rows = [("seg-default", None, None, 1.0, 100, 0, "PLANT-A", "L1")]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])  # PLANT-A has no plants-table override
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
@@ -274,7 +274,7 @@ def test_update_task_dates_bulk_honors_a_plant_configured_productive_segment_flo
     30-minute default (proven above) rejects, proving the threading from
     plants.min_productive_segment_minutes through to
     _validate_schedule_segments actually reaches this code path."""
-    eff_rows = [("seg-override", None, None, 1.0, 100, 0, "PLANT-B")]
+    eff_rows = [("seg-override", None, None, 1.0, 100, 0, "PLANT-B", "L1")]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[("PLANT-B", 15)])
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
@@ -283,6 +283,58 @@ def test_update_task_dates_bulk_honors_a_plant_configured_productive_segment_flo
     assert result["invalid_ids"] == []
     assert result["persisted"] == 1
     assert result["versions"] == {"seg-override": 999}
+
+
+class _FakeConflictCursor(_FakeSegmentCursor):
+    """Adds the N3 conflict-scan SELECT (dispatched on 'o.machine = ANY(%s)')."""
+
+    def __init__(self, eff_rows, plant_rows, conflict_rows):
+        super().__init__(eff_rows, plant_rows)
+        self.conflict_rows = conflict_rows
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "o.machine = ANY(%s)" in sql:
+            self.executed.append((sql, params))
+            self._pending = ("all", list(self.conflict_rows))   # same tuple shape _FakeSegmentCursor uses (:187-199)
+            return
+        super().execute(statement, params)
+
+
+def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(monkeypatch):
+    t = lambda h: datetime(2026, 8, 17, h, 0)
+    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    conflict_rows = [("L1", "mv-a", [], t(8), t(10)), ("L1", "mv-b", [], t(9), t(11))]
+    cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+
+    result = brain.db.update_task_dates_bulk([{"id": "mv-a", "start": t(8), "end": t(10)}])
+
+    assert result["persisted"] == 1
+    assert result["conflicts"] == [{"machine": "L1", "order_a": "mv-a", "order_b": "mv-b", "overlap_minutes": 60}]
+    scan = next(p for s, p in cursor.executed if "o.machine = ANY(%s)" in s)
+    assert scan[0] == ["L1"]
+
+
+def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_optimizer(monkeypatch):
+    t = lambda h: datetime(2026, 8, 17, h, 0)
+    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    conflict_rows = [("L1", "mv-a", [], t(8), t(10)), ("L1", "mv-b", [], t(9), t(11))]
+    item = {"id": "mv-a", "start": t(8), "end": t(10), "base_version": 100}
+
+    cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    strict = brain.db.update_task_dates_bulk([item], atomic_optimizer=True, strict_conflicts=True)
+    assert strict["status"] == "error"
+    assert strict["error_code"] == "schedule.conflicts"
+    assert strict["persisted"] == 0 and strict["versions"] == {}
+    assert len(strict["conflicts"]) == 1
+
+    cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    manual = brain.db.update_task_dates_bulk([item], strict_conflicts=True)  # no atomic flag → advisory
+    assert manual["persisted"] == 1
+    assert len(manual["conflicts"]) == 1
 
 
 def test_openapi_schema_includes_new_components():
@@ -332,6 +384,32 @@ def test_bulk_update_alias_strips_a_caller_supplied_force_flag(monkeypatch):
 
     assert result["persisted"] == 1
     assert captured["items"][0]["force"] is False
+
+
+def test_detect_interval_conflicts_reports_strict_overlaps_only():
+    """N3: same-instant touching is not a conflict (SAP midnight snaps are
+    intentional), segments of one order never conflict with each other, pairs
+    on different machines never conflict, and only pairs involving a touched
+    order are reported."""
+    t = lambda h, m=0: datetime(2026, 8, 17, h, m)
+    intervals = [
+        ("L1", "a", t(8), t(10)),
+        ("L1", "b", t(9), t(11)),          # overlaps a by 60 min
+        ("L1", "c", t(11), t(12)),         # touches b, no conflict
+        ("L1", "d", t(8, 30), t(9)),       # segment 1 of d
+        ("L1", "d", t(9, 30), t(9, 45)),   # segment 2 of d
+        ("L2", "e", t(8), t(10)),          # other machine
+        ("L1", "f", t(13), t(14)), ("L1", "g", t(13, 30), t(14)),  # untouched pair
+    ]
+    out = brain.db._detect_interval_conflicts(intervals, touched={"a", "d"})
+    keyed = {(c["order_a"], c["order_b"]): c for c in out}
+    assert ("a", "b") in keyed and keyed[("a", "b")]["overlap_minutes"] == 60
+    assert keyed[("a", "b")]["machine"] == "L1"
+    assert ("a", "d") in keyed and keyed[("a", "d")]["overlap_minutes"] == 45  # 30 + 15
+    assert ("b", "d") in keyed
+    assert ("b", "c") not in keyed
+    assert ("f", "g") not in keyed
+    assert all("e" not in k for k in keyed)
 
 
 def test_apply_task_date_updates_logs_a_forced_non_atomic_write(monkeypatch):

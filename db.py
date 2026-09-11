@@ -885,8 +885,82 @@ def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
     return {"status": "ok", "updated": updated}
 
 
+def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> list[dict]:
+    """Pairwise strict overlaps (`start < other_end`, never `<=`) between orders on
+    the same machine. `intervals` are (machine, order_id, start, end); an order with
+    child segments contributes one tuple per segment. Same-order pairs are skipped;
+    overlap minutes are summed per (machine, pair). Only pairs where at least one
+    order is in `touched` (ids this save wrote) are reported, so pre-existing
+    overlaps between untouched orders don't show up as consequences of this save.
+    """
+    by_machine: dict[str, list[tuple]] = {}
+    for machine, oid, start, end in intervals:
+        if not machine or start is None or end is None or end <= start:
+            continue
+        by_machine.setdefault(machine, []).append((start, end, oid))
+    totals: dict[tuple, float] = {}
+    for machine, rows in by_machine.items():
+        rows.sort(key=lambda r: (r[0], r[1], r[2]))
+        active: list[tuple] = []          # (end, oid) still open at the current start
+        for start, end, oid in rows:
+            active = [(e, o) for e, o in active if e > start]
+            for e, o in active:
+                if o == oid:
+                    continue
+                overlap = (min(e, end) - start).total_seconds() / 60.0
+                if overlap <= 0:
+                    continue
+                a, b = sorted((o, oid))
+                if a not in touched and b not in touched:
+                    continue
+                totals[(machine, a, b)] = totals.get((machine, a, b), 0.0) + overlap
+            active.append((end, oid))
+    return [{"machine": m, "order_a": a, "order_b": b, "overlap_minutes": round(v, 1)}
+            for (m, a, b), v in sorted(totals.items())]
+
+
+def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[dict]:
+    """Runs inside the still-open save transaction so the scan sees this batch's
+    own UPDATEs. Window bounds come from the rows that actually moved."""
+    moved = [r for r in update_rows if r["moved"] and not r["queued"] and r["machine"]]
+    if not moved:
+        return []
+    machines = sorted({r["machine"] for r in moved})
+    starts = [s for s in (r["start"] or eff[r["id"]]["start"] for r in moved) if s is not None]
+    ends = [e for e in (r["end"] or eff[r["id"]]["end"] for r in moved) if e is not None]
+    if not starts or not ends:
+        return []
+    lo = min(starts) - timedelta(days=1)
+    hi = max(ends) + timedelta(days=1)
+    cur.execute(
+        f"""
+        SELECT o.machine, o.id,
+               COALESCE(seg.schedule_segments, '[]'::jsonb) AS segments,
+               COALESCE(o.scheduled_start, o.basic_start_date) AS eff_start,
+               {_EFF_END_SQL} AS eff_end
+        FROM orders o
+        {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+        WHERE o.machine = ANY(%s)
+          AND o.planning_status <> 'needs_planning'
+          AND COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
+        """,
+        (machines, lo, hi),
+    )
+    intervals: list[tuple] = []
+    for machine, oid, segments, eff_start, eff_end in cur.fetchall():
+        if segments:
+            for seg in segments:
+                intervals.append((machine, oid,
+                                  datetime.fromisoformat(str(seg["start_date"])),
+                                  datetime.fromisoformat(str(seg["end_date"]))))
+        else:
+            intervals.append((machine, oid, eff_start, eff_end))
+    return _detect_interval_conflicts(intervals, touched={r["id"] for r in moved})
+
+
 def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None,
-                           *, atomic_optimizer: bool = False) -> dict:
+                           *, atomic_optimizer: bool = False,
+                           strict_conflicts: bool = False) -> dict:
     """
     Persist parent schedule aggregates and allowlisted order attributes in one
     transaction.  A schedule_segments field is an all-or-nothing replacement
@@ -910,6 +984,15 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     their NEW xmin in `versions` so the client can re-stamp without a self-conflict on
     its next edit.
 
+    Schedule conflicts (N3, 2026-09): before commit, every machine touched by a
+    date/segment write is scanned for same-machine strict overlaps within
+    [min new start - 1 day, max new end + 1 day] (start-indexed via
+    idx_orders_machine_eff_start; queued rows excluded). Pairs involving at least
+    one written id are returned in `conflicts` — advisory by default (commit and
+    report). `strict_conflicts=True` is honored only together with
+    `atomic_optimizer`: a non-empty scan rolls the batch back and returns
+    status 'error' / error_code 'schedule.conflicts'.
+
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
     not_found_ids, stale, versions}. invalid_ids / not_found_ids carry the actual ids
     (not just counts) so the client can stop retrying terminally-rejected rows while
@@ -920,10 +1003,11 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     invalid_ids: list[str] = []
     not_found_ids: list[str] = []
     versions: dict[str, int] = {}
+    conflicts: list[dict] = []
     if not items:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {}}
+                "stale": [], "versions": {}, "conflicts": []}
 
     ids = [it["id"] for it in items if it.get("id")]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -935,7 +1019,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                    o.run_time,
                    o.xmin::text::bigint AS row_version,
                    seg.segment_count,
-                   o.plant
+                   o.plant,
+                   o.machine
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             WHERE o.id = ANY(%s)
@@ -948,6 +1033,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             r[0]: {
                 "start": r[1], "end": r[2], "run_time": r[3],
                 "row_version": r[4], "segment_count": int(r[5] or 0), "plant": r[6],
+                "machine": r[7],
             }
             for r in cur.fetchall()
         }
@@ -1074,6 +1160,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "has_runtime": has_runtime,
                 "segments": segment_rows,
                 "clear_runtime_mismatch": has_segments or start is not None or end is not None,
+                "machine": current["machine"],
+                "moved": has_segments or start is not None or end is not None or has_planning,
             })
 
         if atomic_optimizer and (invalid_ids or not_found_ids or stale):
@@ -1081,7 +1169,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             return {"applied": 0, "persisted": 0, "failed": len(items),
                     "invalid": len(invalid_ids), "not_found": len(not_found_ids),
                     "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
-                    "stale": stale, "versions": {}}
+                    "stale": stale, "versions": {}, "conflicts": []}
 
         if update_rows:
             try:
@@ -1139,6 +1227,15 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                                     for segment in row["segments"]
                                 ],
                             )
+                conflicts = _scan_conflicts_for_rows(cur, update_rows, eff)
+                if strict_conflicts and atomic_optimizer and conflicts:
+                    conn.rollback()
+                    return {"applied": 0, "persisted": 0, "failed": len(update_rows),
+                            "invalid": len(invalid_ids), "not_found": len(not_found_ids),
+                            "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
+                            "stale": stale, "versions": {}, "conflicts": conflicts,
+                            "status": "error", "error_code": "schedule.conflicts",
+                            "cause": f"{len(conflicts)} schedule conflict(s) on the written machines (strict mode)"}
                 conn.commit()
                 persisted = applied = len(versions)
             except Exception:
@@ -1148,7 +1245,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     return {"applied": applied, "persisted": persisted, "failed": failed,
             "invalid": len(invalid_ids), "not_found": len(not_found_ids),
             "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
-            "stale": stale, "versions": versions}
+            "stale": stale, "versions": versions, "conflicts": conflicts}
 
 
 def correct_due_date_baselines(corrections: list[dict], allowed_plants: list[str] | None = None) -> dict:

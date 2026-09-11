@@ -272,7 +272,8 @@ def get_task_horizons(plant: str,
 
 
 def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None,
-                             *, atomic_optimizer: bool = False) -> dict:
+                             *, atomic_optimizer: bool = False,
+                             strict_conflicts: bool = False) -> dict:
     """
     Normalize schedule/attribute edits and persist them write-through to Postgres
     in a single transaction (db.update_task_dates_bulk). No in-memory frame to
@@ -375,16 +376,18 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     if atomic_optimizer and invalid:
         return {"applied": 0, "persisted": 0, "failed": len(items), "invalid": invalid,
                 "not_found": 0, "invalid_ids": invalid_ids, "not_found_ids": [],
-                "stale": [], "versions": {}}
+                "stale": [], "versions": {}, "conflicts": []}
 
     if not norm:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {}}
+                "stale": [], "versions": {}, "conflicts": []}
 
     try:
-        res = db.update_task_dates_bulk(norm, allowed_plants=allowed_plants,
-                                        **({"atomic_optimizer": True} if atomic_optimizer else {}))
+        res = db.update_task_dates_bulk(
+            norm, allowed_plants=allowed_plants,
+            **({"atomic_optimizer": True} if atomic_optimizer else {}),
+            **({"strict_conflicts": True} if (atomic_optimizer and strict_conflicts) else {}))
     except Exception as e:
         error_code = (db.translate_db_error(e).get("error_code")
                       if isinstance(e, psycopg.Error) else "db.error")
@@ -396,7 +399,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
         return {"applied": 0, "persisted": 0, "failed": len(norm),
                 "invalid": invalid, "not_found": 0,
                 "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {},
+                "stale": [], "versions": {}, "conflicts": [],
                 "status": "error", "error_code": error_code,
                 "cause": "Bulk task update persist failed (transaction rolled back)"}
     res["invalid"] = res.get("invalid", 0) + invalid
@@ -422,7 +425,8 @@ def update_task(task: TaskDateUpdate,
     if res.get("invalid"):
         raise HTTPException(status_code=400, detail="Invalid date range (end must be after start)")
     return {"status": "ok", "persisted": res["persisted"], "failed": res["failed"],
-            "stale": res.get("stale", []), "versions": res.get("versions", {})}
+            "stale": res.get("stale", []), "versions": res.get("versions", {}),
+            "conflicts": res.get("conflicts", [])}
 
 
 @router.post("/task/note", dependencies=[Depends(auth.require_authenticated)])
@@ -465,7 +469,8 @@ def tasks_update(payload: TasksUpdatePayload,
                 invalid_ids, not_found_ids, stale, versions }
     """
     res = _apply_task_date_updates(payload.tasks, allowed_plants=allowed_plants,
-                                   atomic_optimizer=payload.atomic_optimizer)
+                                   atomic_optimizer=payload.atomic_optimizer,
+                                   strict_conflicts=payload.strict_conflicts)
     total = len(payload.tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:
@@ -473,6 +478,12 @@ def tasks_update(payload: TasksUpdatePayload,
                    total=total, persisted=res["persisted"], failed=res["failed"],
                    invalid=res["invalid"], not_found=res.get("not_found", 0),
                    stale=len(stale))
+    conflicts = res.get("conflicts", [])
+    if conflicts:
+        _log_event("info", "db", "Bulk update produced schedule conflicts",
+                   event="schedule_conflicts", count=len(conflicts),
+                   machines=sorted({c["machine"] for c in conflicts}),
+                   strict=bool(payload.strict_conflicts and payload.atomic_optimizer))
     # Honest body signal: HTTP status stays 200, but surface a hard-failure flag +
     # cause when the whole transaction rolled back (default 'ok' otherwise).
     out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
@@ -486,7 +497,8 @@ def tasks_update(payload: TasksUpdatePayload,
            # re-warns "Partial DB save" on every subsequent save.
            "invalid_ids": res.get("invalid_ids", []),
            "not_found_ids": res.get("not_found_ids", []),
-           "stale": stale, "versions": res.get("versions", {})}
+           "stale": stale, "versions": res.get("versions", {}),
+           "conflicts": conflicts}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")
@@ -516,6 +528,11 @@ def bulk_update(tasks: list[TaskDateUpdate],
                    total=total, persisted=res["persisted"], failed=res["failed"],
                    invalid=res["invalid"], not_found=res.get("not_found", 0),
                    stale=len(stale))
+    conflicts = res.get("conflicts", [])
+    if conflicts:
+        _log_event("info", "db", "Bulk update produced schedule conflicts",
+                   event="schedule_conflicts", count=len(conflicts),
+                   machines=sorted({c["machine"] for c in conflicts}))
     out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
            "failed": res["failed"], "invalid": res["invalid"],
            "not_found": res.get("not_found", 0),
@@ -527,7 +544,8 @@ def bulk_update(tasks: list[TaskDateUpdate],
            # re-warns "Partial DB save" on every subsequent save.
            "invalid_ids": res.get("invalid_ids", []),
            "not_found_ids": res.get("not_found_ids", []),
-           "stale": stale, "versions": res.get("versions", {})}
+           "stale": stale, "versions": res.get("versions", {}),
+           "conflicts": conflicts}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")

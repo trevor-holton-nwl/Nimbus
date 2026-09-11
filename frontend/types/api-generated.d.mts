@@ -38,6 +38,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/horizons": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Task Horizons
+         * @description Meta-only probe: the plant's resolved visibility/frozen horizon instants and
+         *     alert-flag horizon minutes — the same values GET /tasks carries in `meta`,
+         *     without the task list. The Gantt calls this on timeline re-entry so its
+         *     horizon bands refresh after an admin change or the daily roll without a
+         *     full /tasks reload (which would clobber unsaved planner edits).
+         */
+        get: operations["get_task_horizons_tasks_horizons_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/task/update": {
         parameters: {
             query?: never;
@@ -121,9 +145,13 @@ export interface paths {
         /**
          * Bulk Update
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-         *     Payload: [{ id, start_date?, end_date?, base_version?, force? }]
+         *     Payload: [{ id, start_date?, end_date?, base_version? }]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
          *                 invalid_ids, not_found_ids, stale, versions }
+         *
+         *     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
+         *     external caller may not bypass the base_version check. A stale row is
+         *     reported in `stale`, never overwritten.
          */
         post: operations["bulk_update_tasks_bulk_update_post"];
         delete?: never;
@@ -2342,6 +2370,8 @@ export interface components {
             versions: {
                 [key: string]: number;
             };
+            /** Conflicts */
+            conflicts?: components["schemas"]["ScheduleConflict"][];
             /** Error Code */
             error_code?: string | null;
             /** Cause */
@@ -2446,6 +2476,19 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * HorizonsResponse
+         * @description GET /tasks/horizons — the plant's resolved horizon instants (ISO strings, naive plant-local
+         *     like GET /tasks' meta) plus the alert-flag horizon in minutes; every field None when off/unknown.
+         */
+        HorizonsResponse: {
+            /** Visibility Horizon End */
+            visibility_horizon_end: string | null;
+            /** Frozen Horizon End */
+            frozen_horizon_end: string | null;
+            /** Alert Horizon Minutes */
+            alert_horizon_minutes: number | null;
         };
         /**
          * LinkDTO
@@ -2582,6 +2625,21 @@ export interface components {
             pages: {
                 [key: string]: boolean;
             };
+        };
+        /**
+         * ScheduleConflict
+         * @description One same-machine strict overlap detected inside the save transaction (N3).
+         *     order_a < order_b lexicographically; overlap_minutes is summed across segments.
+         */
+        ScheduleConflict: {
+            /** Machine */
+            machine: string;
+            /** Order A */
+            order_a: string;
+            /** Order B */
+            order_b: string;
+            /** Overlap Minutes */
+            overlap_minutes: number;
         };
         /**
          * ScheduleSegmentDTO
@@ -2750,8 +2808,11 @@ export interface components {
          *
          *     Optimistic concurrency: `base_version` is the xmin the client last saw for this
          *     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
-         *     unless `force` is set. `force=True` is used for authoritative bulk reschedules
-         *     (the optimizer), which intentionally overwrite regardless of concurrent edits.
+         *     unless `force` is set. The optimizer does NOT use `force` — it sends
+         *     `atomic_optimizer: true` on /tasks/update, under which `force` is ignored and any
+         *     stale row rolls back the whole batch. `force` is honored only by /tasks/update in
+         *     non-atomic mode (the client's Config.CONCURRENCY_CHECK=false escape hatch) and is
+         *     stripped by /tasks/bulk_update.
          */
         TaskDateUpdate: {
             /** Id */
@@ -2814,6 +2875,8 @@ export interface components {
             versions: {
                 [key: string]: number;
             };
+            /** Conflicts */
+            conflicts?: components["schemas"]["ScheduleConflict"][];
         };
         /**
          * TaskVersionRow
@@ -2888,6 +2951,11 @@ export interface components {
              * @default false
              */
             atomic_optimizer: boolean;
+            /**
+             * Strict Conflicts
+             * @default false
+             */
+            strict_conflicts: boolean;
         };
         /**
          * UpdateOwnNameResult
@@ -3027,6 +3095,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TasksResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_horizons_tasks_horizons_get: {
+        parameters: {
+            query: {
+                plant: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HorizonsResponse"];
                 };
             };
             /** @description Validation Error */

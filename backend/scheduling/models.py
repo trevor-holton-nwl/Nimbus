@@ -104,6 +104,15 @@ class HorizonsResponse(BaseModel):
     alert_horizon_minutes: int | None
 
 
+class ScheduleConflict(BaseModel):
+    """One same-machine strict overlap detected inside the save transaction (N3).
+    order_a < order_b lexicographically; overlap_minutes is summed across segments."""
+    machine: str
+    order_a: str
+    order_b: str
+    overlap_minutes: float
+
+
 class TaskUpdateResult(BaseModel):
     """Response for POST /task/update (singular). Narrower than the bulk
     shape — this endpoint also raises 404/400 (response_model only applies
@@ -113,6 +122,7 @@ class TaskUpdateResult(BaseModel):
     failed: int
     stale: list[str]
     versions: dict[str, int]
+    conflicts: list[ScheduleConflict] = Field(default_factory=list)
 
 
 class BulkUpdateResult(BaseModel):
@@ -130,6 +140,7 @@ class BulkUpdateResult(BaseModel):
     not_found_ids: list[str]
     stale: list[str]
     versions: dict[str, int]
+    conflicts: list[ScheduleConflict] = Field(default_factory=list)
     error_code: str | None = None
     cause: str | None = None
 
@@ -210,6 +221,9 @@ class TasksUpdatePayload(BaseModel):
     here are ignored (legacy ride-along, harmless)."""
     tasks: list[TaskDateUpdate] = []
     atomic_optimizer: bool = False
+    # N3: roll back when the written machines end up with overlaps. Honored only
+    # together with atomic_optimizer; manual saves are never blocked.
+    strict_conflicts: bool = False
 
 
 class TaskRefreshPayload(BaseModel):
