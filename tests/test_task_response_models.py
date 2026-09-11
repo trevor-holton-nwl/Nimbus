@@ -304,22 +304,25 @@ class _FakeConflictCursor(_FakeSegmentCursor):
 def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(monkeypatch):
     t = lambda h: datetime(2026, 8, 17, h, 0)
     eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
-    conflict_rows = [("L1", "mv-a", [], t(8), t(10)), ("L1", "mv-b", [], t(9), t(11))]
+    conflict_rows = [("L1", "PLANT-A", "mv-a", [], t(8), t(10)), ("L1", "PLANT-A", "mv-b", [], t(9), t(11))]
     cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
     result = brain.db.update_task_dates_bulk([{"id": "mv-a", "start": t(8), "end": t(10)}])
 
     assert result["persisted"] == 1
-    assert result["conflicts"] == [{"machine": "L1", "order_a": "mv-a", "order_b": "mv-b", "overlap_minutes": 60}]
-    scan = next(p for s, p in cursor.executed if "o.machine = ANY(%s)" in s)
-    assert scan[0] == ["L1"]
+    assert result["conflicts"] == [{"machine": "L1", "plant": "PLANT-A", "order_a": "mv-a",
+                                     "order_b": "mv-b", "overlap_minutes": 60}]
+    scan_sql, scan_params = next((s, p) for s, p in cursor.executed if "o.machine = ANY(%s)" in s)
+    assert "o.plant = ANY(%s)" in scan_sql
+    assert scan_params[0] == ["L1"]
+    assert scan_params[1] == ["PLANT-A"]
 
 
 def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_optimizer(monkeypatch):
     t = lambda h: datetime(2026, 8, 17, h, 0)
     eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
-    conflict_rows = [("L1", "mv-a", [], t(8), t(10)), ("L1", "mv-b", [], t(9), t(11))]
+    conflict_rows = [("L1", "PLANT-A", "mv-a", [], t(8), t(10)), ("L1", "PLANT-A", "mv-b", [], t(9), t(11))]
     item = {"id": "mv-a", "start": t(8), "end": t(10), "base_version": 100}
 
     cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
@@ -335,6 +338,34 @@ def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_opt
     manual = brain.db.update_task_dates_bulk([item], strict_conflicts=True)  # no atomic flag → advisory
     assert manual["persisted"] == 1
     assert len(manual["conflicts"]) == 1
+
+
+class _FakeScanErrorCursor(_FakeSegmentCursor):
+    """The N3 conflict-scan SELECT itself raises (malformed segment data, a
+    stray SQL error, an unexpected datetime rendering, ...). The scan is an
+    advisory diagnostic layered on an otherwise-valid save, so this must
+    exercise the non-strict try/except path: log + treat as no conflicts,
+    never roll back writes that already succeeded."""
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "o.machine = ANY(%s)" in sql:
+            self.executed.append((sql, params))
+            raise RuntimeError("conflict scan blew up")
+        super().execute(statement, params)
+
+
+def test_update_task_dates_bulk_advisory_scan_failure_does_not_block_a_valid_save(monkeypatch):
+    t = lambda h: datetime(2026, 8, 17, h, 0)
+    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    cursor = _FakeScanErrorCursor(eff_rows, plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+
+    result = brain.db.update_task_dates_bulk([{"id": "mv-a", "start": t(8), "end": t(10)}])
+
+    assert result["persisted"] == 1
+    assert result["conflicts"] == []
+    assert result.get("status") != "error"
 
 
 def test_openapi_schema_includes_new_components():

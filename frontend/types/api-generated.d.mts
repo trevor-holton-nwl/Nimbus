@@ -2630,10 +2630,15 @@ export interface components {
          * ScheduleConflict
          * @description One same-machine strict overlap detected inside the save transaction (N3).
          *     order_a < order_b lexicographically; overlap_minutes is summed across segments.
+         *     `plant` scopes the pair (machine names are per-plant — workcenter_mapping/
+         *     machine_state are both keyed (plant, machine) — so two different plants
+         *     sharing a machine name are never pooled into the same conflict).
          */
         ScheduleConflict: {
             /** Machine */
             machine: string;
+            /** Plant */
+            plant: string;
             /** Order A */
             order_a: string;
             /** Order B */

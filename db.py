@@ -921,11 +921,25 @@ def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> lis
 
 def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[dict]:
     """Runs inside the still-open save transaction so the scan sees this batch's
-    own UPDATEs. Window bounds come from the rows that actually moved."""
+    own UPDATEs. Window bounds come from the rows that actually moved.
+
+    Machine names are per-plant (`workcenter_mapping`/`machine_state` are both
+    keyed `(plant, machine)`), so at 50+ plants a shared machine name like
+    'LINE1' must never let this scan pair an order in one plant against an
+    order of the same machine name in a different plant — that would report a
+    phantom conflict, leak an out-of-scope order id into the caller's 200
+    body, and (in strict mode) roll back a perfectly legitimate save. The SQL
+    filters both `o.machine` (leading, so idx_orders_machine_eff_start still
+    serves it) and `o.plant`; grouping is further keyed by an internal
+    plant-qualified machine token so two different plants that both touch a
+    same-named machine in one batch still can't be pooled together by
+    `_detect_interval_conflicts` (which only groups by its `machine` key).
+    """
     moved = [r for r in update_rows if r["moved"] and not r["queued"] and r["machine"]]
     if not moved:
         return []
     machines = sorted({r["machine"] for r in moved})
+    plants = sorted({eff[r["id"]]["plant"] for r in moved})
     starts = [s for s in (r["start"] or eff[r["id"]]["start"] for r in moved) if s is not None]
     ends = [e for e in (r["end"] or eff[r["id"]]["end"] for r in moved) if e is not None]
     if not starts or not ends:
@@ -934,28 +948,40 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     hi = max(ends) + timedelta(days=1)
     cur.execute(
         f"""
-        SELECT o.machine, o.id,
+        SELECT o.machine, o.plant, o.id,
                COALESCE(seg.schedule_segments, '[]'::jsonb) AS segments,
                COALESCE(o.scheduled_start, o.basic_start_date) AS eff_start,
                {_EFF_END_SQL} AS eff_end
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.machine = ANY(%s)
+          AND o.plant = ANY(%s)
           AND o.planning_status <> 'needs_planning'
           AND COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
         """,
-        (machines, lo, hi),
+        (machines, plants, lo, hi),
     )
+    # Plant-qualified key so _detect_interval_conflicts (grouped by its
+    # `machine` field only) never pools two different plants' same-named
+    # machine together; split back apart below before returning.
     intervals: list[tuple] = []
-    for machine, oid, segments, eff_start, eff_end in cur.fetchall():
+    for machine, plant, oid, segments, eff_start, eff_end in cur.fetchall():
+        key = f"{plant}\x1f{machine}"
         if segments:
             for seg in segments:
-                intervals.append((machine, oid,
+                intervals.append((key, oid,
                                   datetime.fromisoformat(str(seg["start_date"])),
                                   datetime.fromisoformat(str(seg["end_date"]))))
         else:
-            intervals.append((machine, oid, eff_start, eff_end))
-    return _detect_interval_conflicts(intervals, touched={r["id"] for r in moved})
+            intervals.append((key, oid, eff_start, eff_end))
+    raw = _detect_interval_conflicts(intervals, touched={r["id"] for r in moved})
+    conflicts = []
+    for c in raw:
+        plant, machine = c["machine"].split("\x1f", 1)
+        conflicts.append({"machine": machine, "plant": plant,
+                          "order_a": c["order_a"], "order_b": c["order_b"],
+                          "overlap_minutes": c["overlap_minutes"]})
+    return conflicts
 
 
 def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None,
@@ -1227,7 +1253,23 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                                     for segment in row["segments"]
                                 ],
                             )
-                conflicts = _scan_conflicts_for_rows(cur, update_rows, eff)
+                try:
+                    conflicts = _scan_conflicts_for_rows(cur, update_rows, eff)
+                except Exception:
+                    # The conflict scan is an advisory diagnostic layered on top of
+                    # an otherwise-valid save; a bug in the scan (a malformed
+                    # segment object, an unexpected datetime rendering, a stray SQL
+                    # error) must never roll back writes that already succeeded. In
+                    # strict mode the caller explicitly asked the scan to gate the
+                    # commit, so there we let it propagate to the outer handler
+                    # (which rolls back and reports status: error) instead of
+                    # silently treating a broken scan as "no conflicts found".
+                    if strict_conflicts and atomic_optimizer:
+                        raise
+                    log.warning("Schedule-conflict scan failed; treating as no "
+                                "conflicts (advisory only, save proceeds)",
+                                exc_info=True, extra={"category": "scheduling"})
+                    conflicts = []
                 if strict_conflicts and atomic_optimizer and conflicts:
                     conn.rollback()
                     return {"applied": 0, "persisted": 0, "failed": len(update_rows),
