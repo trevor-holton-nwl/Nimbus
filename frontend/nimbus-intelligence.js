@@ -960,6 +960,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         { type:'action', label:t('cmdp.label_go_to_now'), sub:t('cmdp.sub_center_gantt_on_now'), icon:'⊙',  run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); NIMBUS.Timeline.gotoNow?.(); } },
         { type:'action', label:t('cmdp.label_time_machine'), sub:t('cmdp.sub_browse_schedule_history'), icon:'⏱', run(){ CommandPalette.close(); TimeMachine.openUI(); } },
         { type:'action', label:t('cmdp.label_compare_schedules'), sub:t('cmdp.sub_diff_current_vs_snapshot'), icon:'⇄',  run(){ CommandPalette.close(); Diff.showUI(); } },
+        { type:'action', label:t('cmdp.label_ripple_preview'), sub:t('cmdp.sub_ripple_preview'), icon:'≋',
+          run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); Toast.show(t('toast.ripple_howto'), 'info', 4000); } },
         { type:'action', label:t('cmdp.label_reload_data'), sub:t('cmdp.sub_reread_excel'), icon:'↺', run(){ CommandPalette.close(); NIMBUS.Persistence?.reload?.(); } }
       );
       CommandPalette._index = idx;

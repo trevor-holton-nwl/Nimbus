@@ -214,11 +214,11 @@ Product framing that supports these calls: `PRODUCT.md` names exactly four const
 
 ### N7 · Surface what is already built
 
-**Why.** NIMBUS's own APO gap analysis (`docs/SAP_APO_Opportunities.md`) already notes that reason codes shipped, the `needs_planning` queue exists in data, and the Ripple Preview overlay is fully built but permanently disabled. The assessment asked for an exception worklist and before/after views. Most of that is a discoverability problem, not a build problem.
+**Why.** NIMBUS's own APO gap analysis (`docs/SAP_APO_Opportunities.md`) predates `needs_planning` (2026-08-22) and describes the deallocation pool it later became. The Ripple Preview overlay is fully built and live but has zero affordance (Alt-hover only; `docs/SAP_APO_Opportunities.md` §3.1 item 3 has this right). The assessment asked for an exception worklist and before/after views. Most of that is a discoverability problem, not a build problem.
 
 **Steps.**
 1. Expose the `planning_status='needs_planning'` rows (with `planning_reason`) as a ranked worklist in the existing Alerts panel or the Orders grid filter, linked to the Gantt and Inspector. Reuse the grid; do not add a new tab.
-2. Decide on Ripple Preview: re-enable behind a user setting, or delete the dead code. Record the decision here.
+2. Ripple Preview decision (2026-09-11): keep the code; add a searchable Cmd+K entry with a how-to toast. It is a shallow same-line highlight of the next five orders, not a computed ripple; a real one waits on demand.
 3. Only after N1 and N3 land, evaluate whether an "affected orders before/after" table is still needed or whether the corrected snapshot diff plus save-time conflicts already answer it.
 
 **Files.** `frontend/insights/insights-ui.mts`; `frontend/scheduling/orders.mts`; `frontend/nimbus-intelligence.js` (Ripple Preview).
@@ -226,6 +226,8 @@ Product framing that supports these calls: `PRODUCT.md` names exactly four const
 **Acceptance.** A scheduler can list every `needs_planning` order for the selected plant, see its reason, and jump to it on the Gantt in two clicks.
 
 **Risks.** Lean scope: do not build an affected-orders table or resource-conflict explainer until the surfaced items are used and found insufficient.
+
+**Deferred.** Step 3 (before/after affected-orders table) stays deferred until N1 and N3 have shipped and been used; not planned in this cycle.
 
 ---
 

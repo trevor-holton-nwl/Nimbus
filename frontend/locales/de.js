@@ -53,6 +53,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.unscheduled_orders':          '{{count}} Auftrag/Aufträge abgeplant — Strg+Z zum Rückgängigmachen',
   'toast.firmed_count_not_moved':      '{{count}} festgeschriebener/festgeschriebene Auftrag/Aufträge nicht verschoben',
   'toast.snapshot_saved':              'Momentaufnahme gespeichert',
+  'toast.ripple_howto':                'Ripple-Vorschau: Alt halten und über einen Auftrag im Gantt fahren.',
   'toast.snapshot_not_found':          'Momentaufnahme nicht gefunden',
   'toast.restored':                    'Wiederhergestellt: {{label}} ({{time}}) — Strg+Z zum Rückgängigmachen',
   'toast.no_active_conflicts':         'Keine aktiven Konflikte',
@@ -1538,6 +1539,8 @@ window.__NIMBUS_LOCALES.de = {
   'cmdp.sub_browse_schedule_history':  'Browse schedule history',                                     // MISSING TRANSLATION
   'cmdp.label_compare_schedules':      'Compare Schedules',                                           // MISSING TRANSLATION
   'cmdp.sub_diff_current_vs_snapshot': 'Diff current vs. a snapshot',                                 // MISSING TRANSLATION
+  'cmdp.label_ripple_preview':         'Ripple-Vorschau',
+  'cmdp.sub_ripple_preview':           'Alt halten und über einen Auftrag fahren, um die nächsten Aufträge der Linie zu markieren',
   'cmdp.label_reload_data':            'Reload Data',                                                 // MISSING TRANSLATION
   'cmdp.sub_reread_excel':             'Re-read Excel (discards in-memory edits)',                    // MISSING TRANSLATION
   'cmdp.index_actions_count':          '{{count}} actions',                                           // MISSING TRANSLATION

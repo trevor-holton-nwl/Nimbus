@@ -53,6 +53,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.unscheduled_orders':          '{{count}} pedido(s) desplanificados — Ctrl+Z para deshacer',
   'toast.firmed_count_not_moved':      '{{count}} pedido(s) en firme no movidos',
   'toast.snapshot_saved':              'Instantánea guardada',
+  'toast.ripple_howto':                'Vista previa de arrastre: mantén Alt y pasa sobre un pedido en el Gantt.',
   'toast.snapshot_not_found':          'Instantánea no encontrada',
   'toast.restored':                    'Restaurado: {{label}} ({{time}}) — Ctrl+Z para deshacer',
   'toast.no_active_conflicts':         'Sin conflictos activos',
@@ -1536,6 +1537,8 @@ window.__NIMBUS_LOCALES.es = {
   'cmdp.sub_browse_schedule_history':  'Browse schedule history',                                     // MISSING TRANSLATION
   'cmdp.label_compare_schedules':      'Compare Schedules',                                           // MISSING TRANSLATION
   'cmdp.sub_diff_current_vs_snapshot': 'Diff current vs. a snapshot',                                 // MISSING TRANSLATION
+  'cmdp.label_ripple_preview':         'Vista previa de arrastre',
+  'cmdp.sub_ripple_preview':           'Mantén Alt y pasa sobre un pedido para resaltar los siguientes de su línea',
   'cmdp.label_reload_data':            'Reload Data',                                                 // MISSING TRANSLATION
   'cmdp.sub_reread_excel':             'Re-read Excel (discards in-memory edits)',                    // MISSING TRANSLATION
   'cmdp.index_actions_count':          '{{count}} actions',                                           // MISSING TRANSLATION
