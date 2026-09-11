@@ -451,6 +451,15 @@ window.__NIMBUS_LOCALES.es = {
   'ui.split_order_policy_help':        'Los segmentos generados son visibles para el planificador, siguen siendo un único pedido lógico y nunca son más cortos de 30 minutos.',
   'ui.split_policy_saved':             'Política de división de pedidos guardada para esta planta.',
   'ui.split_policy_save_failed':       'No se pudo guardar la política de división de pedidos: {{msg}}',
+  'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
+  'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
+  'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
+  'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Mínimo de segmento productivo',
   'ui.min_productive_segment_help':    'Controla la duración mínima de un fragmento productivo cuando arriba se permite la división parcial o solo para pedidos excesivamente largos. Se aplica tanto al planificador sin conocimiento de cambios como al que sí los considera.',
   'ui.min_productive_segment_label':   'Segmento productivo mínimo (minutos)',

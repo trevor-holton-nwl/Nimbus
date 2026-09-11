@@ -447,6 +447,15 @@ window.__NIMBUS_LOCALES.de = {
   'ui.split_order_policy_help':        'Erzeugte Segmente sind für Planer sichtbar, bleiben ein logischer Auftrag und sind nie kürzer als 30 Minuten.',
   'ui.split_policy_saved':             'Auftragsteilungsrichtlinie für dieses Werk gespeichert.',
   'ui.split_policy_save_failed':       'Auftragsteilungsrichtlinie konnte nicht gespeichert werden: {{msg}}',
+  'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
+  'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
+  'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
+  'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Mindest-Produktivsegment',
   'ui.min_productive_segment_help':    'Legt die Mindestlänge eines geteilten Produktivstücks fest, wenn oben eine teilweise oder nur-übermäßig-lange Teilung zugelassen ist. Gilt für den setup-unabhängigen und den setup-bewussten Planer.',
   'ui.min_productive_segment_label':   'Mindest-Produktivsegment (Minuten)',

@@ -210,6 +210,29 @@ test('Scheduling Rules density pass keys exist in all 5 locales', () => {
   }
 });
 
+test('N8c unknown-setup scheduling-rules control keys exist in all 5 locales', () => {
+  // N8c: Scheduling Rules pane's per-plant unknown-setup-policy control
+  // (dropdown + plant-default minutes row + rule-help hint), saved via N8a's
+  // POST /master-data/plants/{plant}/unknown-setup-policy.
+  const REQUIRED_UNKNOWN_SETUP = [
+    'ui.unknown_setup_title',
+    'ui.unknown_setup_help',
+    'ui.unknown_setup_opt_zero',
+    'ui.unknown_setup_opt_default',
+    'ui.unknown_setup_opt_exclude',
+    'ui.unknown_setup_minutes_label',
+    'ui.unknown_setup_saved',
+    'ui.unknown_setup_failed',
+    'ui.unknown_setup_minutes_invalid',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_UNKNOWN_SETUP) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('Command Palette (cmdp.*) keys exist in all 5 locales', () => {
   // 2026-09 i18n sweep (Code_Review_09_01.md §5/§11 item 21) — CommandPalette
   // (frontend/nimbus-intelligence.js) previously had its chrome (aria-labels,

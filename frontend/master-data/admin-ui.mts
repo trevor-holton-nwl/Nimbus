@@ -13,7 +13,7 @@ import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport } from '../platform/types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
 //   - `SetupAdmin.render` is called from Plant's Settings pane. `SetupAdmin`
@@ -107,6 +107,7 @@ const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   maxPushForward:       { title: 'ui.max_push_forward_title',       help: ['ui.max_push_forward_help'] },
   minProductiveSegment: { title: 'ui.min_productive_segment_title', help: ['ui.min_productive_segment_help', 'ui.min_productive_segment_help_detail'] },
   splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
+  unknownSetupPolicy:   { title: 'ui.unknown_setup_title',          help: ['ui.unknown_setup_help'] },
 };
 
 export const Plant = {
@@ -1227,6 +1228,26 @@ export const Plant = {
                   </select>
                   <span class="sched-rule-unit"></span>
                 </div>
+
+                <!-- Wide for the same reason as splitOrderPolicy above: the
+                     third option ("Send to Needs Planning until the matrix
+                     row exists") needs the full row width. The minutes row
+                     below is only shown when the select is set to
+                     'plantDefaultMinutes'. -->
+                <div class="sched-rule-row sched-rule-row--wide" data-rule-key="unknownSetupPolicy">
+                  <label for="sys-unknown-setup-policy">${Util.t('ui.unknown_setup_title')}</label>
+                  <select id="sys-unknown-setup-policy" class="form-input">
+                    <option value="zero">${Util.t('ui.unknown_setup_opt_zero')}</option>
+                    <option value="plantDefaultMinutes">${Util.t('ui.unknown_setup_opt_default')}</option>
+                    <option value="excludeFromSearch">${Util.t('ui.unknown_setup_opt_exclude')}</option>
+                  </select>
+                  <span class="sched-rule-unit"></span>
+                </div>
+                <div class="sched-rule-row" data-rule-key="unknownSetupPolicy" id="sys-unknown-setup-minutes-row" hidden>
+                  <label for="sys-unknown-setup-minutes">${Util.t('ui.unknown_setup_minutes_label')}</label>
+                  <input type="number" id="sys-unknown-setup-minutes" class="form-input" min="0" step="1" inputmode="numeric">
+                  <span class="sched-rule-unit">${Util.t('ui.unit_minutes')}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -1313,6 +1334,9 @@ export const Plant = {
     const maxPushForwardInp = pane.querySelector('#sys-max-push-forward-days') as HTMLInputElement;
     const minProductiveSegmentInp = pane.querySelector('#sys-min-productive-segment-minutes') as HTMLInputElement;
     const frozenHorizonDaysInp = pane.querySelector('#sys-frozen-horizon-days') as HTMLInputElement;
+    const unknownSetupSelect = pane.querySelector('#sys-unknown-setup-policy') as HTMLSelectElement;
+    const unknownSetupMinutesRow = pane.querySelector('#sys-unknown-setup-minutes-row') as HTMLElement;
+    const unknownSetupMinutesInp = pane.querySelector('#sys-unknown-setup-minutes') as HTMLInputElement;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
     confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
@@ -1327,6 +1351,17 @@ export const Plant = {
       ? String(plantRow!.min_productive_segment_minutes) : '30';
     frozenHorizonDaysInp.value = Number.isInteger(plantRow?.frozen_horizon_days) && (plantRow!.frozen_horizon_days as number) >= 0
       ? String(plantRow!.frozen_horizon_days) : '';
+    const readUnknownPolicy = (): UnknownSetupPolicy => {
+      const v = plantRow?.setup_policy_config?.unknownSetupPolicy;
+      return v === 'plantDefaultMinutes' || v === 'excludeFromSearch' ? v : 'zero';
+    };
+    const readUnknownMinutes = (): number => {
+      const v = plantRow?.setup_policy_config?.unknownSetupDefaultMinutes;
+      return Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0;
+    };
+    unknownSetupSelect.value = readUnknownPolicy();
+    unknownSetupMinutesInp.value = String(readUnknownMinutes());
+    unknownSetupMinutesRow.hidden = unknownSetupSelect.value !== 'plantDefaultMinutes';
 
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
@@ -1416,6 +1451,38 @@ export const Plant = {
         splitPolicySelect.disabled = false;
       }
     });
+
+    async function saveUnknownSetupPolicy(): Promise<void> {
+      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const previousPolicy = readUnknownPolicy(); const previousMinutes = readUnknownMinutes();
+      const policy = unknownSetupSelect.value;
+      const raw = unknownSetupMinutesInp.value.trim();
+      const minutes = raw === '' ? 0 : Number(raw);
+      if (!Number.isInteger(minutes) || minutes < 0) {
+        unknownSetupMinutesInp.value = String(previousMinutes);
+        Toast.show(Util.t('ui.unknown_setup_minutes_invalid'), 'error');
+        return;
+      }
+      unknownSetupMinutesRow.hidden = policy !== 'plantDefaultMinutes';
+      unknownSetupSelect.disabled = true; unknownSetupMinutesInp.disabled = true;
+      try {
+        const response = await Util.fetchTraced(
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/unknown-setup-policy`,
+          { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+            body: JSON.stringify({ subnetwork: plantRow.subnetwork, unknown_setup_policy: policy, unknown_setup_default_minutes: minutes }) },
+        );
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        const saved = await response.json();
+        plantRow.setup_policy_config = { ...(plantRow.setup_policy_config ?? {}), ...saved.setup_policy_config };
+        Toast.show(Util.t('ui.unknown_setup_saved'), 'success');
+      } catch (error) {
+        unknownSetupSelect.value = previousPolicy; unknownSetupMinutesInp.value = String(previousMinutes);
+        unknownSetupMinutesRow.hidden = previousPolicy !== 'plantDefaultMinutes';
+        Toast.show(`${Util.t('ui.unknown_setup_failed')}: ${(error as Error).message}`, 'error');
+      } finally { unknownSetupSelect.disabled = false; unknownSetupMinutesInp.disabled = false; }
+    }
+    unknownSetupSelect.addEventListener('change', saveUnknownSetupPolicy);
+    unknownSetupMinutesInp.addEventListener('change', saveUnknownSetupPolicy);
 
     maxPullForwardInp.addEventListener('change', async () => {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
@@ -2454,6 +2521,9 @@ interface PlantRow extends MasterDataRow {
   constraints?: ConstraintConfig[] | null;
   /** plants.setup_active — see NimbusMasterPlant's field of the same name. */
   setup_active?: boolean;
+  /** N8 (2026-09): plants.setup_policy_config JSONB sidecar — see
+   *  NimbusMasterPlant's field of the same name. */
+  setup_policy_config?: { unknownSetupPolicy?: UnknownSetupPolicy; unknownSetupDefaultMinutes?: number } | null;
 }
 
 interface MaterialRow extends MasterDataRow {

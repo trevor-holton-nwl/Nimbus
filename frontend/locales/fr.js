@@ -447,6 +447,15 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que 30 minutes.',
   'ui.split_policy_saved':             'Politique de division des ordres enregistrée pour cette usine.',
   'ui.split_policy_save_failed':       'Impossible d\'enregistrer la politique de division des ordres : {{msg}}',
+  'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
+  'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
+  'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
+  'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Segment productif minimal',
   'ui.min_productive_segment_help':    'Contrôle la durée minimale d\'un segment productif fractionné lorsque le fractionnement partiel ou réservé aux ordres excessivement longs est autorisé ci-dessus. S\'applique aussi bien au planificateur sans connaissance des changements qu\'à celui qui en tient compte.',
   'ui.min_productive_segment_label':   'Segment productif minimal (minutes)',

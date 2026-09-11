@@ -447,6 +447,15 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.split_order_policy_help':        'Os segmentos gerados são visíveis ao planejador, permanecem um único pedido lógico e nunca são mais curtos que 30 minutos.',
   'ui.split_policy_saved':             'Política de divisão de pedidos salva para esta planta.',
   'ui.split_policy_save_failed':       'Não foi possível salvar a política de divisão de pedidos: {{msg}}',
+  'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
+  'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
+  'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
+  'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
+  'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Piso do segmento produtivo',
   'ui.min_productive_segment_help':    'Controla a duração mínima de um segmento produtivo dividido quando a divisão parcial ou apenas para pedidos excessivamente longos está permitida acima. Aplica-se tanto ao planejador sem conhecimento de troca quanto ao que considera as trocas.',
   'ui.min_productive_segment_label':   'Segmento produtivo mínimo (minutos)',
