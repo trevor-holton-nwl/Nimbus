@@ -576,6 +576,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.failed_rename_label':         'Umbenennung fehlgeschlagen: {{msg}}',
 
   'tip.fix_alert':                     'Diese Warnung automatisch beheben',
+  'alert.tool_conflict':               'Werkzeug "{{tool}}" wird gleichzeitig von "{{a}}" auf {{lineA}} und "{{b}}" auf {{lineB}} benötigt.',
+  'ui.alert_headline_tool_conflict':   'Werkzeugkonflikt',
 
   /* ── Sub-tab-Bezeichnungen ───────────────────────────────────────────────── */
   'tab.machine':              'Maschinen',

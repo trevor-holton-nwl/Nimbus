@@ -580,6 +580,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.failed_rename_label':         'Error al renombrar etiqueta: {{msg}}',
 
   'tip.fix_alert':                     'Resolver esta alerta automáticamente',
+  'alert.tool_conflict':               'La herramienta "{{tool}}" la necesitan "{{a}}" en {{lineA}} y "{{b}}" en {{lineB}} al mismo tiempo.',
+  'ui.alert_headline_tool_conflict':   'Conflicto de herramienta compartida',
 
   /* ── Etiquetas de sub-pestañas ───────────────────────────────────────────── */
   'tab.machine':              'Máquinas',

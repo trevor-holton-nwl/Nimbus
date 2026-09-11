@@ -576,6 +576,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.failed_rename_label':         'Échec du renommage: {{msg}}',
 
   'tip.fix_alert':                     'Résoudre automatiquement cette alerte',
+  'alert.tool_conflict':               'L\'outil "{{tool}}" est requis en même temps par "{{a}}" sur {{lineA}} et "{{b}}" sur {{lineB}}.',
+  'ui.alert_headline_tool_conflict':   "Conflit d'outil partagé",
 
   /* ── Libellés des sous-onglets ───────────────────────────────────────────── */
   'tab.machine':              'Machines',

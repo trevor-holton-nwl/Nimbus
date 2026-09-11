@@ -1278,11 +1278,13 @@ export const AlertsUIAdapter = {
         const top = cellEntries.slice().sort((x, y) => y.scheduledHours - x.scheduledHours)
           .slice(0, 4).map(entry => entry.task);
         if (top.length) chipsHtml = `<div class="ac-chips">${top.map(t => renderChip(t.id)).join('')}</div>`;
-      } else if (a.type === 'overlap') {
-        headline = 'Order overlap';
+      } else if (a.type === 'overlap' || a.type === 'tool-conflict') {
+        headline = a.type === 'overlap' ? 'Order overlap' : Util.t('ui.alert_headline_tool_conflict');
         const m = a.id.match(/^ovl-(.+)-(.+)$/);
-        if (m) {
-          chipsHtml = `<div class="ac-chips">${renderChip(m[1])}<span class="ac-chip-sep">⇄</span>${renderChip(m[2])}</div>`;
+        const peer = a.peerId ?? (m ? m[1] : null);
+        const later = a.taskId ?? (m ? m[2] : null);
+        if (peer && later) {
+          chipsHtml = `<div class="ac-chips">${renderChip(peer)}<span class="ac-chip-sep">⇄</span>${renderChip(later)}</div>`;
         } else if (a.taskId) {
           chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
         }
@@ -1421,11 +1423,12 @@ export const AlertsUIAdapter = {
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
     const isCalendar = CALENDAR_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
-    const fixable  = ['overlap', 'blackout', 'overload'].includes(a.type);
+    const fixable  = ['overlap', 'blackout', 'overload', 'tool-conflict'].includes(a.type);
     const override = (a.type === 'closed' || a.type === 'firmed-closed' || a.type === 'firmed-out-of-hours') && a.taskId != null;
+    const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
     return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${Util.escapeHtml(a.id)}">` +
       `<span class="alert-ico">${ico}</span>` +
-      `<span class="alert-msg">${Util.escapeHtml(a.msg)}</span>` +
+      `<span class="alert-msg">${Util.escapeHtml(msg)}</span>` +
       `<div class="alert-actions">` +
         ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
         (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +

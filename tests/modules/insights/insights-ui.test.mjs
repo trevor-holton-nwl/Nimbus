@@ -183,6 +183,23 @@ test('alert drawer delegates fix and override actions without compiling IDs into
   }
 });
 
+test('alert drawer renders tool-conflict alerts with localized text and a fix button', () => {
+  const row = AlertsUIAdapter._renderAlertRow({
+    id: 'tool-conflict|task-b|task-a', type: 'tool-conflict', sev: 'err',
+    msg: 'Tool "PRT_01" is needed by "task-a" on 1000TA and "task-b" on 1000TB at the same time.',
+    msgKey: 'alert.tool_conflict',
+    msgVars: { tool: 'PRT_01', a: 'task-a', b: 'task-b', lineA: '1000TA', lineB: '1000TB' },
+    taskId: 'task-b', peerId: 'task-a', line: '1000TB', time: new Date(),
+  });
+
+  // Util.t has no locale dictionary loaded in this unit-test environment, so it
+  // falls back to the key itself — this still proves the msgKey path is taken
+  // rather than the raw English a.msg fallback string.
+  assert.match(row, /alert-msg">alert\.tool_conflict</);
+  assert.doesNotMatch(row, /Tool "PRT_01" is needed/);
+  assert.match(row, /data-alert-action="fix"/);
+});
+
 test('alert drawer host binds the delegated action handler even in its empty state', () => {
   const body = { innerHTML: '', onclick: null };
   const priorGetElementById = globalThis.document.getElementById;

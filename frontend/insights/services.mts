@@ -395,20 +395,20 @@ export const Alerts = {
     const a = Store.alerts.find(x => x.id === alertId);
     if (!a) return;
 
-    if (a.type === 'overlap' || a.type === 'blackout') {
+    if (a.type === 'overlap' || a.type === 'blackout' || a.type === 'tool-conflict') {
       const task = Store.tasks[a.taskId!];
       if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
       const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
 
-      // For overlap: start searching from end of the overlapping peer
+      // For pairwise alerts: start searching from the end of the peer (earlier) order.
+      // Prefer the structured peerId; the id-parse fallback is wrong for ids containing '-'.
       let searchFrom = task.start_date;
-      if (a.type === 'overlap') {
-        const peerId = a.id.replace(/^ovl-/, '').split('-')[0];
+      if (a.type === 'overlap' || a.type === 'tool-conflict') {
+        const peerId = a.peerId ?? (a.type === 'overlap' ? a.id.replace(/^ovl-/, '').split('-')[0] : null);
         const peer = peerId ? Store.tasks[peerId] : null;
-        if (peer && peer.end_date) searchFrom = peer.end_date;
-        else searchFrom = task.start_date;
+        searchFrom = peer && peer.end_date ? peer.end_date : task.start_date;
       }
 
       const snap = UndoStack.snapshotTasks([task.id]);

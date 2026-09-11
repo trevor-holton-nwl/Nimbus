@@ -576,6 +576,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.failed_rename_label':         'Falha ao renomear rótulo: {{msg}}',
 
   'tip.fix_alert':                     'Resolver este alerta automaticamente',
+  'alert.tool_conflict':               'A ferramenta "{{tool}}" é necessária ao mesmo tempo por "{{a}}" em {{lineA}} e "{{b}}" em {{lineB}}.',
+  'ui.alert_headline_tool_conflict':   'Conflito de ferramenta compartilhada',
 
   /* ── Rótulos das sub-abas ────────────────────────────────────────────────── */
   'tab.machine':              'Máquinas',
