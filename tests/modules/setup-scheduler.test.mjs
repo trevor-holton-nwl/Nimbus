@@ -1339,7 +1339,7 @@ test('evaluateDueDateFirst is deterministic, eliminates duplicate state-group ca
   // longer freezes the line either — the whole fragment is placed as an
   // unknown tail instead.
   assert.deepEqual(expired.unchangedLines, []);
-  assert.ok(expired.explanation.some(reason => ['unknown-setup-tail-placement', 'initial-state-unknown'].includes(reason.code)));
+  assert.ok(expired.explanation.some(reason => ['unknown-setup-tail-placement', 'initial-state-unknown', 'admitted-state-unrecorded'].includes(reason.code)));
 });
 
 test('evaluateDueDateFirst bounds exact occurrence traversal before a low-cap same-state search can recurse deeply', () => {
@@ -1502,7 +1502,7 @@ test('evaluateDueDateFirst never freezes a line with an incomplete (strict-blank
   assert.deepEqual(scheduledPatches(result).map(patch => patch.id).sort(), ['incomplete-state', 'known-state']);
   assert.deepEqual(result.unchangedLines, []);
   assert.ok(result.explanation.some(reason => (
-    reason.line === 'L1' && ['unknown-setup-tail-placement', 'initial-state-unknown'].includes(reason.code) && reason.taskId === 'incomplete-state'
+    reason.line === 'L1' && ['unknown-setup-tail-placement', 'initial-state-unknown', 'admitted-state-unrecorded'].includes(reason.code) && reason.taskId === 'incomplete-state'
   )));
   // Unknown signatures remain separate from known uncovered transitions.
   assert.ok(result.missingEdges.some(edge => (
@@ -1732,7 +1732,7 @@ test('setup-aware evaluators never freeze a line over a stale-signature line sta
   assert.deepEqual(result.unchangedLines, []);
   assert.ok(result.missingEdges.some(edge => edge.reason === 'signature-incompatible'));
   assert.ok(result.explanation.some(reason => (
-    reason.code === 'initial-state-unknown' && reason.taskId === 'signature-incompatible-blue'
+    reason.code === 'admitted-state-unrecorded' && reason.taskId === 'signature-incompatible-blue'
   )), 'the first order reports an unknown incoming setup rather than being frozen');
 });
 
@@ -2156,7 +2156,7 @@ test('setup-aware evaluators whole-line tail-place an explicitly incompatible sn
       && reason.message.includes('Tooling signature differs on this line')
     )));
     assert.ok(result.explanation.some(reason => (
-      reason.line === 'L1' && ['unknown-setup-tail-placement', 'initial-state-unknown'].includes(reason.code)
+      reason.line === 'L1' && ['unknown-setup-tail-placement', 'initial-state-unknown', 'admitted-state-unrecorded'].includes(reason.code)
       && reason.taskId === 'compatibility-disabled-blue'
     )), `${label} places L1's order at the tail with no per-order override diagnostic noise`);
   }
@@ -2369,7 +2369,7 @@ test('setup-aware evaluators proceed with a null initial state (never freeze) wh
     assert.deepEqual(result.unchangedLines, []);
     assert.ok(result.missingEdges.some(edge => edge.reason === 'initial-state-unknown'));
     assert.ok(result.explanation.some(reason => (
-      reason.code === 'initial-state-unknown' && reason.taskId === 'unknown-state-no-anchor-red'
+      reason.code === 'admitted-state-unrecorded' && reason.taskId === 'unknown-state-no-anchor-red'
     )), `${label} charges no incoming setup and reports it as unknown instead`);
   }
 });
@@ -3263,7 +3263,7 @@ test('placeUnknownTail orders the tail by policy tier first, then due date, acro
   assert.deepEqual(result.unchangedLines, []);
   for (const id of ['tail-order-a', 'tail-order-b', 'tail-order-c']) {
     assert.ok(result.explanation.some(reason => (
-      ['unknown-setup-tail-placement', 'initial-state-unknown'].includes(reason.code) && reason.taskId === id
+      ['unknown-setup-tail-placement', 'initial-state-unknown', 'admitted-state-unrecorded'].includes(reason.code) && reason.taskId === id
     )));
   }
 });
@@ -3483,10 +3483,10 @@ test('unknown initial state: the first order pays no incoming charge, and the se
     edge.predecessorOrderId === null && edge.reason === 'initial-state-unknown'
   )), 'the unknown incoming state is retained as a diagnostic');
   assert.ok(result.explanation.some(reason => (
-    reason.code === 'initial-state-unknown' && reason.taskId === 'chain-first'
+    reason.code === 'admitted-state-unrecorded' && reason.taskId === 'chain-first'
   )));
   assert.equal(result.explanation.some(reason => (
-    reason.code === 'initial-state-unknown' && reason.taskId === 'chain-second'
+    reason.code === 'admitted-state-unrecorded' && reason.taskId === 'chain-second'
   )), false, 'only the first order is charged an unknown incoming setup');
   assert.deepEqual(result.unchangedLines, []);
 });
@@ -4720,4 +4720,27 @@ test('Due Date finds September capacity for the three queued orders on machine 7
     assert.equal(result.dispositions.filter(d => d.status === 'needs_planning').length, 0);
     assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
   }
+});
+
+test('admission diagnostics distinguish an unrecorded line state from an uncovered matrix row', () => {
+  const rejected = /(?:unavailable|unknown|uncovered|infeasible|missing|disabled|fail)/i; // optimize-ui.mts summarizeCandidate
+  // Case 1: line state unrecorded (current: null) — first order admitted at zero.
+  const stateless = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([scheduledTask('n6-first', 1, 'RED', '2026-08-03T10:00')]),
+    dueDateBounds(setupTruth({ current: null, rows: [setupRow('GREEN', 'RED', 5)] })),
+  );
+  const stateReason = stateless.explanation.find(r => r.code === 'admitted-state-unrecorded' && r.taskId === 'n6-first');
+  assert.ok(stateReason, 'unknown incoming state gets its own admitted code');
+  assert.equal(rejected.test(`${stateReason.code} ${stateReason.message}`), false, 'must not be stamped rejected in the preview');
+  assert.equal(stateless.explanation.some(r => r.code === 'initial-state-unknown' && r.taskId === 'n6-first'), false);
+  assert.ok(stateless.missingEdges.some(e => e.reason === 'initial-state-unknown'), 'edge reason is unchanged');
+  // Case 2: both states known, no row — existing code still fires.
+  const uncovered = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([scheduledTask('n6-red', 1, 'RED', '2026-08-03T10:00')]),
+    dueDateBounds(setupTruth({ current: 'GREEN', rows: [setupRow('GREEN', 'BLUE', 5)] })),
+  );
+  const rowReason = uncovered.explanation.find(r => r.code === 'admitted-without-setup' && r.taskId === 'n6-red');
+  assert.ok(rowReason);
+  assert.equal(rejected.test(`${rowReason.code} ${rowReason.message}`), false);
+  assert.ok(uncovered.missingEdges.some(e => e.reason === 'scheduled-without-setup' && e.successorOrderId === 'n6-red'));
 });

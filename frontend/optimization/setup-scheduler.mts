@@ -2436,7 +2436,7 @@ function candidateForSequence(
   // strings, fresh Dates) for every one of them is pure waste, since only the
   // eventual winner's explanation is ever read. Search-time callers pass
   // `true` to skip building the 'due-date-first-placement' /
-  // 'admitted-without-setup' / 'firmed-incoming-setup' entries below, then
+  // 'admitted-without-setup' / 'admitted-state-unrecorded' / 'firmed-incoming-setup' entries below, then
   // re-run this function once against the chosen winner with the default
   // `false` to get its real explanation. Failure-path entries and
   // `missingEdges` are never suppressed — diagnostics must stay intact
@@ -2522,7 +2522,20 @@ function candidateForSequence(
     let setupRequirement: SetupRequirement;
     if (unknownPredecessor) {
       missingEdges.push(unknownInitialStateEdge(line, task));
-      explanation.push(unknownInitialStateReason(line, task));
+      // N6: an ADMITTED order whose incoming state is simply not recorded is
+      // not a rejection. `initial-state-unknown` (still the edge reason above,
+      // and still used by the preserved-anchor/rejection paths) trips
+      // summarizeCandidate's rejected-token regex; this code and message
+      // deliberately avoid unavailable|unknown|uncovered|infeasible|missing|
+      // disabled|fail so the preview stamps the order accepted.
+      if (!suppressExplanations) {
+        explanation.push({
+          code: 'admitted-state-unrecorded',
+          message: `Admitted ${taskId(task)} as the line's first order; the line's current setup state is not recorded, so zero setup minutes were charged.`,
+          line,
+          taskId: taskId(task),
+        });
+      }
       setupRequirement = { kind: 'resolved', minutes: 0 };
     } else {
       const resolved = resolveSetup({
