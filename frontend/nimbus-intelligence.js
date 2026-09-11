@@ -2115,6 +2115,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         COLOR:            t.COLOR            || live?.COLOR             || '',
         FORM_SIZE:        t.FORM_SIZE        || live?.FORM_SIZE         || '',
         FIRMED:           t.FIRMED           ?? live?.firmed           ?? false,
+        scheduleSegments: t.scheduleSegments,   // undefined on pre-field snapshots (unknown), null = unsplit
       };
     },
 
@@ -2126,23 +2127,47 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const added   = Object.keys(mapB).filter(id => !mapA[id]).map(id => mapB[id]);
       const removed = Object.keys(mapA).filter(id => !mapB[id]).map(id => mapA[id]);
       const moved   = [];
+      const isNum = v => typeof v === 'number' && Number.isFinite(v);
+      // undefined on either side = the snapshot predates the field: unknown, never "changed".
+      const sameSegments = (a, b) => {
+        if (a === undefined || b === undefined) return true;
+        if (a === null || b === null) return a === b;
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) if (a[i][0] !== b[i][0] || a[i][1] !== b[i][1]) return false;
+        return true;
+      };
       Object.keys(mapB).forEach(id => {
         if (!mapA[id]) return;
-        const delta       = (mapB[id].start_date || 0) - (mapA[id].start_date || 0);
-        const lineChanged = mapA[id].MACHINE !== mapB[id].MACHINE;
-        if (Math.abs(delta) > 0 || lineChanged) {
-          moved.push({
-            ...mapB[id],
-            delta,
-            lineFrom:    mapA[id].MACHINE,
-            lineTo:      mapB[id].MACHINE,
-            lineChanged,
-            newStart:    mapB[id].start_date,
-            oldStart:    mapA[id].start_date,
-          });
-        }
+        const A = mapA[id], B = mapB[id];
+        const startDelta   = isNum(A.start_date) && isNum(B.start_date) ? B.start_date - A.start_date : 0;
+        const endDelta     = isNum(A.end_date)   && isNum(B.end_date)   ? B.end_date   - A.end_date   : 0;
+        const startChanged = isNum(A.start_date) && isNum(B.start_date) ? startDelta !== 0 : A.start_date !== B.start_date;
+        const endChanged   = isNum(A.end_date)   && isNum(B.end_date)   ? endDelta   !== 0 : A.end_date   !== B.end_date;
+        const lineChanged  = A.MACHINE !== B.MACHINE;
+        const segmentsChanged = !sameSegments(A.scheduleSegments, B.scheduleSegments);
+        const kinds = [];
+        if (startChanged) kinds.push('start');
+        // A pure move shifts finish by the same amount as start; only a duration or
+        // finish-only change earns the 'finish' kind.
+        if (endChanged && endDelta !== startDelta) kinds.push('finish');
+        if (lineChanged) kinds.push('machine');
+        if (segmentsChanged) kinds.push('split');
+        if (!kinds.length) return;
+        moved.push({
+          ...B,
+          delta: startDelta,
+          startDelta, endDelta, segmentsChanged, kinds,
+          lineFrom:    A.MACHINE,
+          lineTo:      B.MACHINE,
+          lineChanged,
+          newStart:    B.start_date,
+          oldStart:    A.start_date,
+          newEnd:      B.end_date,
+          oldEnd:      A.end_date,
+        });
       });
-      moved.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+      const magnitude = m => Math.max(Math.abs(m.startDelta), Math.abs(m.endDelta));
+      moved.sort((a, b) => magnitude(b) - magnitude(a));
 
       // Line-level summary
       const lineImpact = {};
