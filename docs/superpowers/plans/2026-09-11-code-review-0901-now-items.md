@@ -71,7 +71,7 @@ Recommended order for a single executor: **N2 → N3 → N1 → N4 → N7 → N5
 - Consumes: `_apply_task_date_updates(items, allowed_plants=None, *, atomic_optimizer=False) -> dict` (unchanged); `_log_event(level, category, msg, **ctx)` from `backend.admin_ops.logbuffer` (request id auto-attached).
 - Produces: `POST /tasks/bulk_update` never forwards `force=True`. `_apply_task_date_updates` emits one `warn` `_log_event` with `event="forced_write"` whenever a non-atomic batch contains forced items.
 
-- [ ] **Step 1: Write the two failing tests** (append to `tests/test_task_response_models.py`)
+- [x] **Step 1: Write the two failing tests** (append to `tests/test_task_response_models.py`)
 
 ```python
 from backend.scheduling import routes as scheduling_routes
@@ -124,14 +124,14 @@ def test_apply_task_date_updates_logs_a_forced_non_atomic_write(monkeypatch):
     assert forced[0][3]["ids"] == ["abc123"]
 ```
 
-- [ ] **Step 2: Run to confirm they fail**
+- [x] **Step 2: Run to confirm they fail**
 
 ```powershell
 $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python -m pytest tests/test_task_response_models.py -q -k "force"
 ```
 Expected: 2 failed.
 
-- [ ] **Step 3: Strip `force` in the alias route** (`routes.py:491-497`, replace the docstring and first line of the body)
+- [x] **Step 3: Strip `force` in the alias route** (`routes.py:491-497`, replace the docstring and first line of the body)
 
 ```python
     """
@@ -148,7 +148,7 @@ Expected: 2 failed.
     res = _apply_task_date_updates(stripped, allowed_plants=allowed_plants)
 ```
 
-- [ ] **Step 4: Log forced non-atomic writes** (in `_apply_task_date_updates`, immediately before `if atomic_optimizer and invalid:` at `:366`)
+- [x] **Step 4: Log forced non-atomic writes** (in `_apply_task_date_updates`, immediately before `if atomic_optimizer and invalid:` at `:366`)
 
 ```python
     forced_ids = [it["id"] for it in norm if it.get("force")]
@@ -169,7 +169,7 @@ Rewrite the docstring sentence at `:283-285`:
     which is logged as a warn `forced_write` event. /tasks/bulk_update strips it.
 ```
 
-- [ ] **Step 5: Fix the stale docs**
+- [x] **Step 5: Fix the stale docs**
 
 `backend/scheduling/models.py:184-187`, replace the concurrency paragraph:
 
@@ -195,14 +195,14 @@ Same file, "Tests" section, replace the last bullet:
 - `tests/test_planning_exceptions.py` and `tests/test_task_response_models.py` import `backend.scheduling.models`/`backend.scheduling.routes` directly; older files go through `brain` (back-compat re-exports) or a live `TestClient`.
 ```
 
-- [ ] **Step 6: Run the scoped tests**
+- [x] **Step 6: Run the scoped tests**
 
 ```powershell
 $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python -m pytest tests/test_task_response_models.py tests/test_planning_exceptions.py tests/test_to_pydt.py -q
 ```
 Expected: all pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add backend/scheduling/routes.py backend/scheduling/models.py backend/scheduling/CLAUDE.md tests/test_task_response_models.py
@@ -225,14 +225,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Consumes: `Config.CONCURRENCY_CHECK` (`foundation.mts:143`), `ErrorLog.warn(scope, msg)`, `Util.t(key)` — all already destructured in `app.js:273`.
 - Produces: `#concurrency-banner` element, body class `concurrency-off`, locale key `ui.concurrency_off_banner`.
 
-- [ ] **Step 1: Add the banner slot** (`frontend/index.html`, after line 2944)
+- [x] **Step 1: Add the banner slot** (`frontend/index.html`, after line 2944)
 
 ```html
 <!-- Last-write-wins warning (shown by app.js _bootMain when Config.CONCURRENCY_CHECK is false) -->
 <div id="concurrency-banner" hidden></div>
 ```
 
-- [ ] **Step 2: Style it** (`frontend/styles.css`, after line 2473)
+- [x] **Step 2: Style it** (`frontend/styles.css`, after line 2473)
 
 ```css
 /* Concurrency-guard-off banner — same band as #sandbox-banner (z 450) */
@@ -251,7 +251,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 .concurrency-off .alert-drawer { margin-top: 34px; }
 ```
 
-- [ ] **Step 3: Show it at boot** (`frontend/app.js`, after `SessionUIAdapter._applyGates();` at line 446)
+- [x] **Step 3: Show it at boot** (`frontend/app.js`, after `SessionUIAdapter._applyGates();` at line 446)
 
 ```js
     // N2: Config.CONCURRENCY_CHECK=false makes every manual save force:true
@@ -269,7 +269,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     }
 ```
 
-- [ ] **Step 4: Locale keys** (all five files, next to `'ui.what_if_title'`)
+- [x] **Step 4: Locale keys** (all five files, next to `'ui.what_if_title'`)
 
 ```js
 // en.js
@@ -284,14 +284,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   'ui.concurrency_off_banner': '⚠ Proteção de concorrência DESLIGADA — salvar sobrescreve alterações de outros planejadores sem aviso (Config.CONCURRENCY_CHECK)',
 ```
 
-- [ ] **Step 5: Lint, legacy-surface pin, manual check**
+- [x] **Step 5: Lint, legacy-surface pin, manual check**
 
 ```bash
 npm run lint && npm run check:legacy-surface && node --test tests/modules/locale-completeness.test.mjs
 ```
 Expected: clean. Manual: set `CONCURRENCY_CHECK: false` in `foundation.mts:143`, `npm run build`, load the app, confirm banner + ErrorLog badge; revert and rebuild.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/app.js frontend/index.html frontend/styles.css frontend/locales/
@@ -316,7 +316,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Produces: `update_task_dates_bulk(..., *, atomic_optimizer=False, strict_conflicts=False)`; result dict gains `"conflicts": list[dict]`; strict rollback returns `{"status": "error", "error_code": "schedule.conflicts", "cause": ..., "conflicts": [...]}`.
 - Produces: Pydantic `ScheduleConflict(machine: str, order_a: str, order_b: str, overlap_minutes: float)`; `BulkUpdateResult.conflicts` and `TaskUpdateResult.conflicts` default `[]`; `TasksUpdatePayload.strict_conflicts: bool = False`.
 
-- [ ] **Step 1: Write the failing pure-logic test** (append to `tests/test_task_response_models.py`; `datetime` import needed)
+- [x] **Step 1: Write the failing pure-logic test** (append to `tests/test_task_response_models.py`; `datetime` import needed)
 
 ```python
 def test_detect_interval_conflicts_reports_strict_overlaps_only():
@@ -345,14 +345,14 @@ def test_detect_interval_conflicts_reports_strict_overlaps_only():
     assert all("e" not in k for k in keyed)
 ```
 
-- [ ] **Step 2: Run to confirm it fails**
+- [x] **Step 2: Run to confirm it fails**
 
 ```powershell
 $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python -m pytest tests/test_task_response_models.py -q -k "detect_interval"
 ```
 Expected: FAIL, `AttributeError: module 'db' has no attribute '_detect_interval_conflicts'`.
 
-- [ ] **Step 3: Add the pure helper to `db.py`** (directly above `def update_task_dates_bulk`)
+- [x] **Step 3: Add the pure helper to `db.py`** (directly above `def update_task_dates_bulk`)
 
 ```python
 def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> list[dict]:
@@ -389,9 +389,9 @@ def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> lis
             for (m, a, b), v in sorted(totals.items())]
 ```
 
-- [ ] **Step 4: Run the pure test** — same command as Step 2. Expected: PASS.
+- [x] **Step 4: Run the pure test** — same command as Step 2. Expected: PASS.
 
-- [ ] **Step 5: Fetch `o.machine` under the lock**
+- [x] **Step 5: Fetch `o.machine` under the lock**
 
 `db.py:932-938`: add `o.machine` after `o.plant` in the SELECT list. `db.py:947-953`:
 
@@ -414,7 +414,7 @@ Update the two existing fake-cursor tests (`tests/test_task_response_models.py:2
     eff_rows = [("seg-override", None, None, 1.0, 100, 0, "PLANT-B", "L1")]
 ```
 
-- [ ] **Step 6: Signature flag, pre-commit scan, strict rollback**
+- [x] **Step 6: Signature flag, pre-commit scan, strict rollback**
 
 `db.py:888-889`:
 
@@ -503,7 +503,7 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
 
 > Verified 2026-09-11: `_SCHEDULE_SEGMENTS_LATERAL_SQL` (`db.py:212-213`) emits segment objects keyed `start_date` / `end_date`, matching the loop above.
 
-- [ ] **Step 7: Fake-cursor tests for the wired scan** (append to `tests/test_task_response_models.py`; adapt the dispatch to how `_FakeSegmentCursor` at `:175-210` actually stores pending results)
+- [x] **Step 7: Fake-cursor tests for the wired scan** (append to `tests/test_task_response_models.py`; adapt the dispatch to how `_FakeSegmentCursor` at `:175-210` actually stores pending results)
 
 ```python
 class _FakeConflictCursor(_FakeSegmentCursor):
@@ -560,7 +560,7 @@ def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_opt
 
 Run with `-k "conflicts"`. Expected: PASS after Steps 5–6.
 
-- [ ] **Step 8: Response models and route pass-through**
+- [x] **Step 8: Response models and route pass-through**
 
 `backend/scheduling/models.py`, above `TaskUpdateResult`:
 
@@ -606,7 +606,7 @@ Add `conflicts: list[ScheduleConflict] = Field(default_factory=list)` to `TaskUp
 ```
   and `"conflicts": conflicts,` in the `out` dict. Same in `bulk_update` (`res.get("conflicts", [])`, same info log minus `strict`). `update_task` (`:415-416`): add `"conflicts": res.get("conflicts", [])`.
 
-- [ ] **Step 9: Regenerate OpenAPI types; run the Python slice**
+- [x] **Step 9: Regenerate OpenAPI types; run the Python slice**
 
 ```powershell
 $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python -m pytest tests/test_task_response_models.py tests/test_planning_exceptions.py -q
@@ -615,7 +615,7 @@ git diff --stat frontend/types/api-generated.d.mts
 ```
 Expected: tests pass; diff shows `ScheduleConflict`, `conflicts` on both result schemas, `strict_conflicts` on `TasksUpdatePayload`.
 
-- [ ] **Step 10: Postgres-gated end-to-end case** (append to `TestUpdateTaskDatesBulkXminConflict` in `tests/test_task_concurrency.py`; extend `_seed` with a second order `self.oid2 = db_.make_id(self.ORDER + "_B", self.MATERIAL)` on the same `MACHINE`, `basic_start_date = self.start + 6h`, `basic_finish_date = self.start + 10h`, deleted in teardown)
+- [x] **Step 10: Postgres-gated end-to-end case** (append to `TestUpdateTaskDatesBulkXminConflict` in `tests/test_task_concurrency.py`; extend `_seed` with a second order `self.oid2 = db_.make_id(self.ORDER + "_B", self.MATERIAL)` on the same `MACHINE`, `basic_start_date = self.start + 6h`, `basic_finish_date = self.start + 10h`, deleted in teardown)
 
 ```python
     def test_saving_into_an_occupied_slot_reports_the_conflict_and_strict_atomic_rolls_back(self, pg):
@@ -642,7 +642,7 @@ Expected: tests pass; diff shows `ScheduleConflict`, `conflicts` on both result 
 
 Runs only with a local Postgres and `NIMBUS_TEST_DB=1`; auto-skipped otherwise. Do not point `.env` at Azure to run it.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add db.py backend/scheduling/models.py backend/scheduling/routes.py frontend/types/api-generated.d.mts tests/test_task_response_models.py tests/test_task_concurrency.py
@@ -666,7 +666,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Consumes: `result.conflicts` (regenerated type from N3a), `Alerts.scheduleRecomputeLines(lines: Set<string>)`.
 - Produces: Store event `{ type: 'schedule:conflicts', lines: string[], source: 'persistence' }`; locale keys `toast.save_conflicts`, `toast.optimizer_conflicts` (both take `{{count}}`).
 
-- [ ] **Step 1: Write the failing test** (append to `tests/modules/scheduling/persistence.test.mjs`; add `import { Toast } from '../../../frontend/platform/foundation.mjs';`; check `Store.subscribe`'s return/unsubscribe mechanism in `store.mts` first)
+- [x] **Step 1: Write the failing test** (append to `tests/modules/scheduling/persistence.test.mjs`; add `import { Toast } from '../../../frontend/platform/foundation.mjs';`; check `Store.subscribe`'s return/unsubscribe mechanism in `store.mts` first)
 
 ```js
 test('a save response carrying conflicts toasts a count and emits schedule:conflicts for the machines', async () => {
@@ -699,20 +699,20 @@ test('a save response carrying conflicts toasts a count and emits schedule:confl
 });
 ```
 
-- [ ] **Step 2: Run to confirm it fails**
+- [x] **Step 2: Run to confirm it fails**
 
 ```bash
 npm run build && node --test tests/modules/scheduling/persistence.test.mjs
 ```
 Expected: new test fails (`events.length` is 0).
 
-- [ ] **Step 3: Add the event type** (`frontend/platform/types.mts:452`)
+- [x] **Step 3: Add the event type** (`frontend/platform/types.mts:452`)
 
 ```ts
   | 'sandbox:reverted' | 'schedule:hydrated' | 'schedule:conflicts' | 'session:changed'
 ```
 
-- [ ] **Step 4: Handle conflicts in `saveAll`**
+- [x] **Step 4: Handle conflicts in `saveAll`**
 
 Inside the atomic-rejection branch (`persistence.mts:1358-1363`), replace the `Toast.show(...)` line:
 
@@ -740,7 +740,7 @@ After the `if (stale.length) { ... }` block (`:1403-1407`):
         }
 ```
 
-- [ ] **Step 5: Subscribe in services** (`frontend/insights/services.mts:542-544`, replace the existing subscriber body)
+- [x] **Step 5: Subscribe in services** (`frontend/insights/services.mts:542-544`, replace the existing subscriber body)
 
 ```ts
 Store.subscribe(evt => {
@@ -753,7 +753,7 @@ Store.subscribe(evt => {
 }, 'insights-services.hydrated');
 ```
 
-- [ ] **Step 6: Locale keys** (all five files, next to `'toast.concurrent_edit_conflict'`)
+- [x] **Step 6: Locale keys** (all five files, next to `'toast.concurrent_edit_conflict'`)
 
 ```js
 // en.js
@@ -773,14 +773,14 @@ Store.subscribe(evt => {
   'toast.optimizer_conflicts': 'Alterações do otimizador não foram salvas: {{count}} conflito(s) de máquina detectado(s). Execute o otimizador novamente.',
 ```
 
-- [ ] **Step 7: Build, test, lint**
+- [x] **Step 7: Build, test, lint**
 
 ```bash
 npm run build && node --test tests/modules/scheduling/persistence.test.mjs tests/modules/locale-completeness.test.mjs && npm run typecheck && npm run lint
 ```
 Expected: all pass; `typecheck` confirms `result.conflicts` resolves from the regenerated schema.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add frontend/platform/types.mts frontend/scheduling/persistence.mts frontend/insights/services.mts frontend/locales/ tests/modules/scheduling/persistence.test.mjs
@@ -803,7 +803,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: snapshot task field `scheduleSegments: Array<[startMs, endMs]> | null` (`null` = continuous order; key absent = legacy snapshot).
 
-- [ ] **Step 1: Add a module-scope normalizer above `const TimeMachine = {`** (a bare function, not a `TimeMachine._x` property)
+- [x] **Step 1: Add a module-scope normalizer above `const TimeMachine = {`** (a bare function, not a `TimeMachine._x` property)
 
 ```js
   // Snapshot/diff encoding of a split order: sorted [startMs, endMs] pairs, or
@@ -822,21 +822,21 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 > Executor check: confirm the live segment key names on `NimbusTask.scheduleSegments` in `frontend/platform/types.mts` and keep only the matching accessor.
 
-- [ ] **Step 2: Persist it in `TimeMachine.snapshot`** — after `FIRMED: !!t.firmed,` at `:1285`:
+- [x] **Step 2: Persist it in `TimeMachine.snapshot`** — after `FIRMED: !!t.firmed,` at `:1285`:
 
 ```js
           scheduleSegments: snapshotSegments(t),
 ```
 
-- [ ] **Step 3: Mirror it on the "current" side in `runDiff`** — after `FIRMED: !!t.firmed,` at `:2293`, the identical line.
+- [x] **Step 3: Mirror it on the "current" side in `runDiff`** — after `FIRMED: !!t.firmed,` at `:2293`, the identical line.
 
-- [ ] **Step 4: Lint and surface check**
+- [x] **Step 4: Lint and surface check**
 
 ```bash
 npm run lint && npm run check:legacy-surface
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/nimbus-intelligence.js
@@ -857,7 +857,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Consumes: snapshot rows from N1a.
 - Produces: each `moved` row gains `startDelta`, `endDelta`, `segmentsChanged`, `kinds: Array<'start'|'finish'|'machine'|'split'>`, `oldEnd`, `newEnd`; `delta` kept (= `startDelta`) for the renderer.
 
-- [ ] **Step 1: Write the failing test** at `tests/modules/insights/diff.test.mjs`
+- [x] **Step 1: Write the failing test** at `tests/modules/insights/diff.test.mjs`
 
 ```js
 // Pure-function tests for the classic-script Diff module. The VM harness runs
@@ -927,20 +927,20 @@ test('Diff.compute keeps start and machine detection unchanged and sorts by the 
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 npm run build && node --test tests/modules/insights/diff.test.mjs
 ```
 Expected: FAIL — `kinds` undefined; split/finish cases report 0 moved.
 
-- [ ] **Step 3: Carry `scheduleSegments` through `_enrich`** — after `FIRMED:` at `:2103`:
+- [x] **Step 3: Carry `scheduleSegments` through `_enrich`** — after `FIRMED:` at `:2103`:
 
 ```js
         scheduleSegments: t.scheduleSegments,   // undefined on pre-field snapshots (unknown), null = unsplit
 ```
 
-- [ ] **Step 4: Replace the body of `compute` from `const moved = [];` through `moved.sort(...)` (`:2114-2131`)**
+- [x] **Step 4: Replace the body of `compute` from `const moved = [];` through `moved.sort(...)` (`:2114-2131`)**
 
 ```js
       const moved   = [];
@@ -989,9 +989,9 @@ Expected: FAIL — `kinds` undefined; split/finish cases report 0 moved.
 
 Leave the `lineImpact` block (`:2133-2142`) and return untouched.
 
-- [ ] **Step 5: Run the test** — `node --test tests/modules/insights/diff.test.mjs`. Expected: 5 passing.
+- [x] **Step 5: Run the test** — `node --test tests/modules/insights/diff.test.mjs`. Expected: 5 passing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/nimbus-intelligence.js tests/modules/insights/diff.test.mjs
@@ -1011,7 +1011,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `m.kinds`, `m.endDelta`, `m.startDelta` from N1b.
 
-- [ ] **Step 1: Locale keys** in each of the five files, next to `'ui.hint_close'` (`en.js:349`):
+- [x] **Step 1: Locale keys** in each of the five files, next to `'ui.hint_close'` (`en.js:349`):
 
 | key | en | de | es | fr | pt |
 |---|---|---|---|---|---|
@@ -1021,7 +1021,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 | `ui.diff_kind_split` | Split | Geteilt | Dividida | Fractionnée | Dividida |
 | `ui.diff_finish_delta` | finish {{delta}} | Ende {{delta}} | fin {{delta}} | fin {{delta}} | fim {{delta}} |
 
-- [ ] **Step 2: Badge CSS** after `.ni-diff-stat.removed ...` (`:288`):
+- [x] **Step 2: Badge CSS** after `.ni-diff-stat.removed ...` (`:288`):
 
 ```css
 .ni-diff-kind { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em;
@@ -1030,7 +1030,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 .ni-diff-finish { font-size:11px; color:var(--fg-mute); margin-left:6px; }
 ```
 
-- [ ] **Step 3: Extend `rowMoved`** — replace `:2169-2188`:
+- [x] **Step 3: Extend `rowMoved`** — replace `:2169-2188`:
 
 ```js
       const rowMoved = d.moved.map(m => {
@@ -1060,15 +1060,15 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
       }).join('');
 ```
 
-- [ ] **Step 4: Lint, surface, locale gate**
+- [x] **Step 4: Lint, surface, locale gate**
 
 ```bash
 npm run lint && npm run check:legacy-surface && node --test tests/modules/locale-completeness.test.mjs tests/modules/insights/diff.test.mjs
 ```
 
-- [ ] **Step 5: Manual check** — Cmd+K → Compare Schedules against a snapshot where one order's run time was edited: row shows a FINISH badge and `finish +2.0h` with no start arrow.
+- [x] **Step 5: Manual check** — Cmd+K → Compare Schedules against a snapshot where one order's run time was edited: row shows a FINISH badge and `finish +2.0h` with no start arrow.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/nimbus-intelligence.js frontend/locales/*.js
@@ -1090,7 +1090,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces alert shape additions: `type:'tool-conflict'`, `peerId?: string` (also set on `overlap`), `msgKey?: string`, `msgVars?: Record<string,string>`. Alert id `` `toolc-${prevId}|${curId}` `` (`|` separator because task ids may contain `-`). `taskId` is the later order; `line` is its line.
 
-- [ ] **Step 1: Write the failing tests** — append to `tests/js/compute-core.test.js`
+- [x] **Step 1: Write the failing tests** — append to `tests/js/compute-core.test.js`
 
 ```js
 test('computeAlerts raises one tool-conflict for the same PRT_01 on two lines at once', () => {
@@ -1151,9 +1151,9 @@ test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure** — `node --test tests/js/compute-core.test.js`. Expected: 4 new tests FAIL.
+- [x] **Step 2: Run to verify failure** — `node --test tests/js/compute-core.test.js`. Expected: 4 new tests FAIL.
 
-- [ ] **Step 3: Add `peerId` to the overlap emission** at `:375-380`
+- [x] **Step 3: Add `peerId` to the overlap emission** at `:375-380`
 
 ```js
           alerts.push({
@@ -1164,7 +1164,7 @@ test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
           });
 ```
 
-- [ ] **Step 4: Insert rule 1b** immediately after rule 1's closing `}` (`:383`), before `/* 2. OVERLOAD / CLOSED */`
+- [x] **Step 4: Insert rule 1b** immediately after rule 1's closing `}` (`:383`), before `/* 2. OVERLOAD / CLOSED */`
 
 ```js
     /* 1b. TOOL CONFLICT — one physical tool (PRT_01 / PRT_02 identify a unique tool,
@@ -1220,9 +1220,9 @@ test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
     }
 ```
 
-- [ ] **Step 5: Run tests** — `node --test tests/js/compute-core.test.js`. Expected: all pass, including the pre-existing `ovl-a-b` dismissal pin.
+- [x] **Step 5: Run tests** — `node --test tests/js/compute-core.test.js`. Expected: all pass, including the pre-existing `ovl-a-b` dismissal pin.
 
-- [ ] **Step 6: Update the ambient types** in `frontend/nimbus-compute-core.d.ts`
+- [x] **Step 6: Update the ambient types** in `frontend/nimbus-compute-core.d.ts`
 
 ```ts
   interface NimbusAlert {
@@ -1248,7 +1248,7 @@ test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
 ```
 Add to the local `NimbusTask` (`:39-55`): `PRT_01?: string; PRT_02?: string; PRODUCTION_ORDER?: string; ORDER?: string;`.
 
-- [ ] **Step 7: Update `frontend/platform/types.mts:421-424`**
+- [x] **Step 7: Update `frontend/platform/types.mts:421-424`**
 
 ```ts
 export type AlertType =
@@ -1259,9 +1259,9 @@ export type AlertType =
   | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown';
 ```
 
-- [ ] **Step 8: Typecheck and lint** — `npm run typecheck && npm run lint`.
+- [x] **Step 8: Typecheck and lint** — `npm run typecheck && npm run lint`.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add frontend/nimbus-compute-core.js frontend/nimbus-compute-core.d.ts frontend/platform/types.mts tests/js/compute-core.test.js
@@ -1282,14 +1282,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `a.msgKey`, `a.msgVars`, `a.peerId`, `type:'tool-conflict'` from N4a.
 
-- [ ] **Step 1: Locale keys** (all five files, near `'tip.fix_alert'`, `en.js:796`)
+- [x] **Step 1: Locale keys** (all five files, near `'tip.fix_alert'`, `en.js:796`)
 
 | key | en | de | es | fr | pt |
 |---|---|---|---|---|---|
 | `alert.tool_conflict` | Tool "{{tool}}" is needed by "{{a}}" on {{lineA}} and "{{b}}" on {{lineB}} at the same time. | Werkzeug "{{tool}}" wird gleichzeitig von "{{a}}" auf {{lineA}} und "{{b}}" auf {{lineB}} benötigt. | La herramienta "{{tool}}" la necesitan "{{a}}" en {{lineA}} y "{{b}}" en {{lineB}} al mismo tiempo. | L'outil "{{tool}}" est requis en même temps par "{{a}}" sur {{lineA}} et "{{b}}" sur {{lineB}}. | A ferramenta "{{tool}}" é necessária ao mesmo tempo por "{{a}}" em {{lineA}} e "{{b}}" em {{lineB}}. |
 | `ui.alert_headline_tool_conflict` | Shared tool conflict | Werkzeugkonflikt | Conflicto de herramienta compartida | Conflit d'outil partagé | Conflito de ferramenta compartilhada |
 
-- [ ] **Step 2: `_renderAlertRow`** — change `:1421` and `:1425`
+- [x] **Step 2: `_renderAlertRow`** — change `:1421` and `:1425`
 
 ```ts
     const fixable  = ['overlap', 'blackout', 'overload', 'tool-conflict'].includes(a.type);
@@ -1299,7 +1299,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
       `<span class="alert-msg">${Util.escapeHtml(msg)}</span>` +
 ```
 
-- [ ] **Step 3: `showForCell`** — replace the overlap branch at `:1278-1285`
+- [x] **Step 3: `showForCell`** — replace the overlap branch at `:1278-1285`
 
 ```ts
       } else if (a.type === 'overlap' || a.type === 'tool-conflict') {
@@ -1314,7 +1314,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
         }
 ```
 
-- [ ] **Step 4: `applyFix`** — change `:398` and `:405-412`
+- [x] **Step 4: `applyFix`** — change `:398` and `:405-412`
 
 ```ts
     if (a.type === 'overlap' || a.type === 'blackout' || a.type === 'tool-conflict') {
@@ -1330,15 +1330,15 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 The remainder (calendar placement on `line`, `autoReflow`, undo, dismiss, toast) is unchanged: the later order slides right on its own line.
 
-- [ ] **Step 5: Build, typecheck, run insights tests**
+- [x] **Step 5: Build, typecheck, run insights tests**
 
 ```bash
 npm run build && npm run typecheck && node --test tests/modules/insights/*.test.mjs tests/modules/locale-completeness.test.mjs
 ```
 
-- [ ] **Step 6: Manual check** — two orders sharing a PRT_01 value on different lines, overlapping: one red alert in the drawer with the localized sentence and a Fix button; Fix moves the later order to the peer's end on its own line.
+- [x] **Step 6: Manual check** — two orders sharing a PRT_01 value on different lines, overlapping: one red alert in the drawer with the localized sentence and a Fix button; Fix moves the later order to the peer's end on its own line.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add frontend/insights/insights-ui.mts frontend/insights/services.mts frontend/locales/*.js
@@ -1355,7 +1355,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `frontend/scheduling/orders.mts:467-473`, `:798`, `:959`
 - Modify: `frontend/locales/*.js`
 
-- [ ] **Step 1: Locale keys** (all five; `col.*` near `en.js:189`, `ui.*` near `:364-372`)
+- [x] **Step 1: Locale keys** (all five; `col.*` near `en.js:189`, `ui.*` near `:364-372`)
 
 | key | en | de | es | fr | pt |
 |---|---|---|---|---|---|
@@ -1366,7 +1366,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 | `ui.planning_status_scheduled` | Scheduled | Eingeplant | Programada | Planifiée | Programada |
 | `ui.status_desc_needs_planning` | unplaced orders awaiting a legal schedule | nicht platzierte Aufträge ohne gültigen Termin | pedidos sin ubicar a la espera de un programa válido | ordres non placés en attente d'un créneau valide | ordens não posicionadas aguardando programação válida |
 
-- [ ] **Step 2: Column defs** (`:467-471`)
+- [x] **Step 2: Column defs** (`:467-471`)
 
 ```ts
         { headerName: Util.t('col.planning_status'), field: 'planning_status', minWidth: 150, editable: false,
@@ -1377,7 +1377,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
         { headerName: Util.t('col.planning_window'), colId: 'planning_window', minWidth: 260, editable: false,
 ```
 
-- [ ] **Step 3: Dropdown entry** (`:798`) and chip label (`:959`)
+- [x] **Step 3: Dropdown entry** (`:798`) and chip label (`:959`)
 
 ```ts
       { v: 'needs_planning', k: Util.t('ui.needs_planning'), d: Util.t('ui.status_desc_needs_planning') },
@@ -1386,13 +1386,13 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     const STATUS_LABEL: Record<TableStatusFilter, string> = { needs_planning: Util.t('ui.needs_planning'), late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
 ```
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 ```bash
 npm run build && npm run typecheck && node --test tests/modules/scheduling/orders.test.mjs tests/modules/locale-completeness.test.mjs
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/scheduling/orders.mts frontend/locales/*.js
@@ -1412,7 +1412,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `Table._applyChipFilter({ status: 'needs_planning' })` (`orders.mts:924-935`, exists) and `NIMBUS.App.goto('table')`.
 
-- [ ] **Step 1: Locale keys** (near `kpi.*`, `en.js:1314`)
+- [x] **Step 1: Locale keys** (near `kpi.*`, `en.js:1314`)
 
 | key | en | de | es | fr | pt |
 |---|---|---|---|---|---|
@@ -1420,13 +1420,13 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 | `kpi.needs_planning_demand` | {{h}} h unplaced demand | {{h}} h nicht platzierter Bedarf | {{h}} h de demanda sin ubicar | {{h}} h de demande non placée | {{h}} h de demanda não posicionada |
 | `tip.tile_needs_planning` | Open Orders table filtered to orders awaiting a legal schedule | Auftragstabelle gefiltert auf Aufträge ohne gültigen Termin öffnen | Abrir la tabla de pedidos filtrada por pedidos sin programa válido | Ouvrir la table des ordres filtrée sur les ordres à planifier | Abrir a tabela de ordens filtrada por ordens a planejar |
 
-- [ ] **Step 2: Extend the action union** (`:46`)
+- [x] **Step 2: Extend the action union** (`:46`)
 
 ```ts
 type DashboardTileAction = 'orders-today' | 'alerts-today' | 'late' | 'headroom' | 'needs-planning';
 ```
 
-- [ ] **Step 3: Replace the queued suffix with a conditional tile.** Change `:411-414`:
+- [x] **Step 3: Replace the queued suffix with a conditional tile.** Change `:411-414`:
 
 ```ts
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
@@ -1446,7 +1446,7 @@ After the `headroom` tile (`:428`), before the closing `];`:
       }] : []),
 ```
 
-- [ ] **Step 4: Tooltip and click** — add cases
+- [x] **Step 4: Tooltip and click** — add cases
 
 ```ts
       case 'needs-planning': return Util.t('tip.tile_needs_planning');
@@ -1465,15 +1465,15 @@ After the `headroom` tile (`:428`), before the closing `];`:
 
 > Executor check: confirm the Orders tab id used by `App.goto` (grep `goto('table')` / `gotoTable` in `insights-ui.mts` and `application-shell.mts`) and reuse whatever the lateness tile's click handler calls.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 npm run build && npm run typecheck && node --test tests/modules/insights/*.test.mjs tests/modules/locale-completeness.test.mjs && npm run check:legacy-surface
 ```
 
-- [ ] **Step 6: Manual check** — with at least one `needs_planning` order in the selected plant, the Dashboard shows a red fifth tile; clicking it lands on the Orders tab with the status chip set to Needs Planning and the reason column visible. Selecting a row opens the Inspector (two clicks total). With zero queued orders the row is back to four tiles.
+- [x] **Step 6: Manual check** — with at least one `needs_planning` order in the selected plant, the Dashboard shows a red fifth tile; clicking it lands on the Orders tab with the status chip set to Needs Planning and the reason column visible. Selecting a row opens the Inspector (two clicks total). With zero queued orders the row is back to four tiles.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add frontend/insights/insights-ui.mts frontend/locales/*.js
@@ -1491,7 +1491,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `frontend/locales/*.js`
 - Modify: `Code_Review_09_01.md:217`, `:221`, N7 section
 
-- [ ] **Step 1: Locale keys** (near `cmdp.label_compare_schedules`, `en.js:1743`; toast near `toast.snapshot_saved`)
+- [x] **Step 1: Locale keys** (near `cmdp.label_compare_schedules`, `en.js:1743`; toast near `toast.snapshot_saved`)
 
 | key | en | de | es | fr | pt |
 |---|---|---|---|---|---|
@@ -1499,24 +1499,24 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 | `cmdp.sub_ripple_preview` | Hold Alt and hover an order to outline the next orders on its line | Alt halten und über einen Auftrag fahren, um die nächsten Aufträge der Linie zu markieren | Mantén Alt y pasa sobre un pedido para resaltar los siguientes de su línea | Maintenez Alt et survolez un ordre pour encadrer les suivants sur sa ligne | Segure Alt e passe sobre uma ordem para destacar as próximas na linha |
 | `toast.ripple_howto` | Ripple preview: hold Alt and hover an order on the Gantt. | Ripple-Vorschau: Alt halten und über einen Auftrag im Gantt fahren. | Vista previa de arrastre: mantén Alt y pasa sobre un pedido en el Gantt. | Aperçu de répercussion : maintenez Alt et survolez un ordre dans le Gantt. | Prévia de repercussão: segure Alt e passe sobre uma ordem no Gantt. |
 
-- [ ] **Step 2: Palette entry** — after the Compare Schedules action (`:958`)
+- [x] **Step 2: Palette entry** — after the Compare Schedules action (`:958`)
 
 ```js
         { type:'action', label:t('cmdp.label_ripple_preview'), sub:t('cmdp.sub_ripple_preview'), icon:'≋',
           run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); Toast.show(t('toast.ripple_howto'), 'info', 4000); } },
 ```
 
-- [ ] **Step 3: Correct the review doc.** In `Code_Review_09_01.md:217` replace "the Ripple Preview overlay is fully built but permanently disabled" with "the Ripple Preview overlay is fully built and live but has zero affordance (Alt-hover only; `docs/SAP_APO_Opportunities.md` §3.1 item 3 has this right)". Also replace "notes that reason codes shipped, the `needs_planning` queue exists in data" with "predates `needs_planning` (2026-08-22) and describes the deallocation pool it later became". Replace step 2 (`:221`) with: "Ripple Preview decision (2026-09-11): keep the code; add a searchable Cmd+K entry with a how-to toast. It is a shallow same-line highlight of the next five orders, not a computed ripple; a real one waits on demand."
+- [x] **Step 3: Correct the review doc.** In `Code_Review_09_01.md:217` replace "the Ripple Preview overlay is fully built but permanently disabled" with "the Ripple Preview overlay is fully built and live but has zero affordance (Alt-hover only; `docs/SAP_APO_Opportunities.md` §3.1 item 3 has this right)". Also replace "notes that reason codes shipped, the `needs_planning` queue exists in data" with "predates `needs_planning` (2026-08-22) and describes the deallocation pool it later became". Replace step 2 (`:221`) with: "Ripple Preview decision (2026-09-11): keep the code; add a searchable Cmd+K entry with a how-to toast. It is a shallow same-line highlight of the next five orders, not a computed ripple; a real one waits on demand."
 
-- [ ] **Step 4: Record the deferral.** Append to N7 in `Code_Review_09_01.md`: "Step 3 (before/after affected-orders table) stays deferred until N1 and N3 have shipped and been used; not planned in this cycle."
+- [x] **Step 4: Record the deferral.** Append to N7 in `Code_Review_09_01.md`: "Step 3 (before/after affected-orders table) stays deferred until N1 and N3 have shipped and been used; not planned in this cycle."
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 npm run lint && npm run check:legacy-surface && node --test tests/modules/locale-completeness.test.mjs
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/nimbus-intelligence.js frontend/locales/*.js Code_Review_09_01.md
@@ -1537,7 +1537,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Files:** none modified. Output: `<scratchpad>/n5-baseline.txt`, `<scratchpad>/n5-baseline-failures.txt` (scratchpad = the session scratchpad directory).
 
-- [ ] **Step 1: Build and run the scheduler file, saving output**
+- [x] **Step 1: Build and run the scheduler file, saving output**
 
 ```powershell
 npm run build
@@ -1545,7 +1545,7 @@ node --test tests/modules/setup-scheduler.test.mjs 2>&1 | Tee-Object -FilePath "
 Measure-Command { node --test tests/modules/setup-scheduler.test.mjs > $null 2>&1 } | Select-Object TotalSeconds
 ```
 
-- [ ] **Step 2: Record the failing test names**
+- [x] **Step 2: Record the failing test names**
 
 ```powershell
 Select-String -Path "$env:SCRATCHPAD\n5-baseline.txt" -Pattern '^not ok' | Tee-Object -FilePath "$env:SCRATCHPAD\n5-baseline-failures.txt"
@@ -1563,7 +1563,7 @@ This list, and the wall time, are the only acceptable outcomes after every later
 **Interfaces:**
 - Produces: explanation code `'admitted-state-unrecorded'` (unknown line-initial/predecessor state, order admitted). `'admitted-without-setup'` unchanged (uncovered row). Edge reasons `initial-state-unknown` / `scheduled-without-setup` unchanged.
 
-- [ ] **Step 1: Write the failing test** (append)
+- [x] **Step 1: Write the failing test** (append)
 
 ```js
 test('admission diagnostics distinguish an unrecorded line state from an uncovered matrix row', () => {
@@ -1590,14 +1590,14 @@ test('admission diagnostics distinguish an unrecorded line state from an uncover
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs --test-name-pattern="unrecorded line state"
 ```
 Expected: FAIL on `stateReason` (code is `initial-state-unknown` today).
 
-- [ ] **Step 3: Implement** — replace `:2523-2526`
+- [x] **Step 3: Implement** — replace `:2523-2526`
 
 ```ts
     if (unknownPredecessor) {
@@ -1620,13 +1620,13 @@ Expected: FAIL on `stateReason` (code is `initial-state-unknown` today).
     } else {
 ```
 
-- [ ] **Step 4: Repair the existing assertions** (semantics unchanged)
+- [x] **Step 4: Repair the existing assertions** (semantics unchanged)
 
 - `:1735`, `:2372`, `:3486`, `:3489`: `reason.code === 'initial-state-unknown'` → `'admitted-state-unrecorded'`.
 - `:1342`, `:1505`, `:2159`, `:3266`: `['unknown-setup-tail-placement', 'initial-state-unknown']` → add `'admitted-state-unrecorded'`.
 - `:2439` comment: list `'admitted-state-unrecorded'` among suppressed codes.
 
-- [ ] **Step 5: Run the file, diff against baseline, commit**
+- [x] **Step 5: Run the file, diff against baseline, commit**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs 2>&1 | Tee-Object "$env:SCRATCHPAD\n6a.txt"
@@ -1654,7 +1654,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: `export function remedyKeyForEdgeReason(reason: string): 'ui.setup_missing_remedy_state' | 'ui.setup_missing_remedy_row' | null` in `optimize-ui.mts`; `PreviewExplanation.scheduledStateUnrecorded: { orders: number; lines: number }`; `MissingSetupReviewPair` and `missingPairs[]` rows gain `remedy: string` (localized text, resolved at describe time).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `optimize-ui.test.mjs`, extend the test at `:315`: set the fixture edge `reason` to `'scheduled-without-setup'`, expect the pair to include `remedy: 'Add a setup matrix row for this transition'`, add `assert.match(csv, /Reason,Remedy/);`. Add:
 
@@ -1677,13 +1677,13 @@ test('summarizeCandidate tallies unrecorded-state and uncovered-row admissions s
 `setup-admin.test.mjs:53-58`: add `remedy: 'Add a setup matrix row for this transition'` to the pair fixture; header regex gains `,Remedy`.
 `locale-completeness.test.mjs`: add a test pinning `['ui.setup_missing_remedy_state','ui.setup_missing_remedy_row','ui.opt_pv_scheduled_state_unrecorded','ui.setup_col_remedy','ui.setup_review_filter_state','ui.setup_review_filter_row','ui.setup_review_filter_all']` in all 5 locales, copying the existing `REQUIRED` test shape at `:32-40`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```powershell
 npm run build; node --test tests/modules/optimization/optimize-ui.test.mjs tests/modules/setup/setup-admin.test.mjs tests/modules/locale-completeness.test.mjs
 ```
 
-- [ ] **Step 3: Locale keys** (`en.js` near `:1565-1567`; de/es/fr/pt with the file's `// MISSING TRANSLATION` marker convention, see `locale-completeness.test.mjs:203-206`)
+- [x] **Step 3: Locale keys** (`en.js` near `:1565-1567`; de/es/fr/pt with the file's `// MISSING TRANSLATION` marker convention, see `locale-completeness.test.mjs:203-206`)
 
 ```js
   'ui.setup_col_remedy':                  'Remedy',
@@ -1696,7 +1696,7 @@ npm run build; node --test tests/modules/optimization/optimize-ui.test.mjs tests
 ```
 Reword `ui.opt_pv_scheduled_without_setup` to end "— add a setup matrix row for each transition to charge their setup." (it is now row-only).
 
-- [ ] **Step 4: `optimize-ui.mts`**
+- [x] **Step 4: `optimize-ui.mts`**
 
 Module-level helper near `PREVIEW_MISSING_PAIR_LIMIT` (`:905`):
 ```ts
@@ -1734,7 +1734,7 @@ Return adds `scheduledStateUnrecorded: { orders: stateUnrecordedOrders.size, lin
 `gapsHtml` `:1783`: add `<th>${Util.escapeHtml(Util.t('ui.setup_col_remedy'))}</th>` and `<td>${Util.escapeHtml(pair.remedy || '—')}</td>`.
 Banner: beside `scheduledWithoutSetupHtml` add the twin from `explanation.scheduledStateUnrecorded` with key `ui.opt_pv_scheduled_state_unrecorded`; render both at `:1982`.
 
-- [ ] **Step 5: `setup-admin.mts`**
+- [x] **Step 5: `setup-admin.mts`**
 
 `:115` type gains `remedy?: string`. `missingPairsCsv`: header `…,Reason,Remedy`, row appends `pair.remedy`. Module state beside `_missingReview` (`:145`): `let _missingReviewFilter: 'all' | 'state' | 'row' = 'all';`. Chip `:914` gains `<select data-setup-review-filter>` with the three `ui.setup_review_filter_*` options (values `all|state|row`, current selected). Handler beside `:1082`:
 ```ts
@@ -1752,7 +1752,7 @@ Banner: beside `scheduledWithoutSetupHtml` add the twin from `explanation.schedu
 ```
 and derive `reviewSigs` from `reviewPairs` exactly as today from `review.pairs`. Reset `_missingReviewFilter = 'all'` inside `reviewMissingPairs` (`:515`) and the clear handler (`:1083`).
 
-- [ ] **Step 6: Build, run, lint, commit**
+- [x] **Step 6: Build, run, lint, commit**
 
 ```powershell
 npm run build; node --test tests/modules/optimization/optimize-ui.test.mjs tests/modules/setup/setup-admin.test.mjs tests/modules/locale-completeness.test.mjs; npm run lint
@@ -1779,7 +1779,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: `POST /master-data/plants/{plant}/unknown-setup-policy` body `{ subnetwork?, unknown_setup_policy: 'zero'|'plantDefaultMinutes'|'excludeFromSearch', unknown_setup_default_minutes?: int>=0 }` → `{ status, plant, setup_policy_config }`. Plant rows from `list_rows('plants')` carry `setup_policy_config` (dict; version-1 rows lack the two new keys).
 
-- [ ] **Step 1: Failing tests** (append to `tests/test_master_data_setup_policy.py`)
+- [x] **Step 1: Failing tests** (append to `tests/test_master_data_setup_policy.py`)
 
 ```python
 def test_unknown_setup_policy_write_merges_jsonb_and_audits(monkeypatch):
@@ -1810,7 +1810,7 @@ def test_unknown_setup_policy_rejects_invalid_values():
 ```
 Run: `.\.venv\Scripts\python -m pytest tests/test_master_data_setup_policy.py -q` → FAIL `AttributeError`.
 
-- [ ] **Step 2: `master_data.py` — the setter** (after `set_plant_frozen_horizon_days`)
+- [x] **Step 2: `master_data.py` — the setter** (after `set_plant_frozen_horizon_days`)
 
 ```python
 UNKNOWN_SETUP_POLICIES = ("zero", "plantDefaultMinutes", "excludeFromSearch")
@@ -1855,9 +1855,9 @@ def set_plant_unknown_setup_policy(subnetwork: str, plant: str, policy: str, def
 ```
 (`Jsonb` is already imported. The test's `update[1][1:]` skips the `Jsonb` wrapper.)
 
-- [ ] **Step 3: `master_data.py` — read-back** (`:333-358`): append `setup_policy_config` to the sidecar SELECT list, extend the `cmap` tuple to `r[2]..r[11]`, add it to the positional unpack with `None` as its default in the `cmap.get` default tuple, then `row['setup_policy_config'] = setup_policy_config or {}`. Update the comment block `:324-326` to list it among unregistered sidecar fields. **Do not** add a `column_metadata` row (that is what keeps the JSONB out of `bulk_apply`, `:784-813`).
+- [x] **Step 3: `master_data.py` — read-back** (`:333-358`): append `setup_policy_config` to the sidecar SELECT list, extend the `cmap` tuple to `r[2]..r[11]`, add it to the positional unpack with `None` as its default in the `cmap.get` default tuple, then `row['setup_policy_config'] = setup_policy_config or {}`. Update the comment block `:324-326` to list it among unregistered sidecar fields. **Do not** add a `column_metadata` row (that is what keeps the JSONB out of `bulk_apply`, `:784-813`).
 
-- [ ] **Step 4: Model, route, audit name, CLAUDE.md**
+- [x] **Step 4: Model, route, audit name, CLAUDE.md**
 
 `models.py` after `PlantFrozenHorizonDaysResult`:
 ```python
@@ -1887,7 +1887,7 @@ def md_set_plant_unknown_setup_policy(plant: str, request: Request, body: dict =
 ```
 `brain.py` audit map: `"/master-data/plants/{plant}/unknown-setup-policy": "plant.unknown_setup_policy_update",`. Add the route to `backend/master_data/CLAUDE.md`'s per-plant policy family list.
 
-- [ ] **Step 5: Run, commit**
+- [x] **Step 5: Run, commit**
 
 ```powershell
 $env:NIMBUS_PG_POOL_MIN='0'; .\.venv\Scripts\python -m pytest tests/test_master_data_setup_policy.py -q
@@ -1913,7 +1913,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Consumes: `NimbusMasterPlant.setup_policy_config` from N8a's sidecar.
 - Produces: `planning_reason.code === 'setup_transition_unrecorded'` for excluded-and-never-placed orders; `SetupRunContext.unknownSetupPolicy`, `.unknownSetupDefaultMinutes`, `._setupExclusions`.
 
-- [ ] **Step 1: Failing tests** (append; the `masterData` plant row carries the policy — confirm `setupSnapshot`'s plant/line ids in the helpers at `:1-140` and adjust `'P1'`/`'L1'`)
+- [x] **Step 1: Failing tests** (append; the `masterData` plant row carries the policy — confirm `setupSnapshot`'s plant/line ids in the helpers at `:1-140` and adjust `'P1'`/`'L1'`)
 
 ```js
 function policySnapshot(tasks, config) {
@@ -1960,14 +1960,14 @@ test('unknownSetupPolicy excludeFromSearch queues the order with a setup_transit
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs --test-name-pattern="unknownSetupPolicy"
 ```
 Expected: `plantDefaultMinutes` and `excludeFromSearch` FAIL; `zero` passes trivially (it pins the no-op).
 
-- [ ] **Step 3: `types.mts`**
+- [x] **Step 3: `types.mts`**
 
 Beside `SplitOrderPolicy`: `export type UnknownSetupPolicy = 'zero' | 'plantDefaultMinutes' | 'excludeFromSearch';`. After `:281`:
 ```ts
@@ -1983,7 +1983,7 @@ Beside `SplitOrderPolicy`: `export type UnknownSetupPolicy = 'zero' | 'plantDefa
   } | null;
 ```
 
-- [ ] **Step 4: `setup-scheduler.mts` — read the policy**
+- [x] **Step 4: `setup-scheduler.mts` — read the policy**
 
 Import `UnknownSetupPolicy` with the other `platform/types.mjs` type imports. Beside `:2312`:
 ```ts
@@ -2018,7 +2018,7 @@ function chargedSetupMinutes(ctx: Readonly<SetupRunContext> | undefined, resolve
 ```
 `buildRunContext` (`:546`): `unknownSetupPolicy: unknownSetupPolicyForSnapshot(snapshot, plant), unknownSetupDefaultMinutes: unknownSetupDefaultMinutesForSnapshot(snapshot, plant), _setupExclusions: new Map(),`.
 
-- [ ] **Step 5: Admission block** — head of the `if (!resolved.covered || resolved.effectiveMin === null) {` branch (`:2540`)
+- [x] **Step 5: Admission block** — head of the `if (!resolved.covered || resolved.effectiveMin === null) {` branch (`:2540`)
 
 ```ts
       if (!resolved.covered || resolved.effectiveMin === null) {
@@ -2044,7 +2044,7 @@ function chargedSetupMinutes(ctx: Readonly<SetupRunContext> | undefined, resolve
 ```
 In the `unknownPredecessor` branch (N6a), set `effectiveSetupMinutes = chargedSetupMinutes(bounds.runContext, null); setupRequirement = { kind: 'resolved', minutes: effectiveSetupMinutes };` and make both admitted messages say `charged ${effectiveSetupMinutes} setup minutes` (still token-free). Executor check: `SetupStateKey`'s actual element shape (`part.value`) — read the type before writing `label`.
 
-- [ ] **Step 6: Other charge/legality sites**
+- [x] **Step 6: Other charge/legality sites**
 
 - Gap-fill `:6379`: `if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null; return chargedSetupMinutes(bounds.runContext, resolution);`
 - Validation `:6067`: `const minutes = chargedSetupMinutes(bounds.runContext, resolution);` (keep the `missing_setup` warning).
@@ -2053,7 +2053,7 @@ In the `unknownPredecessor` branch (N6a), set `effectiveSetupMinutes = chargedSe
 - Normalizer `:5761`: `const reason = result.planning_reason?.code ? result.planning_reason : (planningDefect(snapshot, bounds, task) ?? bounds.runContext?._setupExclusions.get(id) ?? reasonFor(task));`
 - `frontend/optimization/CLAUDE.md` "Hard-bound candidate and Apply contract": add `setup_transition_unrecorded` to the reason-code list.
 
-- [ ] **Step 7: Build, run file, diff against baseline, commit**
+- [x] **Step 7: Build, run file, diff against baseline, commit**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs 2>&1 | Tee-Object "$env:SCRATCHPAD\n8b.txt"
@@ -2075,9 +2075,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `frontend/locales/{en,de,es,fr,pt}.js`
 - Test: `tests/modules/locale-completeness.test.mjs`
 
-- [ ] **Step 1: Locale pin (failing)** — new test in `locale-completeness.test.mjs` requiring `['ui.unknown_setup_title','ui.unknown_setup_help','ui.unknown_setup_opt_zero','ui.unknown_setup_opt_default','ui.unknown_setup_opt_exclude','ui.unknown_setup_minutes_label','ui.unknown_setup_saved','ui.unknown_setup_failed','ui.unknown_setup_minutes_invalid']` in all 5 locales. Run → FAIL.
+- [x] **Step 1: Locale pin (failing)** — new test in `locale-completeness.test.mjs` requiring `['ui.unknown_setup_title','ui.unknown_setup_help','ui.unknown_setup_opt_zero','ui.unknown_setup_opt_default','ui.unknown_setup_opt_exclude','ui.unknown_setup_minutes_label','ui.unknown_setup_saved','ui.unknown_setup_failed','ui.unknown_setup_minutes_invalid']` in all 5 locales. Run → FAIL.
 
-- [ ] **Step 2: `en.js`** (beside `ui.split_order_*`, `:571-577`; mirror into de/es/fr/pt with the MISSING TRANSLATION marker)
+- [x] **Step 2: `en.js`** (beside `ui.split_order_*`, `:571-577`; mirror into de/es/fr/pt with the MISSING TRANSLATION marker)
 
 ```js
   'ui.unknown_setup_title':            'Setup data missing',
@@ -2091,7 +2091,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   'ui.unknown_setup_failed':           'Could not save setup-data policy',
 ```
 
-- [ ] **Step 3: `admin-ui.mts`**
+- [x] **Step 3: `admin-ui.mts`**
 
 `RULE_HELP`: `unknownSetupPolicy: { title: 'ui.unknown_setup_title', help: ['ui.unknown_setup_help'] },`.
 Markup after the split-policy row (`:1229`), same wide-row pattern:
@@ -2165,7 +2165,7 @@ Save handler (after `:1534`), shared by both controls:
 ```
 Executor check: confirm how `plantRow` is resolved at the top of `_renderSettingsPane`; if it is a copy rather than the `Store.masterData.plants` entry, also patch the Store entry so the next optimizer snapshot sees the new policy without a reload (the split-policy handler at `:1387-1418` shows which it does).
 
-- [ ] **Step 4: Build, lint, run, commit**
+- [x] **Step 4: Build, lint, run, commit**
 
 ```powershell
 npm run build; npm run lint; node --test tests/modules/locale-completeness.test.mjs tests/modules/master-data/*.test.mjs
@@ -2188,7 +2188,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: `ObjectiveFacts.maxLatenessMinutes: number`; `DueDateCandidate.maxLatenessMinutes?: number`. Consumed by N5c (same plumbing shape).
 
-- [ ] **Step 1: Write the failing comparator test** (append after the SPT comparator test, `:384`)
+- [x] **Step 1: Write the failing comparator test** (append after the SPT comparator test, `:384`)
 
 ```js
 test('objective facts prefer the smaller worst-case lateness when late count and total lateness tie', () => {
@@ -2207,13 +2207,13 @@ test('objective facts prefer the smaller worst-case lateness when late count and
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs --test-name-pattern="worst-case lateness"
 ```
 
-- [ ] **Step 3: Add the field to `ObjectiveFacts` and `DueDateCandidate`**
+- [x] **Step 3: Add the field to `ObjectiveFacts` and `DueDateCandidate`**
 
 `:371` after `latenessMinutes: number;`:
 ```ts
@@ -2231,7 +2231,7 @@ npm run build; node --test tests/modules/setup-scheduler.test.mjs --test-name-pa
   instabilityMinutes?: number;
 ```
 
-- [ ] **Step 4: Track it in `candidateForSequence`**
+- [x] **Step 4: Track it in `candidateForSequence`**
 
 `:2455` add `let maxLatenessMinutes = 0;`. Checkpoint type (`:2467`) and literal (`:2488`) gain `maxLatenessMinutes`. Replace `:2619-2623`:
 ```ts
@@ -2245,13 +2245,13 @@ npm run build; node --test tests/modules/setup-scheduler.test.mjs --test-name-pa
 ```
 Backtrack restore `:2652`: `maxLatenessMinutes = prior.maxLatenessMinutes;`. Return literal `:2761`: `maxLatenessMinutes,` beside `productiveRuntimeMinutes`.
 
-- [ ] **Step 5: Combine at fragment concatenation** (`:4036`, in the return literal)
+- [x] **Step 5: Combine at fragment concatenation** (`:4036`, in the return literal)
 
 ```ts
     maxLatenessMinutes: Math.max(preFirmed.maxLatenessMinutes ?? 0, continuation.maxLatenessMinutes ?? 0),
 ```
 
-- [ ] **Step 6: Compare it**
+- [x] **Step 6: Compare it**
 
 `compareDueDateCandidate` after `:2360`:
 ```ts
@@ -2274,7 +2274,7 @@ Backtrack restore `:2652`: `maxLatenessMinutes = prior.maxLatenessMinutes;`. Ret
 `fragmentObjectiveFacts`: `maxLatenessMinutes: candidate.maxLatenessMinutes ?? 0,` after `latenessMinutes`.
 `objectiveFactsForCandidate`: `:6561` `let maxLateness = 0;`; in the loop compute each order's lateness into a local for both the `needs_planning` and the scheduled branch and `maxLateness = Math.max(maxLateness, orderLateness)`; return literal adds `maxLatenessMinutes: maxLateness,`.
 
-- [ ] **Step 7: Build, run the whole file, diff against baseline**
+- [x] **Step 7: Build, run the whole file, diff against baseline**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs 2>&1 | Tee-Object -FilePath "$env:SCRATCHPAD\n5b.txt"
@@ -2282,7 +2282,7 @@ Compare-Object (Select-String -Path "$env:SCRATCHPAD\n5-baseline-failures.txt" -
 ```
 Expected: new test PASS; `Compare-Object` prints nothing.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add frontend/optimization/setup-scheduler.mts tests/modules/setup-scheduler.test.mjs
@@ -2299,7 +2299,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `frontend/optimization/setup-scheduler.mts` (`candidateForSequence` locals/checkpoint/placement/return; concat `:4036`; `fragmentObjectiveFacts` `:6483`; one test-seam export at file bottom)
 - Test: `tests/modules/setup-scheduler.test.mjs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 test('fragment search charges instability for moved starts instead of a hardcoded zero', () => {
@@ -2319,14 +2319,14 @@ test('fragment search charges instability for moved starts instead of a hardcode
 ```
 Add the seam at the bottom of `setup-scheduler.mts` beside the other test exports: `export const fragmentObjectiveFactsForTest = fragmentObjectiveFacts;`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```powershell
 npm run build; node --test tests/modules/setup-scheduler.test.mjs --test-name-pattern="instability for moved starts"
 ```
 Expected: FAIL (`fragmentObjectiveFactsForTest` undefined / instability compares 0 vs 0).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `candidateForSequence`: `let instabilityMinutes = 0;` beside `maxLatenessMinutes`; add to checkpoint type/literal and backtrack restore. After the `patches.push({...})` at `:2617`:
 ```ts
@@ -2335,7 +2335,7 @@ Expected: FAIL (`fragmentObjectiveFactsForTest` undefined / instability compares
 ```
 (`timestamp` is the helper used at `:6575`; `task` is the snapshot's own row, so `task.start_date` is the pre-patch baseline, the same source `objectiveFactsForCandidate` uses.) Return literal: `instabilityMinutes,`. Concat `:4036`: `instabilityMinutes: (preFirmed.instabilityMinutes ?? 0) + (continuation.instabilityMinutes ?? 0),`. `fragmentObjectiveFacts` `:6483` → `instabilityMinutes: candidate.instabilityMinutes ?? 0,`.
 
-- [ ] **Step 4: Measure runtime, run the file, diff against baseline**
+- [x] **Step 4: Measure runtime, run the file, diff against baseline**
 
 ```powershell
 npm run build
@@ -2344,7 +2344,7 @@ Compare-Object (Select-String -Path "$env:SCRATCHPAD\n5-baseline-failures.txt" -
 ```
 Expected: same failure set; wall time within ~10% of the N5a measurement. If it is not, stop and report rather than keep it.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/optimization/setup-scheduler.mts tests/modules/setup-scheduler.test.mjs
@@ -2362,9 +2362,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `frontend/locales/{en,de,es,fr,pt}.js` (`tip.duedate_mode`, `tip.changeover_mode`)
 - Test: `tests/modules/locale-completeness.test.mjs`
 
-- [ ] **Step 1: Locale pin (failing)** — append a test requiring `['tip.duedate_mode', 'tip.changeover_mode']` in all 5 locales (same shape as the `constraint.*` test at `:32-40`). Run → FAIL: de/es/fr/pt lack `tip.duedate_mode` and carry stale `tip.changeover_mode` copy.
+- [x] **Step 1: Locale pin (failing)** — append a test requiring `['tip.duedate_mode', 'tip.changeover_mode']` in all 5 locales (same shape as the `constraint.*` test at `:32-40`). Run → FAIL: de/es/fr/pt lack `tip.duedate_mode` and carry stale `tip.changeover_mode` copy.
 
-- [ ] **Step 2: Reword `en.js:1193-1194`**
+- [x] **Step 2: Reword `en.js:1193-1194`**
 
 ```js
   'tip.changeover_mode': "Min Changeover — the plant's priority lists rank first, then fewest orders over the push-forward limit, then fewest late orders and least late hours (never making an already-late order much later), then setup savings. Honors the pull-forward and push-forward limits.",
@@ -2372,11 +2372,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 Add both keys to de/es/fr/pt beside their existing `tip.changeover_mode`, with the MISSING TRANSLATION marker convention.
 
-- [ ] **Step 3: CLAUDE.md** — append to the "Admission and strategy objectives" bullet:
+- [x] **Step 3: CLAUDE.md** — append to the "Admission and strategy objectives" bullet:
 
 > **Tier inversion:** `'due-date'` mode compares late count, total lateness and worst-case lateness *before* `policyKey`; every other mode compares `policyKey` first and lateness after (`compareDueDateCandidate` vs `compareCandidate`, setup-scheduler.mts). This is the per-plant "priority tiers vs. lateness" tradeoff — chosen by mode, not by a setting.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```powershell
 node --test tests/modules/locale-completeness.test.mjs
