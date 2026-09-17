@@ -542,6 +542,8 @@ export const Store = {
       bottleneck: false,
       excludeFromOpt: false,
       plGroup: '',
+      sapWorkcenter: null,
+      distributionWeight: null,
     };
   },
   setLineSetting(line: string, patch: Partial<NimbusLineSetting>, source?: string): void {

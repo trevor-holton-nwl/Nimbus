@@ -2121,6 +2121,14 @@ export const ProdLines = {
           <span class="ld-buffer-label">Production Line Group</span>
           <input type="text" class="input plgroup-input" style="width:140px;" value="${(ls.plGroup||'').replace(/"/g,'&quot;')}" data-line="${line}" placeholder="e.g. PREMIUM">
         </span>
+        <span class="ld-buffer">
+          <span class="ld-buffer-label">SAP Work Center</span>
+          <div class="sap-workcenter-combo" id="sap-workcenter-combo-${line}" style="width:140px;"></div>
+        </span>
+        <span class="ld-buffer">
+          <span class="ld-buffer-label">Distribution Weight</span>
+          <input type="text" class="input distribution-weight-input" style="width:140px;" value="${(ls.distributionWeight != null ? ls.distributionWeight : '')}" data-line="${line}" placeholder="—" readonly>
+        </span>
       </div>
       <div class="ld-section">
         <div class="ld-section-head">
@@ -2143,6 +2151,34 @@ export const ProdLines = {
     </div>`;
 
     ProdLines._ensureDelegated();
+    ProdLines._initSapWorkcenterCombo(line, ls.sapWorkcenter || '');
+  },
+
+  async _initSapWorkcenterCombo(line: string, currentValue: string): Promise<void> {
+    const plant = Store.selectedPlant;
+    if (!plant) return;
+
+    const comboHost = document.getElementById(`sap-workcenter-combo-${line}`);
+    if (!comboHost) return;
+
+    try {
+      const resp = await fetch(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`);
+      if (!resp.ok) { ErrorLog.error('master-data', `Failed to fetch work centers: ${resp.status}`); return; }
+      const data = (await resp.json()) as MasterDataResponse;
+      const wcCodes = data.rows.map(row => (row as any).sap_workcenter as string).filter(Boolean);
+
+      _mkCombobox(comboHost, wcCodes, {
+        value: currentValue,
+        placeholder: Util.t('ph.select_work_center') || '—',
+        onSelect: (wc: string) => {
+          Store.setLineSetting(line, { sapWorkcenter: wc || null }, 'prodlines');
+          NIMBUS!.MasterData!.syncLineSettings!(line, { sapWorkcenter: wc || null });
+          Toast.show(Util.t('toast.line_settings_updated'), 'success');
+        },
+      });
+    } catch (err) {
+      ErrorLog.error('master-data', `Error initializing SAP work center combobox: ${err}`);
+    }
   },
 
   _renderNav(allLines: string[], shownLines: string[]): void {
@@ -2422,7 +2458,7 @@ export const ProdLines = {
  *  engine) — `Security` stays container-`any`-typed until its own task. */
 type MasterDataTable =
   | 'subnetworks' | 'plants' | 'machine'
-  | 'materials' | 'material_plants' | 'bom_items';
+  | 'materials' | 'material_plants' | 'bom_items' | 'sap_workcenter';
 
 /** `column_metadata` row shape returned alongside every `GET
  *  /master-data/{table}` (master_data.py `_column_meta`/get_table_data). */
@@ -2483,6 +2519,8 @@ interface ProductionLineRow extends MasterDataRow {
   machine: string;
   line_key?: string;
   wc_group?: string | null;
+  sap_workcenter?: string | null;
+  distribution_weight?: number | null;
   bottleneck?: string | null;
   excl_optimizer?: string | null;
   buffer_type?: string | null;
@@ -2713,6 +2751,7 @@ export const MasterData = (() => {
     materials:        'Material',
     material_plants:  'Material Plant',
     bom_items:        'Bill of Materials',
+    sap_workcenter:   'Work Centers',
   };
 
   // KEY_COLS drives primary-key identification per table.
@@ -2723,6 +2762,7 @@ export const MasterData = (() => {
     materials:        ['material_id'],
     material_plants:  ['material_id', 'plant'],
     bom_items:        ['material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'],
+    sap_workcenter:   ['plant', 'sap_workcenter'],
   };
 
   // Tables that need a parent-dropdown for FK columns.
@@ -3826,6 +3866,8 @@ export const MasterData = (() => {
     if ('bufferPct'      in patch) updatedRow.buffer_percent  = patch.bufferPct;
     if ('bufferHours'    in patch) updatedRow.buffer_hours    = patch.bufferHours;
     if ('plGroup'        in patch) updatedRow.wc_group        = patch.plGroup || null;
+    if ('sapWorkcenter'  in patch) updatedRow.sap_workcenter  = patch.sapWorkcenter || null;
+    if ('distributionWeight' in patch) updatedRow.distribution_weight = patch.distributionWeight ?? null;
 
     // Update cache row and clear any stale dirty flag so MasterData table stays consistent.
     state.rows[rowIdx] = updatedRow;

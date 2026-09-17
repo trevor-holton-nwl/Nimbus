@@ -131,6 +131,10 @@ export interface NimbusLineSetting {
   /** Wire/DB alias: excl_optimizer. */
   excludeFromOpt: boolean;
   plGroup: string;
+  /** Wire/DB alias: sap_workcenter. */
+  sapWorkcenter?: string | null;
+  /** Wire/DB alias: distribution_weight. */
+  distributionWeight?: number | null;
 }
 
 export interface NimbusMasterLine {
@@ -448,7 +452,7 @@ export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'admin';
 
 export type GanttSubTab = 'timeline' | 'orders';
 
-export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant';
+export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant' | 'work-centers';
 
 export type LaborSubTab = 'aggregate' | 'line-plan' | 'capacity' | 'exceptions' | 'inputs';
 

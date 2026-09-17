@@ -856,6 +856,8 @@ window.__NIMBUS_LOCALES.en = {
   'tab.materials':                     'Material',
   'tab.material_plant':                'Material Plant',
   'tab.bom_items':                     'Bill of Materials',
+  'tab.sap_workcenter':                'Work Centers',
+  'tab.work_centers':                  'Work Centers',
 
   /* ── Security tab ────────────────────────────────────────────────────────── */
   'sec.username':                  'Username',

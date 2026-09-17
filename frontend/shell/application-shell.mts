@@ -420,6 +420,7 @@ const SessionUIAdapter = {
       ['plant',          Util.t('tab.plant')],
       ['material',       Util.t('tab.materials')],
       ['material-plant', Util.t('tab.material_plant')],
+      ['work-centers',   Util.t('tab.work_centers')],
     ];
     return null;   // home / labor / admin land on the tab with no sub-view here
   },
@@ -2503,6 +2504,7 @@ const App = {
     { sub: 'plant',          paneId: 'md-master-plant-pane',          render: () => Plant.render() },
     { sub: 'material',       paneId: 'md-master-material-pane',       render: () => MaterialGrids.render('material') },
     { sub: 'material-plant', paneId: 'md-master-material-plant-pane', render: () => MaterialGrids.render('material-plant') },
+    { sub: 'work-centers',   paneId: 'md-master-work-centers-pane',   render: () => {} },
   ] as Array<{ sub: MasterSubTab; paneId: string; render(): void }>,
 
   gotoMasterSub(sub: MasterSubTab): void {

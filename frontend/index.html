@@ -1661,6 +1661,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
       <button class="admin-subtab" data-md-master="material" role="tab" data-i18n="tab.materials">Material</button>
       <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
+      <button class="admin-subtab" data-md-master="work-centers" role="tab" data-i18n="tab.work_centers">Work Centers</button>
     </nav>
 
     <!-- SUB-PANE: PRODUCTION LINES -->
@@ -1774,6 +1775,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="table-filterbar" id="md-mp-filterbar"></div>
       <div id="md-mp-grid" class="ag-theme-quartz"></div>
+    </div>
+
+    <!-- SUB-PANE: WORK CENTERS (placeholder) -->
+    <div id="md-master-work-centers-pane" hidden>
+      <div style="padding:20px;color:var(--text-muted,#64748b);" data-i18n="ui.coming_soon">Coming soon</div>
     </div>
   </section>
 
@@ -2087,6 +2093,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
             <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
             <button class="md-tab" data-md-tab="bom_items" role="tab" data-i18n="tab.bom_items">Bill of Materials</button>
+            <button class="md-tab" data-md-tab="sap_workcenter" role="tab" data-i18n="tab.sap_workcenter">Work Centers</button>
             <button class="btn btn-ghost sm" id="md-export-schema-btn" style="margin-left:auto" data-i18n="btn.export_schema">Export Schema</button>
           </nav>
           <div id="md-host"></div>
