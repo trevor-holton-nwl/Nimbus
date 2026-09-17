@@ -71,6 +71,10 @@ export interface NimbusTask {
   /** DB column is nullable (brain.py: `notes: str | None = None`) — Table/Inspector's
    *  note editors write `null` (not `''`) to explicitly clear a note. */
   notes?: string | null;
+  /** SAP parent order key for a distributed sub-order; read-only. */
+  PARENT_ORDER?: string | null;
+  /** Letter index for a distributed sub-order within its parent; read-only. */
+  DISTRIBUTION_LETTER?: string | null;
   user_scheduled?: boolean;
   /** Two or more productive child intervals. An absent/empty list means the
    *  parent is a legacy continuous schedule; this is never a manually edited

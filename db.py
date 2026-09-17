@@ -522,6 +522,8 @@ _ORDERS_SELECT = f"""
         labor_hours                     AS "LABOR_HOURS_(MEINH)",
         machine_hours                   AS "MACHINE_HOURS_(MEINH)",
         no_of_fte                       AS "NO_OF_FTE_(MEINH)",
+        parent_production_order         AS "PARENT_ORDER",
+        distribution_letter             AS "DISTRIBUTION_LETTER",
         -- Optimistic-concurrency token. xmin is the txid that last wrote the row;
         -- it changes on every UPDATE, gives exact integer equality (no timestamp
         -- precision/tz fragility), and needs no schema column. Cast via text because

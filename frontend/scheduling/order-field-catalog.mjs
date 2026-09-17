@@ -107,4 +107,11 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'NO_OF_FTE_(MEINH)', dbColumn: 'no_of_fte', type: 'number',
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.no_of_fte', i18nInspectorKey: 'ui.insp_no_of_fte' },
+    // Read-only distribution fields — never grid editable, default hidden until an admin opts in via System Configuration.
+    { key: 'PARENT_ORDER', dbColumn: 'parent_production_order', type: 'text',
+        gridDefault: false, inspectorDefault: false,
+        i18nGridKey: 'col.sap_order', i18nInspectorKey: 'ui.insp_sap_order' },
+    { key: 'DISTRIBUTION_LETTER', dbColumn: 'distribution_letter', type: 'text',
+        gridDefault: false, inspectorDefault: false,
+        i18nGridKey: 'col.dist_letter', i18nInspectorKey: 'ui.insp_dist_letter' },
 ];

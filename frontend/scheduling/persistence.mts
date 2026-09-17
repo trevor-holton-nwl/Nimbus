@@ -1284,6 +1284,7 @@ export const Persistence = {
         start_date: Util.toLocalSeconds(segment.startDate) as NaiveLocalTs,
         end_date: Util.toLocalSeconds(segment.endDate) as NaiveLocalTs,
       })),
+      // Note: PARENT_ORDER and DISTRIBUTION_LETTER are intentionally excluded (read-only)
     };
   },
 

@@ -75,6 +75,8 @@ class TaskDTO(BaseModel):
     labor_hours_meinh: float | None = Field(default=None, alias="LABOR_HOURS_(MEINH)")
     machine_hours_meinh: float | None = Field(default=None, alias="MACHINE_HOURS_(MEINH)")
     no_of_fte_meinh: float | None = Field(default=None, alias="NO_OF_FTE_(MEINH)")
+    PARENT_ORDER: str | None = None
+    DISTRIBUTION_LETTER: str | None = None
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False

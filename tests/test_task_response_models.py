@@ -53,6 +53,8 @@ SAMPLE_TASK_ROW = {
     "LABOR_HOURS_(MEINH)": 2.0,
     "MACHINE_HOURS_(MEINH)": 1.5,
     "NO_OF_FTE_(MEINH)": 1.0,
+    "PARENT_ORDER": None,
+    "DISTRIBUTION_LETTER": None,
     "row_version": 42,
     "schedule_segments": [
         {"sequence": 1, "start_date": "2026-08-01T07:00:00", "end_date": "2026-08-01T15:00:00"},
@@ -495,3 +497,23 @@ def test_apply_task_date_updates_logs_a_forced_non_atomic_write(monkeypatch):
     assert forced[0][0] == "warn"
     assert forced[0][3]["count"] == 1
     assert forced[0][3]["ids"] == ["abc123"]
+
+
+def test_parent_order_and_distribution_letter_are_read_only():
+    """PARENT_ORDER and DISTRIBUTION_LETTER must never be included in
+    TaskDateUpdate (the write model). They exist on TaskDTO (read model) as
+    read-only fields and are excluded from _taskEditSnapshot, ensuring they
+    cannot be edited through any save path."""
+    # Verify TaskDTO accepts them
+    read_task = brain.TaskDTO(**SAMPLE_TASK_ROW)
+    assert read_task.PARENT_ORDER is None
+    assert read_task.DISTRIBUTION_LETTER is None
+
+    # Verify TaskDateUpdate does NOT have these fields
+    update_model_fields = set(brain.TaskDateUpdate.model_fields.keys())
+    assert "PARENT_ORDER" not in update_model_fields, (
+        "PARENT_ORDER must never be in TaskDateUpdate (write model) — it is read-only"
+    )
+    assert "DISTRIBUTION_LETTER" not in update_model_fields, (
+        "DISTRIBUTION_LETTER must never be in TaskDateUpdate (write model) — it is read-only"
+    )

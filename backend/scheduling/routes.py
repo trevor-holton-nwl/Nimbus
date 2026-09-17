@@ -214,6 +214,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "LABOR_HOURS_(MEINH)": row.get("LABOR_HOURS_(MEINH)"),
                 "MACHINE_HOURS_(MEINH)": row.get("MACHINE_HOURS_(MEINH)"),
                 "NO_OF_FTE_(MEINH)": row.get("NO_OF_FTE_(MEINH)"),
+                "PARENT_ORDER": row.get("PARENT_ORDER"),
+                "DISTRIBUTION_LETTER": row.get("DISTRIBUTION_LETTER"),
                 # Optimistic-concurrency token (Postgres xmin). The client echoes it
                 # back on edit so the server can reject writes computed from stale data.
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
