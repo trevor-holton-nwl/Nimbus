@@ -74,6 +74,11 @@ window.__NIMBUS_LOCALES.en = {
   'toast.saved_to_backend':            'Saved to backend',
   'toast.partial_db_save':             '⚠ Only {{persisted}}/{{total}} orders reached the DB — check backend logs',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} order(s) were changed by someone else — refreshed to the latest version',
+  // PR-1 (2026-09-17): /tasks/refresh's `missing` + /tasks/update's `not_found_ids`
+  // both remove ghost tasks from Store; en-only for now — de/es/fr/pt get this
+  // during the Order Distribution feature's locale pass (see persistence.mts's
+  // _refreshTasks/saveAll comments).
+  'toast.orders_removed_remotely':     '{{count}} order(s) were removed and are no longer shown',
   'toast.save_conflicts':              '⚠ Saved, but {{count}} order(s) now overlap another order on the same machine — see Alerts',
   'toast.optimizer_conflicts':         'Optimizer changes were not saved: {{count}} machine conflict(s) detected. Re-run the optimizer.',
   'toast.backend_zero_orders':         'Backend returned zero orders — check brain.py log',
@@ -209,6 +214,8 @@ window.__NIMBUS_LOCALES.en = {
   'col.min_lot_size':                  'Minimum Lot Size',
   'col.incremental_lot_size':          'Incremental Lot Size',
   'col.default_machine':               'Default Machine',
+  'col.default_machine_hint':          'Distribution default when this machine belongs to the order\'s work center (decision G)',
+  'ui.unknown_machine_tooltip':        'Not a machine of this plant — no distribution default will apply',
   'col.planning_status':               'Planning status',
   'col.planning_reason':               'Planning reason',
   'col.planning_window':               'Allowed window',

@@ -175,13 +175,22 @@ export interface paths {
          *     concurrency conflict reconciliation. Returns only what the client needs to
          *     overwrite its stale copies — no links, no color merge.
          *     Payload: { ids: [str] }
-         *     Response: { data: [{ id, start_date, end_date, row_version }] }
+         *     Response: { data: [{ id, start_date, end_date, row_version }], missing: [str] }
          *
          *     Rows outside `allowed_plants` (None for an unrestricted/admin caller) are
          *     silently dropped rather than 403'd — matching GET /tasks's silent-bound
          *     behavior for unscoped pulls. `plant` is only used for this server-side
          *     filter and is stripped before the response leaves — it isn't part of the
          *     TaskVersionRow wire contract.
+         *
+         *     `missing` mirrors the not_found_ids convention from the /tasks/update family
+         *     (BulkUpdateResult): requested ids that no longer exist in `orders` (deleted
+         *     by another session, a purge, an upload) OR that exist but fell outside
+         *     `allowed_plants` — both folded into the same list, same as
+         *     update_task_dates_bulk folds "not yours" into not_found_ids, so the client
+         *     can't distinguish the two cases from this response. The client (Persistence.
+         *     _refreshTasks) uses it to drop these ids from Store instead of leaving them
+         *     as stale ghosts.
          */
         post: operations["tasks_refresh_tasks_refresh_post"];
         delete?: never;
@@ -1534,6 +1543,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/master-data/plants/{plant}/unknown-setup-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Plant Unknown Setup Policy
+         * @description N8: per-plant treatment of orders whose setup transition has no data —
+         *     zero | plantDefaultMinutes | excludeFromSearch — stored in the
+         *     plants.setup_policy_config JSONB sidecar (never freezes a line).
+         */
+        post: operations["md_set_plant_unknown_setup_policy_master_data_plants__plant__unknown_setup_policy_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/master-data/roles/{role}/page-access": {
         parameters: {
             query?: never;
@@ -2615,6 +2646,17 @@ export interface components {
             /** Split Order Policy */
             split_order_policy: string;
         };
+        /** PlantUnknownSetupPolicyResult */
+        PlantUnknownSetupPolicyResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Setup Policy Config */
+            setup_policy_config: {
+                [key: string]: unknown;
+            };
+        };
         /** RolePageAccessResult */
         RolePageAccessResult: {
             /** Status */
@@ -2912,10 +2954,21 @@ export interface components {
             planning_status: "scheduled" | "needs_planning";
             planning_reason?: components["schemas"]["PlanningReason"] | null;
         };
-        /** TasksRefreshResponse */
+        /**
+         * TasksRefreshResponse
+         * @description `missing` mirrors BulkUpdateResult's `not_found_ids` convention: ids the
+         *     client asked about (in the request payload) that no longer exist server-side
+         *     — deleted by another session, a purge, a re-upload, etc. — or that fell
+         *     outside the caller's `allowed_plants` scope (folded in the same way
+         *     update_task_dates_bulk folds an out-of-scope row into not_found_ids, so the
+         *     response can't be used to distinguish "not found" from "not yours"). The
+         *     client removes these from Store instead of silently leaving them as ghosts.
+         */
         TasksRefreshResponse: {
             /** Data */
             data: components["schemas"]["TaskVersionRow"][];
+            /** Missing */
+            missing?: string[];
         };
         /**
          * TasksResponse
@@ -5557,6 +5610,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PlantFrozenHorizonDaysResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_plant_unknown_setup_policy_master_data_plants__plant__unknown_setup_policy_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlantUnknownSetupPolicyResult"];
                 };
             };
             /** @description Validation Error */

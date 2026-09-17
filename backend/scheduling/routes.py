@@ -561,21 +561,33 @@ def tasks_refresh(payload: TaskRefreshPayload,
     concurrency conflict reconciliation. Returns only what the client needs to
     overwrite its stale copies — no links, no color merge.
     Payload: { ids: [str] }
-    Response: { data: [{ id, start_date, end_date, row_version }] }
+    Response: { data: [{ id, start_date, end_date, row_version }], missing: [str] }
 
     Rows outside `allowed_plants` (None for an unrestricted/admin caller) are
     silently dropped rather than 403'd — matching GET /tasks's silent-bound
     behavior for unscoped pulls. `plant` is only used for this server-side
     filter and is stripped before the response leaves — it isn't part of the
     TaskVersionRow wire contract.
+
+    `missing` mirrors the not_found_ids convention from the /tasks/update family
+    (BulkUpdateResult): requested ids that no longer exist in `orders` (deleted
+    by another session, a purge, an upload) OR that exist but fell outside
+    `allowed_plants` — both folded into the same list, same as
+    update_task_dates_bulk folds "not yours" into not_found_ids, so the client
+    can't distinguish the two cases from this response. The client (Persistence.
+    _refreshTasks) uses it to drop these ids from Store instead of leaving them
+    as stale ghosts.
     """
     rows = db.get_task_versions(payload.ids)
+    found_ids = {r["id"] for r in rows}
     if allowed_plants is not None:
         rows = [r for r in rows if r.get("plant") in allowed_plants]
+        found_ids = {r["id"] for r in rows}
+    missing = [i for i in payload.ids if i not in found_ids]
     for row in rows:
         row.pop("plant", None)
         row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
-    return {"data": rows}
+    return {"data": rows, "missing": missing}
 
 
 @router.post("/tasks/baseline-correct", response_model=BaselineCorrectResult,

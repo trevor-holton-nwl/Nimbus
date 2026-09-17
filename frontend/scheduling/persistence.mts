@@ -736,6 +736,15 @@ export const Persistence = {
       const cos = Util.parseDate(cached.original_start_date);
       if (!(cs instanceof Date) || !(ce instanceof Date)) continue;
       if (!(cos instanceof Date) || cs.getTime() === cos.getTime()) continue;
+      // PR-2: a cached override only represents the planner's own unsaved edit
+      // if nothing has written this row server-side since it was cached. When
+      // both sides carry a row_version and they disagree, the server has a
+      // newer write (another session's optimizer run, an anchor-carry, etc.)
+      // that this cached copy knows nothing about — re-applying it here would
+      // silently hide that real update. Old caches (or rows that never got a
+      // version) fall back to the previous best-effort behavior.
+      const cachedVersion = cached.row_version as number | null | undefined;
+      if (cachedVersion != null && t.row_version != null && cachedVersion !== t.row_version) continue;
       t.start_date = cs;
       t.end_date   = ce;
       t.original_start_date = cos;
@@ -1373,6 +1382,20 @@ export const Persistence = {
           const tk = Store.tasks[id];
           if (tk) tk.row_version = versions[id];
         }
+        // PR-1: ids the backend reports as no longer existing server-side —
+        // deleted by another session, a purge, a re-upload, etc. — are ghosts
+        // in Store the instant this response arrives; leaving them in place
+        // just means _saveCache re-persists them to localStorage forever. Drop
+        // them from Store (and their dirty/force flags) instead of merely
+        // treating them as "accounted for" below.
+        const notFoundIds = (result.not_found_ids || []).map(String);
+        if (notFoundIds.length) {
+          const removed = Persistence._removeMissingTasks(notFoundIds);
+          if (removed) {
+            ErrorLog.warn('persistence', `${removed} order(s) no longer exist server-side — removed from Store`, notFoundIds);
+            Toast.show(Util.t('toast.orders_removed_remotely', { count: removed }), 'warn', 6000);
+          }
+        }
         const stale = result.stale || [];
         // Clear dirty/force ONLY for ids the backend actually accounted for (R7):
         // persisted (versions), concurrency-stale (refetched, last-writer-loses), and
@@ -1447,6 +1470,24 @@ export const Persistence = {
       .finally(() => { Persistence._saveInFlight = false; Persistence._syncUnsaved(); Persistence._saveCache(); });
   },
 
+  /** PR-1: ids the backend reports as no longer existing server-side (refresh's
+   *  `missing` / save's `not_found_ids`) — drop the ghost from Store (cleaning up
+   *  dependencies/firmedIds/Selection via Store.removeTask) and clear any stale
+   *  dirty/force flag so a removed id is never resent on the next save. Shared
+   *  by _refreshTasks and saveAll's success handler so both ghost-removal paths
+   *  stay identical. Returns how many ids were actually present to remove, so
+   *  callers only toast when something real happened. */
+  _removeMissingTasks(ids: string[]): number {
+    let removed = 0;
+    for (const rawId of ids) {
+      const id = String(rawId);
+      Persistence._dirtyIds.delete(id);
+      Persistence._forceIds.delete(id);
+      if (Store.removeTask(id, 'persistence')) removed++;
+    }
+    return removed;
+  },
+
   /** Optimistic-concurrency reconciliation: pull the server's current dates +
    *  row_version for orders a concurrent editor changed underneath us, and overwrite
    *  the stale local copies. Writes _state directly and emits ONCE with source
@@ -1460,7 +1501,7 @@ export const Persistence = {
       body: JSON.stringify({ ids }),
     })
       .then(r => r.ok ? r.json() as Promise<TasksRefreshResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(({ data }) => {
+      .then(({ data, missing }) => {
         const applied: string[] = [];
         for (const row of (data || [])) {
           const tk = Store.tasks[String(row.id)];
@@ -1480,6 +1521,17 @@ export const Persistence = {
         }
         if (applied.length) {
           Store.emit({ type: 'tasks:bulkUpdate', ids: applied, source: 'refresh' });
+        }
+        // PR-1: ids the server says no longer exist (deleted by another
+        // session, a purge, an upload, etc.) — remove the ghost from Store
+        // instead of silently leaving it to be re-persisted by _saveCache.
+        const missingIds = (missing || []).map(String);
+        if (missingIds.length) {
+          const removed = Persistence._removeMissingTasks(missingIds);
+          if (removed) {
+            ErrorLog.warn('persistence', `${removed} order(s) no longer exist server-side — removed from Store`, missingIds);
+            Toast.show(Util.t('toast.orders_removed_remotely', { count: removed }), 'warn', 6000);
+          }
         }
       })
       .catch(e => ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids));

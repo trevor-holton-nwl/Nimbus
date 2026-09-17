@@ -163,7 +163,15 @@ class TaskVersionRow(BaseModel):
 
 
 class TasksRefreshResponse(BaseModel):
+    """`missing` mirrors BulkUpdateResult's `not_found_ids` convention: ids the
+    client asked about (in the request payload) that no longer exist server-side
+    — deleted by another session, a purge, a re-upload, etc. — or that fell
+    outside the caller's `allowed_plants` scope (folded in the same way
+    update_task_dates_bulk folds an out-of-scope row into not_found_ids, so the
+    response can't be used to distinguish "not found" from "not yours"). The
+    client removes these from Store instead of silently leaving them as ghosts."""
     data: list[TaskVersionRow]
+    missing: list[str] = Field(default_factory=list)
 
 
 class BaselineCorrectResult(BaseModel):

@@ -42,6 +42,59 @@ test('Needs Planning survives API hydration, cached moves, normalization and und
   assert.equal(Store.tasks.queued.original_end_date.getTime(), due.getTime());
 });
 
+test('PR-2: _overlayUserMoves skips the cached override when the server row_version has moved past what was cached', () => {
+  // Another session's write (optimizer run, anchor-carry, etc.) landed on this
+  // row after the planner's local edit was cached — the cached copy is stale,
+  // not "my own unsaved edit", and must not mask the fresh server dates.
+  const backendTask = {
+    id: 'ver-skip', MACHINE: 'L1', row_version: 9,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'ver-skip', row_version: 5,
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T09:00:00',
+    original_start_date: '2026-09-08T00:00:00',
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.start_date.getTime(), new Date('2026-09-09T08:00:00').getTime(),
+    'a stale-versioned cached edit must not overwrite the freshly-fetched server dates');
+  assert.equal(backendTask.end_date.getTime(), new Date('2026-09-09T09:00:00').getTime());
+});
+
+test('PR-2: _overlayUserMoves still applies the cached override when row_version matches (a genuinely unsaved local edit)', () => {
+  const backendTask = {
+    id: 'ver-match', MACHINE: 'L1', row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'ver-match', row_version: 5,
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T09:00:00',
+    original_start_date: '2026-09-08T00:00:00',
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.start_date.getTime(), new Date('2026-09-10T08:00:00').getTime(),
+    'a same-versioned cached edit is the planner\'s own unsaved move and must still be overlaid');
+});
+
+test('PR-2: _overlayUserMoves falls back to applying the override when either side lacks a row_version', () => {
+  // Old caches (pre-dating this field) or rows that never got one keep the
+  // previous best-effort behavior rather than being silently skipped forever.
+  const backendTask = {
+    id: 'ver-none', MACHINE: 'L1', row_version: null,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'ver-none',
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T09:00:00',
+    original_start_date: '2026-09-08T00:00:00',
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.start_date.getTime(), new Date('2026-09-10T08:00:00').getTime());
+});
+
 test('optimizer save is atomic without force and a conflict leaves every dependent edit unsaved', async () => {
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   Store.setTasks([{ id: 'atomic-a', MACHINE: 'L1', RUN_TIME: 6, row_version: 5,
@@ -359,6 +412,86 @@ test('saveAll clears terminally-rejected ids (invalid_ids/not_found_ids) so they
     assert.ok(!Persistence._dirtyIds.has('gone'),      'not_found_ids id must clear (terminal — row not in DB)');
   } finally {
     globalThis.fetch = origFetch;
+  }
+});
+
+test('PR-1: saveAll removes not_found_ids from Store (not just clears the dirty flag) and toasts the removed count', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'gone-remote', MACHINE: 'L1', RUN_TIME: 1, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00') }], 'unit-test');
+  Persistence._dirtyIds.add('gone-remote');
+  const originalFetch = globalThis.fetch;
+  const originalToast = Toast.show;
+  globalThis.window = globalThis.window || {};
+  const originalLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.orders_removed_remotely': '{{count}} removed' } };
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({
+    status: 'ok', updated: 1, persisted: 0, failed: 1, invalid: 0, not_found: 1,
+    invalid_ids: [], not_found_ids: ['gone-remote'], stale: [], versions: {},
+  }) });
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['gone-remote'], undefined,
+      'a not_found_ids row must be removed from Store, not left behind as a permanent ghost');
+    assert.ok(!Persistence._dirtyIds.has('gone-remote'), 'a removed ghost must not stay dirty and get resent');
+    assert.ok(toasts.some(t => t.type === 'warn' && /1 removed/.test(t.msg)),
+      'a toast naming the removed count');
+  } finally {
+    globalThis.fetch = originalFetch; Toast.show = originalToast;
+    globalThis.window.__NIMBUS_LOCALES = originalLocales;
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  }
+});
+
+test('PR-1: _refreshTasks removes ids in `missing` from Store and toasts once for the whole batch', async () => {
+  Store.setTasks([
+    { id: 'ghost-1', MACHINE: 'L1', RUN_TIME: 1, start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00') },
+    { id: 'ghost-2', MACHINE: 'L1', RUN_TIME: 1, start_date: new Date('2026-09-09T09:00:00'), end_date: new Date('2026-09-09T10:00:00') },
+  ], 'unit-test');
+  Persistence._dirtyIds.add('ghost-1');
+  const originalFetch = globalThis.fetch;
+  const originalToast = Toast.show;
+  globalThis.window = globalThis.window || {};
+  const originalLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.orders_removed_remotely': '{{count}} removed' } };
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [], missing: ['ghost-1', 'ghost-2'] }) });
+  try {
+    Persistence._refreshTasks(['ghost-1', 'ghost-2']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['ghost-1'], undefined, 'a missing id must be removed from Store');
+    assert.equal(Store.tasks['ghost-2'], undefined, 'a missing id must be removed from Store');
+    assert.ok(!Persistence._dirtyIds.has('ghost-1'), 'a removed ghost must not stay dirty');
+    assert.equal(toasts.filter(t => /removed/.test(t.msg)).length, 1, 'exactly one toast for the whole batch');
+    assert.ok(toasts.some(t => t.type === 'warn' && /2 removed/.test(t.msg)));
+  } finally {
+    globalThis.fetch = originalFetch; Toast.show = originalToast;
+    globalThis.window.__NIMBUS_LOCALES = originalLocales;
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  }
+});
+
+test('PR-1: _refreshTasks does not remove or toast when `missing` is absent/empty', async () => {
+  Store.setTasks([{ id: 'kept-1', MACHINE: 'L1', RUN_TIME: 1,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00'), row_version: 1 }], 'unit-test');
+  const originalFetch = globalThis.fetch;
+  const originalToast = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({
+    data: [{ id: 'kept-1', start_date: '2026-09-09T10:00:00', end_date: '2026-09-09T11:00:00', row_version: 2 }],
+  }) });
+  try {
+    Persistence._refreshTasks(['kept-1']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(Store.tasks['kept-1'], 'a task still present server-side must not be removed');
+    assert.equal(toasts.length, 0, 'no removal toast when nothing was removed');
+  } finally {
+    globalThis.fetch = originalFetch; Toast.show = originalToast;
   }
 });
 
