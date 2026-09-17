@@ -183,6 +183,7 @@ const Settings = (() => {
     { key: 'timezone',          category: 'workflow', type: 'timezone', default: 'America/New_York', tier: 'user', region: true  },
     { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
     { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
+    { key: 'distributionFilters', category: 'workflow', type: 'object',  default: null,               tier: 'user', region: false },
   ];
 
   // { key: default } map derived from CATALOG (last link in Store.pref precedence).

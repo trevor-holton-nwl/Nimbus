@@ -74,6 +74,10 @@ interface StoreState {
   /** Read-only setup truth for exactly one plant, or null while unavailable/stale.
    * It is intentionally excluded from Persistence's schedule cache/payload. */
   setupSnapshot: SetupSnapshot | null;
+  /** Per-plant order distribution summary counts: {needs_review, changed, problems}.
+   *  Fetched via GET /distribution/{plant}/summary and cached reactively on plant
+   *  selection and schedule hydration (see frontend/insights/services.mts). */
+  distributionSummary: { needs_review: number; changed: number; problems: number } | null;
   /** Named fields are guaranteed; Session/DB-sourced prefs beyond them are an open bag (Object.assign in setUserSettings). */
   userSettings: Record<string, unknown> & { alertHorizonMinutes: number | null; confidenceHorizonMinutes: number };
   roleDefaults: Record<string, unknown>;
@@ -140,6 +144,7 @@ export const Store = {
     masterData: null,
     priorityRankMaps: {},
     setupSnapshot: null,
+    distributionSummary: null,
     userSettings: { alertHorizonMinutes: null, confidenceHorizonMinutes: 20160 },
     roleDefaults: {},
     orderFieldVisibility: {},
@@ -184,6 +189,7 @@ export const Store = {
   get masterData(): NimbusMasterData | null    { return this._state.masterData; },
   get priorityRankMaps(): PriorityRankMaps { return this._state.priorityRankMaps; },
   get setupSnapshot(): SetupSnapshot | null { return this._state.setupSnapshot; },
+  get distributionSummary(): { needs_review: number; changed: number; problems: number } | null { return this._state.distributionSummary; },
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
   get orderFieldVisibility(): StoreState['orderFieldVisibility'] { return this._state.orderFieldVisibility; },
   get visibilityHorizonEnd(): Date | null { return this._state.visibilityHorizonEnd; },
@@ -279,6 +285,15 @@ export const Store = {
   replaceSetupSnapshot(snapshot: SetupSnapshot | null, source?: string): void {
     this._state.setupSnapshot = snapshot;
     this.emit({ type: 'setup-snapshot:replace', snapshot, source });
+  },
+
+  /** Set the per-plant order distribution summary counts. Fetched reactively by
+   * frontend/insights/services.mts on plant selection and schedule hydration.
+   * Emits a `distribution:summary` event so the Distribution tab and Dashboard
+   * summary can update synchronously. */
+  setDistributionSummary(summary: { needs_review: number; changed: number; problems: number } | null, source?: string): void {
+    this._state.distributionSummary = summary;
+    this.emit({ type: 'distribution:summary', summary, source });
   },
 
   /* ----- subscription ---------------------------------------------------- */
@@ -579,6 +594,8 @@ export const Store = {
     // leak into the new one. Routed through setSelectedLines so this reuses its
     // in-place-mutate + no-op-guard + emit logic instead of duplicating it.
     this.setSelectedLines([], source);
+    // Reset per-plant reactive data when plant changes
+    this._state.distributionSummary = null;
     this.emit({ type: 'plant:selected', plant: this._state.selectedPlant, source });
   },
   setSelectedLines(lines: Iterable<string>, source?: string): void {

@@ -47,6 +47,7 @@ import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundati
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
 import type { SetupObservation } from '../optimization/engine.mjs';
 import type { ScheduleSnapshot } from '../optimization/setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData } from '../platform/types.mjs';
@@ -557,6 +558,43 @@ export function scheduleAlertsForPatches(
   Alerts.scheduleRecomputeLines(lines);
 }
 
+/** Load the order distribution summary for the currently-selected plant.
+ *  Calls GET /distribution/{plant}/summary and sets Store.distributionSummary.
+ *  Exported so the Distribution tab (when it exists) can call this after a
+ *  distribution write to refresh the counts. Should also be called on
+ *  plant:selected and schedule:hydrated events (see the wired subscriber below).
+ *  Skips loading if in What-If mode (Sandbox.active) or before any schedule
+ *  has been hydrated (Store.masterData is null until Persistence.load completes). */
+export async function loadDistributionSummary(): Promise<void> {
+  const plant = Store.selectedPlant;
+  // Skip loading for: no plant selected, What-If mode active (Sandbox is
+  // a real cross-file import, so this is safe to reference inside a method
+  // body; see this file's header comment about the Sandbox ↔ Store ESM cycle),
+  // or no schedule data loaded yet (masterData is null until Persistence.load).
+  if (!plant || Sandbox.active || !Store.masterData) {
+    Store.setDistributionSummary(null, 'distribution-loader');
+    return;
+  }
+  try {
+    const response = await Util.fetchTraced(
+      `/distribution/${encodeURIComponent(plant)}/summary`,
+      { method: 'GET' }
+    );
+    if (!response.ok) {
+      ErrorLog.error('distribution', `Failed to load distribution summary (${response.status})`,
+        { plant }, { errorCode: 'distribution.summary_load' });
+      Store.setDistributionSummary(null, 'distribution-loader');
+      return;
+    }
+    const summary = await response.json();
+    Store.setDistributionSummary(summary, 'distribution-loader');
+  } catch (err) {
+    ErrorLog.error('distribution', `Error loading distribution summary: ${String(err)}`,
+      { plant }, { errorCode: 'distribution.summary_fetch' });
+    Store.setDistributionSummary(null, 'distribution-loader');
+  }
+}
+
 // scheduling/persistence.mjs's Persistence used to call `Alerts.scheduleRecompute()`
 // directly after every hydration (load()'s two branches, _loadCache(), _loadDemo()) —
 // a reverse dependency scheduling/persistence.mjs must never take (it may not import
@@ -571,6 +609,19 @@ Store.subscribe(evt => {
     if (lines?.length) Alerts.scheduleRecomputeLines(new Set(lines)); else Alerts.scheduleRecompute();
   }
 }, 'insights-services.hydrated');
+
+// Load distribution summary reactively on plant selection and schedule hydration.
+// After a plant switch, setSelectedPlant resets distributionSummary to null,
+// then emits plant:selected; after a schedule load, Persistence emits
+// schedule:hydrated. The Distribution tab will also call loadDistributionSummary()
+// directly after a distribution write (placeholder for future task).
+// Skip loading while in What-If mode (Sandbox.active) to avoid network calls
+// during preview operations that may have a test/placeholder plant selected.
+Store.subscribe(evt => {
+  if ((evt.type === 'plant:selected' || evt.type === 'schedule:hydrated') && !Sandbox.active) {
+    void loadDistributionSummary();
+  }
+}, 'distribution-loader');
 
 /** Phase 2 (Pkg D) clone-base reuse: `Utilization.computeMatrix`'s preview
  * path (`utilizationSnapshot` non-null) structured-clones this six-pack on
