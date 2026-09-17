@@ -102,3 +102,9 @@ CREATE TABLE IF NOT EXISTS order_distribution_share (
         REFERENCES order_distribution (plant, production_order, material_number) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_ods_machine ON order_distribution_share(plant, machine);
+
+-- §3.6: sap_field_map seeds for SAP order sync (ARBPL→machine, WERKS→plant)
+INSERT INTO sap_field_map (object_key, sap_field, nimbus_column, transform, field_order) VALUES
+    ('orders', 'ARBPL', 'machine',              'none',        6),
+    ('orders', 'WERKS', 'plant',                'none',        7)
+ON CONFLICT (object_key, sap_field) DO NOTHING;

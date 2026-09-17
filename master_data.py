@@ -29,7 +29,7 @@ log = logging.getLogger("nimbus.md")
 ALLOWED_TABLES = frozenset({
     'subnetworks', 'plants', 'machine',
     'materials', 'material_plants', 'bom_items',
-    'roles', 'role_plants', 'workcenter_mapping',
+    'roles', 'role_plants', 'sap_workcenter',
 })
 
 # Tables whose `plant` column is business/scheduling data, subject to
@@ -40,7 +40,7 @@ ALLOWED_TABLES = frozenset({
 # admin action. Deliberately excludes `role_plants` itself — its `plant`
 # column means "which plant this role can see", a different concept from
 # "which plant this record belongs to".
-PLANT_SCOPED_TABLES = frozenset({'plants', 'machine', 'material_plants', 'bom_items', 'workcenter_mapping'})
+PLANT_SCOPED_TABLES = frozenset({'plants', 'machine', 'material_plants', 'bom_items', 'sap_workcenter'})
 
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
 
@@ -79,7 +79,7 @@ _KEY_COLUMNS = {
     'bom_items':          frozenset({'material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'}),
     'roles':              frozenset({'role'}),
     'role_plants':        frozenset({'role', 'plant'}),
-    'workcenter_mapping': frozenset({'plant', 'machine'}),
+    'sap_workcenter':     frozenset({'plant', 'sap_workcenter'}),
 }
 
 # The ONLY material_plants columns POST /master-data/material-plants/attributes
@@ -237,7 +237,7 @@ def _column_meta(cur, table: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 def list_rows(table: str, limit: int | None = None, offset: int | None = None,
               plant: str | None = None, allowed_plants: list[str] | None = None,
-              material_id: str | None = None) -> dict:
+              material_id: str | None = None, search: str | None = None) -> dict:
     """
     Return column metadata + data rows for the given table.
 
@@ -251,6 +251,8 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         honored when the table actually has one; ignored otherwise). Used by
         the BOM tab, which requires a plant + material pick before browsing
         rather than ever loading the full (potentially huge) bom_items table.
+      - `search`: case-insensitive substring search (ILIKE) over the key column
+        and `description` column (when present).
       - `limit`/`offset`: parameterized LIMIT/OFFSET page window.
     When any of these are supplied, `meta.total` carries the full row count for
     the same filter (ignoring limit/offset) so callers can paginate.
@@ -281,6 +283,24 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         if allowed_plants is not None and table in PLANT_SCOPED_TABLES and "plant" in col_names:
             where_parts.append(sql.SQL("{col} = ANY(%s)").format(col=sql.Identifier("plant")))
             where_params.append(allowed_plants)
+        # Optional search filter (ILIKE over key column and description, when present).
+        if search and col_names:
+            search_cols = []
+            # The last key column (typically the non-plant identifier)
+            key_cols = list(_KEY_COLUMNS[table])
+            if key_cols and key_cols[-1] in col_names:
+                search_cols.append(sql.Identifier(key_cols[-1]))
+            # Also search description if it exists
+            if "description" in col_names:
+                search_cols.append(sql.Identifier("description"))
+            if search_cols:
+                search_clause = sql.SQL(" OR ").join(
+                    sql.SQL("{col} ILIKE %s").format(col=col) for col in search_cols
+                )
+                where_parts.append(sql.SQL("({})").format(search_clause))
+                # Add the search term for each column (prepended/appended with %)
+                search_term = f"%{search}%"
+                where_params.extend([search_term] * len(search_cols))
         where_sql = (sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)) if where_parts else sql.SQL("")
 
         # Fetch rows with only the visible columns (plant filter + page window).

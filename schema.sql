@@ -1049,7 +1049,9 @@ INSERT INTO sap_field_map (object_key, sap_field, nimbus_column, transform, fiel
     ('orders', 'MATNR', 'material_number',      'alpha',       2),
     ('orders', 'GSTRP', 'basic_start_date',     'dats',        3),
     ('orders', 'GLTRP', 'basic_finish_date',    'dats',        4),
-    ('orders', 'GAMNG', 'order_quantity',       'decimal',     5)
+    ('orders', 'GAMNG', 'order_quantity',       'decimal',     5),
+    ('orders', 'ARBPL', 'machine',              'none',        6),
+    ('orders', 'WERKS', 'plant',                'none',        7)
 ON CONFLICT (object_key, sap_field) DO NOTHING;
 
 -- ----------------------------------------------------------------------------

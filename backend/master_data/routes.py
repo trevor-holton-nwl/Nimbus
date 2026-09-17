@@ -284,10 +284,12 @@ def md_list(table: str,
                 description="Filter to one plant (only honored for tables with a plant column)."),
             material_id: str | None = Query(default=None,
                 description="Filter to one material (only honored for tables with a material_id column)."),
+            search: str | None = Query(default=None,
+                description="Search term (case-insensitive substring match on key column and description)."),
             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """List rows for a master-data table (subnetworks | plants | machine | ...).
 
-    Optional ?limit=/?offset=/?plant=/?material_id= scope the result server-side;
+    Optional ?limit=/?offset=/?plant=/?material_id=/?search= scope the result server-side;
     all default to the full-catalog behavior. When supplied, meta.total carries
     the full filtered row count for paging. bom_items in particular relies on
     ?plant=+?material_id= to never load its full (potentially huge) table.
@@ -308,7 +310,7 @@ def md_list(table: str,
             and plant is not None and plant not in allowed_plants):
         raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
     return md.list_rows(table, limit=limit, offset=offset, plant=plant,
-                         allowed_plants=allowed_plants, material_id=material_id)
+                         allowed_plants=allowed_plants, material_id=material_id, search=search)
 
 
 @router.post("/master-data/{table}/cascade-preview", response_model=CascadePreviewResult, dependencies=[Depends(require_admin)])

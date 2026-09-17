@@ -53,6 +53,7 @@ SAP_OBJECTS: dict[str, dict] = {
     "machine":          {"kind": "master", "table": "machine",          "label": "Machines"},
     "materials":        {"kind": "master", "table": "materials",        "label": "Materials"},
     "material_plants":  {"kind": "master", "table": "material_plants",  "label": "Material Plants"},
+    "sap_workcenter":   {"kind": "master", "table": "sap_workcenter",   "label": "SAP Work Centers"},
     "orders":           {"kind": "orders", "table": "orders",           "label": "Production Orders"},
 }
 
@@ -64,6 +65,7 @@ _MASTER_KEY_COLUMNS = {
     "machine":          ("subnetwork", "plant", "machine"),
     "materials":        ("material_id",),
     "material_plants":  ("material_id", "plant"),
+    "sap_workcenter":   ("plant", "sap_workcenter"),
 }
 
 # ---------------------------------------------------------------------------
