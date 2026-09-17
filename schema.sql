@@ -110,11 +110,73 @@ CREATE TABLE IF NOT EXISTS order_schedule_segments (
 CREATE INDEX IF NOT EXISTS idx_order_schedule_segments_order_start
     ON order_schedule_segments(order_id, scheduled_start);
 
+-- ----------------------------------------------------------------------------
+-- order_distribution (header) and order_distribution_share: SAP aggregate
+-- work center distribution across NIMBUS machines (2026-09-17).
+-- Transactional tables, never grid-editable. Written solely by
+-- backend/distribution/. Header + shares are replaced wholesale in one
+-- transaction; header.xmin is the optimistic-concurrency token (base_version
+-- on wire, 409 stale on mismatch).
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS order_distribution (
+    plant              TEXT NOT NULL,
+    production_order   TEXT NOT NULL,
+    material_number    TEXT NOT NULL,
+    sap_workcenter     TEXT NOT NULL,
+    order_quantity     NUMERIC,
+    run_time           NUMERIC,
+    basic_start_date   TIMESTAMP,
+    basic_finish_date  TIMESTAMP,
+    firming_indicator  TEXT,
+    sap_facts          JSONB,
+    source             TEXT NOT NULL DEFAULT 'default' CHECK (source IN ('default','manual')),
+    default_basis      TEXT NOT NULL DEFAULT 'workcenter_weights'
+                       CHECK (default_basis IN ('material_default','tooled_single','workcenter_weights')),
+    reviewed           BOOLEAN NOT NULL DEFAULT FALSE,
+    reviewed_by        TEXT,
+    reviewed_at        TIMESTAMPTZ,
+    reviewed_quantity  NUMERIC,
+    updated_by         TEXT,
+    last_batch_id      UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (plant, production_order, material_number),
+    FOREIGN KEY (plant, sap_workcenter)
+        REFERENCES sap_workcenter (plant, sap_workcenter) ON UPDATE CASCADE ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_order_distribution_wc
+    ON order_distribution(plant, sap_workcenter, reviewed);
+
+CREATE TABLE IF NOT EXISTS order_distribution_share (
+    plant            TEXT NOT NULL,
+    production_order TEXT NOT NULL,
+    material_number  TEXT NOT NULL,
+    machine          TEXT NOT NULL,
+    letter           TEXT NOT NULL,
+    weight           NUMERIC NOT NULL DEFAULT 0 CHECK (weight >= 0),
+    child_id         TEXT,
+    purged_at        TIMESTAMPTZ,
+    PRIMARY KEY (plant, production_order, material_number, machine),
+    UNIQUE (plant, production_order, material_number, letter),
+    FOREIGN KEY (plant, production_order, material_number)
+        REFERENCES order_distribution (plant, production_order, material_number) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ods_machine ON order_distribution_share(plant, machine);
+
 -- Migration for databases created before firming_indicator existed. db.py both
 -- reads (query_orders SELECT) and writes (ingest upsert) this column; without it
 -- GET /tasks fails with UndefinedColumn. ADD COLUMN IF NOT EXISTS is idempotent.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS firming_indicator TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS runtime_schedule_mismatch BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Order Distribution columns (2026-09-17): sub-order identification and parent link.
+-- NULL for plain orders. No stored share (would drift on SAP parent qty change);
+-- client derives share % from sibling quantities and "machine locked" from parent_production_order != NULL.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_production_order TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS distribution_letter     TEXT;
+CREATE INDEX IF NOT EXISTS idx_orders_parent
+    ON orders(plant, parent_production_order, material_number)
+    WHERE parent_production_order IS NOT NULL;
 
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a
@@ -345,6 +407,33 @@ CREATE TABLE IF NOT EXISTS workcenter_mapping (
     PRIMARY KEY (plant, machine)
 );
 
+-- ----------------------------------------------------------------------------
+-- sap_workcenter: SAP work center policy and membership weights (2026-09-17).
+-- Per-plant table; work-center codes aggregate multiple NIMBUS machines.
+-- distribution_mode: 'single' = all orders land on default_machine;
+--   'distribute' = orders split across members by weight.
+-- max_separation: ISO week (Monday start) / day / hour / none; applies in
+--   distribute mode only (§3.1). review_required: default headers start as
+--   reviewed = FALSE when TRUE, as reviewed = TRUE when FALSE.
+-- distribute_tooled: when FALSE, tooled materials default to single 100% share.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sap_workcenter (
+    plant              TEXT NOT NULL,
+    sap_workcenter     TEXT NOT NULL,
+    description        TEXT,
+    distribution_mode  TEXT NOT NULL DEFAULT 'single'
+                       CHECK (distribution_mode IN ('single','distribute')),
+    default_machine    TEXT,
+    max_separation     TEXT NOT NULL DEFAULT 'none'
+                       CHECK (max_separation IN ('none','hour','day','week')),
+    review_required    BOOLEAN NOT NULL DEFAULT TRUE,
+    distribute_tooled  BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (plant, sap_workcenter),
+    CHECK (distribution_mode = 'distribute' OR default_machine IS NOT NULL)
+);
+
 -- column_metadata: display labels + whether a column is a locked key column.
 -- System columns (created_at, updated_at) are never inserted here — the
 -- backend filters them out before returning column lists to the UI.
@@ -366,6 +455,17 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('workcenter_mapping', 'plant',          'Plant',            TRUE,  1),
     ('workcenter_mapping', 'machine',        'Machine',          TRUE,  2),
     ('workcenter_mapping', 'sap_workcenter', 'SAP Workcenter',   FALSE, 3)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('sap_workcenter', 'plant',             'Plant',               TRUE,  1),
+    ('sap_workcenter', 'sap_workcenter',    'SAP Work Center',     TRUE,  2),
+    ('sap_workcenter', 'description',       'Description',         FALSE, 3),
+    ('sap_workcenter', 'distribution_mode', 'Distribution Mode',   FALSE, 4),
+    ('sap_workcenter', 'default_machine',   'Default Machine',     FALSE, 5),
+    ('sap_workcenter', 'max_separation',    'Max Separation',      FALSE, 6),
+    ('sap_workcenter', 'review_required',   'Review Required',     FALSE, 7),
+    ('sap_workcenter', 'distribute_tooled', 'Distribute Tooled',   FALSE, 8)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
@@ -545,6 +645,29 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('machine', 'buffer_type',    'Buffer Type',            FALSE, 7),
     ('machine', 'buffer_percent', 'Buffer %',               FALSE, 8),
     ('machine', 'buffer_hours',   'Buffer Hours',           FALSE, 9)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- Order Distribution columns (2026-09-17): SAP work center link and weight.
+-- sap_workcenter: one work center per machine (soft ref to sap_workcenter table).
+-- distribution_weight: relative weight in work-center distribution; NULL = even
+-- (with all other members NULL) or 0 (some member has weight). Enforced at
+-- Work Centers tab route; hard FK on (plant, sap_workcenter).
+-- ----------------------------------------------------------------------------
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS sap_workcenter      TEXT;
+ALTER TABLE machine ADD COLUMN IF NOT EXISTS distribution_weight NUMERIC
+    CHECK (distribution_weight IS NULL OR distribution_weight >= 0);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_machine_sap_workcenter') THEN
+        ALTER TABLE machine ADD CONSTRAINT fk_machine_sap_workcenter
+            FOREIGN KEY (plant, sap_workcenter) REFERENCES sap_workcenter (plant, sap_workcenter)
+            ON UPDATE CASCADE ON DELETE RESTRICT;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_machine_sap_workcenter ON machine(plant, sap_workcenter);
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('machine', 'sap_workcenter',      'SAP Work Center',     FALSE, 10),
+    ('machine', 'distribution_weight', 'Distribution Weight', FALSE, 11)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
