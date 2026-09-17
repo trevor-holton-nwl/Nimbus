@@ -414,7 +414,17 @@ const SessionUIAdapter = {
     return defs.filter(([tab]) => Session.canAccessTab(tab));
   },
   _landingSubDefs(tab: string): Array<[string, string]> | null {
-    if (tab === 'gantt')      return [['timeline', Util.t('us.landing_timeline')], ['orders', Util.t('tab.table')]];
+    if (tab === 'gantt') {
+      // Built from App._GANTT_SUBS (order + landingEligible filter) rather than a
+      // hardcoded pair. The landing picker's copy for 'timeline' is deliberately
+      // shorter ("Timeline") than the command-band section label ("Gantt Timeline")
+      // that entry's labelKey drives elsewhere, so it's overridden here rather than
+      // reusing labelKey verbatim — same text as before this refactor.
+      const LANDING_LABEL_OVERRIDE: Partial<Record<GanttSubTab, string>> = { timeline: 'us.landing_timeline' };
+      return App._GANTT_SUBS
+        .filter(e => e.landingEligible)
+        .map(e => [e.key, Util.t(LANDING_LABEL_OVERRIDE[e.key] ?? e.labelKey)]);
+    }
     if (tab === 'masterdata') return [
       ['lines',          Util.t('tab.machine')],
       ['plant',          Util.t('tab.plant')],
@@ -1897,9 +1907,10 @@ const App = {
     const el = document.getElementById('cmd-band-section-label');
     if (!el) return;
     if (tab === 'gantt') {
+      const entry = App._GANTT_SUBS.find(e => e.key === App._ganttSub);
       el.textContent = Util.t('ui.section_label_with_sub', {
         tab: Util.t('tab.gantt'),
-        sub: Util.t(App._ganttSub === 'orders' ? 'tab.table' : 'tab.gantt_timeline'),
+        sub: Util.t(entry ? entry.labelKey : 'tab.gantt_timeline'),
       });
       return;
     }
@@ -2229,7 +2240,7 @@ const App = {
   // sub hasn't been reassigned yet (compute it explicitly, don't cache it).
   _scrollKeyFor(tab: TopLevelTab | null): string | null {
     if (!tab) return null;
-    if (tab === 'gantt')      return `gantt:${App._ganttSub}`;
+    if (tab === 'gantt')      return App._GANTT_SUBS.find(e => e.key === App._ganttSub)?.scrollKey ?? null;
     if (tab === 'masterdata') return `masterdata:${App._currentMasterSub}`;
     if (tab === 'labor')      return `labor:${App._laborSub}`;
     return tab;
@@ -2373,8 +2384,23 @@ const App = {
     }
   },
 
+  // Registry of Gantt sub-panes — mirrors _MASTER_SUBS below rather than a
+  // hardcoded whitelist array, so a new sub-tab is added by appending one
+  // entry instead of touching every consumer separately. `labelKey` feeds
+  // _updateSectionLabel's command-band text; `landingEligible` gates which
+  // subs appear in the Settings "default landing view" sub-picker
+  // (SessionUIAdapter._landingSubDefs); `scrollKey` is the _scrollMemory/
+  // _paneScrollTargets key for this sub's pane (a grid-style pane like
+  // Orders owns its own ag-grid viewport, so it has no _paneScrollTargets
+  // case — only Timeline's sidebar list does).
+  _GANTT_SUBS: [
+    { key: 'timeline', paneId: 'gantt-sub-timeline', labelKey: 'tab.gantt_timeline', landingEligible: true, scrollKey: 'gantt:timeline' },
+    { key: 'orders',   paneId: 'gantt-sub-orders',   labelKey: 'tab.table',          landingEligible: true, scrollKey: 'gantt:orders' },
+  ] as Array<{ key: GanttSubTab; paneId: string; labelKey: string; landingEligible: boolean; scrollKey: string }>,
+
   gotoGanttSub(sub: GanttSubTab): void {
-    if (!['timeline', 'orders'].includes(sub)) return;
+    const entry = App._GANTT_SUBS.find(e => e.key === sub);
+    if (!entry) return;
     // Only a genuine within-tab sub switch (not the initial gantt-tab entry,
     // where App._ganttSub already equals `sub` and there's no outgoing pane)
     // has anything worth saving.
@@ -2388,15 +2414,15 @@ const App = {
       if (on) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
     });
     if (App._currentTab === 'gantt') App._updateSectionLabel('gantt');
-    const timelinePane = document.getElementById('gantt-sub-timeline');
-    const ordersPane   = document.getElementById('gantt-sub-orders');
-    if (timelinePane) timelinePane.style.display = sub === 'timeline' ? 'flex' : 'none';
-    if (ordersPane)   ordersPane.style.display   = sub === 'orders'   ? 'flex' : 'none';
+    App._GANTT_SUBS.forEach(e => {
+      const el = document.getElementById(e.paneId);
+      if (el) el.style.display = (e.key === sub) ? 'flex' : 'none';
+    });
     // Zoom/Fit/Now live inside #gantt-sub-timeline now, so the pane toggle above hides them on the Orders sub-view.
     if (sub === 'orders') {
       setTimeout(() => {
         if (Table._api) Table._api.sizeColumnsToFit();
-        requestAnimationFrame(() => App._restoreScroll('gantt:orders'));
+        requestAnimationFrame(() => App._restoreScroll(entry.scrollKey));
       }, 30);
     } else {
       // Mask the entry re-render synchronously (before the 30 ms timeout) so the
@@ -2408,7 +2434,7 @@ const App = {
         GanttFilter._apply!();
         TimelineNav.render();
         if (DependencyOverlay._enabled) DependencyOverlay.render();
-        requestAnimationFrame(() => App._restoreScroll('gantt:timeline'));
+        requestAnimationFrame(() => App._restoreScroll(entry.scrollKey));
         // Frozen/visibility horizon instants come only from /tasks meta and go
         // stale after an admin change or the daily roll; a full reload has no
         // unsaved-edit guard, so refresh just the meta and re-derive the bands
