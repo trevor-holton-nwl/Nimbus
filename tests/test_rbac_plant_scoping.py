@@ -358,3 +358,71 @@ def test_distribution_workcenter_write_allows_an_admin_through_to_the_data_layer
     )
     assert response.status_code == 200
     assert calls == [{"plant": DIST_PLANT_A, "wc": "WC1"}]
+
+
+# ---------------------------------------------------------------------------
+# GET /distribution/{plant}, /{plant}/{order}/{material}, /{plant}/summary,
+# /{plant}/aggregate, /{plant}/unresolved -- backend/distribution/'s 5
+# P2-6/P2-7 read routes (aggregate_to_detail.md §7). All five are
+# `require_authenticated` + plant scope ONLY (no admin/api-key, §7's guard
+# column), so `scoped_client` (PLANT_A/PLANT_B, defined above for /tasks and
+# /task/update) applies directly -- no dedicated fixture needed. Each route
+# runs the SAME `_distribution_plant_guard` the workcenters route above uses
+# (routes.py, shared verbatim), so the catch order -- ValueError (blank
+# plant) checked first inside `md._assert_plant_allowed`, PlantNotAllowed
+# (out-of-scope) second -- is identical; verified against
+# backend/distribution/routes.py, not assumed.
+# ---------------------------------------------------------------------------
+def test_distribution_list_rejects_an_out_of_scope_plant(scoped_client):
+    response = scoped_client.get(f"/distribution/{PLANT_B}")
+    assert response.status_code == 403
+
+
+def test_distribution_list_maps_blank_plant_to_400_not_500(scoped_client):
+    response = scoped_client.get("/distribution/%20")
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_detail_rejects_an_out_of_scope_plant(scoped_client):
+    response = scoped_client.get(f"/distribution/{PLANT_B}/ORDER1/MAT1")
+    assert response.status_code == 403
+
+
+def test_distribution_detail_maps_blank_plant_to_400_not_500(scoped_client):
+    response = scoped_client.get("/distribution/%20/ORDER1/MAT1")
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_summary_rejects_an_out_of_scope_plant(scoped_client):
+    response = scoped_client.get(f"/distribution/{PLANT_B}/summary")
+    assert response.status_code == 403
+
+
+def test_distribution_summary_maps_blank_plant_to_400_not_500(scoped_client):
+    response = scoped_client.get("/distribution/%20/summary")
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_aggregate_rejects_an_out_of_scope_plant(scoped_client):
+    response = scoped_client.get(f"/distribution/{PLANT_B}/aggregate")
+    assert response.status_code == 403
+
+
+def test_distribution_aggregate_maps_blank_plant_to_400_not_500(scoped_client):
+    response = scoped_client.get("/distribution/%20/aggregate")
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_unresolved_rejects_an_out_of_scope_plant(scoped_client):
+    response = scoped_client.get(f"/distribution/{PLANT_B}/unresolved")
+    assert response.status_code == 403
+
+
+def test_distribution_unresolved_maps_blank_plant_to_400_not_500(scoped_client):
+    response = scoped_client.get("/distribution/%20/unresolved")
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]

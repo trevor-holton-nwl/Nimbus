@@ -1468,3 +1468,545 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
     ingest_warnings = plan.get("ingest_warnings", {})
     warnings_entry = _build_warnings_entry(ingest_warnings, counters)
     return {**counters, "warnings_entry": warnings_entry, "ingest_warnings": ingest_warnings}
+
+
+# =====================================================================
+# P2-6/P2-7 -- read routes (aggregate_to_detail.md §6 "Data", §7, §10.2)
+# =====================================================================
+#
+# GET /distribution/{plant}                       -> list_headers_for_plant
+# GET /distribution/{plant}/{order}/{material}     -> get_header_detail
+# GET /distribution/{plant}/summary                -> get_summary
+# GET /distribution/{plant}/aggregate              -> get_aggregate
+# GET /distribution/{plant}/unresolved             -> get_unresolved
+#
+# Derived statuses are never stored (§5.7) -- every one of these functions
+# recomputes them at read time via service.compute_derived_statuses(), fed
+# from the SAME batched-load shape plan()/_load_existing_headers() already
+# use elsewhere in this file (one query per table, never per header).
+
+# Bucket definitions (§6 "Data" bullet) -- the SINGLE source of truth both
+# list_headers_for_plant()'s `bucket` filter and get_summary()'s counts
+# classify against, so the two routes can never drift apart (§7's summary
+# row calls this out by name).
+NEEDS_REVIEW_STATUSES = frozenset({"needs_review", "qty_changed"})
+CHANGED_STATUSES = frozenset({
+    "wc_changed", "membership_changed", "mode_mismatch",
+    "below_min_lot", "zero_quantity_children",
+})
+# separation_violated is a P3a status computed CLIENT-SIDE from live children
+# starts and the work center's max_separation (§6) -- it can never appear in
+# a compute_derived_statuses() result. Listed here only so the bucket
+# membership and the deep-link status list stay documented together; it
+# never actually matches anything server-side.
+PROBLEM_STATUSES = frozenset({"incomplete", "runtime_mismatch", "separation_violated"})
+
+_STATUS_BUCKETS: dict[str, frozenset] = {
+    "needs_review": NEEDS_REVIEW_STATUSES,
+    "changed": CHANGED_STATUSES,
+    "problems": PROBLEM_STATUSES,
+}
+
+
+def classify_bucket_membership(statuses: set) -> set:
+    """One header's derived-status set -> the subset of {'needs_review',
+    'changed', 'problems'} it belongs to. A header can be a member of more
+    than one bucket at once (e.g. `needs_review` + `incomplete`) -- this
+    counts memberships for `summary`'s counts, it does not pick the single
+    primary badge the list pane shows (that severity ordering is a §6
+    frontend concern, not this)."""
+    return {bucket for bucket, codes in _STATUS_BUCKETS.items() if statuses & codes}
+
+
+def status_matches_filter(statuses: set, status_or_bucket: str | None) -> bool:
+    """`status_or_bucket` is None/''/'all' (no filter), one of the three
+    bucket names above, or an individual status code accepted directly "for
+    deep links" (aggregate_to_detail.md §6/§7, e.g. `?bucket=purged`)."""
+    if not status_or_bucket or status_or_bucket == "all":
+        return True
+    if status_or_bucket in _STATUS_BUCKETS:
+        return bool(statuses & _STATUS_BUCKETS[status_or_bucket])
+    return status_or_bucket in statuses
+
+
+# Safety cap on the candidate header set list_headers_for_plant()/get_summary()
+# load before computing derived statuses in Python. A plant's order_distribution
+# header count is bounded by its count of currently-tracked aggregate SAP
+# orders (not the O(states^2) setup-matrix hazard the scale roadmap actually
+# warns against, root CLAUDE.md), but bucket/status filtering is inherently a
+# read-time Python computation (derived statuses are never stored, §5.7) that
+# can't be pushed into the SQL LIMIT/OFFSET -- this bounds the SQL-filterable
+# candidate set before that computation runs, rather than fetching every
+# header a plant has ever had.
+_LIST_CANDIDATE_CAP = 5000
+
+_HEADER_COLUMNS_SQL = """
+    plant, production_order, material_number, sap_workcenter, order_quantity,
+    run_time, basic_start_date, basic_finish_date, firming_indicator, sap_facts,
+    source, default_basis, reviewed, reviewed_by, reviewed_at, reviewed_quantity,
+    updated_by, last_batch_id, updated_at, xmin::text::bigint
+"""
+
+
+def _row_to_header(r) -> dict:
+    return {
+        "plant": r[0], "production_order": r[1], "material_number": r[2],
+        "sap_workcenter": r[3], "order_quantity": r[4], "run_time": r[5],
+        "basic_start_date": r[6], "basic_finish_date": r[7], "firming_indicator": r[8],
+        "sap_facts": r[9] or {}, "source": r[10], "default_basis": r[11],
+        "reviewed": r[12], "reviewed_by": r[13], "reviewed_at": r[14],
+        "reviewed_quantity": r[15], "updated_by": r[16], "last_batch_id": r[17],
+        "updated_at": r[18], "base_version": r[19],
+    }
+
+
+# Keys `_attach_*` helpers stash onto a header dict that are internal
+# working state, never part of the wire "header" object.
+_INTERNAL_HEADER_KEYS = frozenset({"shares", "children", "workcenter", "machines", "statuses"})
+
+
+def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter: str | None = None,
+                       reviewed: bool | None = None, batch: str | None = None,
+                       date_from=None, date_to=None, machines: list | None = None,
+                       limit_cap: int | None = _LIST_CANDIDATE_CAP) -> list[dict]:
+    """Every header matching the SQL-expressible filters (§6 "Data"), ordered
+    `basic_start_date ASC, reviewed ASC` (§6's stated default sort). Bucket/
+    status filtering happens afterward in Python (see module note above)."""
+    where = ["plant = %s"]
+    params: list = [plant]
+    if search:
+        where.append("(production_order ILIKE %s OR material_number ILIKE %s)")
+        like = f"%{search}%"
+        params.extend([like, like])
+    if workcenter:
+        where.append("sap_workcenter = %s")
+        params.append(workcenter)
+    if reviewed is not None:
+        where.append("reviewed = %s")
+        params.append(bool(reviewed))
+    if batch:
+        where.append("last_batch_id = %s")
+        params.append(batch)
+    if date_from is not None:
+        where.append("basic_start_date >= %s")
+        params.append(date_from)
+    if date_to is not None:
+        where.append("basic_start_date <= %s")
+        params.append(date_to)
+    if machines:
+        where.append(
+            "EXISTS (SELECT 1 FROM order_distribution_share s"
+            " WHERE s.plant = order_distribution.plant"
+            " AND s.production_order = order_distribution.production_order"
+            " AND s.material_number = order_distribution.material_number"
+            " AND s.machine = ANY(%s))"
+        )
+        params.append(list(machines))
+    where_sql = " AND ".join(where)
+    limit_sql = ""
+    if limit_cap is not None:
+        limit_sql = " LIMIT %s"
+        params.append(limit_cap)
+    cur.execute(
+        f"""
+        SELECT {_HEADER_COLUMNS_SQL}
+          FROM order_distribution
+         WHERE {where_sql}
+         ORDER BY basic_start_date ASC NULLS LAST, reviewed ASC
+         {limit_sql}
+        """,
+        params,
+    )
+    return [_row_to_header(r) for r in cur.fetchall()]
+
+
+def _fetch_header_by_key(cur, plant: str, order: str, material: str) -> dict | None:
+    cur.execute(
+        f"SELECT {_HEADER_COLUMNS_SQL} FROM order_distribution"
+        " WHERE plant = %s AND production_order = %s AND material_number = %s",
+        (plant, order, material),
+    )
+    r = cur.fetchone()
+    return _row_to_header(r) if r is not None else None
+
+
+def _attach_shares(cur, plant: str, headers: list[dict]) -> None:
+    """Batch-load shares for every header in `headers` -- one query, not one
+    per header, mirroring `_load_existing_headers`'s convention."""
+    if not headers:
+        return
+    prods = sorted({h["production_order"] for h in headers})
+    mats = sorted({h["material_number"] for h in headers})
+    cur.execute(
+        """
+        SELECT production_order, material_number, machine, letter, weight, child_id, purged_at
+          FROM order_distribution_share
+         WHERE plant = %s AND production_order = ANY(%s) AND material_number = ANY(%s)
+        """,
+        (plant, prods, mats),
+    )
+    by_key: dict[tuple, list[dict]] = {}
+    for po, mat, machine, letter, weight, child_id, purged_at in cur.fetchall():
+        by_key.setdefault((po, mat), []).append({
+            "machine": machine, "letter": letter, "weight": weight,
+            "child_id": child_id, "purged_at": purged_at,
+        })
+    for h in headers:
+        h["shares"] = by_key.get((h["production_order"], h["material_number"]), [])
+
+
+def _attach_children(cur, plant: str, headers: list[dict]) -> None:
+    """Batch-load each header's current materialized children (`orders` rows
+    pointing back via `parent_production_order`), keyed by machine so the
+    derived-status computation and the detail route's per-share enrichment
+    can both look a child up by (parent key, machine)."""
+    if not headers:
+        return
+    prods = sorted({h["production_order"] for h in headers})
+    mats = sorted({h["material_number"] for h in headers})
+    cur.execute(
+        """
+        SELECT parent_production_order, material_number, production_order, machine,
+               order_quantity, run_time, labor_hours, machine_hours,
+               scheduled_start, basic_start_date, runtime_schedule_mismatch, id
+          FROM orders
+         WHERE plant = %s AND parent_production_order = ANY(%s) AND material_number = ANY(%s)
+        """,
+        (plant, prods, mats),
+    )
+    by_key: dict[tuple, list[dict]] = {}
+    for (parent_po, mat, po, machine, qty, run_time, labor_hours, machine_hours,
+         sched_start, basic_start, mismatch, oid) in cur.fetchall():
+        by_key.setdefault((parent_po, mat), []).append({
+            "id": oid, "production_order": po, "machine": machine,
+            "order_quantity": qty, "run_time": run_time, "labor_hours": labor_hours,
+            "machine_hours": machine_hours, "scheduled_start": sched_start,
+            "basic_start_date": basic_start, "runtime_schedule_mismatch": bool(mismatch),
+            "below_min_lot": False,
+        })
+    for h in headers:
+        h["children"] = by_key.get((h["production_order"], h["material_number"]), [])
+
+
+def _attach_workcenter_and_machines(cur, plant: str, headers: list[dict]) -> None:
+    """Batch-load each header's work-center policy row and its CURRENT
+    member machines (`machine.sap_workcenter`) -- the same shapes
+    `service.compute_derived_statuses` takes for its `workcenter`/`machines`
+    parameters."""
+    if not headers:
+        return
+    wcs = sorted({h["sap_workcenter"] for h in headers if h.get("sap_workcenter")})
+    if not wcs:
+        for h in headers:
+            h["workcenter"] = None
+            h["machines"] = {}
+        return
+    cur.execute(
+        """
+        SELECT sap_workcenter, distribution_mode, default_machine, review_required, distribute_tooled
+          FROM sap_workcenter WHERE plant = %s AND sap_workcenter = ANY(%s)
+        """,
+        (plant, wcs),
+    )
+    wc_by_code = {
+        row[0]: {"sap_workcenter": row[0], "distribution_mode": row[1], "default_machine": row[2],
+                 "review_required": bool(row[3]), "distribute_tooled": bool(row[4])}
+        for row in cur.fetchall()
+    }
+    cur.execute(
+        "SELECT machine, sap_workcenter FROM machine WHERE plant = %s AND sap_workcenter = ANY(%s)",
+        (plant, wcs),
+    )
+    machines_by_wc: dict[str, dict[str, dict]] = {}
+    for machine, wc in cur.fetchall():
+        machines_by_wc.setdefault(wc, {})[machine] = {}
+    for h in headers:
+        wc = h.get("sap_workcenter")
+        h["workcenter"] = wc_by_code.get(wc)
+        h["machines"] = machines_by_wc.get(wc, {})
+
+
+def _attach_min_lot(cur, plant: str, headers: list[dict]) -> None:
+    """Batch-load `material_plants.min_lot_size` and flag each already-loaded
+    child `below_min_lot` (§5.3: "children whose quantity is below
+    material_plants.min_lot_size (> 0) are still created; the read path marks
+    them below_min_lot")."""
+    if not headers:
+        return
+    mats = sorted({h["material_number"] for h in headers})
+    cur.execute(
+        "SELECT material_id, min_lot_size FROM material_plants WHERE plant = %s AND material_id = ANY(%s)",
+        (plant, mats),
+    )
+    min_lot_by_mat = {r[0]: r[1] for r in cur.fetchall()}
+    for h in headers:
+        min_lot = min_lot_by_mat.get(h["material_number"])
+        if not min_lot or min_lot <= 0:
+            continue
+        for child in h.get("children", []):
+            qty = child.get("order_quantity")
+            child["below_min_lot"] = qty is not None and _dec(qty) < _dec(min_lot)
+
+
+def _hydrate_headers(cur, plant: str, headers: list[dict]) -> None:
+    """The full batched hydration + derived-status computation shared by
+    every read route below: shares, children, workcenter/machines,
+    below_min_lot, then `statuses`."""
+    _attach_shares(cur, plant, headers)
+    _attach_children(cur, plant, headers)
+    _attach_workcenter_and_machines(cur, plant, headers)
+    _attach_min_lot(cur, plant, headers)
+    for h in headers:
+        children_for_service = [
+            {"machine": c["machine"], "order_quantity": c["order_quantity"],
+             "below_min_lot": c.get("below_min_lot", False),
+             "runtime_schedule_mismatch": c.get("runtime_schedule_mismatch", False)}
+            for c in h.get("children", [])
+        ]
+        h["statuses"] = service.compute_derived_statuses(
+            h, h.get("shares", []), children_for_service, h.get("workcenter"), h.get("machines", {}),
+        )
+
+
+def _children_summary(children: list[dict]) -> dict:
+    total_qty = Decimal(0)
+    starts = []
+    for c in children:
+        if c.get("order_quantity") is not None:
+            total_qty += _dec(c["order_quantity"])
+        start = c.get("scheduled_start") or c.get("basic_start_date")
+        if start is not None:
+            starts.append(start)
+    return {
+        "count": len(children),
+        "total_quantity": float(total_qty),
+        "earliest_start": min(starts) if starts else None,
+    }
+
+
+def _header_wire_shape(h: dict) -> dict:
+    return {k: v for k, v in h.items() if k not in _INTERNAL_HEADER_KEYS}
+
+
+def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter: str | None = None,
+                           machines: list | None = None, reviewed: bool | None = None,
+                           bucket: str | None = None, batch: str | None = None,
+                           date_from=None, date_to=None, limit: int = 50, offset: int = 0) -> dict:
+    """`GET /distribution/{plant}` (§6 "Data", §7). Paged (default 50/page)
+    list of a plant's `order_distribution` headers, each with its shares,
+    derived statuses, and a children summary (count, total quantity,
+    earliest start).
+
+    `bucket` accepts `all`, one of the three §6 buckets (`needs_review`,
+    `changed`, `problems`), or an individual status code directly (deep
+    links); `None`/`''`/`'all'` means unfiltered.
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        headers = _fetch_header_rows(
+            cur, plant, search=search, workcenter=workcenter, reviewed=reviewed,
+            batch=batch, date_from=date_from, date_to=date_to, machines=machines,
+        )
+        _hydrate_headers(cur, plant, headers)
+
+    if bucket and bucket != "all":
+        headers = [h for h in headers if status_matches_filter(h["statuses"], bucket)]
+
+    total = len(headers)
+    scheduled_children = sum(
+        1 for h in headers for c in h.get("children", []) if c.get("scheduled_start") is not None
+    )
+
+    page = headers[offset:offset + limit] if limit else headers[offset:]
+    data = [
+        {
+            "header": _header_wire_shape(h),
+            "shares": h.get("shares", []),
+            "statuses": sorted(h.get("statuses", set())),
+            "children_summary": _children_summary(h.get("children", [])),
+        }
+        for h in page
+    ]
+    return {"data": data, "meta": {"total": total, "scheduled_children": scheduled_children}}
+
+
+def get_header_detail(plant: str, order: str, material: str) -> dict | None:
+    """`GET /distribution/{plant}/{order}/{material}` (§7). One header's full
+    detail: header, shares (each with `child_id`, the current child's live
+    quantity/hours/start when it exists, and stale/purged/below-min-lot
+    flags), derived statuses, and `base_version` (the header's xmin).
+    Returns None when no such header exists (route maps this to 404).
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        header = _fetch_header_by_key(cur, plant, order, material)
+        if header is None:
+            return None
+        headers = [header]
+        _hydrate_headers(cur, plant, headers)
+
+    h = headers[0]
+    children_by_machine = {c["machine"]: c for c in h.get("children", [])}
+    current_members = set(h.get("machines", {}).keys())
+    enriched_shares = []
+    for s in h.get("shares", []):
+        machine = s["machine"]
+        child = children_by_machine.get(machine)
+        enriched_shares.append({
+            "machine": machine, "letter": s.get("letter"), "weight": s.get("weight"),
+            "child_id": s.get("child_id"),
+            "quantity": child.get("order_quantity") if child else None,
+            "hours": child.get("run_time") if child else None,
+            "start": (child.get("scheduled_start") or child.get("basic_start_date")) if child else None,
+            "purged": s.get("purged_at") is not None,
+            "stale": machine not in current_members,
+            "below_min_lot": bool(child.get("below_min_lot")) if child else False,
+        })
+    return {
+        "header": _header_wire_shape(h),
+        "shares": enriched_shares,
+        "statuses": sorted(h.get("statuses", set())),
+        "base_version": h.get("base_version"),
+    }
+
+
+def get_summary(plant: str) -> dict:
+    """`GET /distribution/{plant}/summary` (§7). `{needs_review, changed,
+    problems}` counts over the plant's headers, classified by the SAME
+    `classify_bucket_membership` this module's `list_headers_for_plant`
+    `bucket` filter uses -- the two can't drift apart because they share
+    this one function."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        headers = _fetch_header_rows(cur, plant)
+        _hydrate_headers(cur, plant, headers)
+
+    counts = {"needs_review": 0, "changed": 0, "problems": 0}
+    for h in headers:
+        for bucket_name in classify_bucket_membership(h["statuses"]):
+            counts[bucket_name] += 1
+    return counts
+
+
+def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, date_to=None) -> list[dict]:
+    """`GET /distribution/{plant}/aggregate` (§10.2). One row per header:
+    `{production_order, material_number, machine, quantity, sum_child_quantity,
+    start, finish, child_count, queued_children, all_scheduled,
+    firming_indicator, reviewed, children}`.
+
+    Built from `db._EFF_END_SQL` / `db._SCHEDULE_SEGMENTS_LATERAL_SQL` -- the
+    SAME SQL fragments the `/tasks` read path uses for effective end
+    considering segments -- and the matching effective-*start* expression
+    `db.py` repeats inline in several places (`COALESCE(seg.first_start,
+    scheduled_start, basic_start_date)`, gated by `planning_status <>
+    'needs_planning'`), reused here verbatim rather than re-derived, so this
+    roll-up can never silently drift from how the Gantt/task read path
+    computes effective start/end.
+    """
+    where = ["hd.plant = %s"]
+    params: list = [plant]
+    if workcenter:
+        where.append("hd.sap_workcenter = %s")
+        params.append(workcenter)
+    if date_from is not None:
+        where.append("hd.basic_start_date >= %s")
+        params.append(date_from)
+    if date_to is not None:
+        where.append("hd.basic_start_date <= %s")
+        params.append(date_to)
+    where_sql = " AND ".join(where)
+
+    eff_start_sql = (
+        "CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
+        "ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END"
+    )
+    eff_end_sql = (
+        f"CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
+        f"ELSE COALESCE(seg.last_end, {db._EFF_END_SQL}) END"
+    )
+
+    query = f"""
+        SELECT hd.production_order, hd.material_number, hd.sap_workcenter,
+               hd.order_quantity, hd.firming_indicator, hd.reviewed,
+               o.production_order, o.machine, o.order_quantity, o.planning_status,
+               {eff_start_sql}, {eff_end_sql}
+          FROM order_distribution hd
+          LEFT JOIN orders o
+            ON o.plant = hd.plant AND o.parent_production_order = hd.production_order
+           AND o.material_number = hd.material_number
+          {db._SCHEDULE_SEGMENTS_LATERAL_SQL}
+         WHERE {where_sql}
+         ORDER BY hd.production_order, hd.material_number, o.machine
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        rows = cur.fetchall()
+
+    by_header: dict[tuple, dict] = {}
+    order_keys: list[tuple] = []
+    for (po, mat, wc, header_qty, firming, reviewed, child_po, child_machine, child_qty,
+         planning_status, eff_start, eff_end) in rows:
+        key = (po, mat)
+        if key not in by_header:
+            by_header[key] = {
+                "production_order": po, "material_number": mat, "machine": wc,
+                "quantity": float(header_qty) if header_qty is not None else None,
+                "sum_child_quantity": Decimal(0),
+                "start": None, "finish": None, "child_count": 0, "queued_children": 0,
+                "firming_indicator": firming, "reviewed": reviewed, "children": [],
+            }
+            order_keys.append(key)
+        agg = by_header[key]
+        if child_po is not None:
+            agg["child_count"] += 1
+            if child_qty is not None:
+                agg["sum_child_quantity"] += _dec(child_qty)
+            if planning_status == "needs_planning":
+                agg["queued_children"] += 1
+            if eff_start is not None and (agg["start"] is None or eff_start < agg["start"]):
+                agg["start"] = eff_start
+            if eff_end is not None and (agg["finish"] is None or eff_end > agg["finish"]):
+                agg["finish"] = eff_end
+            agg["children"].append({
+                "production_order": child_po, "machine": child_machine,
+                "quantity": float(child_qty) if child_qty is not None else None,
+                "start": eff_start, "end": eff_end,
+            })
+
+    result = []
+    for key in order_keys:
+        agg = by_header[key]
+        agg["sum_child_quantity"] = float(agg["sum_child_quantity"])
+        agg["all_scheduled"] = agg["child_count"] > 0 and agg["queued_children"] == 0
+        result.append(agg)
+    return result
+
+
+def get_unresolved(plant: str) -> dict:
+    """`GET /distribution/{plant}/unresolved` (§7). Plain orders
+    (`parent_production_order IS NULL`) whose `machine` matches no current
+    `machine` row in the plant -- a work-center code with no members, or a
+    line the row never got resolved against. The analogue of
+    `db.missing_master_data_for_plant` (`db.py:2209`)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.machine, COUNT(*)
+              FROM orders o
+              LEFT JOIN machine m ON m.plant = o.plant AND m.machine = o.machine
+             WHERE o.plant = %s
+               AND o.parent_production_order IS NULL
+               AND o.machine IS NOT NULL
+               AND m.machine IS NULL
+             GROUP BY o.machine
+             ORDER BY o.machine
+            """,
+            (plant,),
+        )
+        rows = cur.fetchall()
+    exceptions = [
+        {"plant": plant, "machine": r[0], "order_count": r[1], "reason": "no_machine_row"}
+        for r in rows
+    ]
+    return {
+        "unmatched_pairs": len(exceptions),
+        "unmatched_orders": sum(e["order_count"] for e in exceptions),
+        "exceptions": exceptions,
+    }

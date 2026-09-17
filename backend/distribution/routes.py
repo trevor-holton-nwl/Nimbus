@@ -19,7 +19,11 @@ No `base_version`/optimistic-concurrency (`xmin`) check on this route --
 aggregate_to_detail.md doesn't call for one here (that token belongs to the
 `order_distribution` header table, P2+); see data.py's module docstring.
 """
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+import csv
+import io
+from datetime import datetime
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
 import master_data as md
 import backend.distribution.data as distribution_data
@@ -87,4 +91,142 @@ def save_workcenter(plant: str, wc: str, request: Request, body: dict = Body(def
         )
     except ValueError as exc:
         raise _distribution_error(exc) from exc
+    return result
+
+
+# =====================================================================
+# P2-6/P2-7 -- read routes (aggregate_to_detail.md §7's API table)
+# =====================================================================
+#
+# Every response here is `Cache-Control: no-store` (§7: "the corporate proxy
+# caches by URL") -- set via `_no_store` on the injected `Response`, never
+# relying on a default. All five are `require_authenticated` + plant scope
+# only, per §7's guard column -- no `require_api_key`/`require_admin` (those
+# are reserved for the planner/admin WRITE routes, §11).
+
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+
+
+def _parse_iso_date(value: str | None, field: str) -> datetime | None:
+    """`from`/`to` query params -- naive plant-local wall-clock timestamps,
+    same convention `basic_start_date` itself is stored under (no further tz
+    conversion, matching `_horizon_boundary_core`'s documented convention);
+    an explicit offset in the input is simply dropped, not converted."""
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field} must be an ISO date/datetime") from exc
+    return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+
+
+@router.get("/distribution/{plant}", dependencies=[Depends(auth.require_authenticated)])
+def list_distribution(
+        plant: str, response: Response,
+        search: str | None = Query(default=None),
+        workcenter: str | None = Query(default=None),
+        machines: str | None = Query(default=None),
+        reviewed: bool | None = Query(default=None),
+        status: str | None = Query(default=None),
+        bucket: str | None = Query(default=None),
+        batch: str | None = Query(default=None),
+        from_: str | None = Query(default=None, alias="from"),
+        to_: str | None = Query(default=None, alias="to"),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Paged (default 50/page) list of a plant's order_distribution headers,
+    each with its shares, derived statuses, and a children summary (§6
+    "Data", §7). `bucket` (or its `status` alias -- both accepted, same
+    values) takes `all`, one of the three §6 buckets, or an individual
+    status code directly, for deep links."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _no_store(response)
+    machine_list = [m.strip() for m in machines.split(",") if m.strip()] if machines else None
+    date_from = _parse_iso_date(from_, "from")
+    date_to = _parse_iso_date(to_, "to")
+    return distribution_data.list_headers_for_plant(
+        plant, search=search, workcenter=workcenter, machines=machine_list,
+        reviewed=reviewed, bucket=(bucket or status), batch=batch,
+        date_from=date_from, date_to=date_to, limit=limit, offset=offset,
+    )
+
+
+@router.get("/distribution/{plant}/summary", dependencies=[Depends(auth.require_authenticated)])
+def get_distribution_summary(plant: str, response: Response,
+                             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """`{needs_review, changed, problems}` counts over the plant's headers,
+    using the SAME bucket definitions the list route's `bucket` filter uses
+    (`backend.distribution.data.classify_bucket_membership`) so the two can
+    never drift apart (§7)."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _no_store(response)
+    return distribution_data.get_summary(plant)
+
+
+@router.get("/distribution/{plant}/aggregate", dependencies=[Depends(auth.require_authenticated)])
+def get_distribution_aggregate(
+        plant: str, response: Response,
+        workcenter: str | None = Query(default=None),
+        from_: str | None = Query(default=None, alias="from"),
+        to_: str | None = Query(default=None, alias="to"),
+        format: str | None = Query(default=None),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """§10.2 roll-up: one row per header, built from `db._EFF_END_SQL` /
+    `db._SCHEDULE_SEGMENTS_LATERAL_SQL` so this can never drift from how the
+    Gantt/task read path computes effective start/end (see data.py's
+    `get_aggregate` docstring). `?format=csv` exports the same columns, one
+    row per header, with `children` flattened into a semicolon-joined
+    `production_order|machine|quantity|start|end` summary column --
+    aggregate_to_detail.md §10.2 does not pin a CSV shape, so this is the
+    chosen default (see backend/distribution/CLAUDE.md)."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _no_store(response)
+    date_from = _parse_iso_date(from_, "from")
+    date_to = _parse_iso_date(to_, "to")
+    rows = distribution_data.get_aggregate(plant, workcenter=workcenter, date_from=date_from, date_to=date_to)
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["production_order", "material_number", "machine", "quantity",
+                         "sum_child_quantity", "start", "finish", "child_count",
+                         "queued_children", "all_scheduled", "firming_indicator", "reviewed", "children"])
+        for r in rows:
+            children_summary = "; ".join(
+                f"{c['production_order']}|{c['machine']}|{c['quantity']}|{c['start'] or ''}|{c['end'] or ''}"
+                for c in r["children"]
+            )
+            writer.writerow([r["production_order"], r["material_number"], r["machine"], r["quantity"],
+                             r["sum_child_quantity"], r["start"] or "", r["finish"] or "", r["child_count"],
+                             r["queued_children"], r["all_scheduled"], r["firming_indicator"], r["reviewed"],
+                             children_summary])
+        headers = {"Content-Disposition": f'attachment; filename="distribution-aggregate-{plant}.csv"',
+                  "Cache-Control": "no-store"}
+        return Response(content=buf.getvalue(), media_type="text/csv", headers=headers)
+    return {"data": rows}
+
+
+@router.get("/distribution/{plant}/unresolved", dependencies=[Depends(auth.require_authenticated)])
+def get_distribution_unresolved(plant: str, response: Response,
+                                allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Plain orders whose `machine` matches no current `machine` row in the
+    plant -- the analogue of `db.missing_master_data_for_plant` (`db.py:2209`)."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _no_store(response)
+    return distribution_data.get_unresolved(plant)
+
+
+@router.get("/distribution/{plant}/{order}/{material}", dependencies=[Depends(auth.require_authenticated)])
+def get_distribution_detail(plant: str, order: str, material: str, response: Response,
+                            allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """One header's full detail -- header, shares (with `child_id`, current
+    child live quantity/hours/start, stale/purged/below-min-lot flags),
+    derived statuses, and `base_version` (the header's xmin)."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _no_store(response)
+    result = distribution_data.get_header_detail(plant, order, material)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Order distribution header not found")
     return result

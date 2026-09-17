@@ -1108,6 +1108,123 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/distribution/{plant}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Distribution
+         * @description Paged (default 50/page) list of a plant's order_distribution headers,
+         *     each with its shares, derived statuses, and a children summary (§6
+         *     "Data", §7). `bucket` (or its `status` alias -- both accepted, same
+         *     values) takes `all`, one of the three §6 buckets, or an individual
+         *     status code directly, for deep links.
+         */
+        get: operations["list_distribution_distribution__plant__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Distribution Summary
+         * @description `{needs_review, changed, problems}` counts over the plant's headers,
+         *     using the SAME bucket definitions the list route's `bucket` filter uses
+         *     (`backend.distribution.data.classify_bucket_membership`) so the two can
+         *     never drift apart (§7).
+         */
+        get: operations["get_distribution_summary_distribution__plant__summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/aggregate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Distribution Aggregate
+         * @description §10.2 roll-up: one row per header, built from `db._EFF_END_SQL` /
+         *     `db._SCHEDULE_SEGMENTS_LATERAL_SQL` so this can never drift from how the
+         *     Gantt/task read path computes effective start/end (see data.py's
+         *     `get_aggregate` docstring). `?format=csv` exports the same columns, one
+         *     row per header, with `children` flattened into a semicolon-joined
+         *     `production_order|machine|quantity|start|end` summary column --
+         *     aggregate_to_detail.md §10.2 does not pin a CSV shape, so this is the
+         *     chosen default (see backend/distribution/CLAUDE.md).
+         */
+        get: operations["get_distribution_aggregate_distribution__plant__aggregate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/unresolved": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Distribution Unresolved
+         * @description Plain orders whose `machine` matches no current `machine` row in the
+         *     plant -- the analogue of `db.missing_master_data_for_plant` (`db.py:2209`).
+         */
+        get: operations["get_distribution_unresolved_distribution__plant__unresolved_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/{order}/{material}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Distribution Detail
+         * @description One header's full detail -- header, shares (with `child_id`, current
+         *     child live quantity/hours/start, stale/purged/below-min-lot flags),
+         *     derived statuses, and `base_version` (the header's xmin).
+         */
+        get: operations["get_distribution_detail_distribution__plant___order___material__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit/log": {
         parameters: {
             query?: never;
@@ -2384,7 +2501,10 @@ export interface components {
         };
         /**
          * BulkApplyResult
-         * @description master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk).
+         * @description master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk),
+         *     plus an optional `warnings` list a table-specific post-write hook can
+         *     attach (routes.py `md_bulk`) -- informational only, never a reason the
+         *     write itself failed (the write already committed by the time these run).
          */
         BulkApplyResult: {
             /** Inserted */
@@ -2393,6 +2513,11 @@ export interface components {
             updated: number;
             /** Deleted */
             deleted: number;
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: components["schemas"]["BulkWriteWarning"][];
         };
         /**
          * BulkUpdateResult
@@ -2442,6 +2567,25 @@ export interface components {
             updated: number;
             /** Deleted */
             deleted: number;
+        };
+        /**
+         * BulkWriteWarning
+         * @description One informational (non-blocking) finding from a table-specific
+         *     post-write check -- currently only the `sap_workcenter` branch in
+         *     routes.py's `md_bulk` (aggregate_to_detail.md §3.1/§4.1). Same
+         *     `{level, msg}` shape the diagnostics pipeline's warnings already use
+         *     (backend/admin_ops/logbuffer.py, diagnostics_state.py), reused here so
+         *     the frontend's existing `.admin-bwarn-list` renderer (copied from
+         *     AdminCockpit._warningList) needs no new shape to understand.
+         */
+        BulkWriteWarning: {
+            /**
+             * Level
+             * @default warn
+             */
+            level: string;
+            /** Msg */
+            msg: string;
         };
         /**
          * CascadePreviewResult
@@ -2866,6 +3010,10 @@ export interface components {
             "MACHINE_HOURS_(MEINH)"?: number | null;
             /** No Of Fte (Meinh) */
             "NO_OF_FTE_(MEINH)"?: number | null;
+            /** Parent Order */
+            PARENT_ORDER?: string | null;
+            /** Distribution Letter */
+            DISTRIBUTION_LETTER?: string | null;
             /** Row Version */
             row_version?: number | null;
             /** Schedule Segments */
@@ -4952,6 +5100,180 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkCenterSaveResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_distribution_distribution__plant__get: {
+        parameters: {
+            query?: {
+                search?: string | null;
+                workcenter?: string | null;
+                machines?: string | null;
+                reviewed?: boolean | null;
+                status?: string | null;
+                bucket?: string | null;
+                batch?: string | null;
+                from?: string | null;
+                to?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_distribution_summary_distribution__plant__summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_distribution_aggregate_distribution__plant__aggregate_get: {
+        parameters: {
+            query?: {
+                workcenter?: string | null;
+                from?: string | null;
+                to?: string | null;
+                format?: string | null;
+            };
+            header?: never;
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_distribution_unresolved_distribution__plant__unresolved_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_distribution_detail_distribution__plant___order___material__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plant: string;
+                order: string;
+                material: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

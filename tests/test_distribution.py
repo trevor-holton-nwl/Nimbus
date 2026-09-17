@@ -19,6 +19,13 @@ from backend.distribution.service import (
     apportion,
     compute_derived_statuses,
 )
+from backend.distribution.data import (
+    NEEDS_REVIEW_STATUSES,
+    CHANGED_STATUSES,
+    PROBLEM_STATUSES,
+    classify_bucket_membership,
+    status_matches_filter,
+)
 
 
 class TestToolPlaceholders:
@@ -440,6 +447,82 @@ class TestComputeDerivedStatuses:
         machines = {"L1": {}}
         statuses = compute_derived_statuses(header, shares, children, workcenter, machines)
         assert len(statuses) == 0
+
+
+class TestBucketClassification:
+    """backend/distribution/data.py's classify_bucket_membership() /
+    status_matches_filter() -- the ONE shared helper GET /distribution/{plant}'s
+    `bucket` filter and GET /distribution/{plant}/summary's counts both use,
+    per aggregate_to_detail.md §6 "Data" / §7's bucket definitions:
+      needs_review = needs_review | qty_changed
+      changed      = wc_changed, membership_changed, mode_mismatch,
+                     below_min_lot, zero_quantity_children
+      problems     = incomplete, runtime_mismatch, separation_violated
+    Pure, no DB dependency -- these operate on plain status-code sets.
+    """
+
+    def test_bucket_definitions_match_the_design_doc(self):
+        assert NEEDS_REVIEW_STATUSES == {"needs_review", "qty_changed"}
+        assert CHANGED_STATUSES == {
+            "wc_changed", "membership_changed", "mode_mismatch",
+            "below_min_lot", "zero_quantity_children",
+        }
+        assert PROBLEM_STATUSES == {"incomplete", "runtime_mismatch", "separation_violated"}
+
+    def test_needs_review_bucket_membership(self):
+        assert classify_bucket_membership({"needs_review"}) == {"needs_review"}
+        assert classify_bucket_membership({"qty_changed"}) == {"needs_review"}
+
+    def test_changed_bucket_membership_each_code(self):
+        for code in CHANGED_STATUSES:
+            assert classify_bucket_membership({code}) == {"changed"}, code
+
+    def test_problems_bucket_membership_each_code(self):
+        for code in ("incomplete", "runtime_mismatch"):
+            assert classify_bucket_membership({code}) == {"problems"}
+
+    def test_separation_violated_is_a_documented_problems_code_never_emitted_server_side(self):
+        """separation_violated is computed client-side only (§6) -- it still
+        counts as a `problems` member if it ever showed up in a status set
+        (defensive), but compute_derived_statuses() never produces it."""
+        assert classify_bucket_membership({"separation_violated"}) == {"problems"}
+        never_emitted = compute_derived_statuses({}, [], [], None, {})
+        assert "separation_violated" not in never_emitted
+
+    def test_purged_is_in_no_bucket(self):
+        """`purged` is a real derived status but is not part of any of the
+        three §6 buckets (it renders as a neutral badge, not needs_review/
+        changed/problems) -- deep links reach it via status_matches_filter's
+        individual-code path instead."""
+        assert classify_bucket_membership({"purged"}) == set()
+
+    def test_header_can_be_in_multiple_buckets_at_once(self):
+        statuses = {"needs_review", "incomplete", "mode_mismatch"}
+        assert classify_bucket_membership(statuses) == {"needs_review", "changed", "problems"}
+
+    def test_empty_statuses_classify_to_no_bucket(self):
+        assert classify_bucket_membership(set()) == set()
+
+    def test_status_matches_filter_none_or_all_means_unfiltered(self):
+        statuses = {"needs_review"}
+        assert status_matches_filter(statuses, None) is True
+        assert status_matches_filter(statuses, "") is True
+        assert status_matches_filter(statuses, "all") is True
+
+    def test_status_matches_filter_bucket_name(self):
+        assert status_matches_filter({"qty_changed"}, "needs_review") is True
+        assert status_matches_filter({"below_min_lot"}, "needs_review") is False
+        assert status_matches_filter({"below_min_lot"}, "changed") is True
+
+    def test_status_matches_filter_individual_status_code_deep_link(self):
+        """An individual status code (not one of the three bucket names) is
+        accepted directly, e.g. `?bucket=purged` for a deep link."""
+        assert status_matches_filter({"purged"}, "purged") is True
+        assert status_matches_filter({"needs_review"}, "purged") is False
+
+    def test_status_matches_filter_unknown_bucket_falls_back_to_exact_code_match(self):
+        assert status_matches_filter({"incomplete"}, "incomplete") is True
+        assert status_matches_filter({"incomplete"}, "nonexistent_code") is False
 
 
 # =====================================================================
@@ -1133,3 +1216,169 @@ class TestUpsertOrdersDistributionSeamWiring:
         assert result["status"] == "ok"
         assert result["lines"] == ["ZZTEST_WIRE_MACHINE"]
         assert all(w.get("msg") != "fake apply ran" for w in result["warnings"])
+
+
+# =====================================================================
+# backend/distribution/routes.py -- the 5 P2-6/P2-7 read routes, through a
+# live TestClient/brain app instance (tests/test_setup_endpoints.py's and
+# tests/test_rbac_plant_scoping.py's route-level style; every DB-backed test
+# above this line calls backend/distribution/data.py functions directly).
+# Requires local Postgres + NIMBUS_TEST_DB=1, same as the rest of this file's
+# @pytest.mark.pg tests -- not run in this sandboxed environment (see the
+# module note above `_snapshot_header`).
+# =====================================================================
+from starlette.testclient import TestClient  # noqa: E402
+
+import brain  # noqa: E402
+import backend.security.auth as auth  # noqa: E402
+
+
+@pytest.mark.pg
+class TestDistributionReadRoutes:
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_READ"
+    L1, L2 = "ZZTEST_L1_READ", "ZZTEST_L2_READ"
+    ORD, MAT = "ZZTEST_ORD_READ", "ZZTEST_MAT_READ"
+    UNRESOLVED_MACHINE = "ZZTEST_UNRESOLVED_LINE"
+    UNRESOLVED_ORDER = "ZZTEST_UNRESOLVED_ORD"
+
+    def _cleanup(self, cur):
+        cur.execute(
+            "DELETE FROM orders WHERE plant = %s AND (parent_production_order = %s "
+            "OR production_order IN (%s, %s))",
+            (self.PLANT, self.ORD, self.ORD, self.UNRESOLVED_ORDER),
+        )
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, 60,
+                 self.SUB, self.PLANT, self.L2, self.WC, 40),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.MAT, self.PLANT),
+            )
+            conn.commit()
+
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+        _, plan_structure, _ = distribution_data.plan([row], batch_id)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_structure, batch_id, conn)
+
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (db_.make_id(self.UNRESOLVED_ORDER, self.MAT), self.UNRESOLVED_ORDER, self.MAT,
+                 self.UNRESOLVED_MACHINE, self.PLANT),
+            )
+            conn.commit()
+
+        yield
+
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    @pytest.fixture
+    def client(self):
+        brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [self.PLANT]
+        brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+        try:
+            yield TestClient(brain.api)
+        finally:
+            brain.api.dependency_overrides.clear()
+
+    def test_list_returns_the_seeded_header_with_shares_and_statuses(self, client):
+        response = client.get(f"/distribution/{self.PLANT}", params={"search": self.ORD})
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        body = response.json()
+        assert body["meta"]["total"] == 1
+        item = body["data"][0]
+        assert item["header"]["production_order"] == self.ORD
+        assert item["header"]["sap_workcenter"] == self.WC
+        assert {s["machine"] for s in item["shares"]} == {self.L1, self.L2}
+        assert "needs_review" in item["statuses"]  # fresh header, review_required defaults TRUE
+        assert item["children_summary"]["count"] == 2
+
+    def test_list_bucket_filter_needs_review(self, client):
+        response = client.get(f"/distribution/{self.PLANT}", params={"bucket": "needs_review"})
+        assert response.status_code == 200
+        assert response.json()["meta"]["total"] == 1
+        response_problems = client.get(f"/distribution/{self.PLANT}", params={"bucket": "problems"})
+        assert response_problems.json()["meta"]["total"] == 0
+
+    def test_detail_returns_base_version_and_enriched_shares(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/{self.ORD}/{self.MAT}")
+        assert response.status_code == 200
+        body = response.json()
+        assert isinstance(body["base_version"], int)
+        by_machine = {s["machine"]: s for s in body["shares"]}
+        assert by_machine[self.L1]["quantity"] == pytest.approx(60.0)
+        assert by_machine[self.L2]["quantity"] == pytest.approx(40.0)
+        assert by_machine[self.L1]["stale"] is False
+        assert by_machine[self.L1]["purged"] is False
+
+    def test_detail_404_for_unknown_header(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/NOPE/NOPE")
+        assert response.status_code == 404
+
+    def test_summary_counts_the_seeded_header_as_needs_review(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/summary")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["needs_review"] >= 1
+        assert set(body.keys()) == {"needs_review", "changed", "problems"}
+
+    def test_aggregate_rolls_up_one_row_per_header(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/aggregate", params={"workcenter": self.WC})
+        assert response.status_code == 200
+        rows = response.json()["data"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["production_order"] == self.ORD
+        assert row["machine"] == self.WC
+        assert row["child_count"] == 2
+        assert row["sum_child_quantity"] == pytest.approx(100.0)
+        assert len(row["children"]) == 2
+
+    def test_aggregate_csv_export(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/aggregate",
+                              params={"workcenter": self.WC, "format": "csv"})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert self.ORD in response.text
+
+    def test_unresolved_lists_the_unmapped_machine(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/unresolved")
+        assert response.status_code == 200
+        body = response.json()
+        machines = {e["machine"] for e in body["exceptions"]}
+        assert self.UNRESOLVED_MACHINE in machines
+        assert self.L1 not in machines and self.L2 not in machines
