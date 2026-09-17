@@ -119,13 +119,14 @@ interface TableColDef {
   tooltipField?: string;
   headerTooltip?: string;
   cellClass?: (p: { data: NimbusTask | null }) => string;
-  cellRenderer?: (p: { value: unknown }) => string;
+  cellRenderer?: (p: { value: unknown; data?: NimbusTask }) => string;
   cellEditor?: unknown;
   cellEditorPopup?: boolean;
-  cellEditorParams?: () => Record<string, unknown>;
+  cellEditorParams?: ((p: { data: NimbusTask }) => Record<string, unknown>) | Record<string, unknown>;
   valueGetter?: (p: { data: NimbusTask }) => unknown;
   valueFormatter?: (p: TableValueFormatterParams) => string;
   valueParser?: (p: { newValue: string }) => unknown;
+  comparator?: (valueA: unknown, valueB: unknown, nodeA: AgGridRowNode, nodeB: AgGridRowNode) => number;
 }
 
 /** Shared by AG Grid's own valueFormatter invocation ({value}, from the column
@@ -146,6 +147,7 @@ interface TableCellValueChangedEvent {
   colDef: TableColDef;
   data: NimbusTask;
   newValue: unknown;
+  oldValue?: unknown;
   node: AgGridRowNode;
 }
 
@@ -389,6 +391,33 @@ export const Table = {
     }));
   },
 
+  /** Sort key for the pinned PRODUCTION_ORDER column (aggregate_to_detail.md
+   *  §8 "Grid"): group by PARENT_ORDER (falling back to the row's own order
+   *  when it isn't a sub-order) then by DISTRIBUTION_LETTER, so siblings of a
+   *  distributed SAP order stay adjacent instead of scattering — there is no
+   *  default sort today. */
+  _orderColumnSortKey(task: NimbusTask): string {
+    const primary = String(task.PARENT_ORDER ?? task.PRODUCTION_ORDER ?? task.ORDER ?? '');
+    const letter = String(task.DISTRIBUTION_LETTER ?? '');
+    return `${primary} ${letter}`;
+  },
+  _orderColumnComparator(taskA: NimbusTask, taskB: NimbusTask): number {
+    const a = Table._orderColumnSortKey(taskA);
+    const b = Table._orderColumnSortKey(taskB);
+    return a < b ? -1 : a > b ? 1 : 0;
+  },
+  /** Appends the same letter·count pill the Gantt bar renders
+   *  (Timeline._itemForTask) after a lettered sub-order's order text — the
+   *  firmed-glyph cellRenderer above is the precedent pattern for this column. */
+  _orderColumnRenderer(p: { value: unknown; data?: NimbusTask }): string {
+    const text = Util.escapeHtml(p.value ?? '');
+    const task = p.data;
+    if (!task?.PARENT_ORDER || !task.DISTRIBUTION_LETTER) return text;
+    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
+    const count = scoped.filter(t => t.PARENT_ORDER === task.PARENT_ORDER).length;
+    return `${text}<span class="split-order-part dist-part">${Util.escapeHtml(task.DISTRIBUTION_LETTER)}·${count}</span>`;
+  },
+
   init(): void {
     const el = document.getElementById('ag-grid');
     if (!el || typeof agGrid === 'undefined') return;
@@ -444,7 +473,9 @@ export const Table = {
           editable: false, cellClass: 'cell-num' },
         { headerName: Util.t('col.order'), field: 'PRODUCTION_ORDER', width: 160, minWidth: 160, flex: 0,
           pinned: 'left', editable: false,
-          valueGetter: (p: { data: NimbusTask }) => p.data.PRODUCTION_ORDER || p.data.ORDER || '' },
+          valueGetter: (p: { data: NimbusTask }) => p.data.PRODUCTION_ORDER || p.data.ORDER || '',
+          comparator: (_a: unknown, _b: unknown, nodeA: AgGridRowNode, nodeB: AgGridRowNode) => Table._orderColumnComparator(nodeA.data, nodeB.data),
+          cellRenderer: (p: { value: unknown; data?: NimbusTask }) => Table._orderColumnRenderer(p) },
         { headerName: Util.t('col.material'), field: 'MATERIAL_DESCRIPTION', minWidth: 180, editable: false,
           tooltipField: 'MATERIAL_DESCRIPTION', hide: Table._fieldHidden('MATERIAL_DESCRIPTION') },
         { headerName: Util.t('col.qty'), field: 'ORDER_QUANTITY_(GMEIN)', width: 100, flex: 0,
@@ -453,7 +484,7 @@ export const Table = {
         { headerName: Util.t('col.line'), field: 'MACHINE', minWidth: 130, editable: true,
           cellEditor: Table._SearchableLineEditor,
           cellEditorPopup: true,
-          cellEditorParams: () => ({ values: Table._getLineOptions() }),
+          cellEditorParams: (p: { data: NimbusTask }) => ({ values: Table._getLineOptions(p.data) }),
           cellRenderer: (p: { value: unknown }) => {
             if (!p.value) return '';
             const ci = Timeline._colorIndex(String(p.value));
@@ -1139,6 +1170,27 @@ export const Table = {
     getGui(): HTMLDivElement { return this._eGui; }
   },
 
+  /** Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
+   *  (PARENT_ORDER set) may not change machine from the grid, the Inspector
+   *  select or a Gantt drag — only adjusting its distribution shares can move
+   *  it. 'distribution' is not yet a registered `App._GANTT_SUBS` entry, so
+   *  the toast action falls back to a plain tab switch until that pane
+   *  exists (follow-up); duplicated (not imported) from gantt.mts's
+   *  Interaction._rejectDistMachineMove since Interaction isn't exported. */
+  _rejectDistMachineMove(task: NimbusTask): void {
+    Toast.show(
+      Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
+      'warn', 4000,
+      {
+        label: 'Open Order Distribution',
+        run: () => {
+          const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void } } }).NIMBUS?.App;
+          app?.goto?.('gantt');
+        },
+      }
+    );
+  },
+
   /** Called when a grid cell is edited. Push the change through the store. */
   _onCellChanged(p: TableCellValueChangedEvent): void {
     const field = p.colDef.field;
@@ -1159,10 +1211,27 @@ export const Table = {
       scheduleTask = { ...p.data, RUN_TIME: h };
       requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
     } else if (field === 'MACHINE') {
-      changes.MACHINE = String(p.newValue || 'Unknown');
+      const newMachine = String(p.newValue || 'Unknown');
+      // AG Grid's default valueSetter already wrote p.newValue onto
+      // p.data.MACHINE before this handler runs, so the pre-edit machine
+      // for the lock comparison (decision C, aggregate_to_detail.md §8) has
+      // to come from p.oldValue, not p.data.MACHINE.
+      const priorMachine = p.oldValue != null ? String(p.oldValue) : String(p.data.MACHINE ?? 'Unknown');
+      if (p.data.PARENT_ORDER && newMachine !== priorMachine) {
+        p.data.MACHINE = priorMachine;
+        Table._api!.refreshCells({ rowNodes: [p.node], force: true });
+        Table._rejectDistMachineMove(p.data);
+        return;
+      }
+      changes.MACHINE = newMachine;
       requestedLine = changes.MACHINE;
       requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
+      // Unreachable today — this column is editable:false, and ORDER_QUANTITY
+      // isn't in Persistence._taskEditSnapshot's payload either (§13.1: no
+      // quantity-edit feature exists yet). Sub-orders (PARENT_ORDER set) must
+      // reject this edit with toast.dist_quantity_locked once quantity
+      // becomes editable — see aggregate_to_detail.md §5.8/§8.
       changes[field] = parseFloat(String(p.newValue)) || 0;
     } else if (field === 'notes') {
       const trimmed = String(p.newValue ?? '').trim();
@@ -1218,7 +1287,13 @@ export const Table = {
     return null;
   },
 
-  _getLineOptions(): string[] {
+  /** Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
+   *  (PARENT_ORDER set) passed as `forTask` gets its current machine as the
+   *  sole option, so the MACHINE cell editor structurally cannot offer a
+   *  different line — same "no other valid choice" shape used elsewhere for
+   *  a locked field. */
+  _getLineOptions(forTask?: NimbusTask | null): string[] {
+    if (forTask?.PARENT_ORDER) return [forTask.MACHINE || 'Unknown'];
     if (Store.selectedPlant) return Store.linesForSelectedPlant();
     // No plant selected — fall back to the unscoped view rather than showing nothing.
     const set = new Set(Store.tasksArr.map(t => t.MACHINE || 'Unknown'));
@@ -1885,7 +1960,7 @@ export const Inspector = {
             <div class="insp-val"><input type="text" data-field="${key}" value="${Util.escapeHtml(value)}"></div></div>`;
         }).join('')}
         <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
-          <div class="insp-val"><select data-field="MACHINE">
+          <div class="insp-val"><select data-field="MACHINE" ${task.PARENT_ORDER ? `disabled title="${Util.escapeHtml(Util.t('ui.insp_machine_locked_title'))}"` : ''}>
             ${lineOptions.map(l => `<option value="${Util.escapeHtml(l)}" ${l === task.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('')}
           </select></div></div>
       </div>

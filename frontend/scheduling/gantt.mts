@@ -696,12 +696,23 @@ export const Timeline = {
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
     if (conflict) cls.push('conflict-order');
+    // Distribution marker (decision M, aggregate_to_detail.md §8): every child
+    // of a distributed SAP order (bare 100% child included) gets the inset
+    // keyline via dist-child; a lettered child additionally gets the
+    // letter·count pill, count = currently-living siblings sharing PARENT_ORDER.
+    if (t.PARENT_ORDER) cls.push('dist-child');
     const prefix = firmed ? '🔒 ' : '';
+    let distPart = '';
+    if (t.PARENT_ORDER && t.DISTRIBUTION_LETTER) {
+      const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
+      const count = scoped.filter(x => x.PARENT_ORDER === t.PARENT_ORDER).length;
+      distPart = `<span class="split-order-part dist-part">${Util.escapeHtml(t.DISTRIBUTION_LETTER)}·${count}</span>`;
+    }
     return {
       id:      String(t.id),
       group:   line,
       kind:    'order',
-      content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${label}</span>`,
+      content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${label}${distPart}</span>`,
       start:   t.start_date!,
       end:     t.end_date!,
       className: cls.join(' ')
@@ -3074,6 +3085,7 @@ export const GanttFilter = {
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
       const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
       const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
+      const parent = Util.norm(task.PARENT_ORDER); if (parent) known.add(parent);
     });
     const { matched, total } = Util.countPasteMatches(text, known);
     if (total) Toast.show(Util.t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
@@ -3515,6 +3527,8 @@ export const Interaction = {
       Timeline._suppressEvents = true;
       try { Timeline._tl!.setSelection(evt.ids.flatMap(id => Timeline.itemIdsForTask(id))); }
       finally { Timeline._suppressEvents = false; }
+
+      Interaction._applyDistSiblingHighlight(evt.ids);
 
       // Preserve the original UX: opening the right sidebar when a single
       // order is selected. (This used to live in Timeline.init's select
@@ -4085,6 +4099,70 @@ export const Interaction = {
     if (typeof Timeline.focus === 'function') Timeline.focus(id);
   },
 
+  /** Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
+   *  (PARENT_ORDER set) may not change machine by drag, grid edit or
+   *  Inspector — only adjusting its distribution shares can move it. Shows
+   *  the lock toast with an action to open Order Distribution; 'distribution'
+   *  is not yet a registered `App._GANTT_SUBS` entry, so the action falls
+   *  back to a plain tab switch until that pane exists (follow-up). */
+  _rejectDistMachineMove(task: NimbusTask): void {
+    Toast.show(
+      Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
+      'warn', 4000,
+      {
+        label: 'Open Order Distribution',
+        run: () => {
+          const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void } } }).NIMBUS?.App;
+          app?.goto?.('gantt');
+        },
+      }
+    );
+  },
+
+  /** Sibling highlight (aggregate_to_detail.md §8): items sharing the
+   *  PARENT_ORDER of any currently-selected task get `.dist-sibling` — the
+   *  only visual link between siblings, since finish-to-start links are
+   *  per-machine. Diffs against the previously-highlighted item set (same
+   *  suppressed-update pattern as GanttFilter._doApply's dim/undim) so a
+   *  selection change only touches items whose highlight actually flips. */
+  _distSiblingItemIds: new Set<string>(),
+  _applyDistSiblingHighlight(selectedIds: string[]): void {
+    if (!Timeline._items) return;
+    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
+    const parents = new Set<string>();
+    for (const id of selectedIds) {
+      const t = Store.tasks[id];
+      if (t?.PARENT_ORDER) parents.add(t.PARENT_ORDER);
+    }
+    const nextIds = new Set<string>();
+    if (parents.size) {
+      for (const task of scoped) {
+        if (!task.PARENT_ORDER || !parents.has(task.PARENT_ORDER)) continue;
+        if (selectedIds.includes(String(task.id))) continue;
+        for (const itemId of Timeline.itemIdsForTask(task.id)) nextIds.add(itemId);
+      }
+    }
+    const updates: Array<{ id: string; className: string }> = [];
+    for (const itemId of Interaction._distSiblingItemIds) {
+      if (nextIds.has(itemId)) continue;
+      const item = Timeline._items.get(itemId) as TimelineVisItem | null;
+      if (!item) continue;
+      const cls = (item.className || '').split(' ').filter(c => c !== 'dist-sibling').join(' ');
+      if (cls !== item.className) updates.push({ id: itemId, className: cls });
+    }
+    for (const itemId of nextIds) {
+      const item = Timeline._items.get(itemId) as TimelineVisItem | null;
+      if (!item) continue;
+      if ((item.className || '').split(' ').includes('dist-sibling')) continue;
+      updates.push({ id: itemId, className: (item.className ? item.className + ' ' : '') + 'dist-sibling' });
+    }
+    if (updates.length) {
+      Timeline._suppressEvents = true;
+      try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
+    }
+    Interaction._distSiblingItemIds = nextIds;
+  },
+
   /** Drag commit: update the store and reflow ONLY if times/line actually changed.
    *  Firmed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a firmed order still commits (see the corrected header
@@ -4153,6 +4231,20 @@ export const Interaction = {
       // move all non-firmed selected items by the same time + line delta.
       const deltaMs  = newStart.getTime() - t.start_date.getTime();
       const lineMoved = newLine !== t.MACHINE;
+
+      // Machine lock (decision C, aggregate_to_detail.md §8): reject a
+      // cross-machine drag of a sub-order before either the multi-drag or
+      // single-drag commit path below runs — a time-only drag (lineMoved
+      // false) is unrestricted. This guard sits above both former
+      // manualSchedulePatchFor(t, newLine, newStart) call sites for the
+      // dragged item, so a locked task can never reach either one on a
+      // rejected drag.
+      if (t.PARENT_ORDER && lineMoved) {
+        Interaction._rejectDistMachineMove(t);
+        Timeline._scheduleRebuild();
+        continue;
+      }
+
       const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFirmed(sid));
 
       if (selIds.length > 0 && (Math.abs(deltaMs) > 0 || lineMoved)) {
@@ -4193,10 +4285,19 @@ export const Interaction = {
         const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
         const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
         let companionFailed = false;
+        let companionLockedTask: NimbusTask | null = null;
         for (const sid of selIds) {
           const st = Store.tasks[sid];
           if (!st || !st.start_date) continue;
           const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
+          // Machine lock (decision C): a locked companion fails the whole
+          // multi-drag atomically — nothing has been committed to Store or
+          // Timeline for this drag yet, so breaking here reverts cleanly.
+          if (st.PARENT_ORDER && sNewLine !== st.MACHINE) {
+            companionFailed = true;
+            companionLockedTask = st;
+            break;
+          }
           const sRequestedStart = new Date(st.start_date.getTime() + deltaMs);
           const changes = Engine.manualSchedulePatchFor(st, sNewLine, sRequestedStart);
           if (!changes?.start_date || !changes.end_date) {
@@ -4207,7 +4308,8 @@ export const Interaction = {
           companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
         }
         if (companionFailed) {
-          Toast.show(Util.t('toast.commit_failed'), 'error');
+          if (companionLockedTask) Interaction._rejectDistMachineMove(companionLockedTask);
+          else Toast.show(Util.t('toast.commit_failed'), 'error');
           Timeline._scheduleRebuild();
           continue;
         }

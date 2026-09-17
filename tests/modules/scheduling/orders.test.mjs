@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { Table, Inspector, ContextMenu, Printer } from '../../../frontend/scheduling/orders.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 
@@ -493,6 +493,135 @@ test('Task 3: B2 — Inspector._onFieldChange no longer calls autoReflow (peers 
     Store.setSelectedPlant(priorPlant, 'unit-test');
     Alerts.scheduleRecompute = priorScheduleRecompute;
     Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+  }
+});
+
+// --- Distribution (aggregate_to_detail.md §8) — machine lock + markers -----
+
+test('Table._onCellChanged rejects a cross-machine MACHINE edit on a sub-order (PARENT_ORDER set): reverts the cell and shows the distribution-lock toast, no schedule regenerated', () => {
+  const priorTableApi = Table._api;
+  const priorToastShow = Toast.show;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  // Real en.js interpolation, so this test also pins the toast copy itself.
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.dist_machine_locked': '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.' } };
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  let refreshed = false;
+  Table._api = { applyTransaction: () => {}, refreshCells: () => { refreshed = true; } };
+
+  Store.setTasks([{
+    id: 'dist-child-cell-edit', PRODUCTION_ORDER: 'A-9001', ORDER: 'A-9001',
+    PARENT_ORDER: '9001', DISTRIBUTION_LETTER: 'A', MACHINE: 'L1',
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T10:00:00'),
+  }], 'test');
+
+  try {
+    // AG Grid's default valueSetter already writes p.newValue onto
+    // p.data.MACHINE before onCellValueChanged fires — mirrored here so the
+    // handler's revert-from-oldValue logic is exercised the same way.
+    const row = Store.tasks['dist-child-cell-edit'];
+    row.MACHINE = 'L2';
+    Table._onCellChanged({
+      colDef: { field: 'MACHINE' },
+      data: row,
+      newValue: 'L2',
+      oldValue: 'L1',
+      node: { refreshCells: () => {} },
+    });
+    assert.equal(Store.tasks['dist-child-cell-edit'].MACHINE, 'L1', 'MACHINE must be reverted to its pre-edit value');
+    assert.equal(toastCalls.length, 1, 'the distribution-lock toast must fire exactly once');
+    assert.equal(toastCalls[0].type, 'warn');
+    assert.match(toastCalls[0].msg, /A-9001/);
+    assert.match(toastCalls[0].msg, /L1/);
+    assert.equal(refreshed, true, 'the grid cell must be refreshed to show the reverted value');
+  } finally {
+    Table._api = priorTableApi;
+    Toast.show = priorToastShow;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+  }
+});
+
+test('Table._getLineOptions returns only the sub-order\'s current machine (PARENT_ORDER set) — no other line is offered', () => {
+  assert.deepEqual(Table._getLineOptions({ MACHINE: 'L7', PARENT_ORDER: '9002' }), ['L7']);
+  assert.deepEqual(Table._getLineOptions({ MACHINE: null, PARENT_ORDER: '9002' }), ['Unknown']);
+});
+
+test('Inspector._render disables the MACHINE select with an explanatory title for a sub-order (PARENT_ORDER set)', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  const task = {
+    id: 'dist-inspector-locked', ORDER: 'A-9003', PARENT_ORDER: '9003', DISTRIBUTION_LETTER: 'A',
+    PLANT: 'P-DIST', MACHINE: 'L3', RUN_TIME: 1,
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+  };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(task);
+    const selectIdx = body.innerHTML.indexOf('data-field="MACHINE"');
+    assert.ok(selectIdx >= 0, 'the MACHINE select must still render');
+    const selectTagStart = body.innerHTML.lastIndexOf('<select', selectIdx);
+    const selectTagEnd = body.innerHTML.indexOf('>', selectIdx);
+    const selectTag = body.innerHTML.slice(selectTagStart, selectTagEnd);
+    assert.match(selectTag, /\bdisabled\b/, 'the select must be disabled, not hidden');
+    assert.match(selectTag, /title="[^"]+"/, 'the select must carry an explanatory title');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+  }
+});
+
+test('Inspector._render leaves the MACHINE select enabled for a plain (non-distributed) order', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  const task = {
+    id: 'plain-inspector-order', ORDER: 'PLAIN-1', PLANT: 'P-DIST', MACHINE: 'L3', RUN_TIME: 1,
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+  };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(task);
+    const selectIdx = body.innerHTML.indexOf('data-field="MACHINE"');
+    const selectTagStart = body.innerHTML.lastIndexOf('<select', selectIdx);
+    const selectTagEnd = body.innerHTML.indexOf('>', selectIdx);
+    const selectTag = body.innerHTML.slice(selectTagStart, selectTagEnd);
+    assert.doesNotMatch(selectTag, /\bdisabled\b/);
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+  }
+});
+
+test('Table._orderColumnComparator groups a distributed order\'s siblings adjacent by letter instead of scattering by their own PRODUCTION_ORDER text', () => {
+  const bare = { PRODUCTION_ORDER: 'ZZZ-OTHER', PARENT_ORDER: null, DISTRIBUTION_LETTER: null };
+  const childB = { PRODUCTION_ORDER: 'B-9004', PARENT_ORDER: '9004', DISTRIBUTION_LETTER: 'B' };
+  const childA = { PRODUCTION_ORDER: 'A-9004', PARENT_ORDER: '9004', DISTRIBUTION_LETTER: 'A' };
+  const unrelated = { PRODUCTION_ORDER: 'AAA-EARLY', PARENT_ORDER: null, DISTRIBUTION_LETTER: null };
+  const sorted = [bare, childB, unrelated, childA].sort((a, b) => Table._orderColumnComparator(a, b));
+  const siblingIdx = sorted.reduce((acc, t, i) => (t.PARENT_ORDER === '9004' ? [...acc, i] : acc), []);
+  assert.deepEqual(siblingIdx, [siblingIdx[0], siblingIdx[0] + 1], 'both siblings must be adjacent in the sort');
+  assert.equal(sorted[siblingIdx[0]].DISTRIBUTION_LETTER, 'A');
+  assert.equal(sorted[siblingIdx[0] + 1].DISTRIBUTION_LETTER, 'B');
+});
+
+test('Table._orderColumnRenderer appends the letter·count pill for a lettered sub-order and leaves a bare (100%) child untouched', () => {
+  const priorPlant = Store.selectedPlant;
+  const plant = 'P-DIST-GRID';
+  Store.setSelectedPlant(plant, 'test');
+  Store.setTasks([
+    { id: 'grid-a', PLANT: plant, PRODUCTION_ORDER: 'A-9005', PARENT_ORDER: '9005', DISTRIBUTION_LETTER: 'A', MACHINE: 'L1' },
+    { id: 'grid-b', PLANT: plant, PRODUCTION_ORDER: 'B-9005', PARENT_ORDER: '9005', DISTRIBUTION_LETTER: 'B', MACHINE: 'L2' },
+  ], 'test');
+  try {
+    const html = Table._orderColumnRenderer({ value: 'A-9005', data: Store.tasks['grid-a'] });
+    assert.match(html, /A-9005/);
+    assert.match(html, /class="split-order-part dist-part"/);
+    assert.match(html, new RegExp('A·2'), 'pill must read A·2 for two living siblings');
+
+    const bareHtml = Table._orderColumnRenderer({ value: 'C-9006', data: { PRODUCTION_ORDER: 'C-9006', PARENT_ORDER: '9006', DISTRIBUTION_LETTER: null } });
+    assert.equal(bareHtml, 'C-9006', 'a bare (100%) child has no letter, so no pill is appended');
+  } finally {
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
   }
 });
 

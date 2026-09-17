@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound } from '../../../frontend/scheduling/gantt.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
-import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 
@@ -1301,5 +1301,238 @@ test('Task 3: B2 — Interaction._onDataSetUpdate no longer calls autoReflow (pe
     Alerts.scheduleRecompute = priorScheduleRecompute;
     Timeline._items = undefined;
     Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+// --- Distribution (aggregate_to_detail.md §8) — machine lock + markers -----
+
+test('Interaction._onDataSetUpdate rejects a cross-machine drag of a sub-order (PARENT_ORDER set): the item springs back via Timeline._scheduleRebuild and the distribution-lock toast fires, no Store write', () => {
+  const priorToastShow = Toast.show;
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorScheduleRebuild = Timeline._scheduleRebuild;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  // Real en.js interpolation, so this test also pins the toast copy itself.
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.dist_machine_locked': '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.' } };
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  globalThis.requestAnimationFrame = callback => { callback(performance.now()); return 1; };
+  let scheduleRebuildCalled = false;
+  Timeline._scheduleRebuild = () => { scheduleRebuildCalled = true; };
+
+  const id = 'dist-drag-locked';
+  const line = 'DIST-DRAG-L1';
+  const otherLine = 'DIST-DRAG-L2';
+  const start = new Date('2026-09-21T08:00:00');
+  const end = new Date('2026-09-21T10:00:00');
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'A-9101', ORDER: 'A-9101', PARENT_ORDER: '9101', DISTRIBUTION_LETTER: 'A',
+    MACHINE: line, RUN_TIME: 2, start_date: start, end_date: end,
+  }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start, end, group: otherLine } : undefined) };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].MACHINE, line, 'the sub-order must stay on its original machine');
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+    assert.equal(scheduleRebuildCalled, true, 'the existing spring-back mechanism must be invoked to revert the visual position');
+    assert.equal(toastCalls.length, 1, 'the distribution-lock toast must fire exactly once');
+    assert.equal(toastCalls[0].type, 'warn');
+    assert.match(toastCalls[0].msg, /A-9101/);
+    assert.match(toastCalls[0].msg, new RegExp(line));
+  } finally {
+    Timeline._items = undefined;
+    Timeline._scheduleRebuild = priorScheduleRebuild;
+    Toast.show = priorToastShow;
+    globalThis.requestAnimationFrame = priorRaf;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+  }
+});
+
+test('Interaction._onDataSetUpdate allows a time-only drag of a sub-order on the SAME machine — the machine lock never blocks a time change', () => {
+  const priorToastShow = Toast.show;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  Toast.show = () => {};
+  Alerts.scheduleRecompute = () => {};
+
+  const id = 'dist-drag-timeonly';
+  const line = 'DIST-DRAG-TIME-L1';
+  const start = new Date('2026-09-21T08:00:00');
+  const end = new Date('2026-09-21T10:00:00');
+  const newStart = new Date('2026-09-21T09:00:00');
+  const newEnd = new Date('2026-09-21T11:00:00');
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'A-9106', ORDER: 'A-9106', PARENT_ORDER: '9106', DISTRIBUTION_LETTER: 'A',
+    MACHINE: line, RUN_TIME: 2, start_date: start, end_date: end,
+  }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start: newStart, end: newEnd, group: line } : undefined) };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].MACHINE, line);
+    assert.equal(Store.tasks[id].start_date.getTime(), newStart.getTime(), 'time-only drags remain unrestricted for sub-orders');
+  } finally {
+    Timeline._items = undefined;
+    Toast.show = priorToastShow;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks([], 'test');
+  }
+});
+
+test('Interaction._onDataSetUpdate: a multi-drag whose DRAGGED item is a locked sub-order reverts the whole selection atomically', () => {
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorScheduleRebuild = Timeline._scheduleRebuild;
+  const priorToastShow = Toast.show;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  Timeline._scheduleRebuild = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  const line = 'DIST-MULTI-L1';
+  const otherLine = 'DIST-MULTI-L2';
+  const anchorId = 'dist-multi-anchor';
+  const companionId = 'dist-multi-companion';
+  const anchorStart = new Date('2026-09-21T08:00:00');
+  const anchorEnd = new Date('2026-09-21T10:00:00');
+  const companionStart = new Date('2026-09-21T09:00:00');
+  const companionEnd = new Date('2026-09-21T11:00:00');
+
+  Store.setTasks([
+    { id: anchorId, PRODUCTION_ORDER: 'A-9102', ORDER: 'A-9102', PARENT_ORDER: '9102', DISTRIBUTION_LETTER: 'A', MACHINE: line, RUN_TIME: 2, start_date: anchorStart, end_date: anchorEnd },
+    { id: companionId, PRODUCTION_ORDER: 'PCOMP9102', MACHINE: line, RUN_TIME: 2, start_date: companionStart, end_date: companionEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  let itemsUpdateCalled = false;
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
+    update: () => { itemsUpdateCalled = true; },
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+    assert.equal(Store.tasks[anchorId].MACHINE, line, 'locked dragged item must stay on its machine');
+    assert.equal(Store.tasks[companionId].MACHINE, line, 'the free companion must NOT be moved either — atomic revert');
+    assert.equal(Store.tasks[companionId].start_date.getTime(), companionStart.getTime());
+    assert.equal(itemsUpdateCalled, false, 'no companion Timeline item mirror update should happen when the batch is rejected');
+    assert.equal(toastCalls.length, 1);
+  } finally {
+    Timeline._items = undefined;
+    Timeline._scheduleRebuild = priorScheduleRebuild;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+    Toast.show = priorToastShow;
+  }
+});
+
+test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is a locked sub-order reverts the whole selection atomically (the dragged item is not partially committed)', () => {
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorScheduleRebuild = Timeline._scheduleRebuild;
+  const priorToastShow = Toast.show;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  Timeline._scheduleRebuild = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  const line = 'DIST-MULTI-L3';
+  const otherLine = 'DIST-MULTI-L4';
+  const anchorId = 'dist-multi-anchor2';
+  const companionId = 'dist-multi-companion2';
+  const anchorStart = new Date('2026-09-21T08:00:00');
+  const anchorEnd = new Date('2026-09-21T10:00:00');
+  const companionStart = new Date('2026-09-21T09:00:00');
+  const companionEnd = new Date('2026-09-21T11:00:00');
+
+  Store.setTasks([
+    { id: anchorId, PRODUCTION_ORDER: 'PANCHOR9103', MACHINE: line, RUN_TIME: 2, start_date: anchorStart, end_date: anchorEnd },
+    { id: companionId, PRODUCTION_ORDER: 'B-9103', ORDER: 'B-9103', PARENT_ORDER: '9103', DISTRIBUTION_LETTER: 'B', MACHINE: line, RUN_TIME: 2, start_date: companionStart, end_date: companionEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  let itemsUpdateCalled = false;
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
+    update: () => { itemsUpdateCalled = true; },
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+    assert.equal(Store.tasks[anchorId].MACHINE, line, 'the dragged anchor must not commit either — atomic revert');
+    assert.equal(Store.tasks[companionId].MACHINE, line, 'the locked companion stays on its machine');
+    assert.equal(itemsUpdateCalled, false, 'no Timeline item mirror update should happen when the batch is rejected');
+    assert.equal(toastCalls.length, 1);
+  } finally {
+    Timeline._items = undefined;
+    Timeline._scheduleRebuild = priorScheduleRebuild;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+    Toast.show = priorToastShow;
+  }
+});
+
+test('Timeline._itemForTask adds dist-child for any sub-order and the letter·count pill only for a lettered child', () => {
+  const priorPlant = Store.selectedPlant;
+  const plant = 'P-DIST-BAR';
+  Store.setSelectedPlant(plant, 'test');
+  Store.setTasks([
+    { id: 'bar-a', PLANT: plant, PRODUCTION_ORDER: 'A-9103', ORDER: 'A-9103', PARENT_ORDER: '9103', DISTRIBUTION_LETTER: 'A', MACHINE: 'L1', start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+    { id: 'bar-b', PLANT: plant, PRODUCTION_ORDER: 'B-9103', ORDER: 'B-9103', PARENT_ORDER: '9103', DISTRIBUTION_LETTER: 'B', MACHINE: 'L2', start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+    { id: 'bar-bare', PLANT: plant, PRODUCTION_ORDER: 'C-9104', ORDER: 'C-9104', PARENT_ORDER: '9104', DISTRIBUTION_LETTER: null, MACHINE: 'L3', start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+  ], 'test');
+  try {
+    const letteredItem = Timeline._itemForTask(Store.tasks['bar-a']);
+    assert.match(letteredItem.className, /\bdist-child\b/);
+    assert.match(letteredItem.content, /class="split-order-part dist-part"/);
+    assert.match(letteredItem.content, new RegExp('A·2'), 'pill must read A·2 for two living siblings');
+
+    const bareItem = Timeline._itemForTask(Store.tasks['bar-bare']);
+    assert.match(bareItem.className, /\bdist-child\b/, 'the bare 100% child still gets the inset-keyline class');
+    assert.doesNotMatch(bareItem.content, /dist-part/, 'a bare child has no letter, so no pill is rendered');
+  } finally {
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
+
+test('Interaction._applyDistSiblingHighlight adds .dist-sibling to items sharing PARENT_ORDER with the current selection, and clears it once selection moves away', () => {
+  const priorPlant = Store.selectedPlant;
+  Store.setSelectedPlant(null, 'test');
+  const line = 'DIST-SIB-L';
+  Store.setTasks([
+    { id: 'sib-a', PARENT_ORDER: '9105', DISTRIBUTION_LETTER: 'A', MACHINE: line, start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+    { id: 'sib-b', PARENT_ORDER: '9105', DISTRIBUTION_LETTER: 'B', MACHINE: line, start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+    { id: 'sib-other', PARENT_ORDER: null, MACHINE: line, start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+  ], 'test');
+
+  const classNames = { 'sib-a': 'order-standard', 'sib-b': 'order-standard', 'sib-other': 'order-standard' };
+  Timeline._items = {
+    get: (i) => (classNames[i] != null ? { className: classNames[i] } : undefined),
+    update: (updates) => {
+      const arr = Array.isArray(updates) ? updates : [updates];
+      arr.forEach(u => { classNames[u.id] = u.className; });
+    },
+  };
+
+  try {
+    Interaction._applyDistSiblingHighlight(['sib-a']);
+    assert.match(classNames['sib-b'], /\bdist-sibling\b/, 'sib-b shares PARENT_ORDER with the selected sib-a');
+    assert.doesNotMatch(classNames['sib-a'], /dist-sibling/, 'the selected item itself is not marked as its own sibling');
+    assert.doesNotMatch(classNames['sib-other'], /dist-sibling/);
+
+    Interaction._applyDistSiblingHighlight(['sib-other']);
+    assert.doesNotMatch(classNames['sib-b'], /dist-sibling/, 'the highlight must clear once selection moves away');
+  } finally {
+    Timeline._items = undefined;
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
   }
 });

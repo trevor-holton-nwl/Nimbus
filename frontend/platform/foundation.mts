@@ -762,9 +762,13 @@ export const Util = {
   // for parity with the same convention used by Table's own valueGetter.
   taskMatchesPasteSet(task: NimbusTask, idSet: Set<string> | null | undefined): boolean {
     if (!idSet || idSet.size === 0) return true;
-    const po  = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER);
-    const mat = Util.norm(task.MATERIAL_NUMBER);
-    return !!((po && idSet.has(po)) || (mat && idSet.has(mat)));
+    const po     = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER);
+    const mat    = Util.norm(task.MATERIAL_NUMBER);
+    // Matching the SAP parent order too means pasting/searching a parent
+    // order number (e.g. "1000") selects every sub-order (A-1000, B-1000, …),
+    // not just an exact PRODUCTION_ORDER match (aggregate_to_detail.md §8).
+    const parent = Util.norm(task.PARENT_ORDER);
+    return !!((po && idSet.has(po)) || (mat && idSet.has(mat)) || (parent && idSet.has(parent)));
   },
 
   // Shared search+checkbox "N selected" multi-select combobox — the pattern

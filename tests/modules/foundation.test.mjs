@@ -285,3 +285,16 @@ test('ErrorLog._route() falls back to the bare tab without a ganttSub, and to nu
   assert.equal(ErrorLog._route(), null); // throwing resolver caught, not propagated
   ErrorLog.setRouteResolver(() => null); // reset
 });
+
+// Distribution (aggregate_to_detail.md §8 "Paste and selection"): pasting or
+// searching a parent SAP order number must select every sub-order, not just
+// an exact PRODUCTION_ORDER/MATERIAL_NUMBER match.
+test('Util.taskMatchesPasteSet also matches a task\'s PARENT_ORDER, so pasting the parent selects every sub-order', () => {
+  const idSet = new Set(['1000']);
+  assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: 'A-1000', PARENT_ORDER: '1000' }, idSet), true);
+  assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: 'B-1000', PARENT_ORDER: '1000' }, idSet), true);
+  assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: 'C-2000', PARENT_ORDER: '2000' }, idSet), false);
+  // A task with no PARENT_ORDER still relies only on the existing ORDER/MATERIAL_NUMBER match.
+  assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: '1000' }, idSet), true);
+  assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: '3000' }, idSet), false);
+});
