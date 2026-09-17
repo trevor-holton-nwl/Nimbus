@@ -298,13 +298,15 @@ class TestApportion:
 
     def test_tie_order_for_remainder(self):
         """Ties in remainder broken by tie_order."""
-        total = Decimal(10)
+        total = Decimal(11)
         weights = {"L2": Decimal(1), "L1": Decimal(1)}  # Equal weights
         unit = Decimal(1)
         tie_order = ["L1", "L2"]
         result = apportion(total, weights, unit, tie_order)
-        # L1 should win the tie (appears first in tie_order)
-        assert result["L1"] > result["L2"]
+        # Ideal shares 5.5/5.5, floor to 5/5, 1 unit of remainder to distribute.
+        # Both tied at remainder 0.5 -> L1 wins (appears first in tie_order).
+        assert result["L1"] == 6
+        assert result["L2"] == 5
 
     def test_minutes_apportionment(self):
         """Apportion in minutes for run-time (e.g., 300 minutes / 3 ways)."""

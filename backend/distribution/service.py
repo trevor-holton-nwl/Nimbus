@@ -288,8 +288,7 @@ def apportion(
 
         machines_by_remainder = sorted(
             allocations.keys(),
-            key=lambda m: (remainders.get(m, Decimal(0)), tie_order.index(m) if m in tie_order else float('inf')),
-            reverse=True,
+            key=lambda m: (-remainders.get(m, Decimal(0)), tie_order.index(m) if m in tie_order else float('inf')),
         )
 
         for machine in machines_by_remainder:
@@ -343,7 +342,7 @@ def compute_derived_statuses(
             break
 
     # mode_mismatch: work center now in 'single' mode
-    if workcenter and workcenter.get("distribution_mode") == "single":
+    if workcenter is not None and workcenter.get("distribution_mode") == "single":
         statuses.add("mode_mismatch")
 
     # wc_changed: sap_facts.previous_workcenter is set
@@ -352,7 +351,7 @@ def compute_derived_statuses(
         statuses.add("wc_changed")
 
     # membership_changed: positive share's machine no longer a member, or member has no share
-    if workcenter:
+    if workcenter is not None:
         wc_members = set(machines.keys())
         for share in shares:
             machine = share.get("machine")
