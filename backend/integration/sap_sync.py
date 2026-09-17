@@ -697,8 +697,17 @@ def sync_object(object_key: str, *, user_email: str | None = None,
                 actor=user_email or "system", reason="SAP order replacement",
                 plants=sorted({r.get("plant") for r in mapped if r.get("plant")}) or None,
             )
+            # Local/deferred import — mirrors db.ingest_orders_from_excel's own
+            # reasoning (backend/distribution/data.py imports `db`, so a
+            # top-of-file import here would put this domain's data layer on
+            # the same footing as db.py w.r.t. that reverse dependency; kept
+            # local for consistency even though sap_sync -> distribution ->
+            # db is not itself a cycle).
+            import backend.distribution.data as distribution_data
             apply_res = db.upsert_orders(mapped, source="sap", batch_id=None,
-                                         filename=None, raw_row_count=rows_read)
+                                         filename=None, raw_row_count=rows_read,
+                                         plan_fn=distribution_data.plan,
+                                         apply_fn=distribution_data.apply)
             result["rows_inserted"] = int(apply_res.get("inserted", 0))
             result["rows_updated"] = int(apply_res.get("updated", 0))
             result["rows_failed"] = int(apply_res.get("failed", 0))

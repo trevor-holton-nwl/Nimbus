@@ -16,6 +16,7 @@ import os
 import uuid
 from datetime import datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -2240,7 +2241,8 @@ def missing_master_data_for_plant(plant: str) -> dict:
 
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
-                  warnings: list[dict] | None = None) -> dict:
+                  warnings: list[dict] | None = None,
+                  plan_fn: Callable | None = None, apply_fn: Callable | None = None) -> dict:
     """Shared orders upsert for both the Excel and SAP ingest paths.
 
     `rows` is a list of dicts keyed by orders columns (production_order,
@@ -2256,7 +2258,29 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     The scheduled_start/scheduled_end/notes non-overwrite lives in _UPSERT_SQL
     (unchanged) — user drag/drop edits survive a re-ingest.
 
-    Returns: {status:"ok", batch_id, inserted, updated, failed, warnings}.
+    `plan_fn`/`apply_fn` are the optional Order Distribution ingest seam
+    (aggregate_to_detail.md §5) — both default to None so every caller that
+    doesn't pass them (and any future one) is unaffected. When given:
+      - `plan_fn` is called as `plan_fn(rows, batch_id)` BEFORE the id/dedup
+        loop below, matching `backend.distribution.data.plan`'s
+        `(rows, batch_id, conn=None)` signature (no `conn` — it opens its own
+        short read-only connection). Its `rows_out` replaces `rows` for the
+        rest of this function; its `plan_structure` is held onto for `apply_fn`.
+      - `apply_fn` is called as `apply_fn(plan_structure, batch_id, conn,
+        actor=...)`, matching `backend.distribution.data.apply`'s
+        `(plan, batch_id, conn, *, actor="system")` signature, once every chunk
+        and every backfill has committed and only when `plan_structure` has at
+        least one parent — reusing the connection already open at that point
+        (`apply_fn` commits its own transaction on it; nothing here commits or
+        rolls back around that call). Its `warnings_entry` is folded into the
+        `warnings` list feeding the `upload_audit` row exactly like the
+        `missing_master_data` entry below.
+    db.py never imports `backend.*` at module scope (every router imports
+    `db`, not the reverse — a top-level import here would be circular since
+    `backend/distribution/data.py` imports `db`); callers pass the two
+    functions in instead.
+
+    Returns: {status:"ok", batch_id, inserted, updated, failed, warnings, lines}.
     """
     if batch_id is None:
         batch_id = str(uuid.uuid4())
@@ -2287,6 +2311,25 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 conn.commit()
         except Exception:
             log.warning("Failed to write failed-upload audit row", extra={"category": "upload"})
+
+    # ---------- Order Distribution: plan() seam (aggregate_to_detail.md §5) ----------
+    # Runs BEFORE the id/dedup loop, on its own short read-only connection
+    # (no `conn` passed — plan() opens/closes its own). Replaces `rows` with
+    # `rows_out` (distributed aggregate parents replaced by their per-machine
+    # children, single-mode work-center codes rewritten to a real machine) so
+    # everything below — id/dedup, chunked upsert, backfills — runs unchanged
+    # over the resolved rows. `plan_structure` is held onto for `apply_fn` below.
+    distribution_plan: dict = {}
+    if plan_fn is not None:
+        rows, distribution_plan, _distribution_ingest_warnings = plan_fn(rows, batch_id)
+
+    # The "Unknown production line" soft-warning (backend/integration/routes.py)
+    # must see the RESOLVED machine values — i.e. after plan_fn's single-mode
+    # rewrite — never the raw uploaded column, or every resolved work-center
+    # code would incorrectly trip that warning. Computed here (post-plan_fn,
+    # pre-dedup — dedup only touches `id`, never `machine`) and returned below
+    # so callers (e.g. ingest_orders_from_excel) don't need their own copy.
+    lines = sorted({str(row["machine"]) for row in rows if row.get("machine")})
 
     # ---------- IDs + dedup (mirrors brain.py:131-150) ----------
     # Compute id via make_id() when absent, then apply the cumcount-suffix dedup
@@ -2425,6 +2468,22 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                             f"shared across multiple plants: {machines_amb}. Provide an "
                             f"explicit plant column on upload to resolve."),
                 })
+            # ---------- Order Distribution: apply() seam (aggregate_to_detail.md §5) ----------
+            # Runs after the last upsert chunk AND every backfill above has
+            # committed, so its counters land in `warnings` before the
+            # upload_audit insert just below. Reuses the connection already
+            # open on this transaction — apply_fn commits its own transaction
+            # on `conn` internally (mirroring every other multi-step writer in
+            # backend/distribution/data.py); nothing here commits or rolls
+            # back around this call. Only runs when there's at least one
+            # planned parent — an empty plan (no distribute-mode rows this
+            # batch) is a no-op plan_fn already accounted for.
+            if apply_fn is not None and distribution_plan.get("parents"):
+                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=filename or "system")
+                # Same insertion style as the missing_master_data entry above —
+                # one dict, `level`/`msg` are the two fields the cockpit's
+                # warning list actually reads.
+                warnings.append(apply_res["warnings_entry"])
             cur.execute(
                 """
                 INSERT INTO upload_audit
@@ -2448,6 +2507,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         "updated": updated,
         "failed": 0,
         "warnings": warnings,
+        # Resolved machine values (post-plan_fn) — see the "Unknown production
+        # line" comment near where `lines` is computed above.
+        "lines": lines,
         # Summary only (never blocking — N5/N6/N7). Full per-material detail is the
         # same list persisted into upload_audit.warnings above, served in full by
         # GET /upload/{batch_id}/missing-master-data.
@@ -2664,6 +2726,13 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "no_of_fte": _num(r, "NO_OF_FTE_(MEINH)"),
         })
 
+    # Local, deferred import — backend/distribution/data.py imports `db`
+    # already, so a top-level `import backend.distribution.data` here would be
+    # a circular import (and would violate the "db.py/master_data.py are never
+    # imported by, only importers of, backend/<domain>" architecture in
+    # backend/CLAUDE.md even where Python would tolerate the cycle at runtime).
+    import backend.distribution.data as distribution_data
+
     result = upsert_orders(
         rows,
         batch_id=batch_id,
@@ -2671,14 +2740,19 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
         filename=filename,
         raw_row_count=raw_row_count,
         warnings=warnings,
+        plan_fn=distribution_data.plan,
+        apply_fn=distribution_data.apply,
     )
     if result.get("status") != "ok":
         # upsert_orders already wrote a failed-audit trail and re-raised on a
         # persist failure; this branch covers any defensive non-ok return.
         return result
 
-    lines = sorted({str(v) for v in df["MACHINE"].dropna().unique()}) \
-        if "MACHINE" in df.columns else []
+    # `lines` now comes from upsert_orders itself — computed from the
+    # RESOLVED rows (post plan_fn's single-mode rewrite), not the raw
+    # uploaded MACHINE column, so a resolved work-center code no longer trips
+    # the "Unknown production line" warning in backend/integration/routes.py.
+    lines = result.get("lines", [])
 
     # Preserve the historical return shape exactly: include raw_row_count + lines
     # alongside the upsert_orders result (which carries status/batch_id/

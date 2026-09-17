@@ -1015,3 +1015,121 @@ class TestPlanRerouteRecordsPreviousWorkcenter:
         shares_after = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
         machines_after = {s["machine"] for s in shares_after}
         assert machines_after == {self.L1, self.L2}, "reroute must NOT move shares to the new work center's members"
+
+
+# =====================================================================
+# db.upsert_orders' plan_fn/apply_fn seam (this task, P2-4)
+# =====================================================================
+# Requires a local Postgres with NIMBUS_TEST_DB=1 (same caveat as the classes
+# above -- NOT RUN in this sandboxed environment). Uses FAKE plan_fn/apply_fn
+# (not the real backend.distribution.data.plan/apply) so this test needs no
+# order_distribution schema/seed data at all -- it verifies the WIRING itself
+# (call order, argument shapes, warnings-list fold-in), not distribution's
+# own already-tested planning/apply logic.
+@pytest.mark.pg
+class TestUpsertOrdersDistributionSeamWiring:
+    PLANT = "1006"
+    ORD, MAT = "ZZTEST_WIRE_ORD", "ZZTEST_WIRE_MAT"
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self, pg):
+        db_ = pg
+
+        def _clean():
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM orders WHERE production_order = %s AND material_number = %s",
+                    (self.ORD, self.MAT),
+                )
+                conn.commit()
+
+        _clean()
+        yield
+        _clean()
+
+    def _row(self):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": "ZZTEST_WIRE_MACHINE", "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "run_time": 4.0,
+        }
+
+    def test_plan_runs_before_loop_apply_runs_after_backfills(self, pg):
+        """plan_fn must be called (rows, batch_id) BEFORE the id/dedup loop
+        (its rows_out become what gets upserted); apply_fn must be called
+        (plan_structure, batch_id, conn, actor=...) only AFTER the chunked
+        upsert and every backfill have committed -- proven here by apply_fn
+        reading the row back, on the very connection it was handed, and
+        finding it already persisted."""
+        db_ = pg
+        calls = []
+
+        def fake_plan(rows, batch_id):
+            calls.append(("plan", batch_id))
+            assert rows and rows[0]["production_order"] == self.ORD
+            # rows_out unchanged; one fake "parent" so apply_fn's
+            # non-empty-plan guard fires.
+            return rows, {"parents": {"fake": {}}}, {}
+
+        def fake_apply(plan_structure, batch_id, conn, *, actor="system"):
+            calls.append(("apply", batch_id, actor))
+            assert plan_structure == {"parents": {"fake": {}}}
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM orders WHERE production_order = %s AND material_number = %s",
+                    (self.ORD, self.MAT),
+                )
+                assert cur.fetchone() is not None, "apply_fn ran before the upsert committed"
+            return {
+                "parents_distributed": 0, "children_upserted": 0, "children_deleted": 0,
+                "headers_created": 0, "headers_refreshed": 0, "replanned_after_reweight": 0,
+                "warnings_entry": {"level": "info", "msg": "fake apply ran"},
+                "ingest_warnings": {},
+            }
+
+        batch_id = str(uuid.uuid4())
+        result = db_.upsert_orders(
+            [self._row()], batch_id=batch_id, source="excel", filename="wiring-test.xlsx",
+            plan_fn=fake_plan, apply_fn=fake_apply,
+        )
+
+        assert [c[0] for c in calls] == ["plan", "apply"], "plan_fn then apply_fn, in that order, exactly once each"
+        assert calls[0][1] == batch_id
+        assert calls[1][1] == batch_id
+        assert calls[1][2] == "wiring-test.xlsx", "actor threaded through from filename"
+        assert {"level": "info", "msg": "fake apply ran"} in result["warnings"]
+        assert result["lines"] == ["ZZTEST_WIRE_MACHINE"]
+
+    def test_apply_fn_skipped_when_plan_has_no_parents(self, pg):
+        """An empty plan_structure (no distribute-mode rows this batch) must
+        NOT call apply_fn at all."""
+        db_ = pg
+        apply_calls = []
+
+        def fake_plan(rows, batch_id):
+            return rows, {"parents": {}}, {}
+
+        def fake_apply(*args, **kwargs):
+            apply_calls.append((args, kwargs))
+            raise AssertionError("apply_fn must not be called for an empty plan")
+
+        db_.upsert_orders(
+            [self._row()], batch_id=str(uuid.uuid4()), source="excel", filename="wiring-test2.xlsx",
+            plan_fn=fake_plan, apply_fn=fake_apply,
+        )
+        assert apply_calls == []
+
+    def test_plan_fn_and_apply_fn_default_to_none_is_unaffected(self, pg):
+        """The two new params are optional -- every other caller of
+        upsert_orders (no plan_fn/apply_fn passed) must behave exactly as
+        before: no error, no extra warnings entry, `lines` still derived from
+        the (unrewritten) machine column."""
+        db_ = pg
+        result = db_.upsert_orders(
+            [self._row()], batch_id=str(uuid.uuid4()), source="excel", filename="wiring-test3.xlsx",
+        )
+        assert result["status"] == "ok"
+        assert result["lines"] == ["ZZTEST_WIRE_MACHINE"]
+        assert all(w.get("msg") != "fake apply ran" for w in result["warnings"])
