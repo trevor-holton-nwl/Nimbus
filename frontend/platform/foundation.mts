@@ -88,12 +88,19 @@ interface RecentEntry {
   level: LogLevel;
 }
 
+interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
 interface ToastEntry {
   el: HTMLDivElement;
   msg: string;
   type: string;
   timerId: ReturnType<typeof setTimeout> | null;
   _removing: boolean;
+  actionBtn: HTMLButtonElement | null;
+  _actionHandler: (() => void) | null;
 }
 
 interface ModalConfirmOpts {
@@ -1426,10 +1433,13 @@ export const ErrorLog = {
 
 /* =============================================================================
    TOAST — transient notification banners (top-right stack).
-     Toast.show(msg, type?, ms?)  — show a message; type: 'info'|'warn'|'error'|'success'
+     Toast.show(msg, type?, ms?, action?)  — show a message; type: 'info'|'warn'|'error'|'success'
      Cap of 3 visible at once: drops oldest non-error first when exceeded.
      Dedupes by (msg, type) — repeats refresh the existing toast's timer.
      Default duration 1500ms; callers may override.
+     action?: {label, run} — optional action button appended after the message
+     text (never wired via inline onclick=); clicking it calls run() and then
+     dismisses the toast the same way its timeout/close would.
    ========================================================================== */
 export const Toast = (function() {
   const MAX_VISIBLE = 3;
@@ -1455,8 +1465,34 @@ export const Toast = (function() {
     if (victim) _remove(victim);
   }
 
+  // Dedupe stays keyed on (msg, type) only — unchanged from before `action`
+  // existed. An `action` is not part of the dedupe key: when a second
+  // Toast.show(...) call matches an existing toast, that call's `action`
+  // (present, absent, or different from before) simply replaces whatever
+  // action the existing toast element had — the latest call always wins,
+  // same as how the latest call already wins the dismiss timer.
+  function _applyAction(entry: ToastEntry, action: ToastAction | undefined): void {
+    if (!action) {
+      if (entry.actionBtn) { entry.actionBtn.remove(); entry.actionBtn = null; }
+      entry._actionHandler = null;
+      return;
+    }
+    if (!entry.actionBtn) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'toast-action';
+      entry.el.appendChild(btn);
+      entry.actionBtn = btn;
+    }
+    entry.actionBtn.textContent = action.label;
+    if (entry._actionHandler) entry.actionBtn.removeEventListener('click', entry._actionHandler);
+    const handler = (): void => { action.run(); _remove(entry); };
+    entry.actionBtn.addEventListener('click', handler);
+    entry._actionHandler = handler;
+  }
+
   return {
-    show(msg: string, type: string = 'info', ms: number = 1500): void {
+    show(msg: string, type: string = 'info', ms: number = 1500, action?: ToastAction): void {
       const stack = document.getElementById('toast-stack');
       if (!stack) return;
 
@@ -1464,6 +1500,7 @@ export const Toast = (function() {
       if (dup) {
         if (dup.timerId) clearTimeout(dup.timerId);
         _scheduleRemoval(dup, ms);
+        _applyAction(dup, action);
         return;
       }
 
@@ -1474,7 +1511,8 @@ export const Toast = (function() {
       el.textContent = msg;
       stack.appendChild(el);
 
-      const entry = { el, msg, type, timerId: null, _removing: false };
+      const entry: ToastEntry = { el, msg, type, timerId: null, _removing: false, actionBtn: null, _actionHandler: null };
+      _applyAction(entry, action);
       _visible.push(entry);
       _scheduleRemoval(entry, ms);
     }

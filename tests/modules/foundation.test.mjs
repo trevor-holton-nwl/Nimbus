@@ -3,6 +3,42 @@ import assert from 'node:assert/strict';
 import { Config, PerfMonitor, VirtualList, Toast, Modal } from '../../frontend/platform/foundation.mjs';
 import { Util, ErrorLog } from '../../frontend/platform/foundation.mjs';
 
+/* Minimal fake DOM for Toast tests — Toast.show() only ever calls
+   document.getElementById('toast-stack') and document.createElement(), and
+   operates on elements via textContent/className/classList/appendChild/
+   addEventListener, so a tiny stub is enough (no jsdom dependency needed). */
+function _fakeElement(tag) {
+  const el = {
+    tagName: tag,
+    className: '',
+    textContent: '',
+    type: '',
+    children: [],
+    parent: null,
+    _listeners: {},
+    classList: {
+      _set: new Set(),
+      add(c) { this._set.add(c); },
+      remove(c) { this._set.delete(c); },
+      contains(c) { return this._set.has(c); },
+    },
+    appendChild(child) { child.parent = el; this.children.push(child); return child; },
+    remove() { if (el.parent) { el.parent.children = el.parent.children.filter(c => c !== el); el.parent = null; } },
+    addEventListener(evt, fn) { this._listeners[evt] = fn; },
+    removeEventListener(evt, fn) { if (this._listeners[evt] === fn) delete this._listeners[evt]; },
+    click() { const fn = this._listeners.click; if (fn) fn(); },
+  };
+  return el;
+}
+function _fakeDocument() {
+  const stack = _fakeElement('div');
+  return {
+    _stack: stack,
+    getElementById(id) { return id === 'toast-stack' ? stack : null; },
+    createElement(tag) { return _fakeElement(tag); },
+  };
+}
+
 test('Config exposes the documented constants', () => {
   assert.equal(Config.STEP_MS, 15 * 60 * 1000);
   assert.ok(Array.isArray(Config.COLORS));
@@ -32,6 +68,70 @@ test('Toast and Modal are present with their documented public methods', () => {
   assert.equal(typeof Modal.open, 'function');
   assert.equal(typeof Modal.close, 'function');
   assert.equal(typeof Modal.confirm, 'function');
+});
+
+test('Toast.show without an action behaves exactly as before: textContent only, no button', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  Toast.show('plain message', 'info', 20);
+  assert.equal(doc._stack.children.length, 1);
+  const el = doc._stack.children[0];
+  assert.equal(el.textContent, 'plain message');
+  assert.equal(el.className, 'toast info');
+  assert.equal(el.children.length, 0, 'no .toast-action button when action is omitted');
+});
+
+test('Toast.show(msg, type, ms, action) appends a .toast-action button whose click calls run() and dismisses the toast', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  let ran = false;
+  Toast.show('do the thing', 'warn', 20, { label: 'Open X', run: () => { ran = true; } });
+  const el = doc._stack.children[0];
+  assert.equal(el.textContent, 'do the thing', 'message text is untouched by adding the button');
+  assert.equal(el.children.length, 1);
+  const btn = el.children[0];
+  assert.equal(btn.className, 'toast-action');
+  assert.equal(btn.textContent, 'Open X');
+
+  btn.click();
+  assert.equal(ran, true, 'clicking the action button calls run()');
+  assert.equal(el.classList.contains('leaving'), true, 'clicking the action dismisses the toast the same way its timeout would');
+});
+
+// Dedupe stays keyed on (msg, type) only, same as before `action` existed
+// (per aggregate_to_detail.md §8: "the (msg, type) dedupe unchanged"). An
+// `action` is not part of the dedupe key — the latest Toast.show(...) call
+// for an already-visible (msg, type) simply replaces whatever action the
+// existing toast had, exactly like it already replaces the dismiss timer.
+test('Toast.show dedupe: a repeat (msg, type) call reuses the existing element and its action label wins', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  let firstRan = false;
+  let secondRan = false;
+  Toast.show('dup message', 'error', 20, { label: 'First', run: () => { firstRan = true; } });
+  assert.equal(doc._stack.children.length, 1);
+  const el = doc._stack.children[0];
+
+  Toast.show('dup message', 'error', 20, { label: 'Second', run: () => { secondRan = true; } });
+  assert.equal(doc._stack.children.length, 1, 'dedupe reuses the existing toast, does not stack a second one');
+  assert.equal(el.children.length, 1, 'exactly one action button, not stacked');
+  const btn = el.children[0];
+  assert.equal(btn.textContent, 'Second', 'the latest call\'s action replaces the previous one');
+
+  btn.click();
+  assert.equal(firstRan, false, 'the stale first action must not still be wired');
+  assert.equal(secondRan, true, 'the latest run() is the one that fires');
+});
+
+test('Toast.show dedupe: a later call with no action clears a previous one (latest call wins entirely)', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  Toast.show('toggle action', 'success', 20, { label: 'Click me', run: () => {} });
+  const el = doc._stack.children[0];
+  assert.equal(el.children.length, 1);
+
+  Toast.show('toggle action', 'success', 20); // no action this time
+  assert.equal(el.children.length, 0, 'omitting the action on the latest call removes the existing button');
 });
 
 test('Util.setPreferenceResolver changes what _timeFormatPref/_dateFormatPref read', () => {
