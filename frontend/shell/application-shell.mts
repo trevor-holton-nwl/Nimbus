@@ -72,7 +72,7 @@ import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter } from
 import { Table } from '../scheduling/orders.mjs';
 import { Dashboard, AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
-import { Plant, ProdLines } from '../master-data/admin-ui.mjs';
+import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
 import { LaborPlanning } from '../labor/labor-planning.mjs';
 import { MaterialGrids } from '../master-data/material-grids.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
@@ -2146,6 +2146,7 @@ const App = {
       if (evt.type === 'plant:selected') {
         ProdLines._lineSearch = '';
         if (onMaster('lines')) ProdLines.render();
+        if (onMaster('work-centers')) void WorkCenters.render();
       }
       if (evt.type === 'lines:selected') {
         // Cross-screen production-line filter (Gantt/Orders/Dashboard/Labor
@@ -2504,7 +2505,7 @@ const App = {
     { sub: 'plant',          paneId: 'md-master-plant-pane',          render: () => Plant.render() },
     { sub: 'material',       paneId: 'md-master-material-pane',       render: () => MaterialGrids.render('material') },
     { sub: 'material-plant', paneId: 'md-master-material-plant-pane', render: () => MaterialGrids.render('material-plant') },
-    { sub: 'work-centers',   paneId: 'md-master-work-centers-pane',   render: () => {} },
+    { sub: 'work-centers',   paneId: 'md-master-work-centers-pane',   render: () => void WorkCenters.render() },
   ] as Array<{ sub: MasterSubTab; paneId: string; render(): void }>,
 
   gotoMasterSub(sub: MasterSubTab): void {

@@ -134,11 +134,27 @@ class CascadePreviewResult(BaseModel):
     headers: int = 0
 
 
+class BulkWriteWarning(BaseModel):
+    """One informational (non-blocking) finding from a table-specific
+    post-write check -- currently only the `sap_workcenter` branch in
+    routes.py's `md_bulk` (aggregate_to_detail.md §3.1/§4.1). Same
+    `{level, msg}` shape the diagnostics pipeline's warnings already use
+    (backend/admin_ops/logbuffer.py, diagnostics_state.py), reused here so
+    the frontend's existing `.admin-bwarn-list` renderer (copied from
+    AdminCockpit._warningList) needs no new shape to understand."""
+    level: str = "warn"
+    msg: str
+
+
 class BulkApplyResult(BaseModel):
-    """master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk)."""
+    """master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk),
+    plus an optional `warnings` list a table-specific post-write hook can
+    attach (routes.py `md_bulk`) -- informational only, never a reason the
+    write itself failed (the write already committed by the time these run)."""
     inserted: int
     updated: int
     deleted: int
+    warnings: list[BulkWriteWarning] = []
 
 
 class PlantConstraintsResult(BaseModel):

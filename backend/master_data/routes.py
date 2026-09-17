@@ -321,6 +321,87 @@ def md_cascade_preview(table: str, body: dict = Body(default={})):
     return md.cascade_preview(table, body.get("deletes", []))
 
 
+def _sap_workcenter_bulk_warnings(upserted_rows: list[dict]) -> list[dict]:
+    """Post-write, non-blocking evaluation of the §3.1 write-path rules for
+    `sap_workcenter` rows just written via the generic grid (`md_bulk`).
+    Re-reads each affected (plant, sap_workcenter) from the DB rather than
+    trusting the request payload alone -- `bulk_apply` only writes columns
+    present in each upserted row, so a partial-column paste (e.g. only
+    `description` changed) would not carry `distribution_mode`/
+    `default_machine` at all; the row's true current state has to come from
+    the table itself, post-commit.
+
+    Mirrors the four rules `backend/distribution/data.py.save_workcenter`
+    enforces as hard 400s on its own dedicated route, except
+    `distribute_mode_thin` is warning-only here (the generic grid has no
+    equivalent hard gate to enforce it against, per aggregate_to_detail.md
+    §3.1's "warning only, not blocking"). Never raises -- a failure in this
+    check must never be mistaken for the write itself failing, since the
+    write already committed before this runs."""
+    seen: set[tuple[str, str]] = set()
+    keys: list[tuple[str, str]] = []
+    for row in upserted_rows:
+        plant = row.get("plant")
+        code = row.get("sap_workcenter")
+        if not plant or not code:
+            continue
+        k = (plant, code)
+        if k in seen:
+            continue
+        seen.add(k)
+        keys.append(k)
+    if not keys:
+        return []
+
+    warnings: list[dict] = []
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        for plant, code in keys:
+            cur.execute(
+                "SELECT distribution_mode, default_machine FROM sap_workcenter"
+                " WHERE plant = %s AND sap_workcenter = %s",
+                (plant, code),
+            )
+            row = cur.fetchone()
+            if row is None:
+                continue  # deleted in this same batch, or a delete-only request
+            mode, default_machine = row
+
+            cur.execute("SELECT 1 FROM machine WHERE plant = %s AND machine = %s", (plant, code))
+            if cur.fetchone() is not None:
+                warnings.append({
+                    "level": "warn",
+                    "msg": f"wc_code_shadowed_by_machine: {code!r} is also a machine name in plant {plant!r}.",
+                })
+
+            cur.execute("SELECT machine FROM machine WHERE plant = %s AND sap_workcenter = %s", (plant, code))
+            members = {r[0] for r in cur.fetchall()}
+
+            if mode == "single" and not default_machine:
+                # Defense-in-depth only: the CHECK (distribution_mode = 'distribute'
+                # OR default_machine IS NOT NULL) already refuses this at the DB
+                # layer, so the generic grid path should never actually reach here
+                # with 'single'+NULL — kept per §4.1's "include it anyway for
+                # clearer error messages" instruction.
+                warnings.append({
+                    "level": "warn",
+                    "msg": f"single_mode_without_default: {code!r} is in single mode with no default machine.",
+                })
+
+            if default_machine and default_machine not in members:
+                warnings.append({
+                    "level": "warn",
+                    "msg": f"default_machine_not_member: {code!r}'s default machine {default_machine!r} is not a current member.",
+                })
+
+            if mode == "distribute" and len(members) < 2:
+                warnings.append({
+                    "level": "warn",
+                    "msg": f"distribute_mode_thin: {code!r} is in distribute mode with fewer than two member machines.",
+                })
+
+    return warnings
+
+
 @router.post("/master-data/{table}/bulk", response_model=BulkApplyResult,
             dependencies=[Depends(require_api_key), Depends(require_admin)])
 def md_bulk(table: str, request: Request, body: dict = Body(default={})):
@@ -354,6 +435,18 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
                     _log_event("info", "db", "Backfilled order machine_key after line change", count=n)
             except Exception as e:
                 _log_event("warn", "db", "machine_key backfill after line change failed", error=str(e))
+        # Non-blocking §3.1 write-path rule check — the write already
+        # succeeded; this only surfaces findings for the admin to review
+        # (aggregate_to_detail.md §4.1). Best-effort, same posture as the
+        # `machine` block above: a failure here must never mask (or be
+        # mistaken for) the write itself failing.
+        if table == "sap_workcenter" and body.get("upserts"):
+            try:
+                warnings = _sap_workcenter_bulk_warnings(body.get("upserts", []))
+                if warnings:
+                    result["warnings"] = warnings
+            except Exception as e:
+                _log_event("warn", "db", "sap_workcenter post-write warning check failed", error=str(e))
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

@@ -4804,6 +4804,9 @@ body.dark .cw-active-card {
   padding: 2px 10px;
 }
 .md-save-idle { opacity: 0.45; }
+/* §4.1 inline bulk-write warnings — empty and margin-less when there is
+   nothing to show (_renderBulkWarnings clears it to '' between saves). */
+#md-bulk-warnings:not(:empty) { margin-bottom: 12px; }
 
 .md-table-wrap {
   overflow-x: auto;
@@ -4984,6 +4987,76 @@ tr:last-child .md-td { border-bottom: none; }
   color: var(--fg-mute);
 }
 .md-bom-scope-bar strong { color: var(--fg); }
+
+/* =============================================================================
+   WORK CENTERS TAB (§4.3) — reuses .lines-split/.lines-nav/.cal-scroll/
+   .cal-container from the Production Lines pane for the list/detail split,
+   and .panel/.panel-head/.panel-body/.panel-hint/.md-table* from elsewhere
+   in this file for the membership table — only the pieces unique to this
+   pane get new rules below.
+   ============================================================================= */
+.wc-nav { width: 260px; }
+.wc-new-toggle-row { padding: 8px 12px 0; }
+.wc-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.wc-new-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.wc-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 14px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.wc-row:hover { background: var(--bg-hover); }
+.wc-row.active { background: var(--bg-hover); border-left-color: var(--accent); }
+.wc-row-code { font-size: 12px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.wc-row-desc { font-size: 11px; color: var(--fg-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-load-more { width: calc(100% - 24px); margin: 8px 12px; }
+
+.wc-detail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.wc-field-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+.wc-field-row label { width: 150px; flex-shrink: 0; font-size: 12px; color: var(--fg-mute); }
+.wc-field-row .input, .wc-field-row select.input { max-width: 280px; }
+.wc-ro-value { font-size: 13px; color: var(--fg); }
+.wc-checkbox-row { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+.wc-checkbox-row .panel-hint { margin: 0; }
+.wc-info-btn {
+  border: none;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.wc-info-btn:hover { color: var(--accent); }
+.wc-inline-warn {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--warn, #b8860b);
+}
+.wc-not-set { color: var(--fg-faint); font-size: 11px; }
+.wc-membership-panel { margin-top: 16px; }
+.wc-weight-input { width: 90px; }
+.wc-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
 
 /* =============================================================================
    COLUMN CONTEXT MENU (floating)

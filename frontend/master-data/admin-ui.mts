@@ -2614,11 +2614,22 @@ interface MasterDataCascadePreview {
   headers?: number;
 }
 
+/** One informational (non-blocking) finding from a table-specific post-write
+ *  check (backend/master_data/models.py `BulkWriteWarning`) — same
+ *  `{level, msg}` shape AdminCockpit's `_warningList` already renders
+ *  (`frontend/admin-ops/admin-ui.mts`'s `AdminPipelineWarning`), copied here
+ *  rather than imported to avoid a new cross-domain edge (§4.1). */
+interface MasterDataBulkWarning {
+  level?: 'info' | 'warn' | 'error';
+  msg?: string;
+}
+
 /** `POST /master-data/{table}/bulk` response (master_data.py bulk_apply). */
 interface MasterDataBulkResult {
   inserted: number;
   updated: number;
   deleted: number;
+  warnings?: MasterDataBulkWarning[];
 }
 
 /** bom_items' plant+material scope gate (`_renderBomGate`). */
@@ -2633,6 +2644,50 @@ interface BomFilter {
 interface MasterDataFetchError extends Error {
   errorCode?: string;
   httpStatus?: number;
+}
+
+/** `sap_workcenter` row, as returned by `GET /master-data/sap_workcenter`
+ *  (schema.sql §3.1 / aggregate_to_detail.md). Used by the Work Centers
+ *  master-data sub-tab (`WorkCenters` below) — a hand-typed row shape,
+ *  same convention as `ProductionLineRow`/`PlantRow`/etc. above. */
+interface WorkCenterRow extends MasterDataRow {
+  plant: string;
+  sap_workcenter: string;
+  description?: string | null;
+  distribution_mode: 'single' | 'distribute';
+  default_machine?: string | null;
+  max_separation: 'none' | 'hour' | 'day' | 'week';
+  review_required: boolean;
+  distribute_tooled: boolean;
+}
+
+/** `PUT /distribution/{plant}/workcenters/{wc}` response
+ *  (backend/distribution/models.py `WorkCenterSaveResult`). */
+interface WorkCenterSaveResult {
+  plant: string;
+  sap_workcenter: string;
+  description?: string | null;
+  distribution_mode: 'single' | 'distribute';
+  default_machine?: string | null;
+  max_separation: 'none' | 'hour' | 'day' | 'week';
+  review_required: boolean;
+  distribute_tooled: boolean;
+  weights: Record<string, number | null>;
+}
+
+/** The Work Centers tab's client-side staged-edit buffer for the currently
+ *  selected work center — mirrors the shape `PUT
+ *  /distribution/{plant}/workcenters/{wc}` accepts. `weights` only ever
+ *  carries keys for the code's CURRENT member machines (machine.sap_workcenter
+ *  === this code); membership itself is never edited here (§4.2, Machines tab). */
+interface WorkCenterStaged {
+  description: string;
+  distribution_mode: 'single' | 'distribute';
+  default_machine: string;
+  max_separation: 'none' | 'hour' | 'day' | 'week';
+  review_required: boolean;
+  distribute_tooled: boolean;
+  weights: Record<string, number | null>;
 }
 
 interface ComboboxOpts {
@@ -3055,6 +3110,17 @@ export const MasterData = (() => {
     toolbar.appendChild(saveBtn);
 
     host.appendChild(toolbar);
+
+    // Inline post-write warnings (§4.1) — populated by _save() after a bulk
+    // response carries `warnings[]` (currently only the sap_workcenter
+    // branch, backend/master_data/routes.py's `_sap_workcenter_bulk_warnings`).
+    // Present for every table (not just sap_workcenter) since this is a
+    // generic grid engine — it simply stays empty for tables whose bulk
+    // response never carries warnings. Cleared on every re-render (host is
+    // rebuilt from scratch above), same lifetime as the toolbar itself.
+    const bulkWarnHost = document.createElement('div');
+    bulkWarnHost.id = 'md-bulk-warnings';
+    host.appendChild(bulkWarnHost);
 
     // -- Table --
     const wrap = document.createElement('div');
@@ -3550,6 +3616,37 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Save
   // -----------------------------------------------------------------------
+  // Inline post-write warnings block — copies AdminCockpit._warningList's
+  // exact DOM/CSS pattern (`frontend/admin-ops/admin-ui.mts:1064-1081`,
+  // `.admin-bwarn-list`/`.admin-bwarn-row`/`.admin-bwarn-lvl`/`.admin-bwarn-msg`
+  // in styles.css) rather than importing that module, per this repo's
+  // small-deliberate-duplication convention (avoids a new master-data ↔
+  // admin-ops edge for four lines of DOM). `warnings[]` is the first
+  // consumer of a bulk-write warning beyond ErrorLog (§4.1) — this renders
+  // it under the grid's toolbar; an empty array clears any prior block.
+  function _renderBulkWarnings(warnings: MasterDataBulkWarning[]): void {
+    const host = document.getElementById('md-bulk-warnings');
+    if (!host) return;
+    host.textContent = '';
+    if (!warnings.length) return;
+    const list = document.createElement('div');
+    list.className = 'admin-bwarn-list';
+    for (const w of warnings) {
+      const row = document.createElement('div');
+      row.className = `admin-bwarn-row admin-bwarn-${w.level || 'warn'}`;
+      const lvl = document.createElement('span');
+      lvl.className = 'admin-bwarn-lvl';
+      lvl.textContent = (w.level || 'warn').toUpperCase();
+      const msg = document.createElement('span');
+      msg.className = 'admin-bwarn-msg';
+      msg.textContent = w.msg || '';
+      row.appendChild(lvl);
+      row.appendChild(msg);
+      list.appendChild(row);
+    }
+    host.appendChild(list);
+  }
+
   async function _save(table: MasterDataTable): Promise<void> {
     const state = _cache[table];
     if (!state) return;
@@ -3660,6 +3757,11 @@ export const MasterData = (() => {
       );
       delete _cache[table];
       await _loadAndRender(table);
+      // `_loadAndRender` → `_renderTable` rebuilds `#md-bulk-warnings` fresh
+      // on every call (host.innerHTML = ''), so this has to run AFTER it,
+      // not before — the success toast stays the primary signal; this is
+      // the informational, non-blocking layer beneath it (§4.1).
+      _renderBulkWarnings(res.warnings || []);
 
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
@@ -3924,3 +4026,688 @@ export const MasterData = (() => {
 
   return { render, syncLineSettings };
 })();
+
+/* =============================================================================
+   WORK CENTERS — Master Data › Work Centers sub-tab (§4.3)
+   ========================================================================== */
+
+// "More info" popover copy for the two Work Centers checkboxes — same
+// RULE_HELP/_openFieldInfoMenu/_showFieldInfoPopover mechanism the Scheduling
+// Rules pane uses (this file, `RULE_HELP` above `Plant`), reused directly
+// (both live in this module) rather than via a right-click menu: each
+// checkbox gets its own small "More info" button instead, since there's no
+// existing per-row contextmenu delegation over this pane worth adding.
+const WC_INFO_HELP: Record<string, { title: string; help: string[] }> = {
+  review_required:   { title: 'ui.wc_review_required_label',   help: ['ui.wc_review_required_help'] },
+  distribute_tooled: { title: 'ui.wc_distribute_tooled_label', help: ['ui.wc_distribute_tooled_help'] },
+};
+
+function _wcMembers(machines: ProductionLineRow[], code: string): ProductionLineRow[] {
+  return machines.filter((m) => m.sap_workcenter === code);
+}
+
+// Weight semantics per aggregate_to_detail.md §3.2: if every current
+// member's weight is NULL, the split is even; once any member has a real
+// weight, NULL members get 0 (not an equal share) — "set the percentages
+// you care about" rather than silently creating sliver sub-orders.
+function _wcEffectivePercents(memberNames: string[], weights: Record<string, number | null>): Record<string, number> {
+  const out: Record<string, number> = {};
+  const anySet = memberNames.some((m) => weights[m] != null);
+  if (!anySet) {
+    const even = memberNames.length ? 100 / memberNames.length : 0;
+    memberNames.forEach((m) => { out[m] = even; });
+    return out;
+  }
+  const sum = memberNames.reduce((s, m) => s + (weights[m] ?? 0), 0);
+  memberNames.forEach((m) => { out[m] = sum > 0 ? ((weights[m] ?? 0) / sum) * 100 : 0; });
+  return out;
+}
+
+const WC_SCALAR_FIELDS = ['description', 'distribution_mode', 'default_machine', 'max_separation', 'review_required', 'distribute_tooled'] as const;
+
+function _wcDirtyFields(staged: WorkCenterStaged, baseline: WorkCenterStaged): string[] {
+  const out: string[] = [];
+  WC_SCALAR_FIELDS.forEach((f) => { if (staged[f] !== baseline[f]) out.push(f); });
+  for (const m of Object.keys(staged.weights)) {
+    if ((staged.weights[m] ?? null) !== (baseline.weights[m] ?? null)) out.push(`weight:${m}`);
+  }
+  return out;
+}
+
+// Copies AdminCockpit._warningList's exact DOM/CSS pattern
+// (`frontend/admin-ops/admin-ui.mts:1064-1081`, `.admin-bwarn-list` family in
+// styles.css) — same duplication call as MasterData's `_renderBulkWarnings`
+// above and for the same reason (§4.1): avoid a new master-data ↔ admin-ops
+// import edge for a few lines of DOM.
+function _renderWcWarnings(warnings: MasterDataBulkWarning[]): void {
+  const host = document.getElementById('wc-bulk-warnings');
+  if (!host) return;
+  host.textContent = '';
+  if (!warnings.length) return;
+  const list = document.createElement('div');
+  list.className = 'admin-bwarn-list';
+  for (const w of warnings) {
+    const row = document.createElement('div');
+    row.className = `admin-bwarn-row admin-bwarn-${w.level || 'warn'}`;
+    const lvl = document.createElement('span');
+    lvl.className = 'admin-bwarn-lvl';
+    lvl.textContent = (w.level || 'warn').toUpperCase();
+    const msg = document.createElement('span');
+    msg.className = 'admin-bwarn-msg';
+    msg.textContent = w.msg || '';
+    row.appendChild(lvl);
+    row.appendChild(msg);
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+}
+
+export const WorkCenters = {
+  _rows: [] as WorkCenterRow[],
+  _machines: [] as ProductionLineRow[],
+  _search: '',
+  _offset: 0,
+  _total: 0,
+  _loadedPlant: null as string | null,
+  _selected: null as string | null,
+  _staged: null as WorkCenterStaged | null,
+  _baseline: null as WorkCenterStaged | null,
+  _saving: false,
+  _pendingWarnings: [] as MasterDataBulkWarning[],
+
+  // Called from App._MASTER_SUBS' 'work-centers' entry (application-shell.mts)
+  // whenever the sub-tab is activated, and again on 'plant:selected' while it
+  // is the visible sub-tab (same wiring Plant/ProdLines use). A genuine plant
+  // change does a full reload; re-navigating back to this sub-tab for the
+  // SAME plant skips the work-center list/search/paging reload (preserving
+  // any in-progress staged edit) but still refreshes the machine roster —
+  // the §14.1 runbook's step 2 flow ("assign on Machines tab, set weights
+  // here") crosses sub-tabs in one visit, and machine.sap_workcenter
+  // membership assigned there wouldn't otherwise show up here until the
+  // admin switched plants, which is a real correctness gap for that exact flow.
+  async render(): Promise<void> {
+    const pane = document.getElementById('md-master-work-centers-pane');
+    if (!pane) return;
+    const plant = Store.selectedPlant;
+    if (!plant) {
+      pane.innerHTML = `<div class="md-empty">${Util.t('empty.wc_select_plant')}</div>`;
+      return;
+    }
+    if (plant !== WorkCenters._loadedPlant) {
+      WorkCenters._loadedPlant = plant;
+      WorkCenters._selected = null;
+      WorkCenters._staged = null;
+      WorkCenters._baseline = null;
+      WorkCenters._offset = 0;
+      WorkCenters._search = '';
+      await WorkCenters._loadAll(plant, true);
+    } else {
+      await WorkCenters._refreshMachines(plant);
+    }
+    WorkCenters._renderPane();
+  },
+
+  async _refreshMachines(plant: string): Promise<void> {
+    try {
+      const data = await Util.fetchTraced(`${Config.API_BASE}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<MasterDataResponse<ProductionLineRow>>;
+      });
+      WorkCenters._machines = data.rows;
+    } catch {
+      // Best-effort refresh — keep showing the last-known roster rather than
+      // erroring out of an otherwise-successful tab render.
+    }
+  },
+
+  async _loadAll(plant: string, reset: boolean): Promise<void> {
+    const API = Config.API_BASE;
+    if (reset) WorkCenters._offset = 0;
+    try {
+      const params = new URLSearchParams({ plant, limit: '50', offset: String(WorkCenters._offset) });
+      if (WorkCenters._search) params.set('search', WorkCenters._search);
+      const wcFetch = Util.fetchTraced(`${API}/master-data/sap_workcenter?${params.toString()}`).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<MasterDataResponse<WorkCenterRow>>;
+      });
+      // Whole-plant machine fetch — bounded by plant (Production Scale
+      // Roadmap: ~70+ machines/plant is fine to load in full; never all
+      // plants at once). Needed for membership derivation (machine.sap_workcenter),
+      // the default-machine combobox, and the New-form shadowed-code check.
+      // Only re-fetched on a real reset (plant/search change), not on
+      // "Load more" paging through the work-center list — the machine roster
+      // doesn't change just because another page of work centers loaded.
+      const machFetch = reset
+        ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json() as Promise<MasterDataResponse<ProductionLineRow>>;
+          })
+        : null;
+      const [wcData, machData] = await Promise.all([wcFetch, machFetch]);
+      WorkCenters._rows = reset ? wcData.rows : WorkCenters._rows.concat(wcData.rows);
+      WorkCenters._total = wcData.meta?.total ?? WorkCenters._rows.length;
+      if (machData) WorkCenters._machines = machData.rows;
+    } catch (e) {
+      ErrorLog.error('work-centers', `Failed to load work centers: ${(e as Error).message}`);
+      Toast.show(Util.t('toast.wc_load_failed'), 'error');
+    }
+  },
+
+  _renderPane(): void {
+    const pane = document.getElementById('md-master-work-centers-pane');
+    if (!pane) return;
+    const isAdmin = Session.isAdmin();
+    const rows = WorkCenters._rows;
+    const hasMore = rows.length < WorkCenters._total;
+
+    const listRows = rows.map((r) => `
+      <div class="wc-row${r.sap_workcenter === WorkCenters._selected ? ' active' : ''}" data-code="${Util.escapeHtml(r.sap_workcenter)}">
+        <span class="wc-row-code">${Util.escapeHtml(r.sap_workcenter)}</span>
+        <span class="wc-row-desc">${Util.escapeHtml(r.description || '')}</span>
+      </div>`).join('');
+
+    pane.innerHTML = `
+      <div class="lines-split">
+        <div class="lines-nav wc-nav">
+          <div class="lines-nav-header">
+            <div class="lines-nav-title">${Util.escapeHtml(Util.t('tab.work_centers'))} &middot; ${WorkCenters._total}</div>
+            <input type="search" id="wc-search" class="input" placeholder="${Util.escapeHtml(Util.t('ph.search_work_centers'))}" value="${Util.escapeHtml(WorkCenters._search)}">
+          </div>
+          ${isAdmin ? `
+          <div class="wc-new-toggle-row">
+            <button class="btn btn-ghost sm" id="wc-new-toggle">${Util.escapeHtml(Util.t('btn.new_work_center'))}</button>
+          </div>
+          <div class="wc-new-form" id="wc-new-form" hidden>
+            <input type="text" class="input" id="wc-new-code" placeholder="${Util.escapeHtml(Util.t('ph.wc_code'))}" maxlength="20" autocomplete="off">
+            <input type="text" class="input" id="wc-new-desc" placeholder="${Util.escapeHtml(Util.t('ph.wc_description'))}" autocomplete="off">
+            <select class="input" id="wc-new-mode">
+              <option value="distribute">${Util.escapeHtml(Util.t('ui.wc_mode_distribute'))}</option>
+              <option value="single">${Util.escapeHtml(Util.t('ui.wc_mode_single'))}</option>
+            </select>
+            <div class="wc-new-actions">
+              <button class="btn btn-ghost sm" id="wc-new-cancel">${Util.escapeHtml(Util.t('btn.cancel'))}</button>
+              <button class="btn btn-primary sm" id="wc-new-create">${Util.escapeHtml(Util.t('btn.create'))}</button>
+            </div>
+          </div>` : `<p class="panel-hint" style="padding:8px 12px 0;">${Util.escapeHtml(Util.t('ui.wc_admins_edit'))}</p>`}
+          <div class="lines-nav-list wc-list-body" id="wc-list-body">
+            ${listRows || `<div class="lines-nav-empty">${Util.escapeHtml(Util.t('empty.no_work_centers'))}</div>`}
+          </div>
+          ${hasMore ? `<button class="btn btn-ghost sm wc-load-more" id="wc-load-more">${Util.escapeHtml(Util.t('btn.load_more'))}</button>` : ''}
+        </div>
+        <div class="cal-scroll">
+          <div class="cal-container" id="wc-detail-col">
+            ${WorkCenters._selected ? WorkCenters._detailHtml(isAdmin) : `<div class="md-empty">${Util.escapeHtml(Util.t('empty.wc_select_row'))}</div>`}
+          </div>
+        </div>
+      </div>`;
+
+    WorkCenters._wireList(pane, isAdmin);
+    if (WorkCenters._selected) WorkCenters._wireDetail(pane, isAdmin);
+  },
+
+  _detailHtml(isAdmin: boolean): string {
+    const staged = WorkCenters._staged;
+    const baseline = WorkCenters._baseline;
+    const code = WorkCenters._selected;
+    if (!staged || !baseline || !code) return '';
+
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+    const dirty = _wcDirtyFields(staged, baseline);
+    const pct = _wcEffectivePercents(members, staged.weights);
+    const totalPct = members.reduce((s, m) => s + (pct[m] || 0), 0);
+    const evenState = members.every((m) => staged.weights[m] == null);
+
+    const canSaveSingle = staged.distribution_mode !== 'single' || !!staged.default_machine;
+    const defaultOutOfMembership = !!staged.default_machine && !members.includes(staged.default_machine);
+    const thin = staged.distribution_mode === 'distribute' && members.length < 2;
+    const saveDisabled = !dirty.length || !canSaveSingle || defaultOutOfMembership || WorkCenters._saving;
+
+    const sepOptions = (['none', 'hour', 'day', 'week'] as const).map((v) =>
+      `<option value="${v}"${staged.max_separation === v ? ' selected' : ''}>${Util.escapeHtml(Util.t(`ui.wc_max_sep_${v}`))}</option>`).join('');
+
+    const memberRows = members.length ? members.map((m) => {
+      const w = staged.weights[m];
+      const pctText = pct[m] != null ? pct[m].toFixed(1) + '%' : '—';
+      return `
+      <tr>
+        <td class="md-td">${Util.escapeHtml(m)}</td>
+        <td class="md-td">${isAdmin
+          ? `<input type="number" step="any" min="0" class="input wc-weight-input" data-machine="${Util.escapeHtml(m)}" value="${w == null ? '' : w}" placeholder="${Util.escapeHtml(Util.t('ui.wc_even_placeholder'))}">`
+          : (w == null ? '—' : Util.escapeHtml(String(w)))}</td>
+        <td class="md-td"><span class="wc-pct-cell" data-machine="${Util.escapeHtml(m)}">${pctText}</span>${w == null && !evenState ? ` <span class="wc-not-set">${Util.escapeHtml(Util.t('ui.wc_not_set_zero'))}</span>` : ''}</td>
+        <td class="md-td">—</td>
+      </tr>`;
+    }).join('') : `<tr><td class="md-td" colspan="4">${Util.escapeHtml(Util.t('empty.wc_no_members'))}</td></tr>`;
+
+    return `
+      <div class="wc-detail">
+        <div class="wc-detail-head">
+          <h3>${Util.escapeHtml(code)}</h3>
+          <span class="md-dirty-badge" id="wc-dirty" ${dirty.length ? '' : 'hidden'}>${Util.escapeHtml(Util.t('ui.n_unsaved', { count: dirty.length }))}</span>
+        </div>
+        <div id="wc-bulk-warnings"></div>
+
+        <div class="wc-field-row">
+          <label for="wc-desc">${Util.escapeHtml(Util.t('col.description'))}</label>
+          ${isAdmin ? `<input type="text" class="input" id="wc-desc" value="${Util.escapeHtml(staged.description)}">`
+                     : `<span class="wc-ro-value">${Util.escapeHtml(staged.description || '—')}</span>`}
+        </div>
+        <div class="wc-field-row">
+          <label for="wc-mode">${Util.escapeHtml(Util.t('col.distribution_mode'))}</label>
+          ${isAdmin ? `<select class="input" id="wc-mode">
+              <option value="distribute"${staged.distribution_mode === 'distribute' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.wc_mode_distribute'))}</option>
+              <option value="single"${staged.distribution_mode === 'single' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.wc_mode_single'))}</option>
+            </select>`
+                     : `<span class="wc-ro-value">${Util.escapeHtml(Util.t(staged.distribution_mode === 'single' ? 'ui.wc_mode_single' : 'ui.wc_mode_distribute'))}</span>`}
+        </div>
+        <div class="wc-field-row">
+          <label for="wc-default-machine-combo">${Util.escapeHtml(Util.t('col.default_machine'))}</label>
+          ${isAdmin ? `<div id="wc-default-machine-combo" style="width:220px;"></div>`
+                     : `<span class="wc-ro-value">${Util.escapeHtml(staged.default_machine || '—')}</span>`}
+        </div>
+        ${isAdmin && !canSaveSingle ? `<p class="wc-inline-warn">${Util.escapeHtml(Util.t('ui.wc_single_needs_default'))}</p>` : ''}
+        ${isAdmin && defaultOutOfMembership ? `<p class="wc-inline-warn">${Util.escapeHtml(Util.t('ui.wc_default_not_member'))}</p>` : ''}
+        <div class="wc-field-row">
+          <label for="wc-max-sep">${Util.escapeHtml(Util.t('col.max_separation'))}</label>
+          ${isAdmin ? `<select class="input" id="wc-max-sep">${sepOptions}</select>`
+                     : `<span class="wc-ro-value">${Util.escapeHtml(Util.t(`ui.wc_max_sep_${staged.max_separation}`))}</span>`}
+        </div>
+
+        <div class="wc-checkbox-row">
+          <label class="ld-ctrl-label">
+            <input type="checkbox" id="wc-review-required" ${staged.review_required ? 'checked' : ''} ${isAdmin ? '' : 'disabled'}>
+            ${Util.escapeHtml(Util.t('ui.wc_review_required_label'))}
+          </label>
+          ${isAdmin ? `<button type="button" class="wc-info-btn" data-info="review_required" title="${Util.escapeHtml(Util.t('ui.more_info'))}">&#9432;</button>` : ''}
+        </div>
+        <p class="panel-hint">${Util.escapeHtml(Util.t('ui.wc_review_required_hint'))}</p>
+
+        <div class="wc-checkbox-row">
+          <label class="ld-ctrl-label">
+            <input type="checkbox" id="wc-distribute-tooled" ${staged.distribute_tooled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'}>
+            ${Util.escapeHtml(Util.t('ui.wc_distribute_tooled_label'))}
+          </label>
+          ${isAdmin ? `<button type="button" class="wc-info-btn" data-info="distribute_tooled" title="${Util.escapeHtml(Util.t('ui.more_info'))}">&#9432;</button>` : ''}
+        </div>
+        <p class="panel-hint">${Util.escapeHtml(Util.t('ui.wc_distribute_tooled_hint'))}</p>
+
+        <div class="panel wc-membership-panel">
+          <header class="panel-head">
+            <h3>${Util.escapeHtml(Util.t('ui.wc_membership_title'))}</h3>
+            ${isAdmin ? `<button class="btn btn-ghost sm" id="wc-even-btn">${Util.escapeHtml(Util.t('btn.even'))}</button>` : ''}
+          </header>
+          <div class="panel-body panel-body-flush">
+            ${thin ? `<p class="wc-inline-warn" style="margin:8px 12px 0;">${Util.escapeHtml(Util.t('ui.wc_distribute_thin_warning'))}</p>` : ''}
+            <div class="md-table-wrap">
+              <table class="md-table">
+                <thead><tr>
+                  <th class="md-th">${Util.escapeHtml(Util.t('col.machine'))}</th>
+                  <th class="md-th">${Util.escapeHtml(Util.t('col.weight'))}</th>
+                  <th class="md-th">${Util.escapeHtml(Util.t('col.effective_pct'))}</th>
+                  <th class="md-th">${Util.escapeHtml(Util.t('col.open_distributions'))}</th>
+                </tr></thead>
+                <tbody id="wc-member-tbody">${memberRows}</tbody>
+                <tfoot><tr>
+                  <td class="md-td"><strong>${Util.escapeHtml(Util.t('ui.wc_total_row'))}</strong></td>
+                  <td class="md-td"></td>
+                  <td class="md-td"><strong id="wc-total-pct">${members.length ? totalPct.toFixed(1) + '%' : '—'}</strong></td>
+                  <td class="md-td"></td>
+                </tr></tfoot>
+              </table>
+            </div>
+            <p class="panel-hint" style="padding:8px 12px;">${Util.escapeHtml(Util.t('ui.wc_assign_hint'))}</p>
+          </div>
+        </div>
+
+        ${isAdmin ? `
+        <div class="wc-detail-actions">
+          <button class="btn btn-ghost sm" id="wc-discard-btn" ${dirty.length ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.discard'))}</button>
+          <button class="btn btn-primary sm" id="wc-save-btn" ${saveDisabled ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.save'))}</button>
+        </div>` : ''}
+      </div>`;
+  },
+
+  _wireList(pane: HTMLElement, isAdmin: boolean): void {
+    const search = pane.querySelector<HTMLInputElement>('#wc-search');
+    if (search) {
+      search.oninput = Util.debounce(() => {
+        WorkCenters._search = search.value;
+        const plant = Store.selectedPlant;
+        if (!plant) return;
+        void WorkCenters._loadAll(plant, true).then(() => WorkCenters._renderPane());
+      }, 250);
+    }
+
+    const loadMore = pane.querySelector<HTMLButtonElement>('#wc-load-more');
+    if (loadMore) loadMore.onclick = () => {
+      const plant = Store.selectedPlant;
+      if (!plant) return;
+      WorkCenters._offset += 50;
+      void WorkCenters._loadAll(plant, false).then(() => WorkCenters._renderPane());
+    };
+
+    pane.querySelectorAll<HTMLElement>('.wc-row').forEach((row) => {
+      row.onclick = () => WorkCenters._selectRow(row.dataset.code || '');
+    });
+
+    if (!isAdmin) return;
+
+    const newToggle = pane.querySelector<HTMLButtonElement>('#wc-new-toggle');
+    const newForm = pane.querySelector<HTMLElement>('#wc-new-form');
+    if (newToggle && newForm) newToggle.onclick = () => { newForm.hidden = !newForm.hidden; };
+    pane.querySelector<HTMLButtonElement>('#wc-new-cancel')?.addEventListener('click', () => {
+      if (newForm) newForm.hidden = true;
+    });
+    pane.querySelector<HTMLButtonElement>('#wc-new-create')?.addEventListener('click', () => void WorkCenters._createNew());
+  },
+
+  _selectRow(code: string): void {
+    if (!code) return;
+    const row = WorkCenters._rows.find((r) => r.sap_workcenter === code);
+    if (!row) return;
+
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+    const weights: Record<string, number | null> = {};
+    for (const m of members) {
+      const mach = WorkCenters._machines.find((x) => x.machine === m);
+      weights[m] = (mach && mach.distribution_weight != null) ? Number(mach.distribution_weight) : null;
+    }
+    const staged: WorkCenterStaged = {
+      description:       row.description || '',
+      distribution_mode: row.distribution_mode,
+      default_machine:    row.default_machine || '',
+      max_separation:     row.max_separation,
+      review_required:    row.review_required,
+      distribute_tooled:  row.distribute_tooled,
+      weights,
+    };
+    WorkCenters._selected = code;
+    WorkCenters._staged   = staged;
+    WorkCenters._baseline = { ...staged, weights: { ...weights } };
+    WorkCenters._renderPane();
+  },
+
+  // Recomputes only the membership table's % cells + total (not a full
+  // _renderPane()) so typing in a weight input doesn't lose focus/cursor
+  // position on every keystroke — the "live % preview" the §14.1 runbook
+  // calls for, without the classic full-rebuild-steals-focus bug this
+  // codebase has hit before (see CLAUDE.md's drag spring-back history for
+  // why stale-index/full-rebuild bugs from over-eager re-renders are taken
+  // seriously here).
+  _refreshMembershipMath(members: string[]): void {
+    if (!WorkCenters._staged) return;
+    const pct = _wcEffectivePercents(members, WorkCenters._staged.weights);
+    let total = 0;
+    for (const m of members) {
+      const cell = document.querySelector<HTMLElement>(`.wc-pct-cell[data-machine="${CSS.escape(m)}"]`);
+      if (cell) cell.textContent = pct[m] != null ? pct[m].toFixed(1) + '%' : '—';
+      total += pct[m] || 0;
+    }
+    const totalCell = document.getElementById('wc-total-pct');
+    if (totalCell) totalCell.textContent = members.length ? total.toFixed(1) + '%' : '—';
+  },
+
+  _refreshDirtyOnly(): void {
+    const staged = WorkCenters._staged, baseline = WorkCenters._baseline, code = WorkCenters._selected;
+    if (!staged || !baseline || !code) return;
+    const dirty = _wcDirtyFields(staged, baseline);
+    const badge = document.getElementById('wc-dirty');
+    if (badge) {
+      badge.hidden = dirty.length === 0;
+      badge.textContent = Util.t('ui.n_unsaved', { count: dirty.length });
+    }
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+    const canSaveSingle = staged.distribution_mode !== 'single' || !!staged.default_machine;
+    const defaultOutOfMembership = !!staged.default_machine && !members.includes(staged.default_machine);
+    const saveBtn = document.getElementById('wc-save-btn') as HTMLButtonElement | null;
+    const discardBtn = document.getElementById('wc-discard-btn') as HTMLButtonElement | null;
+    if (saveBtn) saveBtn.disabled = !dirty.length || !canSaveSingle || defaultOutOfMembership || WorkCenters._saving;
+    if (discardBtn) discardBtn.disabled = dirty.length === 0;
+  },
+
+  _wireDetail(pane: HTMLElement, isAdmin: boolean): void {
+    if (WorkCenters._pendingWarnings.length) {
+      _renderWcWarnings(WorkCenters._pendingWarnings);
+      WorkCenters._pendingWarnings = [];
+    }
+    if (!isAdmin) return;
+
+    const staged = WorkCenters._staged;
+    const code = WorkCenters._selected;
+    if (!staged || !code) return;
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+
+    const descInp = pane.querySelector<HTMLInputElement>('#wc-desc');
+    if (descInp) descInp.oninput = () => { staged.description = descInp.value; WorkCenters._refreshDirtyOnly(); };
+
+    const modeSel = pane.querySelector<HTMLSelectElement>('#wc-mode');
+    if (modeSel) modeSel.onchange = () => {
+      staged.distribution_mode = modeSel.value as 'single' | 'distribute';
+      WorkCenters._renderPane();
+    };
+
+    const comboHost = pane.querySelector<HTMLElement>('#wc-default-machine-combo');
+    if (comboHost) {
+      _mkCombobox(comboHost, members, {
+        value: staged.default_machine,
+        placeholder: Util.t('ph.wc_default_machine'),
+        onSelect: (v) => { staged.default_machine = v; WorkCenters._renderPane(); },
+      });
+    }
+
+    const sepSel = pane.querySelector<HTMLSelectElement>('#wc-max-sep');
+    if (sepSel) sepSel.onchange = () => {
+      staged.max_separation = sepSel.value as WorkCenterStaged['max_separation'];
+      WorkCenters._refreshDirtyOnly();
+    };
+
+    const reviewChk = pane.querySelector<HTMLInputElement>('#wc-review-required');
+    if (reviewChk) reviewChk.onchange = () => { staged.review_required = reviewChk.checked; WorkCenters._refreshDirtyOnly(); };
+
+    const toolChk = pane.querySelector<HTMLInputElement>('#wc-distribute-tooled');
+    if (toolChk) toolChk.onchange = () => { staged.distribute_tooled = toolChk.checked; WorkCenters._refreshDirtyOnly(); };
+
+    pane.querySelectorAll<HTMLButtonElement>('.wc-info-btn').forEach((btn) => {
+      btn.onclick = () => {
+        const info = WC_INFO_HELP[btn.dataset.info || ''];
+        if (!info) return;
+        Plant._showFieldInfoPopover(btn, Util.escapeHtml(Util.t(info.title)), info.help.map((k) => Util.escapeHtml(Util.t(k))));
+      };
+    });
+
+    pane.querySelectorAll<HTMLInputElement>('.wc-weight-input').forEach((inp) => {
+      const machine = inp.dataset.machine || '';
+      inp.oninput = () => {
+        const raw = inp.value.trim();
+        if (raw === '') staged.weights[machine] = null;
+        else {
+          const n = Number(raw);
+          if (Number.isFinite(n)) staged.weights[machine] = n;
+        }
+        WorkCenters._refreshMembershipMath(members);
+        WorkCenters._refreshDirtyOnly();
+      };
+      inp.onchange = () => {
+        // Final validation on blur/Enter — a negative or non-numeric value
+        // is rejected and reverted; `oninput` above deliberately tolerates
+        // an in-progress partial value (e.g. "-" while typing "-1") without
+        // rejecting on every keystroke.
+        const raw = inp.value.trim();
+        if (raw === '') return;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) {
+          Toast.show(Util.t('toast.wc_invalid_weight'), 'error');
+          const prev = staged.weights[machine];
+          inp.value = prev == null ? '' : String(prev);
+          WorkCenters._refreshMembershipMath(members);
+          WorkCenters._refreshDirtyOnly();
+        }
+      };
+    });
+
+    const evenBtn = pane.querySelector<HTMLButtonElement>('#wc-even-btn');
+    if (evenBtn) evenBtn.onclick = () => {
+      for (const m of members) staged.weights[m] = null;
+      WorkCenters._renderPane();
+    };
+
+    const discardBtn = pane.querySelector<HTMLButtonElement>('#wc-discard-btn');
+    if (discardBtn) discardBtn.onclick = () => {
+      if (!WorkCenters._baseline) return;
+      WorkCenters._staged = { ...WorkCenters._baseline, weights: { ...WorkCenters._baseline.weights } };
+      WorkCenters._renderPane();
+    };
+
+    const saveBtn = pane.querySelector<HTMLButtonElement>('#wc-save-btn');
+    if (saveBtn) saveBtn.onclick = () => void WorkCenters._save();
+  },
+
+  // Creation goes through the generic bulk grid path (POST
+  // /master-data/sap_workcenter/bulk), NOT the dedicated PUT
+  // /distribution/{plant}/workcenters/{wc} route — the PUT route hard-blocks
+  // `distribute_mode_thin` (<2 members) and `single_mode_without_default` as
+  // 400s on every call, including creation, when a brand-new code has zero
+  // members and the New form collects no default-machine field. The generic
+  // bulk path only warns (§4.1's post-write hook), which is what a genuinely
+  // new, not-yet-staffed work center needs. Mode 'single' is rejected
+  // client-side for the same reason (see the DB CHECK: distribution_mode =
+  // 'distribute' OR default_machine IS NOT NULL — 'single' has nothing to
+  // set default_machine to at creation time from this form).
+  async _createNew(): Promise<void> {
+    const plant = Store.selectedPlant;
+    if (!plant) return;
+    const codeInp = document.getElementById('wc-new-code') as HTMLInputElement | null;
+    const descInp = document.getElementById('wc-new-desc') as HTMLInputElement | null;
+    const modeSel = document.getElementById('wc-new-mode') as HTMLSelectElement | null;
+    if (!codeInp || !modeSel) return;
+
+    const code = codeInp.value.trim().toUpperCase().replace(/-/g, '');
+    const description = (descInp?.value || '').trim();
+    const mode = modeSel.value as 'single' | 'distribute';
+
+    if (!code) { Toast.show(Util.t('toast.wc_code_required'), 'error'); return; }
+    if (WorkCenters._machines.some((m) => m.machine === code)) {
+      Toast.show(Util.t('toast.wc_code_shadowed'), 'error');
+      return;
+    }
+    if (WorkCenters._rows.some((r) => r.sap_workcenter === code)) {
+      Toast.show(Util.t('toast.wc_code_exists'), 'error');
+      return;
+    }
+    if (mode === 'single') {
+      Toast.show(Util.t('toast.wc_single_needs_default_at_create'), 'error');
+      return;
+    }
+
+    try {
+      const res = await Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter/bulk`, {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({
+          upserts: [{
+            plant, sap_workcenter: code, description: description || null, distribution_mode: mode,
+            default_machine: null, max_separation: 'none', review_required: true, distribute_tooled: false,
+          }],
+          deletes: [],
+        }),
+      }).then((r) => {
+        if (!r.ok) return r.json().then((e) => { throw new Error((e.detail && (e.detail.message || e.detail)) || `HTTP ${r.status}`); });
+        return r.json() as Promise<MasterDataBulkResult>;
+      });
+
+      Toast.show(Util.t('toast.wc_created', { code }), 'success');
+      WorkCenters._pendingWarnings = res.warnings || [];
+      await WorkCenters._loadAll(plant, true);
+      WorkCenters._selectRow(code);
+    } catch (e) {
+      Toast.show(Util.t('toast.wc_create_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('work-centers', `Create failed for ${code}: ${(e as Error).message}`);
+    }
+  },
+
+  async _save(): Promise<void> {
+    const plant = Store.selectedPlant;
+    const code = WorkCenters._selected;
+    const staged = WorkCenters._staged;
+    if (!plant || !code || !staged || WorkCenters._saving) return;
+
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+    if (staged.distribution_mode === 'single' && !staged.default_machine) {
+      Toast.show(Util.t('ui.wc_single_needs_default'), 'error');
+      return;
+    }
+    if (staged.default_machine && !members.includes(staged.default_machine)) {
+      Toast.show(Util.t('ui.wc_default_not_member'), 'error');
+      return;
+    }
+
+    WorkCenters._saving = true;
+    WorkCenters._refreshDirtyOnly();
+    try {
+      // Full current-membership weight set, not just the changed cells — the
+      // Even button clears every member to NULL, which only takes effect if
+      // every member's key rides along in this payload (backend/distribution/
+      // data.py's save_workcenter only UPDATEs the machines present in
+      // `weights`, so an omitted member's old weight would otherwise survive).
+      const weights: Record<string, number | null> = {};
+      for (const m of members) weights[m] = staged.weights[m] ?? null;
+
+      const res = await Util.fetchTraced(
+        `${Config.API_BASE}/distribution/${encodeURIComponent(plant)}/workcenters/${encodeURIComponent(code)}`,
+        {
+          method:  'PUT',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({
+            description:       staged.description || null,
+            distribution_mode: staged.distribution_mode,
+            default_machine:   staged.default_machine || null,
+            max_separation:    staged.max_separation,
+            review_required:   staged.review_required,
+            distribute_tooled: staged.distribute_tooled,
+            weights,
+          }),
+        },
+      ).then(async (r) => {
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}) as Record<string, unknown>);
+          const detail = (e as { detail?: unknown }).detail;
+          const msg = (detail && typeof detail === 'object' && 'message' in detail)
+            ? String((detail as { message: unknown }).message)
+            : (typeof detail === 'string' ? detail : `HTTP ${r.status}`);
+          throw new Error(msg);
+        }
+        return r.json() as Promise<WorkCenterSaveResult>;
+      });
+
+      // Reflect the saved row/weights locally instead of a full reload —
+      // cheaper, and keeps the currently-selected row and its staged state
+      // stable across the save.
+      const idx = WorkCenters._rows.findIndex((r) => r.sap_workcenter === code);
+      if (idx >= 0) {
+        WorkCenters._rows[idx] = {
+          ...WorkCenters._rows[idx],
+          description:       res.description ?? null,
+          distribution_mode: res.distribution_mode,
+          default_machine:   res.default_machine ?? null,
+          max_separation:    res.max_separation,
+          review_required:   res.review_required,
+          distribute_tooled: res.distribute_tooled,
+        };
+      }
+      for (const m of members) {
+        const mach = WorkCenters._machines.find((x) => x.machine === m);
+        if (mach) mach.distribution_weight = res.weights[m] ?? null;
+      }
+      const savedStaged: WorkCenterStaged = { ...staged, weights };
+      WorkCenters._baseline = { ...savedStaged, weights: { ...weights } };
+      WorkCenters._staged   = { ...savedStaged, weights: { ...weights } };
+      Toast.show(Util.t('toast.wc_saved', { code }), 'success');
+    } catch (e) {
+      Toast.show(Util.t('toast.wc_save_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('work-centers', `Save failed for ${code}: ${(e as Error).message}`);
+    } finally {
+      WorkCenters._saving = false;
+      WorkCenters._renderPane();
+    }
+  },
+};
