@@ -693,7 +693,8 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
     """
     _assert_table(table)
     # Seed all child-table keys so a missing branch reads as 0, not "absent".
-    result = {"plants": 0, "machine": 0, "material_plants": 0, "bom_items": 0, "role_plants": 0}
+    result = {"plants": 0, "machine": 0, "material_plants": 0, "bom_items": 0,
+              "role_plants": 0, "headers": 0}
     if not deletes:
         return result
 
@@ -755,6 +756,29 @@ def cascade_preview(table: str, deletes: list[dict]) -> dict:
                     "SELECT COUNT(*) FROM role_plants WHERE role = ANY(%s)", (roles,)
                 )
                 result["role_plants"] = int(cur.fetchone()[0])
+
+        elif table == "sap_workcenter":
+            # Both fk_machine_sap_workcenter and order_distribution's (plant,
+            # sap_workcenter) FK are ON DELETE RESTRICT (schema.sql), not
+            # CASCADE — a referencing machine or distribution header blocks
+            # the delete rather than disappearing with it, so surface both
+            # counts either way (never "will also delete" wording).
+            machine_count = 0
+            header_count = 0
+            for d in deletes:
+                if d.get("plant") and d.get("sap_workcenter"):
+                    cur.execute(
+                        "SELECT COUNT(*) FROM machine WHERE plant = %s AND sap_workcenter = %s",
+                        (d["plant"], d["sap_workcenter"]),
+                    )
+                    machine_count += int(cur.fetchone()[0])
+                    cur.execute(
+                        "SELECT COUNT(*) FROM order_distribution WHERE plant = %s AND sap_workcenter = %s",
+                        (d["plant"], d["sap_workcenter"]),
+                    )
+                    header_count += int(cur.fetchone()[0])
+            result["machine"] = machine_count
+            result["headers"] = header_count
 
     return result
 

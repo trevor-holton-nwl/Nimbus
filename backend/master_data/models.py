@@ -117,14 +117,21 @@ class GridResult(BaseModel):
 
 
 class CascadePreviewResult(BaseModel):
-    """master_data.cascade_preview()'s shape -- always seeds all five keys to
+    """master_data.cascade_preview()'s shape -- always seeds all six keys to
     0 so the delete-confirmation UI has a stable shape to render, per its own
-    docstring; verified by direct read of the seed dict."""
+    docstring; verified by direct read of the seed dict.
+
+    `headers` counts order_distribution rows referencing a sap_workcenter
+    (added alongside the sap_workcenter cascade-preview branch) -- this model
+    is closed (no extra="allow"), so a key the function returns but that
+    isn't declared here would be silently dropped by response_model
+    serialization rather than raising."""
     plants: int
     machine: int
     material_plants: int
     bom_items: int
     role_plants: int
+    headers: int = 0
 
 
 class BulkApplyResult(BaseModel):

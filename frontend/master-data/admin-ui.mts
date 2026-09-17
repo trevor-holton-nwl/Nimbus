@@ -2604,11 +2604,14 @@ interface BomItemRow extends MasterDataRow {
 
 /** `POST /master-data/{table}/cascade-preview` response (master_data.py) —
  *  counts of dependent rows a delete would also remove (or, for
- *  `material_plants`, rows that block the delete). */
+ *  `material_plants`/`sap_workcenter`, rows that block the delete: RESTRICT
+ *  FKs, never CASCADE). `headers` is order_distribution rows referencing a
+ *  sap_workcenter. */
 interface MasterDataCascadePreview {
   plants?: number;
   machine?: number;
   bom_items?: number;
+  headers?: number;
 }
 
 /** `POST /master-data/{table}/bulk` response (master_data.py bulk_apply). */
@@ -3480,7 +3483,7 @@ export const MasterData = (() => {
     const isNew = state.added.some((r) => _rowKey(table, r) === rowKey);
     let cascadeDetail = '';
 
-    if (!isNew && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
+    if (!isNew && (table === 'subnetworks' || table === 'plants' || table === 'material_plants' || table === 'sap_workcenter')) {
       try {
         const preview = await Util.fetchTraced(`${API}/master-data/${table}/cascade-preview`, {
           method: 'POST',
@@ -3488,15 +3491,27 @@ export const MasterData = (() => {
           body: JSON.stringify({ deletes: [deletePayload] }),
         }).then(_okJson) as MasterDataCascadePreview;
 
-        const parts: string[] = [];
-        const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
-        if (nPlants > 0)  parts.push(`<strong>${nPlants}</strong> plant${nPlants !== 1 ? 's' : ''}`);
-        if (nLines > 0)   parts.push(`<strong>${nLines}</strong> production line${nLines !== 1 ? 's' : ''}`);
-        if (nBom > 0)     parts.push(`<strong>${nBom}</strong> BOM item${nBom !== 1 ? 's' : ''}`);
-        if (parts.length) {
-          cascadeDetail = table === 'material_plants'
-            ? `<div class="md-cascade-warn">This is referenced by ${parts.join(' and ')} — delete those first.</div>`
-            : `<div class="md-cascade-warn">This will also permanently delete ${parts.join(' and ')}.</div>`;
+        if (table === 'sap_workcenter') {
+          // Both FKs (machine.sap_workcenter, order_distribution.sap_workcenter)
+          // are ON DELETE RESTRICT — this table only ever blocks, never cascades.
+          const parts: string[] = [];
+          const nMachines = preview.machine ?? 0, nHeaders = preview.headers ?? 0;
+          if (nMachines > 0) parts.push(`<strong>${nMachines}</strong> machine${nMachines !== 1 ? 's' : ''}`);
+          if (nHeaders > 0)  parts.push(`<strong>${nHeaders}</strong> distribution header${nHeaders !== 1 ? 's' : ''}`);
+          if (parts.length) {
+            cascadeDetail = `<div class="md-cascade-warn">This is referenced by ${parts.join(' and ')} — reassign or collapse those first.</div>`;
+          }
+        } else {
+          const parts: string[] = [];
+          const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
+          if (nPlants > 0)  parts.push(`<strong>${nPlants}</strong> plant${nPlants !== 1 ? 's' : ''}`);
+          if (nLines > 0)   parts.push(`<strong>${nLines}</strong> production line${nLines !== 1 ? 's' : ''}`);
+          if (nBom > 0)     parts.push(`<strong>${nBom}</strong> BOM item${nBom !== 1 ? 's' : ''}`);
+          if (parts.length) {
+            cascadeDetail = table === 'material_plants'
+              ? `<div class="md-cascade-warn">This is referenced by ${parts.join(' and ')} — delete those first.</div>`
+              : `<div class="md-cascade-warn">This will also permanently delete ${parts.join(' and ')}.</div>`;
+          }
         }
       } catch (e) {
         // Fail closed: the true cascade impact is unknown, so never fall through to
@@ -3569,35 +3584,54 @@ export const MasterData = (() => {
     if (!upserts.length && !deletes.length) return;
 
     // Cascade confirmation for deletes that weren't already confirmed.
-    if (deletes.length && (table === 'subnetworks' || table === 'plants' || table === 'material_plants')) {
+    if (deletes.length && (table === 'subnetworks' || table === 'plants' || table === 'material_plants' || table === 'sap_workcenter')) {
       try {
         const preview = await Util.fetchTraced(`${API}/master-data/${table}/cascade-preview`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ deletes }),
         }).then(_okJson) as MasterDataCascadePreview;
-        const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
-        const total = nPlants + nLines + nBom;
-        if (total > 0) {
-          const parts: string[] = [];
-          if (nPlants > 0) parts.push(`${nPlants} plant${nPlants !== 1 ? 's' : ''}`);
-          if (nLines > 0)  parts.push(`${nLines} production line${nLines !== 1 ? 's' : ''}`);
-          if (nBom > 0)    parts.push(`${nBom} BOM item${nBom !== 1 ? 's' : ''}`);
-          const ok = table === 'material_plants'
-            ? await Modal.confirm({
-                title:         `Cannot delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}`,
-                message:       `This is referenced by ${parts.join(' and ')} — delete those first.`,
-                confirmLabel:  `OK`,
-                tone:          'danger',
-              }).then(() => false)
-            : await Modal.confirm({
-                title:         `Delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}?`,
-                message:       `This will also permanently delete ${parts.join(' and ')}.`,
-                detail:        '<strong>This cannot be undone.</strong>',
-                confirmLabel:  `Yes, delete all`,
-                tone:          'danger',
-              });
-          if (!ok) return;
+
+        if (table === 'sap_workcenter') {
+          // Both FKs (machine.sap_workcenter, order_distribution.sap_workcenter)
+          // are ON DELETE RESTRICT — this table only ever blocks, never cascades.
+          const nMachines = preview.machine ?? 0, nHeaders = preview.headers ?? 0;
+          if (nMachines + nHeaders > 0) {
+            const parts: string[] = [];
+            if (nMachines > 0) parts.push(`${nMachines} machine${nMachines !== 1 ? 's' : ''}`);
+            if (nHeaders > 0)  parts.push(`${nHeaders} distribution header${nHeaders !== 1 ? 's' : ''}`);
+            const ok = await Modal.confirm({
+              title:         `Cannot delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}`,
+              message:       `This is referenced by ${parts.join(' and ')} — reassign or collapse those first.`,
+              confirmLabel:  `OK`,
+              tone:          'danger',
+            }).then(() => false);
+            if (!ok) return;
+          }
+        } else {
+          const nPlants = preview.plants ?? 0, nLines = preview.machine ?? 0, nBom = preview.bom_items ?? 0;
+          const total = nPlants + nLines + nBom;
+          if (total > 0) {
+            const parts: string[] = [];
+            if (nPlants > 0) parts.push(`${nPlants} plant${nPlants !== 1 ? 's' : ''}`);
+            if (nLines > 0)  parts.push(`${nLines} production line${nLines !== 1 ? 's' : ''}`);
+            if (nBom > 0)    parts.push(`${nBom} BOM item${nBom !== 1 ? 's' : ''}`);
+            const ok = table === 'material_plants'
+              ? await Modal.confirm({
+                  title:         `Cannot delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}`,
+                  message:       `This is referenced by ${parts.join(' and ')} — delete those first.`,
+                  confirmLabel:  `OK`,
+                  tone:          'danger',
+                }).then(() => false)
+              : await Modal.confirm({
+                  title:         `Delete ${deletes.length} row${deletes.length !== 1 ? 's' : ''}?`,
+                  message:       `This will also permanently delete ${parts.join(' and ')}.`,
+                  detail:        '<strong>This cannot be undone.</strong>',
+                  confirmLabel:  `Yes, delete all`,
+                  tone:          'danger',
+                });
+            if (!ok) return;
+          }
         }
       } catch (e) {
         // Fail closed: this preview only guards the deletes in this bulk save, but

@@ -84,6 +84,69 @@ class TestCascadePreviewMaterials_211:
 
 
 @pytest.mark.pg
+class TestCascadePreviewSapWorkcenter:
+    """P1-4a: sap_workcenter's cascade preview must count BOTH RESTRICT-FK
+    referrers (machine.sap_workcenter, order_distribution.sap_workcenter) —
+    never cascade-delete wording, since both FKs are ON DELETE RESTRICT."""
+    SUB, PLANT = "WTG", "1006"   # seeded by schema.sql
+    WC = "ZZTEST_WC_P14A"
+    LINE = "ZZTEST_LINE_P14A"
+    ORD, MAT = "ZZTEST_ORD_P14A", "ZZTEST_MAT_P14A"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db = pg
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM order_distribution WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            cur.execute("DELETE FROM machine WHERE plant = %s AND machine = %s",
+                        (self.PLANT, self.LINE))
+            cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            # distribute mode so default_machine may stay NULL (no ordering
+            # dependency on the machine row existing yet).
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')",
+                (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                "VALUES (%s, %s, %s, %s)",
+                (self.SUB, self.PLANT, self.LINE, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter) "
+                "VALUES (%s, %s, %s, %s)",
+                (self.PLANT, self.ORD, self.MAT, self.WC),
+            )
+            conn.commit()
+        yield
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM order_distribution WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            cur.execute("DELETE FROM machine WHERE plant = %s AND machine = %s",
+                        (self.PLANT, self.LINE))
+            cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            conn.commit()
+
+    def test_reports_both_machine_and_header_referrers(self, pg):
+        import master_data as md
+        res = md.cascade_preview("sap_workcenter", [{"plant": self.PLANT, "sap_workcenter": self.WC}])
+        assert res["machine"] == 1
+        assert res["headers"] == 1
+
+    def test_seeds_all_six_keys_even_when_unreferenced(self, pg):
+        """The result dict must always have a stable shape (all keys present,
+        seeded to 0) so the delete-confirmation UI never sees an absent key."""
+        import master_data as md
+        res = md.cascade_preview("sap_workcenter", [{"plant": self.PLANT, "sap_workcenter": "ZZTEST_WC_NOEXIST"}])
+        assert res == {"plants": 0, "machine": 0, "material_plants": 0, "bom_items": 0,
+                        "role_plants": 0, "headers": 0}
+
+
+@pytest.mark.pg
 class TestBulkUpdateContract_203:
     ORD, MAT = "ZZTEST_ORD_203", "ZZTEST_MAT_203"
 
