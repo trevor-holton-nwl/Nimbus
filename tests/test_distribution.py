@@ -1,11 +1,15 @@
 """
-Unit tests for backend/distribution/service.py pure functions.
-
-No DB dependency — all tests operate on plain dicts/rows passed in as arguments.
+Unit tests for backend/distribution/service.py's pure functions (no DB
+dependency) and backend/distribution/data.py's plan()/apply() ingest
+transaction seam (@pytest.mark.pg -- requires a local/CI Postgres with
+NIMBUS_TEST_DB=1; auto-skipped otherwise, see tests/conftest.py).
 """
 
-import pytest
+import uuid
+import datetime as dt
 from decimal import Decimal
+
+import pytest
 from backend.distribution.service import (
     TOOL_PLACEHOLDERS,
     resolve_plant,
@@ -436,3 +440,578 @@ class TestComputeDerivedStatuses:
         machines = {"L1": {}}
         statuses = compute_derived_statuses(header, shares, children, workcenter, machines)
         assert len(statuses) == 0
+
+
+# =====================================================================
+# backend/distribution/data.py -- plan()/apply() real-DB tests
+# =====================================================================
+# Requires a local Postgres with NIMBUS_TEST_DB=1 (tests/conftest.py). NOT RUN
+# in this sandboxed environment (.env's PG_HOST points at the live Azure
+# pilot, and the DB-safety guard correctly refuses to even collect pytest in
+# that state) -- verified only via py_compile + the pure-function suite
+# above, not an actual pytest run against real Postgres. A human with a local
+# Postgres instance must run these to confirm pass/fail, per
+# tests/test_task_concurrency.py's own precedent docstring.
+#
+# All tests seed under plant "1006" / subnetwork "WTG" (seeded by schema.sql,
+# the same plant tests/test_data_integrity.py's TestCascadePreviewSapWorkcenter
+# uses), with ZZTEST_*-prefixed identifiers, and clean up in teardown.
+
+import backend.distribution.data as distribution_data  # noqa: E402
+
+
+def _snapshot_header(db_, plant, order, material):
+    with db_._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT sap_workcenter, order_quantity, run_time, reviewed, reviewed_by,
+                      default_basis, source, sap_facts, xmin::text::bigint, updated_at
+                 FROM order_distribution
+                WHERE plant = %s AND production_order = %s AND material_number = %s""",
+            (plant, order, material),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "sap_workcenter": row[0], "order_quantity": row[1], "run_time": row[2],
+        "reviewed": row[3], "reviewed_by": row[4], "default_basis": row[5],
+        "source": row[6], "sap_facts": row[7], "xmin": row[8], "updated_at": row[9],
+    }
+
+
+def _snapshot_shares(db_, plant, order, material):
+    with db_._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT machine, letter, weight, child_id, purged_at
+                 FROM order_distribution_share
+                WHERE plant = %s AND production_order = %s AND material_number = %s
+                ORDER BY machine""",
+            (plant, order, material),
+        )
+        return [
+            {"machine": r[0], "letter": r[1], "weight": r[2], "child_id": r[3], "purged_at": r[4]}
+            for r in cur.fetchall()
+        ]
+
+
+def _snapshot_children(db_, plant, parent_order):
+    with db_._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, production_order, machine, order_quantity, run_time,
+                      parent_production_order, distribution_letter,
+                      scheduled_start, scheduled_end, notes,
+                      xmin::text::bigint, updated_at
+                 FROM orders
+                WHERE plant = %s AND parent_production_order = %s
+                ORDER BY production_order""",
+            (plant, parent_order),
+        )
+        return [
+            {"id": r[0], "production_order": r[1], "machine": r[2], "order_quantity": r[3],
+             "run_time": r[4], "parent_production_order": r[5], "distribution_letter": r[6],
+             "scheduled_start": r[7], "scheduled_end": r[8], "notes": r[9],
+             "xmin": r[10], "updated_at": r[11]}
+            for r in cur.fetchall()
+        ]
+
+
+@pytest.mark.pg
+class TestPlanApplyIdempotency:
+    """A second apply() run over the SAME plan_structure must change nothing:
+    no new/deleted children, no header/shares rewrite, xmin/updated_at on
+    every touched row identical before and after the repeat run."""
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_IDEM"
+    L1, L2 = "ZZTEST_L1_IDEM", "ZZTEST_L2_IDEM"
+    ORD, MAT = "ZZTEST_ORD_IDEM", "ZZTEST_MAT_IDEM"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, 60,
+                 self.SUB, self.PLANT, self.L2, self.WC, 40),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.MAT, self.PLANT),
+            )
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+
+    def _row(self):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+    def test_second_apply_is_a_no_op(self, pg):
+        db_ = pg
+        batch_id = str(uuid.uuid4())
+        rows_out, plan_structure, warnings = distribution_data.plan([self._row()], batch_id)
+        assert warnings["conflicting_parent_rows"] == []
+        assert len(rows_out) == 2  # two lettered children, 60/40 split
+
+        with db_._pool.connection() as conn:
+            result = distribution_data.apply(plan_structure, batch_id, conn)
+        assert result["headers_created"] == 1
+        assert result["children_upserted"] == 2
+        assert result["replanned_after_reweight"] == 0
+
+        header_1 = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        shares_1 = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+        children_1 = _snapshot_children(db_, self.PLANT, self.ORD)
+        assert header_1 is not None
+        assert len(shares_1) == 2
+        assert len(children_1) == 2
+
+        # Re-run apply() with the EXACT SAME plan_structure object.
+        with db_._pool.connection() as conn:
+            result_2 = distribution_data.apply(plan_structure, batch_id, conn)
+
+        header_2 = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        shares_2 = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+        children_2 = _snapshot_children(db_, self.PLANT, self.ORD)
+
+        assert header_2 == header_1, "header row (incl. xmin/updated_at) must be byte-identical"
+        assert shares_2 == shares_1, "shares must be byte-identical"
+        assert children_2 == children_1, "children rows (incl. xmin/updated_at) must be byte-identical"
+        assert result_2["children_deleted"] == 0
+        assert result_2["headers_created"] == 0
+        # plan_structure's is_new_header flag is a static planning-time
+        # decision that apply() never mutates back onto the caller's plan --
+        # so a SECOND apply() call over the SAME plan_structure re-takes the
+        # is_new_header branch, finds the header already exists (ON CONFLICT
+        # DO NOTHING -> rowcount 0), and re-plans from current state exactly
+        # like a genuine concurrent-creation race would. This is expected,
+        # documented behavior (see apply()'s docstring): it is why the
+        # RESULTING STATE assertions above are the real idempotency proof,
+        # not this counter.
+        assert result_2["replanned_after_reweight"] == 1
+
+
+@pytest.mark.pg
+class TestApplyReplanAfterConcurrentReweight:
+    """Simulates a planner re-weight landing between plan()'s snapshot and
+    apply()'s lock: apply() must detect the xmin mismatch and re-plan from
+    the header's CURRENT shares, not the stale plan()-time snapshot."""
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_RACE"
+    L1, L2 = "ZZTEST_L1_RACE", "ZZTEST_L2_RACE"
+    ORD, MAT = "ZZTEST_ORD_RACE", "ZZTEST_MAT_RACE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.MAT, self.PLANT),
+            )
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+
+    def _row(self):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+    def test_xmin_mismatch_triggers_replan_from_current_shares(self, pg):
+        db_ = pg
+        batch_id_1 = str(uuid.uuid4())
+        rows_out_1, plan_1, _ = distribution_data.plan([self._row()], batch_id_1)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_1, batch_id_1, conn)
+
+        # Second ingest of the SAME parent: plan() snapshots the header's
+        # CURRENT xmin (even split, 50/50 since no weights were set).
+        batch_id_2 = str(uuid.uuid4())
+        rows_out_2, plan_2, _ = distribution_data.plan([self._row()], batch_id_2)
+        header_key = (self.PLANT, self.ORD, self.MAT)
+        snapshot_xmin = plan_2["parents"][header_key]["header_xmin"]
+        assert snapshot_xmin is not None
+
+        # Simulate a CONCURRENT planner re-weight landing between plan_2's
+        # snapshot and apply_2's lock: L1 -> 100%, L2 -> 0%. Any UPDATE bumps
+        # the header's xmin regardless of which columns changed.
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE order_distribution_share SET weight = 100 "
+                " WHERE plant = %s AND production_order = %s AND material_number = %s AND machine = %s",
+                (self.PLANT, self.ORD, self.MAT, self.L1),
+            )
+            cur.execute(
+                "UPDATE order_distribution_share SET weight = 0 "
+                " WHERE plant = %s AND production_order = %s AND material_number = %s AND machine = %s",
+                (self.PLANT, self.ORD, self.MAT, self.L2),
+            )
+            cur.execute(
+                "UPDATE order_distribution SET updated_at = now() "
+                " WHERE plant = %s AND production_order = %s AND material_number = %s",
+                (self.PLANT, self.ORD, self.MAT),
+            )
+            conn.commit()
+
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT xmin::text::bigint FROM order_distribution WHERE plant=%s AND "
+                        "production_order=%s AND material_number=%s", (self.PLANT, self.ORD, self.MAT))
+            bumped_xmin = cur.fetchone()[0]
+        assert bumped_xmin != snapshot_xmin, "the simulated concurrent write must bump xmin"
+
+        with db_._pool.connection() as conn:
+            result = distribution_data.apply(plan_2, batch_id_2, conn)
+
+        assert result["replanned_after_reweight"] == 1
+
+        # The planner's re-weight WINS: only L1 has a living child now
+        # (100%), and L2's earlier child is superseded/deleted.
+        shares = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+        by_machine = {s["machine"]: s for s in shares}
+        assert by_machine[self.L1]["weight"] == 100
+        assert by_machine[self.L2]["weight"] == 0
+        assert by_machine[self.L2]["child_id"] is None
+        assert by_machine[self.L1]["child_id"] is not None
+
+        children = _snapshot_children(db_, self.PLANT, self.ORD)
+        assert len(children) == 1
+        assert children[0]["machine"] == self.L1
+        # 100% on a single machine collapses to the BARE parent id (no letter).
+        assert children[0]["distribution_letter"] is None
+        assert children[0]["production_order"] == self.ORD
+
+
+@pytest.mark.pg
+class TestPlanApplyAnchorCarry:
+    """1->N anchor carry: a plain order that arrived before its work center
+    was configured as `distribute` gets distributed on the NEXT ingest; its
+    schedule (COALESCE(first segment start, scheduled_start)) and notes are
+    carried onto the new lettered children, and the old plain row is deleted
+    as a superseded child."""
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_ANCHOR"
+    L1, L2 = "ZZTEST_L1_ANCHOR", "ZZTEST_L2_ANCHOR"
+    ORD, MAT = "ZZTEST_ORD_ANCHOR", "ZZTEST_MAT_ANCHOR"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        self.plain_id = db_.make_id(self.ORD, self.MAT)
+        self.anchor_start = dt.datetime(2026, 10, 5, 6, 0)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.MAT, self.PLANT),
+            )
+            # The plain order arrived BEFORE the work center was configured --
+            # it is already scheduled by a planner (scheduled_start set) and
+            # carries a note.
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, scheduled_start, scheduled_end, notes, run_time) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.plain_id, self.ORD, self.MAT, self.WC, self.PLANT,
+                 dt.datetime(2026, 10, 1, 0, 0), dt.datetime(2026, 10, 2, 0, 0),
+                 self.anchor_start, self.anchor_start + dt.timedelta(hours=10),
+                 "Planner note", 10.0),
+            )
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+
+    def test_anchor_and_notes_carried_old_plain_row_deleted(self, pg):
+        db_ = pg
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 0, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 2, 0, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+        rows_out, plan_structure, warnings = distribution_data.plan([row], batch_id)
+        header_key = (self.PLANT, self.ORD, self.MAT)
+        assert plan_structure["parents"][header_key]["anchor"] is not None
+        assert plan_structure["parents"][header_key]["anchor"]["anchor"] == self.anchor_start
+        assert self.plain_id in plan_structure["parents"][header_key]["previous_child_ids"]
+
+        with db_._pool.connection() as conn:
+            result = distribution_data.apply(plan_structure, batch_id, conn)
+        assert result["headers_created"] == 1
+        assert result["children_deleted"] == 1  # the old plain row is superseded
+
+        children = _snapshot_children(db_, self.PLANT, self.ORD)
+        assert len(children) == 2
+        for child in children:
+            assert child["scheduled_start"] == self.anchor_start
+            assert child["notes"] == "Planner note"
+
+        # The old plain id must be gone.
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM orders WHERE id = %s", (self.plain_id,))
+            assert cur.fetchone() is None
+
+
+@pytest.mark.pg
+class TestApplyPreservesReviewedAndDefaultBasis:
+    """§5.2 'Existing': a refresh (SAP facts only) must never touch shares,
+    reviewed, reviewed_by, source, or default_basis -- confirmed by manually
+    marking a header reviewed before a second ingest with CHANGED facts."""
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_REFRESH"
+    L1, L2 = "ZZTEST_L1_REFRESH", "ZZTEST_L2_REFRESH"
+    ORD, MAT = "ZZTEST_ORD_REFRESH", "ZZTEST_MAT_REFRESH"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.MAT, self.PLANT),
+            )
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+
+    def _row(self, qty, run_time):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": qty, "run_time": run_time,
+        }
+
+    def test_refresh_never_touches_review_state_or_shares(self, pg):
+        db_ = pg
+        batch_1 = str(uuid.uuid4())
+        rows_1, plan_1, _ = distribution_data.plan([self._row(100.0, 10.0)], batch_1)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_1, batch_1, conn)
+
+        # Planner reviews the header manually (as the /review route would).
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE order_distribution SET reviewed = TRUE, reviewed_by = 'alice', "
+                "reviewed_quantity = order_quantity, source = 'manual' "
+                "WHERE plant = %s AND production_order = %s AND material_number = %s",
+                (self.PLANT, self.ORD, self.MAT),
+            )
+            conn.commit()
+        before = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        shares_before = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+        assert before["reviewed"] is True
+        assert before["source"] == "manual"
+
+        # Second ingest with CHANGED SAP facts (quantity moved).
+        batch_2 = str(uuid.uuid4())
+        rows_2, plan_2, _ = distribution_data.plan([self._row(200.0, 10.0)], batch_2)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_2, batch_2, conn)
+
+        after = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        shares_after = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+
+        # Facts refreshed...
+        assert after["order_quantity"] == 200
+        # ...but review state, source, and default_basis are UNTOUCHED.
+        assert after["reviewed"] is True
+        assert after["reviewed_by"] == "alice"
+        assert after["source"] == "manual"
+        assert after["default_basis"] == before["default_basis"]
+        # ...and shares (letters/weights) are UNTOUCHED by ingest.
+        assert shares_after == shares_before
+
+
+@pytest.mark.pg
+class TestPlanRerouteRecordsPreviousWorkcenter:
+    """Decision I: a distributed parent whose row now resolves to a
+    DIFFERENT distribute-mode work center keeps its existing header/shares
+    (header authority); sap_workcenter takes the new code and the old one is
+    recorded in sap_facts.previous_workcenter."""
+    SUB, PLANT = "WTG", "1006"
+    WC1, WC2 = "ZZTEST_WC1_REROUTE", "ZZTEST_WC2_REROUTE"
+    L1, L2, M1 = "ZZTEST_L1_REROUTE", "ZZTEST_L2_REROUTE", "ZZTEST_M1_REROUTE"
+    ORD, MAT = "ZZTEST_ORD_REROUTE", "ZZTEST_MAT_REROUTE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s,%s,'distribute'),(%s,%s,'distribute')",
+                (self.PLANT, self.WC1, self.PLANT, self.WC2),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s),(%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC1, self.SUB, self.PLANT, self.L2, self.WC1,
+                 self.SUB, self.PLANT, self.M1, self.WC2),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.MAT, self.PLANT),
+            )
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s, %s)",
+                    (self.PLANT, self.L1, self.L2, self.M1))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter IN (%s, %s)",
+                    (self.PLANT, self.WC1, self.WC2))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+
+    def _row(self, machine):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": machine, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+    def test_reroute_keeps_old_shares_and_records_previous_workcenter(self, pg):
+        db_ = pg
+        batch_1 = str(uuid.uuid4())
+        rows_1, plan_1, _ = distribution_data.plan([self._row(self.WC1)], batch_1)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_1, batch_1, conn)
+
+        shares_before = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+        machines_before = {s["machine"] for s in shares_before}
+        assert machines_before == {self.L1, self.L2}
+
+        # SAP now addresses the SAME parent to WC2 instead.
+        batch_2 = str(uuid.uuid4())
+        rows_2, plan_2, warnings_2 = distribution_data.plan([self._row(self.WC2)], batch_2)
+        header_key = (self.PLANT, self.ORD, self.MAT)
+        parent_plan = plan_2["parents"][header_key]
+        assert parent_plan["sap_workcenter"] == self.WC2
+        assert parent_plan["previous_workcenter"] == self.WC1
+        # Header authority: children still come from the OLD (WC1) shares.
+        assert set(parent_plan["shares"].keys()) == {self.L1, self.L2}
+
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_2, batch_2, conn)
+
+        header_after = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        assert header_after["sap_workcenter"] == self.WC2
+        assert header_after["sap_facts"].get("previous_workcenter") == self.WC1
+
+        shares_after = _snapshot_shares(db_, self.PLANT, self.ORD, self.MAT)
+        machines_after = {s["machine"] for s in shares_after}
+        assert machines_after == {self.L1, self.L2}, "reroute must NOT move shares to the new work center's members"
