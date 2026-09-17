@@ -64,6 +64,10 @@ interface ColSpec {
   width?: number;
   numeric?: boolean;
   editable?: boolean;
+  cellEditor?: unknown;
+  cellEditorParams?: () => Record<string, unknown>;
+  headerTooltip?: string;
+  cellRenderer?: unknown;
 }
 
 interface FilterSpec {
@@ -108,6 +112,30 @@ interface GridState {
   readOnly: boolean;
   saving: boolean;
   loaded: boolean;
+}
+
+// -- Cell renderers ---------------------------------------------------------
+
+// Renderer for default_machine column that adds a tooltip for unknown machines.
+function _mkDefaultMachineRenderer() {
+  return class {
+    _eGui!: HTMLDivElement;
+    init(params: { value: unknown }): void {
+      this._eGui = document.createElement('div');
+      const value = params.value;
+      if (value && typeof value === 'string' && value.trim()) {
+        const machines = Store.linesForSelectedPlant();
+        if (!machines.includes(value.trim())) {
+          this._eGui.textContent = String(value);
+          this._eGui.title = Util.t('ui.unknown_machine_tooltip');
+          return;
+        }
+      }
+      this._eGui.textContent = String(value || '');
+    }
+    getGui(): HTMLDivElement { return this._eGui; }
+    refresh(): boolean { return false; }
+  };
 }
 
 // -- Grid definitions ---------------------------------------------------------
@@ -157,7 +185,14 @@ const SPECS: Record<GridId, GridSpec> = {
       { field: 'prt_01',                      i18n: 'col.prt_01', width: 170, editable: true },
       { field: 'prt_02',                      i18n: 'col.prt_02', width: 170, editable: true },
       { field: 'color',                       i18n: 'col.color',  width: 130, editable: true },
-      { field: 'default_machine',          i18n: 'col.default_machine', width: 170, editable: true },
+      { field: 'default_machine',          i18n: 'col.default_machine', width: 170, editable: true,
+        cellEditor: 'agSelectCellEditor',
+        cellEditorParams: () => ({
+          values: ['', ...Store.linesForSelectedPlant()],
+        }),
+        cellRenderer: _mkDefaultMachineRenderer(),
+        headerTooltip: 'col.default_machine_hint',  // Locale key, resolved in _buildColumnDefs
+      },
     ],
     filters: [
       { field: 'material_id',                i18n: 'col.material_id',   mode: 'bigset' },
@@ -445,22 +480,68 @@ function _onFilterChanged(spec: GridSpec, field: string): void {
 
 function _buildColumnDefs(spec: GridSpec): unknown[] {
   const st = _state[spec.id];
-  return spec.cols.map(c => ({
-    headerName: Util.t(c.i18n),
-    field: c.field,
-    width: c.width,
-    minWidth: 100,
-    flex: c.width ? 0 : 1,
-    editable: !!c.editable && !st.readOnly,
-    cellClass: c.numeric ? 'cell-num' : undefined,
-    cellClassRules: c.editable ? {
-      'md-cell-dirty': (p: { data: MaterialGridRow }) => {
-        const patch = st.dirty.get(spec.rowKey(p.data));
-        return !!patch && c.field in patch;
-      },
-    } : undefined,
-    tooltipField: c.field === 'material_description' ? c.field : undefined,
-  }));
+  return spec.cols.map(c => {
+    const colDef: Record<string, unknown> = {
+      headerName: Util.t(c.i18n),
+      field: c.field,
+      width: c.width,
+      minWidth: 100,
+      flex: c.width ? 0 : 1,
+      editable: !!c.editable && !st.readOnly,
+      cellClass: c.numeric ? 'cell-num' : undefined,
+    };
+
+    // Build cellClassRules for editable fields
+    if (c.editable) {
+      const cellClassRules: Record<string, (p: { data: MaterialGridRow }) => boolean> = {
+        'md-cell-dirty': (p: { data: MaterialGridRow }) => {
+          const patch = st.dirty.get(spec.rowKey(p.data));
+          return !!patch && c.field in patch;
+        },
+      };
+
+      // Add mp-unknown-machine rule for default_machine column
+      if (c.field === 'default_machine') {
+        cellClassRules['mp-unknown-machine'] = (p: { data: MaterialGridRow }) => {
+          const value = p.data.default_machine;
+          if (!value || typeof value !== 'string' || !value.trim()) return false;
+          const machines = Store.linesForSelectedPlant();
+          return !machines.includes(value.trim());
+        };
+      }
+
+      colDef.cellClassRules = cellClassRules;
+    } else {
+      colDef.cellClassRules = undefined;
+    }
+
+    // Add cell editor if specified
+    if (c.cellEditor) {
+      colDef.cellEditor = c.cellEditor;
+    }
+
+    // Add cell editor params if specified
+    if (c.cellEditorParams) {
+      colDef.cellEditorParams = c.cellEditorParams;
+    }
+
+    // Add cell renderer if specified
+    if (c.cellRenderer) {
+      colDef.cellRenderer = c.cellRenderer;
+    }
+
+    // Add header tooltip if specified (may be a locale key)
+    if (c.headerTooltip) {
+      colDef.headerTooltip = Util.t(c.headerTooltip);
+    }
+
+    // Add field tooltip for material_description
+    if (c.field === 'material_description') {
+      colDef.tooltipField = c.field;
+    }
+
+    return colDef;
+  });
 }
 
 function _sizeSoon(spec: GridSpec): void {

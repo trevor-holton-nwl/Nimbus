@@ -4733,6 +4733,12 @@ body.dark .cw-active-card {
 
 /* Dirty-cell marker for the three planner-editable Material Plant columns. */
 .ag-theme-quartz .md-cell-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
+
+/* Soft-warn tint for unknown machine values in default_machine column. */
+.ag-theme-quartz .mp-unknown-machine {
+  background: var(--warn-soft, #f8ecd0);
+}
+
 .ag-theme-quartz .ag-cell[col-id="prt_01"]:hover:not(.ag-cell-inline-editing),
 .ag-theme-quartz .ag-cell[col-id="prt_02"]:hover:not(.ag-cell-inline-editing),
 .ag-theme-quartz .ag-cell[col-id="color"]:hover:not(.ag-cell-inline-editing) {
