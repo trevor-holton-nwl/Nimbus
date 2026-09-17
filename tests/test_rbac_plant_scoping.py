@@ -234,7 +234,7 @@ def test_master_data_list_allows_an_authenticated_caller_through_to_the_data_lay
     reach md.list_rows with its allowed_plants forwarded unmodified."""
     calls = []
 
-    def fake_list_rows(table, limit=None, offset=None, plant=None, allowed_plants=None, material_id=None):
+    def fake_list_rows(table, limit=None, offset=None, plant=None, allowed_plants=None, material_id=None, search=None):
         calls.append({"table": table, "allowed_plants": allowed_plants})
         return {"rows": [], "columns": [], "meta": {"total": 0}}
 
