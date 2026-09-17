@@ -37,6 +37,7 @@ None of these tests require a live database -- confirmed via `ast.parse`
 import pytest
 
 try:
+    from fastapi.routing import iter_route_contexts
     from starlette.testclient import TestClient
 
     import backend.security.auth as auth
@@ -241,3 +242,119 @@ def test_master_data_list_allows_an_authenticated_caller_through_to_the_data_lay
     response = scoped_client.get("/master-data/plants")
     assert response.status_code == 200
     assert calls == [{"table": "plants", "allowed_plants": [PLANT_A]}]
+
+
+# ---------------------------------------------------------------------------
+# PUT /distribution/{plant}/workcenters/{wc} -- backend/distribution/'s FIRST
+# route (aggregate_to_detail.md §4.3/§7). Modeled on backend/setup/routes.py,
+# so these tests pin the exact same historical regression class this file's
+# docstring describes -- a blank/whitespace plant escaping past a
+# PlantNotAllowed-only catch as an unhandled 500 -- for the newest domain.
+# Admin-gated (require_api_key + require_authenticated + require_admin), so
+# every fixture below overrides require_admin directly rather than relying on
+# the real admin_exists() DB check, mirroring test_setup_endpoints.py's `tc`
+# fixture and test_priority_lists.py's oversized-upload tests.
+# ---------------------------------------------------------------------------
+DIST_PLANT_A = "ZZTEST_DIST_PLANT_A"
+DIST_PLANT_B = "ZZTEST_DIST_PLANT_B"
+
+_DIST_BODY = {
+    "distribution_mode": "single", "default_machine": "M1", "max_separation": "none",
+    "review_required": True, "distribute_tooled": False, "weights": {},
+}
+
+
+@pytest.fixture
+def distribution_admin_client():
+    """An authenticated, admin-scoped caller for DIST_PLANT_A only -- DB-free
+    (require_admin/require_api_key are overridden, not the real checks)."""
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [DIST_PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "dist.admin@example.com"
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "dist.admin@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    try:
+        yield TestClient(brain.api)
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def test_distribution_workcenter_write_rejects_an_out_of_scope_plant(distribution_admin_client):
+    """The caller's role_plants scope is {DIST_PLANT_A}; a PUT against
+    DIST_PLANT_B must be rejected 403, not merely fail validation deeper in
+    the stack (and never reach backend.distribution.data)."""
+    response = distribution_admin_client.put(
+        f"/distribution/{DIST_PLANT_B}/workcenters/WC1", json=_DIST_BODY,
+    )
+    assert response.status_code == 403
+
+
+def test_distribution_workcenter_write_maps_blank_plant_to_400_not_500(distribution_admin_client):
+    """md._assert_plant_allowed raises ValueError (not PlantNotAllowed) for a
+    blank/whitespace plant -- checked FIRST, inside _assert_plant_allowed,
+    before the role_plants scope check ever runs. backend/distribution/routes.py's
+    _distribution_plant_guard catches PlantNotAllowed and ValueError (in that
+    order); catching only the former would let this ValueError escape as an
+    unhandled 500 -- the exact regression class this file exists to guard
+    against, now pinned for this domain too."""
+    response = distribution_admin_client.put(
+        "/distribution/%20/workcenters/WC1", json=_DIST_BODY,
+    )
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_workcenter_write_is_admin_gated():
+    """Static, DB-free check mirroring test_material_plant_attributes.py's
+    dependency-inspection pattern (there, the inverse assertion for
+    planner-facing routes; here, this route IS admin-only, so require_admin
+    must be present)."""
+    matches = [r for r in iter_route_contexts(brain.api.routes)
+               if getattr(r, "path", None) == "/distribution/{plant}/workcenters/{wc}"]
+    assert len(matches) == 1
+    dep_names = {dep.call.__name__ for dep in matches[0].dependant.dependencies}
+    assert "require_admin" in dep_names
+
+
+def test_distribution_workcenter_write_rejects_a_non_admin_caller():
+    """A merely-authenticated (non-admin) caller must be rejected 403 --
+    require_admin overridden to throw directly (no live admin_exists() DB
+    call), mirroring test_setup_endpoints.py's
+    test_definition_write_requires_master_data_owner."""
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [DIST_PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "planner@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Admin role required")
+    )
+    try:
+        response = TestClient(brain.api).put(
+            f"/distribution/{DIST_PLANT_A}/workcenters/WC1", json=_DIST_BODY,
+        )
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 403
+
+
+def test_distribution_workcenter_write_allows_an_admin_through_to_the_data_layer(distribution_admin_client, monkeypatch):
+    """Positive-path companion: an authorized admin call for an in-scope plant
+    must reach backend.distribution.data.save_workcenter (mocked here, so this
+    needs no live DB) -- proves the guard isn't rejecting valid requests too."""
+    import backend.distribution.data as distribution_data
+    calls = []
+
+    def fake_save_workcenter(plant, wc, description, distribution_mode, default_machine,
+                             max_separation, review_required, distribute_tooled, weights, user_email=None):
+        calls.append({"plant": plant, "wc": wc})
+        return {
+            "plant": plant, "sap_workcenter": wc, "description": description,
+            "distribution_mode": distribution_mode, "default_machine": default_machine,
+            "max_separation": max_separation, "review_required": bool(review_required),
+            "distribute_tooled": bool(distribute_tooled), "weights": weights or {},
+        }
+
+    monkeypatch.setattr(distribution_data, "save_workcenter", fake_save_workcenter)
+    response = distribution_admin_client.put(
+        f"/distribution/{DIST_PLANT_A}/workcenters/WC1", json=_DIST_BODY,
+    )
+    assert response.status_code == 200
+    assert calls == [{"plant": DIST_PLANT_A, "wc": "WC1"}]

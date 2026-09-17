@@ -80,6 +80,7 @@ from backend.priority_lists import cache as plcache
 # `api.include_router(...)` for each happens later, once `api` exists.
 import backend.admin_ops.routes as admin_ops_routes
 import backend.calendars.routes as calendars_routes
+import backend.distribution.routes as distribution_routes
 import backend.integration.routes as integration_routes
 import backend.labor.routes as labor_routes
 import backend.master_data.routes as master_data_routes
@@ -625,6 +626,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/setup/{plant}/lines/{machine}/compatibility": "setup.line_compatibility_write",
     "/setup/{plant}/overrides": "setup.override_create",
     "/setup/{plant}/overrides/{override_id}": "setup.override_write",
+    "/distribution/{plant}/workcenters/{wc}": "distribution.workcenter_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
 }
@@ -645,13 +647,15 @@ def _admin_route_details(request: Request) -> tuple[str | None, dict]:
 
 
 # =========================
-# ROUTERS — nine domain-scoped routers (docs/architecture/domain-refactor-plan.md §4;
-# imported at the top of this file — the module objects are already bound here)
+# ROUTERS — ten domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
+# §4, plus backend/distribution/ added 2026-09-17 per aggregate_to_detail.md; imported at
+# the top of this file — the module objects are already bound here)
 # =========================
 api.include_router(scheduling_routes.router)
 api.include_router(integration_routes.router)
 api.include_router(priority_lists_routes.router)
 api.include_router(setup_routes.router)
+api.include_router(distribution_routes.router)
 api.include_router(master_data_routes.router)
 api.include_router(security_routes.router)
 api.include_router(labor_routes.router)

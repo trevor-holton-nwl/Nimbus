@@ -1085,6 +1085,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/distribution/{plant}/workcenters/{wc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save Workcenter
+         * @description Create-or-replace one plant's SAP work center policy + member weights
+         *     in a single transaction with an admin_audit row (aggregate_to_detail.md
+         *     §4.3/§7). Body: {description, distribution_mode, default_machine,
+         *     max_separation, review_required, distribute_tooled, weights: {machine: weight}}.
+         */
+        put: operations["save_workcenter_distribution__plant__workcenters__wc__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit/log": {
         parameters: {
             query?: never;
@@ -1303,7 +1326,7 @@ export interface paths {
          * Md List
          * @description List rows for a master-data table (subnetworks | plants | machine | ...).
          *
-         *     Optional ?limit=/?offset=/?plant=/?material_id= scope the result server-side;
+         *     Optional ?limit=/?offset=/?plant=/?material_id=/?search= scope the result server-side;
          *     all default to the full-catalog behavior. When supplied, meta.total carries
          *     the full filtered row count for paging. bom_items in particular relies on
          *     ?plant=+?material_id= to never load its full (potentially huge) table.
@@ -2422,9 +2445,15 @@ export interface components {
         };
         /**
          * CascadePreviewResult
-         * @description master_data.cascade_preview()'s shape -- always seeds all five keys to
+         * @description master_data.cascade_preview()'s shape -- always seeds all six keys to
          *     0 so the delete-confirmation UI has a stable shape to render, per its own
          *     docstring; verified by direct read of the seed dict.
+         *
+         *     `headers` counts order_distribution rows referencing a sap_workcenter
+         *     (added alongside the sap_workcenter cascade-preview branch) -- this model
+         *     is closed (no extra="allow"), so a key the function returns but that
+         *     isn't declared here would be silently dropped by response_model
+         *     serialization rather than raising.
          */
         CascadePreviewResult: {
             /** Plants */
@@ -2437,6 +2466,11 @@ export interface components {
             bom_items: number;
             /** Role Plants */
             role_plants: number;
+            /**
+             * Headers
+             * @default 0
+             */
+            headers: number;
         };
         /**
          * ClientConfigResult
@@ -3119,6 +3153,35 @@ export interface components {
              */
             role_settings: {
                 [key: string]: unknown;
+            };
+        };
+        /**
+         * WorkCenterSaveResult
+         * @description backend/distribution/data.py's `save_workcenter()` return shape.
+         */
+        WorkCenterSaveResult: {
+            /** Plant */
+            plant: string;
+            /** Sap Workcenter */
+            sap_workcenter: string;
+            /** Description */
+            description?: string | null;
+            /** Distribution Mode */
+            distribution_mode: string;
+            /** Default Machine */
+            default_machine?: string | null;
+            /** Max Separation */
+            max_separation: string;
+            /** Review Required */
+            review_required: boolean;
+            /** Distribute Tooled */
+            distribute_tooled: boolean;
+            /**
+             * Weights
+             * @default {}
+             */
+            weights: {
+                [key: string]: number | null;
             };
         };
     };
@@ -4862,6 +4925,46 @@ export interface operations {
             };
         };
     };
+    save_workcenter_distribution__plant__workcenters__wc__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+                wc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkCenterSaveResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_audit_log_audit_log_get: {
         parameters: {
             query?: {
@@ -5171,6 +5274,8 @@ export interface operations {
                 plant?: string | null;
                 /** @description Filter to one material (only honored for tables with a material_id column). */
                 material_id?: string | null;
+                /** @description Search term (case-insensitive substring match on key column and description). */
+                search?: string | null;
             };
             header?: never;
             path: {
