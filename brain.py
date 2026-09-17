@@ -262,6 +262,7 @@ async def lifespan(app: FastAPI):
     db.ensure_color_wheel_table()
     db.ensure_priority_list_table()
     db.ensure_order_schedule_segments_table()
+    db.ensure_order_distribution_tables()
     if CW_BACKFILL_FROM_DISK:
         _backfill_color_wheels_from_disk()
     plcache.load_priority_lists()

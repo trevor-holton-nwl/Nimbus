@@ -923,8 +923,7 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     """Runs inside the still-open save transaction so the scan sees this batch's
     own UPDATEs. Window bounds come from the rows that actually moved.
 
-    Machine names are per-plant (`workcenter_mapping`/`machine_state` are both
-    keyed `(plant, machine)`), so at 50+ plants a shared machine name like
+    Machine names are per-plant (`machine_state` is keyed `(plant, machine)`), so at 50+ plants a shared machine name like
     'LINE1' must never let this scan pair an order in one plant against an
     order of the same machine name in a different plant — that would report a
     phantom conflict, leak an out-of-scope order id into the caller's 200
@@ -2884,6 +2883,114 @@ def ensure_priority_list_table() -> None:
                 PRIMARY KEY (plant, machine, field_key)
             )
         """)
+        conn.commit()
+
+
+def ensure_order_distribution_tables() -> None:
+    """Idempotent: create the order_distribution, order_distribution_share, and
+    sap_workcenter tables if missing (mirrors schema.sql / migrations/). Lets the
+    app self-bootstrap even before the migration is applied, matching the other
+    ensure_* startup hooks. Creates in FK-safe order: sap_workcenter first, then
+    order_distribution (which FKs to it), then order_distribution_share (which
+    FKs to order_distribution)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        # sap_workcenter: SAP work center policy and membership weights (2026-09-17).
+        # Per-plant table; work-center codes aggregate multiple NIMBUS machines.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sap_workcenter (
+                plant              TEXT NOT NULL,
+                sap_workcenter     TEXT NOT NULL,
+                description        TEXT,
+                distribution_mode  TEXT NOT NULL DEFAULT 'single'
+                                   CHECK (distribution_mode IN ('single','distribute')),
+                default_machine    TEXT,
+                max_separation     TEXT NOT NULL DEFAULT 'none'
+                                   CHECK (max_separation IN ('none','hour','day','week')),
+                review_required    BOOLEAN NOT NULL DEFAULT TRUE,
+                distribute_tooled  BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (plant, sap_workcenter),
+                CHECK (distribution_mode = 'distribute' OR default_machine IS NOT NULL)
+            )
+        """)
+
+        # order_distribution: header table for SAP aggregate work center distribution.
+        # Transactional tables, never grid-editable. Written solely by backend/distribution/.
+        # Header + shares are replaced wholesale in one transaction; header.xmin is the
+        # optimistic-concurrency token (base_version on wire, 409 stale on mismatch).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS order_distribution (
+                plant              TEXT NOT NULL,
+                production_order   TEXT NOT NULL,
+                material_number    TEXT NOT NULL,
+                sap_workcenter     TEXT NOT NULL,
+                order_quantity     NUMERIC,
+                run_time           NUMERIC,
+                basic_start_date   TIMESTAMP,
+                basic_finish_date  TIMESTAMP,
+                firming_indicator  TEXT,
+                sap_facts          JSONB,
+                source             TEXT NOT NULL DEFAULT 'default'
+                                   CHECK (source IN ('default','manual')),
+                default_basis      TEXT NOT NULL DEFAULT 'workcenter_weights'
+                                   CHECK (default_basis IN ('material_default','tooled_single','workcenter_weights')),
+                reviewed           BOOLEAN NOT NULL DEFAULT FALSE,
+                reviewed_by        TEXT,
+                reviewed_at        TIMESTAMPTZ,
+                reviewed_quantity  NUMERIC,
+                updated_by         TEXT,
+                last_batch_id      UUID,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (plant, production_order, material_number),
+                FOREIGN KEY (plant, sap_workcenter)
+                    REFERENCES sap_workcenter (plant, sap_workcenter) ON UPDATE CASCADE ON DELETE RESTRICT
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_order_distribution_wc
+                ON order_distribution(plant, sap_workcenter, reviewed)
+        """)
+
+        # order_distribution_share: distribution shares across NIMBUS machines.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS order_distribution_share (
+                plant            TEXT NOT NULL,
+                production_order TEXT NOT NULL,
+                material_number  TEXT NOT NULL,
+                machine          TEXT NOT NULL,
+                letter           TEXT NOT NULL,
+                weight           NUMERIC NOT NULL DEFAULT 0
+                                 CHECK (weight >= 0),
+                child_id         TEXT,
+                purged_at        TIMESTAMPTZ,
+                PRIMARY KEY (plant, production_order, material_number, machine),
+                UNIQUE (plant, production_order, material_number, letter),
+                FOREIGN KEY (plant, production_order, material_number)
+                    REFERENCES order_distribution (plant, production_order, material_number)
+                    ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ods_machine
+                ON order_distribution_share(plant, machine)
+        """)
+
+        # column_metadata entries for Admin Cockpit grid visibility.
+        cur.execute("""
+            INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+                ('sap_workcenter', 'plant',             'Plant',               TRUE,  1),
+                ('sap_workcenter', 'sap_workcenter',    'SAP Work Center',     TRUE,  2),
+                ('sap_workcenter', 'description',       'Description',         FALSE, 3),
+                ('sap_workcenter', 'distribution_mode', 'Distribution Mode',   FALSE, 4),
+                ('sap_workcenter', 'default_machine',   'Default Machine',     FALSE, 5),
+                ('sap_workcenter', 'max_separation',    'Max Separation',      FALSE, 6),
+                ('sap_workcenter', 'review_required',   'Review Required',     FALSE, 7),
+                ('sap_workcenter', 'distribute_tooled', 'Distribute Tooled',   FALSE, 8)
+            ON CONFLICT (table_name, column_name) DO NOTHING
+        """)
+
         conn.commit()
 
 
