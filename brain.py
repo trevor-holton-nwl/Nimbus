@@ -524,13 +524,13 @@ async def block_markdown_mw(request: Request, call_next):
 # Unifying the shape means every frontend callsite that reads body.message /
 # body.status works the same for every error, whatever its origin.
 def _error_response(status_code: int, message: str, rid: str | None,
-                    extra_headers: dict | None = None) -> JSONResponse:
+                    extra_headers: dict | None = None, detail=None) -> JSONResponse:
     headers = dict(extra_headers or {})
     if rid:
         headers["x-request-id"] = rid
     return JSONResponse(
         status_code=status_code,
-        content={"status": "error", "message": message, "detail": message},
+        content={"status": "error", "message": message, "detail": message if detail is None else detail},
         headers=headers or None,
     )
 
@@ -539,9 +539,26 @@ def _error_response(status_code: int, message: str, rid: str | None,
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
     # Covers fastapi.HTTPException too (subclass). Re-shapes {"detail":…} into
     # our envelope while preserving status code + any exception headers.
+    #
+    # A structured `detail={"code": ..., "message": ...}` (backend/setup and
+    # backend/distribution's routes both raise these, e.g. `_distribution_error`/
+    # `_distribution_conflict`) used to collapse to the bare literal string
+    # "error" here, silently discarding the whole object -- a real,
+    # previously-unnoticed bug: aggregate_to_detail.md SS6 documents the
+    # frontend keying UI copy off `detail.code`, which never reached the
+    # client. Fixed by passing a dict `detail` through unchanged and
+    # synthesizing `message` from its own `message`/`code`; a plain string
+    # detail (the overwhelming majority of routes) is completely unaffected
+    # -- `message` and `detail` are still the identical string, as before.
     rid = request.headers.get("x-request-id")
-    msg = exc.detail if isinstance(exc.detail, str) else "error"
-    return _error_response(exc.status_code, msg, rid, getattr(exc, "headers", None))
+    if isinstance(exc.detail, str):
+        msg, detail = exc.detail, exc.detail
+    elif isinstance(exc.detail, dict):
+        msg = str(exc.detail.get("message") or exc.detail.get("code") or "error")
+        detail = exc.detail
+    else:
+        msg, detail = "error", "error"
+    return _error_response(exc.status_code, msg, rid, getattr(exc, "headers", None), detail=detail)
 
 
 @api.exception_handler(ValueError)
@@ -627,6 +644,11 @@ _ADMIN_WRITE_OPERATIONS = {
     "/setup/{plant}/overrides": "setup.override_create",
     "/setup/{plant}/overrides/{override_id}": "setup.override_write",
     "/distribution/{plant}/workcenters/{wc}": "distribution.workcenter_write",
+    "/distribution/{plant}/{order}/{material}/shares": "distribution.shares_write",
+    "/distribution/{plant}/review": "distribution.review_write",
+    "/distribution/{plant}/reset": "distribution.reset_write",
+    "/distribution/{plant}/reapply-defaults": "distribution.reapply_defaults",
+    "/distribution/{plant}/resolve": "distribution.resolve_write",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
 }

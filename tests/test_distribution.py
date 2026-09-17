@@ -1382,3 +1382,317 @@ class TestDistributionReadRoutes:
         machines = {e["machine"] for e in body["exceptions"]}
         assert self.UNRESOLVED_MACHINE in machines
         assert self.L1 not in machines and self.L2 not in machines
+
+
+# =====================================================================
+# P2-8/P2-9 -- planner re-weight/review/reset + admin reapply-defaults/resolve
+# (aggregate_to_detail.md SS5.5-SS5.7). Same real-DB caveat as the plan()/
+# apply() section above: NOT run in this sandboxed environment (.env's
+# PG_HOST points at the live Azure pilot DB) -- verified only via py_compile
+# + the RBAC/route-guard suite, not an actual pytest run against Postgres. A
+# human with a local Postgres instance must run these to confirm pass/fail.
+# =====================================================================
+
+class _ReweightFixtureBase:
+    """Shared seed shape for the re-weight/reset/resolve tests below: one
+    distribute-mode work center, two machines (60/40 default split), one
+    ingested parent with two lettered children."""
+    SUB, PLANT = "WTG", "1006"
+
+    def _cleanup(self, cur, wc, l1, l2, ord_, mat):
+        cur.execute("DELETE FROM orders WHERE plant = %s AND (parent_production_order = %s OR production_order = %s)",
+                    (self.PLANT, ord_, ord_))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, ord_))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)", (self.PLANT, l1, l2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s", (self.PLANT, wc))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s", (self.PLANT, mat))
+
+    def _seed_header(self, db_, wc, l1, l2, ord_, mat):
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, wc, l1, l2, ord_, mat)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES (%s, %s, 'distribute')",
+                (self.PLANT, wc),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, l1, wc, 60, self.SUB, self.PLANT, l2, wc, 40),
+            )
+            cur.execute(
+                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (mat, self.PLANT),
+            )
+            conn.commit()
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": ord_, "material_number": mat, "machine": wc, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+        _, plan_structure, _ = distribution_data.plan([row], batch_id)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_structure, batch_id, conn)
+
+
+@pytest.mark.pg
+class TestReweightSharesGuards(_ReweightFixtureBase):
+    """409 `stale` / 409 `children_scheduled` guards on POST .../shares."""
+    WC = "ZZTEST_WC_RWGUARD"
+    L1, L2 = "ZZTEST_L1_RWGUARD", "ZZTEST_L2_RWGUARD"
+    ORD, MAT = "ZZTEST_ORD_RWGUARD", "ZZTEST_MAT_RWGUARD"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_stale_base_version_raises_409(self, pg):
+        with pytest.raises(distribution_data.DistributionStaleVersion):
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}],
+                base_version=-1, actor="tester",
+            )
+
+    def test_removing_a_scheduled_child_without_confirm_raises_409(self, pg):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        l2_child = next(c for c in children if c["machine"] == self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE id = %s",
+                (dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 12, 0), l2_child["id"]),
+            )
+            conn.commit()
+
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        with pytest.raises(distribution_data.DistributionChildrenScheduled) as excinfo:
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+                base_version=header["xmin"], actor="tester",
+            )
+        assert excinfo.value.children[0]["id"] == l2_child["id"]
+
+        # Same call WITH confirm_remove_scheduled succeeds and deletes L2's child.
+        result = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester",
+        )
+        assert l2_child["id"] in result["removed"]
+        remaining = _snapshot_children(pg, self.PLANT, self.ORD)
+        assert all(c["id"] != l2_child["id"] for c in remaining)
+
+
+@pytest.mark.pg
+class TestReweightSharesDryRunParity(_ReweightFixtureBase):
+    """A dry-run's `plan` must match what the following real call then
+    writes -- an actual two-call test, diffing the results, per SS5.5 step 8's
+    explicit parity requirement."""
+    WC = "ZZTEST_WC_RWDRY"
+    L1, L2 = "ZZTEST_L1_RWDRY", "ZZTEST_L2_RWDRY"
+    ORD, MAT = "ZZTEST_ORD_RWDRY", "ZZTEST_MAT_RWDRY"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_dry_run_plan_matches_the_subsequent_real_write(self, pg):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        new_shares = [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}]
+
+        dry = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, new_shares, base_version=header["xmin"],
+            dry_run=True, actor="tester",
+        )
+        assert "plan" in dry
+        dry_by_machine = {e["machine"]: e for e in dry["plan"]}
+
+        # The dry run must not have written anything.
+        assert _snapshot_header(pg, self.PLANT, self.ORD, self.MAT) == header
+
+        real = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, new_shares, base_version=header["xmin"],
+            dry_run=False, actor="tester",
+        )
+        real_by_machine = {c["machine"]: c for c in real["children"]}
+
+        for machine in (self.L1, self.L2):
+            previewed_qty = dry_by_machine[machine]["qty_after"]
+            written_qty = real_by_machine[machine]["order_quantity"]
+            assert previewed_qty == pytest.approx(float(written_qty)), \
+                f"{machine}: dry-run preview {previewed_qty} != written {written_qty}"
+            previewed_hours = dry_by_machine[machine]["hours_after"]
+            written_hours = real_by_machine[machine]["run_time"]
+            assert previewed_hours == pytest.approx(float(written_hours))
+
+
+@pytest.mark.pg
+class TestReweightSharesPurgedRefusal(_ReweightFixtureBase):
+    """400 `share_purged`: a positive weight on a purged share is refused
+    even with `allow_stale: true` -- only a fresh upload revives it."""
+    WC = "ZZTEST_WC_RWPURGE"
+    L1, L2 = "ZZTEST_L1_RWPURGE", "ZZTEST_L2_RWPURGE"
+    ORD, MAT = "ZZTEST_ORD_RWPURGE", "ZZTEST_MAT_RWPURGE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE order_distribution_share SET purged_at = now(), child_id = NULL"
+                " WHERE plant = %s AND production_order = %s AND material_number = %s AND machine = %s",
+                (self.PLANT, self.ORD, self.MAT, self.L2),
+            )
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_positive_weight_on_a_purged_share_is_refused(self, pg):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        with pytest.raises(ValueError, match="share_purged"):
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT,
+                [{"machine": self.L1, "weight": 50}, {"machine": self.L2, "weight": 50}],
+                base_version=header["xmin"], allow_stale=True, actor="tester",
+            )
+
+
+@pytest.mark.pg
+class TestReweightSharesCollapse(_ReweightFixtureBase):
+    """SS5.5 bullet 6, the N->1 collapse: when the surviving 100 % machine
+    already had a living, SCHEDULED child, its schedule and segments must
+    land on the new bare id, not be discarded."""
+    WC = "ZZTEST_WC_RWCOLLAPSE"
+    L1, L2 = "ZZTEST_L1_RWCOLLAPSE", "ZZTEST_L2_RWCOLLAPSE"
+    ORD, MAT = "ZZTEST_ORD_RWCOLLAPSE", "ZZTEST_MAT_RWCOLLAPSE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_collapse_copies_schedule_and_repoints_segments(self, pg):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        l1_child = next(c for c in children if c["machine"] == self.L1)
+        assert l1_child["distribution_letter"] is not None, "L1 must start lettered (2 positive shares)"
+        old_child_id = l1_child["id"]
+        sched_start = dt.datetime(2026, 10, 1, 8, 0)
+        sched_end = dt.datetime(2026, 10, 1, 12, 0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET scheduled_start = %s, scheduled_end = %s, notes = %s WHERE id = %s",
+                (sched_start, sched_end, "keep me", old_child_id),
+            )
+            cur.execute(
+                "INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                " VALUES (%s, 1, %s, %s)",
+                (old_child_id, sched_start, sched_end),
+            )
+            conn.commit()
+
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        result = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester",
+        )
+
+        new_bare_id = pg.make_id(self.ORD, self.MAT)
+        assert old_child_id in result["removed"]
+        assert new_bare_id != old_child_id
+
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT scheduled_start, scheduled_end, notes FROM orders WHERE id = %s", (new_bare_id,),
+            )
+            new_row = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (old_child_id,))
+            old_still_exists = cur.fetchone()[0]
+            cur.execute(
+                "SELECT order_id FROM order_schedule_segments WHERE scheduled_start = %s", (sched_start,),
+            )
+            segment_owner = cur.fetchone()
+
+        assert old_still_exists == 0, "the superseded lettered child must be deleted"
+        assert new_row is not None, "the surviving 100% machine's bare id must exist"
+        assert new_row[0] == sched_start and new_row[1] == sched_end
+        assert new_row[2] == "keep me"
+        assert segment_owner is not None and segment_owner[0] == new_bare_id, \
+            "the segment must be re-pointed onto the new bare id, not cascade-deleted"
+
+
+@pytest.mark.pg
+class TestResolveRepairRecoversIncompleteHeader(_ReweightFixtureBase):
+    """`resolve` scope `repair`: a header whose children set doesn't match
+    its positive/unpurged shares (`incomplete`) gets its missing child
+    recreated from CURRENT shares -- and a purged share's child is NEVER
+    recreated alongside it."""
+    WC = "ZZTEST_WC_REPAIR"
+    L1, L2, L3_PURGED = "ZZTEST_L1_REPAIR", "ZZTEST_L2_REPAIR", "ZZTEST_L3_REPAIR_PURGED"
+    ORD, MAT = "ZZTEST_ORD_REPAIR", "ZZTEST_MAT_REPAIR"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # A purged, positive-weight third share with no member row and no
+            # child -- repair must leave it exactly alone.
+            cur.execute(
+                "INSERT INTO order_distribution_share (plant, production_order, material_number,"
+                " machine, letter, weight, child_id, purged_at)"
+                " VALUES (%s, %s, %s, %s, 'C', 25, NULL, now())",
+                (self.PLANT, self.ORD, self.MAT, self.L3_PURGED),
+            )
+            conn.commit()
+
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        self._missing_machine = self.L2
+        missing_child = next(c for c in children if c["machine"] == self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # Simulate the crash window: the child row is gone but the share
+            # still points at it -- the header now reads `incomplete`.
+            cur.execute("DELETE FROM orders WHERE id = %s", (missing_child["id"],))
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM order_distribution_share WHERE plant=%s AND production_order=%s"
+                " AND material_number=%s AND machine=%s",
+                (self.PLANT, self.ORD, self.MAT, self.L3_PURGED),
+            )
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_repair_recreates_the_missing_child_and_never_the_purged_one(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            rows = distribution_data._fetch_header_rows(cur, self.PLANT)
+            distribution_data._hydrate_headers(cur, self.PLANT, rows)
+        this_header = next(h for h in rows if h["production_order"] == self.ORD)
+        assert "incomplete" in this_header["statuses"]
+
+        result = distribution_data.resolve(self.PLANT, "repair", dry_run=False)
+        assert result["repaired"] >= 1
+
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        by_machine = {c["machine"]: c for c in children}
+        assert self.L2 in by_machine, "the missing L2 child must be recreated"
+        assert self.L3_PURGED not in by_machine, "a purged share's child must never be recreated"
+
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            rows2 = distribution_data._fetch_header_rows(cur, self.PLANT)
+            distribution_data._hydrate_headers(cur, self.PLANT, rows2)
+        this_header2 = next(h for h in rows2 if h["production_order"] == self.ORD)
+        assert "incomplete" not in this_header2["statuses"]

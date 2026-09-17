@@ -14,16 +14,17 @@ inbound rows and replacing a distributed aggregate parent with its per-machine
 child rows; `apply()` runs AFTER the caller's normal upsert chunks and
 backfills have committed, in ONE transaction, writing the `order_distribution`
 header + `order_distribution_share` rows, carrying schedule/notes onto
-brand-new children, and deleting superseded ones. Neither function is wired
-into `db.py`'s ingest path yet -- that two-callable-parameter wiring into
-`db.upsert_orders` (called from `db.ingest_orders_from_excel` and
-`backend/integration/sap_sync.py`) is explicitly a LATER task (aggregate_to_detail.md
-§5 intro); `plan()`/`apply()` are self-contained and independently correct
-without it, and the `@pytest.mark.pg` tests below exercise them directly.
+brand-new children, and deleting superseded ones. Wired into `db.py`'s ingest
+path via `db.upsert_orders`' optional `plan_fn`/`apply_fn` parameters (P2-4);
+`plan()`/`apply()` are also self-contained and independently correct on their
+own, and the `@pytest.mark.pg` tests below exercise them directly in addition
+to the wired path.
 
-Later phases add the Distribution tab's own read routes and the planner
-re-weight endpoint (§5.5) -- aggregate_to_detail.md §7 at the repo root is the
-full API table this domain grows into.
+P2-6/P2-7 add the five read-only routes; P2-8/P2-9 add the three planner
+writes (`shares`/`review`/`reset`) and two admin writes (`reapply-defaults`/
+`resolve`) -- see the module note ahead of `DistributionHeaderNotFound` below
+for that section's own shared-engine design. aggregate_to_detail.md §7 at the
+repo root is the full API table this domain grows into (now fully shipped).
 
 Plain psycopg-style functions over the shared pool (`db._pool`), mirroring
 `backend/setup/data.py`'s convention -- no ORM, every value goes through a
@@ -38,8 +39,9 @@ the `order_distribution` HEADER table (this file's `plan`/`apply`), not to the
 only). `save_workcenter` stays a plain last-write-wins transaction, the same
 shape as master_data.py's other narrow single-purpose admin writers.
 """
+import uuid
 from decimal import ROUND_HALF_UP, Decimal
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
@@ -253,11 +255,12 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
 # NOTHING`/`DO UPDATE ... WHERE`) so re-running `apply()` with the same `plan`
 # a second time changes nothing.
 #
-# Scope boundary this file deliberately does NOT cross: N->1 collapse (when a
-# planner re-weights a distributed header down to one 100% machine, copying
-# the surviving machine's existing scheduled_*/segments onto the new plain id)
-# is §5.5 bullet 6 -- the planner re-weight endpoint (POST
-# /distribution/{plant}/{order}/{material}/shares), a LATER task. `apply()`
+# Scope boundary this file's `apply()` deliberately does NOT cross: N->1
+# collapse (when a planner re-weights a distributed header down to one 100%
+# machine, copying the surviving machine's existing scheduled_*/segments onto
+# the new bare id) is §5.5 bullet 6 -- the planner re-weight endpoint's job
+# (POST /distribution/{plant}/{order}/{material}/shares, `reweight_shares` /
+# `_collapse_to_survivor` further down this file), NOT `apply()`'s. `apply()`
 # here only ever CREATES/refreshes via ingest; it has no survivor-copy logic
 # and must not grow any -- ingest's "children the current shares do not want
 # are treated as superseded" (§5.4 step 3) already covers the shrink-to-fewer-
@@ -1360,7 +1363,8 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
 
     N->1 collapse is explicitly OUT of scope here -- see this file's module
     docstring "Scope boundary" note; that belongs to the planner re-weight
-    endpoint (§5.5 bullet 6), a later task.
+    endpoint (§5.5 bullet 6, `reweight_shares`/`_collapse_to_survivor` further
+    down this file).
     """
     parents: dict = plan.get("parents", {})
     if not parents:
@@ -2010,3 +2014,1027 @@ def get_unresolved(plant: str) -> dict:
         "unmatched_orders": sum(e["order_count"] for e in exceptions),
         "exceptions": exceptions,
     }
+
+
+# =====================================================================
+# P2-8/P2-9 -- planner re-weight/review/reset + admin reapply-defaults/resolve
+# (aggregate_to_detail.md SS5.5-SS5.7, SS7's API table)
+# =====================================================================
+#
+# The shared engine below (`_materialize_reweight`) is the ONE internal
+# function `POST .../shares`, `POST .../reset`, and the `repair` scope of
+# `POST .../resolve` all call to recompute a header's children from a
+# {machine: weight} map and a {machine: letter} map against the header's
+# STORED facts -- never a second, independently-maintained code path. A
+# `dry_run` boolean threads straight through it: with `dry_run=True` the
+# function stops before any write and returns the SS5.5 step 8 preview shape;
+# with `dry_run=False` it performs the exact same computation and then writes
+# it. This is what makes a dry run's preview and the following real write
+# provably identical -- they share every line of materialization logic.
+#
+# `_build_child_rows`, `_apply_children`, `_delete_superseded_children`, and
+# `_update_share_child_ids` (all defined above, for plan()/apply()) are
+# reused VERBATIM here rather than re-implemented -- see each call site below.
+
+
+class DistributionHeaderNotFound(Exception):
+    """No `order_distribution` header at this (plant, production_order,
+    material_number) -- routes.py maps this to 404."""
+
+
+class DistributionStaleVersion(Exception):
+    """409 'stale': the caller's base_version no longer matches the header's
+    current xmin."""
+    def __init__(self, base_version):
+        self.base_version = base_version
+        super().__init__("stale: base_version does not match the current header")
+
+
+class DistributionChildrenScheduled(Exception):
+    """409 'children_scheduled': removing these children would discard a
+    planner's schedule (or their segments) without `confirm_remove_scheduled`.
+    `children` is the SS5.5 step 5 list: [{id, production_order, machine,
+    scheduled_start, frozen}, ...]."""
+    def __init__(self, children: list[dict]):
+        self.children = children
+        super().__init__("children_scheduled: removal would discard scheduled sub-orders")
+
+
+def _check_base_version(header: dict, base_version) -> None:
+    """The identical equality check every planner-write call site runs before
+    touching a header -- factored out so dry-run and real-write paths (and
+    the bulk review/reset loops) all apply it the same way."""
+    if base_version is not None and header["xmin"] != base_version:
+        raise DistributionStaleVersion(header["xmin"])
+
+
+def _load_one_header_shares(cur, plant: str, order: str, material: str) -> dict[str, dict]:
+    """Every current share row for ONE header, keyed by machine -- the
+    single-header analogue of `_load_existing_headers`'s batched shares
+    query, used by the planner-write routes below (one header per call)."""
+    cur.execute(
+        """
+        SELECT machine, letter, weight, child_id, purged_at
+          FROM order_distribution_share
+         WHERE plant = %s AND production_order = %s AND material_number = %s
+        """,
+        (plant, order, material),
+    )
+    return {
+        r[0]: {"machine": r[0], "letter": r[1], "weight": r[2], "child_id": r[3], "purged_at": r[4]}
+        for r in cur.fetchall()
+    }
+
+
+def _load_workcenter_for_plant(cur, plant: str, wc: str | None) -> dict | None:
+    """One work center's policy + CURRENT members, scoped to a single known
+    plant (unlike `_load_lookups`, which is deliberately unscoped for the
+    ingest path where plant isn't known yet -- see that function's
+    docstring). Returns None when `wc` is falsy or no longer exists."""
+    if not wc:
+        return None
+    cur.execute(
+        "SELECT distribution_mode, default_machine, review_required, distribute_tooled, max_separation"
+        " FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+        (plant, wc),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    cur.execute(
+        "SELECT machine, distribution_weight FROM machine WHERE plant = %s AND sap_workcenter = %s",
+        (plant, wc),
+    )
+    pairs = cur.fetchall()
+    return {
+        "sap_workcenter": wc,
+        "distribution_mode": row[0], "default_machine": row[1],
+        "review_required": bool(row[2]), "distribute_tooled": bool(row[3]), "max_separation": row[4],
+        "members": sorted(m for m, _w in pairs),
+        "member_weights": dict(pairs),
+    }
+
+
+def _load_one_material_attrs(cur, plant: str, material: str) -> dict:
+    cur.execute(
+        "SELECT default_machine, prt_01, prt_02, min_lot_size, incremental_lot_size"
+        " FROM material_plants WHERE plant = %s AND material_id = %s",
+        (plant, material),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return {}
+    return {
+        "default_machine": row[0], "prt_01": row[1], "prt_02": row[2],
+        "min_lot_size": row[3], "incremental_lot_size": row[4],
+    }
+
+
+def _parent_facts_from_header(cur, plant: str, order: str, material: str, header: dict) -> dict:
+    """Reconstruct a `_build_child_rows`-shaped `parent_facts` dict from a
+    STORED header -- used by re-weight/reset/repair, none of which have a
+    fresh ingest row to read facts from.
+
+    `labor_hours`/`machine_hours` have no `order_distribution` column (only
+    `order_quantity`/`run_time`/dates/`firming_indicator` do -- SS3's
+    `_ADDITIVE_COLS` are apportioned per child at ingest time and never
+    summed back onto the header). Deliberately re-derived here as the SUM of
+    the header's CURRENT living children's own `labor_hours`/`machine_hours`,
+    so a re-weight/reset/repair preserves the parent's total rather than
+    silently losing it -- see backend/distribution/CLAUDE.md."""
+    sap_facts = header.get("sap_facts") or {}
+    facts = {k: sap_facts.get(k) for k in _SAP_FACTS_COPIED_KEYS}
+    cur.execute(
+        "SELECT SUM(labor_hours), SUM(machine_hours) FROM orders"
+        " WHERE plant = %s AND parent_production_order = %s AND material_number = %s",
+        (plant, order, material),
+    )
+    row = cur.fetchone()
+    labor_hours, machine_hours = row if row else (None, None)
+    facts.update({
+        "basic_start_date": header.get("basic_start_date"),
+        "basic_finish_date": header.get("basic_finish_date"),
+        "order_quantity": header.get("order_quantity"),
+        "run_time": header.get("run_time"),
+        "firming_indicator": header.get("firming_indicator"),
+        "labor_hours": labor_hours,
+        "machine_hours": machine_hours,
+    })
+    return facts
+
+
+def _reweight_letters(existing_shares: dict[str, dict], desired_machines: set[str]) -> dict[str, str]:
+    """SS5.3 bullet 1 + SS5.7 "Membership": every existing share KEEPS its
+    letter (including a now-zero-weight one -- letters stay reserved); a
+    machine that doesn't have a share row yet gets the lowest unused letter,
+    per SS5.7 ("A machine joining gets the lowest unused letter in an
+    existing header the first time a planner gives it weight")."""
+    letters = {m: s["letter"] for m, s in existing_shares.items() if s.get("letter")}
+    used = set(letters.values())
+    new_machines = sorted(m for m in desired_machines if m not in letters)
+    idx = 0
+    for machine in new_machines:
+        while service._index_to_letter(idx) in used:
+            idx += 1
+        letter = service._index_to_letter(idx)
+        letters[machine] = letter
+        used.add(letter)
+        idx += 1
+    return letters
+
+
+def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
+                            current_members: set[str], allow_stale: bool) -> dict[str, Decimal]:
+    """SS5.5 step 1: validate one `{shares:[{machine, weight}], ...}` payload
+    and return the {machine: weight} map it specifies (existing shares not
+    mentioned are NOT included here -- the caller fills them in at 0, SS5.5
+    "Removed children"). Raises ValueError with a `"<code>: <detail>"`
+    message (routes.py's `_distribution_error` renders `code` structurally)
+    for every 400 this step can produce; raises `DistributionChildrenScheduled`
+    for nothing (that's a later step) and never raises for base_version (the
+    caller checks that separately via `_check_base_version`, shared with the
+    other planner-write routes)."""
+    if not isinstance(shares_input, list) or not shares_input:
+        raise ValueError("weights_empty: shares must be a non-empty list of {machine, weight}")
+    desired: dict[str, Decimal] = {}
+    total = Decimal(0)
+    for entry in shares_input:
+        if not isinstance(entry, dict):
+            raise ValueError("each share entry must be an object with machine/weight")
+        machine = entry.get("machine")
+        if not isinstance(machine, str) or not machine.strip():
+            raise ValueError("each share entry needs a non-blank machine")
+        machine = machine.strip()
+        if machine in desired:
+            raise ValueError(f"duplicate_machine: {machine!r} appears more than once in shares")
+        weight = entry.get("weight")
+        if weight is None:
+            weight_dec = Decimal(0)
+        elif isinstance(weight, bool) or not isinstance(weight, (int, float, Decimal)):
+            raise ValueError(f"weight for {machine!r} must be numeric or null")
+        else:
+            weight_dec = Decimal(str(weight))
+        if weight_dec < 0:
+            raise ValueError(f"weight for {machine!r} must be >= 0")
+        if weight_dec > 0:
+            existing = existing_shares.get(machine)
+            if existing is not None and existing.get("purged_at") is not None:
+                raise ValueError(f"share_purged: {machine!r} is purged; only a fresh upload revives it")
+            is_current_member = machine in current_members
+            has_existing_share = existing is not None
+            # SS5.7: "A share is stale when its machine is not a current
+            # member or no longer exists" -- both a never-seen machine and an
+            # existing share whose machine has since left the work center
+            # need allow_stale to receive a positive weight. A CURRENT member
+            # with no share row yet (SS5.7's "joining" case) needs neither --
+            # that's the ordinary new-member path, handled by
+            # `_reweight_letters` assigning it a fresh letter below.
+            if not has_existing_share and not is_current_member and not allow_stale:
+                raise ValueError(f"stale_machine: {machine!r} is not a current work-center "
+                                 f"member or an existing share")
+            if has_existing_share and not is_current_member and not allow_stale:
+                raise ValueError(f"stale_machine: {machine!r} is no longer a current member "
+                                 f"of the work center")
+        desired[machine] = weight_dec
+        total += weight_dec
+    if total <= 0:
+        raise ValueError("weights_empty: at least one share must carry a positive weight")
+    return desired
+
+
+def _compute_reweight_anchor(cur, plant: str, order: str, material: str, fallback) -> dict | None:
+    """SS5.5 step 4: "New children: anchor = the earliest existing child's
+    effective start, else basic_start_date." Shaped like
+    `_load_anchor_sources`' per-id value so `_carry_anchor_onto_new_child`
+    (reused verbatim) needs no change to consume it."""
+    cur.execute(
+        """
+        SELECT MIN(COALESCE(seg.first_start, o.scheduled_start))
+          FROM orders o
+          LEFT JOIN LATERAL (
+              SELECT MIN(s.scheduled_start) AS first_start
+                FROM order_schedule_segments s WHERE s.order_id = o.id
+          ) seg ON true
+         WHERE o.plant = %s AND o.parent_production_order = %s AND o.material_number = %s
+        """,
+        (plant, order, material),
+    )
+    row = cur.fetchone()
+    earliest = row[0] if row else None
+    start = earliest if earliest is not None else fallback
+    if start is None:
+        return None
+    return {"anchor": start, "notes": None, "planning_status": None, "planning_reason": None}
+
+
+def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
+    """SS5.5 bullet 6, the N->1 collapse: when the surviving 100 % machine
+    already had a living child, copy that child's `scheduled_*`, `notes`,
+    `planning_status`/`planning_reason` and re-point its
+    `order_schedule_segments` rows onto the NEW bare id BEFORE the old
+    lettered child is deleted -- schedule-preserving collapse. Must run
+    AFTER the new bare row has been upserted (so it exists as an UPDATE
+    target) and BEFORE `_delete_superseded_children` removes `old_child_id`
+    (segments cascade-delete on that removal otherwise)."""
+    cur.execute(
+        """
+        UPDATE orders AS new_o
+           SET scheduled_start = old_o.scheduled_start,
+               scheduled_end   = old_o.scheduled_end,
+               notes           = old_o.notes,
+               planning_status = old_o.planning_status,
+               planning_reason = old_o.planning_reason,
+               updated_at      = NOW()
+          FROM orders AS old_o
+         WHERE new_o.id = %s AND old_o.id = %s
+        """,
+        (new_child_id, old_child_id),
+    )
+    cur.execute(
+        "UPDATE order_schedule_segments SET order_id = %s WHERE order_id = %s",
+        (new_child_id, old_child_id),
+    )
+
+
+def _write_reweight_shares(cur, plant: str, order: str, material: str,
+                          letters: dict[str, str], desired_weights: dict[str, Decimal]) -> None:
+    """Upsert every share this materialization touches (every machine in
+    `letters`), guarded so an unchanged letter/weight is a no-op. Never
+    touches `purged_at` or `child_id` (those are `_update_share_child_ids`'s
+    and purge's jobs respectively) -- a purged machine can only ever appear
+    here at weight 0 (validation refuses a positive weight on it), so this
+    leaves it untouched in substance even though the guarded UPDATE runs."""
+    for machine, letter in letters.items():
+        weight = desired_weights.get(machine, Decimal(0))
+        cur.execute(
+            """
+            INSERT INTO order_distribution_share
+                (plant, production_order, material_number, machine, letter, weight)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (plant, production_order, material_number, machine) DO UPDATE
+                SET letter = EXCLUDED.letter, weight = EXCLUDED.weight
+            WHERE order_distribution_share.letter IS DISTINCT FROM EXCLUDED.letter
+               OR order_distribution_share.weight IS DISTINCT FROM EXCLUDED.weight
+            """,
+            (plant, order, material, machine, letter, weight),
+        )
+
+
+def _write_reweight_header(cur, plant: str, order: str, material: str, *, source: str,
+                          default_basis: str, reviewed: bool, reviewed_by, reviewed_at,
+                          reviewed_quantity, actor: str) -> None:
+    """Unconditional header UPDATE -- every planner-write call here is a
+    deliberate, one-shot mutation (never an idempotent ingest re-run), so
+    `updated_at`/`xmin` bump on every call, the same way
+    `db.resync_order_attributes` bumps `orders.xmin` unconditionally for
+    every row it touches (root CLAUDE.md's `_ADMIN_WRITE_OPERATIONS` note).
+    A caller that wants a field left alone passes the header's own current
+    value back in (see `_resolve_review_stamp`)."""
+    cur.execute(
+        """
+        UPDATE order_distribution
+           SET source = %s, default_basis = %s, reviewed = %s, reviewed_by = %s,
+               reviewed_at = %s, reviewed_quantity = %s, updated_by = %s, updated_at = now()
+         WHERE plant = %s AND production_order = %s AND material_number = %s
+        """,
+        (source, default_basis, reviewed, reviewed_by, reviewed_at, reviewed_quantity, actor,
+         plant, order, material),
+    )
+
+
+def _resolve_review_stamp(header: dict, requested_reviewed, actor: str):
+    """`reviewed?` in the SS5.5 body is optional -- when omitted (`None`),
+    every reviewed-related column is passed back through unchanged; when
+    given, it stamps `reviewed_by`/`reviewed_at`/`reviewed_quantity` from the
+    caller's identity and the header's CURRENT `order_quantity`."""
+    if requested_reviewed is None:
+        return (header["reviewed"], header["reviewed_by"], header["reviewed_at"], header["reviewed_quantity"])
+    reviewed = bool(requested_reviewed)
+    reviewed_by = actor if reviewed else None
+    reviewed_at = datetime.now(timezone.utc) if reviewed else None
+    reviewed_quantity = header["order_quantity"] if reviewed else None
+    return (reviewed, reviewed_by, reviewed_at, reviewed_quantity)
+
+
+def _fetch_children_by_machine(cur, plant: str, order: str, material: str) -> dict[str, dict]:
+    """Every LIVE child currently materialized for one header, keyed by
+    machine -- the "before" snapshot the dry-run preview and the
+    scheduled-removal check both need."""
+    cur.execute(
+        """
+        SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
+               o.scheduled_start, o.scheduled_end, o.notes, o.planning_status, o.planning_reason,
+               EXISTS(SELECT 1 FROM order_schedule_segments s WHERE s.order_id = o.id) AS has_segments
+          FROM orders o
+         WHERE o.plant = %s AND o.parent_production_order = %s AND o.material_number = %s
+        """,
+        (plant, order, material),
+    )
+    out = {}
+    for (oid, po, machine, qty, run_time, sched_start, sched_end, notes, plan_status,
+         plan_reason, has_segments) in cur.fetchall():
+        out[machine] = {
+            "id": oid, "production_order": po, "order_quantity": qty, "run_time": run_time,
+            "scheduled_start": sched_start, "scheduled_end": sched_end, "notes": notes,
+            "planning_status": plan_status, "planning_reason": plan_reason,
+            "has_segments": bool(has_segments),
+        }
+    return out
+
+
+def _materialize_reweight(cur, plant: str, order: str, material: str, header: dict,
+                          existing_shares: dict[str, dict], mat_attrs: dict,
+                          desired_weights: dict[str, Decimal], letters: dict[str, str], *,
+                          source: str, default_basis: str, reviewed, confirm_remove_scheduled: bool,
+                          dry_run: bool, actor: str, audit_action: str) -> dict:
+    """The ONE shared internal function behind `POST .../shares`, `POST
+    .../reset`, and `resolve`'s `repair` scope. `dry_run` is the only branch:
+    every line of materialization above it runs identically either way, so a
+    dry run's `plan` can never disagree with what the following real call
+    writes (SS5.5 step 8's parity requirement).
+
+    `desired_weights`/`letters` are the CALLER's full target share set
+    (already validated) -- this function only diffs it against what's
+    currently on file and writes/previews the difference; it never validates
+    payload shape (that's `_validate_share_payload`'s job) and never checks
+    `base_version` (that's `_check_base_version`'s job, run by every caller
+    before this).
+    """
+    parent_facts = _parent_facts_from_header(cur, plant, order, material, header)
+    child_rows, child_ids_by_machine, _zero_qty = _build_child_rows(
+        plant, order, material, parent_facts, desired_weights, letters, mat_attrs,
+    )
+    child_rows_by_machine = {c["machine"]: c for c in child_rows}
+
+    previous_child_ids = {s["child_id"] for s in existing_shares.values() if s.get("child_id")}
+    intended_child_ids = set(child_ids_by_machine.values())
+    removed_ids = previous_child_ids - intended_child_ids
+
+    # SS5.5 bullet 6: N->1 collapse detection. Only reachable when exactly
+    # one machine ends up with a positive share AND that same machine
+    # already carried a positive, living share BEFORE this call -- a
+    # brand-new 100% share (no prior positive weight) uses the anchor
+    # instead, per the bullet's own wording.
+    collapse = None
+    if len(child_ids_by_machine) == 1:
+        (surv_machine, new_bare_id), = child_ids_by_machine.items()
+        prev = existing_shares.get(surv_machine)
+        if (prev and prev.get("child_id") and prev["child_id"] != new_bare_id
+                and prev.get("weight") is not None and _dec(prev["weight"]) > 0):
+            collapse = {"machine": surv_machine, "old_child_id": prev["child_id"], "new_child_id": new_bare_id}
+
+    children_before = _fetch_children_by_machine(cur, plant, order, material)
+    _visibility_end, frozen_end = db._horizon_bounds_for_plant(cur, plant)
+
+    removed_details = []
+    for machine, before in children_before.items():
+        if before["id"] not in removed_ids:
+            continue
+        if collapse and before["id"] == collapse["old_child_id"]:
+            continue  # schedule survives via _collapse_to_survivor, not a destructive removal
+        frozen = bool(before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
+        removed_details.append({
+            "id": before["id"], "production_order": before["production_order"], "machine": machine,
+            "scheduled_start": before["scheduled_start"], "frozen": frozen,
+        })
+    scheduled_removed = [d for d in removed_details
+                         if d["scheduled_start"] is not None
+                         or children_before.get(d["machine"], {}).get("has_segments")]
+
+    if not dry_run and scheduled_removed and not confirm_remove_scheduled:
+        raise DistributionChildrenScheduled(scheduled_removed)
+
+    min_lot_size = mat_attrs.get("min_lot_size")
+    total_weight = sum(w for w in desired_weights.values() if w > 0) or Decimal(0)
+    plan_entries = []
+    for machine, letter in sorted(letters.items(), key=lambda kv: kv[1]):
+        weight = desired_weights.get(machine, Decimal(0))
+        before = children_before.get(machine)
+        after = child_rows_by_machine.get(machine)
+        qty_before = before["order_quantity"] if before else None
+        hours_before = before["run_time"] if before else None
+        qty_after = after["order_quantity"] if after else None
+        hours_after = after["run_time"] if after else None
+        if before is None and after is not None:
+            outcome = "new"
+        elif before is not None and after is None:
+            outcome = "removed"
+        elif before is not None and after is not None:
+            # Cross-type compare (DB NUMERIC arrives as Decimal, _build_child_rows'
+            # output is float) via a shared float() cast so a value that is
+            # merely re-typed, not actually changed, never misclassifies as resized.
+            qty_changed = (qty_before is None) != (qty_after is None) or (
+                qty_before is not None and abs(float(qty_before) - float(qty_after)) > 1e-9)
+            hours_changed = (hours_before is None) != (hours_after is None) or (
+                hours_before is not None and abs(float(hours_before) - float(hours_after)) > 1e-9)
+            outcome = "resized" if (qty_changed or hours_changed) else "unchanged"
+        else:
+            outcome = "unchanged"
+        effective_pct = float(weight / total_weight * 100) if total_weight else 0.0
+        scheduled = bool(before and (before["scheduled_start"] is not None or before["has_segments"]))
+        frozen = bool(before and before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
+        below_min_lot = bool(
+            min_lot_size and min_lot_size > 0 and qty_after is not None
+            and Decimal(0) < _dec(qty_after) < _dec(min_lot_size)
+        )
+        plan_entries.append({
+            "machine": machine, "letter": letter, "weight": float(weight),
+            "effective_pct": effective_pct, "qty_before": qty_before, "qty_after": qty_after,
+            "hours_before": hours_before, "hours_after": hours_after, "outcome": outcome,
+            "scheduled": scheduled, "frozen": frozen, "below_min_lot": below_min_lot,
+        })
+
+    if dry_run:
+        return {
+            "plan": plan_entries,
+            "removed_scheduled": [
+                {"id": d["id"], "production_order": d["production_order"], "machine": d["machine"],
+                 "scheduled_start": d["scheduled_start"], "frozen": d["frozen"]}
+                for d in scheduled_removed
+            ],
+            "base_version": header["xmin"],
+        }
+
+    # --- real write from here -------------------------------------------------
+    anchor_skip_ids = {collapse["new_child_id"]} if collapse else set()
+    real_new_ids = intended_child_ids - previous_child_ids - anchor_skip_ids
+    anchor = _compute_reweight_anchor(cur, plant, order, material, header.get("basic_start_date")) \
+        if real_new_ids else None
+
+    # `orders.upload_batch_id` is a UUID column -- `audit_action` (a
+    # human-readable admin_audit label, e.g. "reweight_shares") is NOT a
+    # valid value for it, so a fresh uuid4 is minted here, purely for this
+    # one write's child rows, distinct from the admin_audit `action` string.
+    upload_batch_id = str(uuid.uuid4())
+    parent_stub = {
+        "plant": plant, "production_order": order, "material_number": material,
+        "previous_child_ids": previous_child_ids | anchor_skip_ids,
+        "anchor": anchor, "child_rows": child_rows, "batch_id": upload_batch_id,
+        "letters": letters, "child_ids": child_ids_by_machine,
+    }
+    touched = _apply_children(cur, parent_stub)
+    if collapse:
+        _collapse_to_survivor(cur, collapse["old_child_id"], collapse["new_child_id"])
+    superseded = previous_child_ids - intended_child_ids
+    deleted = _delete_superseded_children(cur, superseded)
+    _update_share_child_ids(cur, parent_stub)
+    _write_reweight_shares(cur, plant, order, material, letters, desired_weights)
+
+    reviewed_val, reviewed_by, reviewed_at, reviewed_quantity = _resolve_review_stamp(header, reviewed, actor)
+    _write_reweight_header(
+        cur, plant, order, material, source=source, default_basis=default_basis,
+        reviewed=reviewed_val, reviewed_by=reviewed_by, reviewed_at=reviewed_at,
+        reviewed_quantity=reviewed_quantity, actor=actor,
+    )
+    cur.execute(
+        "SELECT xmin::text::bigint FROM order_distribution WHERE plant=%s AND production_order=%s AND material_number=%s",
+        (plant, order, material),
+    )
+    new_xmin = cur.fetchone()[0]
+
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES "
+        "('order_distribution', %s, %s, %s)",
+        (audit_action, Jsonb({
+            "plant": plant, "production_order": order, "material_number": material,
+            "source": source, "children_upserted": touched, "children_deleted": deleted,
+            "collapse": collapse is not None,
+        }), actor),
+    )
+
+    if intended_child_ids:
+        cur.execute(
+            "SELECT id, production_order, machine, order_quantity, run_time, labor_hours, machine_hours,"
+            " scheduled_start, scheduled_end, basic_start_date, basic_finish_date, notes,"
+            " planning_status, planning_reason, distribution_letter, parent_production_order,"
+            " xmin::text::bigint"
+            " FROM orders WHERE id = ANY(%s)",
+            (sorted(intended_child_ids),),
+        )
+        children_out = [
+            {
+                "id": r[0], "production_order": r[1], "machine": r[2], "order_quantity": r[3],
+                "run_time": r[4], "labor_hours": r[5], "machine_hours": r[6],
+                "scheduled_start": r[7], "scheduled_end": r[8], "basic_start_date": r[9],
+                "basic_finish_date": r[10], "notes": r[11], "planning_status": r[12],
+                "planning_reason": r[13], "distribution_letter": r[14],
+                "parent_production_order": r[15], "base_version": r[16],
+            }
+            for r in cur.fetchall()
+        ]
+    else:
+        children_out = []
+    versions = {c["id"]: c["base_version"] for c in children_out}
+
+    previous_shares_out = [
+        {"machine": m, "letter": s.get("letter"), "weight": s.get("weight")}
+        for m, s in existing_shares.items()
+    ]
+
+    return {
+        "status": "ok",
+        "children": children_out,
+        "removed": sorted(superseded),
+        "previous_shares": previous_shares_out,
+        "versions": versions,
+        "base_version": new_xmin,
+    }
+
+
+def reweight_shares(plant: str, order: str, material: str, shares_input, base_version, *,
+                    reviewed=None, allow_stale: bool = False, confirm_remove_scheduled: bool = False,
+                    dry_run: bool = False, actor: str = "system") -> dict:
+    """`POST /distribution/{plant}/{order}/{material}/shares` (SS5.5). Opens
+    one connection, locks the header (and, implicitly, its shares/children
+    through that same transaction) `FOR UPDATE` in the SAME single-header
+    query shape `apply()`'s multi-header lock generalizes -- a concurrent
+    `apply()` ingest run locks in `ORDER BY plant, production_order,
+    material_number`, which a single-row lock trivially satisfies, so the two
+    can never deadlock each other.
+
+    For `dry_run=True`, no `conn.commit()` is ever called -- exiting the
+    `with _pool.connection()` block below rolls the transaction back,
+    releasing the `FOR UPDATE` lock immediately (SS5.5 step 8: "no lock held
+    past the read").
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        header = _lock_one_header(cur, plant, order, material)
+        if header is None:
+            raise DistributionHeaderNotFound(f"no distribution header at {plant}/{order}/{material}")
+        _check_base_version(header, base_version)
+
+        workcenter = _load_workcenter_for_plant(cur, plant, header["sap_workcenter"])
+        current_members = set(workcenter["members"]) if workcenter else set()
+        existing_shares = _load_one_header_shares(cur, plant, order, material)
+        mat_attrs = _load_one_material_attrs(cur, plant, material)
+
+        input_weights = _validate_share_payload(shares_input, existing_shares, current_members, allow_stale)
+        desired_weights = {m: Decimal(0) for m in existing_shares}
+        desired_weights.update(input_weights)
+        letters = _reweight_letters(existing_shares, set(desired_weights) | set(input_weights))
+
+        result = _materialize_reweight(
+            cur, plant, order, material, header, existing_shares, mat_attrs, desired_weights, letters,
+            source="manual", default_basis=header["default_basis"], reviewed=reviewed,
+            confirm_remove_scheduled=confirm_remove_scheduled, dry_run=dry_run, actor=actor,
+            audit_action="reweight_shares",
+        )
+        if not dry_run:
+            conn.commit()
+    return result
+
+
+def reset_one_header(plant: str, order: str, material: str, base_version, *,
+                     confirm_remove_scheduled: bool = False, dry_run: bool = False,
+                     actor: str = "system") -> dict:
+    """`POST /distribution/{plant}/reset`'s per-parent core (SS5.2's default
+    precedence, `source = 'default'`) -- shares the SAME
+    `_materialize_reweight` engine `reweight_shares` uses, just with the
+    desired weights computed from `service.compute_default_shares` instead of
+    a planner-typed payload. Raises the same `DistributionHeaderNotFound` /
+    `DistributionStaleVersion` / `DistributionChildrenScheduled` /
+    `ValueError` family; `reset_orders` (the bulk route entry point) catches
+    them per item."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        header = _lock_one_header(cur, plant, order, material)
+        if header is None:
+            raise DistributionHeaderNotFound(f"no distribution header at {plant}/{order}/{material}")
+        _check_base_version(header, base_version)
+
+        workcenter = _load_workcenter_for_plant(cur, plant, header["sap_workcenter"])
+        if workcenter is None:
+            raise ValueError(f"workcenter_missing: {header['sap_workcenter']!r} no longer exists in {plant!r}")
+        existing_shares = _load_one_header_shares(cur, plant, order, material)
+        mat_attrs = _load_one_material_attrs(cur, plant, material)
+
+        member_pairs = [(m, workcenter["member_weights"].get(m)) for m in workcenter["members"]]
+        default_shares, default_basis = service.compute_default_shares(mat_attrs, workcenter, member_pairs)
+        desired_weights = {m: Decimal(0) for m in existing_shares}
+        desired_weights.update({m: _dec(w) for m, w in default_shares.items()})
+        letters = _reweight_letters(existing_shares, set(workcenter["members"]))
+
+        review_required = workcenter.get("review_required", True)
+        reviewed_flag = not review_required
+
+        result = _materialize_reweight(
+            cur, plant, order, material, header, existing_shares, mat_attrs, desired_weights, letters,
+            source="default", default_basis=default_basis, reviewed=reviewed_flag,
+            confirm_remove_scheduled=confirm_remove_scheduled, dry_run=dry_run, actor=actor,
+            audit_action="reset_shares",
+        )
+        if not dry_run:
+            conn.commit()
+    return result
+
+
+def review_orders(plant: str, items: list[dict], reviewed: bool, actor: str = "system") -> dict:
+    """`POST /distribution/{plant}/review` (SS5.5/SS7 table, SS5.7's "review
+    acknowledges wc_changed implicitly"). Per-item: stamps
+    `reviewed`/`reviewed_by`/`reviewed_at`/`reviewed_quantity` (=
+    `order_quantity` at the moment of review) from the caller's identity.
+    Does NOT clear `sap_facts.previous_workcenter` -- SS5.7 pins that only a
+    re-weight or reset (an actual materialization) acknowledges `wc_changed`
+    by clearing it; a plain review only stops the header showing as
+    unreviewed. One partial-success pass over `items`: an individual stale/
+    not-found item is recorded in its own result and does not abort the rest
+    of the batch (each header is an independent row, locked and updated
+    within the same transaction one at a time)."""
+    results = []
+    ok_count = 0
+    with _pool.connection() as conn, conn.cursor() as cur:
+        for item in items:
+            order = item.get("production_order")
+            material = item.get("material_number")
+            base_version = item.get("base_version")
+            header = _lock_one_header(cur, plant, order, material)
+            if header is None:
+                results.append({"production_order": order, "material_number": material, "status": "not_found"})
+                continue
+            try:
+                _check_base_version(header, base_version)
+            except DistributionStaleVersion as exc:
+                results.append({"production_order": order, "material_number": material,
+                                "status": "stale", "base_version": exc.base_version})
+                continue
+            cur.execute(
+                """
+                UPDATE order_distribution
+                   SET reviewed = %s, reviewed_by = %s, reviewed_at = now(),
+                       reviewed_quantity = order_quantity, updated_by = %s, updated_at = now()
+                 WHERE plant = %s AND production_order = %s AND material_number = %s
+                """,
+                (bool(reviewed), actor, actor, plant, order, material),
+            )
+            cur.execute(
+                "SELECT xmin::text::bigint FROM order_distribution"
+                " WHERE plant=%s AND production_order=%s AND material_number=%s",
+                (plant, order, material),
+            )
+            new_xmin = cur.fetchone()[0]
+            results.append({"production_order": order, "material_number": material,
+                            "status": "ok", "base_version": new_xmin})
+            ok_count += 1
+        if ok_count:
+            cur.execute(
+                "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES "
+                "('order_distribution', 'review', %s, %s)",
+                (Jsonb({"plant": plant, "reviewed": bool(reviewed), "count": ok_count}), actor),
+            )
+        conn.commit()
+    return {"results": results}
+
+
+def reset_orders(plant: str, items: list[dict], *, confirm_remove_scheduled: bool = False,
+                 dry_run: bool = False, actor: str = "system") -> dict:
+    """`POST /distribution/{plant}/reset`'s bulk entry point: one
+    `reset_one_header` call per requested `{production_order, material_number,
+    base_version}` item, each independently succeeding/failing (a
+    `children_scheduled` guard on one parent never blocks the others in the
+    same request)."""
+    results = []
+    for item in items:
+        order = item.get("production_order")
+        material = item.get("material_number")
+        base_version = item.get("base_version")
+        try:
+            result = reset_one_header(
+                plant, order, material, base_version,
+                confirm_remove_scheduled=confirm_remove_scheduled, dry_run=dry_run, actor=actor,
+            )
+        except DistributionHeaderNotFound:
+            results.append({"production_order": order, "material_number": material, "status": "not_found"})
+            continue
+        except DistributionStaleVersion as exc:
+            results.append({"production_order": order, "material_number": material,
+                            "status": "stale", "base_version": exc.base_version})
+            continue
+        except DistributionChildrenScheduled as exc:
+            results.append({"production_order": order, "material_number": material,
+                            "status": "children_scheduled", "children": exc.children})
+            continue
+        except ValueError as exc:
+            results.append({"production_order": order, "material_number": material,
+                            "status": "error", "message": str(exc)})
+            continue
+        results.append({"production_order": order, "material_number": material,
+                        "status": "ok", **result})
+    return {"results": results}
+
+
+def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[dict] | None = None,
+                     only_unreviewed: bool = True, confirm_remove_scheduled: bool = False,
+                     actor: str = "system") -> dict:
+    """`POST /distribution/{plant}/reapply-defaults` (admin). Bulk-applies
+    SS5.2's default-share precedence to every matching header via the same
+    `reset_one_header` core (no `base_version` gate here -- this is an
+    explicit, admin-initiated bulk sweep, not a single planner's edit; every
+    touched header's `xmin` bumps unconditionally per `_write_reweight_header`,
+    the same "bump plant-wide" pattern `db.resync_order_attributes` uses).
+
+    Candidates: `orders` (an explicit list of {production_order,
+    material_number}) when given; else every header in `plant` (optionally
+    filtered to `workcenter`) that is `NOT reviewed` when `only_unreviewed`
+    (the default and, per SS7, the only mode this route documents), or every
+    matching header when `only_unreviewed` is explicitly False."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        if orders:
+            keys = [(o.get("production_order"), o.get("material_number")) for o in orders]
+        else:
+            where = ["plant = %s"]
+            params: list = [plant]
+            if workcenter:
+                where.append("sap_workcenter = %s")
+                params.append(workcenter)
+            if only_unreviewed:
+                where.append("reviewed = FALSE")
+            cur.execute(
+                f"SELECT production_order, material_number FROM order_distribution WHERE {' AND '.join(where)}",
+                params,
+            )
+            keys = [(r[0], r[1]) for r in cur.fetchall()]
+
+    counters = {"headers_processed": 0, "children_upserted": 0, "children_deleted": 0,
+               "skipped": 0, "children_scheduled": 0}
+    for order, material in keys:
+        try:
+            result = reset_one_header(
+                plant, order, material, base_version=None,
+                confirm_remove_scheduled=confirm_remove_scheduled, dry_run=False, actor=actor,
+            )
+        except DistributionHeaderNotFound:
+            counters["skipped"] += 1
+            continue
+        except DistributionChildrenScheduled:
+            counters["children_scheduled"] += 1
+            continue
+        except ValueError:
+            counters["skipped"] += 1
+            continue
+        counters["headers_processed"] += 1
+        counters["children_upserted"] += len(result.get("children", []))
+        counters["children_deleted"] += len(result.get("removed", []))
+    return counters
+
+
+def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
+    """`resolve` scope `wc_codes` (SS5.6 bullet 1): plain orders whose
+    `machine` equals a `sap_workcenter` code get run through the SAME
+    `plan()`/`apply()` ingest machinery a fresh upload would use -- this
+    function builds one synthetic ingest row per candidate plain order (from
+    the row's OWN current column values) and feeds it through `plan()`/
+    `apply()` unchanged, rather than re-implementing SS5.1-SS5.4's
+    resolve/classify/materialize logic a second time."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.id, o.production_order, o.material_number, o.material_description, o.machine,
+                   o.basic_start_date, o.basic_finish_date, o.run_time, o.color, o.order_quantity,
+                   o.form_size, o.firming_indicator, o.planned_order_initial_quantity, o.reduced_quantity,
+                   o.order_category, o.order_type, o.bom_alternative, o.bom_usage, o.labor_hours,
+                   o.machine_hours, o.no_of_fte
+              FROM orders o
+             WHERE o.plant = %s AND o.parent_production_order IS NULL
+               AND o.machine IN (SELECT sap_workcenter FROM sap_workcenter WHERE plant = %s)
+            """,
+            (plant, plant),
+        )
+        candidates = cur.fetchall()
+        if not candidates:
+            return {"headers_created": 0, "children_upserted": 0, "single_rewrites": 0,
+                    "repaired": 0, "skipped": 0}
+
+        rows = [
+            {
+                "production_order": r[1], "material_number": r[2], "material_description": r[3],
+                "machine": r[4], "plant": plant, "basic_start_date": r[5], "basic_finish_date": r[6],
+                "run_time": r[7], "color": r[8], "order_quantity": r[9], "form_size": r[10],
+                "firming_indicator": r[11], "planned_order_initial_quantity": r[12],
+                "reduced_quantity": r[13], "order_category": r[14], "order_type": r[15],
+                "bom_alternative": r[16], "bom_usage": r[17], "labor_hours": r[18],
+                "machine_hours": r[19], "no_of_fte": r[20],
+            }
+            for r in candidates
+        ]
+        ids_by_key = {(r[1], r[2]): r[0] for r in candidates}
+
+        batch_id = str(uuid.uuid4())
+        rows_out, plan_structure, warnings = plan(rows, batch_id, conn=conn)
+        single_rewrites = int(warnings.get("single_rewrites", 0))
+        distributed_keys = set(plan_structure.get("parents", {}).keys())
+        skipped = len(candidates) - single_rewrites - len(distributed_keys)
+
+        if dry_run:
+            return {"headers_created": len(distributed_keys), "children_upserted": 0,
+                    "single_rewrites": single_rewrites, "repaired": 0, "skipped": max(skipped, 0)}
+
+        # Single-mode rewrites: rows_out carries the caller's normal upsert
+        # shape, but this scope isn't going through db.upsert_orders' chunked
+        # path -- apply the machine rewrite directly, guarded the same way
+        # aggregate_to_detail.md SS5.6 calls for.
+        for row in rows_out:
+            key = (row.get("production_order"), row.get("material_number"))
+            oid = ids_by_key.get(key)
+            if oid is None or key in distributed_keys:
+                continue
+            cur.execute(
+                "UPDATE orders SET machine = %s, updated_at = NOW() WHERE id = %s AND machine IS DISTINCT FROM %s",
+                (row.get("machine"), oid, row.get("machine")),
+            )
+
+        apply_result = {"headers_created": 0, "children_upserted": 0}
+        if plan_structure.get("parents"):
+            apply_result = apply(plan_structure, batch_id, conn, actor=actor)
+        else:
+            conn.commit()
+
+    return {
+        "headers_created": apply_result.get("headers_created", 0),
+        "children_upserted": apply_result.get("children_upserted", 0),
+        "single_rewrites": single_rewrites,
+        "repaired": 0,
+        "skipped": max(skipped, 0),
+    }
+
+
+def _resolve_machines(plant: str, workcenter: str, actor: str, dry_run: bool) -> dict:
+    """`resolve` scope `machines` (SS5.6 bullet 2, opt-in): a plain order
+    already sitting on one of `workcenter`'s CURRENT member machines gets a
+    brand-new header with 100 % weight on its current machine -- schedule
+    PRESERVED, since the plain order's bare id IS the winning share's child
+    id already (a 100 % share never gets a letter prefix, SS5.3), so nothing
+    about the `orders` row itself needs to move; it only gains
+    `parent_production_order`/`distribution_letter` so the read paths
+    recognize it as a distributed child from now on."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        workcenter_row = _load_workcenter_for_plant(cur, plant, workcenter)
+        if workcenter_row is None or not workcenter_row["members"]:
+            return {"headers_created": 0, "children_upserted": 0, "single_rewrites": 0,
+                    "repaired": 0, "skipped": 0}
+        members = workcenter_row["members"]
+        cur.execute(
+            """
+            SELECT o.id, o.production_order, o.material_number, o.machine, o.order_quantity, o.run_time,
+                   o.basic_start_date, o.basic_finish_date, o.firming_indicator
+              FROM orders o
+              LEFT JOIN order_distribution od
+                ON od.plant = o.plant AND od.production_order = o.production_order
+               AND od.material_number = o.material_number
+             WHERE o.plant = %s AND o.parent_production_order IS NULL
+               AND o.machine = ANY(%s) AND od.production_order IS NULL
+            """,
+            (plant, members),
+        )
+        candidates = cur.fetchall()
+        if not candidates:
+            return {"headers_created": 0, "children_upserted": 0, "single_rewrites": 0,
+                    "repaired": 0, "skipped": 0}
+
+        if dry_run:
+            return {"headers_created": len(candidates), "children_upserted": 0,
+                    "single_rewrites": 0, "repaired": 0, "skipped": 0}
+
+        letters = service.assign_letters(sorted(members))
+        resolve_batch_id = str(uuid.uuid4())  # order_distribution.last_batch_id is UUID-typed
+        headers_created = 0
+        for oid, order, material, machine, qty, run_time, bs, bf, firming in candidates:
+            shares = {m: (Decimal(100) if m == machine else Decimal(0)) for m in members}
+            parent = {
+                "plant": plant, "production_order": order, "material_number": material,
+                "sap_workcenter": workcenter, "parent_facts": {
+                    "order_quantity": qty, "run_time": run_time, "basic_start_date": bs,
+                    "basic_finish_date": bf, "firming_indicator": firming,
+                },
+                "default_basis": "workcenter_weights", "is_new_header": True, "letters": letters,
+                "shares": shares, "runtime_defaulted": False,
+            }
+            inserted = _insert_new_header(cur, parent, batch_id=resolve_batch_id)
+            if not inserted:
+                continue
+            cur.execute(
+                "UPDATE order_distribution SET source = 'manual', reviewed = FALSE"
+                " WHERE plant = %s AND production_order = %s AND material_number = %s",
+                (plant, order, material),
+            )
+            _write_shares(cur, parent)
+            cur.execute(
+                "UPDATE order_distribution_share SET child_id = %s"
+                " WHERE plant = %s AND production_order = %s AND material_number = %s AND machine = %s",
+                (oid, plant, order, material, machine),
+            )
+            cur.execute(
+                "UPDATE orders SET parent_production_order = %s, distribution_letter = NULL,"
+                " updated_at = NOW() WHERE id = %s",
+                (order, oid),
+            )
+            headers_created += 1
+        conn.commit()
+    return {"headers_created": headers_created, "children_upserted": headers_created,
+            "single_rewrites": 0, "repaired": 0, "skipped": len(candidates) - headers_created}
+
+
+def _repair_one_header(cur, plant: str, order: str, material: str, header: dict) -> dict:
+    """`resolve` scope `repair`'s per-header core (SS5.6 bullet 3 / SS5's
+    crash-window recovery): re-materialize from the header's CURRENT,
+    non-purged shares and facts -- explicitly excluding purged shares from
+    both weights and letters, so a purged share's child is NEVER recreated
+    (SS5.7's guarantee, which the more general `_replan_from_current_header`
+    used by `apply()`'s own re-check branch does not enforce, since that
+    branch never needs to -- ingest's `_write_shares` for an existing header
+    only revives `purged_at`, it never assigns a fresh positive weight to a
+    just-revived share)."""
+    all_shares = _load_one_header_shares(cur, plant, order, material)
+    live_shares = {m: s for m, s in all_shares.items() if s.get("purged_at") is None}
+    desired_weights = {m: _dec(s.get("weight")) for m, s in live_shares.items()}
+    letters = {m: s["letter"] for m, s in live_shares.items()}
+    mat_attrs = _load_one_material_attrs(cur, plant, material)
+
+    result = _materialize_reweight(
+        cur, plant, order, material, header, all_shares, mat_attrs, desired_weights, letters,
+        source=header["source"], default_basis=header["default_basis"], reviewed=None,
+        confirm_remove_scheduled=True, dry_run=False, actor="system", audit_action="resolve_repair",
+    )
+    return {"children_upserted": len(result.get("children", [])), "children_deleted": len(result.get("removed", []))}
+
+
+def _resolve_repair(plant: str, dry_run: bool) -> dict:
+    """`resolve` scope `repair`: every header currently classified
+    `incomplete` (SS5.7) gets re-materialized via `_repair_one_header`."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        headers = _fetch_header_rows(cur, plant)
+        _hydrate_headers(cur, plant, headers)
+        incomplete = [h for h in headers if "incomplete" in h.get("statuses", set())]
+
+        if dry_run:
+            return {"headers_created": 0, "children_upserted": 0, "single_rewrites": 0,
+                    "repaired": len(incomplete), "skipped": 0}
+
+        repaired = 0
+        children_upserted = 0
+        for h in incomplete:
+            po, mat = h["production_order"], h["material_number"]
+            current = _lock_one_header(cur, plant, po, mat)
+            if current is None:
+                continue
+            result = _repair_one_header(cur, plant, po, mat, current)
+            children_upserted += result["children_upserted"]
+            repaired += 1
+        conn.commit()
+    return {"headers_created": 0, "children_upserted": children_upserted, "single_rewrites": 0,
+            "repaired": repaired, "skipped": len(incomplete) - repaired}
+
+
+def resolve(plant: str, scope: str, *, workcenter: str | None = None, dry_run: bool = False,
+           actor: str = "system") -> dict:
+    """`POST /distribution/{plant}/resolve` (admin, SS5.6). Dispatches to one
+    of the three scope-specific helpers above; every scope shares the
+    `{headers_created, children_upserted, single_rewrites, repaired, skipped}`
+    response shape (a scope simply leaves the fields it doesn't touch at 0)."""
+    if scope == "wc_codes":
+        return _resolve_wc_codes(plant, actor, dry_run)
+    if scope == "machines":
+        if not workcenter:
+            raise ValueError("workcenter is required for the 'machines' resolve scope")
+        return _resolve_machines(plant, workcenter, actor, dry_run)
+    if scope == "repair":
+        return _resolve_repair(plant, dry_run)
+    raise ValueError("scope must be one of 'wc_codes', 'machines', 'repair'")

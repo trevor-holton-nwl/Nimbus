@@ -2,22 +2,34 @@
 NIMBUS 2.0 — Order Distribution domain routes: SAP aggregate work center <->
 NIMBUS per-machine sub-order bridge.
 
-P1 (this file): the FIRST route in this brand-new domain --
-`PUT /distribution/{plant}/workcenters/{wc}` -- establishing the guard/
+P1: the FIRST route in this brand-new domain --
+`PUT /distribution/{plant}/workcenters/{wc}` -- established the guard/
 error-handling shape every later route in `backend/distribution/` copies.
 Modeled directly on `backend/setup/routes.py` (the `setup_compatible`
 precedent aggregate_to_detail.md §4.3 names explicitly):
   - `require_api_key` + `require_admin` dependencies for an admin-gated write.
   - A local `_distribution_plant_guard` that calls `md._assert_plant_allowed`
     and catches `md.PlantNotAllowed` (-> 403) and `ValueError` (-> 400) --
-    there is NO global exception handler in this app; every route does this
-    itself (see backend/setup/routes.py's `_setup_plant_guard`).
+    there is NO global exception handler in this app for THAT choice (403 vs
+    400); every route does it itself (see backend/setup/routes.py's
+    `_setup_plant_guard`). `brain.py` DOES have a global handler that reshapes
+    whatever HTTPException a route raises into the app's `{status, message,
+    detail}` envelope -- see the note on `_distribution_conflict` below about
+    a bug in that reshaping this session fixed.
   - A per-route `except ValueError: raise HTTPException(400, ...)` pattern
     for the data-layer's own validation errors, via `_distribution_error`.
 
-No `base_version`/optimistic-concurrency (`xmin`) check on this route --
-aggregate_to_detail.md doesn't call for one here (that token belongs to the
-`order_distribution` header table, P2+); see data.py's module docstring.
+No `base_version`/optimistic-concurrency (`xmin`) check on `save_workcenter` --
+aggregate_to_detail.md doesn't call for one there (that token belongs to the
+`order_distribution` header table; see data.py's module docstring).
+
+P2-6/P2-7 added the five read-only routes. P2-8/P2-9 (below) added the three
+planner writes (`shares`/`review`/`reset`, `require_api_key + require_authenticated`
++ plant scope, deliberately NOT admin-gated) and two admin writes
+(`reapply-defaults`/`resolve`, admin-gated like `save_workcenter`) -- all five
+are thin route-level wiring over `backend/distribution/data.py`'s
+`reweight_shares`/`review_orders`/`reset_orders`/`reapply_defaults`/`resolve`,
+which do the actual validation/materialization/writing.
 """
 import csv
 import io
@@ -229,4 +241,154 @@ def get_distribution_detail(plant: str, order: str, material: str, response: Res
     result = distribution_data.get_header_detail(plant, order, material)
     if result is None:
         raise HTTPException(status_code=404, detail="Order distribution header not found")
+    return result
+
+
+# =====================================================================
+# P2-8/P2-9 -- planner writes (shares/review/reset) + admin writes
+# (reapply-defaults/resolve), aggregate_to_detail.md SS5.5-SS5.7 / SS7.
+#
+# Planner writes: `require_api_key + require_authenticated` + plant scope --
+# the setup-write precedent (backend/setup/routes.py's `save_setup_line_state`
+# etc.), NOT `require_admin` (SS7: "All three planner writes use the
+# identical guard set"). Admin writes add `require_admin` on top, following
+# the same `require_api_key + require_authenticated + require_admin` shape
+# `save_workcenter` above and every admin route in backend/setup/routes.py use.
+# =====================================================================
+
+def _distribution_conflict(exc) -> HTTPException:
+    """Structured 409 body for the two named conflicts SS5.5 defines --
+    `stale` (base_version mismatch) and `children_scheduled` (a destructive
+    removal without `confirm_remove_scheduled`), mirroring `_distribution_error`'s
+    `{code, message}` shape for 400s."""
+    if isinstance(exc, distribution_data.DistributionStaleVersion):
+        return HTTPException(status_code=409, detail={
+            "code": "stale", "message": "This distribution was changed since you loaded it.",
+            "base_version": exc.base_version,
+        })
+    return HTTPException(status_code=409, detail={
+        "code": "children_scheduled",
+        "message": "Removing these shares would discard scheduled sub-orders.",
+        "children": exc.children,
+    })
+
+
+@router.post("/distribution/{plant}/{order}/{material}/shares",
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def save_distribution_shares(plant: str, order: str, material: str, request: Request,
+                             body: dict = Body(default={}),
+                             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                             actor: str = Depends(auth.require_authenticated)):
+    """Planner re-weight (SS5.5). Body: `{shares:[{machine, weight}],
+    base_version, reviewed?, allow_stale?, confirm_remove_scheduled?,
+    dry_run?}`. `dry_run: true` runs the identical materialization and
+    returns the SS5.5 step 8 preview (`{plan, removed_scheduled,
+    base_version}`) without writing; otherwise `{status, children, removed,
+    previous_shares, versions, base_version}`."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, production_order=order, material_number=material)
+    dry_run = bool(body.get("dry_run"))
+    try:
+        result = distribution_data.reweight_shares(
+            plant, order, material, body.get("shares"), body.get("base_version"),
+            reviewed=body.get("reviewed"), allow_stale=bool(body.get("allow_stale")),
+            confirm_remove_scheduled=bool(body.get("confirm_remove_scheduled")),
+            dry_run=dry_run, actor=actor,
+        )
+    except distribution_data.DistributionHeaderNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (distribution_data.DistributionStaleVersion, distribution_data.DistributionChildrenScheduled) as exc:
+        raise _distribution_conflict(exc) from exc
+    except ValueError as exc:
+        raise _distribution_error(exc) from exc
+    if not dry_run:
+        _set_admin_log_details(request, children=len(result.get("children", [])),
+                               removed=len(result.get("removed", [])))
+    return result
+
+
+@router.post("/distribution/{plant}/review",
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def review_distribution_orders(plant: str, request: Request, body: dict = Body(default={}),
+                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                               actor: str = Depends(auth.require_authenticated)):
+    """Bulk review acknowledgement (SS5.5/SS7). Body: `{orders:[{production_order,
+    material_number, base_version}], reviewed}` -> per-item results; does NOT
+    clear `sap_facts.previous_workcenter` (SS5.7 -- that needs a materializing
+    re-weight or reset)."""
+    _distribution_plant_guard(plant, allowed_plants)
+    orders = body.get("orders")
+    if not isinstance(orders, list) or not orders:
+        raise HTTPException(status_code=400, detail="orders must be a non-empty list")
+    _set_admin_log_details(request, plant=plant, count=len(orders), reviewed=bool(body.get("reviewed")))
+    result = distribution_data.review_orders(plant, orders, bool(body.get("reviewed")), actor=actor)
+    return result
+
+
+@router.post("/distribution/{plant}/reset",
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def reset_distribution_orders(plant: str, request: Request, body: dict = Body(default={}),
+                              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                              actor: str = Depends(auth.require_authenticated)):
+    """Bulk reset-to-work-center-defaults (SS5.2 precedence, `source =
+    'default'`). Body: `{orders:[{production_order, material_number,
+    base_version}], confirm_remove_scheduled?, dry_run?}` -> per-item
+    results, same shape `shares` returns per item (or `dry_run`'s preview
+    shape per item)."""
+    _distribution_plant_guard(plant, allowed_plants)
+    orders = body.get("orders")
+    if not isinstance(orders, list) or not orders:
+        raise HTTPException(status_code=400, detail="orders must be a non-empty list")
+    _set_admin_log_details(request, plant=plant, count=len(orders))
+    result = distribution_data.reset_orders(
+        plant, orders, confirm_remove_scheduled=bool(body.get("confirm_remove_scheduled")),
+        dry_run=bool(body.get("dry_run")), actor=actor,
+    )
+    return result
+
+
+@router.post("/distribution/{plant}/reapply-defaults",
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def reapply_distribution_defaults(plant: str, request: Request, body: dict = Body(default={}),
+                                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                                  actor: str = Depends(auth.require_authenticated)):
+    """Admin bulk sweep (SS7): re-applies SS5.2's default-share precedence to
+    every matching `NOT reviewed` header (or an explicit `orders` list),
+    bumping `xmin` plant-wide the same way `POST /master-data/resync-order-attributes`
+    does. Body: `{workcenter?, orders?, only_unreviewed: true,
+    confirm_remove_scheduled?}` -> counts."""
+    _distribution_plant_guard(plant, allowed_plants)
+    _set_admin_log_details(request, plant=plant, workcenter=body.get("workcenter"))
+    try:
+        result = distribution_data.reapply_defaults(
+            plant, workcenter=body.get("workcenter"), orders=body.get("orders"),
+            only_unreviewed=body.get("only_unreviewed", True),
+            confirm_remove_scheduled=bool(body.get("confirm_remove_scheduled")), actor=actor,
+        )
+    except ValueError as exc:
+        raise _distribution_error(exc) from exc
+    _set_admin_log_details(request, **result)
+    return result
+
+
+@router.post("/distribution/{plant}/resolve",
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def resolve_distribution_orders(plant: str, request: Request, body: dict = Body(default={}),
+                                allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                                actor: str = Depends(auth.require_authenticated)):
+    """Admin recovery/backfill sweep (SS5.6). Body: `{scope: 'wc_codes' |
+    'machines' | 'repair', workcenter?, dry_run?}` -> `{headers_created,
+    children_upserted, single_rewrites, repaired, skipped}`."""
+    _distribution_plant_guard(plant, allowed_plants)
+    scope = body.get("scope") or "wc_codes"
+    _set_admin_log_details(request, plant=plant, scope=scope, workcenter=body.get("workcenter"))
+    try:
+        result = distribution_data.resolve(
+            plant, scope, workcenter=body.get("workcenter"), dry_run=bool(body.get("dry_run")), actor=actor,
+        )
+    except ValueError as exc:
+        raise _distribution_error(exc) from exc
+    _set_admin_log_details(request, **result)
     return result

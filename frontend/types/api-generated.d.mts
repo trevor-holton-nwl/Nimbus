@@ -1225,6 +1225,124 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/distribution/{plant}/{order}/{material}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Save Distribution Shares
+         * @description Planner re-weight (SS5.5). Body: `{shares:[{machine, weight}],
+         *     base_version, reviewed?, allow_stale?, confirm_remove_scheduled?,
+         *     dry_run?}`. `dry_run: true` runs the identical materialization and
+         *     returns the SS5.5 step 8 preview (`{plan, removed_scheduled,
+         *     base_version}`) without writing; otherwise `{status, children, removed,
+         *     previous_shares, versions, base_version}`.
+         */
+        post: operations["save_distribution_shares_distribution__plant___order___material__shares_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Review Distribution Orders
+         * @description Bulk review acknowledgement (SS5.5/SS7). Body: `{orders:[{production_order,
+         *     material_number, base_version}], reviewed}` -> per-item results; does NOT
+         *     clear `sap_facts.previous_workcenter` (SS5.7 -- that needs a materializing
+         *     re-weight or reset).
+         */
+        post: operations["review_distribution_orders_distribution__plant__review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Distribution Orders
+         * @description Bulk reset-to-work-center-defaults (SS5.2 precedence, `source =
+         *     'default'`). Body: `{orders:[{production_order, material_number,
+         *     base_version}], confirm_remove_scheduled?, dry_run?}` -> per-item
+         *     results, same shape `shares` returns per item (or `dry_run`'s preview
+         *     shape per item).
+         */
+        post: operations["reset_distribution_orders_distribution__plant__reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/reapply-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reapply Distribution Defaults
+         * @description Admin bulk sweep (SS7): re-applies SS5.2's default-share precedence to
+         *     every matching `NOT reviewed` header (or an explicit `orders` list),
+         *     bumping `xmin` plant-wide the same way `POST /master-data/resync-order-attributes`
+         *     does. Body: `{workcenter?, orders?, only_unreviewed: true,
+         *     confirm_remove_scheduled?}` -> counts.
+         */
+        post: operations["reapply_distribution_defaults_distribution__plant__reapply_defaults_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/distribution/{plant}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Distribution Orders
+         * @description Admin recovery/backfill sweep (SS5.6). Body: `{scope: 'wc_codes' |
+         *     'machines' | 'repair', workcenter?, dry_run?}` -> `{headers_created,
+         *     children_upserted, single_rewrites, repaired, skipped}`.
+         */
+        post: operations["resolve_distribution_orders_distribution__plant__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit/log": {
         parameters: {
             query?: never;
@@ -5266,6 +5384,203 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_distribution_shares_distribution__plant___order___material__shares_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+                order: string;
+                material: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_distribution_orders_distribution__plant__review_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reset_distribution_orders_distribution__plant__reset_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reapply_distribution_defaults_distribution__plant__reapply_defaults_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_distribution_orders_distribution__plant__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

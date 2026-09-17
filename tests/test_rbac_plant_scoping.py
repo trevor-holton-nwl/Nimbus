@@ -426,3 +426,328 @@ def test_distribution_unresolved_maps_blank_plant_to_400_not_500(scoped_client):
     response = scoped_client.get("/distribution/%20/unresolved")
     assert response.status_code == 400
     assert "plant is required" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# P2-8/P2-9 planner writes -- POST /distribution/{plant}/{order}/{material}/shares,
+# /review, /reset (aggregate_to_detail.md SS7: `require_api_key +
+# require_authenticated` + plant scope, deliberately NOT require_admin -- "All
+# three planner writes use the identical guard set" is SS7's own wording) --
+# and admin writes -- POST /distribution/{plant}/reapply-defaults, /resolve
+# (require_api_key + require_authenticated + require_admin, the P1
+# workcenters-route precedent above).
+# ---------------------------------------------------------------------------
+import backend.distribution.data as distribution_data  # noqa: E402
+
+
+@pytest.fixture
+def distribution_planner_client():
+    """An authenticated, non-admin caller for DIST_PLANT_A only -- DB-free
+    (require_api_key overridden, no require_admin override needed since
+    these routes never depend on it)."""
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [DIST_PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "dist.planner@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    try:
+        yield TestClient(brain.api)
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def _distribution_planner_route_paths():
+    return {
+        "/distribution/{plant}/{order}/{material}/shares",
+        "/distribution/{plant}/review",
+        "/distribution/{plant}/reset",
+    }
+
+
+def test_distribution_planner_writes_are_not_admin_gated():
+    """Locked product decision (SS7): the three planner writes must stay
+    reachable by any authenticated, in-scope, API-key-bearing caller -- a
+    `require_admin` dependency creeping onto any of them would lock
+    non-admin planners out of Adjust shares / Reviewed / Reset."""
+    by_path = {}
+    for r in iter_route_contexts(brain.api.routes):
+        p = getattr(r, "path", None)
+        if p in _distribution_planner_route_paths():
+            by_path[p] = r
+    assert set(by_path) == _distribution_planner_route_paths()
+    for path, route in by_path.items():
+        dep_names = {dep.call.__name__ for dep in route.dependant.dependencies}
+        assert "require_admin" not in dep_names, f"{path} must not be require_admin-gated"
+        assert "require_api_key" in dep_names, f"{path} must require_api_key (SS7: deletes/creates rows)"
+
+
+def test_distribution_shares_rejects_an_out_of_scope_plant(distribution_planner_client):
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_B}/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+    )
+    assert response.status_code == 403
+
+
+def test_distribution_shares_maps_blank_plant_to_400_not_500(distribution_planner_client):
+    response = distribution_planner_client.post(
+        "/distribution/%20/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+    )
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_shares_allows_a_planner_through_to_the_data_layer(distribution_planner_client, monkeypatch):
+    calls = []
+
+    def fake_reweight_shares(plant, order, material, shares, base_version, **kwargs):
+        calls.append({"plant": plant, "order": order, "material": material})
+        return {"status": "ok", "children": [], "removed": [], "previous_shares": [], "versions": {},
+                "base_version": 2}
+
+    monkeypatch.setattr(distribution_data, "reweight_shares", fake_reweight_shares)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+    )
+    assert response.status_code == 200
+    assert calls == [{"plant": DIST_PLANT_A, "order": "ORDER1", "material": "MAT1"}]
+
+
+def test_distribution_shares_maps_stale_version_to_409_with_structured_detail(distribution_planner_client, monkeypatch):
+    def fake_reweight_shares(*a, **k):
+        raise distribution_data.DistributionStaleVersion(7)
+
+    monkeypatch.setattr(distribution_data, "reweight_shares", fake_reweight_shares)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "stale"
+    assert detail["base_version"] == 7
+
+
+def test_distribution_shares_maps_children_scheduled_to_409_with_children_list(distribution_planner_client, monkeypatch):
+    def fake_reweight_shares(*a, **k):
+        raise distribution_data.DistributionChildrenScheduled(
+            [{"id": "x", "production_order": "A-ORDER1", "machine": "M1", "scheduled_start": None, "frozen": False}]
+        )
+
+    monkeypatch.setattr(distribution_data, "reweight_shares", fake_reweight_shares)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+        params={"confirm": "false"},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "children_scheduled"
+    assert detail["children"][0]["id"] == "x"
+
+
+def test_distribution_shares_maps_header_not_found_to_404(distribution_planner_client, monkeypatch):
+    def fake_reweight_shares(*a, **k):
+        raise distribution_data.DistributionHeaderNotFound("nope")
+
+    monkeypatch.setattr(distribution_data, "reweight_shares", fake_reweight_shares)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+    )
+    assert response.status_code == 404
+
+
+def test_distribution_review_rejects_an_out_of_scope_plant(distribution_planner_client):
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_B}/review",
+        json={"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}], "reviewed": True},
+    )
+    assert response.status_code == 403
+
+
+def test_distribution_review_maps_blank_plant_to_400_not_500(distribution_planner_client):
+    response = distribution_planner_client.post(
+        "/distribution/%20/review",
+        json={"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}], "reviewed": True},
+    )
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_review_rejects_an_empty_orders_list(distribution_planner_client):
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/review", json={"orders": [], "reviewed": True},
+    )
+    assert response.status_code == 400
+
+
+def test_distribution_review_allows_a_planner_through_to_the_data_layer(distribution_planner_client, monkeypatch):
+    calls = []
+
+    def fake_review_orders(plant, items, reviewed, actor=None):
+        calls.append({"plant": plant, "items": items, "reviewed": reviewed})
+        return {"results": [{"production_order": "O1", "material_number": "M1", "status": "ok", "base_version": 2}]}
+
+    monkeypatch.setattr(distribution_data, "review_orders", fake_review_orders)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/review",
+        json={"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}], "reviewed": True},
+    )
+    assert response.status_code == 200
+    assert calls[0]["plant"] == DIST_PLANT_A
+    assert calls[0]["reviewed"] is True
+
+
+def test_distribution_reset_rejects_an_out_of_scope_plant(distribution_planner_client):
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_B}/reset",
+        json={"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}]},
+    )
+    assert response.status_code == 403
+
+
+def test_distribution_reset_maps_blank_plant_to_400_not_500(distribution_planner_client):
+    response = distribution_planner_client.post(
+        "/distribution/%20/reset",
+        json={"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}]},
+    )
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_reset_allows_a_planner_through_to_the_data_layer(distribution_planner_client, monkeypatch):
+    calls = []
+
+    def fake_reset_orders(plant, items, **kwargs):
+        calls.append({"plant": plant, "items": items})
+        return {"results": [{"production_order": "O1", "material_number": "M1", "status": "ok"}]}
+
+    monkeypatch.setattr(distribution_data, "reset_orders", fake_reset_orders)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/reset",
+        json={"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}]},
+    )
+    assert response.status_code == 200
+    assert calls == [{"plant": DIST_PLANT_A, "items": [{"production_order": "O1", "material_number": "M1", "base_version": 1}]}]
+
+
+def _distribution_admin_route_paths():
+    return {"/distribution/{plant}/reapply-defaults", "/distribution/{plant}/resolve"}
+
+
+@pytest.fixture
+def distribution_reapply_admin_client():
+    """Mirrors `distribution_admin_client` above (the P1 workcenters-route
+    fixture) for the two new admin writes."""
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [DIST_PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "dist.admin@example.com"
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "dist.admin@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    try:
+        yield TestClient(brain.api)
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def test_distribution_admin_writes_are_admin_gated():
+    by_path = {}
+    for r in iter_route_contexts(brain.api.routes):
+        p = getattr(r, "path", None)
+        if p in _distribution_admin_route_paths():
+            by_path[p] = r
+    assert set(by_path) == _distribution_admin_route_paths()
+    for path, route in by_path.items():
+        dep_names = {dep.call.__name__ for dep in route.dependant.dependencies}
+        assert "require_admin" in dep_names, f"{path} must be require_admin-gated"
+
+
+def test_distribution_reapply_defaults_rejects_an_out_of_scope_plant(distribution_reapply_admin_client):
+    response = distribution_reapply_admin_client.post(f"/distribution/{DIST_PLANT_B}/reapply-defaults", json={})
+    assert response.status_code == 403
+
+
+def test_distribution_reapply_defaults_maps_blank_plant_to_400_not_500(distribution_reapply_admin_client):
+    response = distribution_reapply_admin_client.post("/distribution/%20/reapply-defaults", json={})
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_reapply_defaults_rejects_a_non_admin_caller():
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [DIST_PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "planner@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Admin role required")
+    )
+    try:
+        response = TestClient(brain.api).post(f"/distribution/{DIST_PLANT_A}/reapply-defaults", json={})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 403
+
+
+def test_distribution_reapply_defaults_allows_an_admin_through_to_the_data_layer(
+        distribution_reapply_admin_client, monkeypatch):
+    calls = []
+
+    def fake_reapply_defaults(plant, **kwargs):
+        calls.append({"plant": plant})
+        return {"headers_processed": 0, "children_upserted": 0, "children_deleted": 0,
+                "skipped": 0, "children_scheduled": 0}
+
+    monkeypatch.setattr(distribution_data, "reapply_defaults", fake_reapply_defaults)
+    response = distribution_reapply_admin_client.post(f"/distribution/{DIST_PLANT_A}/reapply-defaults", json={})
+    assert response.status_code == 200
+    assert calls == [{"plant": DIST_PLANT_A}]
+
+
+def test_distribution_resolve_rejects_an_out_of_scope_plant(distribution_reapply_admin_client):
+    response = distribution_reapply_admin_client.post(f"/distribution/{DIST_PLANT_B}/resolve", json={})
+    assert response.status_code == 403
+
+
+def test_distribution_resolve_maps_blank_plant_to_400_not_500(distribution_reapply_admin_client):
+    response = distribution_reapply_admin_client.post("/distribution/%20/resolve", json={})
+    assert response.status_code == 400
+    assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_resolve_rejects_a_non_admin_caller():
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [DIST_PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "planner@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Admin role required")
+    )
+    try:
+        response = TestClient(brain.api).post(f"/distribution/{DIST_PLANT_A}/resolve", json={})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 403
+
+
+def test_distribution_resolve_allows_an_admin_through_to_the_data_layer(distribution_reapply_admin_client, monkeypatch):
+    calls = []
+
+    def fake_resolve(plant, scope, **kwargs):
+        calls.append({"plant": plant, "scope": scope})
+        return {"headers_created": 0, "children_upserted": 0, "single_rewrites": 0, "repaired": 0, "skipped": 0}
+
+    monkeypatch.setattr(distribution_data, "resolve", fake_resolve)
+    response = distribution_reapply_admin_client.post(
+        f"/distribution/{DIST_PLANT_A}/resolve", json={"scope": "wc_codes"},
+    )
+    assert response.status_code == 200
+    assert calls == [{"plant": DIST_PLANT_A, "scope": "wc_codes"}]
+
+
+def test_distribution_resolve_rejects_an_invalid_scope(distribution_reapply_admin_client, monkeypatch):
+    def fake_resolve(plant, scope, **kwargs):
+        raise ValueError("scope must be one of 'wc_codes', 'machines', 'repair'")
+
+    monkeypatch.setattr(distribution_data, "resolve", fake_resolve)
+    response = distribution_reapply_admin_client.post(
+        f"/distribution/{DIST_PLANT_A}/resolve", json={"scope": "bogus"},
+    )
+    assert response.status_code == 400
