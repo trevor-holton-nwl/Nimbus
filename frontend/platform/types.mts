@@ -454,7 +454,7 @@ export type BufferUnit = 'pct' | 'hours';
 
 export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'admin';
 
-export type GanttSubTab = 'timeline' | 'orders';
+export type GanttSubTab = 'timeline' | 'orders' | 'distribution';
 
 export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant' | 'work-centers';
 

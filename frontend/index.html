@@ -1576,6 +1576,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
     <div id="ag-grid" class="ag-theme-quartz"></div>
     </div><!-- #gantt-sub-orders -->
+
+    <!-- Pane: Order Distribution (P2-15) — fully JS-rendered by
+         frontend/distribution/distribution-pane.mts, same empty-container
+         convention as #md-master-work-centers-pane. -->
+    <div id="gantt-sub-distribution" style="flex:1;min-height:0;display:none;flex-direction:column;"></div>
   </section>
 
   <!-- =========================================================
@@ -2144,6 +2149,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="nav-sub-list" id="nav-sub-gantt" role="group" aria-labelledby="nav-tab-gantt" hidden>
         <button type="button" class="nav-sub-btn active" data-gantt-sub="timeline" aria-current="true"><span data-i18n="tab.gantt_timeline">Gantt Timeline</span></button>
         <button type="button" class="nav-sub-btn" data-gantt-sub="orders"><span data-i18n="tab.table">Orders</span></button>
+        <button type="button" class="nav-sub-btn" data-gantt-sub="distribution"><span data-i18n="tab.distribution">Order Distribution</span></button>
       </div>
     </div>
     <button class="tab-btn" data-tab="labor" role="tab">

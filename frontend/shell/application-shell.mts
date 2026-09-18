@@ -75,6 +75,7 @@ import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
 import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
 import { LaborPlanning } from '../labor/labor-planning.mjs';
 import { MaterialGrids } from '../master-data/material-grids.mjs';
+import { DistributionPane } from '../distribution/distribution-pane.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
@@ -1399,17 +1400,24 @@ class FactoryScene {
    calls EmptyState.render(el, opts) instead of its normal render path.
    ========================================================================== */
 const EmptyState = {
-  render(container: HTMLElement | null, opts: { title?: string; msg?: string; icon?: string } = {}): void {
+  render(container: HTMLElement | null, opts: { title?: string; msg?: string; icon?: string; action?: { label: string; onClick(): void } } = {}): void {
     if (!container) return;
     const title = opts.title || Util.t('empty.select_plant_title');
     const msg = opts.msg || Util.t('empty.select_plant_msg');
     const icon = opts.icon || '◨';
+    // `action` (Distribution pane's "Open Work Centers"/"Clear filters"
+    // empty-state buttons) is additive-only — every pre-existing caller that
+    // omits it renders identically to before.
     container.innerHTML =
       `<div class="nimbus-empty-state">
          <div class="nes-icon">${icon}</div>
          <div class="nes-title">${title}</div>
          <div class="nes-msg">${msg}</div>
+         ${opts.action ? `<div class="nes-action"><button type="button" class="btn btn-primary sm">${Util.escapeHtml(opts.action.label)}</button></div>` : ''}
        </div>`;
+    if (opts.action) {
+      container.querySelector('.nes-action button')?.addEventListener('click', opts.action.onClick);
+    }
   }
 };
 
@@ -2279,6 +2287,14 @@ const App = {
         const el = document.querySelector<HTMLElement>('#md-master-plant-pane .cal-scroll');
         return el ? [{ el }] : [];
       }
+      case 'gantt:distribution': {
+        // The list pane owns its own scroll viewport (a grid-style pane, like
+        // Orders' ag-grid — see this method's own header comment); the detail
+        // panel is a separate, independently-scrolled subtree that isn't
+        // restored here on purpose (it resets to a fresh selection on re-entry).
+        const el = document.getElementById('dist-list-scroll');
+        return el ? [{ el }] : [];
+      }
       default:
         return [];
     }
@@ -2395,8 +2411,9 @@ const App = {
   // Orders owns its own ag-grid viewport, so it has no _paneScrollTargets
   // case — only Timeline's sidebar list does).
   _GANTT_SUBS: [
-    { key: 'timeline', paneId: 'gantt-sub-timeline', labelKey: 'tab.gantt_timeline', landingEligible: true, scrollKey: 'gantt:timeline' },
-    { key: 'orders',   paneId: 'gantt-sub-orders',   labelKey: 'tab.table',          landingEligible: true, scrollKey: 'gantt:orders' },
+    { key: 'timeline',     paneId: 'gantt-sub-timeline',     labelKey: 'tab.gantt_timeline', landingEligible: true, scrollKey: 'gantt:timeline' },
+    { key: 'orders',       paneId: 'gantt-sub-orders',       labelKey: 'tab.table',          landingEligible: true, scrollKey: 'gantt:orders' },
+    { key: 'distribution', paneId: 'gantt-sub-distribution', labelKey: 'tab.distribution',   landingEligible: true, scrollKey: 'gantt:distribution' },
   ] as Array<{ key: GanttSubTab; paneId: string; labelKey: string; landingEligible: boolean; scrollKey: string }>,
 
   gotoGanttSub(sub: GanttSubTab): void {
@@ -2407,8 +2424,17 @@ const App = {
     // has anything worth saving.
     if (App._currentTab === 'gantt' && App._ganttSub !== sub) {
       App._saveScroll(App._scrollKeyFor('gantt'));
+      // Stop the Distribution pane's debounced Store-event refresh from doing
+      // background network work once it's no longer the visible sub-tab.
+      if (App._ganttSub === 'distribution') DistributionPane.setActive(false);
     }
     App._ganttSub = sub;
+    // The CSS hook `body[data-tab="gantt"][data-gantt-sub="distribution"]`
+    // (styles.css) hides #context-sched-actions (Optimize/What-If/Print) on
+    // the Distribution sub-view — this is the only place that attribute is
+    // ever written, so it's set unconditionally on every switch, not just
+    // the distribution one.
+    document.body.dataset.ganttSub = sub;
     document.querySelectorAll<HTMLElement>('.nav-sub-btn[data-gantt-sub]').forEach(b => {
       const on = b.dataset.ganttSub === sub;
       b.classList.toggle('active', on);
@@ -2425,6 +2451,10 @@ const App = {
         if (Table._api) Table._api.sizeColumnsToFit();
         requestAnimationFrame(() => App._restoreScroll(entry.scrollKey));
       }, 30);
+    } else if (sub === 'distribution') {
+      DistributionPane.init();
+      DistributionPane.render();
+      requestAnimationFrame(() => App._restoreScroll(entry.scrollKey));
     } else {
       // Mask the entry re-render synchronously (before the 30 ms timeout) so the
       // first paint after the pane flips is the mask, not a half-laid-out Gantt.

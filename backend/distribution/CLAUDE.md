@@ -38,4 +38,4 @@ Run: `python -m pytest tests/test_distribution.py tests/test_rbac_plant_scoping.
 
 ## Counterpart
 
-Frontend half does not exist yet — the Work Centers master-data sub-tab described in §4.3 is future work, as is the Distribution tab itself (§6/§10).
+Frontend half: `frontend/distribution/CLAUDE.md`. The Work Centers master-data sub-tab (§4.3) shipped inside `frontend/master-data/admin-ui.mts` (`WorkCenters`), not this folder. The Scheduling Board Distribution tab (§6) shipped its pane shell/list/filters/detail-header as `frontend/distribution/distribution-pane.mts` (P2-15) — the shares editor, dry-run preview, Save/Reset/Undo, the reconcile banner, and the What-If guard are still open (P2-16). §10's aggregate roll-up/CSV export (`GET /distribution/{plant}/aggregate`) has no frontend consumer yet.

@@ -26,6 +26,11 @@ declare global {
         App?: {
           goto?(tab: string): void;
           gotoGanttTimeline?(): void;
+          /** Added for the Distribution pane's "no distribute-mode work
+           *  center" empty state (`frontend/distribution/distribution-pane.mts`),
+           *  whose "Open Work Centers" button navigates to Master Data ›
+           *  Work Centers the same way `App.gotoMasterSub` does internally. */
+          gotoMasterSub?(sub: string): void;
         };
         Inspector?: {
           show?(task: NimbusTask): void;
@@ -43,7 +48,11 @@ declare global {
           DEBUG?: boolean;
         };
         EmptyState?: {
-          render?(container: HTMLElement | null, opts?: { title?: string; msg?: string; icon?: string }): void;
+          /** `action` added for the Distribution pane's "Open Work Centers" /
+           *  "Clear filters" empty-state buttons (`distribution-pane.mts`) —
+           *  optional and additive, every existing call site that omits it
+           *  renders exactly as before. */
+          render?(container: HTMLElement | null, opts?: { title?: string; msg?: string; icon?: string; action?: { label: string; onClick(): void } }): void;
         };
         Timeline?: {
           rebuild?(): void;

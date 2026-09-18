@@ -30,10 +30,10 @@ test('Settings (per-user settings catalog) is exported with its documented shape
 // ['timeline', 'orders'].includes(sub) whitelist. Mirrors _MASTER_SUBS'
 // { sub, paneId, render } shape but with { key, paneId, labelKey,
 // landingEligible, scrollKey } per aggregate_to_detail.md §6's first bullet.
-// No `distribution` entry yet — that lands with its own pane in a later task.
+// The `distribution` entry (P2-15) is the pane frontend/distribution/distribution-pane.mts owns.
 
-test('App._GANTT_SUBS carries the documented registry shape for the two existing sub-tabs', () => {
-  assert.deepEqual(App._GANTT_SUBS.map(e => e.key), ['timeline', 'orders']);
+test('App._GANTT_SUBS carries the documented registry shape for all three sub-tabs', () => {
+  assert.deepEqual(App._GANTT_SUBS.map(e => e.key), ['timeline', 'orders', 'distribution']);
   assert.deepEqual(App._GANTT_SUBS.find(e => e.key === 'timeline'), {
     key: 'timeline', paneId: 'gantt-sub-timeline', labelKey: 'tab.gantt_timeline',
     landingEligible: true, scrollKey: 'gantt:timeline',
@@ -42,13 +42,17 @@ test('App._GANTT_SUBS carries the documented registry shape for the two existing
     key: 'orders', paneId: 'gantt-sub-orders', labelKey: 'tab.table',
     landingEligible: true, scrollKey: 'gantt:orders',
   });
+  assert.deepEqual(App._GANTT_SUBS.find(e => e.key === 'distribution'), {
+    key: 'distribution', paneId: 'gantt-sub-distribution', labelKey: 'tab.distribution',
+    landingEligible: true, scrollKey: 'gantt:distribution',
+  });
 });
 
 test('gotoGanttSub is a no-op for an unknown sub-tab key (matches the old whitelist\'s reject-unknown behavior)', () => {
   const priorSub = App._ganttSub;
   App._ganttSub = 'timeline';
   try {
-    App.gotoGanttSub('distribution'); // not registered yet — must be rejected same as any bogus key
+    App.gotoGanttSub('not-a-real-sub'); // not registered — must be rejected same as any bogus key
     assert.equal(App._ganttSub, 'timeline', 'unknown sub must not overwrite the current sub');
   } finally {
     App._ganttSub = priorSub;
@@ -65,6 +69,7 @@ test('gotoGanttSub resolves timeline/orders to the correct pane and scroll-key v
   // back null so those call sites take their existing `if (!el) return;` path,
   // same as a real page before this refactor.
   globalThis.document = {
+    body: { dataset: {} }, // gotoGanttSub stamps document.body.dataset.ganttSub on every switch (styles.css's Distribution context-actions hide rule keys on it)
     getElementById(id) {
       if (id !== 'gantt-sub-timeline' && id !== 'gantt-sub-orders') return null;
       if (!panes[id]) panes[id] = { style: {} };
@@ -108,6 +113,7 @@ test('SessionUIAdapter._landingSubDefs(\'gantt\') is built from the registry and
     assert.deepEqual(SessionUIAdapter._landingSubDefs('gantt'), [
       ['timeline', Util.t('us.landing_timeline')],
       ['orders', Util.t('tab.table')],
+      ['distribution', Util.t('tab.distribution')],
     ]);
   } finally {
     globalThis.window = priorWindow;
