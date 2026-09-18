@@ -1604,15 +1604,12 @@ window.__NIMBUS_LOCALES.de = {
   'col.default_machine_hint':          'Verteilungsstandard, wenn diese Maschine zum Arbeitszentrum des Auftrags gehört (Entscheidung G)',
 
   // Button labels
-  'btn.new_work_center':                '+ Neu',
   'btn.create':                         'Erstellen',
   'btn.load_more':                      'Mehr laden',
   'btn.even':                           'Gleichmäßig',
 
   // Placeholder text
   'ph.search_work_centers':             'Arbeitszentren suchen…',
-  'ph.wc_code':                         'Code (z. B. WC100)',
-  'ph.wc_description':                  'Beschreibung',
   'ph.wc_default_machine':              'Wählen Sie eine Mitgliedsmaschine…',
   'ph.select_work_center':              'Wählen Sie ein Arbeitszentrum…',
 
@@ -1630,13 +1627,15 @@ window.__NIMBUS_LOCALES.de = {
   'ui.wc_distribute_tooled_label':      'Auch bearbeitete Materialien verteilen (jede Maschine hat ihr eigenes Werkzeug)',
   'ui.wc_distribute_tooled_hint':       'Nur aktivieren, wenn jede Mitgliedsmaschine ihre eigene Kopie des Werkzeugs hat.',
   'ui.wc_distribute_tooled_help':       'Deaktiviert (Standard): Bearbeitete Materialien werden immer auf die Standardmaschine des Arbeitszentrums gelegt, nie aufgeteilt. Aktiviert: Bearbeitete Materialien folgen den gleichen Gewichtungen wie alles andere, da jede Maschine bereits ihre eigene Kopie des Werkzeugs hat.',
-  'ui.wc_membership_title':             'Mitgliedschaft',
+  'ui.wc_membership_title':             'Maschinen & Gewichtungen',
   'ui.wc_assign_hint':                  'Weisen Sie Maschinen auf der Registerkarte „Maschinen" zu.',
   'ui.wc_total_row':                    'GESAMT',
   'ui.wc_even_placeholder':             'gleichmäßig',
   'ui.wc_not_set_zero':                 '(nicht gesetzt → 0 %)',
-  'ui.wc_distribute_thin_warning':      'Der Verteilungsmodus hat weniger als zwei Mitgliedsmaschinen — Aufträge werden nicht tatsächlich aufgeteilt, bis eine zweite Maschine beitritt.',
-  'ui.wc_single_needs_default':         'Der Einzelmodus benötigt eine Standardmaschine, bevor Sie speichern können.',
+  'ui.wc_distribute_thin_warning':      'Der Verteilungsmodus benötigt mindestens zwei Mitgliedsmaschinen — Änderungen werden nicht gespeichert, bis eine zweite Maschine beitritt, oder wechseln Sie zum Modus „Einzelmaschine".',
+  'ui.wc_single_needs_default':         'Der Einzelmodus benötigt eine Standardmaschine — wählen Sie eine aus, diese wird dann gespeichert.',
+  'ui.wc_blocked_needs_members':        'Diesem Arbeitszentrum sind noch keine Maschinen zugewiesen, daher können Änderungen nicht gespeichert werden. Weisen Sie zuerst Maschinen auf der Registerkarte „Maschinen" zu.',
+  'ui.wc_member_count_tip':             '{{n}} Maschinen zugewiesen',
   'ui.wc_default_not_member':           'Die Standardmaschine ist kein Mitglied dieses Arbeitszentrums mehr — wählen Sie eine aus den aktuellen Mitgliedern.',
 
   // Distribution filters and buckets
@@ -1757,12 +1756,6 @@ window.__NIMBUS_LOCALES.de = {
 
   // Work center toasts
   'toast.wc_load_failed':               'Arbeitszentren konnten nicht geladen werden — versuchen Sie es erneut.',
-  'toast.wc_code_required':             'Geben Sie einen Arbeitszentrumscode ein',
-  'toast.wc_code_shadowed':             'Dieser Code ist bereits ein Maschinenname an diesem Werk',
-  'toast.wc_code_exists':               'Ein Arbeitszentrum mit diesem Code existiert bereits',
-  'toast.wc_single_needs_default_at_create': 'Erstellen Sie zuerst als Verteilen, wechseln Sie dann zu Einzeln, wenn eine Standardmaschine Mitglied ist',
-  'toast.wc_created':                   'Arbeitszentrum {{code}} erstellt',
-  'toast.wc_create_failed':             'Arbeitszentrum konnte nicht erstellt werden: {{msg}}',
   'toast.wc_invalid_weight':            'Gewichtung muss eine Zahl ≥ 0 sein',
   'toast.wc_saved':                     'Arbeitszentrum {{code}} gespeichert',
   'toast.wc_save_failed':               'Speichern fehlgeschlagen: {{msg}}',

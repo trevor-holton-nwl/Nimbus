@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { Plant, ProdLines, MasterData } from '../../../frontend/master-data/admin-ui.mjs';
+import { Plant, ProdLines, MasterData, WorkCenters } from '../../../frontend/master-data/admin-ui.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -257,4 +257,62 @@ test('ProdLines._reassignWorkcenter writes directly with no dialog when meta.tot
     if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
     Store.setSelectedPlant(priorPlant, 'test-restore');
   }
+});
+
+// WorkCenters._wcBlockReason(staged: WorkCenterStaged, members: string[]): WcBlockReason
+// is the client-side pre-flight for the three PUT /distribution/{plant}/workcenters/{wc}
+// rules (backend/distribution/data.py:161-172) — autosave only fires when this
+// returns null, so it is the gate that keeps the pane from ever sending a
+// request the backend would reject with a 400. Pure/DOM-free, hence testable
+// directly with no jsdom. The returned strings are the literal backend rule
+// codes ('single_mode_without_default', 'default_machine_not_member',
+// 'distribute_mode_thin') by design — that's the client/server contract — so
+// assert the exact strings, not just truthiness.
+test('WorkCenters._wcBlockReason covers every gate rule with the exact backend rule code', () => {
+  const base = {
+    description: '', distribution_mode: 'distribute', default_machine: '',
+    max_separation: 'none', review_required: false, distribute_tooled: false, weights: {},
+  };
+
+  // distribute mode, 2+ members, no default machine -> all-clear.
+  assert.equal(WorkCenters._wcBlockReason({ ...base }, ['M1', 'M2']), null);
+
+  // single mode with no default machine set.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base, distribution_mode: 'single' }, ['M1', 'M2']),
+    'single_mode_without_default',
+  );
+
+  // default machine set but not among the work center's current members —
+  // checked ahead of the thin-membership rule regardless of mode.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base, default_machine: 'M9' }, ['M1', 'M2']),
+    'default_machine_not_member',
+  );
+
+  // distribute mode with exactly 1 member.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base }, ['M1']),
+    'distribute_mode_thin',
+  );
+
+  // distribute mode with 0 members: the implementation reuses
+  // 'distribute_mode_thin' rather than a distinct code (members.length < 2
+  // catches both 0 and 1) — only the *display text* (_wcNoticeText) branches
+  // on memberCount === 0 to point the admin at the Machines tab instead of
+  // repeating the generic "needs 2+ members" copy.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base }, []),
+    'distribute_mode_thin',
+  );
+});
+
+// Work centers are now source data (SAP interface ingest or the Admin >
+// Manage Plant Data grid) — this pins that the removed creation surface
+// (toggle/form/create/cancel controls and the old staged-edit Save/Discard
+// machinery) never regrows on this tab.
+test('Work Centers tab source has no creation surface and no Save/Discard staging leftovers', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /wc-new-(toggle|form|create|cancel)|_createNew/);
+  assert.doesNotMatch(source, /wc-save-btn|wc-discard-btn|_wcDirtyFields|_pendingWarnings|_renderWcWarnings/);
 });

@@ -359,8 +359,12 @@ test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
     'toast.dist_review_failed', 'toast.dist_reviewed', 'toast.dist_shares_saved', 'toast.dist_shares_save_failed',
     'toast.dist_stale_refetched', 'toast.dist_reset_failed', 'toast.dist_repaired', 'toast.dist_repair_failed',
     'toast.dist_bulk_done', 'toast.dist_reassign_confirm',
-    'toast.wc_load_failed', 'toast.wc_code_required', 'toast.wc_code_shadowed', 'toast.wc_code_exists',
-    'toast.wc_single_needs_default_at_create', 'toast.wc_created', 'toast.wc_create_failed',
+    // toast.wc_code_required/_shadowed/_exists, toast.wc_single_needs_default_at_create,
+    // toast.wc_created and toast.wc_create_failed were removed: creation was
+    // taken out of the Work Centers tab (work centers now only come from SAP
+    // interface ingest or the Admin > Manage Plant Data grid), so there is no
+    // create-time validation or create-result toast left to back.
+    'toast.wc_load_failed',
     'toast.wc_invalid_weight', 'toast.wc_saved', 'toast.wc_save_failed',
     // Alert messages
     'alert.distribution_separation',
@@ -376,8 +380,19 @@ test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
     'kpi.orders_sub_counted',
     'cmdp.need_distribution_review', 'cmdp.sub_view_distribution',
     // Buttons and placeholders
-    'btn.new_work_center', 'btn.create', 'btn.load_more', 'btn.even',
-    'ph.search_work_centers', 'ph.wc_code', 'ph.wc_description', 'ph.wc_default_machine', 'ph.select_work_center',
+    // btn.new_work_center dropped with the create form it opened. btn.create
+    // stays pinned below — this repo's convention for a generic verb key kept
+    // even though it is now unreferenced (see this file's own comments around
+    // lines 56-63 and 183-195 for other examples of that convention).
+    'btn.create', 'btn.load_more', 'btn.even',
+    // ph.wc_code/_description backed the removed create form's own inputs;
+    // gone with it. ph.wc_default_machine/select_work_center are still used
+    // by the surviving detail-pane combobox/selector.
+    'ph.search_work_centers', 'ph.wc_default_machine', 'ph.select_work_center',
+    // New in the autosave-on-change rework: the sidebar's block-reason glyph
+    // tooltip (ui.wc_blocked_needs_members) and member-count badge tooltip
+    // (ui.wc_member_count_tip) — see WorkCenters._wcNoticeText/_renderSidebarList.
+    'ui.wc_blocked_needs_members', 'ui.wc_member_count_tip',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED_DISTRIBUTION) {

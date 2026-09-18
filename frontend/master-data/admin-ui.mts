@@ -2730,6 +2730,32 @@ interface WorkCenterStaged {
   weights: Record<string, number | null>;
 }
 
+/** Wire body for `PUT /distribution/{plant}/workcenters/{wc}` — the autosave
+ *  write's payload shape, built from a `WorkCenterStaged` snapshot at fire
+ *  time (`WorkCenters._autosave`/`_write`). Distinct from `WorkCenterStaged`
+ *  only in that the two optional-ish string fields go through `|| null`
+ *  instead of staying `''`, matching what the backend model expects. */
+interface WorkCenterWritePayload {
+  description: string | null;
+  distribution_mode: 'single' | 'distribute';
+  default_machine: string | null;
+  max_separation: 'none' | 'hour' | 'day' | 'week';
+  review_required: boolean;
+  distribute_tooled: boolean;
+  weights: Record<string, number | null>;
+}
+
+/** A fully-captured write request — plant/code/payload/members already
+ *  resolved from live state, so it can be handed to `WorkCenters._write`
+ *  (or parked in `_queued`) without re-reading selection later. Built by
+ *  `WorkCenters._buildWrite`. */
+interface WorkCenterWriteRequest {
+  plant: string;
+  code: string;
+  payload: WorkCenterWritePayload;
+  members: string[];
+}
+
 interface ComboboxOpts {
   value?: string;
   placeholder?: string;
@@ -3706,7 +3732,21 @@ export const MasterData = (() => {
         Toast.show(Util.t('toast.missing_required_key') + ': ' + missing.join(', '), 'error');
         return;
       }
-      upserts.push(row);
+      // Drop blank non-key cells so the column DEFAULT applies instead of a literal
+      // ''. _addRow prefills EVERY column with '', and master_data.bulk_apply inserts
+      // whatever keys the row carries — so a cell the admin left blank used to send ''
+      // to the column, which fails outright on a NOT NULL column that has a default
+      // (sap_workcenter.review_required and distribute_tooled are both BOOLEAN NOT
+      // NULL DEFAULT ...). Omitting the key lets Postgres apply the default, which is
+      // what makes "create the row now, configure it later" work.
+      // Only ADDED rows are stripped: in a dirty patch for an existing row, ''
+      // legitimately means "clear this field", so that path must keep sending it.
+      const clean: MasterDataRow = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (v === '' && !keys.includes(k)) continue;
+        clean[k] = v;
+      }
+      upserts.push(clean);
     }
 
     // Build deletes.
@@ -4114,43 +4154,58 @@ function _wcEffectivePercents(memberNames: string[], weights: Record<string, num
   return out;
 }
 
+// Retained not for a per-field dirty *list* (autosave has no such UI — the
+// old Save/Discard badge is gone) but as the comparison _maybeFlush uses to
+// decide whether a held edit is worth re-attempting.
 const WC_SCALAR_FIELDS = ['description', 'distribution_mode', 'default_machine', 'max_separation', 'review_required', 'distribute_tooled'] as const;
 
-function _wcDirtyFields(staged: WorkCenterStaged, baseline: WorkCenterStaged): string[] {
-  const out: string[] = [];
-  WC_SCALAR_FIELDS.forEach((f) => { if (staged[f] !== baseline[f]) out.push(f); });
-  for (const m of Object.keys(staged.weights)) {
-    if ((staged.weights[m] ?? null) !== (baseline.weights[m] ?? null)) out.push(`weight:${m}`);
+function _wcStagedEqual(a: WorkCenterStaged, b: WorkCenterStaged): boolean {
+  if (WC_SCALAR_FIELDS.some((f) => a[f] !== b[f])) return false;
+  const keys = new Set([...Object.keys(a.weights), ...Object.keys(b.weights)]);
+  for (const k of keys) {
+    if ((a.weights[k] ?? null) !== (b.weights[k] ?? null)) return false;
   }
-  return out;
+  return true;
 }
 
-// Copies AdminCockpit._warningList's exact DOM/CSS pattern
-// (`frontend/admin-ops/admin-ui.mts:1064-1081`, `.admin-bwarn-list` family in
-// styles.css) — same duplication call as MasterData's `_renderBulkWarnings`
-// above and for the same reason (§4.1): avoid a new master-data ↔ admin-ops
-// import edge for a few lines of DOM.
-function _renderWcWarnings(warnings: MasterDataBulkWarning[]): void {
-  const host = document.getElementById('wc-bulk-warnings');
-  if (!host) return;
-  host.textContent = '';
-  if (!warnings.length) return;
-  const list = document.createElement('div');
-  list.className = 'admin-bwarn-list';
-  for (const w of warnings) {
-    const row = document.createElement('div');
-    row.className = `admin-bwarn-row admin-bwarn-${w.level || 'warn'}`;
-    const lvl = document.createElement('span');
-    lvl.className = 'admin-bwarn-lvl';
-    lvl.textContent = (w.level || 'warn').toUpperCase();
-    const msg = document.createElement('span');
-    msg.className = 'admin-bwarn-msg';
-    msg.textContent = w.msg || '';
-    row.appendChild(lvl);
-    row.appendChild(msg);
-    list.appendChild(row);
+// Shared shape between a persisted WorkCenterRow and a live WorkCenterStaged
+// edit buffer. Used both to seed _selectRow's staged copy and — with an
+// empty weights map, since none of _wcBlockReason's three rules look at
+// weights — to run that same gate against every un-selected sidebar row's
+// own saved values, for the sidebar's warning glyph.
+function _wcStagedBase(row: WorkCenterRow): WorkCenterStaged {
+  return {
+    description:       row.description || '',
+    distribution_mode: row.distribution_mode,
+    default_machine:   row.default_machine || '',
+    max_separation:    row.max_separation,
+    review_required:   row.review_required,
+    distribute_tooled: row.distribute_tooled,
+    weights: {},
+  };
+}
+
+// Client-side mirror of the three PUT /distribution/{plant}/workcenters/{wc}
+// pre-flight rules (backend/distribution/data.py:161-172) — see
+// WorkCenters._wcBlockReason below for the rules themselves.
+type WcBlockReason = 'single_mode_without_default' | 'default_machine_not_member' | 'distribute_mode_thin' | null;
+
+function _wcNoticeText(reason: Exclude<WcBlockReason, null>, memberCount: number): string {
+  switch (reason) {
+    case 'single_mode_without_default': return Util.t('ui.wc_single_needs_default');
+    case 'default_machine_not_member':  return Util.t('ui.wc_default_not_member');
+    case 'distribute_mode_thin':
+      // Zero members is only fixable from the Machines tab (membership
+      // isn't edited here, per WorkCenterStaged's own doc comment) — say so
+      // instead of repeating the generic "needs 2+ members" copy a
+      // one-member work center would also see.
+      return memberCount === 0 ? Util.t('ui.wc_blocked_needs_members') : Util.t('ui.wc_distribute_thin_warning');
   }
-  host.appendChild(list);
+}
+
+function _wcNoticesInnerHtml(reason: WcBlockReason, memberCount: number): string {
+  if (!reason) return '';
+  return `<p class="wc-inline-warn">${Util.escapeHtml(_wcNoticeText(reason, memberCount))}</p>`;
 }
 
 export const WorkCenters = {
@@ -4160,11 +4215,21 @@ export const WorkCenters = {
   _offset: 0,
   _total: 0,
   _loadedPlant: null as string | null,
+  _shellPlant: null as string | null, // which plant the current sidebar/search DOM shell was built for — see _renderPane
   _selected: null as string | null,
   _staged: null as WorkCenterStaged | null,
-  _baseline: null as WorkCenterStaged | null,
-  _saving: false,
-  _pendingWarnings: [] as MasterDataBulkWarning[],
+  _baseline: null as WorkCenterStaged | null, // "last known saved state" (autosave repurposing — was dirty-comparison baseline under the old Save/Discard model)
+  _dirty: false,      // true from the moment _staged diverges from what's been sent until a write for it is actually dispatched
+  _saving: false,     // a PUT is in flight
+  _editSeq: 0,        // bumped on every _staged mutation/replacement; lets a slow response detect it's now stale
+  _queued: null as WorkCenterWriteRequest | null, // a flushed-but-can't-send-yet write, captured against the row it belonged to — see _flushPending
+
+  // Fires _autosave() ~500ms after the last Description/weight keystroke.
+  // Util.debounce (foundation.mts) has no cancel/flush handle, so
+  // _flushPending() below can't cancel this timer — it just wins the race by
+  // firing _autosave() itself first; _dirty already being false by the time
+  // this stale timer fires makes that a harmless no-op.
+  _debouncedAutosave: Util.debounce(() => void WorkCenters._autosave(), 500),
 
   // Called from App._MASTER_SUBS' 'work-centers' entry (application-shell.mts)
   // whenever the sub-tab is activated, and again on 'plant:selected' while it
@@ -4185,6 +4250,11 @@ export const WorkCenters = {
       return;
     }
     if (plant !== WorkCenters._loadedPlant) {
+      // Flush before the reset below discards _selected/_staged/_baseline —
+      // otherwise a still-debounced edit on the OLD plant's selected work
+      // center is silently dropped, the same hazard _selectRow guards
+      // against for a same-plant row switch.
+      WorkCenters._flushPending();
       WorkCenters._loadedPlant = plant;
       WorkCenters._selected = null;
       WorkCenters._staged = null;
@@ -4196,6 +4266,12 @@ export const WorkCenters = {
       await WorkCenters._refreshMachines(plant);
     }
     WorkCenters._renderPane();
+    // Recovers the one dead end _wcBlockReason creates: a held edit whose
+    // gate failed only for a reason that gets fixed elsewhere (e.g. adding a
+    // machine to a 0-member distribute work center, on the Machines tab)
+    // lands on its own the next time this sub-tab re-renders, rather than
+    // needing the admin to re-touch every field.
+    WorkCenters._maybeFlush();
   },
 
   async _refreshMachines(plant: string): Promise<void> {
@@ -4244,74 +4320,140 @@ export const WorkCenters = {
     }
   },
 
+  // Full innerHTML rebuild only when the shell doesn't exist yet or belongs
+  // to a different plant (_shellPlant mismatch) — mirrors ProdLines._renderNav's
+  // build-once-else-patch idiom (2243-2264). Everything else (search typing,
+  // load-more paging, row selection, every field edit) refreshes
+  // #wc-list-body/#wc-detail-col surgically via _renderSidebarList/
+  // _renderDetailOnly instead. Rebuilding the whole pane on every keystroke
+  // used to destroy #wc-search mid-word the instant its 250ms debounce
+  // fired — this split is what fixes that. After this split, _renderPane()
+  // is reachable only from render() (tab activate / plant switch); nothing
+  // else in this file may call it.
   _renderPane(): void {
     const pane = document.getElementById('md-master-work-centers-pane');
     if (!pane) return;
+    const plant = Store.selectedPlant;
     const isAdmin = Session.isAdmin();
-    const rows = WorkCenters._rows;
-    const hasMore = rows.length < WorkCenters._total;
 
-    const listRows = rows.map((r) => `
-      <div class="wc-row${r.sap_workcenter === WorkCenters._selected ? ' active' : ''}" data-code="${Util.escapeHtml(r.sap_workcenter)}">
-        <span class="wc-row-code">${Util.escapeHtml(r.sap_workcenter)}</span>
-        <span class="wc-row-desc">${Util.escapeHtml(r.description || '')}</span>
-      </div>`).join('');
-
-    pane.innerHTML = `
-      <div class="lines-split">
-        <div class="lines-nav wc-nav">
-          <div class="lines-nav-header">
-            <div class="lines-nav-title">${Util.escapeHtml(Util.t('tab.work_centers'))} &middot; ${WorkCenters._total}</div>
-            <input type="search" id="wc-search" class="input" placeholder="${Util.escapeHtml(Util.t('ph.search_work_centers'))}" value="${Util.escapeHtml(WorkCenters._search)}">
-          </div>
-          ${isAdmin ? `
-          <div class="wc-new-toggle-row">
-            <button class="btn btn-ghost sm" id="wc-new-toggle">${Util.escapeHtml(Util.t('btn.new_work_center'))}</button>
-          </div>
-          <div class="wc-new-form" id="wc-new-form" hidden>
-            <input type="text" class="input" id="wc-new-code" placeholder="${Util.escapeHtml(Util.t('ph.wc_code'))}" maxlength="20" autocomplete="off">
-            <input type="text" class="input" id="wc-new-desc" placeholder="${Util.escapeHtml(Util.t('ph.wc_description'))}" autocomplete="off">
-            <select class="input" id="wc-new-mode">
-              <option value="distribute">${Util.escapeHtml(Util.t('ui.wc_mode_distribute'))}</option>
-              <option value="single">${Util.escapeHtml(Util.t('ui.wc_mode_single'))}</option>
-            </select>
-            <div class="wc-new-actions">
-              <button class="btn btn-ghost sm" id="wc-new-cancel">${Util.escapeHtml(Util.t('btn.cancel'))}</button>
-              <button class="btn btn-primary sm" id="wc-new-create">${Util.escapeHtml(Util.t('btn.create'))}</button>
+    if (!document.getElementById('wc-search') || WorkCenters._shellPlant !== plant) {
+      WorkCenters._shellPlant = plant;
+      pane.innerHTML = `
+        <div class="lines-split">
+          <div class="lines-nav wc-nav">
+            <div class="lines-nav-header">
+              <div class="lines-nav-title" id="wc-nav-title"></div>
+              <input type="search" id="wc-search" class="input" placeholder="${Util.escapeHtml(Util.t('ph.search_work_centers'))}" value="${Util.escapeHtml(WorkCenters._search)}">
             </div>
-          </div>` : `<p class="panel-hint" style="padding:8px 12px 0;">${Util.escapeHtml(Util.t('ui.wc_admins_edit'))}</p>`}
-          <div class="lines-nav-list wc-list-body" id="wc-list-body">
-            ${listRows || `<div class="lines-nav-empty">${Util.escapeHtml(Util.t('empty.no_work_centers'))}</div>`}
+            ${isAdmin ? '' : `<p class="panel-hint" style="padding:8px 12px 0;">${Util.escapeHtml(Util.t('ui.wc_admins_edit'))}</p>`}
+            <div class="lines-nav-list wc-list-body" id="wc-list-body"></div>
+            <button class="btn btn-ghost sm wc-load-more" id="wc-load-more" hidden>${Util.escapeHtml(Util.t('btn.load_more'))}</button>
           </div>
-          ${hasMore ? `<button class="btn btn-ghost sm wc-load-more" id="wc-load-more">${Util.escapeHtml(Util.t('btn.load_more'))}</button>` : ''}
-        </div>
-        <div class="cal-scroll">
-          <div class="cal-container" id="wc-detail-col">
-            ${WorkCenters._selected ? WorkCenters._detailHtml(isAdmin) : `<div class="md-empty">${Util.escapeHtml(Util.t('empty.wc_select_row'))}</div>`}
+          <div class="cal-scroll">
+            <div class="cal-container" id="wc-detail-col"></div>
           </div>
-        </div>
-      </div>`;
+        </div>`;
+      WorkCenters._wireShell(pane);
+    }
 
-    WorkCenters._wireList(pane, isAdmin);
-    if (WorkCenters._selected) WorkCenters._wireDetail(pane, isAdmin);
+    WorkCenters._renderSidebarList();
+    WorkCenters._renderDetailOnly();
+  },
+
+  // Wired exactly once per shell build (search/load-more are destroyed and
+  // recreated only when _renderPane rebuilds the shell above, so there's no
+  // double-binding risk here the way ProdLines' persistent filter dropdown
+  // needs a `._wired` guard for).
+  _wireShell(pane: HTMLElement): void {
+    const search = pane.querySelector<HTMLInputElement>('#wc-search');
+    if (search) {
+      search.oninput = Util.debounce(() => {
+        WorkCenters._search = search.value;
+        const plant = Store.selectedPlant;
+        if (!plant) return;
+        void WorkCenters._loadAll(plant, true).then(() => {
+          WorkCenters._renderSidebarList();
+          WorkCenters._renderDetailOnly();
+        });
+      }, 250);
+    }
+
+    const loadMore = pane.querySelector<HTMLButtonElement>('#wc-load-more');
+    if (loadMore) loadMore.onclick = () => {
+      const plant = Store.selectedPlant;
+      if (!plant) return;
+      WorkCenters._offset += 50;
+      void WorkCenters._loadAll(plant, false).then(() => WorkCenters._renderSidebarList());
+    };
+  },
+
+  // Rebuilds #wc-list-body's rows and the load-more button's visibility.
+  // Never touches #wc-search — this is exactly what makes typing in it safe
+  // across a debounced reload.
+  _renderSidebarList(): void {
+    const listBody = document.getElementById('wc-list-body');
+    if (!listBody) return;
+    const titleEl = document.getElementById('wc-nav-title');
+    if (titleEl) titleEl.textContent = `${Util.t('tab.work_centers')} · ${WorkCenters._total}`;
+
+    const rows = WorkCenters._rows;
+    const listRows = rows.map((r, i) => {
+      const color = Config.COLORS[i % Config.COLORS.length];
+      const members = _wcMembers(WorkCenters._machines, r.sap_workcenter).map((m) => m.machine);
+      const n = members.length;
+      const reason = WorkCenters._wcBlockReason(_wcStagedBase(r), members);
+      return `
+      <div class="lines-nav-item${r.sap_workcenter === WorkCenters._selected ? ' active' : ''}" data-code="${Util.escapeHtml(r.sap_workcenter)}">
+        <span class="line-dot" style="background:${color};display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;"></span>
+        <span class="lines-nav-label">${Util.escapeHtml(r.sap_workcenter)}</span>
+        ${n > 0 ? `<span class="wc-member-count" title="${Util.escapeHtml(Util.t('ui.wc_member_count_tip', { n }))}">${n}</span>` : ''}
+        ${reason ? `<span class="lines-nav-bottleneck" title="${Util.escapeHtml(_wcNoticeText(reason, n))}">⚠</span>` : ''}
+      </div>`;
+    }).join('');
+    listBody.innerHTML = listRows || `<div class="lines-nav-empty">${Util.escapeHtml(Util.t('empty.no_work_centers'))}</div>`;
+
+    // Delegated click on the list container itself (ProdLines._renderNav/
+    // _wireNav's idiom, 2329-2338) — #wc-list-body's own identity survives
+    // every call to this method (only the shell rebuild in _renderPane ever
+    // replaces the node itself), so one binding here covers every row.
+    listBody.onclick = (e: MouseEvent) => {
+      const item = (e.target as HTMLElement).closest<HTMLElement>('.lines-nav-item');
+      if (!item) return;
+      const code = item.dataset.code;
+      if (code) WorkCenters._selectRow(code);
+    };
+
+    const loadMoreBtn = document.getElementById('wc-load-more') as HTMLButtonElement | null;
+    if (loadMoreBtn) loadMoreBtn.hidden = rows.length >= WorkCenters._total;
+  },
+
+  // Rebuilds only #wc-detail-col. Called on selection change, on a search/
+  // load-more refresh, and on a failed write's rollback — never on a
+  // successful autosave, which only needs the narrower _refreshNoticesOnly/
+  // _refreshSidebarRow surgical updates (see _write).
+  _renderDetailOnly(): void {
+    const col = document.getElementById('wc-detail-col');
+    if (!col) return;
+    const isAdmin = Session.isAdmin();
+    col.innerHTML = WorkCenters._selected
+      ? WorkCenters._detailHtml(isAdmin)
+      : `<div class="md-empty">${Util.escapeHtml(Util.t('empty.wc_select_row'))}</div>`;
+    if (WorkCenters._selected) WorkCenters._wireDetail(col, isAdmin);
   },
 
   _detailHtml(isAdmin: boolean): string {
     const staged = WorkCenters._staged;
-    const baseline = WorkCenters._baseline;
     const code = WorkCenters._selected;
-    if (!staged || !baseline || !code) return '';
+    if (!staged || !code) return '';
 
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
-    const dirty = _wcDirtyFields(staged, baseline);
     const pct = _wcEffectivePercents(members, staged.weights);
     const totalPct = members.reduce((s, m) => s + (pct[m] || 0), 0);
     const evenState = members.every((m) => staged.weights[m] == null);
+    const reason = WorkCenters._wcBlockReason(staged, members);
 
-    const canSaveSingle = staged.distribution_mode !== 'single' || !!staged.default_machine;
-    const defaultOutOfMembership = !!staged.default_machine && !members.includes(staged.default_machine);
-    const thin = staged.distribution_mode === 'distribute' && members.length < 2;
-    const saveDisabled = !dirty.length || !canSaveSingle || defaultOutOfMembership || WorkCenters._saving;
+    const gi = WorkCenters._rows.findIndex((r) => r.sap_workcenter === code);
+    const color = Config.COLORS[(gi >= 0 ? gi : 0) % Config.COLORS.length];
 
     const sepOptions = (['none', 'hour', 'day', 'week'] as const).map((v) =>
       `<option value="${v}"${staged.max_separation === v ? ' selected' : ''}>${Util.escapeHtml(Util.t(`ui.wc_max_sep_${v}`))}</option>`).join('');
@@ -4319,76 +4461,76 @@ export const WorkCenters = {
     const memberRows = members.length ? members.map((m) => {
       const w = staged.weights[m];
       const pctText = pct[m] != null ? pct[m].toFixed(1) + '%' : '—';
+      // The `.wc-not-set` span is always emitted (just `hidden` when not
+      // applicable) so _refreshMembershipMath can toggle it in place after a
+      // weight edit or the Even button, instead of needing a row rebuild.
+      const notSetHidden = !(w == null && !evenState);
       return `
       <tr>
         <td class="md-td">${Util.escapeHtml(m)}</td>
         <td class="md-td">${isAdmin
           ? `<input type="number" step="any" min="0" class="input wc-weight-input" data-machine="${Util.escapeHtml(m)}" value="${w == null ? '' : w}" placeholder="${Util.escapeHtml(Util.t('ui.wc_even_placeholder'))}">`
           : (w == null ? '—' : Util.escapeHtml(String(w)))}</td>
-        <td class="md-td"><span class="wc-pct-cell" data-machine="${Util.escapeHtml(m)}">${pctText}</span>${w == null && !evenState ? ` <span class="wc-not-set">${Util.escapeHtml(Util.t('ui.wc_not_set_zero'))}</span>` : ''}</td>
+        <td class="md-td">
+          <span class="wc-pct-cell" data-machine="${Util.escapeHtml(m)}">${pctText}</span>
+          <span class="wc-not-set" data-machine="${Util.escapeHtml(m)}"${notSetHidden ? ' hidden' : ''}>${Util.escapeHtml(Util.t('ui.wc_not_set_zero'))}</span>
+        </td>
         <td class="md-td">—</td>
       </tr>`;
     }).join('') : `<tr><td class="md-td" colspan="4">${Util.escapeHtml(Util.t('empty.wc_no_members'))}</td></tr>`;
 
     return `
-      <div class="wc-detail">
-        <div class="wc-detail-head">
-          <h3>${Util.escapeHtml(code)}</h3>
-          <span class="md-dirty-badge" id="wc-dirty" ${dirty.length ? '' : 'hidden'}>${Util.escapeHtml(Util.t('ui.n_unsaved', { count: dirty.length }))}</span>
-        </div>
-        <div id="wc-bulk-warnings"></div>
-
-        <div class="wc-field-row">
-          <label for="wc-desc">${Util.escapeHtml(Util.t('col.description'))}</label>
-          ${isAdmin ? `<input type="text" class="input" id="wc-desc" value="${Util.escapeHtml(staged.description)}">`
-                     : `<span class="wc-ro-value">${Util.escapeHtml(staged.description || '—')}</span>`}
-        </div>
-        <div class="wc-field-row">
-          <label for="wc-mode">${Util.escapeHtml(Util.t('col.distribution_mode'))}</label>
-          ${isAdmin ? `<select class="input" id="wc-mode">
-              <option value="distribute"${staged.distribution_mode === 'distribute' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.wc_mode_distribute'))}</option>
-              <option value="single"${staged.distribution_mode === 'single' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.wc_mode_single'))}</option>
-            </select>`
-                     : `<span class="wc-ro-value">${Util.escapeHtml(Util.t(staged.distribution_mode === 'single' ? 'ui.wc_mode_single' : 'ui.wc_mode_distribute'))}</span>`}
-        </div>
-        <div class="wc-field-row">
-          <label for="wc-default-machine-combo">${Util.escapeHtml(Util.t('col.default_machine'))}</label>
-          ${isAdmin ? `<div id="wc-default-machine-combo" style="width:220px;"></div>`
-                     : `<span class="wc-ro-value">${Util.escapeHtml(staged.default_machine || '—')}</span>`}
-        </div>
-        ${isAdmin && !canSaveSingle ? `<p class="wc-inline-warn">${Util.escapeHtml(Util.t('ui.wc_single_needs_default'))}</p>` : ''}
-        ${isAdmin && defaultOutOfMembership ? `<p class="wc-inline-warn">${Util.escapeHtml(Util.t('ui.wc_default_not_member'))}</p>` : ''}
-        <div class="wc-field-row">
-          <label for="wc-max-sep">${Util.escapeHtml(Util.t('col.max_separation'))}</label>
-          ${isAdmin ? `<select class="input" id="wc-max-sep">${sepOptions}</select>`
-                     : `<span class="wc-ro-value">${Util.escapeHtml(Util.t(`ui.wc_max_sep_${staged.max_separation}`))}</span>`}
+      <div class="lines-detail">
+        <div class="ld-header">
+          <span class="line-dot" style="background:${color};width:14px;height:14px;border-radius:50%;display:inline-block;flex-shrink:0;"></span>
+          <span class="ld-name">${Util.escapeHtml(code)}</span>
+          <span class="plant-badge" style="margin-left:auto;">${Util.escapeHtml(Store.selectedPlant || '—')}</span>
         </div>
 
-        <div class="wc-checkbox-row">
+        <div class="ld-settings-row">
           <label class="ld-ctrl-label">
             <input type="checkbox" id="wc-review-required" ${staged.review_required ? 'checked' : ''} ${isAdmin ? '' : 'disabled'}>
             ${Util.escapeHtml(Util.t('ui.wc_review_required_label'))}
           </label>
           ${isAdmin ? `<button type="button" class="wc-info-btn" data-info="review_required" title="${Util.escapeHtml(Util.t('ui.more_info'))}">&#9432;</button>` : ''}
-        </div>
-        <p class="panel-hint">${Util.escapeHtml(Util.t('ui.wc_review_required_hint'))}</p>
-
-        <div class="wc-checkbox-row">
           <label class="ld-ctrl-label">
             <input type="checkbox" id="wc-distribute-tooled" ${staged.distribute_tooled ? 'checked' : ''} ${isAdmin ? '' : 'disabled'}>
             ${Util.escapeHtml(Util.t('ui.wc_distribute_tooled_label'))}
           </label>
           ${isAdmin ? `<button type="button" class="wc-info-btn" data-info="distribute_tooled" title="${Util.escapeHtml(Util.t('ui.more_info'))}">&#9432;</button>` : ''}
+          <span class="ld-buffer">
+            <span class="ld-buffer-label">${Util.escapeHtml(Util.t('col.description'))}</span>
+            ${isAdmin ? `<input type="text" class="input" id="wc-desc" style="width:200px;" value="${Util.escapeHtml(staged.description)}">`
+                       : `<span class="wc-ro-value">${Util.escapeHtml(staged.description || '—')}</span>`}
+          </span>
+          <span class="ld-buffer">
+            <span class="ld-buffer-label">${Util.escapeHtml(Util.t('col.distribution_mode'))}</span>
+            ${isAdmin ? `<select class="input" id="wc-mode" style="width:180px;">
+                <option value="distribute"${staged.distribution_mode === 'distribute' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.wc_mode_distribute'))}</option>
+                <option value="single"${staged.distribution_mode === 'single' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.wc_mode_single'))}</option>
+              </select>`
+                       : `<span class="wc-ro-value">${Util.escapeHtml(Util.t(staged.distribution_mode === 'single' ? 'ui.wc_mode_single' : 'ui.wc_mode_distribute'))}</span>`}
+          </span>
+          <span class="ld-buffer">
+            <span class="ld-buffer-label">${Util.escapeHtml(Util.t('col.default_machine'))}</span>
+            ${isAdmin ? `<div id="wc-default-machine-combo" style="width:160px;"></div>`
+                       : `<span class="wc-ro-value">${Util.escapeHtml(staged.default_machine || '—')}</span>`}
+          </span>
+          <span class="ld-buffer">
+            <span class="ld-buffer-label">${Util.escapeHtml(Util.t('col.max_separation'))}</span>
+            ${isAdmin ? `<select class="input" id="wc-max-sep" style="width:150px;">${sepOptions}</select>`
+                       : `<span class="wc-ro-value">${Util.escapeHtml(Util.t(`ui.wc_max_sep_${staged.max_separation}`))}</span>`}
+          </span>
         </div>
-        <p class="panel-hint">${Util.escapeHtml(Util.t('ui.wc_distribute_tooled_hint'))}</p>
 
-        <div class="panel wc-membership-panel">
-          <header class="panel-head">
-            <h3>${Util.escapeHtml(Util.t('ui.wc_membership_title'))}</h3>
+        <div id="wc-notices">${_wcNoticesInnerHtml(reason, members.length)}</div>
+
+        <div class="ld-section">
+          <div class="ld-section-head">
+            <span class="ld-section-title">${Util.escapeHtml(Util.t('ui.wc_membership_title'))}</span>
             ${isAdmin ? `<button class="btn btn-ghost sm" id="wc-even-btn">${Util.escapeHtml(Util.t('btn.even'))}</button>` : ''}
-          </header>
-          <div class="panel-body panel-body-flush">
-            ${thin ? `<p class="wc-inline-warn" style="margin:8px 12px 0;">${Util.escapeHtml(Util.t('ui.wc_distribute_thin_warning'))}</p>` : ''}
+          </div>
+          <div class="ld-section-body">
             <div class="md-table-wrap">
               <table class="md-table">
                 <thead><tr>
@@ -4406,54 +4548,20 @@ export const WorkCenters = {
                 </tr></tfoot>
               </table>
             </div>
-            <p class="panel-hint" style="padding:8px 12px;">${Util.escapeHtml(Util.t('ui.wc_assign_hint'))}</p>
+            <p class="panel-hint">${Util.escapeHtml(Util.t('ui.wc_assign_hint'))}</p>
           </div>
         </div>
-
-        ${isAdmin ? `
-        <div class="wc-detail-actions">
-          <button class="btn btn-ghost sm" id="wc-discard-btn" ${dirty.length ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.discard'))}</button>
-          <button class="btn btn-primary sm" id="wc-save-btn" ${saveDisabled ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.save'))}</button>
-        </div>` : ''}
       </div>`;
   },
 
-  _wireList(pane: HTMLElement, isAdmin: boolean): void {
-    const search = pane.querySelector<HTMLInputElement>('#wc-search');
-    if (search) {
-      search.oninput = Util.debounce(() => {
-        WorkCenters._search = search.value;
-        const plant = Store.selectedPlant;
-        if (!plant) return;
-        void WorkCenters._loadAll(plant, true).then(() => WorkCenters._renderPane());
-      }, 250);
-    }
-
-    const loadMore = pane.querySelector<HTMLButtonElement>('#wc-load-more');
-    if (loadMore) loadMore.onclick = () => {
-      const plant = Store.selectedPlant;
-      if (!plant) return;
-      WorkCenters._offset += 50;
-      void WorkCenters._loadAll(plant, false).then(() => WorkCenters._renderPane());
-    };
-
-    pane.querySelectorAll<HTMLElement>('.wc-row').forEach((row) => {
-      row.onclick = () => WorkCenters._selectRow(row.dataset.code || '');
-    });
-
-    if (!isAdmin) return;
-
-    const newToggle = pane.querySelector<HTMLButtonElement>('#wc-new-toggle');
-    const newForm = pane.querySelector<HTMLElement>('#wc-new-form');
-    if (newToggle && newForm) newToggle.onclick = () => { newForm.hidden = !newForm.hidden; };
-    pane.querySelector<HTMLButtonElement>('#wc-new-cancel')?.addEventListener('click', () => {
-      if (newForm) newForm.hidden = true;
-    });
-    pane.querySelector<HTMLButtonElement>('#wc-new-create')?.addEventListener('click', () => void WorkCenters._createNew());
-  },
-
+  // Flushes any still-debounced edit for the PREVIOUSLY selected code (see
+  // _flushPending) before overwriting _staged/_baseline for the newly
+  // clicked row — otherwise the old row's last keystrokes are simply
+  // discarded the instant _staged is replaced below.
   _selectRow(code: string): void {
-    if (!code) return;
+    if (!code || code === WorkCenters._selected) return;
+    WorkCenters._flushPending();
+
     const row = WorkCenters._rows.find((r) => r.sap_workcenter === code);
     if (!row) return;
 
@@ -4463,64 +4571,97 @@ export const WorkCenters = {
       const mach = WorkCenters._machines.find((x) => x.machine === m);
       weights[m] = (mach && mach.distribution_weight != null) ? Number(mach.distribution_weight) : null;
     }
-    const staged: WorkCenterStaged = {
-      description:       row.description || '',
-      distribution_mode: row.distribution_mode,
-      default_machine:    row.default_machine || '',
-      max_separation:     row.max_separation,
-      review_required:    row.review_required,
-      distribute_tooled:  row.distribute_tooled,
-      weights,
-    };
+    const staged: WorkCenterStaged = { ..._wcStagedBase(row), weights };
     WorkCenters._selected = code;
     WorkCenters._staged   = staged;
     WorkCenters._baseline = { ...staged, weights: { ...weights } };
-    WorkCenters._renderPane();
+    WorkCenters._dirty    = false;
+    WorkCenters._editSeq++; // discontinuity marker — see _write's rollback guard
+
+    document.querySelectorAll<HTMLElement>('#wc-list-body .lines-nav-item').forEach((el) => {
+      el.classList.toggle('active', el.dataset.code === code);
+    });
+    WorkCenters._renderDetailOnly();
   },
 
-  // Recomputes only the membership table's % cells + total (not a full
-  // _renderPane()) so typing in a weight input doesn't lose focus/cursor
-  // position on every keystroke — the "live % preview" the §14.1 runbook
-  // calls for, without the classic full-rebuild-steals-focus bug this
-  // codebase has hit before (see CLAUDE.md's drag spring-back history for
-  // why stale-index/full-rebuild bugs from over-eager re-renders are taken
-  // seriously here).
+  // Recomputes only the membership table's % cells, total, and the
+  // per-machine "not set" markers (not a full re-render) so typing in a
+  // weight input doesn't lose focus/cursor position on every keystroke —
+  // the "live % preview" the §14.1 runbook calls for, without the classic
+  // full-rebuild-steals-focus bug this codebase has hit before (see
+  // CLAUDE.md's drag spring-back history for why stale-index/full-rebuild
+  // bugs from over-eager re-renders are taken seriously here).
   _refreshMembershipMath(members: string[]): void {
-    if (!WorkCenters._staged) return;
-    const pct = _wcEffectivePercents(members, WorkCenters._staged.weights);
+    const staged = WorkCenters._staged;
+    if (!staged) return;
+    const pct = _wcEffectivePercents(members, staged.weights);
+    const evenState = members.every((m) => staged.weights[m] == null);
     let total = 0;
     for (const m of members) {
       const cell = document.querySelector<HTMLElement>(`.wc-pct-cell[data-machine="${CSS.escape(m)}"]`);
       if (cell) cell.textContent = pct[m] != null ? pct[m].toFixed(1) + '%' : '—';
+      const marker = document.querySelector<HTMLElement>(`.wc-not-set[data-machine="${CSS.escape(m)}"]`);
+      if (marker) marker.hidden = !(staged.weights[m] == null && !evenState);
       total += pct[m] || 0;
     }
     const totalCell = document.getElementById('wc-total-pct');
     if (totalCell) totalCell.textContent = members.length ? total.toFixed(1) + '%' : '—';
   },
 
-  _refreshDirtyOnly(): void {
-    const staged = WorkCenters._staged, baseline = WorkCenters._baseline, code = WorkCenters._selected;
-    if (!staged || !baseline || !code) return;
-    const dirty = _wcDirtyFields(staged, baseline);
-    const badge = document.getElementById('wc-dirty');
-    if (badge) {
-      badge.hidden = dirty.length === 0;
-      badge.textContent = Util.t('ui.n_unsaved', { count: dirty.length });
-    }
+  // Notices-only surgical refresh — replaces the old Save/Discard-era
+  // _refreshDirtyOnly (there's no dirty badge or Save button left to enable).
+  _refreshNoticesOnly(): void {
+    const staged = WorkCenters._staged;
+    const code = WorkCenters._selected;
+    if (!staged || !code) return;
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
-    const canSaveSingle = staged.distribution_mode !== 'single' || !!staged.default_machine;
-    const defaultOutOfMembership = !!staged.default_machine && !members.includes(staged.default_machine);
-    const saveBtn = document.getElementById('wc-save-btn') as HTMLButtonElement | null;
-    const discardBtn = document.getElementById('wc-discard-btn') as HTMLButtonElement | null;
-    if (saveBtn) saveBtn.disabled = !dirty.length || !canSaveSingle || defaultOutOfMembership || WorkCenters._saving;
-    if (discardBtn) discardBtn.disabled = dirty.length === 0;
+    const reason = WorkCenters._wcBlockReason(staged, members);
+    const host = document.getElementById('wc-notices');
+    if (host) host.innerHTML = _wcNoticesInnerHtml(reason, members.length);
+  },
+
+  // Patches one sidebar row's member-count badge and warning glyph in place
+  // — used after a successful autosave so the sidebar reflects the new
+  // persisted state without a full _renderSidebarList() rebuild (which would
+  // also be harmless here, but every other autosave success path is
+  // surgical-only by design, so this stays consistent with that).
+  _refreshSidebarRow(code: string): void {
+    const row = WorkCenters._rows.find((r) => r.sap_workcenter === code);
+    const el = document.querySelector<HTMLElement>(`#wc-list-body .lines-nav-item[data-code="${CSS.escape(code)}"]`);
+    if (!row || !el) return;
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+    const n = members.length;
+    const reason = WorkCenters._wcBlockReason(_wcStagedBase(row), members);
+
+    let countEl = el.querySelector<HTMLElement>('.wc-member-count');
+    if (n > 0) {
+      if (!countEl) {
+        countEl = document.createElement('span');
+        countEl.className = 'wc-member-count';
+        el.appendChild(countEl);
+      }
+      countEl.textContent = String(n);
+      countEl.title = Util.t('ui.wc_member_count_tip', { n });
+    } else {
+      countEl?.remove();
+    }
+
+    let warnEl = el.querySelector<HTMLElement>('.lines-nav-bottleneck');
+    if (reason) {
+      const text = _wcNoticeText(reason, n);
+      if (!warnEl) {
+        warnEl = document.createElement('span');
+        warnEl.className = 'lines-nav-bottleneck';
+        warnEl.textContent = '⚠';
+        el.appendChild(warnEl);
+      }
+      warnEl.title = text;
+    } else {
+      warnEl?.remove();
+    }
   },
 
   _wireDetail(pane: HTMLElement, isAdmin: boolean): void {
-    if (WorkCenters._pendingWarnings.length) {
-      _renderWcWarnings(WorkCenters._pendingWarnings);
-      WorkCenters._pendingWarnings = [];
-    }
     if (!isAdmin) return;
 
     const staged = WorkCenters._staged;
@@ -4529,12 +4670,32 @@ export const WorkCenters = {
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
 
     const descInp = pane.querySelector<HTMLInputElement>('#wc-desc');
-    if (descInp) descInp.oninput = () => { staged.description = descInp.value; WorkCenters._refreshDirtyOnly(); };
+    if (descInp) {
+      descInp.oninput = () => {
+        staged.description = descInp.value;
+        WorkCenters._markDirty();
+        WorkCenters._debouncedAutosave();
+      };
+      // Blur also flushes — "type, then immediately click another row"
+      // must not lose the edit to a debounce timer that never gets a
+      // chance to fire (see _flushPending).
+      descInp.onchange = () => WorkCenters._flushPending();
+    }
 
     const modeSel = pane.querySelector<HTMLSelectElement>('#wc-mode');
     if (modeSel) modeSel.onchange = () => {
       staged.distribution_mode = modeSel.value as 'single' | 'distribute';
-      WorkCenters._renderPane();
+      WorkCenters._markDirty();
+      // Surgical refresh only, never _renderDetailOnly() — mode never
+      // changes membership or the DOM structure around it, just whether
+      // _wcBlockReason holds this edit. A full rebuild here would also
+      // needlessly tear down and reconstruct the default-machine combobox
+      // (_mkCombobox leaks a `document` click listener per construction,
+      // ~2824 — fine once per real selection, not worth paying on every
+      // mode toggle).
+      WorkCenters._refreshNoticesOnly();
+      WorkCenters._refreshSidebarRow(code);
+      void WorkCenters._autosave();
     };
 
     const comboHost = pane.querySelector<HTMLElement>('#wc-default-machine-combo');
@@ -4542,21 +4703,45 @@ export const WorkCenters = {
       _mkCombobox(comboHost, members, {
         value: staged.default_machine,
         placeholder: Util.t('ph.wc_default_machine'),
-        onSelect: (v) => { staged.default_machine = v; WorkCenters._renderPane(); },
+        onSelect: (v) => {
+          staged.default_machine = v;
+          WorkCenters._markDirty();
+          // No render call here either, and for a second reason beyond the
+          // leak above: this callback runs INSIDE _mkCombobox's own click
+          // handling, and its clearBtn calls `input.focus()` right after
+          // invoking onSelect (~2823) — rebuilding/destroying this container
+          // mid-callback would make that focus() call silently target a
+          // detached node.
+          WorkCenters._refreshNoticesOnly();
+          WorkCenters._refreshSidebarRow(code);
+          void WorkCenters._autosave();
+        },
       });
     }
 
     const sepSel = pane.querySelector<HTMLSelectElement>('#wc-max-sep');
     if (sepSel) sepSel.onchange = () => {
       staged.max_separation = sepSel.value as WorkCenterStaged['max_separation'];
-      WorkCenters._refreshDirtyOnly();
+      WorkCenters._markDirty();
+      WorkCenters._refreshNoticesOnly();
+      void WorkCenters._autosave();
     };
 
     const reviewChk = pane.querySelector<HTMLInputElement>('#wc-review-required');
-    if (reviewChk) reviewChk.onchange = () => { staged.review_required = reviewChk.checked; WorkCenters._refreshDirtyOnly(); };
+    if (reviewChk) reviewChk.onchange = () => {
+      staged.review_required = reviewChk.checked;
+      WorkCenters._markDirty();
+      WorkCenters._refreshNoticesOnly();
+      void WorkCenters._autosave();
+    };
 
     const toolChk = pane.querySelector<HTMLInputElement>('#wc-distribute-tooled');
-    if (toolChk) toolChk.onchange = () => { staged.distribute_tooled = toolChk.checked; WorkCenters._refreshDirtyOnly(); };
+    if (toolChk) toolChk.onchange = () => {
+      staged.distribute_tooled = toolChk.checked;
+      WorkCenters._markDirty();
+      WorkCenters._refreshNoticesOnly();
+      void WorkCenters._autosave();
+    };
 
     pane.querySelectorAll<HTMLButtonElement>('.wc-info-btn').forEach((btn) => {
       btn.onclick = () => {
@@ -4575,8 +4760,9 @@ export const WorkCenters = {
           const n = Number(raw);
           if (Number.isFinite(n)) staged.weights[machine] = n;
         }
+        WorkCenters._markDirty();
         WorkCenters._refreshMembershipMath(members);
-        WorkCenters._refreshDirtyOnly();
+        WorkCenters._debouncedAutosave();
       };
       inp.onchange = () => {
         // Final validation on blur/Enter — a negative or non-numeric value
@@ -4584,139 +4770,193 @@ export const WorkCenters = {
         // an in-progress partial value (e.g. "-" while typing "-1") without
         // rejecting on every keystroke.
         const raw = inp.value.trim();
-        if (raw === '') return;
-        const n = Number(raw);
-        if (!Number.isFinite(n) || n < 0) {
-          Toast.show(Util.t('toast.wc_invalid_weight'), 'error');
-          const prev = staged.weights[machine];
-          inp.value = prev == null ? '' : String(prev);
-          WorkCenters._refreshMembershipMath(members);
-          WorkCenters._refreshDirtyOnly();
+        if (raw !== '') {
+          const n = Number(raw);
+          if (!Number.isFinite(n) || n < 0) {
+            Toast.show(Util.t('toast.wc_invalid_weight'), 'error');
+            const prev = staged.weights[machine];
+            inp.value = prev == null ? '' : String(prev);
+            WorkCenters._refreshMembershipMath(members);
+          }
         }
+        // Blur also flushes any still-debounced write for the same reason
+        // as #wc-desc above.
+        WorkCenters._flushPending();
       };
     });
 
     const evenBtn = pane.querySelector<HTMLButtonElement>('#wc-even-btn');
     if (evenBtn) evenBtn.onclick = () => {
       for (const m of members) staged.weights[m] = null;
-      WorkCenters._renderPane();
+      WorkCenters._markDirty();
+      pane.querySelectorAll<HTMLInputElement>('.wc-weight-input').forEach((inp) => { inp.value = ''; });
+      WorkCenters._refreshMembershipMath(members);
+      void WorkCenters._autosave();
     };
-
-    const discardBtn = pane.querySelector<HTMLButtonElement>('#wc-discard-btn');
-    if (discardBtn) discardBtn.onclick = () => {
-      if (!WorkCenters._baseline) return;
-      WorkCenters._staged = { ...WorkCenters._baseline, weights: { ...WorkCenters._baseline.weights } };
-      WorkCenters._renderPane();
-    };
-
-    const saveBtn = pane.querySelector<HTMLButtonElement>('#wc-save-btn');
-    if (saveBtn) saveBtn.onclick = () => void WorkCenters._save();
   },
 
-  // Creation goes through the generic bulk grid path (POST
-  // /master-data/sap_workcenter/bulk), NOT the dedicated PUT
-  // /distribution/{plant}/workcenters/{wc} route — the PUT route hard-blocks
-  // `distribute_mode_thin` (<2 members) and `single_mode_without_default` as
-  // 400s on every call, including creation, when a brand-new code has zero
-  // members and the New form collects no default-machine field. The generic
-  // bulk path only warns (§4.1's post-write hook), which is what a genuinely
-  // new, not-yet-staffed work center needs. Mode 'single' is rejected
-  // client-side for the same reason (see the DB CHECK: distribution_mode =
-  // 'distribute' OR default_machine IS NOT NULL — 'single' has nothing to
-  // set default_machine to at creation time from this form).
-  async _createNew(): Promise<void> {
-    const plant = Store.selectedPlant;
-    if (!plant) return;
-    const codeInp = document.getElementById('wc-new-code') as HTMLInputElement | null;
-    const descInp = document.getElementById('wc-new-desc') as HTMLInputElement | null;
-    const modeSel = document.getElementById('wc-new-mode') as HTMLSelectElement | null;
-    if (!codeInp || !modeSel) return;
-
-    const code = codeInp.value.trim().toUpperCase().replace(/-/g, '');
-    const description = (descInp?.value || '').trim();
-    const mode = modeSel.value as 'single' | 'distribute';
-
-    if (!code) { Toast.show(Util.t('toast.wc_code_required'), 'error'); return; }
-    if (WorkCenters._machines.some((m) => m.machine === code)) {
-      Toast.show(Util.t('toast.wc_code_shadowed'), 'error');
-      return;
-    }
-    if (WorkCenters._rows.some((r) => r.sap_workcenter === code)) {
-      Toast.show(Util.t('toast.wc_code_exists'), 'error');
-      return;
-    }
-    if (mode === 'single') {
-      Toast.show(Util.t('toast.wc_single_needs_default_at_create'), 'error');
-      return;
-    }
-
-    try {
-      const res = await Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter/bulk`, {
-        method:  'POST',
-        headers: { 'content-type': 'application/json' },
-        body:    JSON.stringify({
-          upserts: [{
-            plant, sap_workcenter: code, description: description || null, distribution_mode: mode,
-            default_machine: null, max_separation: 'none', review_required: true, distribute_tooled: false,
-          }],
-          deletes: [],
-        }),
-      }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error((e.detail && (e.detail.message || e.detail)) || `HTTP ${r.status}`); });
-        return r.json() as Promise<MasterDataBulkResult>;
-      });
-
-      Toast.show(Util.t('toast.wc_created', { code }), 'success');
-      WorkCenters._pendingWarnings = res.warnings || [];
-      await WorkCenters._loadAll(plant, true);
-      WorkCenters._selectRow(code);
-    } catch (e) {
-      Toast.show(Util.t('toast.wc_create_failed', { msg: (e as Error).message }), 'error');
-      ErrorLog.error('work-centers', `Create failed for ${code}: ${(e as Error).message}`);
-    }
+  _markDirty(): void {
+    WorkCenters._dirty = true;
+    WorkCenters._editSeq++;
   },
 
-  async _save(): Promise<void> {
+  // Forces any debounced-but-unsent edit to fire NOW, using whatever is
+  // currently selected/staged. Called before _selectRow/render's plant-switch
+  // branch overwrite _staged for a different row/plant, and on blur of the
+  // debounced Description/weight inputs, so "type, then immediately switch
+  // rows/plants" never silently drops the last edit. Util.debounce has no
+  // cancel/flush handle, so this can't actually cancel the pending timer —
+  // it just wins the race by acting first; _autosave()'s own
+  // `if (!WorkCenters._dirty) return;` guard makes that stale timer's
+  // eventual, later call a no-op.
+  _flushPending(): void {
+    if (WorkCenters._saving && WorkCenters._dirty) {
+      // A write is already in flight and the caller is about to replace
+      // _staged (row or plant switch). Left alone, the trailing retry in
+      // _autosave's finally would find _dirty already cleared by the
+      // caller (_selectRow/render both do) and silently drop this edit.
+      // Capture it as a concrete payload against the CURRENT (about to
+      // become old) plant/code instead, so that retry has something to send.
+      const q = WorkCenters._buildWrite();
+      if (q) { WorkCenters._queued = q; WorkCenters._dirty = false; }
+      return;
+    }
+    void WorkCenters._autosave();
+  },
+
+  // Recovers the one dead end _wcBlockReason creates: a distribute-mode work
+  // center with 0 members can never pass the gate from THIS pane (membership
+  // is only edited on the Machines tab, per WorkCenterStaged's own doc
+  // comment). Called after every render() so leaving to add a machine there
+  // and coming back lets a held edit land on its own instead of needing the
+  // admin to re-touch every field.
+  _maybeFlush(): void {
+    const staged = WorkCenters._staged;
+    const baseline = WorkCenters._baseline;
+    const code = WorkCenters._selected;
+    if (!staged || !baseline || !code || WorkCenters._saving) return;
+    const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
+    if (WorkCenters._wcBlockReason(staged, members)) return;
+    if (_wcStagedEqual(staged, baseline)) return;
+    WorkCenters._dirty = true;
+    void WorkCenters._autosave();
+  },
+
+  // Client-side pre-flight for the three PUT /distribution/{plant}/workcenters/{wc}
+  // rules we can evaluate locally (backend/distribution/data.py:161-172).
+  // Autosave fires only when this returns null; otherwise the edit is held
+  // and the pane explains what is missing, so we never send a request the
+  // route will reject. This is strictly an improvement over the old Save
+  // button's own pre-checks, which never covered distribute_mode_thin at
+  // all — ticking a checkbox on a 1-member distribute work center used to
+  // sail straight through Save and surface a raw 400 as a generic toast.
+  // Pure and DOM-free by design (also exercised directly by tests).
+  _wcBlockReason(staged: WorkCenterStaged, members: string[]): WcBlockReason {
+    if (staged.distribution_mode === 'single' && !staged.default_machine) return 'single_mode_without_default';
+    if (staged.default_machine && !members.includes(staged.default_machine)) return 'default_machine_not_member';
+    if (staged.distribution_mode === 'distribute' && members.length < 2) return 'distribute_mode_thin';
+    return null;
+  },
+
+  // Resolves the CURRENT plant/selection/staged into a self-contained write
+  // request, or null when there's nothing to send — no plant/code/staged,
+  // or _wcBlockReason holds it. Pulled out of _autosave so _flushPending can
+  // also capture one on demand (see there) without duplicating the gate
+  // check or the payload shape.
+  _buildWrite(): WorkCenterWriteRequest | null {
     const plant = Store.selectedPlant;
     const code = WorkCenters._selected;
     const staged = WorkCenters._staged;
-    if (!plant || !code || !staged || WorkCenters._saving) return;
+    if (!plant || !code || !staged) return null;
 
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
-    if (staged.distribution_mode === 'single' && !staged.default_machine) {
-      Toast.show(Util.t('ui.wc_single_needs_default'), 'error');
-      return;
-    }
-    if (staged.default_machine && !members.includes(staged.default_machine)) {
-      Toast.show(Util.t('ui.wc_default_not_member'), 'error');
+    if (WorkCenters._wcBlockReason(staged, members)) return null;
+
+    // Full current-membership weight set, not just the changed cells — the
+    // Even button clears every member to NULL, which only takes effect if
+    // every member's key rides along in this payload (backend/distribution/
+    // data.py's save_workcenter only UPDATEs the machines present in
+    // `weights`, so an omitted member's old weight would otherwise survive).
+    const weights: Record<string, number | null> = {};
+    for (const m of members) weights[m] = staged.weights[m] ?? null;
+    const payload: WorkCenterWritePayload = {
+      description:       staged.description || null,
+      distribution_mode: staged.distribution_mode,
+      default_machine:   staged.default_machine || null,
+      max_separation:    staged.max_separation,
+      review_required:   staged.review_required,
+      distribute_tooled: staged.distribute_tooled,
+      weights,
+    };
+    return { plant, code, payload, members };
+  },
+
+  // Entry point every control handler calls after mutating _staged (either
+  // directly, for an immediate-fire control, or via _debouncedAutosave).
+  // Coalesces concurrent triggers through _saving + the persistent _dirty
+  // flag (set by _markDirty, cleared here right before dispatch) instead of
+  // a separate "pending" flag — _dirty already means exactly "there's an
+  // edit that hasn't been handed to _write yet", which is also exactly what
+  // the trailing-retry check in the `finally` below needs.
+  async _autosave(): Promise<void> {
+    if (WorkCenters._saving) return; // in-flight write's own finally() retries once it settles, since _dirty stays true
+    if (!WorkCenters._dirty) return;
+
+    const build = WorkCenters._buildWrite();
+    if (!build) {
+      // Either no plant/code/staged (nothing to do), or _wcBlockReason held
+      // it — in the latter case _dirty stays true so _maybeFlush() retries
+      // once the gate clears. _refreshNoticesOnly is a no-op if there's no
+      // selection to show a notice for.
+      WorkCenters._refreshNoticesOnly();
       return;
     }
 
+    WorkCenters._dirty = false;
     WorkCenters._saving = true;
-    WorkCenters._refreshDirtyOnly();
-    try {
-      // Full current-membership weight set, not just the changed cells — the
-      // Even button clears every member to NULL, which only takes effect if
-      // every member's key rides along in this payload (backend/distribution/
-      // data.py's save_workcenter only UPDATEs the machines present in
-      // `weights`, so an omitted member's old weight would otherwise survive).
-      const weights: Record<string, number | null> = {};
-      for (const m of members) weights[m] = staged.weights[m] ?? null;
+    const seq = WorkCenters._editSeq;
 
+    try {
+      await WorkCenters._write(build.plant, build.code, build.payload, build.members, seq);
+    } finally {
+      WorkCenters._saving = false;
+      const q = WorkCenters._queued;
+      if (q) {
+        WorkCenters._queued = null;
+        // Selection has already moved on by the time a queued write drains
+        // (that's exactly why _flushPending queued it instead of just
+        // firing), so pass the CURRENT _editSeq here, not an older captured
+        // one — _write's `_selected === code` guard is already false for
+        // this request either way, so it never re-bases or rolls back
+        // `_staged`/`_baseline`; it only persists q's old-row payload and
+        // patches `_rows`/`_machines`, which are code-keyed and safe
+        // regardless of what's currently selected. Don't "fix" this by
+        // capturing an older seq — there's nothing left for it to guard
+        // once the row has changed.
+        void WorkCenters._write(q.plant, q.code, q.payload, q.members, WorkCenters._editSeq);
+      } else if (WorkCenters._dirty) {
+        void WorkCenters._autosave();
+      }
+    }
+  },
+
+  // The actual PUT — plant/code/payload/members/seq are all captured by the
+  // caller at fire time and never re-read from live selection state in
+  // here, because a slow response can land after the user has switched rows
+  // or plants (autosave races the user in a way the old single Save button
+  // never had to).
+  async _write(plant: string, code: string, payload: WorkCenterWritePayload, members: string[], seq: number): Promise<void> {
+    // Defensive — autosave is reachable from many more paths now (debounced
+    // typing, checkbox/select onchange, _maybeFlush after a re-render) than
+    // the single explicit Save button it replaces.
+    if (!Session.isAdmin()) return;
+    try {
       const res = await Util.fetchTraced(
         `${Config.API_BASE}/distribution/${encodeURIComponent(plant)}/workcenters/${encodeURIComponent(code)}`,
         {
           method:  'PUT',
           headers: { 'content-type': 'application/json' },
-          body:    JSON.stringify({
-            description:       staged.description || null,
-            distribution_mode: staged.distribution_mode,
-            default_machine:   staged.default_machine || null,
-            max_separation:    staged.max_separation,
-            review_required:   staged.review_required,
-            distribute_tooled: staged.distribute_tooled,
-            weights,
-          }),
+          body:    JSON.stringify(payload),
         },
       ).then(async (r) => {
         if (!r.ok) {
@@ -4730,9 +4970,8 @@ export const WorkCenters = {
         return r.json() as Promise<WorkCenterSaveResult>;
       });
 
-      // Reflect the saved row/weights locally instead of a full reload —
-      // cheaper, and keeps the currently-selected row and its staged state
-      // stable across the save.
+      // Code-keyed and safe unconditionally, even if the selection or plant
+      // moved on while this request was in flight.
       const idx = WorkCenters._rows.findIndex((r) => r.sap_workcenter === code);
       if (idx >= 0) {
         WorkCenters._rows[idx] = {
@@ -4749,16 +4988,47 @@ export const WorkCenters = {
         const mach = WorkCenters._machines.find((x) => x.machine === m);
         if (mach) mach.distribution_weight = res.weights[m] ?? null;
       }
-      const savedStaged: WorkCenterStaged = { ...staged, weights };
-      WorkCenters._baseline = { ...savedStaged, weights: { ...weights } };
-      WorkCenters._staged   = { ...savedStaged, weights: { ...weights } };
-      Toast.show(Util.t('toast.wc_saved', { code }), 'success');
+      WorkCenters._refreshSidebarRow(code);
+
+      // A slow response landing after a plant/row switch must not touch the
+      // live edit buffer for whatever is now selected instead.
+      if (WorkCenters._selected !== code || WorkCenters._loadedPlant !== plant) return;
+
+      const savedStaged: WorkCenterStaged = {
+        description:       payload.description ?? '',
+        distribution_mode: payload.distribution_mode,
+        default_machine:   payload.default_machine ?? '',
+        max_separation:    payload.max_separation,
+        review_required:   payload.review_required,
+        distribute_tooled: payload.distribute_tooled,
+        weights:           { ...payload.weights },
+      };
+      WorkCenters._baseline = { ...savedStaged, weights: { ...payload.weights } };
+      // Only overwrite the live `_staged` buffer if nothing has edited it
+      // since this request was fired — otherwise this response would stomp
+      // a newer, still-unsent edit with the snapshot it was built from.
+      if (WorkCenters._editSeq === seq) WorkCenters._staged = { ...savedStaged, weights: { ...payload.weights } };
+
+      // Success must NOT trigger _renderDetailOnly()/_renderPane() — a full
+      // rebuild here could steal focus/cursor from a Description or weight
+      // input the user may already be mid-typing into for the NEXT edit
+      // (autosave races typing, unlike the old explicit-Save button). Only
+      // the notices paragraph needs to reflect the save.
+      WorkCenters._refreshNoticesOnly();
     } catch (e) {
       Toast.show(Util.t('toast.wc_save_failed', { msg: (e as Error).message }), 'error');
       ErrorLog.error('work-centers', `Save failed for ${code}: ${(e as Error).message}`);
-    } finally {
-      WorkCenters._saving = false;
-      WorkCenters._renderPane();
+      // Roll the edit back to the last known-good save — but only if the
+      // user is still on this exact work center AND hasn't edited it again
+      // since this request was fired; otherwise leave the newer state
+      // alone (the trailing retry in _autosave's finally, or the next
+      // debounce tick, will attempt it and roll itself back if it also
+      // fails). A failed write is the one case allowed to disturb the
+      // detail panel, since the alternative is silently pretending it saved.
+      if (WorkCenters._selected === code && WorkCenters._loadedPlant === plant && WorkCenters._editSeq === seq && WorkCenters._baseline) {
+        WorkCenters._staged = { ...WorkCenters._baseline, weights: { ...WorkCenters._baseline.weights } };
+        WorkCenters._renderDetailOnly();
+      }
     }
   },
 };
