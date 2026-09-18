@@ -294,6 +294,92 @@ test('Optimizer mode tips exist in all 5 locales', () => {
   }
 });
 
+test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
+  // The Order Distribution feature (aggregate_to_detail.md, ROUTING_RUNTIME_DESIGN.md)
+  // introduces work-center distribution modes, shares editors, sub-order management,
+  // and distribution review workflows. All user-facing strings are localized.
+  const REQUIRED_DISTRIBUTION = [
+    // Tab labels
+    'tab.distribution', 'tab.sap_workcenter', 'tab.work_centers',
+    // Column header
+    'col.default_machine_hint',
+    // Work center modes and settings (ui.wc_*)
+    'ui.wc_admins_edit', 'ui.wc_mode_single', 'ui.wc_mode_distribute',
+    'ui.wc_max_sep_none', 'ui.wc_max_sep_hour', 'ui.wc_max_sep_day', 'ui.wc_max_sep_week',
+    'ui.wc_review_required_label', 'ui.wc_review_required_hint', 'ui.wc_review_required_help',
+    'ui.wc_distribute_tooled_label', 'ui.wc_distribute_tooled_hint', 'ui.wc_distribute_tooled_help',
+    'ui.wc_membership_title', 'ui.wc_assign_hint', 'ui.wc_total_row', 'ui.wc_even_placeholder',
+    'ui.wc_not_set_zero', 'ui.wc_distribute_thin_warning', 'ui.wc_single_needs_default',
+    'ui.wc_default_not_member',
+    // Distribution filters and buckets
+    'ui.dist_filter_from', 'ui.dist_filter_to',
+    'ui.dist_bucket_needs_review', 'ui.dist_bucket_changed', 'ui.dist_bucket_problems', 'ui.dist_bucket_all',
+    // Distribution table columns and details
+    'ui.dist_col_order', 'ui.dist_col_material', 'ui.dist_col_workcenter', 'ui.dist_col_qty',
+    'ui.dist_col_start', 'ui.dist_col_suborders', 'ui.dist_col_status', 'ui.dist_col_reviewed',
+    'ui.dist_showing_count', 'ui.dist_batch_chip', 'ui.dist_detail_empty', 'ui.dist_detail_window',
+    'ui.dist_detail_hours', 'ui.dist_detail_hours_vs', 'ui.dist_detail_updated', 'ui.dist_detail_reviewed',
+    'ui.dist_upload', 'ui.dist_shares_editor_placeholder',
+    // Distribution basis/explanation
+    'ui.dist_basis_material_default', 'ui.dist_basis_tooled_single', 'ui.dist_basis_weights',
+    'ui.dist_basis_even', 'ui.dist_basis_manual', 'ui.dist_basis_unknown',
+    // Distribution status indicators
+    'ui.dist_status_incomplete', 'ui.dist_status_incomplete_tip',
+    'ui.dist_status_runtime_mismatch', 'ui.dist_status_runtime_mismatch_tip',
+    'ui.dist_status_separation_violated', 'ui.dist_status_separation_violated_tip',
+    'ui.dist_status_wc_changed', 'ui.dist_status_wc_changed_tip',
+    'ui.dist_status_membership_changed', 'ui.dist_status_membership_changed_tip',
+    'ui.dist_status_mode_mismatch', 'ui.dist_status_mode_mismatch_tip',
+    'ui.dist_status_qty_changed', 'ui.dist_status_qty_changed_tip',
+    'ui.dist_status_below_min_lot', 'ui.dist_status_below_min_lot_tip',
+    'ui.dist_status_zero_quantity_children', 'ui.dist_status_zero_quantity_children_tip',
+    'ui.dist_status_needs_review', 'ui.dist_status_needs_review_tip',
+    'ui.dist_status_purged', 'ui.dist_status_purged_tip',
+    // Distribution editor
+    'ui.dist_editor_col_letter', 'ui.dist_editor_col_machine', 'ui.dist_editor_col_weight',
+    'ui.dist_editor_col_effective', 'ui.dist_editor_col_qty_after', 'ui.dist_editor_col_hours_after',
+    'ui.dist_editor_col_start', 'ui.dist_editor_col_outcome', 'ui.dist_editor_total',
+    'ui.dist_no_suborder', 'ui.dist_outcome_unchanged', 'ui.dist_outcome_resized',
+    'ui.dist_outcome_new', 'ui.dist_outcome_removed',
+    'ui.dist_marker_frozen', 'ui.dist_marker_stale', 'ui.dist_marker_purged', 'ui.dist_marker_below_min_lot',
+    // Distribution actions
+    'ui.dist_save_plain', 'ui.dist_save_removes', 'ui.dist_confirm_remove_title', 'ui.dist_confirm_remove_msg',
+    'ui.dist_saved_reconcile', 'ui.dist_banner_firmed_left', 'ui.dist_whatif_blocked',
+    'ui.dist_bulk_selected', 'ui.dist_bulk_partial_msg', 'ui.dist_bulk_review_result_title',
+    'ui.dist_bulk_reset_result_title',
+    // Distribution inspector/KPI
+    'ui.insp_machine_locked_title', 'ui.work_status_distribution',
+    // Toast messages
+    'toast.dist_machine_locked', 'toast.dist_load_failed', 'toast.dist_detail_load_failed',
+    'toast.dist_review_failed', 'toast.dist_reviewed', 'toast.dist_shares_saved', 'toast.dist_shares_save_failed',
+    'toast.dist_stale_refetched', 'toast.dist_reset_failed', 'toast.dist_repaired', 'toast.dist_repair_failed',
+    'toast.dist_bulk_done', 'toast.dist_reassign_confirm',
+    'toast.wc_load_failed', 'toast.wc_code_required', 'toast.wc_code_shadowed', 'toast.wc_code_exists',
+    'toast.wc_single_needs_default_at_create', 'toast.wc_created', 'toast.wc_create_failed',
+    'toast.wc_invalid_weight', 'toast.wc_saved', 'toast.wc_save_failed',
+    // Error messages
+    'err.dist_weights_empty', 'err.dist_duplicate_machine', 'err.dist_share_purged',
+    'err.dist_stale_machine', 'err.dist_workcenter_missing',
+    // Empty states
+    'empty.dist_no_workcenters_title', 'empty.dist_no_workcenters_msg',
+    'empty.dist_no_orders_title', 'empty.dist_no_orders_msg',
+    'empty.dist_no_match_title', 'empty.dist_no_match_msg',
+    'empty.wc_select_plant', 'empty.wc_select_row', 'empty.wc_no_members',
+    // KPI and command palette
+    'kpi.orders_sub_counted',
+    'cmdp.need_distribution_review', 'cmdp.sub_view_distribution',
+    // Buttons and placeholders
+    'btn.new_work_center', 'btn.create', 'btn.load_more', 'btn.even',
+    'ph.search_work_centers', 'ph.wc_code', 'ph.wc_description', 'ph.wc_default_machine', 'ph.select_work_center',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_DISTRIBUTION) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {

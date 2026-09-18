@@ -1582,4 +1582,200 @@ window.__NIMBUS_LOCALES.de = {
   'cmdp.toast_split_orders_whole':     'Split orders must be rescheduled as a whole.',                // MISSING TRANSLATION
   'cmdp.label_snapshot_before_acting': 'Snapshot before acting on selection ({{count}})',              // MISSING TRANSLATION
   'cmdp.sub_save_checkpoint_now':      'Save a Time Machine checkpoint now',                          // MISSING TRANSLATION
+  'cmdp.need_distribution_review':     '{{count}} Verteilungen benötigen Überprüfung',
+  'cmdp.sub_view_distribution':        'Zur Registerkarte Verteilung springen',
+
+  /* ── Order Distribution (P2-22) ──────────────────────────────────────────── */
+  // Tab labels
+  'tab.distribution':                  'Auftragsverteilung',
+  'tab.sap_workcenter':                'Arbeitszentren',
+  'tab.work_centers':                  'Arbeitszentren',
+
+  // Column header
+  'col.default_machine_hint':          'Verteilungsstandard, wenn diese Maschine zum Arbeitszentrum des Auftrags gehört (Entscheidung G)',
+
+  // Button labels
+  'btn.new_work_center':                '+ Neu',
+  'btn.create':                         'Erstellen',
+  'btn.load_more':                      'Mehr laden',
+  'btn.even':                           'Gleichmäßig',
+
+  // Placeholder text
+  'ph.search_work_centers':             'Arbeitszentren suchen…',
+  'ph.wc_code':                         'Code (z. B. WC100)',
+  'ph.wc_description':                  'Beschreibung',
+  'ph.wc_default_machine':              'Wählen Sie eine Mitgliedsmaschine…',
+  'ph.select_work_center':              'Wählen Sie ein Arbeitszentrum…',
+
+  // Work center UI
+  'ui.wc_admins_edit':                  'Administratoren bearbeiten Arbeitszentren',
+  'ui.wc_mode_single':                  'Eine Maschine',
+  'ui.wc_mode_distribute':              'Auf Maschinen verteilen',
+  'ui.wc_max_sep_none':                 'Keine Begrenzung',
+  'ui.wc_max_sep_hour':                 'Gleiche Stunde',
+  'ui.wc_max_sep_day':                  'Gleicher Tag',
+  'ui.wc_max_sep_week':                 'Gleiche Woche (Mo–So)',
+  'ui.wc_review_required_label':        'Planer überprüfen die Anteile jedes Auftrags',
+  'ui.wc_review_required_hint':         'Bei Deaktivierung werden neue Aufträge automatisch als überprüft betrachtet.',
+  'ui.wc_review_required_help':         'Bei Deaktivierung wird die Standardaufteilung jedes neuen Auftrags als überprüft (von „Richtlinie") markiert, anstatt in der Überprüfungswarteschlange zu warten. Verwenden Sie dies für ein Arbeitszentrum mit hohem Volumen, bei dem die Standardaufteilung als zuverlässig gilt. Manuelle Neubewertungen werden weiterhin mit Wer und Wann aufgezeichnet.',
+  'ui.wc_distribute_tooled_label':      'Auch bearbeitete Materialien verteilen (jede Maschine hat ihr eigenes Werkzeug)',
+  'ui.wc_distribute_tooled_hint':       'Nur aktivieren, wenn jede Mitgliedsmaschine ihre eigene Kopie des Werkzeugs hat.',
+  'ui.wc_distribute_tooled_help':       'Deaktiviert (Standard): Bearbeitete Materialien werden immer auf die Standardmaschine des Arbeitszentrums gelegt, nie aufgeteilt. Aktiviert: Bearbeitete Materialien folgen den gleichen Gewichtungen wie alles andere, da jede Maschine bereits ihre eigene Kopie des Werkzeugs hat.',
+  'ui.wc_membership_title':             'Mitgliedschaft',
+  'ui.wc_assign_hint':                  'Weisen Sie Maschinen auf der Registerkarte „Maschinen" zu.',
+  'ui.wc_total_row':                    'GESAMT',
+  'ui.wc_even_placeholder':             'gleichmäßig',
+  'ui.wc_not_set_zero':                 '(nicht gesetzt → 0 %)',
+  'ui.wc_distribute_thin_warning':      'Der Verteilungsmodus hat weniger als zwei Mitgliedsmaschinen — Aufträge werden nicht tatsächlich aufgeteilt, bis eine zweite Maschine beitritt.',
+  'ui.wc_single_needs_default':         'Der Einzelmodus benötigt eine Standardmaschine, bevor Sie speichern können.',
+  'ui.wc_default_not_member':           'Die Standardmaschine ist kein Mitglied dieses Arbeitszentrums mehr — wählen Sie eine aus den aktuellen Mitgliedern.',
+
+  // Distribution filters and buckets
+  'ui.dist_filter_from':                'Von',
+  'ui.dist_filter_to':                  'Bis',
+  'ui.dist_bucket_needs_review':        'Benötigt Überprüfung',
+  'ui.dist_bucket_changed':             'Geändert',
+  'ui.dist_bucket_problems':            'Probleme',
+  'ui.dist_bucket_all':                 'Alle',
+
+  // Distribution table columns
+  'ui.dist_col_order':                  'SAP-Auftrag',
+  'ui.dist_col_material':               'Material',
+  'ui.dist_col_workcenter':             'Arbeitszentrum',
+  'ui.dist_col_qty':                    'Menge',
+  'ui.dist_col_start':                  'Grundlegender Start',
+  'ui.dist_col_suborders':              'Unteraufträge',
+  'ui.dist_col_status':                 'Status',
+  'ui.dist_col_reviewed':               'Überprüft',
+
+  // Distribution detail
+  'ui.dist_showing_count':              'Zeige {{shown}} von {{total}}',
+  'ui.dist_batch_chip':                 'Upload · {{when}} ×',
+  'ui.dist_detail_empty':               'Wählen Sie einen Auftrag aus, um seine Verteilung zu sehen.',
+  'ui.dist_detail_window':              'Grundlegender Start → Finish',
+  'ui.dist_detail_hours':               'Unterauftrags-Stunden gegenüber Auftrag',
+  'ui.dist_detail_hours_vs':            '{{sum}}h vs {{parent}}h',
+  'ui.dist_detail_updated':             'Aktualisiert {{when}} durch {{who}}',
+  'ui.dist_detail_reviewed':            'Überprüft {{when}} durch {{who}}',
+  'ui.dist_upload':                     'Upload',
+  'ui.dist_shares_editor_placeholder':  'Anteile-Editor kommt bald',
+
+  // Distribution basis
+  'ui.dist_basis_material_default':     '100% auf {{machine}} — Standardmaschine von Material {{material}}',
+  'ui.dist_basis_tooled_single':        'Eine Maschine — Material nutzt ein Werkzeug',
+  'ui.dist_basis_weights':              'Arbeitszentrum-Gewichtungen {{list}}',
+  'ui.dist_basis_even':                 'Gleichmäßig — keine Gewichtungen gesetzt',
+  'ui.dist_basis_manual':               'Angepasst durch {{who}} am {{when}}',
+  'ui.dist_basis_unknown':              '',
+
+  // Distribution status
+  'ui.dist_status_incomplete':          'Unvollständig',
+  'ui.dist_status_incomplete_tip':      'Unteraufträge und Anteile stimmen nicht überein',
+  'ui.dist_status_runtime_mismatch':    'Laufzeit geändert',
+  'ui.dist_status_runtime_mismatch_tip':'Die Laufzeit eines eingeplanten Unterauftrags hat sich geändert',
+  'ui.dist_status_separation_violated': 'Trennung verletzt',
+  'ui.dist_status_separation_violated_tip': 'Unteraufträge starten in unterschiedlichen Buckets',
+  'ui.dist_status_wc_changed':          'Arbeitszentrum geändert',
+  'ui.dist_status_wc_changed_tip':      'In SAP zu einem anderen Arbeitszentrum verschoben',
+  'ui.dist_status_membership_changed':  'Mitgliedschaft geändert',
+  'ui.dist_status_membership_changed_tip': 'Eine Maschine ist dem Arbeitszentrum beigetreten oder hat es verlassen',
+  'ui.dist_status_mode_mismatch':       'Modus geändert',
+  'ui.dist_status_mode_mismatch_tip':   'Arbeitszentrum ist jetzt „Eine Maschine"',
+  'ui.dist_status_qty_changed':         'Menge geändert',
+  'ui.dist_status_qty_changed_tip':     'Menge seit Überprüfung geändert',
+  'ui.dist_status_below_min_lot':       'Unter Mindestlosgröße',
+  'ui.dist_status_below_min_lot_tip':   'Ein Unterauftrag ist unter der Mindestlosgröße',
+  'ui.dist_status_zero_quantity_children': 'Null Menge',
+  'ui.dist_status_zero_quantity_children_tip': 'Ein Unterauftrag hat keine Menge',
+  'ui.dist_status_needs_review':        'Benötigt Überprüfung',
+  'ui.dist_status_needs_review_tip':    'Standardanteile noch nicht überprüft',
+  'ui.dist_status_purged':              'Gelöscht',
+  'ui.dist_status_purged_tip':          'Ein Unterauftrag wurde gelöscht; der nächste Upload belebt ihn',
+
+  // Distribution editor columns
+  'ui.dist_editor_col_letter':          'Buchstabe',
+  'ui.dist_editor_col_machine':         'Maschine',
+  'ui.dist_editor_col_weight':          'Gewichtung',
+  'ui.dist_editor_col_effective':       'Effektiv %',
+  'ui.dist_editor_col_qty_after':       'Menge nach',
+  'ui.dist_editor_col_hours_after':     'Stunden nach',
+  'ui.dist_editor_col_start':           'Aktueller Start',
+  'ui.dist_editor_col_outcome':         'Ergebnis',
+  'ui.dist_editor_total':               'GESAMT',
+
+  // Distribution outcomes and markers
+  'ui.dist_no_suborder':                '(kein Unterauftrag)',
+  'ui.dist_outcome_unchanged':          'Unverändert',
+  'ui.dist_outcome_resized':            'Verändert',
+  'ui.dist_outcome_new':                'Neu',
+  'ui.dist_outcome_removed':            'Entfernt',
+  'ui.dist_marker_frozen':              'eingefroren',
+  'ui.dist_marker_stale':               'veraltet',
+  'ui.dist_marker_purged':              'gelöscht',
+  'ui.dist_marker_below_min_lot':       'unter Mindestlosgröße',
+
+  // Distribution actions
+  'ui.dist_save_plain':                 'Speichern',
+  'ui.dist_save_removes':               'Speichern · entfernt {{n}} eingeplante Unteraufträge',
+  'ui.dist_confirm_remove_title':       'Eingeplante Unteraufträge entfernen?',
+  'ui.dist_confirm_remove_msg':         'Dies verwirft den Zeitplan für {{n}} Unterauftrag/Unteraufträge:',
+  'ui.dist_saved_reconcile':            'Anteile gespeichert. {{n}} Unterauftrags-Balken wurden in ihrer neuen Laufzeit angepasst — speichern Sie den Zeitplan, um sie zu behalten.',
+  'ui.dist_banner_firmed_left':         '{{n}} festgeschriebene/festgeschriebener Unterauftrag/Unteraufträge zum Freigeben übrig.',
+  'ui.dist_whatif_blocked':             'Verteilungsänderungen sind im Was-wäre-wenn-Modus deaktiviert.',
+  'ui.dist_bulk_selected':              '{{n}} ausgewählt',
+  'ui.dist_bulk_partial_msg':           '{{n}} Element/Elemente konnte/n nicht abgeschlossen werden:',
+  'ui.dist_bulk_review_result_title':   'Als überprüft markieren — Ergebnisse',
+  'ui.dist_bulk_reset_result_title':    'Auf Standards zurücksetzen — Ergebnisse',
+
+  // Distribution inspector
+  'ui.insp_machine_locked_title':       'Maschine wird durch die Verteilung dieses Auftrags gesetzt. Passen Sie die Anteile in Auftragsverteilung an, um dies zu ändern.',
+  'ui.work_status_distribution':        '{{count}} Verteilung{{plural}} benötigen Überprüfung',
+
+  // Distribution toasts
+  'toast.dist_machine_locked':          '{{order}} läuft auf {{machine}}, da es verteilt ist. Passen Sie die Anteile an, um es zu verschieben.',
+  'toast.dist_load_failed':             'Auftragsverteilungsdaten konnten nicht geladen werden.',
+  'toast.dist_detail_load_failed':      'Auftragsdetails konnten nicht geladen werden.',
+  'toast.dist_review_failed':           'Konnte nicht als überprüft markieren.',
+  'toast.dist_reviewed':                'Als überprüft markiert.',
+  'toast.dist_shares_saved':            'Anteile gespeichert.',
+  'toast.dist_shares_save_failed':      'Anteile konnten nicht gespeichert werden.',
+  'toast.dist_stale_refetched':         'Diese Verteilung hat sich geändert, seit Sie sie geladen haben — mit den neuesten Daten aktualisiert.',
+  'toast.dist_reset_failed':            'Konnte nicht auf Arbeitszentrum-Standardwerte zurücksetzen.',
+  'toast.dist_repaired':                'Unteraufträge wurden repariert, um den aktuellen Anteilen zu entsprechen.',
+  'toast.dist_repair_failed':           'Unteraufträge konnten nicht repariert werden.',
+  'toast.dist_bulk_done':               '{{n}} Auftrag/Aufträge aktualisiert.',
+  'toast.dist_reassign_confirm':        '{{n}} Verteilung/Verteilungen und {{k}} eingeplante Unterauftrag/Unteraufträge beziehen sich auf {{machine}} unter {{wc}}; sie werden als *Maschine hat Arbeitszentrum verlassen* angezeigt, bis ihre Anteile angepasst werden',
+
+  // Work center toasts
+  'toast.wc_load_failed':               'Arbeitszentren konnten nicht geladen werden — versuchen Sie es erneut.',
+  'toast.wc_code_required':             'Geben Sie einen Arbeitszentrumscode ein',
+  'toast.wc_code_shadowed':             'Dieser Code ist bereits ein Maschinenname an diesem Werk',
+  'toast.wc_code_exists':               'Ein Arbeitszentrum mit diesem Code existiert bereits',
+  'toast.wc_single_needs_default_at_create': 'Erstellen Sie zuerst als Verteilen, wechseln Sie dann zu Einzeln, wenn eine Standardmaschine Mitglied ist',
+  'toast.wc_created':                   'Arbeitszentrum {{code}} erstellt',
+  'toast.wc_create_failed':             'Arbeitszentrum konnte nicht erstellt werden: {{msg}}',
+  'toast.wc_invalid_weight':            'Gewichtung muss eine Zahl ≥ 0 sein',
+  'toast.wc_saved':                     'Arbeitszentrum {{code}} gespeichert',
+  'toast.wc_save_failed':               'Speichern fehlgeschlagen: {{msg}}',
+
+  // Distribution errors
+  'err.dist_weights_empty':             'Mindestens eine Maschine benötigt eine positive Gewichtung.',
+  'err.dist_duplicate_machine':         'Eine Maschine kann nur einmal in der Anteilsliste vorkommen.',
+  'err.dist_share_purged':              'Dieser Unterauftrag wurde gelöscht — nur ein neuer Upload belebt ihn.',
+  'err.dist_stale_machine':             'Diese Maschine ist kein Mitglied dieses Arbeitszentrums mehr.',
+  'err.dist_workcenter_missing':        'Das Arbeitszentrum für diesen Auftrag existiert nicht mehr.',
+
+  // Distribution empty states
+  'empty.dist_no_workcenters_title':    'Keine Arbeitszentren zum Verteilen konfiguriert',
+  'empty.dist_no_workcenters_msg':      'Sammelaufträge von SAP werden hier auf die Maschinen eines Arbeitszentrums verteilt. Konfigurieren Sie ein Arbeitszentrum zum Verteilen auf Maschinen, um zu beginnen.',
+  'empty.dist_no_orders_title':         'Noch keine verteilten Aufträge',
+  'empty.dist_no_orders_msg':           'Verteilte Unteraufträge erscheinen hier, sobald Aufträge für ein Arbeitszentrum im Verteilungsmodus hochgeladen werden.',
+  'empty.dist_no_match_title':          'Keine Aufträge entsprechen diesem Filter',
+  'empty.dist_no_match_msg':            'Versuchen Sie, den Datumsbereich zu erweitern oder Filter zu löschen.',
+  'empty.wc_select_plant':              'Wählen Sie ein Werk aus, um seine Arbeitszentren zu sehen.',
+  'empty.wc_select_row':                'Wählen Sie ein Arbeitszentrum aus, um seine Details zu sehen.',
+  'empty.wc_no_members':                'Noch keine Maschinen zugewiesen — weisen Sie sie auf der Registerkarte „Maschinen" zu.',
+
+  // Distribution KPI
+  'kpi.orders_sub_counted':             'Unteraufträge einzeln gezählt',
 };
