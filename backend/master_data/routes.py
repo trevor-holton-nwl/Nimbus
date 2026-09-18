@@ -377,11 +377,16 @@ def _sap_workcenter_bulk_warnings(upserted_rows: list[dict]) -> list[dict]:
             members = {r[0] for r in cur.fetchall()}
 
             if mode == "single" and not default_machine:
-                # Defense-in-depth only: the CHECK (distribution_mode = 'distribute'
-                # OR default_machine IS NOT NULL) already refuses this at the DB
-                # layer, so the generic grid path should never actually reach here
-                # with 'single'+NULL — kept per §4.1's "include it anyway for
-                # clearer error messages" instruction.
+                # This is now the ONLY enforcement on the generic-grid path. The
+                # table-level CHECK (distribution_mode = 'distribute' OR
+                # default_machine IS NOT NULL) was dropped on 2026-09-18
+                # (migrations/2026-09-18-sap-workcenter-allow-unconfigured.sql) so a
+                # work center can be created with only plant/code/description and
+                # configured later. 'single' + NULL IS therefore reachable here now,
+                # and this warning is what tells the admin the row is unconfigured —
+                # it is no longer defense-in-depth sitting behind a DB constraint.
+                # The blocking version of this rule still lives in
+                # backend/distribution/data.py's save_workcenter (400).
                 warnings.append({
                     "level": "warn",
                     "msg": f"single_mode_without_default: {code!r} is in single mode with no default machine.",

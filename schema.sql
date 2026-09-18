@@ -430,8 +430,7 @@ CREATE TABLE IF NOT EXISTS sap_workcenter (
     distribute_tooled  BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (plant, sap_workcenter),
-    CHECK (distribution_mode = 'distribute' OR default_machine IS NOT NULL)
+    PRIMARY KEY (plant, sap_workcenter)
 );
 
 -- column_metadata: display labels + whether a column is a locked key column.

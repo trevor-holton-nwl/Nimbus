@@ -2986,8 +2986,7 @@ def ensure_order_distribution_tables() -> None:
                 distribute_tooled  BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                PRIMARY KEY (plant, sap_workcenter),
-                CHECK (distribution_mode = 'distribute' OR default_machine IS NOT NULL)
+                PRIMARY KEY (plant, sap_workcenter)
             )
         """)
 
