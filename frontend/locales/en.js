@@ -855,6 +855,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.open_schedule':                  'Open schedule',
   'ui.work_status_attention':          '{{count}} item{{plural}} needing attention · {{total}} order{{totalPlural}} today',
   'ui.work_status_clear':              'All clear · {{total}} order{{totalPlural}} today',
+  'ui.work_status_distribution':       '{{count}} distribution{{plural}} awaiting review',
 
   /* ── Dashboard greeting matrix (time-of-day × attention state × rotation) ── */
   'ui.greet_morning_ok_1':             'Good morning, {{plant}} — running clean',
@@ -1410,6 +1411,7 @@ window.__NIMBUS_LOCALES.en = {
   // Dashboard KPI tiles
   'kpi.orders_today':                  'Orders today',
   'kpi.orders_total':                  '{{n}} total',
+  'kpi.orders_sub_counted':            'sub-orders counted individually',
   'kpi.overdue_backlog':               'All-Time Late Orders',
   'kpi.no_backlog':                    'no backlog',
   'kpi.all_open_past_finish':          'all open orders past due date',
@@ -1818,6 +1820,8 @@ window.__NIMBUS_LOCALES.en = {
   'cmdp.sub_save_first_entry':         'Save your first Time Machine entry',
   'cmdp.need_blackout_risk':           '{{count}} order{{plural}} near an upcoming blackout',
   'cmdp.sub_review_blackout_overlap':  'Review orders overlapping a scheduled blackout block',
+  'cmdp.need_distribution_review':     '{{count}} distributions need review',
+  'cmdp.sub_view_distribution':        'Jump to the Distribution tab',
   'cmdp.need_sandbox_active':          'Sandbox is active — apply or discard',
   'cmdp.sub_whatif_mode':              'You are in what-if mode',
   'cmdp.label_compare_snapshot':       'Compare to a previous snapshot',

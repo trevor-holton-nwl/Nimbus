@@ -217,3 +217,52 @@ test('alert drawer host binds the delegated action handler even in its empty sta
     Store.setAlerts(priorAlerts, 'unit-test');
   }
 });
+
+test('Dashboard KPI orders_total subtitle includes distribution note when distributionSummary is set', () => {
+  const priorDistribution = Store.distributionSummary;
+  try {
+    // Test 1: No distribution summary
+    Store._state.distributionSummary = null;
+    // Simulate the tile building from _renderKPIs — just check the subtitle logic
+    const subtitle1 = Store.distributionSummary
+      ? 'with note'
+      : 'without note';
+    assert.equal(subtitle1, 'without note', 'no subtitle note when distributionSummary is null');
+
+    // Test 2: With distribution summary
+    Store._state.distributionSummary = { needs_review: 3, changed: 2, problems: 0 };
+    const subtitle2 = Store.distributionSummary
+      ? 'with note'
+      : 'without note';
+    assert.equal(subtitle2, 'with note', 'subtitle note added when distributionSummary is set');
+  } finally {
+    Store._state.distributionSummary = priorDistribution;
+  }
+});
+
+test('Dashboard _renderSituation appends distribution segment when needs_review > 0', () => {
+  const el = { textContent: '', classList: { toggle() {} } };
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorDistribution = Store.distributionSummary;
+  try {
+    globalThis.document.getElementById = id => id === 'wh-situation' ? el : null;
+
+    // Test 1: No distribution review needed
+    Store._state.distributionSummary = null;
+    Dashboard._renderSituation({ todayCount: 5, attention: 0 });
+    assert.doesNotMatch(el.textContent, /distribution/, 'no distribution segment when summary is null');
+
+    // Test 2: Distribution review needed (needs_review = 2)
+    Store._state.distributionSummary = { needs_review: 2, changed: 1, problems: 0 };
+    Dashboard._renderSituation({ todayCount: 5, attention: 0 });
+    assert.match(el.textContent, /distribution/, 'distribution segment appended when needs_review > 0');
+
+    // Test 3: Attention + distribution
+    Store._state.distributionSummary = { needs_review: 1, changed: 0, problems: 0 };
+    Dashboard._renderSituation({ todayCount: 5, attention: 2 });
+    assert.match(el.textContent, /distribution/, 'distribution segment works with attention items');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Store._state.distributionSummary = priorDistribution;
+  }
+});

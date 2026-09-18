@@ -543,6 +543,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         blackoutRisk,
         snapshotCount: plantSnaps.length,
         hasPlant:      !!Store.selectedPlant,
+        distributionReviewCount: Store.distributionSummary?.needs_review ?? 0,
       };
     },
 
@@ -630,6 +631,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
             Toast.show(t('toast.check_gantt_blackout'), 'warn', 3000);
+          }
+        },
+        {
+          id: 'distribution-review',
+          label: s => t('cmdp.need_distribution_review', { count: s.distributionReviewCount }),
+          sub:   () => t('cmdp.sub_view_distribution'),
+          icon:  '📦',
+          score: s => s.distributionReviewCount > 0 ? 50 + Math.min(s.distributionReviewCount, 15) : 0,
+          when:  s => s.distributionReviewCount > 0 && s.hasPlant,
+          run()  {
+            CommandPalette.close();
+            NIMBUS.App.goto('gantt');
+            NIMBUS.App.gotoGanttSub('distribution');
           }
         },
         {

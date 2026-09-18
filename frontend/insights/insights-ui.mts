@@ -409,7 +409,9 @@ export const Dashboard = {
     // (alert-summary-count, the firmed-orders list) so nothing is lost, just decluttered.
     const tiles: DashboardKpiTile[] = [
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
-        d: Util.t('kpi.orders_total', { n: tasks.length }),
+        d: Store.distributionSummary
+          ? Util.t('kpi.orders_total', { n: tasks.length }) + ' · ' + Util.t('kpi.orders_sub_counted')
+          : Util.t('kpi.orders_total', { n: tasks.length }),
         action: 'orders-today' },
       { k: Util.t('kpi.conflicts_pending'),         v: String(conflictsToday),
         d: conflictsToday === 0 ? Util.t('kpi.none_blocking') : Util.t('kpi.blocking_fix_now'),
@@ -549,15 +551,23 @@ export const Dashboard = {
     const el = document.getElementById('wh-situation');
     if (!el) return;
     const totalPlural = todayCount === 1 ? '' : 's';
+    let situation = '';
     if (attention > 0) {
-      el.textContent = Util.t('ui.work_status_attention', {
+      situation = Util.t('ui.work_status_attention', {
         count: attention, plural: attention === 1 ? '' : 's',
         total: todayCount, totalPlural,
       });
     } else {
-      el.textContent = Util.t('ui.work_status_clear', { total: todayCount, totalPlural });
+      situation = Util.t('ui.work_status_clear', { total: todayCount, totalPlural });
     }
-    el.classList.toggle('warn', attention > 0);
+    if (Store.distributionSummary && Store.distributionSummary.needs_review > 0) {
+      situation += ' · ' + Util.t('ui.work_status_distribution', {
+        count: Store.distributionSummary.needs_review,
+        plural: Store.distributionSummary.needs_review === 1 ? '' : 's',
+      });
+    }
+    el.textContent = situation;
+    el.classList.toggle('warn', attention > 0 || (Store.distributionSummary?.needs_review ?? 0) > 0);
   },
 
   // Dashboard greeting: plant-named, time-of-day, state-aware (never
