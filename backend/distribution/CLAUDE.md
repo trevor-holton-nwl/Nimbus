@@ -4,7 +4,7 @@
 
 Order Distribution bridges SAP's aggregate work centers (one SAP work center standing in for several physical machines) with NIMBUS's discrete-machine scheduling model. `routes.py` holds this domain's FastAPI router; `data.py` holds the plain psycopg write logic over the shared pool (`db._pool`), mirroring `backend/setup/data.py`'s convention; `models.py` holds the route's typed response DTO.
 
-**Shipped: P1 (write) + P2-2/P2-3 (ingest seam) + P2-6/P2-7 (read routes) + P2-8/P2-9 (planner writes `shares`/`review`/`reset` + admin writes `reapply-defaults`/`resolve`). The Distribution tab itself (§6/§10) and its frontend counterpart are still future work.**
+**Shipped: P1 (write) + P2-2/P2-3 (ingest seam) + P2-6/P2-7 (read routes) + P2-8/P2-9 (planner writes `shares`/`review`/`reset` + admin writes `reapply-defaults`/`resolve`) + P2-15/P2-16 (full frontend Distribution pane with shares editor, dry-run, save/reset/undo, reconcile).**
 
 - `PUT /distribution/{plant}/workcenters/{wc}` (`save_workcenter`) — a validated create-or-replace of one plant's `sap_workcenter` policy row and its member machines' `machine.distribution_weight`, in one transaction with an `admin_audit` row. Enforces the four §3.1 write-path rules (`wc_code_shadowed_by_machine`, `default_machine_not_member`, `single_mode_without_default`, `distribute_mode_thin`) as 400s with a structured `{"code": ...}` detail, plus an additional `weight_machine_not_member` guard. No `base_version`/optimistic-concurrency token on this route — that belongs to the `order_distribution` header table.
 - `plan()`/`apply()` (`data.py`) — the ingest transaction seam (§5), wired into `db.upsert_orders` via its optional `plan_fn`/`apply_fn` parameters.
@@ -38,4 +38,4 @@ Run: `python -m pytest tests/test_distribution.py tests/test_rbac_plant_scoping.
 
 ## Counterpart
 
-Frontend half: `frontend/distribution/CLAUDE.md`. The Work Centers master-data sub-tab (§4.3) shipped inside `frontend/master-data/admin-ui.mts` (`WorkCenters`), not this folder. The Scheduling Board Distribution tab (§6) shipped its pane shell/list/filters/detail-header as `frontend/distribution/distribution-pane.mts` (P2-15) — the shares editor, dry-run preview, Save/Reset/Undo, the reconcile banner, and the What-If guard are still open (P2-16). §10's aggregate roll-up/CSV export (`GET /distribution/{plant}/aggregate`) has no frontend consumer yet.
+Frontend half: `frontend/distribution/CLAUDE.md`. The Work Centers master-data sub-tab (§4.3) shipped inside `frontend/master-data/admin-ui.mts` (`WorkCenters`), not this folder. The Scheduling Board Distribution tab (§6) shipped in full with `frontend/distribution/distribution-pane.mts` (P2-15 pane shell/list/filters/detail-header + P2-16 shares editor, dry-run preview, Save/Reset/Undo, reconcile banner, and What-If guard). §10's aggregate roll-up/CSV export (`GET /distribution/{plant}/aggregate`) has no frontend consumer yet.

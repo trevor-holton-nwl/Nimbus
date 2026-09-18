@@ -4102,9 +4102,7 @@ export const Interaction = {
   /** Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
    *  (PARENT_ORDER set) may not change machine by drag, grid edit or
    *  Inspector — only adjusting its distribution shares can move it. Shows
-   *  the lock toast with an action to open Order Distribution; 'distribution'
-   *  is not yet a registered `App._GANTT_SUBS` entry, so the action falls
-   *  back to a plain tab switch until that pane exists (follow-up). */
+   *  the lock toast with an action to open the Order Distribution pane. */
   _rejectDistMachineMove(task: NimbusTask): void {
     Toast.show(
       Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
@@ -4112,8 +4110,8 @@ export const Interaction = {
       {
         label: 'Open Order Distribution',
         run: () => {
-          const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void } } }).NIMBUS?.App;
-          app?.goto?.('gantt');
+          const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
+          app?.gotoGanttSub?.('distribution');
         },
       }
     );
