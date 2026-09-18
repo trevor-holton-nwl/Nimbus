@@ -12,8 +12,8 @@
 Frontend half: `frontend/master-data/admin-ui.mts` (`MasterData` — CRUD grids, plant policy forms, role page-access) and `frontend/master-data/material-grids.mts` (`MaterialGrids` — Material / Material Plant grid UI).
 
 Deferred split — the data layer itself stays in root `master_data.py`:
-- `ALLOWED_TABLES` (the nine registered tables: `subnetworks`, `plants`, `machine`, `materials`, `material_plants`, `bom_items`, `roles`, `role_plants`, `workcenter_mapping`) — `master_data.py` lines 29–33.
-- `PLANT_SCOPED_TABLES` (`{'plants', 'machine', 'material_plants', 'bom_items', 'workcenter_mapping'}`) — `master_data.py` line 43.
+- `ALLOWED_TABLES` (the nine registered tables: `subnetworks`, `plants`, `machine`, `materials`, `material_plants`, `bom_items`, `roles`, `role_plants`, `sap_workcenter`) — `master_data.py` lines 29–33.
+- `PLANT_SCOPED_TABLES` (`{'plants', 'machine', 'material_plants', 'bom_items', 'sap_workcenter'}`; `workcenter_mapping` still exists in `schema.sql` but has no code references and is not allowlisted) — `master_data.py` line 43.
 - `add_column()` (DDL for the "Add Column" wizard) — `master_data.py` lines 931 onward.
 - `_get_maint_table_allowlist()` / `run_vacuum_analyze()` / `run_analyze()` — `db.py` lines 1612–1652 (these back `backend/admin_ops`'s maintenance routes, not this domain's, but validate against the same `pg_stat_user_tables` catalog pattern `browser.py` also uses independently).
 
