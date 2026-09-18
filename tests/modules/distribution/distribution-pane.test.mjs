@@ -20,6 +20,26 @@ import {
   reviewedCheckboxState,
   STATUS_SEVERITY,
 } from '../../../frontend/distribution/distribution-pane.mjs';
+// P2-16: the shares editor's pure logic module — weight math, dry-run
+// merging, the save-button/undo/removal-confirm state machines. See that
+// module's own header comment for why it's kept separate from
+// distribution-pane.mjs (the most logic-heavy piece of the whole feature).
+import {
+  onlyThisMachine,
+  evenWeights,
+  quantityToWeight,
+  resolvedWeight,
+  buildSharesPayload,
+  weightsSignature,
+  mergeRowsWithDryRun,
+  computeTotals,
+  computeSaveButtonState,
+  needsRemovalConfirm,
+  sortRemovedFrozenFirst,
+  isUndoDisabled,
+  previousSharesToWeightMap,
+  distErrorLocaleKey,
+} from '../../../frontend/distribution/shares-editor.mjs';
 
 test('pickPrimaryBadge — severity order picks the most severe status as primary', () => {
   // incomplete outranks everything else in STATUS_SEVERITY.
@@ -177,4 +197,225 @@ test('reviewedCheckboxState — reviewed with no drift is checked', () => {
 test('reviewedCheckboxState — reviewed but qty_changed is indeterminate, regardless of the reviewed flag', () => {
   assert.equal(reviewedCheckboxState({ reviewed: true }, ['qty_changed']), 'indeterminate');
   assert.equal(reviewedCheckboxState({ reviewed: false }, ['qty_changed']), 'indeterminate');
+});
+
+/* ============================================================================
+   P2-16 — shares-editor.mjs pure logic
+   ========================================================================== */
+
+test('onlyThisMachine — target gets weight 1, every other machine is explicitly zeroed', () => {
+  const out = onlyThisMachine(['M1', 'M2', 'M3'], 'M2');
+  assert.deepEqual(out, { M1: 0, M2: 1, M3: 0 });
+});
+
+test('evenWeights — clears every row to null (resolves to an equal implicit share later)', () => {
+  assert.deepEqual(evenWeights(['M1', 'M2']), { M1: null, M2: null });
+});
+
+test('quantityToWeight — a typed quantity converts 1:1 into a relative weight', () => {
+  assert.equal(quantityToWeight(300), 300);
+  assert.equal(quantityToWeight(0), 0);
+});
+
+test('quantityToWeight — refuses negative/non-finite input rather than silently producing a bad weight', () => {
+  assert.throws(() => quantityToWeight(-1), RangeError);
+  assert.throws(() => quantityToWeight(NaN), RangeError);
+  assert.throws(() => quantityToWeight(Infinity), RangeError);
+});
+
+test('resolvedWeight — a purged row is ALWAYS 0 regardless of its (inert) input value', () => {
+  assert.equal(resolvedWeight(5, true), 0);
+  assert.equal(resolvedWeight(null, true), 0);
+});
+
+test('resolvedWeight — an unset (null) row resolves to 1 (the "Even"/blank-row convention)', () => {
+  assert.equal(resolvedWeight(null, false), 1);
+  assert.equal(resolvedWeight(undefined, false), 1);
+});
+
+test('resolvedWeight — an explicit weight (including 0) is sent as-is when not purged', () => {
+  assert.equal(resolvedWeight(0, false), 0);
+  assert.equal(resolvedWeight(7, false), 7);
+});
+
+test('buildSharesPayload — By-quantity conversion end to end: typed quantities become the wire shares payload', () => {
+  const rows = [
+    { machine: 'M1', weight: quantityToWeight(300), purged: false },
+    { machine: 'M2', weight: quantityToWeight(700), purged: false },
+  ];
+  assert.deepEqual(buildSharesPayload(rows), [
+    { machine: 'M1', weight: 300 },
+    { machine: 'M2', weight: 700 },
+  ]);
+});
+
+test('buildSharesPayload — Only-this-machine end to end', () => {
+  const weights = onlyThisMachine(['M1', 'M2', 'M3'], 'M3');
+  const rows = ['M1', 'M2', 'M3'].map(machine => ({ machine, weight: weights[machine], purged: false }));
+  assert.deepEqual(buildSharesPayload(rows), [
+    { machine: 'M1', weight: 0 },
+    { machine: 'M2', weight: 0 },
+    { machine: 'M3', weight: 1 },
+  ]);
+});
+
+test('weightsSignature — order-independent and stable for identical weight maps', () => {
+  const a = [{ machine: 'M2', weight: 5, purged: false }, { machine: 'M1', weight: null, purged: false }];
+  const b = [{ machine: 'M1', weight: null, purged: false }, { machine: 'M2', weight: 5, purged: false }];
+  assert.equal(weightsSignature(a), weightsSignature(b));
+});
+
+test('weightsSignature — a changed weight produces a different signature', () => {
+  const a = [{ machine: 'M1', weight: 1, purged: false }];
+  const b = [{ machine: 'M1', weight: 2, purged: false }];
+  assert.notEqual(weightsSignature(a), weightsSignature(b));
+});
+
+const DRY_RUN_FIXTURE = {
+  plan: [
+    { machine: 'M1', letter: 'A', weight: 1, effective_pct: 60, qty_before: 50, qty_after: 60,
+      hours_before: 5, hours_after: 6, outcome: 'resized', scheduled: true, frozen: false, below_min_lot: false },
+    { machine: 'M2', letter: 'B', weight: 0, effective_pct: 0, qty_before: 50, qty_after: null,
+      hours_before: 5, hours_after: null, outcome: 'removed', scheduled: true, frozen: true, below_min_lot: false },
+    { machine: 'M3', letter: 'C', weight: 1, effective_pct: 40, qty_before: null, qty_after: 40,
+      hours_before: null, hours_after: 4, outcome: 'new', scheduled: false, frozen: false, below_min_lot: true },
+  ],
+  removed_scheduled: [
+    { id: 'child-2', production_order: 'B-1000', machine: 'M2', scheduled_start: '2026-09-20T08:00:00', frozen: true },
+  ],
+  base_version: 42,
+};
+
+test('mergeRowsWithDryRun — outcome derivation zips each row with its matching dry-run plan entry', () => {
+  const rows = [
+    { machine: 'M1', letter: 'A', weight: 1, purged: false, stale: false, currentStart: '2026-09-18T06:00:00' },
+    { machine: 'M2', letter: 'B', weight: 0, purged: false, stale: false, currentStart: '2026-09-18T06:00:00' },
+    { machine: 'M3', letter: 'C', weight: 1, purged: false, stale: false, currentStart: null },
+  ];
+  const view = mergeRowsWithDryRun(rows, DRY_RUN_FIXTURE);
+  assert.equal(view[0].outcome, 'resized');
+  assert.equal(view[0].effectivePct, 60);
+  assert.equal(view[0].qtyAfter, 60);
+  assert.equal(view[1].outcome, 'removed');
+  assert.equal(view[1].frozen, true);
+  assert.equal(view[2].outcome, 'new');
+  assert.equal(view[2].belowMinLot, true);
+});
+
+test('mergeRowsWithDryRun — a row with no matching plan entry (dry run pending/failed) renders null/false, not a crash', () => {
+  const rows = [{ machine: 'M9', letter: 'Z', weight: null, purged: false, stale: false, currentStart: null }];
+  const view = mergeRowsWithDryRun(rows, null);
+  assert.deepEqual(view[0], {
+    machine: 'M9', letter: 'Z', weight: null, purged: false, stale: false, currentStart: null,
+    effectivePct: null, qtyAfter: null, hoursAfter: null, outcome: null, scheduled: false, frozen: false, belowMinLot: false,
+  });
+});
+
+test('computeTotals — sums every numeric column across the current row view', () => {
+  const rows = [
+    { machine: 'M1', letter: 'A', weight: 1, purged: false, stale: false, currentStart: null },
+    { machine: 'M2', letter: 'B', weight: 0, purged: false, stale: false, currentStart: null },
+    { machine: 'M3', letter: 'C', weight: 1, purged: false, stale: false, currentStart: null },
+  ];
+  const view = mergeRowsWithDryRun(rows, DRY_RUN_FIXTURE);
+  const totals = computeTotals(view);
+  assert.equal(totals.weight, 2);
+  assert.equal(totals.effectivePct, 100);
+  assert.equal(totals.qtyAfter, 100);
+  assert.equal(totals.hoursAfter, 10);
+});
+
+/* --- Save-button disabled-until-dry-run-settles state machine ----------- */
+
+test('computeSaveButtonState — disabled while the dry run is pending/idle/error', () => {
+  for (const dryRunStatus of ['idle', 'pending', 'error']) {
+    const state = computeSaveButtonState({
+      dryRunStatus, dryRunSignature: 'sig-a', currentSignature: 'sig-a',
+      removedScheduledCount: 0, whatIfBlocked: false,
+    });
+    assert.equal(state.disabled, true, `expected disabled for status ${dryRunStatus}`);
+  }
+});
+
+test('computeSaveButtonState — enabled once ready AND the dry-run signature matches the current inputs', () => {
+  const state = computeSaveButtonState({
+    dryRunStatus: 'ready', dryRunSignature: 'sig-a', currentSignature: 'sig-a',
+    removedScheduledCount: 0, whatIfBlocked: false,
+  });
+  assert.equal(state.disabled, false);
+  assert.equal(state.labelKey, 'ui.dist_save_plain');
+});
+
+test('computeSaveButtonState — ready but STALE (a keystroke moved the inputs after the dry run settled) stays disabled', () => {
+  const state = computeSaveButtonState({
+    dryRunStatus: 'ready', dryRunSignature: 'sig-a', currentSignature: 'sig-b',
+    removedScheduledCount: 0, whatIfBlocked: false,
+  });
+  assert.equal(state.disabled, true);
+});
+
+test('computeSaveButtonState — the What-If guard disables Save even when the dry run is ready and matching', () => {
+  const state = computeSaveButtonState({
+    dryRunStatus: 'ready', dryRunSignature: 'sig-a', currentSignature: 'sig-a',
+    removedScheduledCount: 0, whatIfBlocked: true,
+  });
+  assert.equal(state.disabled, true);
+});
+
+test('computeSaveButtonState — label switches to the removal-count variant once the settled preview shows removals', () => {
+  const state = computeSaveButtonState({
+    dryRunStatus: 'ready', dryRunSignature: 'sig-a', currentSignature: 'sig-a',
+    removedScheduledCount: 3, whatIfBlocked: false,
+  });
+  assert.equal(state.disabled, false);
+  assert.equal(state.labelKey, 'ui.dist_save_removes');
+  assert.equal(state.removedCount, 3);
+});
+
+/* --- Removal-confirm gating ---------------------------------------------- */
+
+test('needsRemovalConfirm — false for an empty removal list, true otherwise', () => {
+  assert.equal(needsRemovalConfirm([]), false);
+  assert.equal(needsRemovalConfirm([{ frozen: false }]), true);
+});
+
+test('sortRemovedFrozenFirst — frozen removals are listed before non-frozen ones', () => {
+  const removed = [
+    { id: 'a', frozen: false }, { id: 'b', frozen: true }, { id: 'c', frozen: false }, { id: 'd', frozen: true },
+  ];
+  const sorted = sortRemovedFrozenFirst(removed);
+  assert.deepEqual(sorted.map(r => r.id), ['b', 'd', 'a', 'c']);
+  // Original array is untouched (pure function).
+  assert.deepEqual(removed.map(r => r.id), ['a', 'b', 'c', 'd']);
+});
+
+/* --- Undo-disabled-after-base_version-moved ------------------------------ */
+
+test('isUndoDisabled — disabled when there is nothing to undo yet', () => {
+  assert.equal(isUndoDisabled(null, 42), true);
+});
+
+test('isUndoDisabled — disabled when the current header base_version is unknown', () => {
+  assert.equal(isUndoDisabled(42, null), true);
+});
+
+test('isUndoDisabled — enabled immediately after our own write (versions match)', () => {
+  assert.equal(isUndoDisabled(42, 42), false);
+});
+
+test('isUndoDisabled — disabled once the header moved to a NEWER base_version (another write happened after)', () => {
+  assert.equal(isUndoDisabled(42, 43), true);
+});
+
+test('previousSharesToWeightMap — converts a captured previous_shares snapshot back into a weight map', () => {
+  const previousShares = [{ machine: 'M1', letter: 'A', weight: 30 }, { machine: 'M2', letter: 'B', weight: null }];
+  assert.deepEqual(previousSharesToWeightMap(previousShares), { M1: 30, M2: null });
+});
+
+/* --- Error mapping -------------------------------------------------------- */
+
+test('distErrorLocaleKey — builds the err.dist_<code> key, or null for no code', () => {
+  assert.equal(distErrorLocaleKey('share_purged'), 'err.dist_share_purged');
+  assert.equal(distErrorLocaleKey(null), null);
+  assert.equal(distErrorLocaleKey(undefined), null);
 });

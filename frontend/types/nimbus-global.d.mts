@@ -58,6 +58,14 @@ declare global {
           rebuild?(): void;
           focus?(id: string): void;
         };
+        /** Reached by the Distribution pane's "Show on Gantt" action
+         *  (`frontend/distribution/distribution-pane.mts`, P2-16) to select a
+         *  header's live children before scrolling to the earliest via
+         *  `Timeline.focus` — the same ambient-global "leaf pane reaching
+         *  upward" idiom this file documents for `App`/`EmptyState` above. */
+        Selection?: {
+          set?(ids: Array<string | number>): void;
+        };
         TimelineNav?: {
           render?(): void;
         };

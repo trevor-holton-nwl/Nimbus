@@ -54,6 +54,7 @@ frontend/admin-ops/admin-ui.mjs
 frontend/integration/sap-interface-ui.mjs
 frontend/security/security-admin.mjs
 frontend/distribution/distribution-pane.mjs
+frontend/distribution/shares-editor.mjs
 
 # Intermediate OpenAPI JSON dump (regenerated every `npm run generate:api-types`
 # run) — the generated frontend/types/api-generated.d.mts it feeds IS committed.
