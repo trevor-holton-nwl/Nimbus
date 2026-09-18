@@ -448,10 +448,12 @@ async def request_id_mw(request: Request, call_next):
 # route rather than falling through to try other routes or StaticFiles. This
 # has to be fixed here, at the middleware layer, before routing dispatch.
 #
-# Scoped to exactly these two prefixes — verified to be the only two of the
-# planned domain folders whose name collides with an existing
-# "/<segment>/{param}"-shaped API route. Do not generalize this to "any
-# static file anywhere," which would be needless surface area.
+# Scoped to exactly these prefixes — verified to be the domain folders whose
+# name collides with an existing "/<segment>/{param}"-shaped API route
+# ("distribution" added when GET /distribution/{plant} shadowed
+# frontend/distribution/distribution-pane.mjs and shares-editor.mjs). Do not
+# generalize this to "any static file anywhere," which would be needless
+# surface area.
 #
 # Also scoped to EXACTLY 2 path segments (the prefix segment + one more) —
 # matching the bug as it's actually shaped. brain.py has real, shipped
@@ -476,7 +478,7 @@ async def request_id_mw(request: Request, call_next):
 # Starlette's `@api.middleware("http")` stack nests in reverse declaration
 # order (the last-declared middleware ends up outermost), so declaring this
 # one first, above static_mjs_no_cache_mw, makes it the inner of the two.
-_DOMAIN_STATIC_PREFIXES = ("setup", "master-data")
+_DOMAIN_STATIC_PREFIXES = ("setup", "master-data", "distribution")
 
 
 @api.middleware("http")
