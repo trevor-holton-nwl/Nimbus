@@ -1264,6 +1264,7 @@ export const AlertsUIAdapter = {
       'near-capacity':      'capacity',
       overlap:              'conflicts',
       'tool-conflict':      'conflicts',
+      'distribution-separation': 'conflicts',
       blackout:             'calendar',
       closed:               'calendar',
       'firmed-closed':       'calendar',

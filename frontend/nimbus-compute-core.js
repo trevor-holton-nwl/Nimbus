@@ -69,6 +69,30 @@
     return x;
   }
 
+  // Buckets a date into a separation-window key at the given granularity
+  // ('hour' | 'day' | 'week'); 'none' (or anything unrecognized) returns null,
+  // meaning no bucket constraint applies. Local wall-clock components throughout —
+  // no timezone conversion.
+  function separationBucketKey(d, scope) {
+    if (scope === 'none') return null;
+    if (scope === 'day') return dayKey(d);
+    const date = parseDate(d);
+    if (!date) return null;
+    if (scope === 'hour') {
+      const p = n => String(n).padStart(2, '0');
+      return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}`;
+    }
+    if (scope === 'week') {
+      const wd = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = wd.getUTCDay() || 7;
+      wd.setUTCDate(wd.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(wd.getUTCFullYear(), 0, 1));
+      const weekNo = Math.ceil(((wd.getTime() - yearStart.getTime()) / MS_DAY + 1) / 7);
+      return `${wd.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+    }
+    return null;
+  }
+
   function runHours(task) {
     const v = parseFloat(task?.RUN_TIME);
     return isNaN(v) ? 0 : v;
@@ -330,6 +354,19 @@
     const onlyLines = Array.isArray(opts?.lines) && opts.lines.length
       ? new Set(opts.lines) : null;
 
+    // machine -> sap_workcenter, and sap_workcenter -> its policy row (distribution
+    // separation rule 1c below). masterData is a plain SAP-shaped bag here, no
+    // compile-time guarantee it actually carries `workcenters` — both loops no-op
+    // harmlessly on older/incomplete snapshots.
+    const machineToWorkcenter = new Map();
+    for (const l of masterData?.lines ?? []) {
+      if (l?.sap_workcenter) machineToWorkcenter.set(l.machine, l.sap_workcenter);
+    }
+    const workcenterPolicy = new Map();
+    for (const wc of masterData?.workcenters ?? []) {
+      if (wc?.sap_workcenter) workcenterPolicy.set(wc.sap_workcenter, wc);
+    }
+
     // Pre-parse block dates once. Line blocks carry `plant` so they can be plant-scoped.
     const parsedBlocks = [];
     for (const b of blocks) {
@@ -432,6 +469,54 @@
           });
         }
       }
+    }
+
+    /* 1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
+       PARENT_ORDER; a per-work-center policy (max_separation: 'hour'|'day'|'week')
+       caps how far apart their scheduled starts may drift. Grouped by
+       (plant, PARENT_ORDER, MATERIAL_NUMBER) so an unlikely parent-order-number
+       collision across two different materials never conflates two distinct
+       distributions. Queued (needs_planning) siblings have no dates yet and are
+       excluded from both the group's policy resolution and its date comparison. */
+    const distGroups = new Map();
+    for (const t of tasks) {
+      if (!t.PARENT_ORDER) continue;
+      if (t.planning_status === 'needs_planning') continue;
+      const plant = plantOf(t.MACHINE || 'Unknown');
+      const material = t.MATERIAL_NUMBER ?? '';
+      const key = JSON.stringify([plant, t.PARENT_ORDER, material]);
+      let g = distGroups.get(key);
+      if (!g) distGroups.set(key, g = { plant, parent: t.PARENT_ORDER, material, tasks: [] });
+      g.tasks.push(t);
+    }
+    for (const g of distGroups.values()) {
+      if (g.tasks.length < 2) continue;
+      let maxSeparation = null;
+      for (const t of g.tasks) {
+        const wc = machineToWorkcenter.get(t.MACHINE || 'Unknown');
+        const policy = wc ? workcenterPolicy.get(wc) : null;
+        if (policy?.max_separation) { maxSeparation = policy.max_separation; break; }
+      }
+      if (!maxSeparation || maxSeparation === 'none') continue;
+      const dated = g.tasks.filter(t => t.start_date);
+      if (dated.length < 2) continue;
+      const buckets = new Set(dated.map(t => separationBucketKey(t.start_date, maxSeparation)));
+      if (buckets.size <= 1) continue;
+      const sortedDated = dated.slice().sort((a, b) => a.start_date.getTime() - b.start_date.getTime());
+      const earliest = sortedDated[0];
+      const earliestLine = earliest.MACHINE || 'Unknown';
+      // Mirrors the tool-conflict rule's own onlyLines gate above: the peer pool
+      // is horizon/plant-wide, but an incremental recompute only emits the alert
+      // when the line it attaches to (the earliest sibling's) is in scope.
+      if (onlyLines && !onlyLines.has(earliestLine)) continue;
+      const vars = { parent: g.parent, scope: maxSeparation };
+      alerts.push({
+        id: `dist-sep:${g.plant ?? ''}:${g.parent}:${g.material}`,
+        sev: 'err', type: 'distribution-separation',
+        msg: `Sub-orders of "${g.parent}" start in different ${maxSeparation}s.`,
+        msgKey: 'alert.distribution_separation', msgVars: vars,
+        taskId: earliest.id, line: earliestLine, time: earliest.start_date,
+      });
     }
 
     /* 2. OVERLOAD / CLOSED */
@@ -909,7 +994,7 @@
     // constants
     MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
     // date/time helpers
-    parseDate, dayKey, startOfDay, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
+    parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, workWindow,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,

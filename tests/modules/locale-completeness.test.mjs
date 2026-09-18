@@ -349,7 +349,12 @@ test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
     'ui.dist_bulk_reset_result_title',
     // Distribution inspector/KPI
     'ui.insp_machine_locked_title', 'ui.work_status_distribution',
+    'ui.hov_suborder',
+    'ui.insp_dist_title', 'ui.insp_dist_share', 'ui.insp_dist_siblings',
+    'ui.insp_dist_note_child', 'ui.insp_dist_note_bare',
+    'btn.insp_dist_open',
     // Toast messages
+    'toast.optimize_distribution_separation',
     'toast.dist_machine_locked', 'toast.dist_load_failed', 'toast.dist_detail_load_failed',
     'toast.dist_review_failed', 'toast.dist_reviewed', 'toast.dist_shares_saved', 'toast.dist_shares_save_failed',
     'toast.dist_stale_refetched', 'toast.dist_reset_failed', 'toast.dist_repaired', 'toast.dist_repair_failed',
@@ -357,6 +362,8 @@ test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
     'toast.wc_load_failed', 'toast.wc_code_required', 'toast.wc_code_shadowed', 'toast.wc_code_exists',
     'toast.wc_single_needs_default_at_create', 'toast.wc_created', 'toast.wc_create_failed',
     'toast.wc_invalid_weight', 'toast.wc_saved', 'toast.wc_save_failed',
+    // Alert messages
+    'alert.distribution_separation',
     // Error messages
     'err.dist_weights_empty', 'err.dist_duplicate_machine', 'err.dist_share_purged',
     'err.dist_stale_machine', 'err.dist_workcenter_missing',

@@ -534,6 +534,18 @@ export function taskCarriesTool(task: NimbusTask | undefined | null): boolean {
   return false;
 }
 
+/** True when `task` carries a `PARENT_ORDER` (i.e. is one of a group of
+ *  distribution sub-orders that may live on different machines/lines).
+ *  Mirrors `taskCarriesTool` for the same reason: a `distribution-separation`
+ *  alert can be created/cleared on a sibling sub-order's line — a different
+ *  line than the one just edited — so an incremental recompute scoped to
+ *  only the touched line(s) can miss it. Used alongside `taskCarriesTool` to
+ *  decide whether an incremental alert recompute must escalate to a full
+ *  recompute — see `scheduleAlertsForPatches`'s header comment. */
+export function taskCarriesDistribution(task: NimbusTask | undefined | null): boolean {
+  return !!task?.PARENT_ORDER;
+}
+
 export function scheduleAlertsForPatches(
   patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
   resolveLine: (id: string) => string | undefined,
@@ -547,12 +559,16 @@ export function scheduleAlertsForPatches(
     if ('MACHINE' in p.changes) { Alerts.scheduleRecompute(); return; }
     const line = resolveLine(p.id);
     if (!line) { Alerts.scheduleRecompute(); return; }
-    // `tool-conflict` is emitted on the LATER order's line, which can differ
-    // from the line any moved task actually lives on — a scoped recompute
-    // could miss creating/clearing that alert on the other line. Any moved
-    // task carrying a real PRT_01/PRT_02 tool id forces a full recompute
-    // instead of trusting the line scope.
-    if (resolveTask && taskCarriesTool(resolveTask(p.id))) { Alerts.scheduleRecompute(); return; }
+    // `tool-conflict` is emitted on the LATER order's line, and
+    // `distribution-separation` can be emitted on any sibling sub-order's
+    // line — both can differ from the line any moved task actually lives on,
+    // so a scoped recompute could miss creating/clearing that alert on the
+    // other line. Any moved task carrying a real PRT_01/PRT_02 tool id or a
+    // PARENT_ORDER forces a full recompute instead of trusting the line scope.
+    if (resolveTask) {
+      const t = resolveTask(p.id);
+      if (taskCarriesTool(t) || taskCarriesDistribution(t)) { Alerts.scheduleRecompute(); return; }
+    }
     lines.add(line);
   }
   Alerts.scheduleRecomputeLines(lines);

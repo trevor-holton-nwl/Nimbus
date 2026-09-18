@@ -1173,10 +1173,10 @@ export const Table = {
   /** Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
    *  (PARENT_ORDER set) may not change machine from the grid, the Inspector
    *  select or a Gantt drag — only adjusting its distribution shares can move
-   *  it. 'distribution' is not yet a registered `App._GANTT_SUBS` entry, so
-   *  the toast action falls back to a plain tab switch until that pane
-   *  exists (follow-up); duplicated (not imported) from gantt.mts's
-   *  Interaction._rejectDistMachineMove since Interaction isn't exported. */
+   *  it. Shows the lock toast with an action to open the Order Distribution
+   *  pane. Intentionally duplicated (not imported) from gantt.mts's
+   *  Interaction._rejectDistMachineMove — kept in sync manually since
+   *  Interaction isn't exported/shared with this module. */
   _rejectDistMachineMove(task: NimbusTask): void {
     Toast.show(
       Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
@@ -1184,8 +1184,8 @@ export const Table = {
       {
         label: 'Open Order Distribution',
         run: () => {
-          const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void } } }).NIMBUS?.App;
-          app?.goto?.('gantt');
+          const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
+          app?.gotoGanttSub?.('distribution');
         },
       }
     );
@@ -1922,6 +1922,18 @@ export const Inspector = {
     const missingSetupPlaceholder = '—';
     const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
     const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
+    // Distribution card (aggregate_to_detail.md §8): only rendered for a
+    // sub-order (PARENT_ORDER set). Share % is this child's quantity over
+    // the sum of all living siblings' quantities (siblings = other tasks
+    // currently in Store sharing the same PARENT_ORDER — deleted/completed
+    // orders are never in Store, so this is "living" by construction).
+    const distSiblings = task.PARENT_ORDER
+      ? (Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr).filter(x => x.PARENT_ORDER === task.PARENT_ORDER)
+      : [];
+    const distTotalQty = distSiblings.reduce((sum, s) => sum + (Number(s['ORDER_QUANTITY_(GMEIN)']) || 0), 0);
+    const distThisQty = Number(task['ORDER_QUANTITY_(GMEIN)']) || 0;
+    const distPct = distTotalQty > 0 ? Math.round(distThisQty / distTotalQty * 100) : 0;
+    const distOtherSiblings = distSiblings.filter(s => String(s.id) !== String(task.id));
 
     body.innerHTML = `
       ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
@@ -1964,6 +1976,29 @@ export const Inspector = {
             ${lineOptions.map(l => `<option value="${Util.escapeHtml(l)}" ${l === task.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('')}
           </select></div></div>
       </div>
+
+      ${task.PARENT_ORDER ? `<div class="insp-card">
+        <h4>${Util.t('ui.insp_dist_title')}</h4>
+        <div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
+          <div class="insp-val">${Util.escapeHtml(task.PARENT_ORDER)}${task.DISTRIBUTION_LETTER ? ' · ' + Util.escapeHtml(task.DISTRIBUTION_LETTER) : ''}</div></div>
+        <div style="font-size:12px;margin:4px 0 8px;">${Util.t('ui.insp_dist_share', { pct: distPct })}</div>
+        ${distOtherSiblings.length ? `
+        <div style="font-size:11px;font-weight:500;color:var(--fg-mute);margin-bottom:4px;">${Util.t('ui.insp_dist_siblings')}</div>
+        <div class="insp-split-segments">
+          ${distOtherSiblings.map(s => `
+          <div class="insp-split-segment">
+            <span>${Util.escapeHtml(s.DISTRIBUTION_LETTER || '—')}</span>
+            <span>${Util.escapeHtml(s.MACHINE || '—')} · ${Util.escapeHtml(String(s['ORDER_QUANTITY_(GMEIN)'] ?? 0))} · ${s.start_date ? Util.fmtDTReadable(s.start_date) : '—'}</span>
+            <button class="btn btn-ghost sm" data-act="focus-sibling" data-id="${Util.escapeHtml(String(s.id))}">${Util.t('btn.focus')}</button>
+          </div>`).join('')}
+        </div>` : ''}
+        <div class="insp-actions" style="margin-top:8px;">
+          <button class="btn btn-ghost sm" data-act="open-distribution">${Util.t('btn.insp_dist_open')}</button>
+        </div>
+        <div class="insp-split-summary-note">${task.DISTRIBUTION_LETTER
+          ? Util.t('ui.insp_dist_note_child', { parent: Util.escapeHtml(task.PARENT_ORDER) })
+          : Util.t('ui.insp_dist_note_bare', { machine: Util.escapeHtml(task.MACHINE || '—') })}</div>
+      </div>` : ''}
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_schedule_section')}</h4>
@@ -2058,6 +2093,15 @@ export const Inspector = {
     const _id = String(task.id);
     body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS!.Table!._openOverrideModalForId!(_id));
     body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS!.Timeline!.focus!(_id));
+    // Distribution card: per-sibling jump links + "Open in Order Distribution".
+    body.querySelectorAll<HTMLButtonElement>('[data-act="focus-sibling"]').forEach((el) => {
+      const sid = el.dataset.id;
+      if (sid) el.addEventListener('click', () => NIMBUS!.Timeline!.focus!(sid));
+    });
+    body.querySelector('[data-act="open-distribution"]')?.addEventListener('click', () => {
+      const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
+      app?.gotoGanttSub?.('distribution');
+    });
     body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
       const snapshot = Store.setupSnapshot;
       const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');

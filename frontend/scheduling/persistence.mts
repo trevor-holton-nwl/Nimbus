@@ -34,7 +34,7 @@ import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment, NimbusMasterWorkcenter } from '../platform/types.mjs';
 import type { components } from '../types/api-generated.mjs';
 
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
@@ -296,11 +296,13 @@ export const Persistence = {
       return Promise.all([
         Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
         Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-      ]).then(([pData, lData]) => {
-        if (pData || lData) {
+        Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
+      ]).then(([pData, lData, wcData]) => {
+        if (pData || lData || wcData) {
           Store.setMasterData({
             plants: pData?.rows ?? [],
             lines:  lData?.rows ?? [],
+            workcenters: wcData?.rows ?? [],
           }, 'persistence');
         }
       }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (no-plant path): ${e.message}`));
@@ -368,11 +370,13 @@ export const Persistence = {
           Promise.all([
             Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-          ]).then(([pData, lData]) => {
-            if (pData || lData) {
+            Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
+          ]).then(([pData, lData, wcData]) => {
+            if (pData || lData || wcData) {
               Store.setMasterData({
                 plants: pData?.rows ?? [],
                 lines:  lData?.rows ?? [],
+                workcenters: wcData?.rows ?? [],
               }, 'persistence');
             }
           }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`))
@@ -500,11 +504,13 @@ export const Persistence = {
           Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
-        ]).then(([pData, lData, ssData]) => {
-          if (pData || lData) {
+          Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
+        ]).then(([pData, lData, ssData, wcData]) => {
+          if (pData || lData || wcData) {
             Store.setMasterData({
               plants: pData?.rows ?? [],
               lines:  lData?.rows ?? [],
+              workcenters: wcData?.rows ?? [],
             }, 'persistence');
           }
           Store.setOrderFieldVisibility(ssData?.orderFields ?? {}, 'persistence');

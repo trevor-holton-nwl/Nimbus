@@ -469,3 +469,63 @@ test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
   assert.equal(ovl.id, 'ovl-a-b');      // id format is pinned; peerId is additive
   assert.equal(ovl.peerId, 'a');
 });
+
+// ── separationBucketKey (P3a distribution separation) ──────────────────────
+
+test('separationBucketKey buckets by hour/day and returns null for none/unrecognized scopes', () => {
+  assert.equal(Core.separationBucketKey(new Date(2026, 6, 7, 14, 30), 'hour'), '2026-07-07T14');
+  assert.equal(Core.separationBucketKey(new Date(2026, 6, 7, 23, 59), 'hour'), '2026-07-07T23');
+  assert.equal(Core.separationBucketKey(new Date(2026, 6, 7, 9), 'day'), Core.dayKey(new Date(2026, 6, 7, 9)));
+  assert.equal(Core.separationBucketKey(new Date(2026, 6, 7), 'none'), null);
+  assert.equal(Core.separationBucketKey(new Date(2026, 6, 7), 'bogus'), null);
+});
+
+test('separationBucketKey resolves ISO weeks, including across the 2026/2027 year boundary (2026 is a 53-ISO-week year)', () => {
+  // Ordinary mid-year case: Wednesday July 8, 2026 falls in ISO week 28.
+  assert.equal(Core.separationBucketKey(new Date(2026, 6, 8), 'week'), '2026-W28');
+  // The year-boundary case: both dates fall in the same ISO week (2026-W53),
+  // a value already manually verified when the function was built. Asserting
+  // the exact string (not just that the two calls are equal to each other)
+  // catches a bug that shifted both dates by the same wrong amount.
+  assert.equal(Core.separationBucketKey(new Date(2026, 11, 29), 'week'), '2026-W53');
+  assert.equal(Core.separationBucketKey(new Date(2027, 0, 2), 'week'), '2026-W53');
+});
+
+// ── computeAlerts distribution-separation dedup ─────────────────────────────
+
+test('computeAlerts raises exactly one distribution-separation alert per recompute pass, with no accumulation across calls', () => {
+  const base = new Date(Date.now() + 24 * 3600000);
+  base.setHours(9, 0, 0, 0);
+  const day1 = new Date(base);
+  const day2 = new Date(base.getTime() + 24 * 3600000);
+  const mk = (id, line, start) => ({
+    id, MACHINE: line, RUN_TIME: 2, PARENT_ORDER: 'A-1000', MATERIAL_NUMBER: 'MAT-1',
+    start_date: start, end_date: new Date(start.getTime() + 2 * 3600000),
+  });
+  const tasks = [mk('a', 'L1', day1), mk('b', 'L2', day1), mk('c', 'L3', day2)];
+  const masterData = {
+    lines: [
+      { machine: 'L1', plant: 'P1', sap_workcenter: 'WC1' },
+      { machine: 'L2', plant: 'P1', sap_workcenter: 'WC1' },
+      { machine: 'L3', plant: 'P1', sap_workcenter: 'WC1' },
+    ],
+    workcenters: [{ sap_workcenter: 'WC1', max_separation: 'day' }],
+  };
+  const fixture = {
+    tasks, blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData, dismissed: [], opts: {},
+  };
+
+  const res1 = Core.computeAlerts(fixture);
+  const hits1 = res1.alerts.filter(a => a.type === 'distribution-separation');
+  assert.equal(hits1.length, 1);
+  assert.equal(hits1[0].msgKey, 'alert.distribution_separation');
+  assert.equal(hits1[0].id, 'dist-sep:P1:A-1000:MAT-1');
+
+  // A second, independent recompute pass over the same input must not
+  // accumulate/duplicate the alert.
+  const res2 = Core.computeAlerts(fixture);
+  const hits2 = res2.alerts.filter(a => a.type === 'distribution-separation');
+  assert.equal(hits2.length, 1);
+  assert.equal(hits2[0].id, hits1[0].id);
+});

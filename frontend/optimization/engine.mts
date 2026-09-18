@@ -66,7 +66,7 @@
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
-import { Alerts, scheduleAlertsForPatches, taskCarriesTool } from '../insights/services.mjs';
+import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
   evaluateDueDateFirst as evaluateDueDateFirstPure,
@@ -2183,6 +2183,16 @@ export const Engine = {
           days: overCapSummary.days ?? 0,
         }), 'warn');
       }
+      // Sub-order distribution separation (SAP aggregate work center -> per-
+      // machine sub-orders): report parents whose siblings landed in
+      // different calendar buckets, same post-hoc pattern as the push-
+      // forward cap above and NOT gated on `synthetic` — separation is a
+      // scheduling-outcome fact, not a setup-data fact, so it applies to
+      // every plant regardless of setup-tracking activation.
+      const distributionSeparationCount = result.validationFindings?.filter(f => f.code === 'distribution_separation').length ?? 0;
+      if (distributionSeparationCount) {
+        Toast.show(Util.t('toast.optimize_distribution_separation', { parents: distributionSeparationCount }), 'warn');
+      }
       // B3: derive the unplaced set by difference, in this one place, rather
       // than threading an unplacedOrderIds field through CandidateResult —
       // the worst drops (plant/line mismatch, this same opts.lines/
@@ -2572,11 +2582,15 @@ export const Engine = {
         Calendar._endRun();
       }
       if (patches.length) Store.updateMany(patches, 'engine');
-      // A `tool-conflict` alert is emitted on the LATER order's line, which
-      // can be a different line than this reflow's own `line` — a moved
-      // task carrying a real PRT_01/PRT_02 tool id forces a full recompute
-      // instead of trusting the single-line scope.
-      if (taskCarriesTool(changed) || patches.some(p => taskCarriesTool(Store.tasks[p.id]))) Alerts.scheduleRecompute();
+      // A `tool-conflict` alert is emitted on the LATER order's line, and a
+      // `distribution-separation` alert can be emitted on any sibling
+      // sub-order's line — both can be a different line than this reflow's
+      // own `line` — a moved task carrying a real PRT_01/PRT_02 tool id or a
+      // PARENT_ORDER forces a full recompute instead of trusting the
+      // single-line scope.
+      if (taskCarriesTool(changed) || taskCarriesDistribution(changed)
+        || patches.some(p => taskCarriesTool(Store.tasks[p.id]) || taskCarriesDistribution(Store.tasks[p.id])))
+        Alerts.scheduleRecompute();
       else Alerts.scheduleRecomputeLines(new Set([line]));
       return;
     }
@@ -2620,10 +2634,14 @@ export const Engine = {
     }
     if (patches.length) Store.updateMany(patches, 'engine');
     // Reflow only ever shifts dates within `line`, so scope the alert recompute to it —
-    // unless a moved task carries a real PRT_01/PRT_02 tool id: `tool-conflict` is
-    // emitted on the LATER order's (possibly different) line, so that case forces a
-    // full recompute instead of trusting the single-line scope.
-    if (taskCarriesTool(changed) || patches.some(p => taskCarriesTool(Store.tasks[p.id]))) Alerts.scheduleRecompute();
+    // unless a moved task carries a real PRT_01/PRT_02 tool id or a PARENT_ORDER:
+    // `tool-conflict` is emitted on the LATER order's (possibly different) line, and
+    // `distribution-separation` can be emitted on any sibling sub-order's (possibly
+    // different) line, so either case forces a full recompute instead of trusting the
+    // single-line scope.
+    if (taskCarriesTool(changed) || taskCarriesDistribution(changed)
+      || patches.some(p => taskCarriesTool(Store.tasks[p.id]) || taskCarriesDistribution(Store.tasks[p.id])))
+      Alerts.scheduleRecompute();
     else Alerts.scheduleRecomputeLines(new Set([line]));
   }
 };

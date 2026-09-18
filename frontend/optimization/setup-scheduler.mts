@@ -16,6 +16,7 @@ import type {
   ConstraintConfig,
   NimbusLineSetting,
   NimbusMasterData,
+  NimbusMasterWorkcenter,
   NimbusPlantBlock,
   NimbusTask,
   OptimizerMode,
@@ -772,6 +773,10 @@ export interface ValidationFinding {
   severity: 'error' | 'warning';
   taskId?: string;
   line?: string;
+  /** Sibling sub-order ids implicated in a cross-order finding (e.g.
+   * `distribution_separation`) — orthogonal to `taskId`, which stays
+   * single-task. */
+  parents?: readonly string[];
 }
 export interface CandidateResult {
   /** A malformed or reversed normalized planning horizon is a caller error;
@@ -6322,6 +6327,81 @@ function retainCompatiblePlacements(
   return { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
 }
 
+/**
+ * P3a — detection only. Warns (never blocks, never affects the score vector)
+ * when a SAP aggregate order's distributed sub-orders (siblings sharing
+ * `PARENT_ORDER`) start further apart than their work center's configured
+ * `max_separation` policy allows. A future alignment pass may actually fix
+ * these; this only surfaces them.
+ */
+function checkDistributionSeparation(
+  patches: ReadonlyArray<SchedulePatch>,
+  snapshot: Readonly<ScheduleSnapshot>,
+): ValidationFinding[] {
+  const finalTasks = applyPatchesToSnapshot(snapshot.tasks, patches);
+
+  const machineToWorkcenter = new Map<string, string>();
+  for (const line of snapshot.masterData?.lines ?? []) {
+    if (line.sap_workcenter) machineToWorkcenter.set(line.machine, line.sap_workcenter);
+  }
+  const workcenterPolicy = new Map<string, NimbusMasterWorkcenter>();
+  for (const workcenter of snapshot.masterData?.workcenters ?? []) {
+    workcenterPolicy.set(workcenter.sap_workcenter, workcenter);
+  }
+
+  const groups = new Map<string, NimbusTask[]>();
+  for (const task of finalTasks) {
+    if (!task.PARENT_ORDER || task.planning_status === 'needs_planning') continue;
+    const plant = resolveTaskPlant(task, snapshot) ?? '';
+    const key = `${plant} ${task.PARENT_ORDER} ${task.MATERIAL_NUMBER ?? ''}`;
+    const group = groups.get(key);
+    if (group) group.push(task); else groups.set(key, [task]);
+  }
+
+  const findings: ValidationFinding[] = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    // Mirror nimbus-compute-core.js's computeAlerts: scan every sibling (not
+    // just group[0]) for the first machine that resolves to a workcenter with
+    // a truthy max_separation policy, so the two never disagree purely due to
+    // sibling-iteration order.
+    let maxSeparation: NimbusMasterWorkcenter['max_separation'] | undefined;
+    for (const task of group) {
+      const machine = String(task.MACHINE ?? '');
+      const workcenterId = machineToWorkcenter.get(machine);
+      const policy = workcenterId ? workcenterPolicy.get(workcenterId) : undefined;
+      if (policy?.max_separation) { maxSeparation = policy.max_separation; break; }
+    }
+    if (!maxSeparation || maxSeparation === 'none') continue;
+    const buckets = group.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.start_date, maxSeparation));
+    if (buckets.some(bucket => bucket !== buckets[0])) {
+      findings.push({
+        code: 'distribution_separation',
+        severity: 'warning',
+        parents: group.map(taskId),
+        message: `Sub-orders of ${group[0].PARENT_ORDER} start in different ${maxSeparation} buckets.`,
+      });
+    }
+  }
+  return findings;
+}
+
+/** Recompute `distribution_separation` findings fresh against a result's
+ * truly-final patches and merge them into its validationFindings, replacing
+ * (never duplicating) any stale entries a caller already had — the finding
+ * must always reflect the last placement pass to touch `result.patches`, not
+ * whatever pass happened to run `checkDistributionSeparation` first. */
+function withFreshDistributionFindings(result: CandidateResult, snapshot: Readonly<ScheduleSnapshot>): CandidateResult {
+  const distributionFindings = checkDistributionSeparation(result.patches, snapshot);
+  return {
+    ...result,
+    validationFindings: [
+      ...(result.validationFindings ?? []).filter(f => f.code !== 'distribution_separation'),
+      ...distributionFindings,
+    ],
+  };
+}
+
 function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: CandidateResult): CandidateResult {
   const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
@@ -6374,7 +6454,8 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   result = preferIncumbent
     ? retainCompatiblePlacements(snapshot, bounds, incumbent, result)
     : retainCompatiblePlacements(snapshot, bounds, result, incumbent);
-  return refreshFinalMetrics(snapshot, bounds, result);
+  const finalResult = refreshFinalMetrics(snapshot, bounds, result);
+  return withFreshDistributionFindings(finalResult, snapshot);
 }
 
 function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, result: CandidateResult): CandidateResult {
@@ -6499,10 +6580,14 @@ export function fillPlanningGaps(
     // A completed gap check still needs the same final-state accounting pass
     // as a run that inserted work. The primary candidate may have emitted
     // fewer patches than the number of already-scheduled tasks in scope.
-    return refreshFinalMetrics(snapshot, bounds, {
+    const refreshed = refreshFinalMetrics(snapshot, bounds, {
       ...candidate,
       gapFill: { complete: true, placed: 0, unchecked: 0, runtimeMs: bounds.clock() - started },
     });
+    // No pending orders to try doesn't guarantee nothing moved relative to
+    // what finalizeCandidate last saw — recompute rather than assume the
+    // incoming findings are still accurate.
+    return withFreshDistributionFindings(refreshed, snapshot);
   }
   const revision = new Map<string, number>();
   const checked = new Map<string, number>();
@@ -6628,7 +6713,7 @@ export function fillPlanningGaps(
     unchangedLines: candidate.unchangedLines.filter(line => !revision.has(line)),
     gapFill: { complete: valid && unchecked === 0, placed, unchecked, runtimeMs: bounds.clock() - started } };
   result.validationFindings = validateCandidate(snapshot, bounds, result);
-  const final = refreshFinalMetrics(snapshot, bounds, result);
+  const final = withFreshDistributionFindings(refreshFinalMetrics(snapshot, bounds, result), snapshot);
   return { ...final, gapFill: { ...result.gapFill!, runtimeMs: bounds.clock() - started } };
 }
 

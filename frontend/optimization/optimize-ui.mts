@@ -1978,6 +1978,21 @@ export const OptimizerPreview = {
         ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
       </div>
     </details>` : '';
+
+    // P3a — distribution_separation findings: always severity 'warning', filtered
+    // by code (not severity) since other warning-severity codes exist that aren't
+    // part of this feature. Never gates Apply (see canApply, which only checks
+    // severity === 'error'). One finding per violating sibling-order group.
+    const distributionSeparationFindings = (OptimizerPreview._candidate?.validationFindings ?? [])
+      .filter(item => item.code === 'distribution_separation');
+    const distributionSeparationHtml = distributionSeparationFindings.length ? `<details class="opt-pv-section">
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Sub-orders may start in different buckets</span><span class="opt-pv-section-badge">${distributionSeparationFindings.length}</span></summary>
+      <div class="opt-pv-section-body">
+        <ul>${distributionSeparationFindings.slice(0, 50)
+          .map(item => `<li>${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
+        ${distributionSeparationFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
+      </div>
+    </details>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
@@ -2017,6 +2032,7 @@ export const OptimizerPreview = {
           ${gapsHtml}
           ${diagHtml}
           ${protectedHtml}
+          ${distributionSeparationHtml}
         </div>
 
         <div class="opt-pv-footer-note">

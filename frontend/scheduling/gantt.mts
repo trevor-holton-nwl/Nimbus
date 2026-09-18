@@ -3717,6 +3717,18 @@ export const Interaction = {
         : '';
       const firmedBadge = Engine.firmingStatus(t).firmed
         ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '';
+      const suborderHtml = t.PARENT_ORDER ? (() => {
+        const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
+        const siblings = scoped.filter(x => x.PARENT_ORDER === t.PARENT_ORDER);
+        const getQty = (task: any) => {
+          const q = task['ORDER_QUANTITY_(GMEIN)'];
+          return (typeof q === 'number' ? q : typeof q === 'string' ? parseFloat(q) : 0) || 0;
+        };
+        const thisQty = getQty(t);
+        const totalQty = siblings.reduce((sum, s) => sum + getQty(s), 0);
+        const pct = totalQty > 0 ? Math.round((thisQty / totalQty) * 100) : 0;
+        return `<div class="hov-suborder">${Util.t('ui.hov_suborder', {letter: t.DISTRIBUTION_LETTER || '', parent: t.PARENT_ORDER, pct, count: siblings.length})}</div>`;
+      })() : '';
 
       return `
         <div class="hov-title">${Util.escapeHtml(orderNo)} ${firmedBadge}</div>
@@ -3729,6 +3741,7 @@ export const Interaction = {
           <span>Form</span><span>${Util.escapeHtml(form)}</span>
         </div>
         <div class="hov-dates">${startStr} → ${endStr}</div>
+        ${suborderHtml}
         ${alertsHtml}
       `;
     };

@@ -3820,6 +3820,17 @@ export const MasterData = (() => {
           Store.setMasterData({
             plants: pData?.rows ?? [],
             lines:  lData?.rows ?? [],
+            // This refresh only re-fetches plants/machine (the two tables the
+            // Hierarchy/ProdLines consumers below actually need); it is not
+            // work-center-specific and has no sap_workcenter rows in scope
+            // even when `table === 'sap_workcenter'`. setMasterData replaces
+            // the whole object (Store.setMasterData in store.mts), so
+            // omitting this field — or passing [] — would silently wipe
+            // whatever work-center data persistence.mts's boot-time fetch
+            // already populated. Preserve the current in-memory value
+            // instead of firing a redundant new /master-data/sap_workcenter
+            // request here.
+            workcenters: Store.masterData?.workcenters ?? [],
           }, 'master-data-save');
         } else {
           Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });

@@ -197,6 +197,7 @@ declare global {
     parseDate(v: unknown): Date | null;
     dayKey(d: unknown): string;
     startOfDay(d: unknown): Date | null;
+    separationBucketKey(d: unknown, scope: 'none' | 'hour' | 'day' | 'week'): string | null;
     runHours(task: NimbusTask): number;
     scheduleIntervals(task: NimbusTask): Array<{ sequence: number; start: Date; end: Date }>;
     setupIntervals(setup?: NimbusSetupObservation): NimbusSetupInterval[];

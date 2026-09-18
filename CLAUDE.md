@@ -23,7 +23,7 @@ The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<dom
 | Labor | `frontend/labor/` + `backend/labor/` | Aggregate and line-level available-labor-hours planning | `backend/labor/` |
 | Security | `frontend/security/` + `backend/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `backend/security/` |
 | Integration | `frontend/integration/` + `backend/integration/` | Excel order/BOM ingest, purge, upload audit, missing-master-data reports, SAP sync skeleton | `backend/integration/` |
-| Distribution | `frontend/distribution/` + `backend/distribution/` | SAP aggregate work center ↔ NIMBUS per-machine sub-order distribution; Work Centers master-data tab (P1 shipped, lives in `frontend/master-data/`); Distribution Scheduling Board tab shell/list/filters/detail-header (P2-15 shipped); dry-run share editor + Save/Reset/Undo (P2-16, not yet built) | both sides |
+| Distribution | `frontend/distribution/` + `backend/distribution/` | SAP aggregate work center ↔ NIMBUS per-machine sub-order distribution; Work Centers master-data tab (P1 shipped, lives in `frontend/master-data/`); Distribution Scheduling Board tab shell/list/filters/detail-header (P2-15 shipped); dry-run share editor + Save/Reset/Undo (P2-16, shipped) | both sides |
 | Admin Ops | `frontend/admin-ops/` + `backend/admin_ops/` | Diagnostics, DB maintenance, `_BACKEND_LOG` ring buffer, System Configuration | `backend/admin_ops/` |
 | Shell | `frontend/shell/` | Boot, tab chrome, login screen, the intelligence layer, and the root-pinned classic scripts (`app.js`, `index.html`, `locales/`) | `frontend/shell/` |
 

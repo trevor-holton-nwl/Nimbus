@@ -4916,3 +4916,224 @@ test('fragment search charges instability for moved starts instead of a hardcode
   assert.equal(SetupScheduler.fragmentObjectiveFactsForTest(candidateShape).instabilityMinutes, 0,
     'fragmentObjectiveFacts falls back to 0 when instabilityMinutes is absent');
 });
+
+// ── P3a: distribution separation (checkDistributionSeparation / finalizeCandidate) ──
+
+// Three siblings of one SAP-distributed order (shared PARENT_ORDER + MATERIAL_NUMBER)
+// on three different machines of the same work center. Each machine's own
+// calendar makes ITS placement the individually-optimal (earliest legal) slot —
+// there is no artificial delay injected for the test's sake, only a genuinely
+// different closed-day pattern per line. That is what makes this discriminating:
+// a naive fixture that just hardcoded three different start dates would exercise
+// nothing about the grouping/bucket logic in checkDistributionSeparation, only
+// the test author's own arithmetic. Here the finding must come from the real
+// evaluator's per-line ASAP search landing on three different calendar days.
+function distributionCalendars() {
+  const closedOn = (days) => {
+    const wh = { ...OPEN_HOURS };
+    for (const d of days) wh[d] = null;
+    return wh;
+  };
+  return {
+    // 2026-08-03 is a Monday (day-of-week 1).
+    L1: { workHours: OPEN_HOURS },        // open every day -> starts Mon 08/03
+    L2: { workHours: closedOn([1]) },     // Monday closed -> starts Tue 08/04
+    L3: { workHours: closedOn([1, 2]) },  // Mon+Tue closed -> starts Wed 08/05
+  };
+}
+
+function distributionMasterData(lineOverrides = {}) {
+  const line = (machine) => ({ plant: 'P1', machine, sap_workcenter: 'WC1', ...(lineOverrides[machine] ?? {}) });
+  return {
+    plants: [{ plant: 'P1' }],
+    lines: [line('L1'), line('L2'), line('L3')],
+    workcenters: [{
+      plant: 'P1', sap_workcenter: 'WC1', description: null, distribution_mode: 'distribute',
+      default_machine: null, max_separation: 'day', review_required: false, distribute_tooled: false,
+    }],
+  };
+}
+
+function distributionSiblings(due = '2026-08-06T18:00:00') {
+  const parent = 'PO-DIST-1';
+  const material = 'MAT-DIST';
+  return [
+    { ...scheduledTask('dist-a', 1, 'GREEN', due), MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material },
+    { ...scheduledTask('dist-b', 1, 'GREEN', due), MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material },
+    { ...scheduledTask('dist-c', 1, 'GREEN', due), MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material },
+  ];
+}
+
+function distributionSetup() {
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'GREEN', 0)] });
+  setup.machine_states.push(
+    { machine: 'L2', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'dist L2' },
+    { machine: 'L3', state_key: setupState('GREEN'), signature_version: 1, source: 'manual', reason: 'dist L3' },
+  );
+  return setup;
+}
+
+test('checkDistributionSeparation flags siblings whose individually-optimal per-machine placement lands on different calendar days', () => {
+  const [a, b, c] = distributionSiblings();
+  const snapshot = setupSnapshot([a, b, c]);
+  snapshot.calendars = distributionCalendars();
+  snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+  snapshot.masterData = distributionMasterData();
+
+  const bounds = dueDateBounds(distributionSetup(), { horizonEnd: at('2026-08-06T18:00:00') });
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+
+  // Confirm each machine actually lands on its own individually-optimal (earliest
+  // legal) day — nothing here is contrived directly onto the task's dates.
+  assert.equal(patchFor(result, 'dist-a').changes.start_date.getTime(), at('2026-08-03T08:00:00').getTime());
+  assert.equal(patchFor(result, 'dist-b').changes.start_date.getTime(), at('2026-08-04T08:00:00').getTime());
+  assert.equal(patchFor(result, 'dist-c').changes.start_date.getTime(), at('2026-08-05T08:00:00').getTime());
+
+  const findings = result.validationFindings.filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 1);
+  assert.deepEqual(findings[0].parents.slice().sort(), ['dist-a', 'dist-b', 'dist-c']);
+  assert.equal(findings[0].severity, 'warning');
+  assert.ok(findings[0].message && findings[0].message.length > 0);
+
+  // Never blocks/never affects score: all three siblings are still 'scheduled'.
+  for (const id of ['dist-a', 'dist-b', 'dist-c']) {
+    assert.equal(result.dispositions.find(d => d.id === id).status, 'scheduled');
+  }
+
+  // And it does not change which candidate the search picks: an otherwise
+  // identical run with no shared PARENT_ORDER (so no grouping/finding at all)
+  // must produce the exact same placements and objective score.
+  const unrelated = [a, b, c].map((t, i) => ({ ...t, PARENT_ORDER: null, id: `${t.id}-unrelated-${i}` }));
+  const baseline = SetupScheduler.evaluateDueDateFirst({ ...snapshot, tasks: unrelated }, bounds);
+  assert.equal(baseline.validationFindings.filter(f => f.code === 'distribution_separation').length, 0);
+  assert.deepEqual(result.score, baseline.score);
+  assert.deepEqual(
+    scheduledPatches(result).map(p => +p.changes.start_date).sort(),
+    scheduledPatches(baseline).map(p => +p.changes.start_date).sort(),
+  );
+});
+
+test('checkDistributionSeparation stays silent when siblings share a bucket, the policy is none, or the policy is unresolvable', () => {
+  const bounds = dueDateBounds(distributionSetup(), { horizonEnd: at('2026-08-06T18:00:00') });
+
+  // (a) Same bucket: every line open every day, so all three start Mon 08/03.
+  {
+    const [a, b, c] = distributionSiblings();
+    const snapshot = setupSnapshot([a, b, c]);
+    snapshot.calendars = { L1: { workHours: OPEN_HOURS }, L2: { workHours: OPEN_HOURS }, L3: { workHours: OPEN_HOURS } };
+    snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+    snapshot.masterData = distributionMasterData();
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+    assert.equal(patchFor(result, 'dist-a').changes.start_date.getTime(), patchFor(result, 'dist-b').changes.start_date.getTime());
+    assert.equal(patchFor(result, 'dist-a').changes.start_date.getTime(), patchFor(result, 'dist-c').changes.start_date.getTime());
+    assert.equal(result.validationFindings.filter(f => f.code === 'distribution_separation').length, 0,
+      'siblings landing in the same bucket must not raise a finding');
+  }
+
+  // (b) Different buckets (the discriminating layout above), but the work
+  // center's policy is 'none'.
+  {
+    const [a, b, c] = distributionSiblings();
+    const snapshot = setupSnapshot([a, b, c]);
+    snapshot.calendars = distributionCalendars();
+    snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+    snapshot.masterData = distributionMasterData();
+    snapshot.masterData.workcenters[0].max_separation = 'none';
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+    assert.notEqual(patchFor(result, 'dist-a').changes.start_date.getTime(), patchFor(result, 'dist-c').changes.start_date.getTime(),
+      'sanity: the siblings really do land on different days in this layout');
+    assert.equal(result.validationFindings.filter(f => f.code === 'distribution_separation').length, 0,
+      'max_separation "none" must never raise a finding regardless of drift');
+  }
+
+  // (c) Different buckets, but NO sibling's line resolves to a work center at
+  // all (checkDistributionSeparation must stay silent when the policy is
+  // truly unresolvable across the whole group, not just for one sibling).
+  {
+    const [a, b, c] = distributionSiblings();
+    const snapshot = setupSnapshot([a, b, c]);
+    snapshot.calendars = distributionCalendars();
+    snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+    snapshot.masterData = distributionMasterData();
+    for (const line of snapshot.masterData.lines) delete line.sap_workcenter; // no sibling resolves to a work center
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+    assert.notEqual(patchFor(result, 'dist-a').changes.start_date.getTime(), patchFor(result, 'dist-c').changes.start_date.getTime(),
+      'sanity: the siblings really do land on different days in this layout');
+    assert.equal(result.validationFindings.filter(f => f.code === 'distribution_separation').length, 0,
+      'a group where no sibling resolves to a policy must never raise a finding');
+  }
+
+  // (d) Different buckets; only the FIRST sibling (group[0]) fails to resolve
+  // to a work center, but a later sibling (dist-b, on L2) still resolves to
+  // WC1's 'day' policy. This mirrors nimbus-compute-core.js's computeAlerts,
+  // which scans every sibling for a resolvable policy rather than stopping at
+  // the first — checkDistributionSeparation must do the same, so the two
+  // never disagree purely due to sibling-iteration order. The finding must
+  // still fire here (previously it was silently swallowed because only
+  // group[0] was inspected).
+  {
+    const [a, b, c] = distributionSiblings();
+    const snapshot = setupSnapshot([a, b, c]);
+    snapshot.calendars = distributionCalendars();
+    snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+    snapshot.masterData = distributionMasterData();
+    delete snapshot.masterData.lines[0].sap_workcenter; // L1 (dist-a) now has no work center
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+    assert.notEqual(patchFor(result, 'dist-a').changes.start_date.getTime(), patchFor(result, 'dist-c').changes.start_date.getTime(),
+      'sanity: the siblings really do land on different days in this layout');
+    const findings = result.validationFindings.filter(f => f.code === 'distribution_separation');
+    assert.equal(findings.length, 1,
+      'a resolvable policy on ANY sibling (not just group[0]) must still raise the finding');
+    assert.deepEqual(findings[0].parents.slice().sort(), ['dist-a', 'dist-b', 'dist-c']);
+  }
+});
+
+// Regression: fillPlanningGaps used to silently discard distribution_separation
+// findings whenever it had at least one pending order to try (the common
+// case), because its final `result.validationFindings = validateCandidate(...)`
+// assignment replaces rather than merges — and validateCandidate has no
+// knowledge of this check at all. finalizeCandidate's own pass can't see this
+// either: it runs BEFORE gap fill, so a violation that only exists among
+// siblings placed *by* gap fill was never checked, never mind preserved.
+test('fillPlanningGaps recomputes distribution_separation against its own final placements instead of discarding it via the validateCandidate overwrite', () => {
+  const [a, b, c] = distributionSiblings();
+  const snapshot = setupSnapshot([a, b, c]);
+  snapshot.calendars = distributionCalendars();
+  snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+  snapshot.masterData = distributionMasterData();
+
+  // An already-expired primary-search deadline leaves all three siblings
+  // needs_planning coming out of evaluateDueDateFirst/finalizeCandidate, so
+  // pending.length > 0 when fillPlanningGaps runs -- the exact branch that
+  // used to overwrite validationFindings with validateCandidate's output.
+  const bounds = dueDateBounds(distributionSetup(), { deadline: -2000, horizonEnd: at('2026-08-06T18:00:00') });
+  const candidate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  for (const id of ['dist-a', 'dist-b', 'dist-c']) {
+    assert.equal(candidate.dispositions.find(d => d.id === id).status, 'needs_planning',
+      'sanity: the expired deadline must leave all three siblings pending, not yet scheduled');
+  }
+  // Nothing is scheduled yet, so checkDistributionSeparation (which skips
+  // needs_planning tasks) had no group to flag -- the violation genuinely
+  // does not exist until gap fill places these siblings.
+  assert.equal(candidate.validationFindings.filter(f => f.code === 'distribution_separation').length, 0);
+
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate);
+
+  // Gap fill's own per-line ASAP capacity search places each sibling on its
+  // individually-optimal day given each line's own closed-day pattern --
+  // the same discriminating layout used by the finalizeCandidate-only test
+  // above, landing on three different calendar days.
+  for (const id of ['dist-a', 'dist-b', 'dist-c']) {
+    assert.equal(result.dispositions.find(d => d.id === id).status, 'scheduled', id);
+  }
+  assert.equal(+patchFor(result, 'dist-a').changes.start_date, +at('2026-08-03T08:00:00'));
+  assert.equal(+patchFor(result, 'dist-b').changes.start_date, +at('2026-08-04T08:00:00'));
+  assert.equal(+patchFor(result, 'dist-c').changes.start_date, +at('2026-08-05T08:00:00'));
+
+  const findings = result.validationFindings.filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 1,
+    'a violation newly created by gap fill\'s own placements must survive in the final result, ' +
+    'not be silently dropped by the validateCandidate overwrite');
+  assert.deepEqual(findings[0].parents.slice().sort(), ['dist-a', 'dist-b', 'dist-c']);
+  assert.equal(findings[0].severity, 'warning');
+});

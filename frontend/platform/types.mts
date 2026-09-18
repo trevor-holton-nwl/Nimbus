@@ -150,6 +150,8 @@ export interface NimbusMasterLine {
    * compatible behavior for cached/current snapshots. */
   setup_compatible?: boolean;
   setup_compatibility_reason?: string | null;
+  sap_workcenter?: string;
+  distribution_weight?: number | null;
 }
 
 export interface ConstraintConfig {
@@ -301,9 +303,21 @@ export interface NimbusMasterPlant {
   } | null;
 }
 
+export interface NimbusMasterWorkcenter {
+  plant: string;
+  sap_workcenter: string;
+  description?: string | null;
+  distribution_mode: 'single' | 'distribute';
+  default_machine?: string | null;
+  max_separation: 'none' | 'hour' | 'day' | 'week';
+  review_required: boolean;
+  distribute_tooled: boolean;
+}
+
 export interface NimbusMasterData {
   plants: NimbusMasterPlant[];
   lines: NimbusMasterLine[];
+  workcenters: NimbusMasterWorkcenter[];
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +457,7 @@ export type AlertType =
   | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours'
   | 'runtime-schedule-mismatch' | 'tool-conflict'
   | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged'
-  | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown';
+  | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown' | 'distribution-separation';
 
 export type AlertSev = 'err' | 'warn';
 
