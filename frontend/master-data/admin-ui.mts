@@ -2889,6 +2889,23 @@ export const MasterData = (() => {
     sap_workcenter:   ['plant', 'sap_workcenter'],
   };
 
+  /** Values pre-filled into a brand-new grid row so an admin can save after
+   *  typing only the key columns + description. Each is deliberately
+   *  operationally inert: a work center in single mode with no default machine
+   *  does not distribute anything (service.classify_row leaves its orders as
+   *  plain orders), so the row exists without changing any scheduling behaviour
+   *  until someone configures it on the Work Centers tab. Mirrors the column
+   *  DEFAULTs except review_required, which is false here by request so a newly
+   *  typed work center does not push its orders into "needs review". */
+  const NEW_ROW_DEFAULTS: Partial<Record<MasterDataTable, Record<string, unknown>>> = {
+    sap_workcenter: {
+      distribution_mode: 'single',
+      max_separation:    'none',
+      review_required:   false,
+      distribute_tooled: false,
+    },
+  };
+
   // Tables that need a parent-dropdown for FK columns.
   const FK_SOURCE: Partial<Record<MasterDataTable, Record<string, MasterDataTable>>> = {
     plants:           { subnetwork: 'subnetworks' },
@@ -3466,6 +3483,7 @@ export const MasterData = (() => {
     if (!state) return;
     const newRow: MasterDataRow = {};
     state.columns.forEach((c) => { newRow[c.column_name] = ''; });
+    Object.assign(newRow, NEW_ROW_DEFAULTS[table] ?? {});
     if (table === 'bom_items') {
       // A new row is always within the currently scoped material+plant —
       // pre-fill so the user isn't retyping the scope on every row.
@@ -3720,7 +3738,18 @@ export const MasterData = (() => {
 
     // Build upserts from dirty + added.
     const upserts: MasterDataRow[] = [];
-    state.dirty.forEach((patch, _key) => { if (!state.deleted.has(_key)) upserts.push(patch); });
+    // An added row is ALSO in state.dirty, by the same object reference, as soon
+    // as the admin types into any cell (_markDirty binds the patch to the added
+    // row rather than copying it). Sending both copies queues the raw, unstripped
+    // one FIRST, so its blank NOT NULL cells fail the insert before the stripped
+    // copy built in the state.added loop below is ever attempted. That loop is the
+    // authoritative path for these rows.
+    const addedKeys = new Set(state.added.map((r) => _rowKey(table, r)));
+    state.dirty.forEach((patch, _key) => {
+      if (state.deleted.has(_key)) return;
+      if (addedKeys.has(_key)) return;
+      upserts.push(patch);
+    });
     // Plain for..of (not .forEach) so `return` here genuinely aborts _save() —
     // a .forEach callback's `return` only skipped that one row and let the save
     // proceed with the rest, silently persisting everything except the invalid
