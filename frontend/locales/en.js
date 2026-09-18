@@ -1998,4 +1998,9 @@ window.__NIMBUS_LOCALES.en = {
   'err.dist_share_purged':              'That sub-order was purged — only a fresh upload revives it.',
   'err.dist_stale_machine':             'That machine is no longer a member of this work center.',
   'err.dist_workcenter_missing':        'The work center for this order no longer exists.',
+
+  // Machines pane SAP Work Center reassignment confirm dialog (P2-11b,
+  // aggregate_to_detail.md §4.2) — English-only per this section's own
+  // established pattern above.
+  'toast.dist_reassign_confirm':        '{{n}} distributions and {{k}} scheduled sub-orders reference {{machine}} under {{wc}}; they will show as *machine left work center* until their shares are adjusted',
 };

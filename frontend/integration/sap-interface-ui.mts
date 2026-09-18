@@ -137,6 +137,37 @@ interface SapSyncResult {
   run_id: number | null;
 }
 
+/** One `upload_audit` row for SAP syncs (filename='sap:sap'). */
+interface SapUploadWarning {
+  level?: 'info' | 'warn' | 'error';
+  msg?: string;
+  category?: string;
+  // Distribution warning fields
+  parents_distributed?: number;
+  children_upserted?: number;
+  children_deleted?: number;
+  headers_created?: number;
+  headers_refreshed?: number;
+  conflicting_parent_rows?: unknown[];
+  ambiguous_plant?: unknown[];
+  workcenter_without_members?: unknown[];
+  default_machine_invalid?: unknown[];
+}
+
+interface SapUploadAuditItem {
+  batch_id: string;
+  filename: string | null;
+  row_count: number;
+  inserted: number;
+  updated: number;
+  uploaded_at: string | null;
+  warnings: SapUploadWarning[];
+}
+
+interface SapUploadAuditResponse {
+  audit: SapUploadAuditItem[];
+}
+
 /* =============================================================================
    INTERFACE — SAP integration console (Admin → Interface sub-tab)
    A master-detail console rendered into #sap-interface-host, driven by the
@@ -668,25 +699,92 @@ export const Interface = (() => {
     if (!body) return;
     body.innerHTML = `<div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
     try {
+      // Fetch both SAP runs and SAP-related upload audit entries
       const params = new URLSearchParams({ limit: '50', object: o.object_key });
-      const data: SapRunsResponse = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then((r) => {
+      const runsData: SapRunsResponse = await Util.fetchTraced(`${API}/sap/interface/runs?${params.toString()}`).then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
+
+      // Also fetch upload audit for SAP syncs (filename='sap:sap')
+      const auditData: SapUploadAuditResponse = await Util.fetchTraced(`${API}/upload/audit`).then((r) => {
+        if (!r.ok) return { audit: [] };
+        return r.json().catch(() => ({ audit: [] }));
+      });
+
       if (document.getElementById('sap-tabbody') !== body || _tab !== 'history' || _selected !== o.object_key) return;
-      const runs = data.runs || [];
-      if (!runs.length) {
+      const runs = runsData.runs || [];
+
+      // Filter audit items for SAP syncs only
+      const sapAuditItems = (auditData.audit || []).filter(it => it.filename === 'sap:sap');
+
+      if (!runs.length && !sapAuditItems.length) {
         body.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_no_runs'))}</div><div class="sap-empty-d">${Util.escapeHtml(Util.t('ui.sap_no_runs_hint'))}</div><button class="btn btn-sm" data-act-empty="dry">${Util.escapeHtml(Util.t('ui.sap_dry_run'))}</button></div>`;
         body.querySelector('[data-act-empty]')?.addEventListener('click', () => _runNow(o.object_key, true, null));
         return;
       }
-      body.innerHTML = `<div class="sap-feed">${runs.map((rn, i) => _runRow(rn, i)).join('')}</div>`;
+
+      // Build combined history: runs + audit entries with distribution warnings
+      let html = '<div class="sap-feed">';
+      html += runs.map((rn, i) => _runRow(rn, i)).join('');
+
+      // Add distribution warnings from upload audit
+      for (const item of sapAuditItems) {
+        const distWarning = item.warnings?.find(w => (w as SapUploadWarning).category === 'distribution') as SapUploadWarning | undefined;
+        if (distWarning) {
+          html += _renderSapAuditRow(item, distWarning);
+        }
+      }
+
+      html += '</div>';
+      body.innerHTML = html;
       body.querySelectorAll<HTMLElement>('[data-exp]').forEach((b) =>
         b.addEventListener('click', () => b.closest('.sap-run')?.classList.toggle('open')));
+
+      // Wire up distribution detail toggles and populate them
+      body.querySelectorAll<HTMLElement>('[data-dist-exp]').forEach((btn) => {
+        const item = btn.closest('.sap-dist-item') as HTMLElement | null;
+        if (!item) return;
+        const detailDiv = item.querySelector('.sap-dist-detail') as HTMLElement | null;
+        if (!detailDiv) return;
+
+        // Find the corresponding batch_id and populate details
+        const batchTitle = item.querySelector('.sap-run-batch')?.getAttribute('title');
+        const auditItem = sapAuditItems.find(x => x.batch_id === batchTitle);
+        if (auditItem) {
+          const distWarning = auditItem.warnings?.find(w => (w as SapUploadWarning).category === 'distribution') as SapUploadWarning | undefined;
+          if (distWarning) {
+            detailDiv.appendChild(_renderSapDistributionWarning(distWarning, auditItem.batch_id));
+          }
+        }
+
+        btn.addEventListener('click', () => {
+          const isOpen = item.classList.contains('open');
+          item.classList.toggle('open');
+          detailDiv.style.display = isOpen ? 'none' : '';
+          btn.textContent = isOpen ? 'details ▾' : 'details ▴';
+        });
+      });
     } catch (e) {
       body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${Util.escapeHtml((e as Error).message)}</div></div>`;
       ErrorLog.error('sap-interface', `Load runs failed: ${(e as Error).message}`);
     }
+  }
+
+  function _renderSapAuditRow(item: SapUploadAuditItem, distWarning: SapUploadWarning): string {
+    const date = item.uploaded_at ? _fmtTs(item.uploaded_at) : '—';
+    const batchShort = item.batch_id ? item.batch_id.slice(0, 8) + '…' : '—';
+    return `<div class="sap-dist-item">
+      <div class="sap-dist-head">
+        <span class="sap-pill info">distribution</span>
+        <span class="sap-run-t">${Util.escapeHtml(date)}</span>
+        <span class="sap-run-by">SAP sync</span>
+        <span class="sap-run-batch" title="${Util.escapeHtml(item.batch_id)}">${Util.escapeHtml(batchShort)}</span>
+        <button class="sap-exp" data-dist-exp>details ▾</button>
+      </div>
+      <div class="sap-dist-detail" style="display:none; padding:12px; background:rgba(0,0,0,0.02); margin:8px 0;">
+      </div>
+    </div>`;
   }
 
   function _runRow(rn: SapRun, i: number): string {
@@ -719,6 +817,92 @@ export const Interface = (() => {
       if (isNaN(d.getTime())) return String(ts);
       return Util.fmtDTReadable ? Util.fmtDTReadable(d) : d.toLocaleString();
     } catch { return String(ts); }
+  }
+
+  // Render distribution warning details from upload_audit SAP entries
+  function _renderSapDistributionWarning(entry: SapUploadWarning, batchId?: string): DocumentFragment {
+    const frag = document.createDocumentFragment();
+    if (entry.category !== 'distribution' || !entry.msg) return frag;
+
+    // Main summary line
+    const summary = document.createElement('div');
+    summary.className = 'sap-dist-summary';
+    summary.style.padding = '8px 0';
+    summary.style.fontSize = '13px';
+    const lvl = document.createElement('span');
+    lvl.style.fontWeight = '600';
+    lvl.style.marginRight = '8px';
+    lvl.style.color = entry.level === 'warn' ? 'var(--warn,#b57a0a)' : 'var(--ok,#2f7a4d)';
+    lvl.textContent = (entry.level || 'warn').toUpperCase() + ':';
+    summary.appendChild(lvl);
+    const msg = document.createElement('span');
+    msg.textContent = entry.msg;
+    summary.appendChild(msg);
+    frag.appendChild(summary);
+
+    // Review link if there are created/refreshed distributions
+    const created = entry.headers_created ?? 0;
+    const refreshed = entry.headers_refreshed ?? 0;
+    const total = created + refreshed;
+    if (total > 0 && batchId) {
+      const linkRow = document.createElement('div');
+      linkRow.style.padding = '4px 0';
+      const link = document.createElement('a');
+      link.href = `#gantt/distribution?batch=${encodeURIComponent(batchId)}`;
+      link.style.color = 'var(--accent,#0066cc)';
+      link.style.textDecoration = 'underline';
+      link.style.fontSize = '13px';
+      link.textContent = `Review ${total} distribution${total === 1 ? '' : 's'}`;
+      linkRow.appendChild(link);
+      frag.appendChild(linkRow);
+    }
+
+    // Expandable lists for detail items
+    const listFields: Array<{ key: keyof SapUploadWarning; label: string }> = [
+      { key: 'conflicting_parent_rows', label: 'Conflicting parent orders' },
+      { key: 'ambiguous_plant', label: 'Ambiguous plant conflicts' },
+      { key: 'workcenter_without_members', label: 'Work center without members' },
+      { key: 'default_machine_invalid', label: 'Invalid default machine' },
+    ];
+
+    for (const field of listFields) {
+      const items = entry[field.key] as unknown[];
+      if (!items || items.length === 0) continue;
+
+      const row = document.createElement('div');
+      row.style.padding = '4px 0';
+      const header = document.createElement('div');
+      header.style.cursor = 'pointer';
+      header.style.fontSize = '12px';
+      header.style.color = 'var(--text-muted,#666)';
+      header.textContent = `${field.label} (${items.length}) ▾`;
+      row.appendChild(header);
+
+      const detail = document.createElement('div');
+      detail.style.display = 'none';
+      detail.style.padding = '4px 0 4px 8px';
+      detail.style.fontSize = '12px';
+      detail.style.fontFamily = 'monospace';
+      detail.style.borderLeft = '2px solid var(--text-muted,#ccc)';
+      const pre = document.createElement('pre');
+      pre.style.margin = '0';
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.style.wordBreak = 'break-word';
+      pre.style.fontSize = '11px';
+      pre.textContent = items.map(i => String(i)).join('\n');
+      detail.appendChild(pre);
+      row.appendChild(detail);
+
+      header.addEventListener('click', () => {
+        detail.style.display = detail.style.display === 'none' ? '' : 'none';
+        header.textContent = detail.style.display === 'none'
+          ? `${field.label} (${items.length}) ▾`
+          : `${field.label} (${items.length}) ▴`;
+      });
+      frag.appendChild(row);
+    }
+
+    return frag;
   }
 
   return { render };

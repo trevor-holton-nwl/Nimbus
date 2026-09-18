@@ -309,6 +309,22 @@ interface AdminUploadWarning {
   level?: 'info' | 'warn' | 'error';
   msg?: string;
   status?: string;
+  category?: string;
+  // Distribution warning fields
+  parents_distributed?: number;
+  children_upserted?: number;
+  children_deleted?: number;
+  headers_created?: number;
+  headers_refreshed?: number;
+  replanned_after_reweight?: number;
+  single_rewrites?: number;
+  duplicates_dropped?: number;
+  conflicting_parent_rows?: unknown[];
+  zero_quantity_children?: number;
+  parent_runtime_defaulted?: number;
+  ambiguous_plant?: unknown[];
+  workcenter_without_members?: unknown[];
+  default_machine_invalid?: unknown[];
 }
 
 /** POST /upload response (db.ingest_orders_from_excel). */
@@ -1080,6 +1096,85 @@ export const AdminCockpit = {
     return ul;
   },
 
+  _renderDistributionWarning(entry: AdminUploadWarning, batchId?: string): DocumentFragment {
+    const frag = document.createDocumentFragment();
+    if (entry.category !== 'distribution' || !entry.msg) return frag;
+
+    // Main summary line
+    const summary = document.createElement('div');
+    summary.className = `admin-bwarn-row admin-bwarn-${entry.level || 'warn'}`;
+    const lvl = document.createElement('span');
+    lvl.className = 'admin-bwarn-lvl';
+    lvl.textContent = (entry.level || 'warn').toUpperCase();
+    const msg = document.createElement('span');
+    msg.className = 'admin-bwarn-msg';
+    msg.textContent = entry.msg;
+    summary.appendChild(lvl);
+    summary.appendChild(msg);
+    frag.appendChild(summary);
+
+    // Review link if there are created/refreshed distributions
+    const created = entry.headers_created ?? 0;
+    const refreshed = entry.headers_refreshed ?? 0;
+    const total = created + refreshed;
+    if (total > 0 && batchId) {
+      const linkRow = document.createElement('div');
+      linkRow.className = 'admin-dist-link-row';
+      const link = document.createElement('a');
+      link.href = `#gantt/distribution?batch=${encodeURIComponent(batchId)}`;
+      link.className = 'admin-dist-link';
+      link.textContent = Util.t('ui.review_distributions', { count: total });
+      linkRow.appendChild(link);
+      frag.appendChild(linkRow);
+    }
+
+    // Expandable lists for detail items
+    const listFields: Array<{ key: keyof AdminUploadWarning; label: string }> = [
+      { key: 'conflicting_parent_rows', label: 'ui.conflicting_parent_rows' },
+      { key: 'ambiguous_plant', label: 'ui.ambiguous_plant_conflicts' },
+      { key: 'workcenter_without_members', label: 'ui.workcenter_without_members' },
+      { key: 'default_machine_invalid', label: 'ui.default_machine_invalid' },
+    ];
+
+    for (const field of listFields) {
+      const items = entry[field.key] as unknown[];
+      if (!items || items.length === 0) continue;
+
+      const row = document.createElement('div');
+      row.className = 'admin-dist-detail-row';
+      const header = document.createElement('div');
+      header.className = 'admin-dist-detail-header';
+      header.style.cursor = 'pointer';
+      header.style.padding = '4px 0';
+      header.textContent = `${Util.t(field.label)} (${items.length})`;
+      row.appendChild(header);
+
+      const detail = document.createElement('div');
+      detail.className = 'admin-dist-detail-content';
+      detail.style.display = 'none';
+      detail.style.padding = '8px 16px';
+      detail.style.fontSize = '12px';
+      detail.style.fontFamily = 'monospace';
+      detail.style.backgroundColor = 'rgba(0,0,0,0.03)';
+      detail.style.borderRadius = '2px';
+      detail.style.margin = '4px 0';
+      const pre = document.createElement('pre');
+      pre.style.margin = '0';
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.style.wordBreak = 'break-word';
+      pre.textContent = items.map(i => String(i)).join('\n');
+      detail.appendChild(pre);
+      row.appendChild(detail);
+
+      header.addEventListener('click', () => {
+        detail.style.display = detail.style.display === 'none' ? '' : 'none';
+      });
+      frag.appendChild(row);
+    }
+
+    return frag;
+  },
+
   _renderBackendWarnings(warnings: AdminPipelineWarning[]): void {
     const host = document.getElementById('admin-backend-warnings');
     const countEl = document.getElementById('admin-bwarn-count');
@@ -1309,6 +1404,18 @@ export const AdminCockpit = {
           `✓ Inserted ${body.inserted}, updated ${body.updated} of ${body.raw_row_count} rows${w}`,
           'success'
         );
+
+        // Display distribution warning if present
+        const distWarning = body.warnings?.find(x => (x as AdminUploadWarning).category === 'distribution') as AdminUploadWarning | undefined;
+        if (distWarning) {
+          const detailZone = document.getElementById('admin-upload-detail');
+          if (detailZone) {
+            detailZone.textContent = '';
+            detailZone.appendChild(AdminCockpit._renderDistributionWarning(distWarning, body.batch_id));
+            detailZone.hidden = false;
+          }
+        }
+
         ErrorLog.info('admin',
           `Upload OK: inserted=${body.inserted} updated=${body.updated} batch=${body.batch_id}`, body);
         if (warnCount) {
@@ -2495,7 +2602,22 @@ export const AdminCockpit = {
             const td = document.createElement('td');
             td.colSpan = 7;
             td.style.padding = '0';
-            td.appendChild(AdminCockpit._warningList(it.warnings));
+            const warnContainer = document.createElement('div');
+            warnContainer.style.padding = '12px';
+
+            // Check for distribution warning
+            const distWarning = it.warnings.find(w => (w as AdminUploadWarning).category === 'distribution');
+            if (distWarning) {
+              warnContainer.appendChild(AdminCockpit._renderDistributionWarning(distWarning as AdminUploadWarning, it.batch_id));
+            }
+
+            // Show other warnings
+            const otherWarnings = it.warnings.filter(w => (w as AdminUploadWarning).category !== 'distribution');
+            if (otherWarnings.length > 0) {
+              warnContainer.appendChild(AdminCockpit._warningList(otherWarnings));
+            }
+
+            td.appendChild(warnContainer);
             warnRow.appendChild(td);
             tb.appendChild(tr);
             tb.appendChild(warnRow);
