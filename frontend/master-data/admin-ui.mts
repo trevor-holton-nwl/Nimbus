@@ -2170,15 +2170,55 @@ export const ProdLines = {
       _mkCombobox(comboHost, wcCodes, {
         value: currentValue,
         placeholder: Util.t('ph.select_work_center') || '—',
-        onSelect: (wc: string) => {
-          Store.setLineSetting(line, { sapWorkcenter: wc || null }, 'prodlines');
-          NIMBUS!.MasterData!.syncLineSettings!(line, { sapWorkcenter: wc || null });
-          Toast.show(Util.t('toast.line_settings_updated'), 'success');
-        },
+        onSelect: (wc: string) => { void ProdLines._reassignWorkcenter(line, wc); },
       });
     } catch (err) {
       ErrorLog.error('master-data', `Error initializing SAP work center combobox: ${err}`);
     }
+  },
+
+  // aggregate_to_detail.md §4.2 (P2-11b): the pane autosaves on change, so the
+  // "how many distributions does this touch" check has to be a dialog fired
+  // from the combobox's own onSelect, not a static note beside the field.
+  // Reads the machine's CURRENT sap_workcenter straight off Store.lineSettings
+  // (not the `currentValue` closed over by _initSapWorkcenterCombo, which goes
+  // stale after the pane's first reassignment without a full re-render) so the
+  // "reassigned away from" half of the message is always accurate.
+  // The check is informational only — §4.2 is explicit that nothing blocks the
+  // save itself, so a `total === 0` response, a declined confirm's `false`
+  // return, and even a failed/erroring impact check all still write through
+  // (a failed check fails OPEN, same as the design's "nothing blocks the save").
+  async _reassignWorkcenter(line: string, wc: string): Promise<void> {
+    const plant = Store.selectedPlant;
+    if (!plant) return;
+    const previousWc = Store.lineSettings[line]?.sapWorkcenter || '';
+
+    try {
+      const resp = await Util.fetchTraced(
+        `${Config.API_BASE}/distribution/${encodeURIComponent(plant)}?machines=${encodeURIComponent(line)}&limit=1`);
+      if (resp.ok) {
+        const body = await resp.json() as { meta?: { total?: number; scheduled_children?: number } };
+        const total = body.meta?.total ?? 0;
+        if (total > 0) {
+          const scheduledChildren = body.meta?.scheduled_children ?? 0;
+          const ok = await Modal.confirm({
+            tone: 'warn',
+            detail: Util.t('toast.dist_reassign_confirm', {
+              n: total, k: scheduledChildren, machine: line, wc: previousWc || '—',
+            }),
+          });
+          if (!ok) return;
+        }
+      } else {
+        ErrorLog.error('master-data', `Failed to check distribution impact for ${line}: ${resp.status}`);
+      }
+    } catch (err) {
+      ErrorLog.error('master-data', `Error checking distribution impact for ${line}: ${err}`);
+    }
+
+    Store.setLineSetting(line, { sapWorkcenter: wc || null }, 'prodlines');
+    NIMBUS!.MasterData!.syncLineSettings!(line, { sapWorkcenter: wc || null });
+    Toast.show(Util.t('toast.line_settings_updated'), 'success');
   },
 
   _renderNav(allLines: string[], shownLines: string[]): void {
