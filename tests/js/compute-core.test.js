@@ -529,3 +529,76 @@ test('computeAlerts raises exactly one distribution-separation alert per recompu
   assert.equal(hits2.length, 1);
   assert.equal(hits2[0].id, hits1[0].id);
 });
+
+// ── computeAlerts routing-runtime kinds (ROUTING_RUNTIME_DESIGN.md §8.6) ────
+
+test('computeAlerts raises runtime-unknown for a task held with planning_reason.code === "runtime_unknown"', () => {
+  const t = {
+    id: 'held-1', ORDER: 'PO-9', MACHINE: 'L1', RUN_TIME: 0,
+    planning_status: 'needs_planning',
+    planning_reason: { code: 'runtime_unknown', step: 'workcenter_unmapped',
+      message: 'Runtime could not be resolved from routing (step: workcenter_unmapped).' },
+    start_date: null, end_date: null,
+  };
+  const res = Core.computeAlerts({
+    tasks: [t], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  const hits = res.alerts.filter(a => a.type === 'runtime-unknown');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].sev, 'err');
+  assert.equal(hits[0].taskId, 'held-1');
+  assert.equal(hits[0].line, 'L1');
+  // The resolver's own message is used verbatim, not re-worded/re-translated.
+  assert.equal(hits[0].msg, t.planning_reason.message);
+});
+
+test('computeAlerts does not raise runtime-unknown for needs_planning held for an unrelated reason', () => {
+  const t = {
+    id: 'held-2', MACHINE: 'L1', RUN_TIME: 0,
+    planning_status: 'needs_planning',
+    planning_reason: { code: 'some_other_reason', message: 'Some other reason.' },
+    start_date: null, end_date: null,
+  };
+  const res = Core.computeAlerts({
+    tasks: [t], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  assert.equal(res.alerts.filter(a => a.type === 'runtime-unknown').length, 0);
+});
+
+test('computeAlerts raises pv-lot-size for a task whose run_time_basis carries the lot-size warning flag', () => {
+  const base = Date.now() + 24 * 3600000;
+  const t = {
+    id: 'lot-1', ORDER: 'PO-8', MACHINE: 'L1', RUN_TIME: 4,
+    run_time_basis: { lot_size_warning: true, production_version: '0001' },
+    start_date: new Date(base), end_date: new Date(base + 4 * 3600000),
+  };
+  const res = Core.computeAlerts({
+    tasks: [t], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  const hits = res.alerts.filter(a => a.type === 'pv-lot-size');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].sev, 'warn');
+  assert.equal(hits[0].taskId, 'lot-1');
+  assert.match(hits[0].msg, /^Order "PO-8"/);
+});
+
+test('computeAlerts does not raise pv-lot-size when run_time_basis has no warning flag (or is absent)', () => {
+  const base = Date.now() + 24 * 3600000;
+  const t1 = {
+    id: 'lot-2', MACHINE: 'L1', RUN_TIME: 4,
+    run_time_basis: { lot_size_warning: false },
+    start_date: new Date(base), end_date: new Date(base + 4 * 3600000),
+  };
+  const t2 = {
+    id: 'lot-3', MACHINE: 'L1', RUN_TIME: 4,
+    start_date: new Date(base + 5 * 3600000), end_date: new Date(base + 9 * 3600000),
+  };
+  const res = Core.computeAlerts({
+    tasks: [t1, t2], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {},
+  });
+  assert.equal(res.alerts.filter(a => a.type === 'pv-lot-size').length, 0);
+});

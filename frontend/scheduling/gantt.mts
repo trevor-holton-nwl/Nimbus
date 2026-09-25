@@ -33,6 +33,7 @@ import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.m
 import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
+import { Runtime } from '../routing/runtime-client.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -4130,6 +4131,34 @@ export const Interaction = {
     );
   },
 
+  /** Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): a drag
+   *  to a machine with no resolvable routing operation for this task is
+   *  rejected before it ever reaches `Engine.manualSchedulePatchFor`. Shows
+   *  a plain toast — unlike `_rejectDistMachineMove` there is no follow-up
+   *  action, since fixing this is a master-data/routing question, not a
+   *  distribution-share edit. */
+  _rejectRuntimeMove(task: NimbusTask, machine: string): void {
+    Toast.show(
+      Util.t('toast.no_routing_at_workcenter', { order: Util.orderNumber(task), machine: machine || 'Unknown' }),
+      'warn', 4000
+    );
+  },
+
+  /** Whether `plant` has the routing-runtime switch on (`Store.masterData
+   *  .plants[].routing_runtime_enabled` — ROUTING_RUNTIME_DESIGN.md §3.6),
+   *  the same lookup `Runtime.load` itself gates on. `Runtime.eligible` is
+   *  unconditionally false when no rate map is cached (§8.1's `_EMPTY_MAP`
+   *  behavior: a disabled/not-yet-loaded plant "falls through the same step
+   *  sequence a real map with nothing in it would produce") — so calling it
+   *  for a plant that hasn't opted in would block every drag on that plant,
+   *  contradicting "the switch defaults off, so nothing schedules
+   *  differently yet" (§12 P1). This gate keeps the eligibility guard a
+   *  no-op outside a plant that has actually turned routing runtime on. */
+  _routingRuntimeEnabled(plant: string | null | undefined): boolean {
+    if (!plant) return false;
+    return !!Store.masterData?.plants?.find(p => p.plant === plant)?.routing_runtime_enabled;
+  },
+
   /** Sibling highlight (aggregate_to_detail.md §8): items sharing the
    *  PARENT_ORDER of any currently-selected task get `.dist-sibling` — the
    *  only visual link between siblings, since finish-to-start links are
@@ -4271,6 +4300,18 @@ export const Interaction = {
         // validate successfully before ANY mutation (Store or Timeline item)
         // happens. See the (now-deleted) regeneration branch's contract: all
         // patches computed first, one atomic Store.updateMany after.
+        //
+        // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): checked
+        // ahead of manualSchedulePatchFor, before anything else in this branch
+        // has run — an ineligible dragged item aborts the whole multi-drag with
+        // one toast, same revert mechanism as every other failure below. Gated
+        // by _routingRuntimeEnabled so a plant that hasn't turned the feature
+        // on sees no behavior change (see that helper's own comment).
+        if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, newLine)) {
+          Interaction._rejectRuntimeMove(t, newLine);
+          Timeline._scheduleRebuild();
+          continue;
+        }
         const draggedPatch = Engine.manualSchedulePatchFor(t, newLine, newStart);
         if (!draggedPatch?.start_date || !draggedPatch.end_date) {
           Toast.show(Util.t('toast.commit_failed'), 'error');
@@ -4297,6 +4338,7 @@ export const Interaction = {
         const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
         let companionFailed = false;
         let companionLockedTask: NimbusTask | null = null;
+        let companionRuntimeIneligible: { task: NimbusTask; line: string } | null = null;
         for (const sid of selIds) {
           const st = Store.tasks[sid];
           if (!st || !st.start_date) continue;
@@ -4307,6 +4349,15 @@ export const Interaction = {
           if (st.PARENT_ORDER && sNewLine !== st.MACHINE) {
             companionFailed = true;
             companionLockedTask = st;
+            break;
+          }
+          // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): same
+          // atomic-abort treatment as the machine lock above — the first
+          // ineligible companion fails the whole drag before any patch is
+          // computed for it. Gated by _routingRuntimeEnabled (see its comment).
+          if (Interaction._routingRuntimeEnabled(st.PLANT) && !Runtime.eligible(st, sNewLine)) {
+            companionFailed = true;
+            companionRuntimeIneligible = { task: st, line: sNewLine };
             break;
           }
           const sRequestedStart = new Date(st.start_date.getTime() + deltaMs);
@@ -4320,6 +4371,7 @@ export const Interaction = {
         }
         if (companionFailed) {
           if (companionLockedTask) Interaction._rejectDistMachineMove(companionLockedTask);
+          else if (companionRuntimeIneligible) Interaction._rejectRuntimeMove(companionRuntimeIneligible.task, companionRuntimeIneligible.line);
           else Toast.show(Util.t('toast.commit_failed'), 'error');
           Timeline._scheduleRebuild();
           continue;
@@ -4351,6 +4403,15 @@ export const Interaction = {
       // collapsed or re-derived (OD-B1a).
       const snap = UndoStack.snapshotTasks([id]);
 
+      // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): checked
+      // ahead of manualSchedulePatchFor, same revert mechanism (Timeline.
+      // _scheduleRebuild + continue) as every other rejected drag above.
+      // Gated by _routingRuntimeEnabled (see its comment).
+      if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, newLine)) {
+        Interaction._rejectRuntimeMove(t, newLine);
+        Timeline._scheduleRebuild();
+        continue;
+      }
       const patch = Engine.manualSchedulePatchFor(t, newLine, newStart);
       if (!patch?.start_date || !patch.end_date) {
         Toast.show(Util.t('toast.commit_failed'), 'error');

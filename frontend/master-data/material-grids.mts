@@ -22,7 +22,7 @@ import { Store } from '../platform/store.mjs';
 
 // -- Local type declarations -------------------------------------------------
 
-type GridId = 'material' | 'material-plant';
+type GridId = 'material' | 'material-plant' | 'routing-pv';
 type FilterMode = 'checklist' | 'bigset';
 
 interface MaterialGridRow {
@@ -68,6 +68,7 @@ interface ColSpec {
   cellEditorParams?: () => Record<string, unknown>;
   headerTooltip?: string;
   cellRenderer?: unknown;
+  valueFormatter?: (p: { value: unknown }) => string;
 }
 
 interface FilterSpec {
@@ -138,10 +139,27 @@ function _mkDefaultMachineRenderer() {
   };
 }
 
+// Formats the `machines` array (machines mapped to this row's operation
+// work center) as a comma-joined list — the plain default rendering already
+// comma-joins via Array.prototype.toString, but this reads better with a space.
+function _fmtMachinesList(p: { value: unknown }): string {
+  return Array.isArray(p.value) ? p.value.join(', ') : '';
+}
+
+// Formats a boolean as translated Yes/No text (routing_pv's
+// counts_toward_runtime badge column, ROUTING_RUNTIME_DESIGN.md §7.3).
+function _fmtYesNo(p: { value: unknown }): string {
+  return p.value ? Util.t('ui.yes') : Util.t('ui.no');
+}
+
 // -- Grid definitions ---------------------------------------------------------
 
 const CHECKLIST_CAP = 500;
 const BIGSET_CAP = 300;
+
+// DOM id prefix for each grid's toolbar buttons (e.g. `md-${abbr}-export`) —
+// index.html's element ids abbreviate routing-pv as "rpv", not the full id.
+const GRID_ABBR: Record<GridId, string> = { material: 'mat', 'material-plant': 'mp', 'routing-pv': 'rpv' };
 
 const SPECS: Record<GridId, GridSpec> = {
   material: {
@@ -204,6 +222,55 @@ const SPECS: Record<GridId, GridSpec> = {
     editableFields: ['prt_01', 'prt_02', 'color', 'default_machine'] as const,
     saveUrl: '/master-data/material-plants/attributes',
   },
+  'routing-pv': {
+    id: 'routing-pv',
+    paneId: 'md-master-routing-pv-pane',
+    barId: 'md-rpv-filterbar',
+    gridId: 'md-rpv-grid',
+    quickId: 'md-rpv-quick',
+    endpoint: '_routing-pv-grid',
+    // Unique per production-version × operation row (ROUTING_RUNTIME_DESIGN.md
+    // §7.3: "rowKey = material|pv|group|counter|seq|activity"). A production
+    // version with no operations yields sequence_no/activity both NULL — still
+    // unique per (material, pv, group, counter) in that case.
+    rowKey: r => `${r.material_id}|${r.production_version}|${r.routing_group}|${r.group_counter}|${r.sequence_no ?? ''}|${r.activity ?? ''}`,
+    cols: [
+      { field: 'material_id',           i18n: 'col.material_id' },
+      { field: 'production_version',    i18n: 'col.routing_pv_production_version' },
+      { field: 'valid_from',            i18n: 'col.routing_pv_valid_from' },
+      { field: 'valid_to',              i18n: 'col.routing_pv_valid_to' },
+      { field: 'task_list_type',        i18n: 'col.routing_pv_task_list_type' },
+      { field: 'routing_group',         i18n: 'col.routing_pv_group' },
+      { field: 'group_counter',         i18n: 'col.routing_pv_group_counter' },
+      { field: 'op_sap_workcenter',     i18n: 'col.routing_pv_sap_workcenter', width: 140 },
+      { field: 'sequence_no',           i18n: 'col.routing_pv_sequence_no', numeric: true, width: 100 },
+      { field: 'activity',              i18n: 'col.routing_pv_activity', width: 140 },
+      { field: 'workcenter_category',   i18n: 'col.routing_pv_workcenter_category', width: 150 },
+      { field: 'base_quantity',         i18n: 'col.routing_pv_base_quantity', numeric: true, width: 120 },
+      { field: 'std_value_machine',      i18n: 'col.routing_pv_std_value_machine', numeric: true, width: 130 },
+      { field: 'std_value_unit_machine', i18n: 'col.routing_pv_std_value_unit_machine', width: 110 },
+      { field: 'std_value_labor',        i18n: 'col.routing_pv_std_value_labor', numeric: true, width: 120 },
+      { field: 'std_value_unit_labor',   i18n: 'col.routing_pv_std_value_unit_labor', width: 110 },
+      { field: 'machines',              i18n: 'col.routing_pv_machines', width: 170, valueFormatter: _fmtMachinesList },
+      { field: 'counts_toward_runtime', i18n: 'col.routing_pv_counts_toward_runtime', width: 150, valueFormatter: _fmtYesNo },
+    ],
+    // §7.3's filter list (Material, Task List Type, Group, Group Counter,
+    // SAP Work Center) minus Plant, which is handled by the existing
+    // plant-scope picker, not a filters entry — same as material-plant's own
+    // plant scoping. SAP Work Center filters on the OPERATION's work center
+    // (op_sap_workcenter), the field that drives `machines`/`counts_toward_runtime`
+    // — not the production version header's own pv_sap_workcenter, which this
+    // grid doesn't render as a column.
+    filters: [
+      { field: 'material_id',         i18n: 'col.material_id',                   mode: 'bigset' },
+      { field: 'task_list_type',      i18n: 'col.routing_pv_task_list_type',     mode: 'checklist' },
+      { field: 'routing_group',       i18n: 'col.routing_pv_group',              mode: 'checklist' },
+      { field: 'group_counter',       i18n: 'col.routing_pv_group_counter',      mode: 'checklist' },
+      { field: 'op_sap_workcenter',   i18n: 'col.routing_pv_sap_workcenter',     mode: 'bigset' },
+    ],
+    editableFields: [],
+    // No saveUrl — read-only per design D12/§7.3.
+  },
 };
 
 const MP_EDITABLE: readonly ('prt_01' | 'prt_02' | 'color' | 'default_machine')[] =
@@ -220,6 +287,7 @@ function _mkState(): GridState {
 const _state: Record<GridId, GridState> = {
   material: _mkState(),
   'material-plant': _mkState(),
+  'routing-pv': _mkState(),
 };
 
 for (const spec of Object.values(SPECS)) {
@@ -535,6 +603,11 @@ function _buildColumnDefs(spec: GridSpec): unknown[] {
       colDef.headerTooltip = Util.t(c.headerTooltip);
     }
 
+    // Add value formatter if specified (e.g. routing-pv's machines join, Yes/No badge)
+    if (c.valueFormatter) {
+      colDef.valueFormatter = c.valueFormatter;
+    }
+
     // Add field tooltip for material_description
     if (c.field === 'material_description') {
       colDef.tooltipField = c.field;
@@ -569,9 +642,12 @@ function _mkNoRowsOverlay(spec: GridSpec) {
             icon: '⌕',
           });
         } else {
-          NIMBUS.EmptyState.render?.(this._eGui, spec.id === 'material'
-            ? { title: Util.t('empty.no_materials_title'), msg: Util.t('empty.no_materials_msg') }
-            : { title: Util.t('empty.no_material_plants_title'), msg: Util.t('empty.no_materials_plant_msg') });
+          const empty: Record<GridId, { title: string; msg: string }> = {
+            material: { title: Util.t('empty.no_materials_title'), msg: Util.t('empty.no_materials_msg') },
+            'material-plant': { title: Util.t('empty.no_material_plants_title'), msg: Util.t('empty.no_materials_plant_msg') },
+            'routing-pv': { title: Util.t('empty.no_routing_pv_title'), msg: Util.t('empty.no_routing_pv_msg') },
+          };
+          NIMBUS.EmptyState.render?.(this._eGui, empty[spec.id]);
         }
       }
     }
@@ -616,7 +692,7 @@ function _createGrid(spec: GridSpec): void {
 
   agGrid.createGrid(el, gridOptions as unknown as NimbusVendor.AgGridOptions);
 
-  document.getElementById(`md-${spec.id === 'material' ? 'mat' : 'mp'}-export`)?.addEventListener('click', () => {
+  document.getElementById(`md-${GRID_ABBR[spec.id]}-export`)?.addEventListener('click', () => {
     try { st.api?.exportDataAsCsv({ fileName: `nimbus-${spec.id}.csv` }); } catch {}
   });
 

@@ -83,6 +83,10 @@ export interface NimbusTask {
   /** Backend-derived diagnostic after a runtime ingest changes a persisted
    *  schedule aggregate; the planner regenerates it from the current parent start. */
   runtime_schedule_mismatch?: boolean;
+  /** Server-computed field describing where an order's RUN_TIME value came from (routing runtime feature). */
+  run_time_source?: string | null;
+  /** Server-computed metadata sidecar for the RUN_TIME source determination. */
+  run_time_basis?: Record<string, unknown> | null;
   /** Open SAP bag — real rows carry additional raw columns not modeled above. */
   [key: string]: unknown;
 }
@@ -256,6 +260,13 @@ export interface NimbusMasterPlant {
    *  GET /setup/{plant}), not this field — this one is display/edit-source
    *  for the relocated checkbox only. */
   setup_active?: boolean;
+  /** schema.sql: NOT NULL DEFAULT FALSE. Per-plant switch for the routing-runtime
+   *  feature (ROUTING_RUNTIME_DESIGN.md §3.6) — registered in column_metadata
+   *  (2026-09-24 migration) so `list_rows`'s column_metadata-driven base SELECT
+   *  for 'plants' already returns it, the same way it returns `setup_active`;
+   *  no backend change needed to reach here via GET /master-data/plants ->
+   *  Store.setMasterData -> Store.masterData.plants[]. */
+  routing_runtime_enabled?: boolean;
   /** Minutes; schema.sql: NOT NULL DEFAULT 43200. Per-plant override for the
    *  Timeline alert-horizon shading band (falls back to
    *  Store.userSettings.alertHorizonMinutes when absent client-side). */
@@ -457,7 +468,8 @@ export type AlertType =
   | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours'
   | 'runtime-schedule-mismatch' | 'tool-conflict'
   | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged'
-  | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown' | 'distribution-separation';
+  | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown' | 'distribution-separation'
+  | 'runtime-unknown' | 'pv-lot-size';
 
 export type AlertSev = 'err' | 'warn';
 
@@ -470,7 +482,7 @@ export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'admin';
 
 export type GanttSubTab = 'timeline' | 'orders' | 'distribution';
 
-export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant' | 'work-centers';
+export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant' | 'routing-pv' | 'work-centers';
 
 export type LaborSubTab = 'aggregate' | 'line-plan' | 'capacity' | 'exceptions' | 'inputs';
 

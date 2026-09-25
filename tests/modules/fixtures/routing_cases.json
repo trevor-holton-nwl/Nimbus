@@ -1,0 +1,405 @@
+{
+  "_comment": "Cases for tests/test_routing_resolver.py, feeding backend.routing.resolver.resolve_one directly. Each case supplies plain rows for pv_lookup/op_lookup/machine_workcenter/rules exactly as resolve_one expects them, plus an `expected` block the test asserts against. `expected.reason_code` is the failing/fallback step: for a `held` outcome it may come from resolve_one's own `reason_code` (step 1, pv_missing) or `detail_step` (steps 2-8) -- the test reads whichever is present, mirroring resolve_orders' own `result.get('detail_step') or result['reason_code']` convention.",
+  "cases": [
+    {
+      "name": "category_0001_uses_machine_value",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": 999.0, "std_value_unit_labor": "H"}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "category_0003_uses_labor_value",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0003", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 999.0, "std_value_unit_machine": "H", "std_value_labor": 1.5, "std_value_unit_labor": "H"}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 1.5, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "category_other_is_skipped_and_falls_to_zero_runtime_held",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0002", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 5.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "zero_runtime"}
+    },
+    {
+      "name": "unit_hour_equivalent_converts_at_x1",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 3.0, "std_value_unit_machine": "HR", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 3.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "unit_minutes_converts_at_div_60",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 120, "std_value_unit_machine": "MIN", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "unit_seconds_converts_at_div_3600",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 7200, "std_value_unit_machine": "SEC", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "unit_unrecognized_is_skipped_and_falls_to_zero_runtime_held",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "XYZ", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "zero_runtime"}
+    },
+    {
+      "name": "base_quantity_scaling",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 2500, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 4.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 10.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "sequence_filtering_excludes_non_standard_sequence",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "1", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "no_operation_at_workcenter"}
+    },
+    {
+      "name": "control_key_filtering_excludes_op_falls_to_sap_order_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": 3.5, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP02", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {"control_key_exclude": ["PP02"]},
+      "expected": {"status": "fallback_sap_order", "run_time": 3.5, "run_time_source": "sap_order", "reason_code": "no_operation_at_workcenter"}
+    },
+    {
+      "name": "deleted_op_filtering_falls_to_legacy_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 4.25},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": true, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_legacy", "run_time": 4.25, "run_time_source": "legacy", "reason_code": "no_operation_at_workcenter"}
+    },
+    {
+      "name": "header_status_filtering_excludes_op_not_in_include_list",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "CRTD", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {"header_status_include": ["REL"]},
+      "expected": {"status": "held", "reason_code": "no_operation_at_workcenter"}
+    },
+    {
+      "name": "pv_validity_inside_window_resolves",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": "2026-06-15", "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": "2026-01-01", "valid_to": "2026-12-31", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "pv_validity_open_ended_null_bounds_resolves",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": "2099-01-01", "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "pv_expired_before_valid_from_falls_to_sap_order_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": "2025-12-31", "machine_hours": 6.0, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": "2026-01-01", "valid_to": "2026-12-31", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_sap_order", "run_time": 6.0, "run_time_source": "sap_order", "reason_code": "pv_expired"}
+    },
+    {
+      "name": "pv_expired_after_valid_to_falls_to_legacy_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": "2027-01-01", "machine_hours": null, "run_time": 5.5},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": "2026-01-01", "valid_to": "2026-12-31", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_legacy", "run_time": 5.5, "run_time_source": "legacy", "reason_code": "pv_expired"}
+    },
+    {
+      "name": "pv_expired_no_fallback_data_holds",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": "2025-01-01", "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": "2026-01-01", "valid_to": "2026-12-31", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "pv_expired"}
+    },
+    {
+      "name": "lot_size_warning_below_range_still_resolves",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 100, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": 500, "lot_size_to": 5000}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 0.2, "run_time_source": "routing", "lot_size_warning": true}
+    },
+    {
+      "name": "lot_size_warning_above_range_still_resolves",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 6000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": 500, "lot_size_to": 5000}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 12.0, "run_time_source": "routing", "lot_size_warning": true}
+    },
+    {
+      "name": "lot_size_within_range_no_warning",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": 500, "lot_size_to": 5000}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "pv_missing_holds_regardless_of_available_fallback_data",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": null, "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": 99.0, "run_time": 88.0},
+      "production_versions": [],
+      "operations": [],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "pv_missing"}
+    },
+    {
+      "name": "pv_not_found_falls_to_sap_order_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "9999", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": 3.3, "run_time": null},
+      "production_versions": [],
+      "operations": [],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_sap_order", "run_time": 3.3, "run_time_source": "sap_order", "reason_code": "pv_not_found"}
+    },
+    {
+      "name": "pv_not_found_falls_to_legacy_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "9999", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 2.2},
+      "production_versions": [],
+      "operations": [],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_legacy", "run_time": 2.2, "run_time_source": "legacy", "reason_code": "pv_not_found"}
+    },
+    {
+      "name": "pv_not_found_no_fallback_data_holds",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "9999", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [],
+      "operations": [],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "pv_not_found"}
+    },
+    {
+      "name": "no_machine_falls_to_legacy_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": null, "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 1.1},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {},
+      "rules": {},
+      "expected": {"status": "fallback_legacy", "run_time": 1.1, "run_time_source": "legacy", "reason_code": "no_machine"}
+    },
+    {
+      "name": "workcenter_unmapped_falls_to_sap_order_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M2", "order_quantity": 1000, "basic_start_date": null, "machine_hours": 4.4, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M2": null},
+      "rules": {},
+      "expected": {"status": "fallback_sap_order", "run_time": 4.4, "run_time_source": "sap_order", "reason_code": "workcenter_unmapped"}
+    },
+    {
+      "name": "no_routing_no_fallback_data_holds",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRPX", "group_counter": "99", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "held", "reason_code": "no_routing"}
+    },
+    {
+      "name": "zero_runtime_falls_to_sap_order_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": 8.8, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0002", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 5.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_sap_order", "run_time": 8.8, "run_time_source": "sap_order", "reason_code": "zero_runtime"}
+    },
+    {
+      "name": "zero_runtime_falls_to_legacy_fallback",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 9.9},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "XYZ", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "fallback_legacy", "run_time": 9.9, "run_time_source": "legacy", "reason_code": "zero_runtime"}
+    },
+    {
+      "name": "worked_example_two_ops_different_categories_5_4",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 2000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "PACK01", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null},
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0020", "activity": "0020", "sap_workcenter": "PACK01", "workcenter_category": "0003", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": null, "std_value_unit_machine": null, "std_value_labor": 1.5, "std_value_unit_labor": "H"}
+      ],
+      "machine_workcenter": {"M1": "PACK01"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 7.0, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "worked_example_two_ops_same_category_5_4",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "PACK01", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 2.0, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null},
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0020", "activity": "0020", "sap_workcenter": "PACK01", "workcenter_category": "0001", "base_quantity": 1000, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 0.5, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "PACK01"},
+      "rules": {},
+      "expected": {"status": "resolved", "run_time": 2.5, "run_time_source": "routing", "lot_size_warning": false}
+    },
+    {
+      "name": "minute_rounding_fractional_hour_boundary",
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1, "basic_start_date": null, "machine_hours": null, "run_time": null},
+      "production_versions": [
+        {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
+      ],
+      "operations": [
+        {"plant": "P1", "material_id": "MAT1", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "sequence_no": "0010", "activity": "0010", "sap_workcenter": "WC1", "workcenter_category": "0001", "base_quantity": 1, "control_key": "PP01", "header_status": "REL", "deleted": false, "sequence_category": "0", "std_value_machine": 1.01, "std_value_unit_machine": "H", "std_value_labor": null, "std_value_unit_labor": null}
+      ],
+      "machine_workcenter": {"M1": "WC1"},
+      "rules": {},
+      "expected": {"status": "resolved", "expected_minutes": 61, "run_time_source": "routing", "lot_size_warning": false}
+    }
+  ]
+}

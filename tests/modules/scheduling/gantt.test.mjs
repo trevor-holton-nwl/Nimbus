@@ -13,6 +13,7 @@ import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -1476,6 +1477,222 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is a locked sub
     Alerts.scheduleRecompute = priorScheduleRecompute;
     Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
     Toast.show = priorToastShow;
+  }
+});
+
+// --- Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.3) -----------------------
+// These tests stub Runtime.eligible directly rather than populating a real
+// rate map — Runtime's own formula/parity coverage lives in
+// tests/modules/routing/runtime-client.test.mjs; this file only exercises
+// the gantt.mts drag-commit call sites that consume it.
+
+function _enableRoutingForPlant(plant) {
+  const priorMasterData = Store.masterData;
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: true }] }, 'test');
+  return priorMasterData;
+}
+
+test('Interaction._onDataSetUpdate rejects a single-item drag when Runtime.eligible is false: the item springs back via Timeline._scheduleRebuild and the no-routing toast fires, no Store write', () => {
+  const priorToastShow = Toast.show;
+  const priorScheduleRebuild = Timeline._scheduleRebuild;
+  const priorEligible = Runtime.eligible;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.no_routing_at_workcenter': '{{order}} has no routing operation at {{machine}} — move blocked.' } };
+  const plant = 'P-ROUTING-DRAG';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  let scheduleRebuildCalled = false;
+  Timeline._scheduleRebuild = () => { scheduleRebuildCalled = true; };
+  let eligibleCalls = [];
+  Runtime.eligible = (task, machine) => { eligibleCalls.push(machine); return false; };
+
+  const id = 'routing-drag-single';
+  const line = 'ROUTING-DRAG-L1';
+  const otherLine = 'ROUTING-DRAG-L2';
+  const start = new Date('2026-09-21T08:00:00');
+  const end = new Date('2026-09-21T10:00:00');
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'A-9201', ORDER: 'A-9201', PLANT: plant,
+    MACHINE: line, RUN_TIME: 2, start_date: start, end_date: end,
+  }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start, end, group: otherLine } : undefined) };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.deepEqual(eligibleCalls, [otherLine]);
+    assert.equal(Store.tasks[id].MACHINE, line, 'the order must stay on its original machine');
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+    assert.equal(scheduleRebuildCalled, true, 'the existing spring-back mechanism must be invoked to revert the visual position');
+    assert.equal(toastCalls.length, 1, 'the no-routing toast must fire exactly once');
+    assert.equal(toastCalls[0].type, 'warn');
+    assert.match(toastCalls[0].msg, /A-9201/);
+    assert.match(toastCalls[0].msg, new RegExp(otherLine));
+  } finally {
+    Timeline._items = undefined;
+    Timeline._scheduleRebuild = priorScheduleRebuild;
+    Toast.show = priorToastShow;
+    Runtime.eligible = priorEligible;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Interaction._onDataSetUpdate skips the routing eligibility guard on a plant that has not enabled the feature — the drag commits normally', () => {
+  const priorEligible = Runtime.eligible;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const plant = 'P-ROUTING-DISABLED-DRAG';
+  const priorMasterData = Store.masterData;
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: false }] }, 'test');
+  Alerts.scheduleRecompute = () => {};
+  let eligibleCalls = 0;
+  Runtime.eligible = () => { eligibleCalls++; return false; };
+
+  const id = 'routing-drag-disabled';
+  const line = 'ROUTING-DISABLED-L1';
+  const otherLine = 'ROUTING-DISABLED-L2';
+  const start = new Date('2026-09-21T08:00:00');
+  const end = new Date('2026-09-21T10:00:00');
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'A-9202', ORDER: 'A-9202', PLANT: plant,
+    MACHINE: line, RUN_TIME: 2, start_date: start, end_date: end,
+  }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start, end, group: otherLine } : undefined) };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(eligibleCalls, 0, 'Runtime.eligible must not be consulted for a plant with the switch off');
+    assert.equal(Store.tasks[id].MACHINE, otherLine, 'the move must be accepted normally');
+  } finally {
+    Timeline._items = undefined;
+    Runtime.eligible = priorEligible;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Interaction._onDataSetUpdate: a multi-drag whose DRAGGED item is routing-ineligible reverts the whole selection atomically', () => {
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorScheduleRebuild = Timeline._scheduleRebuild;
+  const priorToastShow = Toast.show;
+  const priorEligible = Runtime.eligible;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.no_routing_at_workcenter': '{{order}} has no routing operation at {{machine}} — move blocked.' } };
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  Timeline._scheduleRebuild = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  const plant = 'P-ROUTING-MULTI';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const line = 'ROUTING-MULTI-L1';
+  const otherLine = 'ROUTING-MULTI-L2';
+  const anchorId = 'routing-multi-anchor';
+  const companionId = 'routing-multi-companion';
+  const anchorStart = new Date('2026-09-21T08:00:00');
+  const anchorEnd = new Date('2026-09-21T10:00:00');
+  const companionStart = new Date('2026-09-21T09:00:00');
+  const companionEnd = new Date('2026-09-21T11:00:00');
+
+  Store.setTasks([
+    { id: anchorId, PRODUCTION_ORDER: 'A-9203', ORDER: 'A-9203', PLANT: plant, MACHINE: line, RUN_TIME: 2, start_date: anchorStart, end_date: anchorEnd },
+    { id: companionId, PRODUCTION_ORDER: 'B-9203', PLANT: plant, MACHINE: line, RUN_TIME: 2, start_date: companionStart, end_date: companionEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  // Only the dragged item (anchorId) is ineligible; the companion never gets asked.
+  Runtime.eligible = (task) => task.id !== anchorId;
+  let itemsUpdateCalled = false;
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
+    update: () => { itemsUpdateCalled = true; },
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+    assert.equal(Store.tasks[anchorId].MACHINE, line, 'the ineligible dragged item must stay on its machine');
+    assert.equal(Store.tasks[companionId].MACHINE, line, 'the companion must NOT be moved either — atomic revert');
+    assert.equal(itemsUpdateCalled, false, 'no companion Timeline item mirror update should happen when the batch is rejected');
+    assert.equal(toastCalls.length, 1, 'exactly one toast, naming the first (dragged) offender');
+    assert.match(toastCalls[0].msg, /A-9203/);
+  } finally {
+    Timeline._items = undefined;
+    Timeline._scheduleRebuild = priorScheduleRebuild;
+    Runtime.eligible = priorEligible;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+    Toast.show = priorToastShow;
+    Store.setMasterData(priorMasterData, 'test');
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+  }
+});
+
+test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-ineligible reverts the whole selection atomically, naming the companion', () => {
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  const priorScheduleRebuild = Timeline._scheduleRebuild;
+  const priorToastShow = Toast.show;
+  const priorEligible = Runtime.eligible;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.no_routing_at_workcenter': '{{order}} has no routing operation at {{machine}} — move blocked.' } };
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  Timeline._scheduleRebuild = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+
+  const plant = 'P-ROUTING-MULTI-2';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const line = 'ROUTING-MULTI-L3';
+  const otherLine = 'ROUTING-MULTI-L4';
+  const anchorId = 'routing-multi-anchor2';
+  const companionId = 'routing-multi-companion2';
+  const anchorStart = new Date('2026-09-21T08:00:00');
+  const anchorEnd = new Date('2026-09-21T10:00:00');
+  const companionStart = new Date('2026-09-21T09:00:00');
+  const companionEnd = new Date('2026-09-21T11:00:00');
+
+  Store.setTasks([
+    { id: anchorId, PRODUCTION_ORDER: 'A-9204', PLANT: plant, MACHINE: line, RUN_TIME: 2, start_date: anchorStart, end_date: anchorEnd },
+    { id: companionId, PRODUCTION_ORDER: 'B-9204', PLANT: plant, MACHINE: line, RUN_TIME: 2, start_date: companionStart, end_date: companionEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  // The dragged anchor is eligible; only the companion is not.
+  Runtime.eligible = (task) => task.id !== companionId;
+  let itemsUpdateCalled = false;
+  Timeline._items = {
+    get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
+    update: () => { itemsUpdateCalled = true; },
+  };
+
+  try {
+    Interaction._onDataSetUpdate({ items: [anchorId] });
+    assert.equal(Store.tasks[anchorId].MACHINE, line, 'the dragged anchor must not commit either — atomic revert');
+    assert.equal(Store.tasks[companionId].MACHINE, line, 'the ineligible companion stays on its machine');
+    assert.equal(itemsUpdateCalled, false, 'no Timeline item mirror update should happen when the batch is rejected');
+    assert.equal(toastCalls.length, 1, 'exactly one toast, naming the companion offender');
+    assert.match(toastCalls[0].msg, /B-9204/);
+  } finally {
+    Timeline._items = undefined;
+    Timeline._scheduleRebuild = priorScheduleRebuild;
+    Runtime.eligible = priorEligible;
+    Selection.clear();
+    Store.setTasks([], 'test');
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+    Toast.show = priorToastShow;
+    Store.setMasterData(priorMasterData, 'test');
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
   }
 });
 

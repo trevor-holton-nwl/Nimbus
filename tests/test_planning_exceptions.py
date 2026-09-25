@@ -34,7 +34,8 @@ def test_atomic_db_validation_writes_nothing(monkeypatch, rejection):
         def execute(self, sql, params=None):
             assert not sql.lstrip().startswith(('UPDATE', 'DELETE', 'INSERT'))
         def fetchall(self):
-            return [(i, datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1') for i in ['a','b']]
+            return [(i, datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
+                      None, None, None, None, None) for i in ['a','b']]
     class Connection:
         def cursor(self): return Cursor()
         def rollback(self): pass
@@ -64,7 +65,8 @@ def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkey
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def execute(self, sql, params=None): statements.append((sql, params))
-        def fetchall(self): return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 2, 'p', 'L1')]
+        def fetchall(self): return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 2, 'p', 'L1', 'scheduled', None, False, None,
+                                      None, None, None, None, None)]
         def fetchone(self): return ('q', 43)
     class Connection:
         def cursor(self): return Cursor()

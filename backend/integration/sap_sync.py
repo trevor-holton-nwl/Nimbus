@@ -702,12 +702,15 @@ def sync_object(object_key: str, *, user_email: str | None = None,
             # top-of-file import here would put this domain's data layer on
             # the same footing as db.py w.r.t. that reverse dependency; kept
             # local for consistency even though sap_sync -> distribution ->
-            # db is not itself a cycle).
+            # db is not itself a cycle). Same reasoning for
+            # backend/routing/resolver.py's resolve_fn seam.
             import backend.distribution.data as distribution_data
+            import backend.routing.resolver as routing_resolver
             apply_res = db.upsert_orders(mapped, source="sap", batch_id=None,
                                          filename=None, raw_row_count=rows_read,
                                          plan_fn=distribution_data.plan,
-                                         apply_fn=distribution_data.apply)
+                                         apply_fn=distribution_data.apply,
+                                         resolve_fn=routing_resolver.resolve_orders)
             result["rows_inserted"] = int(apply_res.get("inserted", 0))
             result["rows_updated"] = int(apply_res.get("updated", 0))
             result["rows_failed"] = int(apply_res.get("failed", 0))

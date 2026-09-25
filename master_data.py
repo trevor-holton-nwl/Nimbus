@@ -30,6 +30,7 @@ ALLOWED_TABLES = frozenset({
     'subnetworks', 'plants', 'machine',
     'materials', 'material_plants', 'bom_items',
     'roles', 'role_plants', 'sap_workcenter',
+    'production_version', 'routing_operation', 'routing_rules',
 })
 
 # Tables whose `plant` column is business/scheduling data, subject to
@@ -40,7 +41,16 @@ ALLOWED_TABLES = frozenset({
 # admin action. Deliberately excludes `role_plants` itself — its `plant`
 # column means "which plant this role can see", a different concept from
 # "which plant this record belongs to".
-PLANT_SCOPED_TABLES = frozenset({'plants', 'machine', 'material_plants', 'bom_items', 'sap_workcenter'})
+PLANT_SCOPED_TABLES = frozenset({
+    'plants', 'machine', 'material_plants', 'bom_items', 'sap_workcenter',
+    'production_version', 'routing_operation', 'routing_rules',
+})
+
+# Tables the "delete filtered rows" mass-delete endpoint (backend/routing,
+# built separately) is allowed to operate on. Defined here — alongside
+# ALLOWED_TABLES/PLANT_SCOPED_TABLES — so the allowlist lives with the rest
+# of this module's table registration rather than in the route layer.
+MASS_DELETABLE_TABLES = frozenset({'production_version', 'routing_operation', 'routing_rules'})
 
 ALLOWED_COLUMN_TYPES = frozenset({'TEXT', 'INTEGER', 'NUMERIC', 'BOOLEAN', 'DATE', 'TIMESTAMP'})
 
@@ -80,6 +90,21 @@ _KEY_COLUMNS = {
     'roles':              frozenset({'role'}),
     'role_plants':        frozenset({'role', 'plant'}),
     'sap_workcenter':     frozenset({'plant', 'sap_workcenter'}),
+    'production_version': frozenset({'plant', 'material_id', 'production_version'}),
+    'routing_operation':  frozenset({'plant', 'material_id', 'task_list_type', 'routing_group',
+                                      'group_counter', 'sequence_no', 'activity'}),
+    'routing_rules':      frozenset({'plant', 'rule_kind', 'code'}),
+}
+
+# Explicit search-column overrides for list_rows' ILIKE search filter, keyed
+# by table. list_rows' default heuristic (last key column + `description`,
+# when present) picks an arbitrary/unhelpful column for these three tables,
+# so each gets a fixed, meaningful set instead. Any table NOT listed here
+# keeps falling through to that same default heuristic, unchanged.
+_SEARCH_COLUMNS: dict[str, tuple[str, ...]] = {
+    'production_version': ('material_id', 'production_version'),
+    'routing_operation': ('material_id', 'routing_group', 'activity'),
+    'routing_rules': ('code',),
 }
 
 # The ONLY material_plants columns POST /master-data/material-plants/attributes
@@ -150,6 +175,21 @@ _MATERIAL_PLANT_JOINED = ('material_type', 'material_description')
 
 # Hard ceiling on one attributes save — bounds statement count and audit payload.
 MAX_ATTRIBUTE_UPDATES = 5000
+
+
+class MassDeleteStaleCount(Exception):
+    """Raised by `delete_filtered` when the server's fresh re-count of rows
+    matching (plant [+ search]) doesn't match the client-supplied
+    `expected_count` — the same "stale client state" shape
+    `backend/distribution/data.py`'s `DistributionStaleVersion` uses for its
+    own 409, applied here to a filtered mass-delete instead of a single
+    row's `base_version` (ROUTING_RUNTIME_DESIGN.md §6.3). Carries the real
+    count so the caller can show it without a second round trip."""
+    def __init__(self, actual_count: int):
+        self.actual_count = actual_count
+        super().__init__(
+            f"expected_count mismatch: {actual_count} row(s) currently match this filter"
+        )
 
 
 class PlantNotAllowed(PermissionError):
@@ -286,13 +326,19 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         # Optional search filter (ILIKE over key column and description, when present).
         if search and col_names:
             search_cols = []
-            # The last key column (typically the non-plant identifier)
-            key_cols = list(_KEY_COLUMNS[table])
-            if key_cols and key_cols[-1] in col_names:
-                search_cols.append(sql.Identifier(key_cols[-1]))
-            # Also search description if it exists
-            if "description" in col_names:
-                search_cols.append(sql.Identifier("description"))
+            override_cols = _SEARCH_COLUMNS.get(table)
+            if override_cols is not None:
+                # Explicit override for this table — used as-is, no fallback
+                # heuristic and no automatic `description` inclusion.
+                search_cols.extend(sql.Identifier(c) for c in override_cols if c in col_names)
+            else:
+                # The last key column (typically the non-plant identifier)
+                key_cols = list(_KEY_COLUMNS[table])
+                if key_cols and key_cols[-1] in col_names:
+                    search_cols.append(sql.Identifier(key_cols[-1]))
+                # Also search description if it exists
+                if "description" in col_names:
+                    search_cols.append(sql.Identifier("description"))
             if search_cols:
                 search_clause = sql.SQL(" OR ").join(
                     sql.SQL("{col} ILIKE %s").format(col=col) for col in search_cols
@@ -562,6 +608,141 @@ def material_plant_grid(plant: str, limit: int | None = None, offset: int | None
             total = len(rows)
 
     return {"columns": columns + joined, "rows": rows,
+            "meta": {"total": total, "plant": plant}}
+
+
+# Fixed column set for the read-only "Routing & Production Versions" married
+# view (ROUTING_RUNTIME_DESIGN.md §7.3) -- a hand-picked join across two
+# tables, not a single column_metadata-driven table, so (unlike list_rows/
+# material_grid/material_plant_grid) this isn't Add-Column-wizard-extensible;
+# a column added to production_version/routing_operation later needs a line
+# added here too.
+_ROUTING_PV_GRID_COLUMNS = (
+    {"column_name": "plant", "display_label": "Plant", "source_table": "production_version"},
+    {"column_name": "material_id", "display_label": "Material", "source_table": "production_version"},
+    {"column_name": "production_version", "display_label": "Production Version", "source_table": "production_version"},
+    {"column_name": "valid_from", "display_label": "Valid From", "source_table": "production_version"},
+    {"column_name": "valid_to", "display_label": "Valid To", "source_table": "production_version"},
+    {"column_name": "pv_sap_workcenter", "display_label": "PV SAP Work Center", "source_table": "production_version"},
+    {"column_name": "production_version_text", "display_label": "Description", "source_table": "production_version"},
+    {"column_name": "task_list_type", "display_label": "Task List Type", "source_table": "production_version"},
+    {"column_name": "routing_group", "display_label": "Group", "source_table": "production_version"},
+    {"column_name": "group_counter", "display_label": "Group Counter", "source_table": "production_version"},
+    {"column_name": "lot_size_from", "display_label": "Lot Size From", "source_table": "production_version"},
+    {"column_name": "lot_size_to", "display_label": "Lot Size To", "source_table": "production_version"},
+    {"column_name": "sequence_no", "display_label": "Sequence No", "source_table": "routing_operation"},
+    {"column_name": "activity", "display_label": "Operation", "source_table": "routing_operation"},
+    {"column_name": "op_sap_workcenter", "display_label": "Op SAP Work Center", "source_table": "routing_operation"},
+    {"column_name": "workcenter_category", "display_label": "Work Center Category", "source_table": "routing_operation"},
+    {"column_name": "base_quantity", "display_label": "Base Quantity", "source_table": "routing_operation"},
+    {"column_name": "control_key", "display_label": "Control Key", "source_table": "routing_operation"},
+    {"column_name": "operation_text", "display_label": "Operation Description", "source_table": "routing_operation"},
+    {"column_name": "operation_unit", "display_label": "Operation Unit", "source_table": "routing_operation"},
+    {"column_name": "std_value_machine", "display_label": "Std Value (Machine)", "source_table": "routing_operation"},
+    {"column_name": "std_value_unit_machine", "display_label": "Std Value Unit (Machine)", "source_table": "routing_operation"},
+    {"column_name": "std_value_labor", "display_label": "Std Value (Labor)", "source_table": "routing_operation"},
+    {"column_name": "std_value_unit_labor", "display_label": "Std Value Unit (Labor)", "source_table": "routing_operation"},
+    {"column_name": "sequence_category", "display_label": "Sequence Category", "source_table": "routing_operation"},
+    {"column_name": "deleted", "display_label": "Deleted", "source_table": "routing_operation"},
+    {"column_name": "header_status", "display_label": "Header Status", "source_table": "routing_operation"},
+    {"column_name": "machines", "display_label": "Machines", "source_table": "machine"},
+    {"column_name": "counts_toward_runtime", "display_label": "Counts Toward Runtime", "source_table": "routing_operation"},
+)
+
+
+def routing_pv_grid(plant: str, search: str | None = None, limit: int | None = None,
+                    offset: int | None = None, allowed_plants: list[str] | None = None) -> dict:
+    """Read-only married view backing GET /master-data/_routing-pv-grid
+    (ROUTING_RUNTIME_DESIGN.md §7.3): `production_version` LEFT JOIN
+    `routing_operation` on the shared routing key (plant, material_id,
+    task_list_type, routing_group, group_counter), so a production version
+    with no operations still yields one row with every routing_operation
+    column NULL -- a visible gap, not a dropped row.
+
+    Each row also carries `machines` -- the plant's machines whose
+    `machine.sap_workcenter` matches THIS row's operation work center (NULL/
+    empty when the row has no operation) -- and `counts_toward_runtime`, a
+    SIMPLIFIED stand-in for resolver.py's real §5.2 step 6/7 filtering
+    (sequence/control-key/header-status rules aren't applied here yet).
+
+    Scoped like `material_plant_grid` -- `_assert_plant_allowed` first,
+    `plant` always required (both tables are in PLANT_SCOPED_TABLES, but
+    there is no generic per-table scoping path for a hand-built join).
+    """
+    _assert_plant_allowed(plant, allowed_plants)
+
+    where_parts = [sql.SQL("pv.plant = %s")]
+    params: list = [plant]
+    if search:
+        where_parts.append(sql.SQL(
+            "(pv.material_id ILIKE %s OR pv.production_version ILIKE %s"
+            " OR ro.routing_group ILIKE %s OR ro.activity ILIKE %s"
+            " OR pv.sap_workcenter ILIKE %s OR ro.sap_workcenter ILIKE %s)"
+        ))
+        term = f"%{search}%"
+        params.extend([term] * 6)
+    where_sql = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
+
+    base_from = sql.SQL(
+        "FROM production_version pv"
+        " LEFT JOIN routing_operation ro"
+        "   ON ro.plant = pv.plant AND ro.material_id = pv.material_id"
+        "  AND ro.task_list_type = pv.task_list_type AND ro.routing_group = pv.routing_group"
+        "  AND ro.group_counter = pv.group_counter"
+    )
+
+    # counts_toward_runtime -- TODO: align with backend/routing/resolver.py's
+    # real filtering once it exists (this is a simplified stand-in, see the
+    # function docstring).
+    select_cols = sql.SQL(
+        "SELECT pv.plant, pv.material_id, pv.production_version, pv.valid_from, pv.valid_to,"
+        "       pv.sap_workcenter AS pv_sap_workcenter, pv.production_version_text,"
+        "       pv.task_list_type, pv.routing_group, pv.group_counter,"
+        "       pv.lot_size_from, pv.lot_size_to,"
+        "       ro.sequence_no, ro.activity, ro.sap_workcenter AS op_sap_workcenter,"
+        "       ro.workcenter_category, ro.base_quantity, ro.control_key, ro.operation_text,"
+        "       ro.operation_unit, ro.std_value_machine, ro.std_value_unit_machine,"
+        "       ro.std_value_labor, ro.std_value_unit_labor, ro.sequence_category,"
+        "       ro.deleted, ro.header_status,"
+        "       (SELECT array_agg(m.machine ORDER BY m.machine) FROM machine m"
+        "         WHERE m.plant = pv.plant AND m.sap_workcenter = ro.sap_workcenter) AS machines,"
+        "       (COALESCE(ro.workcenter_category IN ('0001', '0003'), FALSE)"
+        "        AND NOT COALESCE(ro.deleted, FALSE)"
+        "        AND COALESCE(ro.sequence_category, '') = '0') AS counts_toward_runtime "
+    )
+    filter_params = list(params)  # snapshot before LIMIT/OFFSET are appended
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        query = select_cols + base_from + where_sql + sql.SQL(
+            " ORDER BY pv.material_id, pv.production_version, ro.sequence_no NULLS FIRST, ro.activity NULLS FIRST"
+        )
+        if limit is not None:
+            query += sql.SQL(" LIMIT %s")
+            params.append(int(limit))
+        if offset:
+            query += sql.SQL(" OFFSET %s")
+            params.append(int(offset))
+        cur.execute(query, params)
+        col_names = [
+            "plant", "material_id", "production_version", "valid_from", "valid_to",
+            "pv_sap_workcenter", "production_version_text", "task_list_type", "routing_group",
+            "group_counter", "lot_size_from", "lot_size_to", "sequence_no", "activity",
+            "op_sap_workcenter", "workcenter_category", "base_quantity", "control_key",
+            "operation_text", "operation_unit", "std_value_machine", "std_value_unit_machine",
+            "std_value_labor", "std_value_unit_labor", "sequence_category", "deleted",
+            "header_status", "machines", "counts_toward_runtime",
+        ]
+        rows = [dict(zip(col_names, r, strict=True)) for r in cur.fetchall()]
+        for row in rows:
+            row["machines"] = row["machines"] or []
+
+        if limit is not None or offset:
+            cur.execute(sql.SQL("SELECT COUNT(*) ") + base_from + where_sql, filter_params)
+            total = int(cur.fetchone()[0])
+        else:
+            total = len(rows)
+
+    return {"columns": list(_ROUTING_PV_GRID_COLUMNS), "rows": rows,
             "meta": {"total": total, "plant": plant}}
 
 
@@ -1018,6 +1199,75 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         conn.commit()
 
     return {"inserted": inserted, "updated": updated, "deleted": deleted}
+
+
+def delete_filtered(table: str, plant: str, search: str | None, expected_count: int,
+                    user_email: str | None = None) -> dict:
+    """Filtered mass delete for `MASS_DELETABLE_TABLES`
+    (ROUTING_RUNTIME_DESIGN.md §6.3): `DELETE FROM <table> WHERE plant = %s
+    [AND <search predicate>]`, using the SAME search-predicate construction
+    `list_rows` uses for its own ILIKE search filter (explicit
+    `_SEARCH_COLUMNS` override when the table has one, else the fallback
+    heuristic), so "how many rows currently match" can never disagree
+    between the grid's own filtered count and this endpoint's.
+
+    Re-counts server-side FIRST and refuses (raises `MassDeleteStaleCount`,
+    routes.py maps this to a 409) if it doesn't equal `expected_count` --
+    the grid's `meta.total` from the load that preceded this call -- so a
+    stale/changed-since-loaded filter can never delete more or fewer rows
+    than the admin was shown. Not `_assert_plant_allowed`-scoped: this is an
+    admin-only, `require_api_key`-gated route (routes.py), matching every
+    other admin write in this module (e.g. `bulk_apply`'s own table-wide
+    write, `add_column`) -- admin is the one intentionally plant-
+    unrestricted role (`backend/security/auth.py`)."""
+    _assert_table(table)
+    if table not in MASS_DELETABLE_TABLES:
+        raise ValueError(f"{table!r} is not mass-deletable")
+    if not plant or not plant.strip():
+        raise ValueError("plant is required")
+
+    with _pool.connection() as conn, conn.cursor() as cur:
+        col_names = [c["column_name"] for c in _column_meta(cur, table)]
+
+        where_parts = [sql.SQL("{col} = %s").format(col=sql.Identifier("plant"))]
+        params: list = [plant]
+        if search:
+            search_cols = []
+            override_cols = _SEARCH_COLUMNS.get(table)
+            if override_cols is not None:
+                search_cols.extend(sql.Identifier(c) for c in override_cols if c in col_names)
+            else:
+                key_cols = list(_KEY_COLUMNS[table])
+                if key_cols and key_cols[-1] in col_names:
+                    search_cols.append(sql.Identifier(key_cols[-1]))
+                if "description" in col_names:
+                    search_cols.append(sql.Identifier("description"))
+            if search_cols:
+                search_clause = sql.SQL(" OR ").join(
+                    sql.SQL("{col} ILIKE %s").format(col=col) for col in search_cols
+                )
+                where_parts.append(sql.SQL("({})").format(search_clause))
+                term = f"%{search}%"
+                params.extend([term] * len(search_cols))
+        where_sql = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
+
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM {tbl}").format(tbl=sql.Identifier(table)) + where_sql, params)
+        actual_count = int(cur.fetchone()[0])
+        if actual_count != expected_count:
+            raise MassDeleteStaleCount(actual_count)
+
+        cur.execute(sql.SQL("DELETE FROM {tbl}").format(tbl=sql.Identifier(table)) + where_sql, params)
+        deleted = cur.rowcount
+
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES (%s, %s, %s, %s)",
+            (table, "delete_filtered",
+             Jsonb({"plant": plant, "search": search, "deleted": deleted}), user_email),
+        )
+        conn.commit()
+
+    return {"deleted": deleted}
 
 
 # ---------------------------------------------------------------------------

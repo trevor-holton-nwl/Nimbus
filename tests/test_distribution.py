@@ -7,6 +7,7 @@ NIMBUS_TEST_DB=1; auto-skipped otherwise, see tests/conftest.py).
 
 import uuid
 import datetime as dt
+import unittest.mock as mock
 from decimal import Decimal
 
 import pytest
@@ -541,6 +542,7 @@ class TestBucketClassification:
 # uses), with ZZTEST_*-prefixed identifiers, and clean up in teardown.
 
 import backend.distribution.data as distribution_data  # noqa: E402
+import backend.routing.resolver as routing_resolver  # noqa: E402
 
 
 def _snapshot_header(db_, plant, order, material):
@@ -1696,3 +1698,216 @@ class TestResolveRepairRecoversIncompleteHeader(_ReweightFixtureBase):
             distribution_data._hydrate_headers(cur, self.PLANT, rows2)
         this_header2 = next(h for h in rows2 if h["production_order"] == self.ORD)
         assert "incomplete" not in this_header2["statuses"]
+
+
+# =====================================================================
+# ROUTING_RUNTIME_DESIGN.md §4 item 4 -- _CHILD_UPSERT_SQL's run_time guard,
+# the runtime_schedule_mismatch no-auto-flag fix, and the three resolver call
+# sites (reweight_shares/reset_one_header/_resolve_repair). Same real-DB
+# caveat as every other @pytest.mark.pg class in this file (NOT run in this
+# sandboxed environment; a human with a local Postgres instance must confirm
+# pass/fail). Reuses _ReweightFixtureBase's 60/40, two-machine seed shape.
+# =====================================================================
+
+@pytest.mark.pg
+class TestChildUpsertRunTimeSourceGuard(_ReweightFixtureBase):
+    """`_CHILD_UPSERT_SQL`'s ON CONFLICT run_time CASE must never overwrite a
+    child whose run_time_source is 'routing' or 'manual' -- those values were
+    set by a mechanism more authoritative than a plain SAP-facts refresh.
+    Every other source (legacy/distributed/sap_order/NULL) still gets
+    refreshed to the newly-apportioned value, exactly as before this fix."""
+    WC = "ZZTEST_WC_RTSRC"
+    L1, L2 = "ZZTEST_L1_RTSRC", "ZZTEST_L2_RTSRC"
+    ORD, MAT = "ZZTEST_ORD_RTSRC", "ZZTEST_MAT_RTSRC"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        # 60/40 split, run_time=10.0h -> L1=6.0h, L2=4.0h to start.
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _set_run_time_source(self, pg, machine, source, sentinel_run_time):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET run_time_source = %s, run_time = %s"
+                " WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                (source, sentinel_run_time, self.PLANT, self.ORD, machine),
+            )
+            conn.commit()
+
+    def _reingest_run_time(self, pg, run_time):
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": run_time,
+        }
+        _, plan_structure, _ = distribution_data.plan([row], batch_id)
+        with pg._pool.connection() as conn:
+            distribution_data.apply(plan_structure, batch_id, conn)
+
+    def _l1_run_time(self, pg):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        l1 = next(c for c in children if c["machine"] == self.L1)
+        return float(l1["run_time"])
+
+    @pytest.mark.parametrize("source", ["routing", "manual"])
+    def test_guarded_source_keeps_its_existing_run_time(self, pg, source):
+        # 20.0h at 60% would otherwise apportion L1 to 12.0h -- a real change
+        # from the 999.0h sentinel, so the WHERE clause fires and the CASE is
+        # actually exercised, not skipped as a no-op.
+        self._set_run_time_source(pg, self.L1, source, 999.0)
+        self._reingest_run_time(pg, 20.0)
+        assert self._l1_run_time(pg) == pytest.approx(999.0)
+
+    @pytest.mark.parametrize("source", ["legacy", "distributed", "sap_order", None])
+    def test_unguarded_source_gets_refreshed_to_the_new_apportioned_value(self, pg, source):
+        if source is not None:
+            self._set_run_time_source(pg, self.L1, source, 999.0)
+        self._reingest_run_time(pg, 20.0)  # 60% of 20.0h = 12.0h
+        assert self._l1_run_time(pg) == pytest.approx(12.0)
+
+
+@pytest.mark.pg
+class TestChildUpsertNeverAutoFlagsRuntimeMismatch(_ReweightFixtureBase):
+    """`_CHILD_UPSERT_SQL`'s ON CONFLICT SET clause for
+    runtime_schedule_mismatch is `COALESCE(orders.runtime_schedule_mismatch,
+    FALSE)` -- the same fix pattern as db.py's own `_UPSERT_SQL`. A
+    distribution write only ever PRESERVES whatever the flag already was; it
+    never computes or sets it from the refreshed facts."""
+    WC = "ZZTEST_WC_MISMATCH"
+    L1, L2 = "ZZTEST_L1_MISMATCH", "ZZTEST_L2_MISMATCH"
+    ORD, MAT = "ZZTEST_ORD_MISMATCH", "ZZTEST_MAT_MISMATCH"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _reingest_run_time(self, pg, run_time, qty=150.0):
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": qty, "run_time": run_time,
+        }
+        _, plan_structure, _ = distribution_data.plan([row], batch_id)
+        with pg._pool.connection() as conn:
+            distribution_data.apply(plan_structure, batch_id, conn)
+
+    def _mismatch_flag(self, pg, machine):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT runtime_schedule_mismatch FROM orders"
+                " WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                (self.PLANT, self.ORD, machine),
+            )
+            return cur.fetchone()[0]
+
+    def test_true_flag_survives_a_facts_refresh_that_touches_the_row(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET runtime_schedule_mismatch = TRUE"
+                " WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                (self.PLANT, self.ORD, self.L1),
+            )
+            conn.commit()
+
+        # Changes both qty and run_time so the row is genuinely touched (the
+        # WHERE clause's IS DISTINCT FROM checks must fire).
+        self._reingest_run_time(pg, 30.0)
+
+        assert self._mismatch_flag(pg, self.L1) is True
+
+    def test_flag_is_never_auto_set_true_by_a_write_that_did_not_set_it(self, pg):
+        # Both children start FALSE/NULL (fresh insert never sets the column).
+        self._reingest_run_time(pg, 45.0)
+        assert self._mismatch_flag(pg, self.L1) is not True
+        assert self._mismatch_flag(pg, self.L2) is not True
+
+
+@pytest.mark.pg
+class TestResolverCallSitesAfterRealDistributionWrites(_ReweightFixtureBase):
+    """ROUTING_RUNTIME_DESIGN.md §4 item 4: `reweight_shares`,
+    `reset_one_header`, and `_resolve_repair` each call
+    `backend.routing.resolver.resolve_orders(plant)` (via a deferred,
+    in-function import) exactly once, AFTER their own real (non-dry-run)
+    write commits -- and NEVER during a dry_run call. Patches the module
+    ATTRIBUTE directly (`mock.patch.object(routing_resolver, "resolve_orders")`)
+    rather than where it's imported from: Python's sys.modules import caching
+    means the deferred `import backend.routing.resolver as routing_resolver`
+    inside each function still resolves to this same module object, so the
+    patched attribute is what gets called regardless of the import site."""
+    WC = "ZZTEST_WC_RESOLVER"
+    L1, L2 = "ZZTEST_L1_RESOLVER", "ZZTEST_L2_RESOLVER"
+    ORD, MAT = "ZZTEST_ORD_RESOLVER", "ZZTEST_MAT_RESOLVER"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_reweight_shares_calls_resolver_once_after_real_write_never_on_dry_run(self, pg):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        new_shares = [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}]
+
+        with mock.patch.object(routing_resolver, "resolve_orders") as fake_resolve:
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, new_shares, base_version=header["xmin"],
+                dry_run=True, actor="tester",
+            )
+            fake_resolve.assert_not_called()
+
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, new_shares, base_version=header["xmin"],
+                dry_run=False, actor="tester",
+            )
+            fake_resolve.assert_called_once_with(self.PLANT)
+
+    def test_reset_one_header_calls_resolver_once_after_real_write_never_on_dry_run(self, pg):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+
+        with mock.patch.object(routing_resolver, "resolve_orders") as fake_resolve:
+            distribution_data.reset_one_header(
+                self.PLANT, self.ORD, self.MAT, base_version=header["xmin"],
+                dry_run=True, actor="tester",
+            )
+            fake_resolve.assert_not_called()
+
+            distribution_data.reset_one_header(
+                self.PLANT, self.ORD, self.MAT, base_version=header["xmin"],
+                dry_run=False, actor="tester",
+            )
+            fake_resolve.assert_called_once_with(self.PLANT)
+
+    def test_resolve_repair_calls_resolver_once_after_real_write_never_on_dry_run(self, pg):
+        # Force the header into `incomplete` so `_resolve_repair` has
+        # something to repair (same crash-window simulation as
+        # TestResolveRepairRecoversIncompleteHeader above).
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        missing_child = next(c for c in children if c["machine"] == self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (missing_child["id"],))
+            conn.commit()
+
+        with mock.patch.object(routing_resolver, "resolve_orders") as fake_resolve:
+            dry_result = distribution_data.resolve(self.PLANT, "repair", dry_run=True)
+            assert dry_result["repaired"] >= 1, "the header must actually be incomplete/repairable here"
+            fake_resolve.assert_not_called()
+
+            real_result = distribution_data.resolve(self.PLANT, "repair", dry_run=False)
+            assert real_result["repaired"] >= 1
+            fake_resolve.assert_called_once_with(self.PLANT)

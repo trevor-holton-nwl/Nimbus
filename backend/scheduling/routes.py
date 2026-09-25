@@ -223,6 +223,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
                 "planning_status": row.get("PLANNING_STATUS") or "scheduled",
                 "planning_reason": row.get("PLANNING_REASON"),
+                "run_time_source": row.get("run_time_source"),
+                "run_time_basis": row.get("run_time_basis"),
             })
 
             if row.get("PLANNING_STATUS") == "needs_planning":
@@ -295,14 +297,18 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     membership via a distinct rejection reason.
 
     Returns { applied, persisted, failed, invalid, not_found, invalid_ids,
-              not_found_ids, stale, versions }. invalid_ids/not_found_ids carry
-    the actual rejected ids (from db.update_task_dates_bulk) so the client can
-    stop retrying terminal rejections while keeping transiently-lost rows dirty.
+              not_found_ids, stale, versions, rejection_reasons }. invalid_ids/
+    not_found_ids carry the actual rejected ids (from db.update_task_dates_bulk)
+    so the client can stop retrying terminal rejections while keeping
+    transiently-lost rows dirty. `rejection_reasons` is db.update_task_dates_bulk's
+    own sparse {id: reason} map (§8.5 routing-eligibility rejections only) —
+    forwarded as-is; this function's OWN pre-DB validation failures above (missing
+    id, unparseable date, malformed segment) never populate it.
     """
     norm: list[dict] = []
     invalid = 0
     invalid_ids = []
-    attribute_fields = ("PRT_01", "PRT_02", "PRODUCTION_VERSION")
+    attribute_fields = ("PRT_01", "PRT_02", "PRODUCTION_VERSION", "MACHINE")
     for it in items:
         if not it.id:
             invalid += 1
@@ -378,12 +384,12 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     if atomic_optimizer and invalid:
         return {"applied": 0, "persisted": 0, "failed": len(items), "invalid": invalid,
                 "not_found": 0, "invalid_ids": invalid_ids, "not_found_ids": [],
-                "stale": [], "versions": {}, "conflicts": []}
+                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
 
     if not norm:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": invalid,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {}, "conflicts": []}
+                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
 
     try:
         res = db.update_task_dates_bulk(
@@ -403,7 +409,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 "invalid_ids": [], "not_found_ids": [],
                 "stale": [], "versions": {}, "conflicts": [],
                 "status": "error", "error_code": error_code,
-                "cause": "Bulk task update persist failed (transaction rolled back)"}
+                "cause": "Bulk task update persist failed (transaction rolled back)",
+                "rejection_reasons": {}}
     res["invalid"] = res.get("invalid", 0) + invalid
     res["invalid_ids"] = res.get("invalid_ids", []) + invalid_ids
     return res
@@ -468,7 +475,7 @@ def tasks_update(payload: TasksUpdatePayload,
                          PRODUCTION_VERSION?, base_version?, force? }],
                blocks?, calendars? }
     Response: { status, updated, persisted, failed, invalid, not_found,
-                invalid_ids, not_found_ids, stale, versions }
+                invalid_ids, not_found_ids, stale, versions, rejection_reasons }
     """
     res = _apply_task_date_updates(payload.tasks, allowed_plants=allowed_plants,
                                    atomic_optimizer=payload.atomic_optimizer,
@@ -500,7 +507,12 @@ def tasks_update(payload: TasksUpdatePayload,
            "invalid_ids": res.get("invalid_ids", []),
            "not_found_ids": res.get("not_found_ids", []),
            "stale": stale, "versions": res.get("versions", {}),
-           "conflicts": conflicts}
+           "conflicts": conflicts,
+           # §8.5: sparse {id: reason} map, populated only for the routing-
+           # eligibility rejection inside db.update_task_dates_bulk — every
+           # other invalid_ids cause has no entry here. Purely additive; does
+           # not change invalid_ids' own shape.
+           "rejection_reasons": res.get("rejection_reasons", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")
@@ -515,7 +527,7 @@ def bulk_update(tasks: list[TaskDateUpdate],
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
     Payload: [{ id, start_date?, end_date?, base_version? }]
     Response: { status, updated, persisted, failed, invalid, not_found,
-                invalid_ids, not_found_ids, stale, versions }
+                invalid_ids, not_found_ids, stale, versions, rejection_reasons }
 
     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
     external caller may not bypass the base_version check. A stale row is
@@ -547,7 +559,12 @@ def bulk_update(tasks: list[TaskDateUpdate],
            "invalid_ids": res.get("invalid_ids", []),
            "not_found_ids": res.get("not_found_ids", []),
            "stale": stale, "versions": res.get("versions", {}),
-           "conflicts": conflicts}
+           "conflicts": conflicts,
+           # §8.5: sparse {id: reason} map, populated only for the routing-
+           # eligibility rejection inside db.update_task_dates_bulk — every
+           # other invalid_ids cause has no entry here. Purely additive; does
+           # not change invalid_ids' own shape.
+           "rejection_reasons": res.get("rejection_reasons", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")

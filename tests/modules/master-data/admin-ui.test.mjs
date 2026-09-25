@@ -316,3 +316,25 @@ test('Work Centers tab source has no creation surface and no Save/Discard stagin
   assert.doesNotMatch(source, /wc-new-(toggle|form|create|cancel)|_createNew/);
   assert.doesNotMatch(source, /wc-save-btn|wc-discard-btn|_wcDirtyFields|_pendingWarnings|_renderWcWarnings/);
 });
+
+// ROUTING_TABLES includes 'machine' to ensure that edits to machine.sap_workcenter
+// trigger a Runtime.load refresh, since a machine's work-center mapping directly
+// affects which routing operation applies (ROUTING_RUNTIME_DESIGN.md D6).
+test('MasterData ROUTING_TABLES includes machine for work-center mapping invalidation', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(source, /const ROUTING_TABLES:.*=\s*new Set\(\[.*['"]machine['"]/s);
+});
+
+// Bulk-save (paste/cell-edit) to routing_rules should refresh Runtime.load for
+// EVERY distinct plant present in the saved rows, not just Store.selectedPlant,
+// because routing_rules is NOT in SCOPED_TABLES (its grid shows multiple plants'
+// rows simultaneously). The fix extracts distinct plants from upserts and calls
+// Runtime.load(plant) for each (mirroring db.py's resolve_fn loop at line 2734).
+test('MasterData bulk-save for routing_rules calls Runtime.load for each distinct plant in saved rows', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  // Verify the special case handler for routing_rules exists and extracts distinct plants
+  assert.match(source, /if \(table === ['"]routing_rules['"]\)/);
+  assert.match(source, /new Set<string>\(\)/);
+  assert.match(source, /affectedPlants\.add\(plant\)/);
+  assert.match(source, /affectedPlants\.forEach\(\(plant\) => Runtime\.load\(plant\)\)/);
+});

@@ -101,6 +101,14 @@ def _str_id(val) -> str:
     return s
 
 
+def _zero_pad(value, width: int):
+    """Left-pad a textual code field with '0' to `width` chars so a spreadsheet's
+    numeric coercion (which drops leading zeros) never creates a mismatched key
+    (ROUTING_RUNTIME_DESIGN.md §4 item 3, e.g. production_version '1' -> '0001').
+    Leaves a falsy value (None/'') alone."""
+    return value.zfill(width) if value else value
+
+
 def make_id(production_order, material_number) -> str:
     """MD5 of 'PRODUCTION_ORDER|MATERIAL_NUMBER' — deterministic across reloads."""
     key = f"{_str_id(production_order)}|{_str_id(material_number)}"
@@ -506,6 +514,13 @@ _ORDERS_SELECT = f"""
         basic_finish_date     AS "ORIGINAL_END_DATE",
         (seg.segment_count >= 2 OR scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
         run_time              AS "RUN_TIME",
+        -- Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13): server-computed
+        -- provenance for run_time. Deliberately snake_case, unmatched to this
+        -- SELECT's SAP-style uppercase alias convention, because the DTO wire
+        -- key is exactly run_time_source/run_time_basis (no aliasing) per the
+        -- design's own DTO contract.
+        o.run_time_source     AS run_time_source,
+        o.run_time_basis      AS run_time_basis,
         color                 AS "COLOR",
         prt_01                AS "PRT_01",
         prt_02                AS "PRT_02",
@@ -798,7 +813,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                o.xmin::text::bigint AS row_version,
                seg.schedule_segments,
                {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
-               o.plant, o.planning_status, o.planning_reason
+               o.plant, o.planning_status, o.planning_reason,
+               o.run_time_source, o.run_time_basis
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -817,6 +833,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "plant": r[6],
             "planning_status": r[7],
             "planning_reason": r[8],
+            "run_time_source": r[9],
+            "run_time_basis": r[10],
         }
         for r in rows
     ]
@@ -999,6 +1017,26 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     *effective* current dates (so updating only start still checks against the
     existing end). Unknown ids are reported, not written.
 
+    A MACHINE edit is rejected as invalid whenever the row's PARENT_ORDER
+    (parent_production_order) is set — a distribution child order may only move
+    via its distribution share, never a direct machine change. This mirrors the
+    frontend's client-side guard but is enforced here too since that guard is
+    not authoritative.
+
+    Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.5): a MACHINE or
+    PRODUCTION_VERSION edit on an order whose run_time is routing-sourced (or
+    still unknown) on a routing-runtime-enabled plant is re-checked against
+    `backend.routing.resolver.check_eligibility` for the candidate combination
+    before being accepted — an ineligible candidate is rejected the same way
+    as any other single-aspect edit conflict in this function (folded into
+    `invalid_ids`, no separate reason field). After a batch with at least one
+    accepted MACHINE/PRODUCTION_VERSION edit on such a plant commits,
+    `backend.routing.resolver.resolve_orders(plant)` is called for each
+    affected plant (its own separate, self-committing connection, never this
+    function's own transaction) so the order's run_time reflects the new
+    combination immediately rather than waiting for the next plant-wide
+    recompute.
+
     `allowed_plants` (None for an unrestricted/admin caller) scopes writes to
     the caller's assigned plants: a row whose plant falls outside the set is
     treated identically to a nonexistent id (folded into not_found_ids) so a
@@ -1030,9 +1068,14 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     `conflicts == []` is not proof of no overlap.
 
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
-    not_found_ids, stale, versions}. invalid_ids / not_found_ids carry the actual ids
-    (not just counts) so the client can stop retrying terminally-rejected rows while
-    still keeping genuinely-unpersisted rows dirty for a retry.
+    not_found_ids, stale, versions, rejection_reasons}. invalid_ids / not_found_ids
+    carry the actual ids (not just counts) so the client can stop retrying
+    terminally-rejected rows while still keeping genuinely-unpersisted rows dirty
+    for a retry. `rejection_reasons` is a purely additive, sparse {id: reason}
+    map -- populated ONLY for the routing-eligibility rejection below
+    (ROUTING_RUNTIME_DESIGN.md §8.5); every other rejection in this function's
+    validation loop keeps its existing plain-id-only invalid_ids/not_found_ids
+    behavior unchanged, so an id absent from this map carries no reason.
     """
     applied = persisted = failed = 0
     stale: list[str] = []
@@ -1040,10 +1083,20 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     not_found_ids: list[str] = []
     versions: dict[str, int] = {}
     conflicts: list[dict] = []
+    rejection_reasons: dict[str, str] = {}
     if not items:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {}, "conflicts": []}
+                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
+
+    # Deferred import (never module-level -- avoids a backend.routing <->
+    # db.py import cycle, matching this codebase's established convention;
+    # see backend/distribution/data.py, backend/integration/sap_sync.py).
+    # Used both for the per-item eligibility gate below (a read inside THIS
+    # function's own open, uncommitted transaction) and, after commit, to
+    # re-resolve any plant whose accepted MACHINE/PRODUCTION_VERSION edit
+    # needs a fresh run_time (ROUTING_RUNTIME_DESIGN.md §8.5).
+    import backend.routing.resolver as routing_resolver
 
     ids = [it["id"] for it in items if it.get("id")]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -1056,9 +1109,19 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                    o.xmin::text::bigint AS row_version,
                    seg.segment_count,
                    o.plant,
-                   o.machine
+                   o.machine,
+                   o.planning_status,
+                   o.planning_reason->>'code' AS reason_code,
+                   p.routing_runtime_enabled,
+                   o.parent_production_order,
+                   o.run_time_source,
+                   o.material_number,
+                   o.order_quantity,
+                   o.basic_start_date,
+                   o.production_version
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+            LEFT JOIN plants p ON p.plant = o.plant
             WHERE o.id = ANY(%s)
             ORDER BY o.id
             FOR UPDATE OF o
@@ -1069,7 +1132,20 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             r[0]: {
                 "start": r[1], "end": r[2], "run_time": r[3],
                 "row_version": r[4], "segment_count": int(r[5] or 0), "plant": r[6],
-                "machine": r[7],
+                "machine": r[7], "planning_status": r[8], "reason_code": r[9],
+                # Missing plants row (shouldn't happen) reads as disabled, matching
+                # today's unconditional behavior rather than gating on nothing.
+                "routing_runtime_enabled": bool(r[10]),
+                "parent_order": r[11],
+                # ROUTING_RUNTIME_DESIGN.md §8.5's eligibility gate reads these
+                # five straight from the row -- material/quantity/start date are
+                # never edited by this endpoint, so the CANDIDATE check always
+                # uses the row's own current values for them.
+                "run_time_source": r[12],
+                "material_number": r[13],
+                "order_quantity": r[14],
+                "basic_start_date": r[15],
+                "production_version": r[16],
             }
             for r in cur.fetchall()
         }
@@ -1088,7 +1164,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             start, end = it.get("start"), it.get("end")
             attrs = {
                 field: it[field]
-                for field in ("PRT_01", "PRT_02", "PRODUCTION_VERSION")
+                for field in ("PRT_01", "PRT_02", "PRODUCTION_VERSION", "MACHINE")
                 if field in it
             }
             has_segments = "schedule_segments" in it
@@ -1109,6 +1185,81 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if allowed_plants is not None and current["plant"] not in allowed_plants:
                 not_found_ids.append(tid)   # out-of-scope looks identical to nonexistent
                 continue
+            # Sub-order machine lock (decision C, aggregate_to_detail.md §8): a
+            # distribution child order (PARENT_ORDER set) may only move via its
+            # distribution share, never a direct MACHINE edit. The client already
+            # guards this (orders.mts's Table._rejectDistMachineMove and
+            # gantt.mts's Interaction._rejectDistMachineMove) but that guard isn't
+            # authoritative — a client bug, a different client, or a direct API
+            # call could bypass it, so it's enforced here too as a whole-item
+            # rejection, same as any other single-aspect edit conflict in this loop.
+            if "MACHINE" in attrs and current["parent_order"] is not None:
+                invalid_ids.append(tid)
+                continue
+            # Routing runtime (ROUTING_RUNTIME_DESIGN.md §5.5/§8.2/§8.5): a client
+            # RUN_TIME is only honored on a disabled plant (today's unconditional
+            # behavior, preserved exactly) or to release an order currently held
+            # for a routing reason. Otherwise it's rejected as a whole-item
+            # validation failure, same as any other single-aspect edit conflict
+            # below (e.g. the queued-order date check just past this).
+            manual_runtime_release = False
+            if has_runtime and current["routing_runtime_enabled"]:
+                if not (current["planning_status"] == "needs_planning"
+                        and current["reason_code"] == "runtime_unknown"):
+                    invalid_ids.append(tid)
+                    continue
+                manual_runtime_release = True
+
+            # Routing runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.5): a
+            # MACHINE or PRODUCTION_VERSION edit on an order whose run_time is
+            # routing-derived (or not yet known at all) must re-check §5.2
+            # steps 1-8 for the CANDIDATE combination before the edit is
+            # accepted -- otherwise the order could land on a machine/version
+            # its routing can't resolve, silently keeping a stale run_time
+            # until the next plant-wide recompute. Only gated when the
+            # plant's switch is on AND the row's run_time is either
+            # routing-sourced or still unknown; a manual/distributed/
+            # sap_order/legacy value is the planner's/ingest's own call and
+            # is never second-guessed here. Material, quantity, and start
+            # date are never edited by this endpoint, so they always come
+            # from the row's own current values; machine/production version
+            # come from the candidate edit when present, else the row's
+            # current value. Read within THIS SAME open transaction/
+            # connection -- never a second connection mid-write.
+            if (("MACHINE" in attrs or "PRODUCTION_VERSION" in attrs)
+                    and current["routing_runtime_enabled"]
+                    and (current["run_time_source"] == "routing" or current["run_time"] is None)):
+                candidate_machine = attrs.get("MACHINE", current["machine"])
+                candidate_pv = attrs.get("PRODUCTION_VERSION", current["production_version"])
+                eligibility = routing_resolver.check_eligibility(
+                    current["plant"], current["material_number"], candidate_pv,
+                    candidate_machine, current["order_quantity"], current["basic_start_date"],
+                    conn=conn,
+                )
+                if not eligibility["ok"]:
+                    # Whole-item rejection, same as every other single-aspect
+                    # rejection in this loop (manual_runtime_release above,
+                    # the sub-order MACHINE lock above that, the queued/
+                    # inverted-range checks below) -- invalid_ids itself
+                    # stays a plain id list, unchanged, for all of them.
+                    # This ONE rejection additionally records its specific
+                    # failure step into the sparse, purely-additive
+                    # `rejection_reasons` map (§8.5) -- the client-side
+                    # `Runtime.eligible` guard already blocks most of these
+                    # before they ever reach here, so when one DOES land
+                    # here (stale/disabled client cache, or a save that
+                    # bypassed the guarded UI paths), the caller can tell
+                    # WHY this particular id was rejected instead of lumping
+                    # it in with every unrelated invalid_ids cause above/
+                    # below. `eligibility["step"]` reuses resolve_one's own
+                    # failure-step vocabulary (pv_missing/pv_not_found/
+                    # pv_expired/workcenter_unmapped/no_machine/no_routing/
+                    # no_operation_at_workcenter/zero_runtime) rather than
+                    # collapsing every cause to one hardcoded string.
+                    rejection_reasons[tid] = eligibility.get("step") or "no_operation_at_workcenter"
+                    invalid_ids.append(tid)
+                    continue
+
             cur_start, cur_end, cur_ver = current["start"], current["end"], current["row_version"]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
@@ -1183,21 +1334,35 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 invalid_ids.append(tid)
                 continue
 
+            row_planning_status = planning_status if has_planning else (
+                "scheduled" if start is not None or end is not None or has_segments else None)
+            row_planning_reason = planning_reason if queued else None
+            if manual_runtime_release:
+                # Releasing a routing hold with a keyed-in value re-enters the
+                # order at 'scheduled' with the reason cleared, in the same
+                # write as the run_time itself (§5.5/§8.2).
+                row_planning_status = "scheduled"
+                row_planning_reason = None
+
             update_rows.append({
                 "id": tid,
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,
                 "queued": queued,
-                "planning_status": planning_status if has_planning else (
-                    "scheduled" if start is not None or end is not None or has_segments else None),
-                "planning_reason": planning_reason if queued else None,
+                "planning_status": row_planning_status,
+                "planning_reason": row_planning_reason,
                 "run_time": requested_runtime,
                 "has_runtime": has_runtime,
+                "manual_runtime_release": manual_runtime_release,
                 "segments": segment_rows,
                 "clear_runtime_mismatch": has_segments or start is not None or end is not None,
-                "machine": current["machine"],
-                "moved": has_segments or start is not None or end is not None or has_planning,
+                # The conflict scan below (_scan_conflicts_for_rows) filters by
+                # this value to find overlaps on the machine the order actually
+                # ends up on — use the NEW machine when this edit moves it,
+                # not the stale pre-write one.
+                "machine": attrs.get("MACHINE", current["machine"]),
+                "moved": has_segments or start is not None or end is not None or has_planning or "MACHINE" in attrs,
             })
 
         if atomic_optimizer and (invalid_ids or not_found_ids or stale):
@@ -1205,7 +1370,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             return {"applied": 0, "persisted": 0, "failed": len(items),
                     "invalid": len(invalid_ids), "not_found": len(not_found_ids),
                     "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
-                    "stale": stale, "versions": {}, "conflicts": []}
+                    "stale": stale, "versions": {}, "conflicts": [],
+                    "rejection_reasons": rejection_reasons}
 
         if update_rows:
             try:
@@ -1226,12 +1392,15 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     if row["has_runtime"]:
                         sets.append("run_time = %s")
                         params.append(row["run_time"])
+                    if row["manual_runtime_release"]:
+                        sets.append("run_time_source = 'manual'")
                     if row["clear_runtime_mismatch"]:
                         sets.append("runtime_schedule_mismatch = FALSE")
                     attr_columns = {
                         "PRT_01": "prt_01",
                         "PRT_02": "prt_02",
                         "PRODUCTION_VERSION": "production_version",
+                        "MACHINE": "machine",
                     }
                     for field, column in attr_columns.items():
                         if field in row["attrs"]:
@@ -1296,17 +1465,43 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                             "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
                             "stale": stale, "versions": {}, "conflicts": conflicts,
                             "status": "error", "error_code": "schedule.conflicts",
-                            "cause": f"{len(conflicts)} schedule conflict(s) on the written machines (strict mode)"}
+                            "cause": f"{len(conflicts)} schedule conflict(s) on the written machines (strict mode)",
+                            "rejection_reasons": rejection_reasons}
                 conn.commit()
                 persisted = applied = len(versions)
             except Exception:
                 conn.rollback()
                 failed = len(update_rows)
                 raise
+
+    # Routing runtime re-resolve (ROUTING_RUNTIME_DESIGN.md §8.5): any
+    # accepted MACHINE/PRODUCTION_VERSION edit on an enabled-plant order
+    # needs a fresh run_time now that the new combination has committed.
+    # Runs AFTER this function's own transaction has committed and its
+    # connection has been returned to the pool -- resolve_orders opens its
+    # OWN separate connection and commits it itself, matching every other
+    # call site of this function (backend/distribution/data.py,
+    # backend/integration/sap_sync.py). Never called with this function's
+    # own still-open conn -- that's only for the read-only eligibility
+    # check above, inside the write transaction.
+    if update_rows:
+        routing_plants: set[str] = set()
+        for row in update_rows:
+            if row["id"] not in versions:
+                continue  # not actually persisted (e.g. an aborted batch)
+            if "MACHINE" not in row["attrs"] and "PRODUCTION_VERSION" not in row["attrs"]:
+                continue
+            current = eff[row["id"]]
+            if current["routing_runtime_enabled"]:
+                routing_plants.add(current["plant"])
+        for plant in sorted(routing_plants):
+            routing_resolver.resolve_orders(plant)
+
     return {"applied": applied, "persisted": persisted, "failed": failed,
             "invalid": len(invalid_ids), "not_found": len(not_found_ids),
             "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
-            "stale": stale, "versions": versions, "conflicts": conflicts}
+            "stale": stale, "versions": versions, "conflicts": conflicts,
+            "rejection_reasons": rejection_reasons}
 
 
 def correct_due_date_baselines(corrections: list[dict], allowed_plants: list[str] | None = None) -> dict:
@@ -2037,15 +2232,12 @@ _UPSERT_SQL = """
         END,
         basic_start_date      = EXCLUDED.basic_start_date,
         basic_finish_date     = EXCLUDED.basic_finish_date,
-        -- Source timing never overwrites an established NIMBUS schedule. If
-        -- its runtime changed, retain that aggregate and require the client to
-        -- regenerate it from the authoritative scheduled start.
-        runtime_schedule_mismatch = CASE
-            WHEN EXCLUDED.run_time IS DISTINCT FROM orders.run_time
-                 AND orders.scheduled_start IS NOT NULL
-            THEN TRUE
-            ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE)
-        END,
+        -- Ingest itself no longer flags this on every re-upload regardless of
+        -- whether the value moved (ROUTING_RUNTIME_DESIGN.md §4 item 6) — plain
+        -- carry-forward. Only the resolver (backend/routing/resolver.py) is
+        -- allowed to set this flag now, and only when the number it writes
+        -- actually differs from what's stored.
+        runtime_schedule_mismatch = COALESCE(orders.runtime_schedule_mismatch, FALSE),
         run_time              = EXCLUDED.run_time,
         color                 = EXCLUDED.color,
         -- prt_01/prt_02/production_version: written from the uploaded row like color
@@ -2070,7 +2262,7 @@ _UPSERT_SQL = """
         no_of_fte                       = EXCLUDED.no_of_fte,
         upload_batch_id       = EXCLUDED.upload_batch_id,
         updated_at            = NOW()
-    RETURNING (xmax = 0) AS inserted
+    RETURNING id, (xmax = 0) AS inserted
 """
 # Deliberately NOT in the UPDATE SET: scheduled_start, scheduled_end.
 # That's the whole point — user drag/drop edits survive a re-upload.
@@ -2132,7 +2324,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
                    SET color              = mp.color,
                        prt_01             = mp.prt_01,
                        prt_02             = mp.prt_02,
-                       production_version = mp.default_production_version,
+                       production_version = COALESCE(NULLIF(o.production_version, ''), mp.default_production_version),
                        updated_at         = NOW()
                   FROM material_plants mp
                  WHERE mp.plant = o.plant
@@ -2161,7 +2353,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
                    SET color              = mp.color,
                        prt_01             = mp.prt_01,
                        prt_02             = mp.prt_02,
-                       production_version = mp.default_production_version,
+                       production_version = COALESCE(NULLIF(o.production_version, ''), mp.default_production_version),
                        updated_at         = NOW()
                   FROM material_plants mp
                  WHERE mp.plant = o.plant
@@ -2242,7 +2434,8 @@ def missing_master_data_for_plant(plant: str) -> dict:
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None,
-                  plan_fn: Callable | None = None, apply_fn: Callable | None = None) -> dict:
+                  plan_fn: Callable | None = None, apply_fn: Callable | None = None,
+                  resolve_fn: Callable | None = None) -> dict:
     """Shared orders upsert for both the Excel and SAP ingest paths.
 
     `rows` is a list of dicts keyed by orders columns (production_order,
@@ -2275,10 +2468,19 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         rolls back around that call). Its `warnings_entry` is folded into the
         `warnings` list feeding the `upload_audit` row exactly like the
         `missing_master_data` entry below.
+      - `resolve_fn` is the optional routing-runtime ingest seam
+        (ROUTING_RUNTIME_DESIGN.md §4/§5) — also defaults to None. When given,
+        it is called as `resolve_fn(plant, conn=conn)` — matching
+        `backend.routing.resolver.resolve_orders`'s `(plant, *, conn=None)`
+        signature reusing the connection already open at that point — once per
+        distinct plant among this batch's rows, AFTER `apply_fn` has run and
+        BEFORE the `upload_audit` INSERT. Each call's report dict is folded
+        into `warnings` as `{"level": "info", "category": "routing_resolve",
+        "plant": ..., **resolve_result}`.
     db.py never imports `backend.*` at module scope (every router imports
     `db`, not the reverse — a top-level import here would be circular since
-    `backend/distribution/data.py` imports `db`); callers pass the two
-    functions in instead.
+    both `backend/distribution/data.py` and `backend/routing/resolver.py`
+    import `db`); callers pass these functions in instead.
 
     Returns: {status:"ok", batch_id, inserted, updated, failed, warnings, lines}.
     """
@@ -2352,6 +2554,37 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             "msg": f"{n_suffixed} duplicate IDs suffixed (ORDER|MATERIAL not unique)",
         })
 
+    # ---------- Routing runtime (ROUTING_RUNTIME_DESIGN.md §4 item 1) ----------
+    # For any plant with plants.routing_runtime_enabled = TRUE, the order
+    # file's run-time column must never land in orders.run_time — only the
+    # resolver (backend/routing/resolver.py, wired in below via `resolve_fn`)
+    # is allowed to set it for those plants. Resolved once per batch, over
+    # this batch's own distinct plants only (never a whole-table scan). A
+    # disabled plant's rows are completely byte-for-byte unaffected.
+    batch_plants = sorted({row["plant"] for row in rows if row.get("plant")})
+    routing_enabled_plants: set[str] = set()
+    if batch_plants:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT plant FROM plants WHERE plant = ANY(%s) AND routing_runtime_enabled = TRUE",
+                (batch_plants,),
+            )
+            routing_enabled_plants = {r[0] for r in cur.fetchall()}
+    if routing_enabled_plants:
+        for row in rows:
+            if row.get("plant") in routing_enabled_plants:
+                row["run_time"] = None
+
+    # ---------- Zero-pad production_version (ROUTING_RUNTIME_DESIGN.md §4 item 3) ----------
+    # Applies only to plants with routing_runtime_enabled = TRUE — a plain data-
+    # hygiene fix against spreadsheet numeric coercion dropping leading zeros.
+    # Disabled plants have ingest unchanged.
+    for row in rows:
+        if row.get("plant") in routing_enabled_plants:
+            pv = row.get("production_version")
+            if pv:
+                row["production_version"] = _zero_pad(str(pv).strip().upper(), 4)
+
     # ---------- Build row tuples in _UPSERT_SQL column order ----------
     tuples = []
     for row in rows:
@@ -2369,6 +2602,11 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     _UPSERT_CHUNK = 500
     inserted = 0
     updated = 0
+    # Ids that were genuinely fresh inserts this batch (RETURNING's xmax=0
+    # signal) — used below (ROUTING_RUNTIME_DESIGN.md §4 item 5) to hold new
+    # orders on an enabled plant instead of letting them look normal while a
+    # run_time_source-'routing' resolve is still pending.
+    inserted_ids: list[str] = []
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             for i in range(0, len(tuples), _UPSERT_CHUNK):
@@ -2377,8 +2615,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 while True:
                     rec = cur.fetchone()
                     if rec is not None:
-                        if rec[0]:
+                        row_id, was_inserted = rec[0], rec[1]
+                        if was_inserted:
                             inserted += 1
+                            inserted_ids.append(row_id)
                         else:
                             updated += 1
                     if not cur.nextset():
@@ -2468,6 +2708,26 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                             f"shared across multiple plants: {machines_amb}. Provide an "
                             f"explicit plant column on upload to resolve."),
                 })
+            # ---------- Routing runtime: hold new orders (ROUTING_RUNTIME_DESIGN.md §4 item 5) ----------
+            # A new order on an enabled plant arrives already held instead of
+            # looking normal while a routing resolve is still pending — the
+            # resolve_fn call below (once wired in) overwrites this placeholder
+            # with the real outcome. Scoped to genuinely fresh inserts this
+            # batch AND plants enabled at the top of this function; never
+            # touches a pre-existing order that was merely updated. Runs after
+            # `plant` is fully resolved (backfills above) so the plant filter
+            # is accurate.
+            if inserted_ids and routing_enabled_plants:
+                cur.execute(
+                    """
+                    UPDATE orders
+                       SET planning_status = 'needs_planning',
+                           planning_reason = '{"code":"runtime_pending","message":"Runtime pending resolution."}'::jsonb
+                     WHERE id = ANY(%s) AND plant = ANY(%s)
+                    """,
+                    (inserted_ids, sorted(routing_enabled_plants)),
+                )
+                conn.commit()
             # ---------- Order Distribution: apply() seam (aggregate_to_detail.md §5) ----------
             # Runs after the last upsert chunk AND every backfill above has
             # committed, so its counters land in `warnings` before the
@@ -2484,6 +2744,23 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # one dict, `level`/`msg` are the two fields the cockpit's
                 # warning list actually reads.
                 warnings.append(apply_res["warnings_entry"])
+            # ---------- Routing runtime: resolve() seam (ROUTING_RUNTIME_DESIGN.md §4 item 4) ----------
+            # Runs after Order Distribution's plan/apply step (so each sub-order
+            # resolves at its own machine/quantity) and after the new-order hold
+            # UPDATE above (so the resolver overwrites that placeholder with the
+            # real outcome), once per distinct plant in this batch, reusing the
+            # already-open `conn` (resolve_fn commits nothing on it itself —
+            # matches `resolve_orders`'s conn-reuse contract). A no-op for any
+            # plant resolve_fn/the caller never wires in.
+            if resolve_fn is not None:
+                for resolve_plant in sorted({r.get("plant") for r in rows if r.get("plant")}):
+                    resolve_result = resolve_fn(resolve_plant, conn=conn)
+                    warnings.append({
+                        "level": "info",
+                        "category": "routing_resolve",
+                        "plant": resolve_plant,
+                        **resolve_result,
+                    })
             cur.execute(
                 """
                 INSERT INTO upload_audit
@@ -2712,6 +2989,14 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),
             "run_time": float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
             "color": _v(r, "COLOR"),
+            # ROUTING_RUNTIME_DESIGN.md §4 item 2: read PRODUCTION_VERSION into
+            # orders.production_version (upper/strip); zero-padded centrally in
+            # upsert_orders (§4 item 3) so both this path and the SAP path share
+            # one normalization point.
+            "production_version": (
+                str(_v(r, "PRODUCTION_VERSION")).strip().upper()
+                if _v(r, "PRODUCTION_VERSION") is not None else None
+            ),
             "order_quantity": float(r[qcol]) if (qcol in df.columns and pd.notna(r.get(qcol))) else None,
             "form_size": _v(r, "FORM_SIZE"),
             "firming_indicator": _v(r, "FIRMING_INDICATOR"),
@@ -2726,12 +3011,15 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "no_of_fte": _num(r, "NO_OF_FTE_(MEINH)"),
         })
 
-    # Local, deferred import — backend/distribution/data.py imports `db`
-    # already, so a top-level `import backend.distribution.data` here would be
-    # a circular import (and would violate the "db.py/master_data.py are never
-    # imported by, only importers of, backend/<domain>" architecture in
-    # backend/CLAUDE.md even where Python would tolerate the cycle at runtime).
+    # Local, deferred import — backend/distribution/data.py and
+    # backend/routing/resolver.py both import `db` already, so a top-level
+    # `import backend.distribution.data`/`import backend.routing.resolver`
+    # here would be a circular import (and would violate the "db.py/
+    # master_data.py are never imported by, only importers of,
+    # backend/<domain>" architecture in backend/CLAUDE.md even where Python
+    # would tolerate the cycle at runtime).
     import backend.distribution.data as distribution_data
+    import backend.routing.resolver as routing_resolver
 
     result = upsert_orders(
         rows,
@@ -2742,6 +3030,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
         warnings=warnings,
         plan_fn=distribution_data.plan,
         apply_fn=distribution_data.apply,
+        resolve_fn=routing_resolver.resolve_orders,
     )
     if result.get("status") != "ok":
         # upsert_orders already wrote a failed-audit trail and re-raised on a

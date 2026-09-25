@@ -11,6 +11,7 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
+import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -622,6 +623,271 @@ test('Table._orderColumnRenderer appends the letter·count pill for a lettered s
   } finally {
     Store.setTasks([], 'test');
     Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
+
+// --- Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§8.3) -----------------
+// These tests stub Runtime.eligible/Runtime.resolve directly rather than
+// populating a real rate map — Runtime's own formula/parity coverage lives
+// in tests/modules/routing/runtime-client.test.mjs; this file only exercises
+// the orders.mts call sites that consume it.
+
+function _enableRoutingForPlant(plant) {
+  const priorMasterData = Store.masterData;
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: true }] }, 'test');
+  return priorMasterData;
+}
+
+test('Table._onCellChanged rejects a MACHINE edit when Runtime.eligible is false: reverts the cell and toasts, no schedule regenerated', () => {
+  const priorTableApi = Table._api;
+  const priorToastShow = Toast.show;
+  const priorEligible = Runtime.eligible;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.no_routing_at_workcenter': '{{order}} has no routing operation at {{machine}} — move blocked.' } };
+  const plant = 'P-ROUTING-GRID';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  let eligibleCalls = [];
+  Runtime.eligible = (task, machine) => { eligibleCalls.push(machine); return false; };
+  let refreshed = false;
+  Table._api = { applyTransaction: () => {}, refreshCells: () => { refreshed = true; } };
+
+  Store.setTasks([{
+    id: 'routing-grid-cell-edit', PRODUCTION_ORDER: 'A-9101', ORDER: 'A-9101', PLANT: plant,
+    MACHINE: 'L1', start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T10:00:00'),
+  }], 'test');
+
+  try {
+    const row = Store.tasks['routing-grid-cell-edit'];
+    row.MACHINE = 'L2';
+    Table._onCellChanged({
+      colDef: { field: 'MACHINE' },
+      data: row,
+      newValue: 'L2',
+      oldValue: 'L1',
+      node: { refreshCells: () => {} },
+    });
+    assert.deepEqual(eligibleCalls, ['L2']);
+    assert.equal(Store.tasks['routing-grid-cell-edit'].MACHINE, 'L1', 'MACHINE must be reverted to its pre-edit value');
+    assert.equal(toastCalls.length, 1, 'the routing-ineligible toast must fire exactly once');
+    assert.equal(toastCalls[0].type, 'warn');
+    assert.match(toastCalls[0].msg, /A-9101/);
+    assert.match(toastCalls[0].msg, /L2/);
+    assert.equal(refreshed, true, 'the grid cell must be refreshed to show the reverted value');
+  } finally {
+    Table._api = priorTableApi;
+    Toast.show = priorToastShow;
+    Runtime.eligible = priorEligible;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._onCellChanged skips the routing eligibility guard on a plant that has not enabled the feature', () => {
+  const priorTableApi = Table._api;
+  const priorEligible = Runtime.eligible;
+  const plant = 'P-ROUTING-DISABLED';
+  const priorMasterData = Store.masterData;
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: false }] }, 'test');
+  let eligibleCalls = 0;
+  Runtime.eligible = () => { eligibleCalls++; return false; };
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  Alerts.scheduleRecompute = () => {};
+
+  Store.setTasks([{
+    id: 'routing-disabled-cell-edit', PRODUCTION_ORDER: 'A-9102', ORDER: 'A-9102', PLANT: plant,
+    MACHINE: 'L1', RUN_TIME: 1, start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T10:00:00'),
+  }], 'test');
+
+  try {
+    const row = Store.tasks['routing-disabled-cell-edit'];
+    row.MACHINE = 'L2';
+    Table._onCellChanged({
+      colDef: { field: 'MACHINE' },
+      data: row,
+      newValue: 'L2',
+      oldValue: 'L1',
+      node: { refreshCells: () => {} },
+    });
+    assert.equal(eligibleCalls, 0, 'Runtime.eligible must not be consulted for a plant with the switch off');
+    assert.equal(Store.tasks['routing-disabled-cell-edit'].MACHINE, 'L2', 'the move must be accepted normally');
+  } finally {
+    Table._api = priorTableApi;
+    Runtime.eligible = priorEligible;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Inspector._onFieldChange rejects a MACHINE edit when Runtime.eligible is false: re-renders instead of committing, no schedule regenerated', () => {
+  const priorToastShow = Toast.show;
+  const priorEligible = Runtime.eligible;
+  const priorCurrentId = Inspector._currentId;
+  const priorGetElementById = globalThis.document.getElementById;
+  const plant = 'P-ROUTING-INSPECTOR';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  Runtime.eligible = () => false;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+
+  Store.setTasks([{
+    id: 'routing-inspector-machine', PRODUCTION_ORDER: 'A-9103', ORDER: 'A-9103', PLANT: plant,
+    MACHINE: 'L1', RUN_TIME: 1, start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+  }], 'test');
+
+  try {
+    Inspector._currentId = 'routing-inspector-machine';
+    Inspector._onFieldChange('MACHINE', 'L2');
+    assert.equal(Store.tasks['routing-inspector-machine'].MACHINE, 'L1', 'MACHINE must not be committed');
+    assert.equal(toastCalls.length, 1, 'the routing-ineligible toast must fire exactly once');
+    assert.equal(toastCalls[0].type, 'warn');
+    assert.ok(body.innerHTML.length > 0, 'Inspector._render must have been called to restore the select');
+  } finally {
+    Toast.show = priorToastShow;
+    Runtime.eligible = priorEligible;
+    Inspector._currentId = priorCurrentId;
+    globalThis.document.getElementById = priorGetElementById;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._onCellChanged: an eligible PRODUCTION_VERSION edit updates RUN_TIME/run_time_source/run_time_basis locally and re-places the order', () => {
+  const priorTableApi = Table._api;
+  const priorResolve = Runtime.resolve;
+  const priorManualSchedule = Engine.manualSchedulePatchFor;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const plant = 'P-ROUTING-PV-OK';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  Alerts.scheduleRecompute = () => {};
+  const newStart = new Date('2026-09-21T08:00:00');
+  const newEnd = new Date('2026-09-21T13:54:00');
+  Runtime.resolve = (task) => (task.PRODUCTION_VERSION === '0002'
+    ? { ok: true, hours: 5.9, basis: { workcenter: 'MOLD01', routingKey: '1|50001234|01', source: 'routing' } }
+    : { ok: false, step: 'pv_not_found' });
+  Engine.manualSchedulePatchFor = () => ({ start_date: newStart, end_date: newEnd, scheduleSegments: [] });
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+
+  Store.setTasks([{
+    id: 'routing-pv-ok', PRODUCTION_ORDER: 'A-9104', ORDER: 'A-9104', PLANT: plant, MACHINE: 'L1',
+    PRODUCTION_VERSION: '0001', RUN_TIME: 1, run_time_source: 'sap_order',
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+  }], 'test');
+
+  try {
+    Table._onCellChanged({
+      colDef: { field: 'PRODUCTION_VERSION' },
+      data: Store.tasks['routing-pv-ok'],
+      newValue: '0002',
+      node: { refreshCells: () => {} },
+    });
+    const task = Store.tasks['routing-pv-ok'];
+    assert.equal(task.PRODUCTION_VERSION, '0002');
+    assert.equal(task.RUN_TIME, 5.9);
+    assert.equal(task.run_time_source, 'routing');
+    assert.equal(task.run_time_basis.workcenter, 'MOLD01');
+    assert.equal(task.start_date.getTime(), newStart.getTime(), 'the order must be re-placed through Engine.manualSchedulePatchFor');
+    assert.notEqual(task.planning_status, 'needs_planning');
+  } finally {
+    Table._api = priorTableApi;
+    Runtime.resolve = priorResolve;
+    Engine.manualSchedulePatchFor = priorManualSchedule;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._onCellChanged: an ineligible PRODUCTION_VERSION edit holds the task locally (needs_planning/runtime_unknown) with null dates', () => {
+  const priorTableApi = Table._api;
+  const priorResolve = Runtime.resolve;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorToastShow = Toast.show;
+  const plant = 'P-ROUTING-PV-HELD';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  Alerts.scheduleRecompute = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  Runtime.resolve = () => ({ ok: false, step: 'workcenter_unmapped' });
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+
+  Store.setTasks([{
+    id: 'routing-pv-held', PRODUCTION_ORDER: 'A-9105', ORDER: 'A-9105', PLANT: plant, MACHINE: 'L1',
+    PRODUCTION_VERSION: '0001', RUN_TIME: 1,
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+  }], 'test');
+
+  try {
+    Table._onCellChanged({
+      colDef: { field: 'PRODUCTION_VERSION' },
+      data: Store.tasks['routing-pv-held'],
+      newValue: '0003',
+      node: { refreshCells: () => {} },
+    });
+    const task = Store.tasks['routing-pv-held'];
+    assert.equal(task.PRODUCTION_VERSION, '0003');
+    assert.equal(task.planning_status, 'needs_planning');
+    assert.equal(task.planning_reason.code, 'runtime_unknown');
+    assert.match(task.planning_reason.message, /workcenter_unmapped/);
+    assert.equal(task.start_date, null);
+    assert.equal(task.end_date, null);
+    assert.equal(toastCalls.length, 1);
+    assert.equal(toastCalls[0].type, 'warn');
+  } finally {
+    Table._api = priorTableApi;
+    Runtime.resolve = priorResolve;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Toast.show = priorToastShow;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._runTimeEditable (the grid RUN_TIME column\'s editable fn) is true only while the order is held for an unresolved routing runtime', () => {
+  const held = { planning_reason: { code: 'runtime_unknown', message: 'x' } };
+  const notHeld = { planning_reason: null };
+  const otherHold = { planning_reason: { code: 'no_fit_found', message: 'x' } };
+  assert.equal(Table._runTimeEditable({ data: held }), true);
+  assert.equal(Table._runTimeEditable({ data: notHeld }), false);
+  assert.equal(Table._runTimeEditable({ data: otherHold }), false);
+});
+
+test('Inspector._render disables the RUN_TIME input unless the order is held for an unresolved routing runtime', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  const heldTask = {
+    id: 'routing-runtime-held', ORDER: 'A-9106', PLANT: 'P-DIST', MACHINE: 'L3', RUN_TIME: 0,
+    planning_status: 'needs_planning', planning_reason: { code: 'runtime_unknown', message: 'x' },
+    start_date: null, end_date: null,
+  };
+  const scheduledTask = {
+    id: 'routing-runtime-scheduled', ORDER: 'A-9107', PLANT: 'P-DIST', MACHINE: 'L3', RUN_TIME: 2,
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T10:00:00'),
+  };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+
+    Inspector._render(heldTask);
+    let idx = body.innerHTML.indexOf('data-field="RUN_TIME"');
+    let tagStart = body.innerHTML.lastIndexOf('<input', idx);
+    let tagEnd = body.innerHTML.indexOf('>', idx);
+    assert.doesNotMatch(body.innerHTML.slice(tagStart, tagEnd), /\bdisabled\b/, 'RUN_TIME must be editable while held for runtime_unknown');
+
+    Inspector._render(scheduledTask);
+    idx = body.innerHTML.indexOf('data-field="RUN_TIME"');
+    tagStart = body.innerHTML.lastIndexOf('<input', idx);
+    tagEnd = body.innerHTML.indexOf('>', idx);
+    assert.match(body.innerHTML.slice(tagStart, tagEnd), /\bdisabled\b/, 'RUN_TIME must be read-only for a normally-scheduled order');
+    assert.match(body.innerHTML.slice(tagStart, tagEnd), /title="[^"]+"/);
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
   }
 });
 

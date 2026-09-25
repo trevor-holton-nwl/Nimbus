@@ -1117,7 +1117,9 @@ _CHILD_UPSERT_SQL = """
     )
     ON CONFLICT (id) DO UPDATE SET
         order_quantity          = EXCLUDED.order_quantity,
-        run_time                = EXCLUDED.run_time,
+        run_time                = CASE
+            WHEN orders.run_time_source IN ('routing', 'manual') THEN orders.run_time
+            ELSE EXCLUDED.run_time END,
         labor_hours             = EXCLUDED.labor_hours,
         machine_hours           = EXCLUDED.machine_hours,
         material_description    = EXCLUDED.material_description,
@@ -1138,10 +1140,7 @@ _CHILD_UPSERT_SQL = """
         parent_production_order = EXCLUDED.parent_production_order,
         distribution_letter     = EXCLUDED.distribution_letter,
         upload_batch_id         = EXCLUDED.upload_batch_id,
-        runtime_schedule_mismatch = CASE
-            WHEN EXCLUDED.run_time IS DISTINCT FROM orders.run_time
-                 AND orders.scheduled_start IS NOT NULL
-            THEN TRUE ELSE orders.runtime_schedule_mismatch END,
+        runtime_schedule_mismatch = COALESCE(orders.runtime_schedule_mismatch, FALSE),
         updated_at              = NOW()
     WHERE orders.order_quantity IS DISTINCT FROM EXCLUDED.order_quantity
        OR orders.run_time IS DISTINCT FROM EXCLUDED.run_time
@@ -2621,6 +2620,14 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
         )
         if not dry_run:
             conn.commit()
+    if not dry_run:
+        # Recompute routing-sourced run_time for this plant's affected
+        # sub-orders now that the re-weight has committed (ROUTING_RUNTIME_DESIGN.md
+        # §4 item 4). Deferred import to avoid a cross-domain module-level
+        # import cycle, matching this codebase's established convention
+        # (e.g. backend/routing/routes.py, backend/master_data/routes.py).
+        import backend.routing.resolver as routing_resolver
+        routing_resolver.resolve_orders(plant)
     return result
 
 
@@ -2664,6 +2671,10 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
         )
         if not dry_run:
             conn.commit()
+    if not dry_run:
+        # See reweight_shares' identical call -- same gap, same fix.
+        import backend.routing.resolver as routing_resolver
+        routing_resolver.resolve_orders(plant)
     return result
 
 
@@ -3019,6 +3030,10 @@ def _resolve_repair(plant: str, dry_run: bool) -> dict:
             children_upserted += result["children_upserted"]
             repaired += 1
         conn.commit()
+    # Reached only on the real (non-dry-run) path -- the dry_run branch
+    # above returns before any commit. See reweight_shares' identical call.
+    import backend.routing.resolver as routing_resolver
+    routing_resolver.resolve_orders(plant)
     return {"headers_created": 0, "children_upserted": children_upserted, "single_rewrites": 0,
             "repaired": repaired, "skipped": len(incomplete) - repaired}
 

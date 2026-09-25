@@ -34,6 +34,7 @@ import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
+import { Runtime } from '../routing/runtime-client.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment, NimbusMasterWorkcenter } from '../platform/types.mjs';
 import type { components } from '../types/api-generated.mjs';
 
@@ -293,6 +294,7 @@ export const Persistence = {
       Store.setFrozenHorizonEnd(null, 'persistence');
       Persistence._currentLoadedPlant = null;
       Persistence.loadPriorityRankMaps(null);
+      Runtime.load(null);
       return Promise.all([
         Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
         Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
@@ -384,6 +386,7 @@ export const Persistence = {
               Promise.all([
                 CalendarSync.fetchPlantConfig(plant),
                 Persistence.loadPriorityRankMaps(plant),
+                Runtime.load(plant),
                 setupSnapshotGeneration === Persistence._setupSnapshotRequest
                   ? Persistence.loadSetupSnapshot(plant) : Promise.resolve(null),
               ])
@@ -527,6 +530,7 @@ export const Persistence = {
           Promise.all([
             CalendarSync.fetchPlantConfig(plant),
             Persistence.loadPriorityRankMaps(plant),
+            Runtime.load(plant),
             setupSnapshotGeneration === Persistence._setupSnapshotRequest
               ? Persistence.loadSetupSnapshot(plant) : Promise.resolve(null),
           ])
@@ -1285,6 +1289,7 @@ export const Persistence = {
       PRT_02:       t.PRT_02,
       PRODUCTION_VERSION: t.PRODUCTION_VERSION,
       RUN_TIME:      t.RUN_TIME,
+      MACHINE:       t.MACHINE,
       schedule_segments: (t.scheduleSegments || []).map(segment => ({
         sequence: segment.sequence,
         start_date: Util.toLocalSeconds(segment.startDate) as NaiveLocalTs,

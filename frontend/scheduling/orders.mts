@@ -31,6 +31,7 @@ import { Engine } from '../optimization/engine.mjs';
 import type { SetupObservation } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
+import { Runtime } from '../routing/runtime-client.mjs';
 import { Persistence } from './persistence.mjs';
 import { SetupAdmin } from '../setup/setup-admin.mjs';
 import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
@@ -113,7 +114,7 @@ interface TableColDef {
   sortable?: boolean;
   filter?: boolean;
   resizable?: boolean;
-  editable?: boolean;
+  editable?: boolean | ((p: { data: NimbusTask }) => boolean);
   checkboxSelection?: boolean;
   headerCheckboxSelection?: boolean;
   tooltipField?: string;
@@ -361,6 +362,14 @@ export const Table = {
     return true;
   },
 
+  /** RUN_TIME column's row-dependent `editable` (ROUTING_RUNTIME_DESIGN.md
+   *  §8.2) — extracted (rather than inlined in Table.init()'s columnDefs, the
+   *  way most cellRenderer/valueGetter callbacks here are) so it's directly
+   *  testable without a live AG Grid instance. */
+  _runTimeEditable(p: { data: NimbusTask }): boolean {
+    return p.data?.planning_reason?.code === 'runtime_unknown';
+  },
+
   /** Columns for the order attributes that schedulers may edit inline. */
   _priorityColumns(): TableColDef[] {
     return [
@@ -379,7 +388,7 @@ export const Table = {
    *  no-column catalog entry doesn't need a matching hand-written columnDef. */
   _catalogOnlyColumns(): TableColDef[] {
     const handwritten = new Set(['MATERIAL_DESCRIPTION', 'ORDER_QUANTITY_(GMEIN)', 'COLOR', 'RUN_TIME',
-      'original_start_date', 'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION']);
+      'original_start_date', 'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'run_time_basis']);
     return ORDER_FIELD_CATALOG.filter(f => !handwritten.has(f.key)).map(f => ({
       headerName: Util.t(f.i18nGridKey),
       field: f.key,
@@ -504,9 +513,19 @@ export const Table = {
           valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),
           tooltipValueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },
         ...Table._catalogOnlyColumns(),
-        { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0, editable: true,
+        { headerName: Util.t('col.run_h'), field: 'RUN_TIME', width: 90, flex: 0,
+          // Editable only while the order is held for an unresolved routing
+          // runtime (ROUTING_RUNTIME_DESIGN.md §8.2) — otherwise the value is
+          // server-computed (routing/order-file/legacy) and read-only.
+          editable: Table._runTimeEditable,
           cellClass: 'cell-num', hide: Table._fieldHidden('RUN_TIME'),
           valueParser: (p: { newValue: string }) => parseFloat(p.newValue) || 0 },
+        { headerName: Util.t('col.run_time_basis'), field: 'run_time_basis', width: 120, flex: 0,
+          editable: false, hide: Table._fieldHidden('run_time_basis'),
+          cellRenderer: (p: { data?: NimbusTask }) => {
+            if (!p.data) return '';
+            return Util.escapeHtml(Inspector._formatRuntimeBasis(p.data));
+          } },
         { headerName: Util.t('col.orig_start'), field: 'original_start_date', minWidth: 160,
           editable: false, hide: Table._fieldHidden('original_start_date'),
           // Display-only derived value (due date minus RUN_TIME — see
@@ -1191,6 +1210,31 @@ export const Table = {
     );
   },
 
+  /** Routing-ineligible machine edit (§8.2/§8.3, ROUTING_RUNTIME_DESIGN.md):
+   *  shared toast for the grid, Inspector and Override dialog when
+   *  `Runtime.eligible` rejects a manual machine move — toast-only, kept
+   *  separate from `_rejectDistMachineMove`'s revert side effects, which
+   *  differ per call site (grid reverts a cell, Inspector re-renders, the
+   *  Override dialog simply doesn't apply). */
+  _toastMachineIneligible(task: NimbusTask, machine: string): void {
+    Toast.show(Util.t('toast.no_routing_at_workcenter', { order: Util.orderNumber(task), machine }), 'warn', 4000);
+  },
+
+  /** Whether the routing-runtime feature (ROUTING_RUNTIME_DESIGN.md §3.6/§8.1)
+   *  is switched on for this task's plant. `Runtime.load` only fetches/caches
+   *  a rate map for a plant whose `routing_runtime_enabled` switch is on —
+   *  for every other plant `Runtime`'s cache stays empty, so
+   *  `Runtime.eligible`/`resolve` would fail closed (`pv_missing`/
+   *  `pv_not_found`) for every order regardless of its actual eligibility.
+   *  The manual MACHINE/PRODUCTION_VERSION edit guards below must only run
+   *  while this is true, or ordinary editing would break on every plant
+   *  that hasn't opted in — the default (decision 16, §12 P3). */
+  _routingEnabledForTask(task: NimbusTask): boolean {
+    const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant || '';
+    if (!plant) return false;
+    return !!Store.masterData?.plants?.find(p => p.plant === plant)?.routing_runtime_enabled;
+  },
+
   /** Called when a grid cell is edited. Push the change through the store. */
   _onCellChanged(p: TableCellValueChangedEvent): void {
     const field = p.colDef.field;
@@ -1208,6 +1252,14 @@ export const Table = {
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(String(p.newValue)) || 0;
       changes.RUN_TIME = h;
+      // A manual RUN_TIME edit is only reachable while the order is held for
+      // an unresolved routing runtime (gated by the column's own `editable`)
+      // — accepting it releases the hold and marks the source manual,
+      // mirroring the server's own authoritative behavior on save
+      // (ROUTING_RUNTIME_DESIGN.md §8.2/§8.5).
+      changes.run_time_source = 'manual';
+      changes.planning_status = 'scheduled';
+      changes.planning_reason = null;
       scheduleTask = { ...p.data, RUN_TIME: h };
       requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
     } else if (field === 'MACHINE') {
@@ -1223,9 +1275,47 @@ export const Table = {
         Table._rejectDistMachineMove(p.data);
         return;
       }
+      // Routing eligibility guard (§8.2): a move to a machine with no
+      // routing operation for this order is rejected outright, but only on
+      // a plant that has opted into the feature (see _routingEnabledForTask).
+      if (newMachine !== priorMachine && Table._routingEnabledForTask(p.data) && !Runtime.eligible(p.data, newMachine)) {
+        p.data.MACHINE = priorMachine;
+        Table._api!.refreshCells({ rowNodes: [p.node], force: true });
+        Table._toastMachineIneligible(p.data, newMachine);
+        return;
+      }
       changes.MACHINE = newMachine;
       requestedLine = changes.MACHINE;
       requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
+    } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(p.data)) {
+      const pv = String(p.newValue ?? '');
+      changes.PRODUCTION_VERSION = pv;
+      const result = Runtime.resolve({ ...p.data, PRODUCTION_VERSION: pv });
+      if (result.ok) {
+        changes.RUN_TIME = result.hours;
+        changes.run_time_source = result.basis.source;
+        changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
+        scheduleTask = { ...p.data, PRODUCTION_VERSION: pv, RUN_TIME: result.hours };
+        requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
+      } else {
+        // Same "held, no fallback" shape setup-scheduler.mts uses for a
+        // needs_planning disposition — null committed dates/segments so the
+        // Needs Planning queue and optimizer treat this exactly like any
+        // other hold (§8.2/§8.4).
+        changes.start_date = null;
+        changes.end_date = null;
+        changes.scheduleSegments = [];
+        changes.planning_status = 'needs_planning';
+        changes.planning_reason = {
+          code: 'runtime_unknown',
+          message: `Runtime could not be resolved from routing (step: ${result.step}).`,
+        };
+        Store.updateTask(id, changes, 'table');
+        Table._api!.applyTransaction({ update: [Store.tasks[id]] });
+        Alerts.scheduleRecompute();
+        Toast.show(Util.t('toast.production_version_runtime_unresolved', { order: Util.orderNumber(p.data), pv: String(pv) }), 'warn', 4000);
+        return;
+      }
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       // Unreachable today — this column is editable:false, and ORDER_QUANTITY
       // isn't in Persistence._taskEditSnapshot's payload either (§13.1: no
@@ -1359,6 +1449,15 @@ export const Table = {
     const newLine  = lineEl.value;
     const alsoFirm = firmEl.checked;
     if (!newStart) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
+
+    // Routing eligibility guard (§8.3): the Override dialog can move an
+    // order to a different machine, so it must be checked the same as the
+    // grid/Inspector edit paths before re-placing (only on a plant that has
+    // opted into the feature — see _routingEnabledForTask).
+    if (Table._routingEnabledForTask(t) && !Runtime.eligible(t, newLine)) {
+      Table._toastMachineIneligible(t, newLine);
+      return;
+    }
 
     const schedule = Engine.manualSchedulePatchFor(t, newLine, newStart);
     if (!schedule?.start_date || !schedule.end_date) {
@@ -1901,6 +2000,35 @@ export const Inspector = {
     return translated === 'ui.setup_capacity_shortfall' ? fallback : translated;
   },
 
+  // Pure formatter for the read-only "Runtime basis" Inspector row (§8.2,
+  // ROUTING_RUNTIME_DESIGN.md). `run_time_basis`'s exact shape isn't finalized
+  // server-side yet, so every field read is defensive — a missing field omits
+  // its clause rather than printing "undefined".
+  _formatRuntimeBasis(task: NimbusTask): string {
+    const source = task.run_time_source;
+    if (source === 'sap_order') return Util.t('ui.insp_runtime_basis_sap_order');
+    if (source === 'legacy') return Util.t('ui.insp_runtime_basis_legacy');
+    if (source === 'manual') return Util.t('ui.insp_runtime_basis_manual');
+    if (source === 'distributed') return Util.t('ui.insp_runtime_basis_distributed');
+    if (source !== 'routing') return '';
+    const basis = task.run_time_basis || {};
+    const parts: string[] = ['Routing'];
+    const pv = basis?.production_version;
+    if (pv != null && pv !== '') parts.push(`PV ${pv}`);
+    const group = basis?.routing_group;
+    const counter = basis?.group_counter;
+    if (group != null && group !== '') {
+      parts.push(counter != null && counter !== '' ? `Group ${group}/${counter}` : `Group ${group}`);
+    }
+    const wc = basis?.sap_workcenter;
+    if (wc != null && wc !== '') parts.push(`WC ${wc}`);
+    const opCount = basis?.operation_count;
+    if (typeof opCount === 'number' && Number.isFinite(opCount)) parts.push(`${opCount} ops`);
+    const hours = basis?.hours;
+    if (typeof hours === 'number' && Number.isFinite(hours)) parts.push(`${hours.toFixed(1)} h`);
+    return parts.join(' · ');
+  },
+
   _render(task: NimbusTask): void {
     const body = document.getElementById('inspector-body');
     if (!body) return;
@@ -2016,7 +2144,10 @@ export const Inspector = {
         <div class="insp-row"><label>${Util.t('ui.insp_updated_end')}</label>
           <div class="insp-val">${Util.fmtDTReadable(task.end_date)}</div></div>
         <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
-          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}"></div></div>
+          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>
+        ${task.run_time_source && Inspector._fieldVisible('run_time_basis') ? `
+        <div class="insp-row"><label>${Util.t('ui.insp_runtime_basis')}</label>
+          <div class="insp-val">${Util.escapeHtml(Inspector._formatRuntimeBasis(task))}</div></div>` : ''}
       </div>
 
       ${(() => {
@@ -2215,8 +2346,43 @@ export const Inspector = {
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(value) || 0;
       changes.RUN_TIME = h;
+      // A manual RUN_TIME edit is only reachable while the order is held for
+      // an unresolved routing runtime (the input is disabled otherwise) —
+      // accepting it releases the hold and marks the source manual,
+      // mirroring the server's own authoritative behavior on save
+      // (ROUTING_RUNTIME_DESIGN.md §8.2/§8.5).
+      changes.run_time_source = 'manual';
+      changes.planning_status = 'scheduled';
+      changes.planning_reason = null;
       scheduleTask = { ...t, RUN_TIME: h };
       requestedStart = t.start_date ? new Date(t.start_date) : null;
+    } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(t)) {
+      const result = Runtime.resolve({ ...t, PRODUCTION_VERSION: value });
+      changes.PRODUCTION_VERSION = value;
+      if (result.ok) {
+        changes.RUN_TIME = result.hours;
+        changes.run_time_source = result.basis.source;
+        changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
+        scheduleTask = { ...t, PRODUCTION_VERSION: value, RUN_TIME: result.hours };
+        requestedStart = t.start_date ? new Date(t.start_date) : null;
+      } else {
+        // Same "held, no fallback" shape setup-scheduler.mts uses for a
+        // needs_planning disposition — null committed dates/segments so the
+        // Needs Planning queue and optimizer treat this exactly like any
+        // other hold (§8.2/§8.4).
+        changes.start_date = null;
+        changes.end_date = null;
+        changes.scheduleSegments = [];
+        changes.planning_status = 'needs_planning';
+        changes.planning_reason = {
+          code: 'runtime_unknown',
+          message: `Runtime could not be resolved from routing (step: ${result.step}).`,
+        };
+        Store.updateTask(id, changes, 'inspector');
+        Alerts.scheduleRecompute();
+        Toast.show(Util.t('toast.production_version_runtime_unresolved', { order: Util.orderNumber(t), pv: String(value) }), 'warn', 4000);
+        return;
+      }
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       changes[field] = parseFloat(value) || 0;
     } else if (field === 'notes') {
@@ -2225,11 +2391,21 @@ export const Inspector = {
       Inspector._persistNote(id, changes.notes ?? null);
       return;
     } else {
-      changes[field] = value;
       if (field === 'MACHINE') {
-        requestedLine = value || 'Unknown';
+        const newMachine = value || 'Unknown';
+        // Routing eligibility guard (§8.2): a move to a machine with no
+        // routing operation for this order is rejected outright, but only
+        // on a plant that has opted into the feature (see
+        // _routingEnabledForTask).
+        if (newMachine !== (t.MACHINE || 'Unknown') && Table._routingEnabledForTask(t) && !Runtime.eligible(t, newMachine)) {
+          Table._toastMachineIneligible(t, newMachine);
+          Inspector._render(t);
+          return;
+        }
+        requestedLine = newMachine;
         requestedStart = t.start_date ? new Date(t.start_date) : null;
       }
+      changes[field] = value;
     }
     if (requestedStart) {
       const targetLine = requestedLine || t.MACHINE || 'Unknown';

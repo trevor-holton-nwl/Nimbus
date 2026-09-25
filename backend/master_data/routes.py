@@ -35,6 +35,7 @@ from backend.master_data.models import (
     AuditLogResult,
     BulkApplyResult,
     CascadePreviewResult,
+    DeleteFilteredResult,
     GridResult,
     PlantConstraintsResult,
     PlantFrozenHorizonDaysResult,
@@ -52,6 +53,32 @@ from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
 
 router = APIRouter()
+
+# ROUTING_RUNTIME_DESIGN.md §6.4: tables whose write touches routing
+# resolution and so must trigger a recompute for every plant the write
+# affected. `machine` is included because a machine's sap_workcenter
+# mapping change changes which routing operations an order's machine
+# adopts (D1); `plants` is handled separately in `md_bulk` below (only a
+# `routing_runtime_enabled` flip matters there, not every plants edit).
+_ROUTING_RECOMPUTE_TABLES = frozenset({"production_version", "routing_operation", "routing_rules", "machine"})
+
+
+def _recompute_routing_for_plants(plants) -> None:
+    """§6.4's recompute hook, generic-grid half (the upload-route half lives
+    in backend/routing/routes.py's `_recompute_after_write`). DEFERRED
+    import -- matches the existing `backend.distribution.data` convention
+    (see db.py's `upsert_orders` docstring / `backend/integration/sap_sync.py`)
+    of never importing a cross-domain module at module scope. Best-effort
+    per plant, same posture as the `machine`/`sap_workcenter` post-write
+    blocks in `md_bulk` immediately below -- a recompute failure must never
+    mask (or be mistaken for) the write itself failing, since the write has
+    already committed by the time this runs."""
+    import backend.routing.resolver as routing_resolver
+    for plant in sorted({p for p in plants if p}):
+        try:
+            routing_resolver.resolve_orders(plant)
+        except Exception as e:
+            _log_event("warn", "routing", "Recompute after master-data write failed", plant=plant, error=str(e))
 
 
 # =========================
@@ -274,6 +301,30 @@ def md_material_plant_grid(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.get("/master-data/_routing-pv-grid", response_model=GridResult)
+def md_routing_pv_grid(
+        plant: str = Query(..., min_length=1,
+            description="Required. Returns production_version rows for this plant, LEFT JOINed "
+                        "with their routing_operation rows and the machines mapped to each "
+                        "operation's work center."),
+        search: str | None = Query(default=None),
+        limit: int | None = Query(default=None, ge=1, le=100000),
+        offset: int | None = Query(default=None, ge=0),
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Read-only "Routing & Production Versions" Master Data sub-tab
+    (ROUTING_RUNTIME_DESIGN.md §7.3). Registered BEFORE the generic
+    GET /master-data/{table} below -- same single-segment route-shadowing
+    hazard as `_material-grid`/`_material-plant-grid` (see this file's
+    module docstring and backend/master_data/CLAUDE.md)."""
+    try:
+        return md.routing_pv_grid(plant, search=search, limit=limit, offset=offset,
+                                  allowed_plants=allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.get("/master-data/{table}", response_model=GridResult, dependencies=[Depends(auth.require_authenticated)])
 def md_list(table: str,
             limit: int | None = Query(default=None, ge=1, le=100000,
@@ -452,9 +503,69 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
                     result["warnings"] = warnings
             except Exception as e:
                 _log_event("warn", "db", "sap_workcenter post-write warning check failed", error=str(e))
+        # ROUTING_RUNTIME_DESIGN.md §6.4: a write to any of the three routing
+        # tables, or to `machine` (its sap_workcenter mapping is what an
+        # order's routing resolution keys off), recomputes every plant the
+        # write touched. A `plants` write only recomputes when it actually
+        # carried `routing_runtime_enabled` (D14) -- an unrelated plants
+        # edit (timezone, horizon days, ...) must not trigger a plant-wide
+        # resolve on every save.
+        if table in _ROUTING_RECOMPUTE_TABLES:
+            affected_plants = {row.get("plant") for row in body.get("upserts", [])}
+            affected_plants |= {row.get("plant") for row in body.get("deletes", [])}
+            if affected_plants:
+                _recompute_routing_for_plants(affected_plants)
+        elif table == "plants":
+            flipped_plants = {
+                row.get("plant") for row in body.get("upserts", [])
+                if "routing_runtime_enabled" in row
+            }
+            if flipped_plants:
+                _recompute_routing_for_plants(flipped_plants)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/master-data/{table}/delete-filtered", response_model=DeleteFilteredResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
+def md_delete_filtered(table: str, request: Request, body: dict = Body(default={})):
+    """Filtered mass delete (ROUTING_RUNTIME_DESIGN.md §6.3). `table` must be
+    in `md.MASS_DELETABLE_TABLES` (production_version/routing_operation/
+    routing_rules today) or this 404s. Payload: {plant, search, expected_count}.
+    The server re-counts rows matching (plant [+ search]) -- the SAME
+    predicate `list_rows`' ILIKE search filter uses -- and refuses with a 409
+    if it doesn't match the caller's `expected_count` (the grid's own
+    `meta.total` from the load that preceded this call), so a stale filter
+    can never delete a different row set than what the admin was shown."""
+    if table not in md.MASS_DELETABLE_TABLES:
+        raise HTTPException(status_code=404, detail=f"Table {table!r} is not mass-deletable")
+    plant = body.get("plant")
+    if not plant:
+        raise HTTPException(status_code=400, detail="plant is required")
+    expected_count = body.get("expected_count")
+    if not isinstance(expected_count, int):
+        raise HTTPException(status_code=400, detail="expected_count (int) is required")
+    search = body.get("search")
+    _set_admin_log_details(request, table=table, plant=plant, search=search)
+    try:
+        result = md.delete_filtered(table, plant, search, expected_count,
+                                    user_email=request.headers.get("x-user-email"))
+    except md.MassDeleteStaleCount as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "stale_count",
+            "message": "The row count changed since this filter was loaded.",
+            "actual_count": exc.actual_count,
+        }) from exc
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _set_admin_log_details(request, deleted=result.get("deleted", 0))
+    # §6.4: every MASS_DELETABLE_TABLES member is one of the three routing
+    # tables, so a successful filtered delete always recomputes `plant`
+    # (best-effort -- see `_recompute_routing_for_plants`).
+    if result.get("deleted"):
+        _recompute_routing_for_plants([plant])
+    return result
 
 
 @router.post("/master-data/{table}/columns", response_model=AddColumnResult,

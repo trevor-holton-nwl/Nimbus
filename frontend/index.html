@@ -1666,6 +1666,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
       <button class="admin-subtab" data-md-master="material" role="tab" data-i18n="tab.materials">Material</button>
       <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
+      <button class="admin-subtab" data-md-master="routing-pv" role="tab" data-i18n="tab.routing_pv">Routing & Production Versions</button>
       <button class="admin-subtab" data-md-master="work-centers" role="tab" data-i18n="tab.work_centers">Work Centers</button>
     </nav>
 
@@ -1780,6 +1781,19 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="table-filterbar" id="md-mp-filterbar"></div>
       <div id="md-mp-grid" class="ag-theme-quartz"></div>
+    </div>
+
+    <!-- SUB-PANE: ROUTING & PRODUCTION VERSIONS (read-only AG Grid) -->
+    <div id="md-master-routing-pv-pane" hidden>
+      <div class="table-toolbar">
+        <input id="md-rpv-quick" class="input" type="search"
+               data-i18n-placeholder="ph.quick_filter_materials" placeholder="Quick filter materials…">
+        <div class="spacer"></div>
+        <span class="dash-filter-hint" data-i18n="ui.md_grid_admin_hint_ro">Read-only. Full editing lives in Admin › Manage Data Tables.</span>
+        <button class="btn btn-ghost" id="md-rpv-export" data-i18n="btn.export_csv">Export CSV</button>
+      </div>
+      <div class="table-filterbar" id="md-rpv-filterbar"></div>
+      <div id="md-rpv-grid" class="ag-theme-quartz"></div>
     </div>
 
     <!-- SUB-PANE: WORK CENTERS (§4.3) — content rendered entirely by
@@ -2098,6 +2112,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
             <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
             <button class="md-tab" data-md-tab="bom_items" role="tab" data-i18n="tab.bom_items">Bill of Materials</button>
+            <button class="md-tab" data-md-tab="production_version" role="tab" data-i18n="tab.production_version">Production Versions</button>
+            <button class="md-tab" data-md-tab="routing_operation" role="tab" data-i18n="tab.routing_operation">Routing Operations</button>
+            <button class="md-tab" data-md-tab="routing_rules" role="tab" data-i18n="tab.routing_rules">Routing Rules</button>
             <button class="md-tab" data-md-tab="sap_workcenter" role="tab" data-i18n="tab.sap_workcenter">Work Centers</button>
             <button class="btn btn-ghost sm" id="md-export-schema-btn" style="margin-left:auto" data-i18n="btn.export_schema">Export Schema</button>
           </nav>

@@ -85,6 +85,7 @@ import backend.integration.routes as integration_routes
 import backend.labor.routes as labor_routes
 import backend.master_data.routes as master_data_routes
 import backend.priority_lists.routes as priority_lists_routes
+import backend.routing.routes as routing_routes
 import backend.scheduling.routes as scheduling_routes
 import backend.security.routes as security_routes
 import backend.setup.routes as setup_routes
@@ -651,6 +652,10 @@ _ADMIN_WRITE_OPERATIONS = {
     "/distribution/{plant}/reset": "distribution.reset_write",
     "/distribution/{plant}/reapply-defaults": "distribution.reapply_defaults",
     "/distribution/{plant}/resolve": "distribution.resolve_write",
+    "/routing/upload/production-versions": "routing.upload_production_versions",
+    "/routing/upload/operations": "routing.upload_operations",
+    "/routing/{plant}/recompute": "routing.recompute",
+    "/master-data/{table}/delete-filtered": "master_data.delete_filtered",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
 }
@@ -680,6 +685,7 @@ api.include_router(integration_routes.router)
 api.include_router(priority_lists_routes.router)
 api.include_router(setup_routes.router)
 api.include_router(distribution_routes.router)
+api.include_router(routing_routes.router)
 api.include_router(master_data_routes.router)
 api.include_router(security_routes.router)
 api.include_router(labor_routes.router)

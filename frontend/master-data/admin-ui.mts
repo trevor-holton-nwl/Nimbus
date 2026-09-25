@@ -11,6 +11,7 @@ import { Engine } from '../optimization/engine.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
+import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
 import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
@@ -2498,7 +2499,8 @@ export const ProdLines = {
  *  engine) — `Security` stays container-`any`-typed until its own task. */
 type MasterDataTable =
   | 'subnetworks' | 'plants' | 'machine'
-  | 'materials' | 'material_plants' | 'bom_items' | 'sap_workcenter';
+  | 'materials' | 'material_plants' | 'bom_items' | 'sap_workcenter'
+  | 'production_version' | 'routing_operation' | 'routing_rules';
 
 /** `column_metadata` row shape returned alongside every `GET
  *  /master-data/{table}` (master_data.py `_column_meta`/get_table_data). */
@@ -2672,7 +2674,9 @@ interface MasterDataBulkResult {
   warnings?: MasterDataBulkWarning[];
 }
 
-/** bom_items' plant+material scope gate (`_renderBomGate`). */
+/** A SCOPED_TABLES entry's scope filter (`_renderScopeGate`/`_scopeFilter`).
+ *  Originally bom_items-only (hence the name); `material_id` stays null and
+ *  unused for a table scoped by plant alone. */
 interface BomFilter {
   plant: string | null;
   material_id: string | null;
@@ -2876,6 +2880,9 @@ export const MasterData = (() => {
     material_plants:  'Material Plant',
     bom_items:        'Bill of Materials',
     sap_workcenter:   'Work Centers',
+    production_version: 'Production Versions',
+    routing_operation:  'Routing Operations',
+    routing_rules:      'Routing Rules',
   };
 
   // KEY_COLS drives primary-key identification per table.
@@ -2887,6 +2894,9 @@ export const MasterData = (() => {
     material_plants:  ['material_id', 'plant'],
     bom_items:        ['material_id', 'plant', 'alternative_bom', 'level', 'item_number', 'component_id'],
     sap_workcenter:   ['plant', 'sap_workcenter'],
+    production_version: ['plant', 'material_id', 'production_version'],
+    routing_operation:  ['plant', 'material_id', 'task_list_type', 'routing_group', 'group_counter', 'sequence_no', 'activity'],
+    routing_rules:      ['plant', 'rule_kind', 'code'],
   };
 
   /** Values pre-filled into a brand-new grid row so an admin can save after
@@ -2917,10 +2927,73 @@ export const MasterData = (() => {
     // can't express. See the bom_items special case in _appendRow instead.
   };
 
-  // bom_items requires a plant + material pick before the grid loads (its
-  // table is expected to be huge — one row per component per level per
-  // material — unlike every other MasterData table, which loads in full).
-  let _bomFilter: BomFilter = { plant: null, material_id: null };
+  // Small, hardcoded per-column option lists for a column whose valid values
+  // are a short fixed set rather than "every row of another table"
+  // (FK_SOURCE's pattern) — ROUTING_RUNTIME_DESIGN.md §7.1. Rendered as a
+  // plain <select> with no fetch/lookup, checked ahead of FK_SOURCE in
+  // _appendRow's branch chain.
+  const FIXED_OPTIONS: Partial<Record<MasterDataTable, Record<string, readonly string[]>>> = {
+    routing_rules: { rule_kind: ['control_key', 'header_status'], action: ['exclude', 'include'] },
+  };
+
+  // Per-table upload endpoint for the toolbar's upload button — generalizes
+  // what used to be a single bom_items-only button/handler (§7.1).
+  const UPLOAD_ENDPOINT: Partial<Record<MasterDataTable, string>> = {
+    bom_items:          '/bom/upload',
+    production_version: '/routing/upload/production-versions',
+    routing_operation:  '/routing/upload/operations',
+  };
+
+  // Toast message key stem by table — 'bom_items' maps to 'bom' (existing
+  // translated keys), while new tables use their own table-name stem for
+  // new locale strings (toast.<stem>_upload_done/failed).
+  const UPLOAD_TOAST_STEM: Partial<Record<MasterDataTable, string>> = {
+    bom_items: 'bom',
+    production_version: 'production_version',
+    routing_operation: 'routing_operation',
+  };
+
+  // Client-side mirror of master_data.MASS_DELETABLE_TABLES — gates the
+  // "Delete filtered rows…" toolbar button (§6.3). The backend route is the
+  // real enforcement (404s any table not in its own allowlist); this only
+  // controls whether the button renders.
+  const MASS_DELETABLE: ReadonlySet<MasterDataTable> = new Set(['production_version', 'routing_operation', 'routing_rules']);
+
+  // The routing-runtime tables plus machine (ROUTING_RUNTIME_DESIGN.md §3.7/§8.1, D6) —
+  // a write to any of them can change the plant's rate map, so the routing
+  // upload/delete-filtered handlers refresh Runtime's cache after a
+  // successful write. `machine` is included because a machine's `sap_workcenter`
+  // mapping change directly affects which routing operation applies; machine
+  // itself is plant-scoped (existing SCOPED_TABLES handling works for it).
+  // Distinct from MASS_DELETABLE (same members today, but a different reason)
+  // so a future mass-deletable table that ISN'T a routing table doesn't
+  // accidentally also trigger this refresh.
+  const ROUTING_TABLES: ReadonlySet<MasterDataTable> = new Set(['production_version', 'routing_operation', 'routing_rules', 'machine']);
+
+  // Tables whose grid must not load unscoped because the table is expected
+  // to be large (one row per component/operation per plant/material).
+  // 'plant+material' is bom_items' original two-field gate; 'plant' needs
+  // only a plant pick before loading. routing_rules is deliberately NOT
+  // here — small enough to load without a gate (§7.1).
+  const SCOPED_TABLES: Partial<Record<MasterDataTable, 'plant' | 'plant+material'>> = {
+    bom_items:          'plant+material',
+    production_version: 'plant',
+    routing_operation:  'plant',
+  };
+
+  // Per-table scope filter for SCOPED_TABLES (was a single bom_items-only
+  // `_bomFilter`; generalized to a map so production_version/routing_operation
+  // each keep their own independent plant selection instead of sharing
+  // bom_items' one filter object). `BomFilter`'s `material_id` field stays
+  // unused for 'plant'-mode tables.
+  const _scopeFilters: Partial<Record<MasterDataTable, BomFilter>> = {};
+  function _scopeFilter(table: MasterDataTable): BomFilter {
+    return _scopeFilters[table] ?? (_scopeFilters[table] = { plant: null, material_id: null });
+  }
+  function _scopeReady(table: MasterDataTable, mode: 'plant' | 'plant+material'): boolean {
+    const f = _scopeFilter(table);
+    return mode === 'plant+material' ? !!(f.plant && f.material_id) : !!f.plant;
+  }
 
   function _rowKey(table: MasterDataTable, row: MasterDataRow): string {
     return KEY_COLS[table].map((k) => String(row[k] ?? '')).join('|');
@@ -2980,45 +3053,56 @@ export const MasterData = (() => {
       b.classList.toggle('active', b.dataset.mdTab === _activeTable));
   }
 
-  // bom_items never loads unscoped (its table is expected to be huge) — show
-  // the plant+material picker gate until both are chosen, same as every
-  // other tab shows its grid immediately.
+  // SCOPED_TABLES tables never load unscoped (their tables are expected to
+  // be huge) — show the plant(+material) picker gate until the mode's
+  // required field(s) are chosen, same as every other tab shows its grid
+  // immediately.
   function _renderActiveTable(): void {
-    if (_activeTable === 'bom_items' && !(_bomFilter.plant && _bomFilter.material_id)) {
-      _renderBomGate();
+    const mode = SCOPED_TABLES[_activeTable];
+    if (mode && !_scopeReady(_activeTable, mode)) {
+      _renderScopeGate(_activeTable, mode);
     } else {
       _loadAndRender(_activeTable);
     }
   }
 
   // -----------------------------------------------------------------------
-  // BOM plant + material scope gate
+  // Plant(+material) scope gate — generalized from bom_items' original
+  // plant+material-only gate. 'plant' mode renders just the plant picker and
+  // is ready to load as soon as that one field is chosen; 'plant+material'
+  // keeps bom_items' exact original behavior (both fields shown/required).
   // -----------------------------------------------------------------------
-  function _renderBomGate(): void {
+  function _renderScopeGate(table: MasterDataTable, mode: 'plant' | 'plant+material'): void {
     const host = document.getElementById('md-host');
     if (!host) return;
+    const scope = _scopeFilter(table);
     host.innerHTML = `
       <div class="md-bom-gate">
-        <p class="md-bom-gate-hint">${Util.t('hint.bom_pick_scope')}</p>
+        <p class="md-bom-gate-hint">${Util.t(mode === 'plant+material' ? 'hint.bom_pick_scope' : 'hint.scope_pick_plant')}</p>
         <div class="md-bom-gate-row">
           <label>${Util.t('ui.plant_label')}</label>
           <div id="md-bom-plant-picker"></div>
         </div>
+        ${mode === 'plant+material' ? `
         <div class="md-bom-gate-row">
           <label>${Util.t('col.material')}</label>
           <div id="md-bom-material-picker"></div>
-        </div>
+        </div>` : ''}
       </div>`;
     const plants = Store.knownPlants ? Store.knownPlants() : [];
     _mkCombobox(document.getElementById('md-bom-plant-picker'), plants, {
-      value: _bomFilter.plant || '',
+      value: scope.plant || '',
       placeholder: Util.t('ph.select_plant'),
       onSelect: (p) => {
-        _bomFilter = { plant: p || null, material_id: null };
-        _renderBomGate();
+        _scopeFilters[table] = { plant: p || null, material_id: null };
+        if (p && mode === 'plant') {
+          _loadAndRender(table);
+        } else {
+          _renderScopeGate(table, mode);
+        }
       },
     });
-    if (_bomFilter.plant) _loadBomMaterialsForPlant(_bomFilter.plant);
+    if (mode === 'plant+material' && scope.plant) _loadBomMaterialsForPlant(scope.plant);
   }
 
   async function _loadBomMaterialsForPlant(plant: string): Promise<void> {
@@ -3031,10 +3115,10 @@ export const MasterData = (() => {
       const host2 = document.getElementById('md-bom-material-picker');
       if (!host2) return; // tab/plant changed again while this was in flight
       _mkCombobox(host2, materials, {
-        value: _bomFilter.material_id || '',
+        value: _scopeFilter('bom_items').material_id || '',
         placeholder: Util.t('ph.select_material'),
         onSelect: (m) => {
-          _bomFilter.material_id = m || null;
+          _scopeFilter('bom_items').material_id = m || null;
           if (m) _loadAndRender('bom_items');
         },
       });
@@ -3060,12 +3144,17 @@ export const MasterData = (() => {
     const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-    // bom_items is the one table that must never load in full — always scope
-    // the request to the plant + material the user picked via the gate.
-    // Non-null assertions: only reached via _renderActiveTable, which already
-    // gated on both being set before calling _loadAndRender('bom_items').
-    const qs = table === 'bom_items'
-      ? `?${new URLSearchParams({ plant: _bomFilter.plant!, material_id: _bomFilter.material_id! }).toString()}`
+    // SCOPED_TABLES tables must never load in full — always scope the
+    // request to the field(s) the user picked via the gate. Non-null
+    // assertions: only reached via _renderActiveTable, which already gated
+    // on the mode's required field(s) being set before calling
+    // _loadAndRender for a scoped table.
+    const _scopeMode = SCOPED_TABLES[table];
+    const _scope = _scopeMode ? _scopeFilter(table) : null;
+    const qs = _scopeMode === 'plant+material'
+      ? `?${new URLSearchParams({ plant: _scope!.plant!, material_id: _scope!.material_id! }).toString()}`
+      : _scopeMode === 'plant'
+      ? `?${new URLSearchParams({ plant: _scope!.plant! }).toString()}`
       : '';
     try {
       const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async (r) => {
@@ -3111,16 +3200,20 @@ export const MasterData = (() => {
 
     host.innerHTML = '';
 
-    if (table === 'bom_items') {
+    const scopeMode = SCOPED_TABLES[table];
+    if (scopeMode) {
+      const scope = _scopeFilter(table);
       const scopeBar = document.createElement('div');
       scopeBar.className = 'md-bom-scope-bar';
-      scopeBar.innerHTML = `<span>${Util.t('ui.plant_label')}: <strong>${_bomFilter.plant}</strong> &middot; ${Util.t('col.material')}: <strong>${_bomFilter.material_id}</strong></span>`;
+      scopeBar.innerHTML = scopeMode === 'plant+material'
+        ? `<span>${Util.t('ui.plant_label')}: <strong>${scope.plant}</strong> &middot; ${Util.t('col.material')}: <strong>${scope.material_id}</strong></span>`
+        : `<span>${Util.t('ui.plant_label')}: <strong>${scope.plant}</strong></span>`;
       const changeBtn = document.createElement('button');
       changeBtn.className = 'btn btn-ghost sm';
       changeBtn.textContent = Util.t('btn.change_scope');
       changeBtn.onclick = () => {
-        _bomFilter = { plant: null, material_id: null };
-        delete _cache.bom_items;
+        _scopeFilters[table] = { plant: null, material_id: null };
+        delete _cache[table];
         _renderActiveTable();
       };
       scopeBar.appendChild(changeBtn);
@@ -3163,12 +3256,23 @@ export const MasterData = (() => {
     pasteBtn.onclick = () => _pasteRows(table);
     toolbar.appendChild(pasteBtn);
 
-    if (table === 'bom_items') {
+    if (MASS_DELETABLE.has(table)) {
+      const delFilteredBtn = document.createElement('button');
+      delFilteredBtn.className = 'btn btn-ghost sm';
+      delFilteredBtn.textContent = Util.t('btn.delete_filtered');
+      delFilteredBtn.title = Util.t('tip.delete_filtered');
+      delFilteredBtn.onclick = () => _deleteFiltered(table);
+      toolbar.appendChild(delFilteredBtn);
+    }
+
+    if (UPLOAD_ENDPOINT[table]) {
       const uploadBtn = document.createElement('button');
       uploadBtn.className = 'btn btn-ghost sm';
-      uploadBtn.textContent = Util.t('btn.upload_bom');
-      uploadBtn.title = Util.t('tip.upload_bom');
-      uploadBtn.onclick = () => _uploadBom();
+      // bom_items keeps its original, already-translated keys; the two new
+      // upload tables get a per-table key (locale strings added separately).
+      uploadBtn.textContent = Util.t(table === 'bom_items' ? 'btn.upload_bom' : `btn.upload_${table}`);
+      uploadBtn.title = Util.t(table === 'bom_items' ? 'tip.upload_bom' : `tip.upload_${table}`);
+      uploadBtn.onclick = () => _uploadFile(table);
       toolbar.appendChild(uploadBtn);
     }
 
@@ -3288,7 +3392,38 @@ export const MasterData = (() => {
       // (true for material_plants -> 'plant', wrong for what we need: 'material_id').
       if (table === 'bom_items' && col.column_name === 'component_id' && isNew) {
         const rowPlant = rowView.plant != null ? String(rowView.plant) : '';
-        td.appendChild(_bomComponentSelect(rowPlant || _bomFilter.plant, rowView.component_id, key));
+        td.appendChild(_bomComponentSelect(rowPlant || _scopeFilter('bom_items').plant, rowView.component_id, key));
+        tr.appendChild(td);
+        return;
+      }
+
+      // Small hardcoded option-list columns (routing_rules.rule_kind/action,
+      // §7.1) — a plain <select> off a fixed array, never backed by a whole
+      // parent table (FK_SOURCE's pattern). Locked key columns (e.g.
+      // routing_rules.rule_kind) are read-only on saved rows, just like FK columns.
+      const fixedOptions = FIXED_OPTIONS[table]?.[col.column_name];
+      if (fixedOptions) {
+        if (col.is_locked && !isNew) {
+          // Key columns on saved rows are read-only.
+          td.textContent = String(rowView[col.column_name] ?? '');
+        } else {
+          td.appendChild(_fixedOptionSelect(table, col.column_name, rowView[col.column_name], fixedOptions, key));
+        }
+        tr.appendChild(td);
+        return;
+      }
+
+      // plants.routing_runtime_enabled: the grid's first boolean column.
+      // Narrow, hardcoded check (§7.1) — a SQL-type lookup would need a new
+      // field threaded through MasterDataColumn's wire shape, out of scope
+      // here. `change`, not `oninput`: checkboxes don't fire the latter.
+      if (table === 'plants' && col.column_name === 'routing_runtime_enabled') {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'md-checkbox';
+        checkbox.checked = !!rowView[col.column_name];
+        checkbox.addEventListener('change', () => _markDirty(table, key, col.column_name, checkbox.checked));
+        td.appendChild(checkbox);
         tr.appendChild(td);
         return;
       }
@@ -3340,6 +3475,26 @@ export const MasterData = (() => {
     }
     tr.appendChild(delTd);
     tbody.appendChild(tr);
+  }
+
+  // FIXED_OPTIONS-backed <select> — a small hardcoded array, no fetch/lookup,
+  // wired to _markDirty the same way _fkSelect's parent-table-backed one is.
+  function _fixedOptionSelect(table: MasterDataTable, colName: string, value: unknown, options: readonly string[], rowKey: string): HTMLSelectElement {
+    const sel = document.createElement('select');
+    sel.className = 'input md-fk-select';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = Util.t('ui.select_placeholder');
+    sel.appendChild(blank);
+    options.forEach((o) => {
+      const opt = document.createElement('option');
+      opt.value = o;
+      opt.textContent = o;
+      if (o === value) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = () => _markDirty(table, rowKey, colName, sel.value);
+    return sel;
   }
 
   function _fkSelect(table: MasterDataTable, colName: string, value: unknown, sourceTable: MasterDataTable, rowKey: string): HTMLSelectElement {
@@ -3484,11 +3639,13 @@ export const MasterData = (() => {
     const newRow: MasterDataRow = {};
     state.columns.forEach((c) => { newRow[c.column_name] = ''; });
     Object.assign(newRow, NEW_ROW_DEFAULTS[table] ?? {});
-    if (table === 'bom_items') {
-      // A new row is always within the currently scoped material+plant —
+    const scopeMode = SCOPED_TABLES[table];
+    if (scopeMode) {
+      // A new row is always within the currently scoped plant(+material) —
       // pre-fill so the user isn't retyping the scope on every row.
-      newRow.material_id = _bomFilter.material_id || '';
-      newRow.plant = _bomFilter.plant || '';
+      const scope = _scopeFilter(table);
+      newRow.plant = scope.plant || '';
+      if (scopeMode === 'plant+material') newRow.material_id = scope.material_id || '';
     }
     state.added.push(newRow);
     // Re-render to show the new row (simpler than appending).
@@ -3502,7 +3659,14 @@ export const MasterData = (() => {
     }, 50);
   }
 
-  async function _uploadBom(): Promise<void> {
+  // Generalized from the former bom_items-only _uploadBom: same FormData/
+  // POST/Toast/ErrorLog/cache-refresh sequence, parameterized by
+  // UPLOAD_ENDPOINT[table] instead of hardcoded to `/bom/upload`. Toast
+  // copy keeps its original (BOM-flavored) keys — table-specific wording is
+  // a locale-string change, out of scope here.
+  async function _uploadFile(table: MasterDataTable): Promise<void> {
+    const endpoint = UPLOAD_ENDPOINT[table];
+    if (!endpoint) return;
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.xlsx';
@@ -3512,11 +3676,11 @@ export const MasterData = (() => {
       const fd = new FormData();
       fd.append('file', file);
       try {
-        const resp = await Util.fetchTraced(`${API}/bom/upload`, { method: 'POST', body: fd });
+        const resp = await Util.fetchTraced(`${API}${endpoint}`, { method: 'POST', body: fd });
         const result = await resp.json();
-        if (!resp.ok) throw new Error(result.detail || result.message || Util.t('toast.bom_upload_failed'));
+        if (!resp.ok) throw new Error(result.detail || result.message || Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_failed`));
         Toast.show(
-          Util.t('toast.bom_upload_done', {
+          Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_done`, {
             inserted: result.inserted || 0, updated: result.updated || 0, rejected: result.rejected || 0,
           }),
           result.rejected ? 'warn' : 'success',
@@ -3524,13 +3688,22 @@ export const MasterData = (() => {
         if (result.warnings && result.warnings.length) {
           result.warnings.slice(0, 10).forEach((w: { msg: string }) => ErrorLog.warn('master-data', w.msg));
         }
-        // Refresh the currently-scoped view so newly uploaded rows for this
-        // material+plant show up immediately.
-        delete _cache.bom_items;
-        if (_activeTable === 'bom_items') _renderActiveTable();
+        // Refresh the currently-scoped view so newly uploaded rows show up
+        // immediately.
+        delete _cache[table];
+        if (_activeTable === table) _renderActiveTable();
+        // Keep Runtime's per-plant rate-map mirror in sync with what just
+        // changed (mirrors the loadPriorityRankMaps refresh pattern below).
+        // Both routing upload tables (production_version, routing_operation)
+        // are SCOPED_TABLES in 'plant' mode, so _scopeFilter always has the
+        // plant this upload targeted.
+        if (ROUTING_TABLES.has(table)) {
+          const plant = _scopeFilter(table).plant;
+          if (plant) Runtime.load(plant);
+        }
       } catch (e) {
-        Toast.show(`${Util.t('toast.bom_upload_failed')}: ${(e as Error).message}`, 'error');
-        ErrorLog.error('master-data', `BOM upload failed: ${(e as Error).message}`);
+        Toast.show(`${Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_failed`)}: ${(e as Error).message}`, 'error');
+        ErrorLog.error('master-data', `Upload failed for ${table}: ${(e as Error).message}`);
       }
     };
     input.click();
@@ -3694,6 +3867,77 @@ export const MasterData = (() => {
       tr.className = 'md-row-deleted';
       _updateSaveBtn(table);
       _renderTable(table);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Delete filtered rows — MASS_DELETABLE_TABLES (§6.3). Unlike _deleteRow,
+  // this bypasses the dirty/added/deleted staging entirely: it's an
+  // immediate server-side `DELETE ... WHERE plant = ... [AND search]`, not
+  // something staged for the next Save.
+  // -----------------------------------------------------------------------
+  async function _deleteFiltered(table: MasterDataTable): Promise<void> {
+    const state = _cache[table];
+    if (!state) return;
+
+    // Plant: the table's own scope-gate filter when it has one (production_
+    // version/routing_operation), else fall back to the app-wide selected
+    // plant (routing_rules has no gate of its own — its grid can show more
+    // than one plant's rows if the admin's role_plants covers several).
+    const scopeMode = SCOPED_TABLES[table];
+    const plant = (scopeMode ? _scopeFilter(table).plant : null) || Store.selectedPlant || null;
+    if (!plant) {
+      Toast.show(Util.t('toast.delete_filtered_needs_plant'), 'error');
+      return;
+    }
+
+    const searchInput = document.querySelector('#md-host .md-search') as HTMLInputElement | null;
+    const search = (searchInput?.value || '').trim();
+
+    // Mirrors _applyFilter's own client-side predicate (whole-row text
+    // includes the search string) so expected_count matches what the admin
+    // is actually looking at. The server does its own authoritative
+    // recount against the SAME (plant [+ search]) predicate list_rows uses,
+    // and refuses with a 409 if it disagrees — this is a best-effort match,
+    // not the source of truth.
+    const q = search.toLowerCase();
+    const visibleCount = q
+      ? state.rows.filter((r) => Object.values(r).some((v) => String(v ?? '').toLowerCase().includes(q))).length
+      : state.rows.length;
+
+    const ok = await Modal.confirm({
+      title:        `Delete filtered rows from ${TABLE_LABELS[table]}?`,
+      message:      `This will permanently delete <strong>${visibleCount}</strong> row(s) in plant <strong>${Util.escapeHtml(plant)}</strong>`
+                    + (search ? ` matching "${Util.escapeHtml(search)}"` : '') + ` from the database.`,
+      detail:       '<strong>This cannot be undone.</strong>',
+      confirmLabel: 'Yes, delete filtered rows',
+      tone:         'danger',
+    });
+    if (!ok) return;
+
+    try {
+      const res = await Util.fetchTraced(`${API}/master-data/${table}/delete-filtered`, {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ plant, search: search || null, expected_count: visibleCount }),
+      }).then(async (r) => {
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          const detail = body?.detail;
+          const msg = typeof detail === 'string' ? detail : (detail?.message || `HTTP ${r.status}`);
+          throw new Error(msg);
+        }
+        return r.json() as Promise<{ deleted: number }>;
+      });
+      Toast.show(Util.t('toast.delete_filtered_done', { count: res.deleted }), 'success');
+      delete _cache[table];
+      _renderActiveTable();
+      // Keep Runtime's per-plant rate-map mirror in sync — `plant` above is
+      // already resolved and non-null by this point.
+      if (ROUTING_TABLES.has(table)) Runtime.load(plant);
+    } catch (e) {
+      Toast.show(Util.t('toast.delete_filtered_failed', { msg: (e as Error).message }), 'error');
+      ErrorLog.error('master-data', `Delete filtered failed for ${table}: ${(e as Error).message}`);
     }
   }
 
@@ -3871,6 +4115,31 @@ export const MasterData = (() => {
       // not before — the success toast stays the primary signal; this is
       // the informational, non-blocking layer beneath it (§4.1).
       _renderBulkWarnings(res.warnings || []);
+
+      // Keep Runtime's per-plant rate-map mirror in sync with what just
+      // changed (mirrors the upload/delete-filtered refresh patterns).
+      if (ROUTING_TABLES.has(table)) {
+        if (table === 'routing_rules') {
+          // routing_rules is NOT in SCOPED_TABLES (its grid can show multiple plants'
+          // rows simultaneously, per §7.1), so we must refresh Runtime for EVERY distinct
+          // plant actually present among the saved rows, not just Store.selectedPlant.
+          // Extract distinct plants from upserts (and ignore deletes since a deleted
+          // routing rule doesn't require a recompute — the operation's fallback behavior
+          // is unaffected). Mirror the pattern from db.py:2734 (resolve_fn loop).
+          const affectedPlants = new Set<string>();
+          upserts.forEach((row) => {
+            const plant = row.plant as string | undefined;
+            if (plant) affectedPlants.add(plant);
+          });
+          affectedPlants.forEach((plant) => Runtime.load(plant));
+        } else {
+          // production_version, routing_operation, and machine are all in SCOPED_TABLES
+          // (single-plant scoped), so this branch handles them uniformly.
+          const scopeMode = SCOPED_TABLES[table];
+          const plant = (scopeMode ? _scopeFilter(table).plant : null) || Store.selectedPlant || null;
+          if (plant) Runtime.load(plant);
+        }
+      }
 
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([

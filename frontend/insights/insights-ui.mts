@@ -1270,6 +1270,8 @@ export const AlertsUIAdapter = {
       'firmed-closed':       'calendar',
       'firmed-out-of-hours': 'calendar',
       'runtime-schedule-mismatch': 'exceptions',
+      'runtime-unknown':     'exceptions',
+      'pv-lot-size':         'exceptions',
     };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
     // Setup diagnostics are intentionally not given a UI category in this

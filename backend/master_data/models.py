@@ -146,6 +146,14 @@ class BulkWriteWarning(BaseModel):
     msg: str
 
 
+class DeleteFilteredResult(BaseModel):
+    """master_data.delete_filtered()'s shape (POST /master-data/{table}/
+    delete-filtered, ROUTING_RUNTIME_DESIGN.md §6.3) -- a filtered mass
+    delete, count-checked against the client's `expected_count` before
+    anything is deleted."""
+    deleted: int
+
+
 class BulkApplyResult(BaseModel):
     """master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk),
     plus an optional `warnings` list a table-specific post-write hook can

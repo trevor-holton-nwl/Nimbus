@@ -747,6 +747,44 @@
       });
     }
 
+    // RUNTIME-UNKNOWN (ROUTING_RUNTIME_DESIGN.md §8.6) — a task held in Needs
+    // Planning specifically because the routing resolver (backend/routing/resolver.py
+    // §5.2) couldn't determine a run time, distinguished from any OTHER
+    // needs_planning reason by planning_reason.code. One alert per affected
+    // task; the message is the resolver's own already-i18n'd text
+    // (planning_reason.message) — never re-translated or re-worded here.
+    const runtimeUnknownTasks = onlyLines
+      ? tasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'))
+      : tasks;
+    for (const t of runtimeUnknownTasks) {
+      const reason = t.planning_reason;
+      if (t.planning_status !== 'needs_planning' || !reason || reason.code !== 'runtime_unknown') continue;
+      const line = t.MACHINE || 'Unknown';
+      alerts.push({
+        id: `runtime-unknown-${t.id}`, sev: 'err', type: 'runtime-unknown',
+        msg: reason.message || `Order "${orderNumber(t)}" runtime could not be resolved (step: ${reason.step}).`,
+        taskId: t.id, line, time: t.start_date || new Date(),
+      });
+    }
+
+    // PV-LOT-SIZE (ROUTING_RUNTIME_DESIGN.md §5.2 "Lot size" / §8.6) — a
+    // resolved order whose order_quantity fell outside the resolved production
+    // version's lot-size range. Warning only: resolver.py still resolves and
+    // schedules the order normally (run_time_basis.lot_size_warning), it's
+    // never a hold and never affects placement.
+    const lotSizeTasks = onlyLines
+      ? tasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'))
+      : tasks;
+    for (const t of lotSizeTasks) {
+      if (!t.run_time_basis || !t.run_time_basis.lot_size_warning) continue;
+      const line = t.MACHINE || 'Unknown';
+      alerts.push({
+        id: `pv-lot-size-${t.id}`, sev: 'warn', type: 'pv-lot-size',
+        msg: `Order "${orderNumber(t)}" quantity is outside the resolved production version's lot-size range.`,
+        taskId: t.id, line, time: t.start_date || new Date(),
+      });
+    }
+
     // Setup observations are intentionally supplied by the caller after its
     // one plant-scoped resolution pass.  Alerting validates/reporting only;
     // it does not read a matrix, change Store, or start an optimizer run.

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Domain Directory
 
-The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<domain>/` (backend routers) folders. Each domain has a `CLAUDE.md` on both sides — substantive on whichever side carries the load-bearing invariants (both sides for scheduling and setup), a 3-line pointer on the other. `frontend/CLAUDE.md` and `backend/CLAUDE.md` sit one level above the domain files and hold side-wide conventions (build model, cross-cutting hazards, back-compat re-exports) that don't belong to any one domain. `brain.py` is now a ~700-line thin assembly — middleware, lifespan, `api.include_router(...)` for nine domain routers, then the `StaticFiles` mount last. `db.py`/`master_data.py` stay unsplit at repo root; see "Deferred" below.
+The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<domain>/` (backend routers) folders. Each domain has a `CLAUDE.md` on both sides — substantive on whichever side carries the load-bearing invariants (both sides for scheduling and setup), a 3-line pointer on the other. `frontend/CLAUDE.md` and `backend/CLAUDE.md` sit one level above the domain files and hold side-wide conventions (build model, cross-cutting hazards, back-compat re-exports) that don't belong to any one domain. `brain.py` is now a ~700-line thin assembly — middleware, lifespan, `api.include_router(...)` for twelve domain routers, then the `StaticFiles` mount last. `db.py`/`master_data.py` stay unsplit at repo root; see "Deferred" below.
 
 | Domain | Folder(s) | Covers | Substantive side |
 |---|---|---|---|
@@ -19,11 +19,12 @@ The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<dom
 | Calendar | `frontend/calendar/` + `backend/calendars/` | Working hours, blackouts, capacity-math engine (mirrored in `nimbus-compute-core.js`) | `frontend/calendar/` |
 | Insights | `frontend/insights/` | Alerts, Utilization matrix, Dashboard KPIs, the off-thread `Compute` worker client | `frontend/insights/` |
 | Priority Lists | `frontend/priority-lists/` + `backend/priority_lists/` | Per-plant rankable lists (color, PRT tooling, production version) feeding optimizer sort terms | `backend/priority_lists/` |
-| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the nine `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
+| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the twelve `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
 | Labor | `frontend/labor/` + `backend/labor/` | Aggregate and line-level available-labor-hours planning | `backend/labor/` |
 | Security | `frontend/security/` + `backend/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `backend/security/` |
 | Integration | `frontend/integration/` + `backend/integration/` | Excel order/BOM ingest, purge, upload audit, missing-master-data reports, SAP sync skeleton | `backend/integration/` |
 | Distribution | `frontend/distribution/` + `backend/distribution/` | SAP aggregate work center ↔ NIMBUS per-machine sub-order distribution; Work Centers master-data tab (P1 shipped, lives in `frontend/master-data/`); Distribution Scheduling Board tab shell/list/filters/detail-header (P2-15 shipped); dry-run share editor + Save/Reset/Undo (P2-16, shipped) | both sides |
+| Routing | `backend/routing/` + `frontend/routing/` | New `production_version`/`routing_operation`/`routing_rules` master data feeding a per-plant run-time calculation from SAP routings; Excel upload, resolver, ingest cutover, and a client-side rate-map mirror for instant drag/edit eligibility feedback (P1+P2+P3 all shipped) | both sides |
 | Admin Ops | `frontend/admin-ops/` + `backend/admin_ops/` | Diagnostics, DB maintenance, `_BACKEND_LOG` ring buffer, System Configuration | `backend/admin_ops/` |
 | Shell | `frontend/shell/` | Boot, tab chrome, login screen, the intelligence layer, and the root-pinned classic scripts (`app.js`, `index.html`, `locales/`) | `frontend/shell/` |
 

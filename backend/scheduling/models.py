@@ -82,6 +82,10 @@ class TaskDTO(BaseModel):
     runtime_schedule_mismatch: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
+    # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed
+    # provenance for RUN_TIME; never client-supplied.
+    run_time_source: str | None = None
+    run_time_basis: dict[str, Any] | None = None
 
 
 class TasksResponse(BaseModel):
@@ -149,6 +153,14 @@ class BulkUpdateResult(BaseModel):
     conflicts: list[ScheduleConflict] = Field(default_factory=list)
     error_code: str | None = None
     cause: str | None = None
+    # ROUTING_RUNTIME_DESIGN.md §8.5: sparse {id: reason} map, purely additive —
+    # populated ONLY for an invalid_ids entry rejected by db.update_task_dates_bulk's
+    # routing-eligibility re-check (reason is one of resolve_one's own failure
+    # steps, e.g. "no_operation_at_workcenter"). Every other invalid_ids cause in
+    # that same validation loop has no entry here; invalid_ids itself is
+    # unchanged (still a plain id list) so this never breaks a consumer that
+    # treats invalid_ids elements as bare ids.
+    rejection_reasons: dict[str, str] = Field(default_factory=dict)
 
 
 class TaskVersionRow(BaseModel):
@@ -162,6 +174,10 @@ class TaskVersionRow(BaseModel):
     runtime_schedule_mismatch: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
+    # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed
+    # provenance for RUN_TIME; never client-supplied.
+    run_time_source: str | None = None
+    run_time_basis: dict[str, Any] | None = None
 
 
 class TasksRefreshResponse(BaseModel):
@@ -220,6 +236,7 @@ class TaskDateUpdate(BaseModel):
     PRT_01: str | None = None
     PRT_02: str | None = None
     PRODUCTION_VERSION: str | None = None
+    MACHINE: str | None = None
     RUN_TIME: float | None = None
     schedule_segments: list[ScheduleSegmentInput] | None = None
     base_version: int | None = None

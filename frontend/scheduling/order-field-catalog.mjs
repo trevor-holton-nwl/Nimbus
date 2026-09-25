@@ -114,4 +114,11 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'DISTRIBUTION_LETTER', dbColumn: 'distribution_letter', type: 'text',
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.dist_letter', i18nInspectorKey: 'ui.insp_dist_letter' },
+    // Routing runtime fields — default hidden until an admin opts in via System Configuration.
+    { key: 'run_time_source', dbColumn: 'run_time_source', type: 'text',
+        gridDefault: false, inspectorDefault: false,
+        i18nGridKey: 'col.run_time_source', i18nInspectorKey: 'ui.insp_run_time_source', gridWidth: 100 },
+    { key: 'run_time_basis', dbColumn: 'run_time_basis', type: 'text',
+        gridDefault: false, inspectorDefault: false,
+        i18nGridKey: 'col.run_time_basis', i18nInspectorKey: 'ui.insp_run_time_basis', gridWidth: 120 },
 ];

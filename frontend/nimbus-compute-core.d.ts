@@ -28,7 +28,8 @@ declare global {
     type: 'overlap' | 'overload' | 'near-capacity' | 'closed' | 'blackout' | 'firmed-closed' | 'firmed-out-of-hours' | 'runtime-schedule-mismatch'
       | 'tool-conflict'
       | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
-      | 'predecessor-state-unknown' | 'successor-state-unknown';
+      | 'predecessor-state-unknown' | 'successor-state-unknown'
+      | 'runtime-unknown' | 'pv-lot-size';
     msg: string;
     /** Optional localized form; the drawer prefers Util.t(msgKey, msgVars) when present. */
     msgKey?: string;
@@ -52,6 +53,12 @@ declare global {
     end_date?: Date | null;
     firmed?: boolean; // manual firm mirror
     runtime_schedule_mismatch?: boolean;
+    planning_status?: string;
+    /** {code, step, message} per ROUTING_RUNTIME_DESIGN.md §4 item 2; message is
+     *  already i18n'd server-side. */
+    planning_reason?: { code?: string; step?: string; message?: string } | null;
+    /** §5.2/§8.6: carries lot_size_warning (bool) among other resolver-written fields. */
+    run_time_basis?: { lot_size_warning?: boolean } | null;
     PRT_01?: string;
     PRT_02?: string;
     PRODUCTION_ORDER?: string;

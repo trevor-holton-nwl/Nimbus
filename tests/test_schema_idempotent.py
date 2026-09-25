@@ -123,8 +123,12 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-01-orders-sap-coois-fields.sql",
         "2026-09-02-drop-redundant-setup-matrix-index.sql",
         "2026-09-02-orders-plant-column.sql",
+        "2026-09-09_optimizer_planning_exceptions.sql",
         "2026-09-09-plant-max-push-forward-days.sql",
         "2026-09-17-order-distribution.sql",
+        "2026-09-18-sap-workcenter-allow-unconfigured.sql",
+        "2026-09-24-routing-production-version-backfill.sql",
+        "2026-09-24-routing-production-version-structure.sql",
     }
     all_names = {
         os.path.basename(path)

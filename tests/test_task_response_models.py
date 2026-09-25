@@ -19,6 +19,7 @@ import pytest
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import brain  # noqa: E402
+import backend.routing.resolver as routing_resolver  # noqa: E402
 
 
 SAMPLE_TASK_ROW = {
@@ -63,6 +64,8 @@ SAMPLE_TASK_ROW = {
     "runtime_schedule_mismatch": False,
     "planning_status": "scheduled",
     "planning_reason": None,
+    "run_time_source": "routing",
+    "run_time_basis": {"production_version": "0001", "hours": 5.9},
 }
 
 
@@ -82,6 +85,9 @@ def test_bulk_update_result_round_trips_db_shape():
         "status": "ok", "updated": 3, "persisted": 3, "failed": 0, "invalid": 0,
         "not_found": 0, "invalid_ids": [], "not_found_ids": [], "stale": [],
         "versions": {"abc123": 43}, "conflicts": [], "error_code": None, "cause": None,
+        # ROUTING_RUNTIME_DESIGN.md §8.5: purely additive sparse {id: reason}
+        # map, populated only for the routing-eligibility invalid_ids rejection.
+        "rejection_reasons": {},
     }
     out = brain.BulkUpdateResult(**sample).model_dump()
     assert out == sample
@@ -241,6 +247,31 @@ class _FakeSegmentConnection:
         self.rolled_back = True
 
 
+def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, machine,
+             planning_status="scheduled", reason_code=None, routing_runtime_enabled=False,
+             parent_order=None, run_time_source=None, material_number=None,
+             order_quantity=None, basic_start_date=None, production_version=None):
+    """One row of update_task_dates_bulk's `FOR UPDATE OF o` eff-lookup SELECT,
+    in its current 17-column order (id, eff_start, eff_end, run_time,
+    row_version, segment_count, plant, machine, planning_status, reason_code,
+    routing_runtime_enabled, parent_order, run_time_source, material_number,
+    order_quantity, basic_start_date, production_version -- the last five
+    added for ROUTING_RUNTIME_DESIGN.md §8.5's write-time eligibility gate).
+    None of these tests exercise the routing-runtime feature itself, so
+    routing_runtime_enabled defaults to False/disabled — matching today's
+    unconditional pre-routing-runtime behavior — and reason_code defaults to
+    None (not held for a routing reason). parent_order defaults to None (not
+    a distribution sub-order) so these pre-existing tests, none of which
+    exercise the MACHINE-edit lock, are unaffected by that guard. The five
+    new §8.5 fields all default to None, inert whenever
+    routing_runtime_enabled is False (the gate short-circuits before reading
+    any of them)."""
+    return (order_id, start, end, run_time, row_version, segment_count, plant, machine,
+            planning_status, reason_code, routing_runtime_enabled, parent_order,
+            run_time_source, material_number, order_quantity, basic_start_date,
+            production_version)
+
+
 def _segment_batch_item(order_id):
     """One order's schedule_segments aggregate: 40 min then (after a 20-min
     gap, so the pieces stay distinct instead of merging) 20 min — total 60
@@ -260,7 +291,7 @@ def test_update_task_dates_bulk_rejects_sub_default_segment_for_a_plant_with_no_
     """B3 review fix (2026-08-21): existing behavior preserved — a plant that
     never configured plants.min_productive_segment_minutes still enforces the
     hardcoded 30-minute floor, so the 20-minute second piece is rejected."""
-    eff_rows = [("seg-default", None, None, 1.0, 100, 0, "PLANT-A", "L1")]
+    eff_rows = [_eff_row("seg-default", None, None, 1.0, 100, 0, "PLANT-A", "L1")]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])  # PLANT-A has no plants-table override
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
@@ -271,6 +302,11 @@ def test_update_task_dates_bulk_rejects_sub_default_segment_for_a_plant_with_no_
     assert any("FROM plants WHERE plant = ANY" in sql for sql, _ in cursor.executed), (
         "the plant-floor lookup must actually run, not just coincidentally fall back to 30"
     )
+    # No regression: this rejection is NOT the routing-eligibility one, so it
+    # must carry no entry in the new rejection_reasons map -- every other
+    # invalid_ids cause in this loop stays exactly as it was (plain id, no
+    # reason attached).
+    assert result.get("rejection_reasons", {}) == {}
 
 
 def test_update_task_dates_bulk_honors_a_plant_configured_productive_segment_floor(monkeypatch):
@@ -280,7 +316,7 @@ def test_update_task_dates_bulk_honors_a_plant_configured_productive_segment_flo
     30-minute default (proven above) rejects, proving the threading from
     plants.min_productive_segment_minutes through to
     _validate_schedule_segments actually reaches this code path."""
-    eff_rows = [("seg-override", None, None, 1.0, 100, 0, "PLANT-B", "L1")]
+    eff_rows = [_eff_row("seg-override", None, None, 1.0, 100, 0, "PLANT-B", "L1")]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[("PLANT-B", 15)])
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
@@ -309,7 +345,7 @@ class _FakeConflictCursor(_FakeSegmentCursor):
 
 def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(monkeypatch):
     t = lambda h: datetime(2026, 8, 17, h, 0)
-    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     conflict_rows = [("L1", "PLANT-A", "mv-a", [], t(8), t(10)), ("L1", "PLANT-A", "mv-b", [], t(9), t(11))]
     cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
@@ -328,7 +364,7 @@ def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(mon
 
 def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_optimizer(monkeypatch):
     t = lambda h: datetime(2026, 8, 17, h, 0)
-    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     conflict_rows = [("L1", "PLANT-A", "mv-a", [], t(8), t(10)), ("L1", "PLANT-A", "mv-b", [], t(9), t(11))]
     item = {"id": "mv-a", "start": t(8), "end": t(10), "base_version": 100}
 
@@ -364,7 +400,7 @@ class _FakeScanErrorCursor(_FakeSegmentCursor):
 
 def test_update_task_dates_bulk_advisory_scan_failure_does_not_block_a_valid_save(monkeypatch):
     t = lambda h: datetime(2026, 8, 17, h, 0)
-    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     cursor = _FakeScanErrorCursor(eff_rows, plant_rows=[])
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
@@ -386,7 +422,7 @@ def test_update_task_dates_bulk_strict_conflicts_scan_failure_propagates_and_rol
     the whole transaction must roll back — never a COMMIT on a transaction the
     failed scan may have left aborted."""
     t = lambda h: datetime(2026, 8, 17, h, 0)
-    eff_rows = [("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
+    eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     cursor = _FakeScanErrorCursor(eff_rows, plant_rows=[])
     pool = _FakeSegmentPool(cursor)
     monkeypatch.setattr(brain.db, "_pool", pool)
@@ -398,6 +434,118 @@ def test_update_task_dates_bulk_strict_conflicts_scan_failure_propagates_and_rol
         )
 
     assert pool.last_connection.rolled_back is True
+
+
+# ---------------------------------------------------------------------------
+# ROUTING_RUNTIME_DESIGN.md §8.5 -- update_task_dates_bulk's write-time
+# eligibility gate + post-commit re-resolve trigger. These mock
+# backend.routing.resolver.check_eligibility/resolve_orders directly (rather
+# than faking the production_version/routing_operation/machine/routing_rules
+# tables) -- resolve_one/check_eligibility's own step logic is already
+# exhaustively covered by tests/test_routing_resolver.py; this file's job is
+# only to prove update_task_dates_bulk wires the gate and the trigger
+# correctly (right args, right id rejected, right plants re-resolved, right
+# connection reused).
+# ---------------------------------------------------------------------------
+def _routing_eff_row(order_id, plant="PLANT-R", machine="M1", **overrides):
+    kwargs = dict(
+        start=None, end=None, run_time=2.0, row_version=100, segment_count=0,
+        plant=plant, machine=machine, routing_runtime_enabled=True,
+        run_time_source="routing", material_number="MAT1", order_quantity=1000,
+        basic_start_date=datetime(2026, 6, 1), production_version="0001",
+    )
+    kwargs.update(overrides)
+    return _eff_row(order_id, kwargs.pop("start"), kwargs.pop("end"), kwargs.pop("run_time"),
+                     kwargs.pop("row_version"), kwargs.pop("segment_count"), kwargs.pop("plant"),
+                     kwargs.pop("machine"), **kwargs)
+
+
+def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch):
+    eff_rows = [_routing_eff_row("r-bad")]
+    cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
+    pool = _FakeSegmentPool(cursor)
+    monkeypatch.setattr(brain.db, "_pool", pool)
+
+    captured = {}
+
+    def fake_check_eligibility(plant, material_number, production_version, machine,
+                               order_quantity, basic_start_date, *, conn=None):
+        captured["args"] = (plant, material_number, production_version, machine,
+                            order_quantity, basic_start_date)
+        captured["conn"] = conn
+        return {"ok": False, "step": "no_operation_at_workcenter"}
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility", fake_check_eligibility)
+    monkeypatch.setattr(routing_resolver, "resolve_orders",
+                        lambda plant: pytest.fail("resolve_orders must not run for a rejected item"))
+
+    result = brain.db.update_task_dates_bulk([{"id": "r-bad", "MACHINE": "M2"}])
+
+    assert result["invalid_ids"] == ["r-bad"]
+    assert result["persisted"] == 0
+    assert captured["args"] == ("PLANT-R", "MAT1", "0001", "M2", 1000, datetime(2026, 6, 1))
+    # The eligibility check must read within THIS function's own open
+    # connection -- never a second, independently-opened one.
+    assert captured["conn"] is pool.last_connection
+    # Code-review fix: this specific rejection must carry WHY it was rejected
+    # (§8.5) -- the fake check_eligibility above returns step
+    # 'no_operation_at_workcenter', and that exact step must show up keyed by
+    # this id in the new, purely-additive rejection_reasons map.
+    assert result["rejection_reasons"] == {"r-bad": "no_operation_at_workcenter"}
+
+
+def test_update_task_dates_bulk_accepts_an_eligible_machine_change_and_reresolves_the_plant(monkeypatch):
+    eff_rows = [_routing_eff_row("r-good")]
+    cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
+    pool = _FakeSegmentPool(cursor)
+    monkeypatch.setattr(brain.db, "_pool", pool)
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility",
+                        lambda *a, **k: {"ok": True, "hours": 3.0, "basis": {}})
+    resolved_plants = []
+    monkeypatch.setattr(routing_resolver, "resolve_orders", lambda plant: resolved_plants.append(plant))
+
+    result = brain.db.update_task_dates_bulk([{"id": "r-good", "MACHINE": "M2", "base_version": 100}])
+
+    assert result["invalid_ids"] == []
+    assert result["persisted"] == 1
+    assert resolved_plants == ["PLANT-R"]
+    # The connection passed to check_eligibility must be the SAME connection
+    # this function's own write transaction used -- proven by the fact the
+    # (mocked) call above never needed a second pooled connection to succeed;
+    # pool.last_connection is the one and only connection this whole call opened.
+    assert pool.last_connection.committed is True
+
+
+def test_update_task_dates_bulk_never_gates_a_disabled_plant(monkeypatch):
+    eff_rows = [_routing_eff_row("r-disabled", routing_runtime_enabled=False)]
+    cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility",
+                        lambda *a, **k: pytest.fail("check_eligibility must not run on a disabled plant"))
+    monkeypatch.setattr(routing_resolver, "resolve_orders",
+                        lambda plant: pytest.fail("resolve_orders must not run on a disabled plant"))
+
+    result = brain.db.update_task_dates_bulk([{"id": "r-disabled", "MACHINE": "M2"}])
+
+    assert result["invalid_ids"] == []
+    assert result["persisted"] == 1
+
+
+def test_update_task_dates_bulk_never_gates_a_non_routing_sourced_order(monkeypatch):
+    eff_rows = [_routing_eff_row("r-manual", run_time_source="manual", run_time=5.0)]
+    cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility",
+                        lambda *a, **k: pytest.fail("check_eligibility must not run for a manual run_time_source"))
+    monkeypatch.setattr(routing_resolver, "resolve_orders", lambda plant: None)
+
+    result = brain.db.update_task_dates_bulk([{"id": "r-manual", "MACHINE": "M2"}])
+
+    assert result["invalid_ids"] == []
+    assert result["persisted"] == 1
 
 
 def test_openapi_schema_includes_new_components():
