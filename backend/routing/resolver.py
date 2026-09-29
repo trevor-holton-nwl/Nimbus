@@ -202,9 +202,7 @@ def _within_validity(basic_start, valid_from, valid_to) -> bool:
     start_date = basic_start.date() if hasattr(basic_start, "date") else basic_start
     if valid_from is not None and start_date < valid_from:
         return False
-    if valid_to is not None and start_date > valid_to:
-        return False
-    return True
+    return valid_to is None or start_date <= valid_to
 
 
 def _fallback(order: dict, reason_code: str) -> dict:
@@ -482,7 +480,7 @@ def _load_pv_lookup(cur, plant: str) -> dict:
     cols = [d[0] for d in cur.description]
     lookup: dict = {}
     for row in cur.fetchall():
-        rec = dict(zip(cols, row))
+        rec = dict(zip(cols, row, strict=True))
         lookup[(rec["plant"], rec["material_id"], rec["production_version"])] = rec
     return lookup
 
@@ -500,7 +498,7 @@ def _load_op_lookup(cur, plant: str) -> dict:
     cols = [d[0] for d in cur.description]
     lookup: dict = {}
     for row in cur.fetchall():
-        rec = dict(zip(cols, row))
+        rec = dict(zip(cols, row, strict=True))
         key = (rec["plant"], rec["material_id"], rec["task_list_type"],
                rec["routing_group"], rec["group_counter"])
         lookup.setdefault(key, []).append(rec)
@@ -540,7 +538,7 @@ def _load_orders(cur, plant: str, is_cutover: bool) -> list[dict]:
         (plant, is_cutover),
     )
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
 
 def _is_routing_hold(planning_reason) -> bool:

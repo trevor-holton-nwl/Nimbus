@@ -928,7 +928,7 @@ def page_matrix_rows(plant: str, machine: str, signature_version: int, *, from_k
             machine_by_key[key] = entry
     merged: dict[str, dict] = {}
     for key, entry in plant_by_key.items():
-        merged[key] = {**entry, "inherited": not machine, "plant_value": entry["setup_min"]}
+        merged[key] = {**entry, "inherited": bool(machine), "plant_value": entry["setup_min"]}
     for key, entry in machine_by_key.items():
         plant_value = plant_by_key.get(key, {}).get("setup_min")
         merged[key] = {**entry, "inherited": False, "plant_value": plant_value}

@@ -186,4 +186,13 @@ module.exports = [
       '@typescript-eslint/no-unused-vars': ['warn', { args: 'none', ignoreRestSiblings: true }],
     },
   },
+  {
+    // Domain API calls must carry the shared identity/API-key headers. The
+    // bootstrap fetch and login handshake are the deliberate exceptions.
+    files: ['frontend/**/*.mts'],
+    ignores: ['frontend/platform/foundation.mts', 'frontend/security/session.mts'],
+    rules: {
+      'no-restricted-globals': ['error', { name: 'fetch', message: 'Use Util.fetchTraced for API calls.' }],
+    },
+  },
 ];

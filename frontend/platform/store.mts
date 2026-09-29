@@ -381,6 +381,12 @@ export const Store = {
     const prev = this._state.tasks[key];
     if (!prev) return null;
     delete this._state.tasks[key];
+    const plant = prev.PLANT || Store.getPlantForLine(prev.MACHINE);
+    const bucket = plant ? Store._tasksByPlant[plant] : null;
+    if (bucket) {
+      const index = bucket.findIndex(task => String(task.id) === key);
+      if (index >= 0) bucket.splice(index, 1);
+    }
 
     // Clean up dependency graph both ways.
     const deps = this._state.dependencies;

@@ -515,7 +515,7 @@ export const SetupAdmin = (() => {
 
   /** Receives only the compact preview edge list. It never stores candidate
    * schedules and it never triggers an optimization run. */
-  function reviewMissingPairs(plant: string | null, pairs: ReadonlyArray<MissingSetupReviewPair>): boolean {
+  async function reviewMissingPairs(plant: string | null, pairs: ReadonlyArray<MissingSetupReviewPair>): Promise<boolean> {
     if (!plant || !canReviewMissingPairs(plant)) return false;
     _missingReview = { plant, pairs: pairs.slice(0, 12).map(pair => ({ ...pair })) };
     _missingReviewFilter = 'all';
@@ -531,7 +531,10 @@ export const SetupAdmin = (() => {
     if (lines.length === 1) _lineScope = lines[0];
     const existingPane = _lastTarget ?? document.getElementById('setup-admin-pane');
     const navigation = reviewNavigation(plant, Store.selectedPlant, !!existingPane && !existingPane.closest('[hidden]'));
-    if (navigation.selectPlant) Store.setSelectedPlant(plant, 'setup-preview-review');
+    if (navigation.selectPlant) {
+      if (!await Persistence.confirmPlantSwitch(plant)) return false;
+      Store.setSelectedPlant(plant, 'setup-preview-review');
+    }
     const app = (globalThis as unknown as { NIMBUS?: { App?: { goto?: (tab: string) => void; gotoMasterSub?: (sub: 'plant') => void } } }).NIMBUS?.App;
     app?.goto?.('masterdata');
     app?.gotoMasterSub?.(navigation.masterSub);

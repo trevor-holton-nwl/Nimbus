@@ -862,7 +862,7 @@ export const AdminCockpit = {
       })
       .catch((e: Error) => {
         if (e.name === 'AbortError') return;
-        wrap.innerHTML = `<div class="admin-log-empty">Could not load pipeline: ${e.message}</div>`;
+        wrap.innerHTML = `<div class="admin-log-empty">Could not load pipeline: ${Util.escapeHtml(e.message)}</div>`;
         ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
       });
   },
@@ -1277,7 +1277,7 @@ export const AdminCockpit = {
       const body = await r.json().catch(() => ({})) as AdminPurgePreview;
       if (seq !== AdminCockpit._purgePreviewSeq) return; // superseded by a newer request
       if (!r.ok || body.status !== 'ok') {
-        el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.t('toast.purge_preview_failed', { msg: body.detail || body.message || 'unknown' })}</span>`;
+        el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.escapeHtml(Util.t('toast.purge_preview_failed', { msg: body.detail || body.message || 'unknown' }))}</span>`;
         return;
       }
       AdminCockpit._purgePreview = body;
@@ -1290,7 +1290,7 @@ export const AdminCockpit = {
       AdminCockpit._setPurgeButtonEnabled(true);
     } catch (e) {
       if (seq !== AdminCockpit._purgePreviewSeq) return;
-      el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.t('toast.purge_preview_failed', { msg: (e as Error).message })}</span>`;
+      el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.escapeHtml(Util.t('toast.purge_preview_failed', { msg: (e as Error).message }))}</span>`;
     }
   },
 
@@ -1523,7 +1523,7 @@ export const AdminCockpit = {
     if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = Util.t('ui.maint_running'); }
     const body = table ? { table } : {};
     try {
-      const r = await fetch(`${Config.API_BASE}/maintenance/${action}`, {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/maintenance/${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify(body),
@@ -2526,7 +2526,7 @@ export const AdminCockpit = {
   async _clearAudit(): Promise<void> {
     const ok = await Modal.confirm({ title: Util.t('modal.delete_upload_history'), confirmLabel: Util.t('btn.yes_delete_all') });
     if (!ok) return;
-    fetch(`${Config.API_BASE}/upload/audit/clear`, { method: 'POST' })
+    Util.fetchTraced(`${Config.API_BASE}/upload/audit/clear`, { method: 'POST' })
       .then(r => r.json())
       .then((body: { status: string; deleted: number }) => {
         if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_history_failed'), 'error'); return; }
@@ -2644,7 +2644,7 @@ export const AdminCockpit = {
   async _clearAuditLog(): Promise<void> {
     const ok = await Modal.confirm({ title: Util.t('modal.clear_audit_log'), confirmLabel: Util.t('btn.yes_delete') });
     if (!ok) return;
-    fetch(`${Config.API_BASE}/audit/log/clear`, { method: 'POST' })
+    Util.fetchTraced(`${Config.API_BASE}/audit/log/clear`, { method: 'POST' })
       .then(r => r.json())
       .then((body: { status: string }) => {
         if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_failed'), 'error'); return; }
@@ -2774,7 +2774,7 @@ export const AdminCockpit = {
     tbody.innerHTML = rows.map(r => {
       const c = cls(r.last);
       return `<tr>
-        <td class="perf-name">${r.name}</td>
+        <td class="perf-name">${Util.escapeHtml(r.name)}</td>
         <td class="${c}">${fmt(r.last)} ms</td>
         <td class="${cls(r.p50)}">${fmt(r.p50)} ms</td>
         <td class="${cls(r.p95)}">${fmt(r.p95)} ms</td>
@@ -2840,7 +2840,7 @@ export const AdminCockpit = {
           <span>${Util.t('ui.diag_kv_warnings')}</span><span>${warnCount} (${warnRate}/min)</span>
           <span>${Util.t('ui.diag_kv_tasks')}</span><span>${Store.tasksArr.length}</span>
           <span>${Util.t('ui.diag_kv_source')}</span><span>${stats.source || '—'}</span>
-          <span>${Util.t('ui.diag_kv_plant')}</span><span>${Store.selectedPlant || '<em>none</em>'}</span>
+          <span>${Util.t('ui.diag_kv_plant')}</span><span>${Store.selectedPlant ? Util.escapeHtml(Store.selectedPlant) : '<em>none</em>'}</span>
         </div>
       </div>`;
 
@@ -3036,7 +3036,7 @@ export const SystemConfig = (() => {
       // shape (same contract as the GET above) — the whole map is always sent,
       // never a per-field diff (the backend merge replaces 'orderFields' wholesale).
       const saved: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> } =
-        await fetch(`${API}/system-settings`, {
+        await Util.fetchTraced(`${API}/system-settings`, {
           method: 'POST',
           headers: _writeHeaders(),
           body: JSON.stringify({ orderFields: next }),

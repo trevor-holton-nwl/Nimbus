@@ -470,6 +470,19 @@ test('computeAlerts overlap alerts carry peerId (the earlier order)', () => {
   assert.equal(ovl.peerId, 'a');
 });
 
+test('computeAlerts detects an outer order overlapping later nested orders', () => {
+  const base = Date.now() + 24 * 3600000;
+  const task = (id, start, end) => ({ id, MACHINE: 'L', RUN_TIME: end - start,
+    start_date: new Date(base + start * 3600000), end_date: new Date(base + end * 3600000) });
+  const res = Core.computeAlerts({
+    tasks: [task('outer', 0, 10), task('inner', 1, 2), task('later', 3, 4)],
+    blocks: [], plantBlocks: [], calendars: {}, plants: {}, lineSettings: {},
+    masterData: noPlant, dismissed: [], opts: {},
+  });
+  const later = res.alerts.find(a => a.type === 'overlap' && a.taskId === 'later');
+  assert.equal(later?.peerId, 'outer');
+});
+
 // ── separationBucketKey (P3a distribution separation) ──────────────────────
 
 test('separationBucketKey buckets by hour/day and returns null for none/unrecognized scopes', () => {

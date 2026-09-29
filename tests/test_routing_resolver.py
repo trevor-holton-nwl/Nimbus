@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-import backend.routing.resolver as resolver
 from backend.routing.resolver import (
     _build_ops_map,
     _new_report,

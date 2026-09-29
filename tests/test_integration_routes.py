@@ -55,6 +55,35 @@ def test_upload_audit_clear_rejects_missing_api_key(monkeypatch):
     assert response.status_code == 401
 
 
+def test_material_plant_attributes_rejects_missing_api_key_and_anonymous_actor(monkeypatch):
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    client = TestClient(brain.api)
+    payload = {"plant": "PLANT-A", "updates": []}
+
+    assert client.post("/master-data/material-plants/attributes", json=payload).status_code == 401
+    assert client.post(
+        "/master-data/material-plants/attributes",
+        json=payload,
+        headers={"x-api-key": "required-key"},
+    ).status_code == 401
+
+
+def test_material_plant_attributes_accepts_authenticated_planner(monkeypatch):
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    monkeypatch.setattr(auth, "get_user_role", lambda email: "planner" if email == "planner@example.com" else None)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["PLANT-A"]
+    monkeypatch.setattr(int_routes.md, "set_material_plant_attributes", lambda **kwargs: {"updated": 0, "columns": []})
+    try:
+        response = TestClient(brain.api).post(
+            "/master-data/material-plants/attributes",
+            json={"plant": "PLANT-A", "updates": []},
+            headers={"x-api-key": "required-key", "x-user-email": "planner@example.com"},
+        )
+    finally:
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+    assert response.status_code == 200
+
+
 def test_upload_orders_captures_uploaded_plants_before_ingest(admin_client, monkeypatch):
     """A valid upload must scope setup-state capture to the workbook's plants
     and perform that capture before mutating orders."""

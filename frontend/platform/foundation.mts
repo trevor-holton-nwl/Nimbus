@@ -172,6 +172,7 @@ let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
 let _changeoverFieldsResolver: (() => string[]) | null = null;
 let _locale: string = (typeof localStorage !== 'undefined' && localStorage.getItem('nimbus.locale')) || 'en';
+if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = _locale;
 // The NIMBUS_API_KEY deployment-config stopgap (see backend/security/CLAUDE.md),
 // learned once at boot from GET /security/client-config (app.js's _domReadyGate)
 // and echoed back on every request via fetchTraced. Empty when the backend key
@@ -207,7 +208,10 @@ export const Util = {
     } catch { return _DEFAULT_CHANGEOVER_FIELDS; }
   },
   locale(): string { return _locale; },
-  setLocale(lang: string): void { _locale = lang; },
+  setLocale(lang: string): void {
+    _locale = lang;
+    if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = lang;
+  },
 
   // Safe Date parser. Accepts Date | ISO | null. Returns Date or null.
   parseDate(v: unknown): Date | null {
@@ -341,11 +345,13 @@ export const Util = {
   // "2h 30m"
   fmtHours(hours: number | null | undefined): string {
     if (hours == null || isNaN(hours)) return '—';
-    const h = Math.floor(hours);
-    const m = Math.round((hours - h) * 60);
-    if (h === 0) return `${m}m`;
-    if (m === 0) return `${h}h`;
-    return `${h}h ${m}m`;
+    const sign = hours < 0 ? '-' : '';
+    const totalMinutes = Math.round(Math.abs(hours) * 60);
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    if (h === 0) return `${sign}${m}m`;
+    if (m === 0) return `${sign}${h}h`;
+    return `${sign}${h}h ${m}m`;
   },
 
   // Convert a Date to <input type="datetime-local"> value.
@@ -1546,11 +1552,13 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
   okBtn.textContent  = opts.confirmLabel || 'Confirm';
   okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
   const closeBtn = document.getElementById('confirm-close-btn')!;
+  const backdrop = document.getElementById('confirm-modal')!;
   const done = (ok: boolean): void => { cleanup(); resolve(ok); };
   const cleanup = (): void => {
     okBtn.removeEventListener('click', onOk);
     document.getElementById('confirm-cancel-btn')!.removeEventListener('click', onCancel);
     closeBtn.removeEventListener('click', onCancel);
+    backdrop.removeEventListener('click', onBackdrop);
     Modal.close('confirm-modal');
     const next = _confirmQueue.shift();
     if (next) { _runConfirm(next.opts, next.resolve); }
@@ -1558,9 +1566,11 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
   };
   const onOk     = (): void => done(true);
   const onCancel = (): void => done(false);
+  const onBackdrop = (event: MouseEvent): void => { if (event.target === backdrop) done(false); };
   okBtn.addEventListener('click', onOk);
   document.getElementById('confirm-cancel-btn')!.addEventListener('click', onCancel);
   closeBtn.addEventListener('click', onCancel);
+  backdrop.addEventListener('click', onBackdrop);
   Modal.open('confirm-modal');
 }
 

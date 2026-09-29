@@ -486,6 +486,16 @@ def test_page_matrix_rows_lets_a_line_override_replace_the_plant_default(monkeyp
     assert all(r["setup_min"] != 99 for r in page["rows"])
 
 
+def test_page_matrix_rows_marks_a_plant_default_as_inherited_only_in_line_scope(monkeypatch):
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_MatrixRowsCursor()))
+    line_page = setup_data.page_matrix_rows("5512", "LINE-1", 4)
+    plant_page = setup_data.page_matrix_rows("5512", "", 4)
+    line_default = next(r for r in line_page["rows"] if r["to_key"] == _state("WHITE"))
+    plant_default = next(r for r in plant_page["rows"] if r["to_key"] == _state("WHITE"))
+    assert line_default["inherited"] is True
+    assert plant_default["inherited"] is False
+
+
 def test_page_matrix_rows_reports_null_plant_value_for_an_override_with_no_default(monkeypatch):
     """A line override on a pair the plant has no default for keeps its own
     setup_min and a null plant_value — the case the List view's

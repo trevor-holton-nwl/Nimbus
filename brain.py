@@ -105,7 +105,7 @@ class _JsonFormatter(logging.Formatter):
         # than recomputing them here. Falls back to the stdlib record for any
         # non-nimbus log that reaches this formatter.
         payload = {
-            "ts":    getattr(record, "evt_ts", None) or pd.Timestamp.utcnow().isoformat(),
+            "ts":    getattr(record, "evt_ts", None) or pd.Timestamp.now('UTC').isoformat(),
             "level": getattr(record, "evt_level", None) or record.levelname.lower(),
             "logger": record.name,
             "msg":   record.getMessage(),
@@ -298,7 +298,7 @@ async def lifespan(app: FastAPI):
     # /tasks request queries Postgres with a plant/line scope. This is what lets
     # the app run as multiple workers/replicas. We just probe the DB so startup
     # surfaces a connection problem early and logs the current row count.
-    DIAGNOSTICS["loaded_at"] = pd.Timestamp.utcnow().isoformat()
+    DIAGNOSTICS["loaded_at"] = pd.Timestamp.now('UTC').isoformat()
     DIAGNOSTICS["source_file"] = "postgres://nimbus/orders"
     try:
         health = db.get_health_stats()

@@ -511,7 +511,7 @@ export const Interface = (() => {
     _testResult = { cls: 'info', dot: '', msg: Util.t('ui.sap_testing') };
     _renderDetail();
     try {
-      const res: SapTestConnectionResult = await fetch(`${API}/sap/interface/test-connection`, {
+      const res: SapTestConnectionResult = await Util.fetchTraced(`${API}/sap/interface/test-connection`, {
         method: 'POST', headers: _writeHeaders(),
         body: JSON.stringify({ transport, source_params: params }),
       }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
@@ -527,7 +527,7 @@ export const Interface = (() => {
 
   async function _saveConfig(object: string, patch: SapConfigPatch, confirmMsg: string | null): Promise<void> {
     try {
-      await fetch(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
+      await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify(patch),
       }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       if (_config[object]) _config[object] = { ...(_config[object]), ...patch };
@@ -543,7 +543,7 @@ export const Interface = (() => {
   async function _runNow(object: string, dryRun: boolean, btn: HTMLButtonElement | null): Promise<void> {
     if (btn) btn.disabled = true;
     try {
-      const res: SapSyncResult = await fetch(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
+      const res: SapSyncResult = await Util.fetchTraced(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ dry_run: !!dryRun }),
       }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
       if (res.status === 'ok') {
@@ -679,7 +679,7 @@ export const Interface = (() => {
       .filter((m) => m.sap_field.trim() && m.nimbus_column.trim())
       .map((m, i) => ({ sap_field: m.sap_field.trim(), nimbus_column: m.nimbus_column.trim(), transform: m.transform || 'none', active: m.active !== false, field_order: i }));
     try {
-      await fetch(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
+      await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ mappings }),
       }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json() as Promise<SapMappingsSaveResult>; });
       delete _mapState[object];

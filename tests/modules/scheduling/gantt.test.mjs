@@ -17,6 +17,13 @@ import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
 
+test('hierarchy escapes stored machine and order labels', () => {
+  const payload = '<img src=x onerror=alert(1)>';
+  const markup = Hierarchy._renderItem({ name: payload, tasks: [{ id: 'safe', ORDER: payload }], color: '#fff', pct: null, sev: '' });
+  assert.ok(markup.includes('&lt;img'));
+  assert.ok(!markup.includes(payload));
+});
+
 // GanttFilter.isolateLine/restoreAllLines call the module's existing
 // _refreshLineBtn/_buildLineDropdown DOM helpers, which reference bare
 // `document` — same split-realm/no-DOM situation documented in

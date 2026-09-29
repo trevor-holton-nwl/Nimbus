@@ -408,7 +408,7 @@ export const Table = {
   _orderColumnSortKey(task: NimbusTask): string {
     const primary = String(task.PARENT_ORDER ?? task.PRODUCTION_ORDER ?? task.ORDER ?? '');
     const letter = String(task.DISTRIBUTION_LETTER ?? '');
-    return `${primary} ${letter}`;
+    return `${primary}\u0000${letter}`;
   },
   _orderColumnComparator(taskA: NimbusTask, taskB: NimbusTask): number {
     const a = Table._orderColumnSortKey(taskA);
@@ -498,7 +498,7 @@ export const Table = {
             if (!p.value) return '';
             const ci = Timeline._colorIndex(String(p.value));
             const color = Config.COLORS[ci % Config.COLORS.length];
-            return `<span class="cell-line-tag"><span class="dot" style="background:${color}"></span>${p.value}</span>`;
+            return `<span class="cell-line-tag"><span class="dot" style="background:${color}"></span>${Util.escapeHtml(String(p.value))}</span>`;
           }
         },
         { headerName: Util.t('col.color'), field: 'COLOR', width: 110, flex: 0, editable: false,
@@ -571,7 +571,7 @@ export const Table = {
             const note = p.value != null ? String(p.value).trim() : '';
             if (!note) return `<span class="nb-note-empty">✎ <em>${Util.t('ui.add_note')}</em></span>`;
             const preview = note.length > 40 ? note.slice(0, 37) + '…' : note;
-            return `<span class="nb-note-preview" title="${Util.escapeHtml(note)}">✎ ${preview}</span>`;
+            return `<span class="nb-note-preview" title="${Util.escapeHtml(note)}">✎ ${Util.escapeHtml(preview)}</span>`;
           }
         }
       ] as TableColDef[],
@@ -871,7 +871,8 @@ export const Table = {
     const drop = document.getElementById('tbl-flt-date-dropdown');
     if (!drop) return;
     const today = Util.startOfDay(new Date())!;
-    const tomorrow = new Date(today.getTime() + Config.MS_DAY);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
     const cur = Table._chipFilters.dateKey;
     // Quick presets + clear. Underlying filter stores YYYY-MM-DD (single day) only;
     // longer ranges set status='atrisk-or-window' via dedicated keys.
@@ -1015,7 +1016,9 @@ export const Table = {
     let dateLabel = Util.t('ui.any_date');
     if (f.dateKey) {
       const todayKey = Util.dayKey(Util.startOfDay(new Date())!);
-      const tomorrowKey = Util.dayKey(new Date(Util.startOfDay(new Date())!.getTime() + Config.MS_DAY));
+      const tomorrow = Util.startOfDay(new Date())!;
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowKey = Util.dayKey(tomorrow);
       if (f.dateKey === todayKey) dateLabel = Util.t('ui.today');
       else if (f.dateKey === tomorrowKey) dateLabel = Util.t('ui.tomorrow');
       else dateLabel = f.dateKey;
@@ -1325,9 +1328,8 @@ export const Table = {
       changes[field] = parseFloat(String(p.newValue)) || 0;
     } else if (field === 'notes') {
       const trimmed = String(p.newValue ?? '').trim();
-      Store.updateTask(id, { notes: trimmed }, 'table');
+      Inspector._updateNote(id, trimmed);
       Table._api!.applyTransaction({ update: [Store.tasks[id]] });
-      Inspector._persistNote(id, trimmed);
       Toast.show(Util.t('toast.row_updated'), 'success', 1200);
       return;
     } else {
@@ -1430,7 +1432,7 @@ export const Table = {
     }
     Table._fpOvrStart.setDate(t.start_date!, false);
     const lines = Table._getLineOptions();
-    lineEl.innerHTML = lines.map(l => `<option value="${l}" ${l === t.MACHINE ? 'selected' : ''}>${l}</option>`).join('');
+    lineEl.innerHTML = lines.map(l => `<option value="${Util.escapeHtml(l)}" ${l === t.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('');
     firmEl.checked = !!t.firmed;
     Modal.open('modal-override');
   },
@@ -1693,8 +1695,7 @@ export const Table = {
     if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
     if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
     const val = ta.value.trim().slice(0, 500) || null;
-    Store.updateTask(id, { notes: val }, 'table');
-    Inspector._persistNote(id, val);
+    Inspector._updateNote(id, val);
     Table._closeNotePopover();
     Table._api.applyTransaction({ update: [Store.tasks[id]] });
   },
@@ -2247,8 +2248,7 @@ export const Inspector = {
       const _noteId = Inspector._currentId!;
       notesEl.onblur = () => {
         const trimmed = notesEl.value.trim() || null;
-        Store.updateTask(_noteId, { notes: trimmed }, 'inspector');
-        Inspector._persistNote(_noteId, trimmed);
+        Inspector._updateNote(_noteId, trimmed);
       };
     }
     // Upgrade start_date to Flatpickr datetime picker
@@ -2387,8 +2387,7 @@ export const Inspector = {
       changes[field] = parseFloat(value) || 0;
     } else if (field === 'notes') {
       changes.notes = value.trim() || null;
-      Store.updateTask(id, changes, 'inspector');
-      Inspector._persistNote(id, changes.notes ?? null);
+      Inspector._updateNote(id, changes.notes ?? null);
       return;
     } else {
       if (field === 'MACHINE') {
@@ -2425,6 +2424,12 @@ export const Inspector = {
   // note on order B within 800ms cancelled order A's pending POST — silent data loss
   // (R5). Keying the timer by task id isolates each order's save.
   _noteTimers: {} as Record<string, ReturnType<typeof setTimeout>>,
+  _updateNote(id: string, notes: string | null): void {
+    const task = Store.tasks[id];
+    if (!task || (task.notes || null) === (notes || null)) return;
+    Store.updateTask(id, { notes }, 'note');
+    Inspector._persistNote(id, notes);
+  },
   _persistNote(id: string, notes: string | null): void {
     clearTimeout(Inspector._noteTimers[id]);
     Inspector._noteTimers[id] = setTimeout(() => {
@@ -2442,6 +2447,12 @@ export const Inspector = {
             const parsed = await Util.parseBackendError(r);
             ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
               { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
+          } else {
+            const result = await r.json() as { versions?: Record<string, number> };
+            const version = result.versions?.[id];
+            if (version && (Store.tasks[id]?.notes || null) === (notes || null)) {
+              Store.tasks[id].row_version = version;
+            }
           }
         })
         .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,

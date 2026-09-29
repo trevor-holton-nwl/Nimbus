@@ -737,8 +737,8 @@ const SessionUIAdapter = {
       }
       const sel = current();
       dropdown.innerHTML = filtered.map((p, i) =>
-        `<div class="us-combo-option${p === sel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
-           <span class="us-combo-option-prefix">${Util.t('ui.plant_label')}</span><span>${p}</span>
+        `<div class="us-combo-option${p === sel ? ' selected' : ''}" role="option" data-plant="${Util.escapeHtml(p)}" data-idx="${i}">
+           <span class="us-combo-option-prefix">${Util.t('ui.plant_label')}</span><span>${Util.escapeHtml(p)}</span>
          </div>`).join('');
       activeIdx = Math.max(0, filtered.indexOf(sel ?? ''));
       highlight();
@@ -1465,7 +1465,8 @@ const PlantSelector = {
       }, 120);
     });
     PlantSelector._clearBtn!.addEventListener('mousedown', e => e.preventDefault());
-    PlantSelector._clearBtn!.addEventListener('click', () => {
+    PlantSelector._clearBtn!.addEventListener('click', async () => {
+      if (!await Persistence.confirmPlantSwitch(null)) return;
       Store.setSelectedPlant(null, 'header');
       (PlantSelector._input as HTMLInputElement).value = '';
       PlantSelector._reflectSelection();
@@ -1593,7 +1594,7 @@ const PlantSelector = {
       const isSel = p === sel;
       const isPin = pinnedSet.has(p);
       const desc = (Store.masterPlant(p)?.description ?? '').trim();
-      return `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}" data-idx="${i}">
+      return `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${Util.escapeHtml(p)}" data-idx="${i}">
         <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${Util.escapeHtml(p)}</span>${desc ? `<span class="hps-option-desc">${Util.escapeHtml(desc)}</span>` : ''}
         ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
       </div>`;
@@ -1650,7 +1651,8 @@ const PlantSelector = {
     }
   },
 
-  _select(plant: string): void {
+  async _select(plant: string): Promise<void> {
+    if (!await Persistence.confirmPlantSwitch(plant)) return;
     Store.setSelectedPlant(plant, 'header');
     PlantSelector._reflectSelection();
     PlantSelector._closeDropdown();
@@ -1854,7 +1856,7 @@ const App = {
       const isSel = p === sel;
       const isPin = pinnedSet.has(p);
       const desc = (Store.masterPlant(p)?.description ?? '').trim();
-      html += `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${p}">
+      html += `<div class="hps-option${isSel ? ' selected' : ''}" role="option" data-plant="${Util.escapeHtml(p)}">
         <span class="hps-option-prefix">${Util.t('ui.plant_label')}</span><span class="hps-option-code">${Util.escapeHtml(p)}</span>${desc ? `<span class="hps-option-desc">${Util.escapeHtml(desc)}</span>` : ''}
         ${isPin ? '<span class="hps-pin-ico" aria-hidden="true">📌</span>' : ''}
       </div>`;
@@ -1865,7 +1867,8 @@ const App = {
     });
   },
 
-  _selectChangePlant(plant: string): void {
+  async _selectChangePlant(plant: string): Promise<void> {
+    if (!await Persistence.confirmPlantSwitch(plant)) return;
     Store.setSelectedPlant(plant, 'nav-drawer');
     Modal.close('modal-change-plant');
   },
@@ -2103,7 +2106,7 @@ const App = {
     /* Optimizer and undo edits are dependent: mark them for atomic version-checked save.
        'refresh' is ignored because those rows have already been reconciled. */
     Store.subscribe(evt => {
-      if (evt.source === 'refresh') return;
+      if (evt.source === 'refresh' || evt.source === 'note') return;
       const force = evt.source === 'engine' || evt.source === 'undo';
       if (evt.type === 'task:update') {
         Persistence._dirtyIds.add(String(evt.id));
@@ -2225,7 +2228,7 @@ const App = {
     // event-type filter, so a broadcast here would schedule a full localStorage
     // write and invalidate Utilization's memo for a registry load that changes no
     // schedule data (the same reason Store.setPriorityRankMaps does not emit).
-    fetch(`${Config.API_BASE}/priority-fields`)
+    Util.fetchTraced(`${Config.API_BASE}/priority-fields`)
       .then(r => r.ok ? r.json() : { fields: [] })
       .then((body: { fields?: PriorityFieldMeta[] }) => {
         Engine.setConstraintCatalog(body.fields || []);

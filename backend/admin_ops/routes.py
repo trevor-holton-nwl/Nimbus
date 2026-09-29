@@ -143,7 +143,7 @@ def reload_data():
     """
     try:
         plcache.load_priority_lists()
-        DIAGNOSTICS["loaded_at"] = pd.Timestamp.utcnow().isoformat()
+        DIAGNOSTICS["loaded_at"] = pd.Timestamp.now('UTC').isoformat()
         _log_event("info", "reload", "Priority-list cache refreshed",
                    plants_with_lists=len(plcache.PLANT_LISTS))
         return {"status": "ok", "diagnostics": _diag_snapshot()}
@@ -206,7 +206,7 @@ def get_diagnostics_db():
         "indexes":      db.get_db_index_usage(),
         "slow_queries": db.get_db_slow_queries(),
         "sequences":    db.get_db_sequence_health(),
-        "fetched_at":   pd.Timestamp.utcnow().isoformat(),
+        "fetched_at":   pd.Timestamp.now('UTC').isoformat(),
     }
 
 
@@ -352,7 +352,7 @@ def ingest_frontend_logs(payload: dict = Body(default={})):
             level = "info"
         scope = raw.get("scope")
         entry: dict = {
-            "ts":       str(raw.get("ts") or pd.Timestamp.utcnow().isoformat()),
+            "ts":       str(raw.get("ts") or pd.Timestamp.now('UTC').isoformat()),
             "level":    level,
             "category": str(scope) if scope else "frontend",
             "msg":      _truncate(raw.get("msg"), _FE_MAX_MSG) or "",

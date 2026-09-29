@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { Config, PerfMonitor, VirtualList, Toast, Modal } from '../../frontend/platform/foundation.mjs';
 import { Util, ErrorLog } from '../../frontend/platform/foundation.mjs';
 
+test('fmtHours carries rounded minutes into hours', () => {
+  assert.equal(Util.fmtHours(1.999), '2h');
+  assert.equal(Util.fmtHours(-1.999), '-2h');
+});
+
 /* Minimal fake DOM for Toast tests — Toast.show() only ever calls
    document.getElementById('toast-stack') and document.createElement(), and
    operates on elements via textContent/className/classList/appendChild/
@@ -68,6 +73,25 @@ test('Toast and Modal are present with their documented public methods', () => {
   assert.equal(typeof Modal.open, 'function');
   assert.equal(typeof Modal.close, 'function');
   assert.equal(typeof Modal.confirm, 'function');
+});
+
+test('confirm backdrop cancels the active prompt and advances the queued prompt', async () => {
+  const previousDocument = globalThis.document;
+  const ids = ['confirm-modal', 'confirm-title', 'confirm-message', 'confirm-detail',
+    'confirm-ok-btn', 'confirm-cancel-btn', 'confirm-close-btn'];
+  const elements = Object.fromEntries(ids.map(id => [id, _fakeElement('div')]));
+  globalThis.document = { getElementById: id => elements[id] ?? null };
+  try {
+    const first = Modal.confirm({ message: 'First' });
+    const second = Modal.confirm({ message: 'Second' });
+    elements['confirm-modal']._listeners.click({ target: elements['confirm-modal'] });
+    assert.equal(await first, false);
+    assert.equal(elements['confirm-message'].textContent, 'Second');
+    elements['confirm-ok-btn'].click();
+    assert.equal(await second, true);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test('Toast.show without an action behaves exactly as before: textContent only, no button', () => {

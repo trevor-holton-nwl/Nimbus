@@ -67,7 +67,7 @@ def load_priority_lists() -> None:
         PLANT_LISTS = {}
         _log_event("error", "color_wheel", "Could not load priority lists from DB",
                    exc=e, error_code="db.read")
-    CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
+    CW_LOADED_AT = pd.Timestamp.now('UTC').isoformat()
 
 
 def _reload_one_plant_lists(plant: str) -> None:
@@ -89,7 +89,7 @@ def _reload_one_plant_lists(plant: str) -> None:
     except Exception as e:
         _log_event("warn", "color_wheel", "Could not refresh plant priority lists",
                    exc=e, error_code="db.read", plant=plant)
-    CW_LOADED_AT = pd.Timestamp.utcnow().isoformat()
+    CW_LOADED_AT = pd.Timestamp.now('UTC').isoformat()
 
 
 def _apply_priority_scope(df: pd.DataFrame, mask: "pd.Series[bool]", cw_map: dict | None) -> None:

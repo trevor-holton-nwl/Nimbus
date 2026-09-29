@@ -335,7 +335,6 @@ export interface ScheduleSnapshot {
   /** Manually firmed ids; callers additionally fold ECC-firmed and
    * frozen-horizon ids in before invoking. */
   firmedIds: ReadonlySet<string> | ReadonlyArray<string>;
-  alerts: ReadonlyArray<unknown>;
   selectedPlant: string | null;
   blocks: ReadonlyArray<NimbusBlock>;
   plantBlocks: ReadonlyArray<NimbusPlantBlock>;
@@ -6353,7 +6352,7 @@ function checkDistributionSeparation(
   for (const task of finalTasks) {
     if (!task.PARENT_ORDER || task.planning_status === 'needs_planning') continue;
     const plant = resolveTaskPlant(task, snapshot) ?? '';
-    const key = `${plant} ${task.PARENT_ORDER} ${task.MATERIAL_NUMBER ?? ''}`;
+    const key = `${plant}\u0000${task.PARENT_ORDER}\u0000${task.MATERIAL_NUMBER ?? ''}`;
     const group = groups.get(key);
     if (group) group.push(task); else groups.set(key, [task]);
   }

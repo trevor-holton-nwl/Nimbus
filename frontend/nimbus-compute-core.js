@@ -406,15 +406,30 @@
     }
     for (const line of Object.keys(byLine)) {
       const arr = byLine[line].slice().sort((a, b) => a.start - b.start);
-      for (let i = 1; i < arr.length; i++) {
-        const prev = arr[i-1], cur = arr[i];
-        if (prev.task.id !== cur.task.id && cur.start < prev.end) {
+      // Keep the two longest-ending distinct orders. An interval can be
+      // nested inside an earlier one, and multiple segments can share an id.
+      let longest = null;
+      let secondLongest = null;
+      for (const cur of arr) {
+        const prev = longest?.task.id === cur.task.id ? secondLongest : longest;
+        if (prev && cur.start < prev.end) {
           alerts.push({
             id:  `ovl-${prev.task.id}-${cur.task.id}`,
             sev: 'err', type: 'overlap',
             msg: `Orders "${orderNumber(prev.task)}" and "${orderNumber(cur.task)}" overlap on ${line}.`,
             taskId: cur.task.id, peerId: prev.task.id, line, time: cur.start
           });
+        }
+        if (longest?.task.id === cur.task.id) {
+          if (cur.end > longest.end) longest = cur;
+        } else if (secondLongest?.task.id === cur.task.id) {
+          if (cur.end > secondLongest.end) secondLongest = cur;
+          if (secondLongest.end > longest.end) [longest, secondLongest] = [secondLongest, longest];
+        } else if (!longest || cur.end > longest.end) {
+          secondLongest = longest;
+          longest = cur;
+        } else if (!secondLongest || cur.end > secondLongest.end) {
+          secondLongest = cur;
         }
       }
     }

@@ -299,7 +299,10 @@ export const Alerts = {
       const reqRev = Store.rev();
       Compute.alerts(opts, Alerts._dismissed)
         .then(({ alerts, elapsed }) => {
-          if (Store.rev() !== reqRev) return; // stale result — a newer compute is in-flight
+          if (Store.rev() !== reqRev) {
+            Alerts.scheduleRecompute();
+            return;
+          }
           const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
           if (onlyLines) {
             const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));

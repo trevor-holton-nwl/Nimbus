@@ -1374,7 +1374,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           ${snaps.length ? snaps.map(s => `
             <div class="ni-tm-row">
               <span class="ni-tm-time">${TimeMachine._relTime(s.ts)}</span>
-              <span class="ni-tm-label" title="${s.label}">${s.label}</span>
+              <span class="ni-tm-label" title="${Util.escapeHtml(s.label)}">${Util.escapeHtml(s.label)}</span>
               <button class="ni-tm-restore-btn" data-ts="${s.ts}">Restore</button>
             </div>`).join('') : '<div style="padding:16px;font-size:12.5px;color:var(--fg-mute)">No snapshots yet. Actions will be recorded here.</div>'}
         </div>`;
@@ -2311,7 +2311,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const taskCt = s.tasks?.length ? `${s.tasks.length} orders` : '';
         return `<div class="ni-diff-snap-row${i === 0 ? ' ni-diff-snap-sel' : ''}" data-ts="${s.ts}">
           <span class="ni-diff-snap-ago">${TimeMachine._relTime(s.ts)}</span>
-          <span class="ni-diff-snap-lbl" title="${s.label}">${s.label}</span>
+          <span class="ni-diff-snap-lbl" title="${Util.escapeHtml(s.label)}">${Util.escapeHtml(s.label)}</span>
           <span style="display:flex;gap:5px;align-items:center">
             <span style="font-size:10px;color:var(--fg-mute)">${taskCt}</span>
             ${badge}

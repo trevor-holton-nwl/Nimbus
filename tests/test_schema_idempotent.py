@@ -80,6 +80,13 @@ def test_schema_migrations_ledger_present():
     )
 
 
+def test_workcenter_exists_before_distribution_foreign_key():
+    text = _schema_text()
+    assert text.index("CREATE TABLE IF NOT EXISTS sap_workcenter (") < text.index(
+        "CREATE TABLE IF NOT EXISTS order_distribution ("
+    )
+
+
 def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     """The smoke script replays only migrations safe after current schema.sql.
 
@@ -127,7 +134,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-09-plant-max-push-forward-days.sql",
         "2026-09-17-order-distribution.sql",
         "2026-09-18-sap-workcenter-allow-unconfigured.sql",
-        "2026-09-24-routing-production-version-backfill.sql",
+        "2026-09-25-routing-production-version-backfill.sql",
         "2026-09-24-routing-production-version-structure.sql",
     }
     all_names = {

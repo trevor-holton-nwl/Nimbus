@@ -299,7 +299,8 @@ def clear_upload_audit():
     return db.clear_upload_audit()
 
 
-@router.post("/master-data/material-plants/attributes")
+@router.post("/master-data/material-plants/attributes",
+             dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
 def md_set_material_plant_attributes(request: Request, body: dict = Body(default={}),
         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Update the planner-editable material_plants attributes (prt_01, prt_02,

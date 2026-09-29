@@ -30,7 +30,7 @@
 // IIFE) stays in app.js as `SessionUIAdapter` — see security/session.mjs's
 // header comment. DOM/UI code that was co-located with these modules in
 // app.js stays there — see docs/architecture/cq1-compatibility-inventory.md.
-import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -174,6 +174,23 @@ export const Persistence = {
   _horizonsFetchedAt: {} as Record<string, number>,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
+  async confirmPlantSwitch(plant: string | null): Promise<boolean> {
+    if (plant === Store.selectedPlant || Persistence._dirtyIds.size === 0) return true;
+    const discard = await Modal.confirm({
+      title: Util.t('modal.discard_schedule_title'),
+      message: Util.t('modal.discard_schedule_message'),
+      confirmLabel: Util.t('btn.discard_and_switch'),
+      tone: 'warn',
+    });
+    if (!discard) return false;
+    Persistence._dirtyIds.clear();
+    Persistence._forceIds.clear();
+    // A later re-selection of the outgoing plant must fetch its saved state,
+    // including when the user cleared the selector before re-selecting it.
+    Persistence._currentLoadedPlant = null;
+    Persistence._syncUnsaved();
+    return true;
+  },
   _syncUnsaved(): void {
     const badge = typeof document === 'undefined' ? null : document.getElementById('schedule-unsaved');
     if (!badge) return;
@@ -312,7 +329,7 @@ export const Persistence = {
 
     const tasksUrl = `${Config.API_BASE}/tasks?plant=${encodeURIComponent(plant)}`;
     Persistence._loadsInFlight++;
-    return fetch(tasksUrl, { signal: AbortSignal.timeout(8000) })
+    return Util.fetchTraced(tasksUrl, { signal: AbortSignal.timeout(8000) })
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status} from /tasks`);
         return r.json() as Promise<TasksResponse>;
@@ -450,9 +467,12 @@ export const Persistence = {
         // Overlay user-explicitly-moved positions from localStorage before snapping so that
         // _snapToWorkingHours detects them via startMoved and skips re-snap. Only tasks
         // where the cached start differs from the cached original baseline are overlaid.
+        let restoredDirtyIds: string[] = [];
         if (cacheData?.tasks?.length) {
           const optimizerIds = new Set<string>(cacheData._optimizerDirtyIds ?? []);
-          Persistence._overlayUserMoves(tasks, cacheData.tasks.filter((task: NimbusTask) => !optimizerIds.has(String(task.id))));
+          const dirtyIds = cacheData._dirtyIds == null ? null : new Set<string>(cacheData._dirtyIds);
+          restoredDirtyIds = Persistence._overlayUserMoves(tasks, cacheData.tasks.filter((task: NimbusTask) =>
+            !optimizerIds.has(String(task.id)) && (dirtyIds === null || dirtyIds.has(String(task.id)))));
         }
 
         // SAP ships date-only starts (00:00) — snap each order to the first
@@ -466,6 +486,11 @@ export const Persistence = {
         Persistence._snapToWorkingHours(tasks, plant);
 
         const setResult = Store.setTasks(tasks, 'persistence');
+        for (const id of restoredDirtyIds) Persistence._dirtyIds.add(id);
+        for (const id of cacheData?._optimizerDirtyIds ?? []) {
+          if (Store.tasks[id]) { Persistence._dirtyIds.add(id); Persistence._forceIds.add(id); }
+        }
+        Persistence._syncUnsaved();
         stats.dedup_collisions = setResult.collisions;
         stats.rendered = Store.tasksArr.length;
         Persistence._currentLoadedPlant = plant;
@@ -599,7 +624,7 @@ export const Persistence = {
     // started for a different plant by the time this resolves, that load's
     // own /tasks meta is authoritative and this response must be discarded.
     const gen = Persistence._loadRequest;
-    return fetch(`${Config.API_BASE}/tasks/horizons?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
+    return Util.fetchTraced(`${Config.API_BASE}/tasks/horizons?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
       .then(r => {
         if (!r.ok) {
           // Silent by design — see the doc comment above. Most likely cause is
@@ -735,8 +760,9 @@ export const Persistence = {
   // from the cached original_start_date are overlaid — those are the ones the user
   // has consciously dragged beyond the auto-snap baseline. This prevents
   // _snapToWorkingHours from re-snapping user placements over blackout blocks.
-  _overlayUserMoves(backendTasks: NimbusTask[], cachedTasks: Array<Record<string, unknown>>): void {
+  _overlayUserMoves(backendTasks: NimbusTask[], cachedTasks: Array<Record<string, unknown>>): string[] {
     const byId = new Map(cachedTasks.map(t => [t.id, t]));
+    const restored: string[] = [];
     for (const t of backendTasks) {
       const cached = byId.get(t.id);
       if (t.planning_status === 'needs_planning' || cached?.planning_status === 'needs_planning') continue;
@@ -761,7 +787,9 @@ export const Persistence = {
       t.scheduleSegments = Persistence._segmentsFromRaw(cached);
       const coe = Util.parseDate(cached.original_end_date);
       if (coe instanceof Date) t.original_end_date = coe;
+      restored.push(String(t.id));
     }
+    return restored;
   },
 
   // SAP gives us date-only `BASIC_START_DATE`s, which parse to 00:00:00. On lines
@@ -1131,6 +1159,9 @@ export const Persistence = {
         }
       }
       Store.setTasks(tasks, 'persistence');
+      for (const id of data._dirtyIds ?? []) {
+        if (Store.tasks[id]) Persistence._dirtyIds.add(id);
+      }
       for (const id of data._optimizerDirtyIds ?? []) {
         if (Store.tasks[id]) {
           Persistence._dirtyIds.add(id);
@@ -1507,7 +1538,7 @@ export const Persistence = {
    *  re-dirty or write the rows we just pulled (see project_store_fanout). */
   _refreshTasks(ids: string[]): void {
     if (!ids || !ids.length) return;
-    fetch(`${Config.API_BASE}/tasks/refresh`, {
+    Util.fetchTraced(`${Config.API_BASE}/tasks/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
@@ -1546,7 +1577,10 @@ export const Persistence = {
           }
         }
       })
-      .catch(e => ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids));
+      .catch(e => {
+        ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids);
+        Toast.show(Util.t('toast.conflict_refresh_failed'), 'error', 8000);
+      });
   },
 
   /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
@@ -1670,6 +1704,7 @@ export const Persistence = {
         _buildId:       Config.BUILD_ID,
         _savedAt:       new Date().toISOString(),
         _optimizerDirtyIds: [...Persistence._forceIds].filter(id => Persistence._dirtyIds.has(id)),
+        _dirtyIds:      [...Persistence._dirtyIds],
         tasks:          Store.tasksArr,
         blocks:         Store.blocks,
         calendars:      Store.calendars,

@@ -137,6 +137,13 @@ test('Store.removeTask removes the id from Selection directly (a real cross-file
   assert.ok(!Selection.has('rm1'));
 });
 
+test('Store.removeTask removes the task from its cached plant bucket', () => {
+  Store.setTasks([{ id: 'remove-from-index', PLANT: 'P-INDEX', MACHINE: 'L1' }], 'unit-test');
+  assert.equal(Store.tasksByPlant('P-INDEX').length, 1);
+  Store.removeTask('remove-from-index', 'unit-test');
+  assert.equal(Store.tasksByPlant('P-INDEX').length, 0);
+});
+
 test('UndoStack.push caps at MAX(10) entries', () => {
   for (let i = 0; i < 12; i++) UndoStack.push(`entry-${i}`, () => {});
   assert.ok(UndoStack._entries.length <= UndoStack.MAX);

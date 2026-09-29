@@ -43,6 +43,6 @@ DIAGNOSTICS: dict = {
 def _warn(level, msg, **ctx):
     DIAGNOSTICS["warnings"].append({
         "level": level, "msg": msg, "ctx": ctx,
-        "ts": pd.Timestamp.utcnow().isoformat(),
+        "ts": pd.Timestamp.now('UTC').isoformat(),
     })
     _log_event(level, "load", msg, **ctx)

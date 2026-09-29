@@ -173,7 +173,7 @@ export const LaborPlanning = (() => {
 
   async function _saveAggregate(subnetwork: string, plant: string, cells: LaborAggrCellPayload[]): Promise<void> {
     try {
-      const r = await fetch(`${Config.API_BASE}/labor-plan`, {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/labor-plan`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify({ subnetwork, plant, cells }),
@@ -188,7 +188,7 @@ export const LaborPlanning = (() => {
   async function _saveLines(subnetwork: string, plant: string, cells: LaborLineCellPayload[]): Promise<void> {
     if (!cells.length) return;
     try {
-      const r = await fetch(`${Config.API_BASE}/labor-plan/line`, {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/labor-plan/line`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify({ subnetwork, plant, cells }),
@@ -203,7 +203,7 @@ export const LaborPlanning = (() => {
   async function _fetchAggregate(plant: string): Promise<Record<string, Record<string, number>>> {
     if (_aggrData[plant]) return _aggrData[plant];
     try {
-      const res = await fetch(`${Config.API_BASE}/labor-plan?plant=${encodeURIComponent(plant)}`);
+      const res = await Util.fetchTraced(`${Config.API_BASE}/labor-plan?plant=${encodeURIComponent(plant)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       const map: Record<string, Record<string, number>> = {};
@@ -227,7 +227,7 @@ export const LaborPlanning = (() => {
     try {
       let url = `${Config.API_BASE}/labor-plan/line?plant=${encodeURIComponent(plant)}&from_date=${from_date}&to_date=${to_date}`;
       if (group) url += `&group=${encodeURIComponent(group)}`;
-      const res = await fetch(url);
+      const res = await Util.fetchTraced(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       if (!_lineData[plant]) _lineData[plant] = {};
@@ -432,10 +432,10 @@ export const LaborPlanning = (() => {
       const cells = _weeks.map((w) => {
         const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
         return `<td>
-          <input type="number" class="lp-cell" data-group="${grp.replace(/"/g,'&quot;')}" data-period="${w.key}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
+          <input type="number" class="lp-cell" data-group="${Util.escapeHtml(grp)}" data-period="${w.key}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
         </td>`;
       }).join('');
-      return `<tr><td>${grp}</td>${cells}</tr>`;
+      return `<tr><td>${Util.escapeHtml(grp)}</td>${cells}</tr>`;
     }).join('');
     const totalCells = _weeks.map((w) => {
       const v = totals[w.key];
@@ -668,7 +668,7 @@ export const LaborPlanning = (() => {
       let groupRow = '';
       if (showGroupHeaders && lm.wc_group !== lastGroup) {
         lastGroup = lm.wc_group;
-        groupRow = `<tr><td class="lp-group-hdr" colspan="${days.length + 1}">${lm.wc_group}</td></tr>`;
+        groupRow = `<tr><td class="lp-group-hdr" colspan="${days.length + 1}">${Util.escapeHtml(lm.wc_group || '')}</td></tr>`;
       }
       const cells = days.map((d) => {
         const wb   = weekStarts.has(d.dayKey) ? 'border-left:2px solid var(--accent-soft);' : '';
@@ -680,11 +680,11 @@ export const LaborPlanning = (() => {
         const bg     = avail === 0 ? 'var(--bg-subtle)' : heatBg(ratio);
         const isOvr  = ld?.source === 'override';
         const title  = `${line} · ${d.dayKey} | Available: ${avail.toFixed(1)}h | Required: ${req.toFixed(1)}h | Cal cap: ${calCap.toFixed(1)}h${isOvr ? ' | Pinned' : ''}`;
-        return `<td class="${isOvr ? 'lp-ovr' : ''}" style="${wb}background:${bg};padding:3px 4px;" title="${title}">
-          <input type="number" class="lp-line-cell" data-line="${line.replace(/"/g,'&quot;')}" data-day="${d.dayKey}" min="0" step="0.5"
+        return `<td class="${isOvr ? 'lp-ovr' : ''}" style="${wb}background:${bg};padding:3px 4px;" title="${Util.escapeHtml(title)}">
+          <input type="number" class="lp-line-cell" data-line="${Util.escapeHtml(line)}" data-day="${d.dayKey}" min="0" step="0.5"
             value="${avail > 0 ? avail : ''}"></td>`;
       }).join('');
-      return groupRow + `<tr><td>${line}</td>${cells}</tr>`;
+      return groupRow + `<tr><td>${Util.escapeHtml(line)}</td>${cells}</tr>`;
     }).join('');
 
     grid.innerHTML = `
@@ -790,7 +790,7 @@ export const LaborPlanning = (() => {
 
     const cols = `100px repeat(${days.length}, 1fr)`;
     let html = `<div class="lp-card" style="padding:14px 16px;">
-      <p class="lp-cap-note">Req/Avail hours · first ${displayDays} days${scopeGroup ? ' · Group: ' + scopeGroup : ''}</p>
+      <p class="lp-cap-note">Req/Avail hours · first ${displayDays} days${scopeGroup ? ' · Group: ' + Util.escapeHtml(scopeGroup) : ''}</p>
       <div class="lp-hm-wrap"><div class="lp-hm-grid" style="grid-template-columns:${cols}">`;
     html += `<div class="lp-hm-corner"></div>`;
     days.forEach((d) => {
@@ -799,7 +799,7 @@ export const LaborPlanning = (() => {
     });
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
-      html += `<div class="lp-hm-label"><span class="lp-hm-dot" style="background:${dot}"></span>${line}</div>`;
+      html += `<div class="lp-hm-label"><span class="lp-hm-dot" style="background:${dot}"></span>${Util.escapeHtml(line)}</div>`;
       days.forEach((d) => {
         const req    = utilMatrix[line]?.[d.dayKey]?.scheduled || 0;
         const ld     = _lineData[plant]?.[line]?.[d.dayKey];
@@ -808,7 +808,7 @@ export const LaborPlanning = (() => {
         const ratio  = avail > 0 ? req / avail : (req > 0 ? 2 : 0);
         const bg     = heatBg(ratio), tc = heatText(ratio);
         const lbl    = avail > 0 ? `${req.toFixed(0)}/${avail.toFixed(0)}` : '—';
-        html += `<div class="lp-hm-cell" style="background:${bg};color:${tc};" title="${line} · ${d.dayKey} | Req: ${req.toFixed(1)}h | Avail: ${avail.toFixed(1)}h | ${Math.round(ratio*100)}%">${lbl}</div>`;
+        html += `<div class="lp-hm-cell" style="background:${bg};color:${tc};" title="${Util.escapeHtml(line)} · ${d.dayKey} | Req: ${req.toFixed(1)}h | Avail: ${avail.toFixed(1)}h | ${Math.round(ratio*100)}%">${lbl}</div>`;
       });
     });
     html += `</div></div><div class="lp-hm-legend"><span>idle</span><div class="lp-hm-grad"></div><span>overload</span></div></div>`;
@@ -853,9 +853,9 @@ export const LaborPlanning = (() => {
     const rows = exceptions.map((ex) => `
       <div class="lp-exc-row lp-exc-${ex.sev}">
         <span class="lp-exc-sev">${ex.sev === 'err' ? '▲' : '⚠'}</span>
-        <span class="lp-exc-line">${ex.line}</span>
+        <span class="lp-exc-line">${Util.escapeHtml(ex.line)}</span>
         <span class="lp-exc-day">${ex.day}</span>
-        <span class="lp-exc-msg">${ex.msg}</span>
+        <span class="lp-exc-msg">${Util.escapeHtml(ex.msg)}</span>
         <button class="btn btn-sm lp-exc-fix" onclick="NIMBUS.App.gotoLaborSub('line-plan')">Line Plan →</button>
       </div>`).join('');
     container.innerHTML = `<div class="lp-exc-summary">${exceptions.length} exception${exceptions.length !== 1 ? 's' : ''}</div><div class="lp-exc-list">${rows}</div>`;
@@ -907,9 +907,9 @@ export const LaborPlanning = (() => {
         `<div class="lp-group-scroll">` +
         _groups.map((g) => `
           <label class="lp-group-chk-row">
-            <input type="checkbox" value="${g.replace(/"/g,'&quot;')}"${_selectedGroups.has(g) ? ' checked' : ''}
+            <input type="checkbox" value="${Util.escapeHtml(g)}"${_selectedGroups.has(g) ? ' checked' : ''}
               onchange="NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)">
-            ${g}
+            ${Util.escapeHtml(g)}
           </label>`).join('') +
         `</div>
         <div class="lp-group-chk-footer">

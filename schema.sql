@@ -111,6 +111,32 @@ CREATE INDEX IF NOT EXISTS idx_order_schedule_segments_order_start
     ON order_schedule_segments(order_id, scheduled_start);
 
 -- ----------------------------------------------------------------------------
+-- sap_workcenter: SAP work center policy and membership weights (2026-09-17).
+-- Per-plant table; work-center codes aggregate multiple NIMBUS machines.
+-- distribution_mode: 'single' = all orders land on default_machine;
+--   'distribute' = orders split across members by weight.
+-- max_separation: ISO week (Monday start) / day / hour / none; applies in
+--   distribute mode only (§3.1). review_required: default headers start as
+--   reviewed = FALSE when TRUE, as reviewed = TRUE when FALSE.
+-- distribute_tooled: when FALSE, tooled materials default to single 100% share.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sap_workcenter (
+    plant              TEXT NOT NULL,
+    sap_workcenter     TEXT NOT NULL,
+    description        TEXT,
+    distribution_mode  TEXT NOT NULL DEFAULT 'single'
+                       CHECK (distribution_mode IN ('single','distribute')),
+    default_machine    TEXT,
+    max_separation     TEXT NOT NULL DEFAULT 'none'
+                       CHECK (max_separation IN ('none','hour','day','week')),
+    review_required    BOOLEAN NOT NULL DEFAULT TRUE,
+    distribute_tooled  BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (plant, sap_workcenter)
+);
+
+-- ----------------------------------------------------------------------------
 -- order_distribution (header) and order_distribution_share: SAP aggregate
 -- work center distribution across NIMBUS machines (2026-09-17).
 -- Transactional tables, never grid-editable. Written solely by
@@ -409,32 +435,6 @@ CREATE TABLE IF NOT EXISTS workcenter_mapping (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (plant, machine)
-);
-
--- ----------------------------------------------------------------------------
--- sap_workcenter: SAP work center policy and membership weights (2026-09-17).
--- Per-plant table; work-center codes aggregate multiple NIMBUS machines.
--- distribution_mode: 'single' = all orders land on default_machine;
---   'distribute' = orders split across members by weight.
--- max_separation: ISO week (Monday start) / day / hour / none; applies in
---   distribute mode only (§3.1). review_required: default headers start as
---   reviewed = FALSE when TRUE, as reviewed = TRUE when FALSE.
--- distribute_tooled: when FALSE, tooled materials default to single 100% share.
--- ----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS sap_workcenter (
-    plant              TEXT NOT NULL,
-    sap_workcenter     TEXT NOT NULL,
-    description        TEXT,
-    distribution_mode  TEXT NOT NULL DEFAULT 'single'
-                       CHECK (distribution_mode IN ('single','distribute')),
-    default_machine    TEXT,
-    max_separation     TEXT NOT NULL DEFAULT 'none'
-                       CHECK (max_separation IN ('none','hour','day','week')),
-    review_required    BOOLEAN NOT NULL DEFAULT TRUE,
-    distribute_tooled  BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (plant, sap_workcenter)
 );
 
 -- column_metadata: display labels + whether a column is a locked key column.

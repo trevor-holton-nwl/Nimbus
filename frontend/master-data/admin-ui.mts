@@ -26,6 +26,7 @@ import { SetupAdmin } from '../setup/setup-admin.mjs';
 //   - `CalendarUI` is used by both Plant (plant-block modal save) and
 //     ProdLines (line-scoped blackout blocks).
 import { CalendarUI } from '../calendar/calendar-admin.mjs';
+import { EditCalendar } from '../calendar/edit-calendar.mjs';
 //   - `PriorityListMapping` is used only by Plant's priority-list upload flow.
 import { PriorityListMapping } from '../priority-lists/mapping.mjs';
 //   - the injected "am I the visible tab?" getter seam Plant needs (see
@@ -2097,44 +2098,44 @@ export const ProdLines = {
     body.innerHTML = `<div class="lines-detail">
       <div class="ld-header">
         <span class="line-dot" style="background:${color};width:14px;height:14px;border-radius:50%;display:inline-block;flex-shrink:0;"></span>
-        <span class="ld-name">${line}</span>
-        <span class="plant-badge" style="margin-left:auto;">${Store.selectedPlant || '—'}</span>
+        <span class="ld-name">${Util.escapeHtml(line)}</span>
+        <span class="plant-badge" style="margin-left:auto;">${Util.escapeHtml(Store.selectedPlant || '—')}</span>
       </div>
       <div class="ld-settings-row">
         <label class="ld-ctrl-label">
-          <input type="checkbox" class="line-bottleneck-chk" ${ls.bottleneck ? 'checked' : ''} data-line="${line}">
+          <input type="checkbox" class="line-bottleneck-chk" ${ls.bottleneck ? 'checked' : ''} data-line="${Util.escapeHtml(line)}">
           ${Util.t('ui.bottleneck')}
         </label>
         <label class="ld-ctrl-label">
-          <input type="checkbox" class="line-excl-opt-chk" ${ls.excludeFromOpt ? 'checked' : ''} data-line="${line}">
+          <input type="checkbox" class="line-excl-opt-chk" ${ls.excludeFromOpt ? 'checked' : ''} data-line="${Util.escapeHtml(line)}">
           ${Util.t('ui.excl_optimizer_full')}
         </label>
         <span class="ld-buffer">
           <span class="ld-buffer-label">${Util.t('ui.buffer_label')}</span>
           <span class="buf-seg">
-            <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'pct' ? 'active' : ''}" data-line="${line}" data-unit="pct">%</button>
-            <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'hours' ? 'active' : ''}" data-line="${line}" data-unit="hours">hrs</button>
+            <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'pct' ? 'active' : ''}" data-line="${Util.escapeHtml(line)}" data-unit="pct">%</button>
+            <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'hours' ? 'active' : ''}" data-line="${Util.escapeHtml(line)}" data-unit="hours">hrs</button>
           </span>
-          <input type="number" class="input buf-pct-input" ${ls.bufferUnit !== 'pct' ? 'style="display:none"' : ''} min="0" max="100" step="1" value="${ls.bufferPct || 0}" data-line="${line}">
-          <input type="number" class="input buf-hrs-input" ${ls.bufferUnit !== 'hours' ? 'style="display:none"' : ''} min="0" step="0.25" value="${ls.bufferHours || 0}" data-line="${line}">
+          <input type="number" class="input buf-pct-input" ${ls.bufferUnit !== 'pct' ? 'style="display:none"' : ''} min="0" max="100" step="1" value="${ls.bufferPct || 0}" data-line="${Util.escapeHtml(line)}">
+          <input type="number" class="input buf-hrs-input" ${ls.bufferUnit !== 'hours' ? 'style="display:none"' : ''} min="0" step="0.25" value="${ls.bufferHours || 0}" data-line="${Util.escapeHtml(line)}">
         </span>
         <span class="ld-buffer">
           <span class="ld-buffer-label">Production Line Group</span>
-          <input type="text" class="input plgroup-input" style="width:140px;" value="${(ls.plGroup||'').replace(/"/g,'&quot;')}" data-line="${line}" placeholder="e.g. PREMIUM">
+          <input type="text" class="input plgroup-input" style="width:140px;" value="${Util.escapeHtml(ls.plGroup || '')}" data-line="${Util.escapeHtml(line)}" placeholder="e.g. PREMIUM">
         </span>
         <span class="ld-buffer">
           <span class="ld-buffer-label">SAP Work Center</span>
-          <div class="sap-workcenter-combo" id="sap-workcenter-combo-${line}" style="width:140px;"></div>
+          <div class="sap-workcenter-combo" id="sap-workcenter-combo-${Util.escapeHtml(line)}" style="width:140px;"></div>
         </span>
         <span class="ld-buffer">
           <span class="ld-buffer-label">Distribution Weight</span>
-          <input type="text" class="input distribution-weight-input" style="width:140px;" value="${(ls.distributionWeight != null ? ls.distributionWeight : '')}" data-line="${line}" placeholder="—" readonly>
+          <input type="text" class="input distribution-weight-input" style="width:140px;" value="${Util.escapeHtml(String(ls.distributionWeight ?? ''))}" data-line="${Util.escapeHtml(line)}" placeholder="—" readonly>
         </span>
       </div>
       <div class="ld-section">
         <div class="ld-section-head">
           <span class="ld-section-title">${Util.t('ui.working_hours_section')}</span>
-          <button class="btn btn-ghost sm" onclick="NIMBUS.EditCalendar.open('${line}')">${Util.t('btn.edit_calendar')}</button>
+          <button class="btn btn-ghost sm" data-action="edit-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.edit_calendar')}</button>
         </div>
         <div class="ld-section-body">
           <div class="line-hours-pills">${hoursPills}</div>
@@ -2143,10 +2144,10 @@ export const ProdLines = {
       <div class="ld-section">
         <div class="ld-section-head">
           <span class="ld-section-title">${Util.t('ui.line_blackouts_section')}</span>
-          <button class="btn btn-ghost sm" onclick="NIMBUS.ProdLines.openBlockModal('${line}')">+ Add</button>
+          <button class="btn btn-ghost sm" data-action="add-block" data-line="${Util.escapeHtml(line)}">+ Add</button>
         </div>
         <div class="ld-section-body">
-          <div class="line-blocks-list" id="line-blocks-${line}">${ProdLines._renderLineBlocks(line)}</div>
+          <div class="line-blocks-list" id="line-blocks-${Util.escapeHtml(line)}">${ProdLines._renderLineBlocks(line)}</div>
         </div>
       </div>
     </div>`;
@@ -2163,7 +2164,7 @@ export const ProdLines = {
     if (!comboHost) return;
 
     try {
-      const resp = await fetch(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`);
+      const resp = await Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`);
       if (!resp.ok) { ErrorLog.error('master-data', `Failed to fetch work centers: ${resp.status}`); return; }
       const data = (await resp.json()) as MasterDataResponse;
       const wcCodes = data.rows.map(row => (row as any).sap_workcenter as string).filter(Boolean);
@@ -2204,9 +2205,9 @@ export const ProdLines = {
           const scheduledChildren = body.meta?.scheduled_children ?? 0;
           const ok = await Modal.confirm({
             tone: 'warn',
-            detail: Util.t('toast.dist_reassign_confirm', {
+            detail: Util.escapeHtml(Util.t('toast.dist_reassign_confirm', {
               n: total, k: scheduledChildren, machine: line, wc: previousWc || '—',
-            }),
+            })),
           });
           if (!ok) return;
         }
@@ -2230,9 +2231,9 @@ export const ProdLines = {
       const color = Config.COLORS[gi % Config.COLORS.length];
       const ls = Store.lineSettings[line] || {};
       const isActive = ProdLines._activeNavLine === line;
-      return `<div class="lines-nav-item${isActive ? ' active' : ''}" data-line="${line}">
+      return `<div class="lines-nav-item${isActive ? ' active' : ''}" data-line="${Util.escapeHtml(line)}">
         <span class="line-dot" style="background:${color};display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;"></span>
-        <span class="lines-nav-label">${line}</span>
+        <span class="lines-nav-label">${Util.escapeHtml(line)}</span>
         ${ls.bottleneck ? '<span class="lines-nav-bottleneck" title="Bottleneck">🚧</span>' : ''}
         ${ls.excludeFromOpt ? '<span class="lines-nav-excl-opt" title="Excluded from optimization">🚫</span>' : ''}
       </div>`;
@@ -2357,15 +2358,15 @@ export const ProdLines = {
     const lineRows = lineBlocks.map(b => `
       <div class="block-row">
         <span class="ico">■</span>
-        <span class="reason">${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>
+        <span class="reason">${Util.escapeHtml(b.reason || Util.t('ui.blackouts_label', {plural: ''}))}</span>
         <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
-        <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" onclick="NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);">×</button>
+        <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" data-action="remove-block" data-block-id="${Util.escapeHtml(String(b.id))}">×</button>
       </div>`).join('');
 
     const plantRows = plantBlocks.map(b => `
       <div class="block-row" style="opacity:0.75;padding-left:6px;padding-right:6px;">
         <span class="ico" style="color:var(--warn,#93610a);">■</span>
-        <span class="reason">${b.reason || Util.t('ui.plant_blackout_default')}</span>
+        <span class="reason">${Util.escapeHtml(b.reason || Util.t('ui.plant_blackout_default'))}</span>
         <span class="line-tag" style="background:var(--warn-soft,#f8ecd0);color:var(--warn,#93610a);">Plant</span>
         <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
       </div>`).join('');
@@ -2414,6 +2415,20 @@ export const ProdLines = {
     });
 
     body.addEventListener('click', (e: Event) => {
+      const action = (e.target as HTMLElement).closest<HTMLElement>('[data-action]');
+      if (action?.dataset.action === 'edit-calendar') {
+        EditCalendar.open(action.dataset.line || '');
+        return;
+      }
+      if (action?.dataset.action === 'add-block') {
+        ProdLines.openBlockModal(action.dataset.line || '');
+        return;
+      }
+      if (action?.dataset.action === 'remove-block') {
+        CalendarUI.removeBlock(action.dataset.blockId || '');
+        ProdLines._renderDetail(ProdLines._activeNavLine);
+        return;
+      }
       const btn = (e.target as HTMLElement).closest<HTMLElement>('.buf-unit-btn');
       if (!btn) return;
       const line = btn.dataset.line;
@@ -2440,7 +2455,7 @@ export const ProdLines = {
     if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: lines-blk-reason'); return; }
 
     lineSel.innerHTML = CalendarUI._getLines()
-      .map(l => `<option value="${l}"${l === line ? ' selected' : ''}>${l}</option>`).join('');
+      .map(l => `<option value="${Util.escapeHtml(l)}"${l === line ? ' selected' : ''}>${Util.escapeHtml(l)}</option>`).join('');
     if (line) lineSel.value = line;
 
     const now = new Date(); now.setMinutes(0, 0, 0);
@@ -2864,6 +2879,7 @@ export const MasterData = (() => {
   let _activeTable: MasterDataTable = 'subnetworks';
   // Per-table state: { columns, rows, dirty: Map(rowKey→patch), deleted: Set(rowKey), added: [] }
   const _cache: Partial<Record<MasterDataTable, MasterDataTableState>> = {};
+  const _fkLoadWarnings = new Set<MasterDataTable>();
   // Bumped on every _loadAndRender call (table switch, discard, save-triggered
   // reload, ...). A response can only mutate `_cache`/render once it belongs to
   // the latest generation — otherwise a slow-resolving fetch for a table the
@@ -3525,7 +3541,11 @@ export const MasterData = (() => {
 
     // If source not loaded yet, fetch it.
     if (!sourceState) {
-      Util.fetchTraced(`${API}/master-data/${sourceTable}`).then((r) => r.json()).then((data: MasterDataResponse) => {
+      Util.fetchTraced(`${API}/master-data/${sourceTable}`).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<MasterDataResponse>;
+      }).then((data) => {
+        _fkLoadWarnings.delete(sourceTable);
         _cache[sourceTable] = { columns: data.columns, rows: data.rows, dirty: new Map(), deleted: new Set(), added: [] };
         // Rebuild select options.
         while (sel.options.length > 1) sel.remove(1);
@@ -3536,7 +3556,13 @@ export const MasterData = (() => {
           if (r[valCol] === value) opt.selected = true;
           sel.appendChild(opt);
         });
-      }).catch(() => {});
+      }).catch((error) => {
+        ErrorLog.warn('master-data', `Foreign-key options failed for ${sourceTable}: ${String(error)}`);
+        if (!_fkLoadWarnings.has(sourceTable)) {
+          _fkLoadWarnings.add(sourceTable);
+          Toast.show(Util.t('toast.master_data_options_failed'), 'error', 6000);
+        }
+      });
     }
     return sel;
   }
@@ -5162,7 +5188,7 @@ export const WorkCenters = {
   // also capture one on demand (see there) without duplicating the gate
   // check or the payload shape.
   _buildWrite(): WorkCenterWriteRequest | null {
-    const plant = Store.selectedPlant;
+    const plant = WorkCenters._loadedPlant;
     const code = WorkCenters._selected;
     const staged = WorkCenters._staged;
     if (!plant || !code || !staged) return null;

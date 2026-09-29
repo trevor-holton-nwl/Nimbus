@@ -2601,19 +2601,19 @@ export const Hierarchy = {
     const chip = item.pct != null
       ? `<span class="line-util ${item.sev}">${item.pct}%</span>`
       : `<span class="line-util">—</span>`;
-    return `<details class="line-group" data-line="${item.name}"${open ? ' open' : ''}>` +
+    return `<details class="line-group" data-line="${Util.escapeHtml(item.name)}"${open ? ' open' : ''}>` +
       `<summary>` +
       `<span class="line-expand">${open ? '−' : '+'}</span>` +
       `<span class="line-dot" style="background:${item.color}"></span>` +
       (item.pinned ? '<span class="line-pin-ico" aria-hidden="true">📌</span>' : '') +
-      `<span>${item.name}</span>` +
+      `<span>${Util.escapeHtml(item.name)}</span>` +
       `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
       `${chip}</summary>` +
       (open ? item.tasks.map((tk, i) => {
         const firmed = Engine.firmingStatus(tk).firmed;
-        return `<div class="hier-item${firmed ? ' firmed' : ''}" data-id="${tk.id}">` +
+        return `<div class="hier-item${firmed ? ' firmed' : ''}" data-id="${Util.escapeHtml(String(tk.id))}">` +
           (firmed ? '<span class="lock-ico">🔒</span>' : '') +
-          `<span>[${i + 1}] ${tk.ORDER || tk.id}</span></div>`;
+          `<span>[${i + 1}] ${Util.escapeHtml(String(tk.ORDER || tk.id))}</span></div>`;
       }).join('') : '') +
       `</details>`;
   },
@@ -3728,7 +3728,7 @@ export const Interaction = {
         const thisQty = getQty(t);
         const totalQty = siblings.reduce((sum, s) => sum + getQty(s), 0);
         const pct = totalQty > 0 ? Math.round((thisQty / totalQty) * 100) : 0;
-        return `<div class="hov-suborder">${Util.t('ui.hov_suborder', {letter: t.DISTRIBUTION_LETTER || '', parent: t.PARENT_ORDER, pct, count: siblings.length})}</div>`;
+        return `<div class="hov-suborder">${Util.escapeHtml(Util.t('ui.hov_suborder', {letter: t.DISTRIBUTION_LETTER || '', parent: t.PARENT_ORDER, pct, count: siblings.length}))}</div>`;
       })() : '';
 
       return `

@@ -78,6 +78,14 @@ window.__NIMBUS_LOCALES.en = {
   'toast.saved_to_backend':            'Saved to backend',
   'toast.partial_db_save':             '⚠ Only {{persisted}}/{{total}} orders reached the DB — check backend logs',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} order(s) were changed by someone else — refreshed to the latest version',
+  'toast.conflict_refresh_failed':     'Could not refresh orders changed by another planner. Reload before continuing.',
+  'modal.discard_schedule_title':       'Discard unsaved schedule changes?',
+  'modal.discard_schedule_message':     'Switching plants will discard your unsaved schedule changes. Save them first if you want to keep them.',
+  'btn.discard_and_switch':             'Discard and switch',
+  'tab.routing_pv':                    'Routing & Production Versions',
+  'ui.review_distributions':            'Review {{count}} distributions',
+  'toast.delete_filtered_done':         'Deleted {{count}} filtered rows',
+  'toast.delete_filtered_failed':       'Could not delete filtered rows: {{msg}}',
   // PR-1 (2026-09-17): /tasks/refresh's `missing` + /tasks/update's `not_found_ids`
   // both remove ghost tasks from Store; en-only for now — de/es/fr/pt get this
   // during the Order Distribution feature's locale pass (see persistence.mts's
@@ -137,6 +145,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.cascade_preview_failed':      'Could not verify what this delete would affect — try again.',
   // Work Centers tab (§4.3).
   'toast.wc_load_failed':               'Could not load work centers — try again.',
+  'toast.master_data_options_failed':  'Could not load list options. Check access and try again.',
   'toast.wc_invalid_weight':            'Weight must be a number ≥ 0',
   'toast.wc_saved':                     'Work center {{code}} saved',
   'toast.wc_save_failed':               'Save failed: {{msg}}',

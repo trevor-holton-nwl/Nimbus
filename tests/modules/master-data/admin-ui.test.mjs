@@ -307,6 +307,34 @@ test('WorkCenters._wcBlockReason covers every gate rule with the exact backend r
   );
 });
 
+test('WorkCenters._buildWrite keeps the loaded plant during a selection change', () => {
+  const previous = {
+    loadedPlant: WorkCenters._loadedPlant, selected: WorkCenters._selected,
+    staged: WorkCenters._staged, machines: WorkCenters._machines,
+    plant: Store.selectedPlant,
+  };
+  try {
+    WorkCenters._loadedPlant = 'PLANT-A';
+    WorkCenters._selected = 'WC-1';
+    WorkCenters._staged = {
+      description: '', distribution_mode: 'distribute', default_machine: '',
+      max_separation: 'none', review_required: false, distribute_tooled: false, weights: {},
+    };
+    WorkCenters._machines = [
+      { machine: 'M1', sap_workcenter: 'WC-1' },
+      { machine: 'M2', sap_workcenter: 'WC-1' },
+    ];
+    Store.setSelectedPlant('PLANT-B', 'unit-test');
+    assert.equal(WorkCenters._buildWrite()?.plant, 'PLANT-A');
+  } finally {
+    WorkCenters._loadedPlant = previous.loadedPlant;
+    WorkCenters._selected = previous.selected;
+    WorkCenters._staged = previous.staged;
+    WorkCenters._machines = previous.machines;
+    Store.setSelectedPlant(previous.plant, 'unit-test');
+  }
+});
+
 // Work centers are now source data (SAP interface ingest or the Admin >
 // Manage Plant Data grid) — this pins that the removed creation surface
 // (toggle/form/create/cancel controls and the old staged-edit Save/Discard

@@ -75,7 +75,7 @@ def _log_event(level: str, category: str, msg: str, *,
         via db.translate_db_error; else omitted.
       - `rid`: read from the request contextvar so every event auto-carries it
         (and populates the _JsonFormatter rid slot)."""
-    ts = pd.Timestamp.utcnow().isoformat()
+    ts = pd.Timestamp.now('UTC').isoformat()
     rid = _current_rid()
     entry: dict = {
         "ts":       ts,

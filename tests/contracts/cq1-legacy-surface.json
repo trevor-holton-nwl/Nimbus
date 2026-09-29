@@ -469,27 +469,7 @@
     {
       "file": "insights/insights-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._gotoLine('${Util.escapeHtml(line)}','${Util.escapeHtml(d)}')"
-    },
-    {
-      "file": "insights/insights-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._jumpToOrder('${Util.escapeHtml(t.id)}')"
-    },
-    {
-      "file": "insights/insights-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._latenessDrill('${Util.escapeHtml(line)}','${dk}')"
-    },
-    {
-      "file": "insights/insights-ui.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.Dashboard._latenessDrillClear()"
-    },
-    {
-      "file": "insights/insights-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Dashboard._unfirm('${t.id}')"
     },
     {
       "file": "labor/labor-planning.mjs",
@@ -519,16 +499,6 @@
     {
       "file": "master-data/admin-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.CalendarUI.removeBlock('${b.id}'); NIMBUS.ProdLines._renderDetail(NIMBUS.ProdLines._activeNavLine);"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.EditCalendar.open('${line}')"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.Plant._pillClick(${d})"
     },
     {
@@ -543,23 +513,8 @@
     },
     {
       "file": "master-data/admin-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.ProdLines.openBlockModal('${line}')"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
       "attribute": "oncontextmenu",
       "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
-    },
-    {
-      "file": "optimization/optimize-ui.mjs",
-      "attribute": "onchange",
-      "expression": "NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)"
-    },
-    {
-      "file": "optimization/optimize-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.selectPlant('${safe}')"
     },
     {
       "file": "platform/foundation.mjs",
@@ -723,6 +678,7 @@
     "UndoStack.restoreTasks",
     "UndoStack.snapshotTasks",
     "Util.debounce",
+    "Util.escapeHtml",
     "Util.norm",
     "Util.scheduleIntervals",
     "Util.startOfDay",

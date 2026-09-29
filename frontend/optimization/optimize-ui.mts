@@ -144,7 +144,7 @@ export const OptimizeDialog = (() => {
     _plant = (Store.selectedPlant && _allPlants.includes(Store.selectedPlant))
       ? Store.selectedPlant
       : (_plant && _allPlants.includes(_plant) ? _plant : null);
-    if (_plant) Store.setSelectedPlant(_plant, 'optimize-dialog');
+    if (_plant && Persistence._dirtyIds.size === 0) Store.setSelectedPlant(_plant, 'optimize-dialog');
     _renderPlantList(_allPlants);
     _updateTriggerLabel();
     _initDropdownListener();
@@ -158,11 +158,12 @@ export const OptimizeDialog = (() => {
       return;
     }
     list.innerHTML = plants.map((p) => {
-      const safe = p.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return `<li class="opt-plant-item${_plant === p ? ' selected' : ''}" role="option"
            aria-selected="${_plant === p}"
-           onclick="NIMBUS.OptimizeDialog.selectPlant('${safe}')">${p}</li>`;
+           data-plant="${Util.escapeHtml(p)}">${Util.escapeHtml(p)}</li>`;
     }).join('');
+    list.querySelectorAll<HTMLElement>('.opt-plant-item').forEach(item =>
+      item.addEventListener('click', () => { void selectPlant(item.dataset.plant || ''); }));
   }
 
   function _updateTriggerLabel() {
@@ -212,7 +213,8 @@ export const OptimizeDialog = (() => {
     _renderPlantList(q ? _allPlants.filter((p) => p.toLowerCase().includes(q)) : _allPlants);
   }
 
-  function selectPlant(plant: string) {
+  async function selectPlant(plant: string) {
+    if (!await Persistence.confirmPlantSwitch(plant)) return;
     _plant = plant;
     Store.setSelectedPlant(plant, 'optimize-dialog');
     _renderPlantList(_allPlants);
@@ -275,20 +277,21 @@ export const OptimizeDialog = (() => {
       list.innerHTML = `<li class="opt-lines-empty">${Util.t('ui.no_matches')}</li>`;
     } else {
       list.innerHTML = visible.map((line) => {
-        const safe = line.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const checked = _selectedLines.has(line) ? 'checked' : '';
         const oc = orderCounts[line] || 0;
         const excluded = (Store.lineSettings[line] || {}).excludeFromOpt;
         const exTag = excluded ? '<span class="opt-line-excluded" title="Globally excluded from optimization">excluded</span>' : '';
         return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}" role="option" aria-selected="${!!checked}">
             <label class="opt-line-label">
-              <input type="checkbox" ${checked} onchange="NIMBUS.OptimizeDialog._onLineToggle('${safe}', this.checked)">
-              <span class="opt-line-name">${line}</span>
+              <input type="checkbox" ${checked} data-line="${Util.escapeHtml(line)}">
+              <span class="opt-line-name">${Util.escapeHtml(line)}</span>
               ${exTag}
               <span class="opt-line-orders">${oc} order${oc === 1 ? '' : 's'}</span>
             </label>
           </li>`;
       }).join('');
+      list.querySelectorAll<HTMLInputElement>('input[data-line]').forEach(input =>
+        input.addEventListener('change', () => _onLineToggle(input.dataset.line || '', input.checked)));
     }
 
     if (count) count.textContent = `${_selectedLines.size} of ${allLines.length} selected`;
@@ -2049,9 +2052,9 @@ export const OptimizerPreview = {
       const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
       link.download = `missing-setups-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
     });
-    body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', () => {
-      const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => void } } }).NIMBUS?.SetupAdmin;
-      if (setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
+    body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', async () => {
+      const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => Promise<boolean> } } }).NIMBUS?.SetupAdmin;
+      if (await setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
     });
     OptimizerPreview._syncApplyButton();
   },
@@ -2077,7 +2080,7 @@ export const OptimizerPreview = {
     }
     OptimizerPreview._applying = true;
     if (auditDetails && plant) {
-      fetch(`${Config.API_BASE}/audit/log`, {
+      Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
         body: JSON.stringify({
           action: 'optimization_run', plant,
@@ -2097,7 +2100,7 @@ export const OptimizerPreview = {
     if (mode === 'backlog' && OptimizerPreview._backlogResult && OptimizerPreview._backlogAudit) {
       const audit = OptimizerPreview._backlogAudit;
       const diagnostics = OptimizerPreview._backlogResult.diagnostics;
-      fetch(`${Config.API_BASE}/audit/log`, {
+      Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
         body: JSON.stringify({
           action: 'optimization_run', plant: audit.plant,

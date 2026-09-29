@@ -20,6 +20,7 @@ os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import brain  # noqa: E402
 import backend.routing.resolver as routing_resolver  # noqa: E402
+from backend.scheduling import routes as scheduling_routes  # noqa: E402
 
 
 SAMPLE_TASK_ROW = {
@@ -344,7 +345,8 @@ class _FakeConflictCursor(_FakeSegmentCursor):
 
 
 def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(monkeypatch):
-    t = lambda h: datetime(2026, 8, 17, h, 0)
+    def t(h):
+        return datetime(2026, 8, 17, h, 0)
     eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     conflict_rows = [("L1", "PLANT-A", "mv-a", [], t(8), t(10)), ("L1", "PLANT-A", "mv-b", [], t(9), t(11))]
     cursor = _FakeConflictCursor(eff_rows, plant_rows=[], conflict_rows=conflict_rows)
@@ -363,7 +365,8 @@ def test_update_task_dates_bulk_returns_advisory_conflicts_and_still_commits(mon
 
 
 def test_update_task_dates_bulk_strict_conflicts_rolls_back_only_with_atomic_optimizer(monkeypatch):
-    t = lambda h: datetime(2026, 8, 17, h, 0)
+    def t(h):
+        return datetime(2026, 8, 17, h, 0)
     eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     conflict_rows = [("L1", "PLANT-A", "mv-a", [], t(8), t(10)), ("L1", "PLANT-A", "mv-b", [], t(9), t(11))]
     item = {"id": "mv-a", "start": t(8), "end": t(10), "base_version": 100}
@@ -399,7 +402,8 @@ class _FakeScanErrorCursor(_FakeSegmentCursor):
 
 
 def test_update_task_dates_bulk_advisory_scan_failure_does_not_block_a_valid_save(monkeypatch):
-    t = lambda h: datetime(2026, 8, 17, h, 0)
+    def t(h):
+        return datetime(2026, 8, 17, h, 0)
     eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     cursor = _FakeScanErrorCursor(eff_rows, plant_rows=[])
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
@@ -421,7 +425,8 @@ def test_update_task_dates_bulk_strict_conflicts_scan_failure_propagates_and_rol
     failure must propagate (never silently swallowed into 'no conflicts') and
     the whole transaction must roll back — never a COMMIT on a transaction the
     failed scan may have left aborted."""
-    t = lambda h: datetime(2026, 8, 17, h, 0)
+    def t(h):
+        return datetime(2026, 8, 17, h, 0)
     eff_rows = [_eff_row("mv-a", t(6), t(8), 2.0, 100, 0, "PLANT-A", "L1")]
     cursor = _FakeScanErrorCursor(eff_rows, plant_rows=[])
     pool = _FakeSegmentPool(cursor)
@@ -458,6 +463,32 @@ def _routing_eff_row(order_id, plant="PLANT-R", machine="M1", **overrides):
     return _eff_row(order_id, kwargs.pop("start"), kwargs.pop("end"), kwargs.pop("run_time"),
                      kwargs.pop("row_version"), kwargs.pop("segment_count"), kwargs.pop("plant"),
                      kwargs.pop("machine"), **kwargs)
+
+
+@pytest.mark.parametrize("row", [
+    _routing_eff_row("unchanged-child", routing_runtime_enabled=False, parent_order="PARENT"),
+    _routing_eff_row("unchanged-routing"),
+])
+def test_full_browser_save_payload_accepts_unchanged_machine_and_runtime(monkeypatch, row):
+    cursor = _FakeSegmentCursor([row], plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    monkeypatch.setattr(routing_resolver, "check_eligibility",
+                        lambda *a, **k: pytest.fail("unchanged machine/version must not recheck eligibility"))
+    monkeypatch.setattr(routing_resolver, "resolve_orders",
+                        lambda *a, **k: pytest.fail("unchanged machine/version must not trigger resolve"))
+    payload = brain.TaskDateUpdate.model_validate({
+        "id": row[0], "start_date": "2026-06-02T08:00:00", "end_date": "2026-06-02T10:00:00",
+        "planning_status": "scheduled", "planning_reason": None,
+        "PRT_01": None, "PRT_02": None, "PRODUCTION_VERSION": "0001",
+        "RUN_TIME": 2.0, "MACHINE": "M1", "schedule_segments": [],
+        "base_version": 100, "force": False,
+    })
+
+    result = brain._apply_task_date_updates([payload])
+
+    assert result["invalid_ids"] == []
+    assert result["persisted"] == 1
+    assert result["versions"] == {row[0]: 999}
 
 
 def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch):
@@ -503,7 +534,7 @@ def test_update_task_dates_bulk_accepts_an_eligible_machine_change_and_reresolve
     monkeypatch.setattr(routing_resolver, "check_eligibility",
                         lambda *a, **k: {"ok": True, "hours": 3.0, "basis": {}})
     resolved_plants = []
-    monkeypatch.setattr(routing_resolver, "resolve_orders", lambda plant: resolved_plants.append(plant))
+    monkeypatch.setattr(routing_resolver, "resolve_orders", resolved_plants.append)
 
     result = brain.db.update_task_dates_bulk([{"id": "r-good", "MACHINE": "M2", "base_version": 100}])
 
@@ -571,9 +602,6 @@ def test_tasks_endpoint_response_validates_live(client):
         assert "id" in row and "start_date" in row and "row_version" in row
 
 
-from backend.scheduling import routes as scheduling_routes
-
-
 def test_bulk_update_alias_strips_a_caller_supplied_force_flag(monkeypatch):
     """N2: the flat-list alias is the one route where an external caller could
     send force:true and overwrite another planner's edit. It must reach the db
@@ -602,7 +630,8 @@ def test_detect_interval_conflicts_reports_strict_overlaps_only():
     intentional), segments of one order never conflict with each other, pairs
     on different machines never conflict, and only pairs involving a touched
     order are reported."""
-    t = lambda h, m=0: datetime(2026, 8, 17, h, m)
+    def t(h, m=0):
+        return datetime(2026, 8, 17, h, m)
     intervals = [
         ("L1", "a", t(8), t(10)),
         ("L1", "b", t(9), t(11)),          # overlaps a by 60 min

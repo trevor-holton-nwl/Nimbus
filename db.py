@@ -1185,6 +1185,16 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if allowed_plants is not None and current["plant"] not in allowed_plants:
                 not_found_ids.append(tid)   # out-of-scope looks identical to nonexistent
                 continue
+            # The browser's save snapshot includes these fields on every edit.
+            # Only changed values are edits for the child-machine lock and the
+            # routing eligibility/runtime gates below.
+            if attrs.get("MACHINE") == current["machine"]:
+                attrs.pop("MACHINE", None)
+            if attrs.get("PRODUCTION_VERSION") == current["production_version"]:
+                attrs.pop("PRODUCTION_VERSION", None)
+            if has_runtime and (_canonical_runtime_minutes(it.get("RUN_TIME"))
+                                == _canonical_runtime_minutes(current["run_time"])):
+                has_runtime = False
             # Sub-order machine lock (decision C, aggregate_to_detail.md §8): a
             # distribution child order (PARENT_ORDER set) may only move via its
             # distribution share, never a direct MACHINE edit. The client already

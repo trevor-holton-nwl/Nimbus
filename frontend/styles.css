@@ -6565,7 +6565,7 @@ button.setup-coverage-tile { cursor: pointer; }
 .setup-list-remove { border: 0; background: none; color: var(--fg-faint); cursor: pointer; font-size: 14px; line-height: 1; }
 .setup-list-revert { border: 0; background: none; color: var(--fg-mute); cursor: pointer; font-size: 14px; line-height: 1; }
 .setup-list-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0 0; font-size: 11.5px; color: var(--fg-mute); }
-.setup-list-delete { border: 0; background: none; color: var(--danger, #c0392b); cursor: pointer; font-size: 14px; line-height: 1; }
+.setup-list-delete { border: 0; background: none; color: var(--err); cursor: pointer; font-size: 14px; line-height: 1; }
 /* Workstream D3 (2026-08-20): bulk/delete-all row actions below the List footer. */
 .setup-list-bulk-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0 0; border-top: 1px solid var(--border-subtle, var(--border)); margin-top: 8px; font-size: 11.5px; }
 .setup-list-delete-all { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

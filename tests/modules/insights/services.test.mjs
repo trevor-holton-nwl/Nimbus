@@ -101,6 +101,27 @@ test('Alerts.recompute with no worker/no plant falls back to sync compute', () =
   assert.doesNotThrow(() => Alerts.recompute());
 });
 
+test('Alerts.recompute schedules a fresh pass when the worker result is stale', async () => {
+  const priorAvailable = Compute.available;
+  const priorAlerts = Compute.alerts;
+  const priorSchedule = Alerts.scheduleRecompute;
+  let queued = 0;
+  Store.setSelectedPlant('PLANT-STABLE', 'unit-test');
+  Compute.available = () => true;
+  Compute.alerts = async () => ({ alerts: [], elapsed: 1 });
+  Alerts.scheduleRecompute = () => { queued += 1; };
+  try {
+    Alerts.recompute();
+    Store.emit({ type: 'unit-test:revision', source: 'unit-test' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(queued, 1);
+  } finally {
+    Compute.available = priorAvailable;
+    Compute.alerts = priorAlerts;
+    Alerts.scheduleRecompute = priorSchedule;
+  }
+});
+
 
 test('Alerts.scheduleRecompute/{,Lines} debounce and eventually call recompute (adaptive delay)', async () => {
   let recomputeCalls = 0;

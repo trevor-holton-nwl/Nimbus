@@ -13,8 +13,38 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Config, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Config, Toast, Util, Modal } from '../../../frontend/platform/foundation.mjs';
 import { UndoStack } from '../../../frontend/platform/store.mjs';
+
+test('plant switch guard keeps dirty edits on cancel and clears them on discard', async () => {
+  const priorConfirm = Modal.confirm;
+  const priorDirty = new Set(Persistence._dirtyIds);
+  const priorForce = new Set(Persistence._forceIds);
+  const priorPlant = Store.selectedPlant;
+  const priorLoadedPlant = Persistence._currentLoadedPlant;
+  try {
+    Store.setSelectedPlant('PLANT-A', 'test');
+    Persistence._currentLoadedPlant = 'PLANT-A';
+    Persistence._dirtyIds.add('order-a');
+    Persistence._forceIds.add('order-a');
+    Modal.confirm = async () => false;
+    assert.equal(await Persistence.confirmPlantSwitch('PLANT-B'), false);
+    assert.equal(Persistence._dirtyIds.has('order-a'), true);
+    Modal.confirm = async () => true;
+    assert.equal(await Persistence.confirmPlantSwitch('PLANT-B'), true);
+    assert.equal(Persistence._dirtyIds.size, 0);
+    assert.equal(Persistence._forceIds.size, 0);
+    assert.equal(Persistence._currentLoadedPlant, null);
+  } finally {
+    Modal.confirm = priorConfirm;
+    Persistence._dirtyIds.clear();
+    Persistence._forceIds.clear();
+    for (const id of priorDirty) Persistence._dirtyIds.add(id);
+    for (const id of priorForce) Persistence._forceIds.add(id);
+    Persistence._currentLoadedPlant = priorLoadedPlant;
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
 
 test('Needs Planning survives API hydration, cached moves, normalization and undo with no committed dates', () => {
   const due = new Date('2026-09-09T18:00:00');
@@ -123,17 +153,22 @@ test('optimizer save is atomic without force and a conflict leaves every depende
   } finally { globalThis.fetch = original; Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
 });
 
-test('offline reload preserves dependent optimizer dirty state and cannot trim part of the cached group', () => {
+test('offline reload preserves both ordinary and dependent optimizer dirty state', () => {
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   const tasks = [{ id: 'offline-queue', MACHINE: 'L1', RUN_TIME: 6, row_version: 7,
-    planning_status: 'needs_planning', start_date: null, end_date: null }];
+    planning_status: 'needs_planning', start_date: null, end_date: null },
+  { id: 'offline-move', MACHINE: 'L1', RUN_TIME: 1, row_version: 8,
+    start_date: new Date('2026-09-10T08:00:00'), end_date: new Date('2026-09-10T09:00:00') }];
   Store.setTasks(tasks, 'unit-test');
   Persistence._dirtyIds.add('offline-queue'); Persistence._forceIds.add('offline-queue');
+  Persistence._dirtyIds.add('offline-move');
   Persistence._saveCache();
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   assert.equal(Persistence._loadCache(), true);
   assert.ok(Persistence._dirtyIds.has('offline-queue'));
+  assert.ok(Persistence._dirtyIds.has('offline-move'));
   assert.ok(Persistence._forceIds.has('offline-queue'));
+  assert.ok(!Persistence._forceIds.has('offline-move'));
   assert.equal(Store.tasks['offline-queue'].start_date, null);
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   globalThis.localStorage.removeItem(Config.LS_KEY);
@@ -288,6 +323,34 @@ function makeStorage() {
   };
 }
 globalThis.localStorage = globalThis.localStorage || makeStorage();
+
+test('conflict refresh sends identity and API key and reports a failed refresh', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousToast = Toast.show;
+  const calls = [];
+  const toasts = [];
+  Util.setActorResolver(() => 'planner@example.com');
+  Util.setApiKey('test-key');
+  globalThis.fetch = async (_url, options) => {
+    calls.push(options.headers);
+    return { ok: false, status: 401 };
+  };
+  Toast.show = (...args) => { toasts.push(args); };
+  try {
+    Persistence._refreshTasks(['order-1']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].get('x-user-email'), 'planner@example.com');
+    assert.equal(calls[0].get('x-api-key'), 'test-key');
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0][1], 'error');
+  } finally {
+    globalThis.fetch = previousFetch;
+    Toast.show = previousToast;
+    Util.setApiKey('');
+    Util.setActorResolver(() => undefined);
+  }
+});
 
 test('Persistence.setCalendarService is settable and Persistence works with a stub before it is wired', () => {
   assert.equal(typeof Persistence.setCalendarService, 'function');

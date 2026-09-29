@@ -709,7 +709,7 @@ export const Dashboard = {
         const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(2);
         const sched   = (matrix[line][d]?.scheduled || 0).toFixed(2);
         const effNote = effCap !== cap ? ` · limit ${effCap}h` : '';
-        html += `<button type="button" class="hm-cell" data-line="${Util.escapeHtml(line)}" data-date="${Util.escapeHtml(d)}" style="background:${bg};color:${tc}" title="Click to view ${Util.escapeHtml(line)} on ${Util.escapeHtml(d)} · ${lbl} (${sched}h / ${cap}h${effNote})" onclick="NIMBUS.Dashboard._gotoLine('${Util.escapeHtml(line)}','${Util.escapeHtml(d)}')">${lbl}</button>`;
+        html += `<button type="button" class="hm-cell" data-line="${Util.escapeHtml(line)}" data-date="${Util.escapeHtml(d)}" style="background:${bg};color:${tc}" title="Click to view ${Util.escapeHtml(line)} on ${Util.escapeHtml(d)} · ${lbl} (${sched}h / ${cap}h${effNote})">${lbl}</button>`;
       });
     });
 
@@ -721,6 +721,8 @@ export const Dashboard = {
       </div>`;
 
     container.innerHTML = html;
+    container.querySelectorAll<HTMLElement>('.hm-cell').forEach(cell =>
+      cell.addEventListener('click', () => Dashboard._gotoLine(cell.dataset.line || '', cell.dataset.date || '')));
   },
 
 
@@ -903,12 +905,14 @@ export const Dashboard = {
     list.innerHTML = firmed.slice(0, 12).map(t => `
       <div class="firmed-row">
         <span class="pin">🔒</span>
-        <span class="id">${t.MACHINE || ''}</span>
-        <span class="name">${t.text || t.ORDER || t.id}</span>
+        <span class="id">${Util.escapeHtml(t.MACHINE || '')}</span>
+        <span class="name">${Util.escapeHtml(t.text || t.ORDER || t.id)}</span>
         <span class="when">${Util.fmtDT(t.start_date).slice(5, 16)}</span>
-        <button class="btn btn-ghost sm" onclick="NIMBUS.Dashboard._unfirm('${t.id}')">${Util.t('btn.unfirm_dashboard')}</button>
+        <button class="btn btn-ghost sm" data-order-id="${Util.escapeHtml(String(t.id))}">${Util.t('btn.unfirm_dashboard')}</button>
       </div>
     `).join('');
+    list.querySelectorAll<HTMLButtonElement>('[data-order-id]').forEach(button =>
+      button.addEventListener('click', () => Dashboard._unfirm(button.dataset.orderId || '')));
   },
   _unfirm(id: string): void {
     Store.setFirmed([id], false, 'dashboard');
@@ -1027,8 +1031,8 @@ export const Dashboard = {
         // keyboard access; on-plan cells stay inert divs (nothing to activate).
         const tag = h > 0 ? 'button' : 'div';
         const typeAttr = h > 0 ? ' type="button"' : '';
-        const click = h > 0 ? ` onclick="NIMBUS.Dashboard._latenessDrill('${Util.escapeHtml(line)}','${dk}')"` : '';
-        html += `<${tag}${typeAttr} class="lh-cell" style="background:${bg};color:${tc}" title="${Util.escapeHtml(title)}"${click}>${lbl}</${tag}>`;
+        const data = h > 0 ? ` data-line="${Util.escapeHtml(line)}" data-date="${Util.escapeHtml(dk)}"` : '';
+        html += `<${tag}${typeAttr} class="lh-cell" style="background:${bg};color:${tc}" title="${Util.escapeHtml(title)}"${data}>${lbl}</${tag}>`;
       }
     });
 
@@ -1045,6 +1049,8 @@ export const Dashboard = {
       </div>`;
 
     container.innerHTML = html;
+    container.querySelectorAll<HTMLButtonElement>('button.lh-cell').forEach(cell =>
+      cell.addEventListener('click', () => Dashboard._latenessDrill(cell.dataset.line || '', cell.dataset.date || '')));
 
     // Re-render drill panel if a cell is still selected
     Dashboard._renderLatenessDrill(cells);
@@ -1076,7 +1082,7 @@ export const Dashboard = {
         const lateLbl = days >= 1 ? `+${days.toFixed(1)}d` : `+${lh.toFixed(1)}h`;
         const due = Util.sapDueDate(t);
         const sched = Util.scheduledEnd(t);
-        return `<div class="lh-drill-row" onclick="NIMBUS.Dashboard._jumpToOrder('${Util.escapeHtml(t.id)}')">
+        return `<div class="lh-drill-row" role="button" tabindex="0" data-order-id="${Util.escapeHtml(String(t.id))}">
           <span class="lh-drill-id">${Util.escapeHtml(t.id).slice(0, 10)}</span>
           <span class="lh-drill-name">${Util.escapeHtml(t.text || t.ORDER || t.MATERIAL_DESCRIPTION || t.id)}</span>
           <span class="lh-drill-due">due ${due ? Util.fmtDT(due).slice(5, 16) : '—'}</span>
@@ -1092,6 +1098,15 @@ export const Dashboard = {
         <button class="lh-drill-close" onclick="NIMBUS.Dashboard._latenessDrillClear()" title="Close">×</button>
       </div>
       ${rows}${more}`;
+    drill.querySelectorAll<HTMLElement>('.lh-drill-row').forEach(row => {
+      row.addEventListener('click', () => Dashboard._jumpToOrder(row.dataset.orderId || ''));
+      row.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          Dashboard._jumpToOrder(row.dataset.orderId || '');
+        }
+      });
+    });
     drill.hidden = false;
   },
 

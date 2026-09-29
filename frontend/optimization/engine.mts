@@ -167,7 +167,6 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
     return {
       tasks,
       firmedIds: Array.from(Store.firmedIds), // manual firms only — ECC/frozen derivation joins at the setup-aware fold; do not union here.
-      alerts: structuredClone(Store.alerts),
       selectedPlant: Store.selectedPlant,
       blocks: structuredClone(Store.blocks),
       plantBlocks: structuredClone(Store.plantBlocks),
@@ -2096,7 +2095,8 @@ export const Engine = {
         return result;
       }
       if (result.patches.length) {
-        const undoTasks = structuredClone(snapshot.tasks.filter(task => result.patches.some(patch => patch.id === String(task.id))));
+        const patchIds = new Set(result.patches.map(patch => patch.id));
+        const undoTasks = structuredClone(snapshot.tasks.filter(task => patchIds.has(String(task.id))));
         UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks));
       }
       applySchedulePatches(result.patches);

@@ -48,11 +48,11 @@ class _FakeCursor:
             self._result = [(p,) for p in self.known_plants if p in wanted]
         elif "FROM material_plants" in stmt:
             plant_list, material_list = params
-            wanted = set(zip(plant_list, material_list))
+            wanted = set(zip(plant_list, material_list, strict=True))
             self._result = [(p, m) for (p, m) in self.known_mp if (p, m) in wanted]
         elif "FROM sap_workcenter" in stmt:
             plant_list, wc_list = params
-            wanted = set(zip(plant_list, wc_list))
+            wanted = set(zip(plant_list, wc_list, strict=True))
             self._result = [(p, w) for (p, w) in self.known_wc if (p, w) in wanted]
         else:
             self._result = []

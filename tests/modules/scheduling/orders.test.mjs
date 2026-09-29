@@ -15,6 +15,34 @@ import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
 
+test('note edits skip unchanged text and restamp the returned row version', async () => {
+  const id = 'note-version-test';
+  const priorTimeout = globalThis.setTimeout;
+  const priorFetch = Util.fetchTraced;
+  const events = [];
+  const unsubscribe = Store.subscribe(event => { if (event.id === id) events.push(event); });
+  Store.tasks[id] = { id, notes: 'old', row_version: 4, MACHINE: 'L1' };
+  let fire;
+  try {
+    globalThis.setTimeout = callback => { fire = callback; return 1; };
+    Util.fetchTraced = async () => ({ ok: true, json: async () => ({ versions: { [id]: 9 } }) });
+    Inspector._updateNote(id, 'old');
+    assert.equal(fire, undefined, 'unchanged blur does not POST');
+    Inspector._updateNote(id, 'new');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].source, 'note');
+    globalThis.setTimeout = priorTimeout;
+    fire();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(Store.tasks[id].row_version, 9);
+  } finally {
+    globalThis.setTimeout = priorTimeout;
+    Util.fetchTraced = priorFetch;
+    delete Store.tasks[id];
+    unsubscribe();
+  }
+});
+
 test('Needs Planning filter retains queued demand within selected machines and excludes scheduled peers', () => {
   const prior = Table._chipFilters;
   try {

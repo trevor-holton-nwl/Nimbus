@@ -149,7 +149,7 @@ export const Security = (() => {
   }
 
   function _postJSON(url: string, body: unknown): Promise<unknown> {
-    return fetch(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
+    return Util.fetchTraced(url, { method: 'POST', headers: _writeHeaders(), body: JSON.stringify(body) })
       .then((r) => {
         if (!r.ok) {
           // A 403 here means the backend admin gate rejected us though the UI
@@ -757,7 +757,7 @@ export const Security = (() => {
     const roleRow = _roles.find((r) => r.role === role);
     const pages: Partial<Record<TopLevelTab, boolean>> = { ..._defaultPageAccess(role), ...(roleRow?.pages || {}), [tab]: checked };
     try {
-      const r = await fetch(`${API}/master-data/roles/${encodeURIComponent(role)}/page-access`, {
+      const r = await Util.fetchTraced(`${API}/master-data/roles/${encodeURIComponent(role)}/page-access`, {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body:    JSON.stringify({ pages }),

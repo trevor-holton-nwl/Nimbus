@@ -1473,7 +1473,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <aside class="side side-right" id="right-sidebar">
         <header class="side-head">
           <h4 data-i18n="ui.sidebar_inspector">Inspector</h4>
-          <button class="icon-btn sm" id="right-sidebar-toggle-btn">✕</button>
+          <button class="icon-btn sm" id="right-sidebar-toggle-btn" aria-label="Close sidebar">✕</button>
         </header>
         <div class="inspector-body" id="inspector-body">
           <div class="empty-state" data-i18n="empty.select_order">Select an order to inspect.</div>
@@ -2208,7 +2208,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <h3 data-i18n="ui.alerts_title">Alerts</h3>
     <div>
       <button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismissAll()" data-i18n="btn.dismiss_all">Dismiss all</button>
-      <button class="icon-btn sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()" aria-label="Close">✕</button>
     </div>
   </header>
   <div class="drawer-body" id="alert-drawer-body"></div>
@@ -2237,7 +2237,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal">
     <header class="modal-head">
       <h3>Change Plant</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-change-plant')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-change-plant')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <input type="text" id="cpm-search" placeholder="Search plants…" autocomplete="off" spellcheck="false">
@@ -2256,7 +2256,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal">
     <header class="modal-head">
       <h3 data-i18n="sec.user_settings_title">User Settings</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-user-settings')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-user-settings')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <nav class="us-tabs" role="tablist" style="display:flex;gap:6px;margin-bottom:14px;">
@@ -2324,7 +2324,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal">
     <header class="modal-head">
       <h3>Override order date</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row">
@@ -2363,7 +2363,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal">
     <header class="modal-head">
       <h3 id="block-modal-title">Blackout block</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-block')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-block')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row">
@@ -2399,7 +2399,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal" style="max-width:860px;">
     <header class="modal-head">
       <h3>Export Orders</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-print')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-print')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" style="padding:16px;">
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
@@ -2424,7 +2424,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal">
     <header class="modal-head">
       <h3>Add plant blackout</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-plant-block')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-plant-block')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row form-row-2">
@@ -2456,7 +2456,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal">
     <header class="modal-head">
       <h3>Add line blackout</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-lines-block')">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-lines-block')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row">
@@ -2516,7 +2516,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <span class="owb-icon">○</span>
         </span>
       </div>
-      <button class="opt-close" onclick="NIMBUS.OptimizeDialog.close()">✕</button>
+      <button class="opt-close" onclick="NIMBUS.OptimizeDialog.close()" aria-label="Close">✕</button>
     </div>
 
     <div class="opt-body">
@@ -2627,7 +2627,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal" style="max-width:340px">
     <header class="modal-head">
       <h3>From Date</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelFromPicker()">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelFromPicker()" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" style="padding:12px">
       <div id="opt-from-cal"></div>
@@ -2647,7 +2647,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal" style="max-width:340px">
     <header class="modal-head">
       <h3>To Date</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelToPicker()">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelToPicker()" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" style="padding:12px">
       <div id="opt-to-cal"></div>
@@ -2668,7 +2668,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal" style="max-width:760px;">
     <header class="modal-head">
       <h3 data-i18n="ui.opt_pv_modal_title">Optimization impact preview</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.OptimizerPreview.discard()">✕</button>
+      <button class="icon-btn sm" onclick="NIMBUS.OptimizerPreview.discard()" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" id="opt-preview-body" style="padding:18px 20px;">
       <!-- Filled by OptimizerPreview._render() -->
@@ -2693,7 +2693,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-header-title">Color Wheel &middot; <span id="cw-viewer-plant-name">—</span></div>
         <div class="opt-header-sub" id="cw-viewer-meta">—</div>
       </div>
-      <button class="opt-close" onclick="NIMBUS.ColorWheelViewer.close()">✕</button>
+      <button class="opt-close" onclick="NIMBUS.ColorWheelViewer.close()" aria-label="Close">✕</button>
     </div>
 
     <div class="cw-viewer-toolbar">
@@ -2738,7 +2738,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal" style="max-width:520px">
     <div class="modal-head">
       <h3 data-i18n="ui.mapping_modal_title">Map columns</h3>
-      <button class="modal-close" id="pl-mapping-close-btn">&times;</button>
+      <button class="modal-close" id="pl-mapping-close-btn" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
       <p style="margin:0 0 12px;font-size:12.5px;color:var(--fg-mute)" data-i18n="ui.mapping_modal_sub">
@@ -2783,7 +2783,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-header-title"><span id="pl-viewer-field-label">&mdash;</span> &middot; <span id="pl-viewer-plant-name">&mdash;</span></div>
         <div class="opt-header-sub" id="pl-viewer-meta">&mdash;</div>
       </div>
-      <button class="opt-close" id="pl-viewer-close-x">&times;</button>
+      <button class="opt-close" id="pl-viewer-close-x" aria-label="Close">&times;</button>
     </div>
     <div class="cw-viewer-toolbar">
       <div class="cw-search-wrap">
@@ -2817,7 +2817,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <span class="cal-edit-plant-tag" id="cal-edit-plant-name"></span>
         </div>
       </div>
-      <button class="opt-close" onclick="NIMBUS.EditCalendar.close()">✕</button>
+      <button class="opt-close" onclick="NIMBUS.EditCalendar.close()" aria-label="Close">✕</button>
     </div>
 
     <div class="cal-edit-body">
@@ -2983,7 +2983,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal modal-sm">
     <header class="modal-head">
       <h3 id="confirm-title">Confirm</h3>
-      <button class="icon-btn" id="confirm-close-btn">✕</button>
+      <button class="icon-btn" id="confirm-close-btn" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <p class="confirm-message" id="confirm-message"></p>
@@ -3003,7 +3003,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal modal-sm">
     <header class="modal-head">
       <h3>Add Column</h3>
-      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-addcol-modal')">✕</button>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-addcol-modal')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <div class="md-warn-banner">
@@ -3058,7 +3058,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal modal-sm">
     <header class="modal-head">
       <h3>Rename Column Label</h3>
-      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-renamelabel-modal')">✕</button>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-renamelabel-modal')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <p class="form-hint" id="md-rename-note"></p>
@@ -3081,7 +3081,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal modal-lg">
     <header class="modal-head">
       <h3 data-i18n="modal.export_schema_title">Export Schema</h3>
-      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-schema-export-modal')">✕</button>
+      <button class="icon-btn" onclick="NIMBUS.Modal.close('md-schema-export-modal')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <p class="form-hint" data-i18n="modal.export_schema_desc">Every column currently in this database, as SQL. Safe to paste into schema.sql or a migrations file — each statement only changes something if it isn't already there.</p>

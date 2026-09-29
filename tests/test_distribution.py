@@ -35,7 +35,7 @@ class TestToolPlaceholders:
     def test_tool_placeholders_exact_match(self):
         """Assert our set matches the frontend exactly."""
         expected = {'', '-', '0', 'N/A', 'NONE', 'NULL'}
-        assert TOOL_PLACEHOLDERS == expected
+        assert expected == TOOL_PLACEHOLDERS
 
 
 class TestResolvePlant:
@@ -463,12 +463,12 @@ class TestBucketClassification:
     """
 
     def test_bucket_definitions_match_the_design_doc(self):
-        assert NEEDS_REVIEW_STATUSES == {"needs_review", "qty_changed"}
-        assert CHANGED_STATUSES == {
+        assert {"needs_review", "qty_changed"} == NEEDS_REVIEW_STATUSES
+        assert {
             "wc_changed", "membership_changed", "mode_mismatch",
             "below_min_lot", "zero_quantity_children",
-        }
-        assert PROBLEM_STATUSES == {"incomplete", "runtime_mismatch", "separation_violated"}
+        } == CHANGED_STATUSES
+        assert {"incomplete", "runtime_mismatch", "separation_violated"} == PROBLEM_STATUSES
 
     def test_needs_review_bucket_membership(self):
         assert classify_bucket_membership({"needs_review"}) == {"needs_review"}
