@@ -218,8 +218,8 @@ def test_catalog_lists_known_business_tables_and_flags_internal_ones(pg):
 
 @pytest.mark.pg
 def test_pk_and_fk_resolution_for_a_composite_pk_and_fk_table(pg):
-    """machine has a 3-column composite PK and a 2-column composite FK to
-    plants(subnetwork, plant) — the classic case where a naive
+    """machine has a 3-column composite PK and 2-column composite FKs to
+    plants and sap_workcenter — the classic case where a naive
     key_column_usage/constraint_column_usage join (joined on constraint_name
     alone) would cross-product every referencing column against every
     referenced column instead of pairing them correctly."""
@@ -230,6 +230,8 @@ def test_pk_and_fk_resolution_for_a_composite_pk_and_fk_table(pg):
     assert fk_pairs == {
         ("subnetwork", "plants", "subnetwork"),
         ("plant", "plants", "plant"),
+        ("plant", "sap_workcenter", "plant"),
+        ("sap_workcenter", "sap_workcenter", "sap_workcenter"),
     }
 
 

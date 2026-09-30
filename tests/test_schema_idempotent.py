@@ -505,7 +505,10 @@ class TestHorizonMigrationIdempotent:
     def _seed(self, pg):
         db = pg
         with db._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("INSERT INTO subnetworks (code) VALUES (%s) ON CONFLICT DO NOTHING", (self.SUB,))
+            cur.execute(
+                "INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (self.SUB, "Horizon migration test"),
+            )
             cur.execute("DELETE FROM plants WHERE subnetwork = %s AND plant = %s", (self.SUB, self.PLANT))
             cur.execute(
                 "INSERT INTO plants (subnetwork, plant, alt_flag_horizon, conf_score_horizon) "

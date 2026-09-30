@@ -177,6 +177,9 @@ def test_get_priority_list_maps_blank_plant_to_400_not_500(client):
 @pytest.mark.pg
 def test_set_plant_constraints_preserves_nested_children(pg):
     import master_data as md
+    # This direct data-layer test does not enter FastAPI's lifespan, which
+    # normally creates this legacy sidecar column on a fresh database.
+    md.ensure_plant_constraints_column()
     sub, plant = "ZZTEST_TREE_SUB", "ZZTEST_TREE_PLANT"
     with pg._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (sub, sub))
