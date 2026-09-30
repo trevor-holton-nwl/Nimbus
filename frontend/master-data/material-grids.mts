@@ -113,6 +113,7 @@ interface GridState {
   readOnly: boolean;
   saving: boolean;
   loaded: boolean;
+  generation: number;
 }
 
 // -- Cell renderers ---------------------------------------------------------
@@ -280,7 +281,7 @@ function _mkState(): GridState {
   return {
     api: null, rows: [], plant: null, inflight: null,
     selected: new Map(), distinct: new Map(), distinctSet: new Map(), search: new Map(),
-    dirty: new Map(), baseline: new Map(), readOnly: false, saving: false, loaded: false,
+    dirty: new Map(), baseline: new Map(), readOnly: false, saving: false, loaded: false, generation: 0,
   };
 }
 
@@ -333,6 +334,10 @@ function _indexRows(spec: GridSpec, rows: MaterialGridRow[]): void {
 
 function _resetGridForPlant(spec: GridSpec): void {
   const st = _state[spec.id];
+  st.generation++;
+  st.inflight?.abort();
+  st.inflight = null;
+  st.saving = false;
   st.rows = [];
   st.plant = null;
   st.loaded = false;
@@ -344,11 +349,14 @@ function _resetGridForPlant(spec: GridSpec): void {
   if (st.api) {
     try { st.api.setGridOption('rowData', []); } catch {}
   }
+  _updateSaveBar(spec);
 }
 
 async function _load(spec: GridSpec, plant: string): Promise<void> {
   const st = _state[spec.id];
   if (st.inflight) st.inflight.abort();
+  const generation = ++st.generation;
+  st.saving = false;
   const controller = new AbortController();
   st.inflight = controller;
   st.loaded = false;
@@ -356,13 +364,13 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
   const t0 = performance.now();
   try {
     const res = await Util.fetchTraced(url, { signal: controller.signal });
-    if (Store.selectedPlant !== plant) return; // stale response — plant changed mid-flight
+    if (st.generation !== generation || Store.selectedPlant !== plant) return;
     if (!res.ok) {
       const err = await Util.parseBackendError(res);
       throw new Error(err.message || `HTTP ${res.status}`);
     }
     const body = await res.json() as MasterDataGridResponse;
-    if (Store.selectedPlant !== plant) return;
+    if (st.generation !== generation || Store.selectedPlant !== plant) return;
     st.rows = body.rows || [];
     _indexRows(spec, st.rows);
     if (spec.editableFields.length) {
@@ -383,6 +391,7 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
     }
     ErrorLog.info('material-grids', `${spec.id} grid loaded ${st.rows.length} row(s) for plant ${plant} in ${Math.round(performance.now() - t0)}ms`);
   } catch (e: unknown) {
+    if (st.generation !== generation) return;
     if ((e as { name?: string })?.name === 'AbortError') return;
     const msg = e instanceof Error ? e.message : String(e);
     ErrorLog.error('material-grids', `${spec.id} grid load failed: ${msg}`);
@@ -746,13 +755,18 @@ async function _save(id: GridId): Promise<void> {
   if (!spec.saveUrl || !st.dirty.size || st.saving || !st.plant) return;
   st.saving = true;
   _updateSaveBar(spec);
-  const updates = [...st.dirty.values()];
+  const plant = st.plant;
+  const generation = st.generation;
+  // Patches contain scalar values; copy each one before serializing so an
+  // edit made during this request cannot change what its response acknowledges.
+  const updates = [...st.dirty.values()].map(patch => ({ ...patch }));
   try {
     const res = await Util.fetchTraced(`${Config.API_BASE}${spec.saveUrl}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ plant: st.plant, updates }),
+      body: JSON.stringify({ plant, updates }),
     });
+    if (st.generation !== generation) return;
     if (!res.ok) {
       const err = await Util.parseBackendError(res);
       const e = new Error(err.message || `HTTP ${res.status}`) as Error & { status?: number };
@@ -760,26 +774,35 @@ async function _save(id: GridId): Promise<void> {
       throw e;
     }
     const body = await res.json() as { updated?: number; columns?: string[] };
+    if (st.generation !== generation) return;
     for (const u of updates) {
-      const key = `${u.material_id}|${st.plant}`;
+      const key = `${u.material_id}|${plant}`;
       const row = st.rows.find(r => spec.rowKey(r) === key);
-      if (!row) continue;
-      for (const f of MP_EDITABLE) if (f in u) (row as Record<string, unknown>)[f] = (u as unknown as Record<string, unknown>)[f] ?? '';
-      st.baseline.set(key, {
-        prt_01: String(row.prt_01 ?? ''), prt_02: String(row.prt_02 ?? ''), color: String(row.color ?? ''),
-        default_machine: String(row.default_machine ?? ''),
-      });
+      const previous = st.baseline.get(key);
+      if (!row || !previous) continue;
+      const baseline = { ...previous };
+      for (const f of MP_EDITABLE) if (f in u) baseline[f] = String(u[f] ?? '');
+      st.baseline.set(key, baseline);
+      // Re-diff the current cells, including edits that returned to the OLD
+      // baseline while saving and therefore disappeared from the dirty map.
+      const remaining: MatPlantPatch = { material_id: row.material_id };
+      for (const f of MP_EDITABLE) {
+        const value = String(row[f] ?? '').trim();
+        if (value !== baseline[f]) remaining[f] = value;
+      }
+      if (MP_EDITABLE.some(f => f in remaining)) st.dirty.set(key, remaining);
+      else st.dirty.delete(key);
     }
     try {
       if (st.api) {
-        const nodes = updates.map(u => st.api!.getRowNode(`${u.material_id}|${st.plant}`)).filter(Boolean);
+        const nodes = updates.map(u => st.api!.getRowNode(`${u.material_id}|${plant}`)).filter(Boolean);
         st.api.applyTransaction({ update: nodes.map((n: unknown) => (n as { data: MaterialGridRow }).data) });
       }
     } catch {}
-    st.dirty.clear();
     _indexRows(spec, st.rows); // prt_01/prt_02/color distinct sets may have changed
     Toast.show(Util.t('toast.material_plant_saved', { count: body.updated ?? updates.length }), 'success');
   } catch (e: unknown) {
+    if (st.generation !== generation) return;
     const status = (e as { status?: number })?.status;
     const msg = e instanceof Error ? e.message : String(e);
     if (status === 403) {
@@ -793,8 +816,10 @@ async function _save(id: GridId): Promise<void> {
     // Dirty map deliberately NOT cleared on failure — the user keeps their
     // edits (and the cell values) so they can retry or copy them out.
   } finally {
-    st.saving = false;
-    _updateSaveBar(spec);
+    if (st.generation === generation) {
+      st.saving = false;
+      _updateSaveBar(spec);
+    }
   }
 }
 

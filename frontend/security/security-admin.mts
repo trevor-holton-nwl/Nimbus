@@ -141,6 +141,12 @@ export const Security = (() => {
   let _rolePlants: SecurityRolePlantRow[] = []; // GET /master-data/role_plants rows: [{role, plant}]
   let _rolesInUse: Set<string> = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
   let _selectedRole: string | null = null;
+  // One writer per role. Pending keys coalesce to the latest click; a
+  // different role can still save independently while this role is waiting.
+  const _pageWrites = new Map<string, {
+    pending: Partial<Record<TopLevelTab, boolean>>;
+    inFlight: Partial<Record<TopLevelTab, boolean>> | null;
+  }>();
 
   function _writeHeaders(json = true): Record<string, string> {
     const h: Record<string, string> = { 'x-user-email': Session.actor() };
@@ -651,7 +657,8 @@ export const Security = (() => {
 
   function _pageAccessRowHtml(role: string, tab: TopLevelTab, label: string, roleRow: SecurityRoleRow | undefined): string {
     const defaults = _defaultPageAccess(role);
-    const checked = roleRow?.pages?.[tab] ?? defaults[tab];
+    const write = _pageWrites.get(role);
+    const checked = write?.pending[tab] ?? write?.inFlight?.[tab] ?? roleRow?.pages?.[tab] ?? defaults[tab];
     const locked = role === 'admin' && tab === 'admin';
     return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
       <span style="font-size:13px">${Util.escapeHtml(label)}</span>
@@ -745,31 +752,43 @@ export const Security = (() => {
     await _reloadRoles();
   }
 
-  // Backend rejects role:'admin' + admin:false outright (server-side backstop
-  // for the checkbox's own disabled state), so this can only ever persist a
-  // legal combination. Full-page reload isn't needed — patch the in-memory
-  // role row on success (same "commit only once confirmed" posture as
-  // Plant's constraint toggles) and repaint either way, so a failure visibly
-  // reverts the checkbox to the last-confirmed state.
+  // The backend merges partial page keys under a row lock. Send only the
+  // edited keys, and serialize writes for each role so repeated clicks on
+  // the same key cannot arrive out of order. Render pending choices over
+  // confirmed values; a response must never visually undo a newer click.
   async function _setRolePageAccess(tab: TopLevelTab, checked: boolean): Promise<void> {
     const role = _selectedRole;
     if (!role) return;
-    const roleRow = _roles.find((r) => r.role === role);
-    const pages: Partial<Record<TopLevelTab, boolean>> = { ..._defaultPageAccess(role), ...(roleRow?.pages || {}), [tab]: checked };
-    try {
-      const r = await Util.fetchTraced(`${API}/master-data/roles/${encodeURIComponent(role)}/page-access`, {
-        method:  'POST',
-        headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-        body:    JSON.stringify({ pages }),
-      });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
-      const result: { pages?: Partial<Record<TopLevelTab, boolean>> } = await r.json();
-      if (roleRow) roleRow.pages = result.pages ?? pages;
-    } catch (e) {
-      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
-      ErrorLog.error('security', `Save role page access failed: ${(e as Error).message}`);
+    let write = _pageWrites.get(role);
+    if (!write) {
+      write = { pending: {}, inFlight: null };
+      _pageWrites.set(role, write);
     }
-    _renderRolesDetail();
+    write.pending[tab] = checked;
+    if (write.inFlight) return;
+    while (Object.keys(write.pending).length) {
+      const pages = write.pending;
+      write.pending = {};
+      write.inFlight = pages;
+      try {
+        const r = await Util.fetchTraced(`${API}/master-data/roles/${encodeURIComponent(role)}/page-access`, {
+          method:  'POST',
+          headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+          body:    JSON.stringify({ pages }),
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        const result: { pages?: Partial<Record<TopLevelTab, boolean>> } = await r.json();
+        const roleRow = _roles.find(candidate => candidate.role === role);
+        if (roleRow) roleRow.pages = result.pages ?? { ...roleRow.pages, ...pages };
+      } catch (e) {
+        Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+        ErrorLog.error('security', `Save role page access failed: ${(e as Error).message}`);
+      } finally {
+        write.inFlight = null;
+        if (_tab === 'roles' && _selectedRole === role) _renderRolesDetail();
+      }
+    }
+    _pageWrites.delete(role);
   }
 
   async function _addRole(): Promise<void> {
