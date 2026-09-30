@@ -4312,7 +4312,7 @@ export const Interaction = {
           Timeline._scheduleRebuild();
           continue;
         }
-        const draggedPatch = Engine.manualSchedulePatchFor(t, newLine, newStart);
+        const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, newLine, newStart);
         if (!draggedPatch?.start_date || !draggedPatch.end_date) {
           Toast.show(Util.t('toast.commit_failed'), 'error');
           Timeline._scheduleRebuild();
@@ -4361,7 +4361,7 @@ export const Interaction = {
             break;
           }
           const sRequestedStart = new Date(st.start_date.getTime() + deltaMs);
-          const changes = Engine.manualSchedulePatchFor(st, sNewLine, sRequestedStart);
+          const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedStart);
           if (!changes?.start_date || !changes.end_date) {
             companionFailed = true;
             break;
@@ -4412,7 +4412,7 @@ export const Interaction = {
         Timeline._scheduleRebuild();
         continue;
       }
-      const patch = Engine.manualSchedulePatchFor(t, newLine, newStart);
+      const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, newStart);
       if (!patch?.start_date || !patch.end_date) {
         Toast.show(Util.t('toast.commit_failed'), 'error');
         Timeline._scheduleRebuild();

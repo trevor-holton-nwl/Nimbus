@@ -170,6 +170,11 @@ class TaskVersionRow(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     row_version: int | None = None
+    MACHINE: str | None = None
+    PRT_01: str | None = None
+    PRT_02: str | None = None
+    PRODUCTION_VERSION: str | None = None
+    RUN_TIME: float | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"

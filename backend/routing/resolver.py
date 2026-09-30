@@ -830,7 +830,7 @@ def _numeric_or_none(value):
 def _build_pv_map(pv_lookup: dict) -> dict:
     """Pure (§8.1's "pv"): one entry per (material_id, production_version)
     already present in `pv_lookup` (as `_load_pv_lookup` shapes it), keyed
-    `"<material>|<pv>"`, routing `key` = `"<type>|<group>|<counter>"`."""
+    `"<material>|<pv>"`, routing `key` = `"<material>|<type>|<group>|<counter>"`."""
     pv: dict = {}
     for (_plant, material_id, production_version), row in pv_lookup.items():
         valid_from = row.get("valid_from")
@@ -840,7 +840,7 @@ def _build_pv_map(pv_lookup: dict) -> dict:
             "valid_to": valid_to.isoformat() if valid_to is not None else None,
             "lot_from": _numeric_or_none(row.get("lot_size_from")),
             "lot_to": _numeric_or_none(row.get("lot_size_to")),
-            "key": f"{row.get('task_list_type')}|{row.get('routing_group')}|{row.get('group_counter')}",
+            "key": f"{material_id}|{row.get('task_list_type')}|{row.get('routing_group')}|{row.get('group_counter')}",
         }
     return pv
 
@@ -863,7 +863,7 @@ def _build_ops_map(op_lookup: dict, rules: dict) -> dict:
     [operation_row, ...]}.
     """
     ops: dict = {}
-    for (_plant, _material_id, task_list_type, routing_group, group_counter), operations in op_lookup.items():
+    for (_plant, material_id, task_list_type, routing_group, group_counter), operations in op_lookup.items():
         workcenters = {op.get("sap_workcenter") for op in operations if op.get("sap_workcenter")}
         for workcenter in workcenters:
             selected = _select_operations(operations, workcenter, rules)
@@ -881,7 +881,7 @@ def _build_ops_map(op_lookup: dict, rules: dict) -> dict:
                     # mirroring resolve_one's own per-operation skip.
                     continue
                 total_minutes += hours_per_unit * Decimal(60)
-            key = f"{task_list_type}|{routing_group}|{group_counter}|{workcenter}"
+            key = f"{material_id}|{task_list_type}|{routing_group}|{group_counter}|{workcenter}"
             ops[key] = {"minutes_per_unit": float(total_minutes)}
     return ops
 

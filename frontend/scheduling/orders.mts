@@ -1238,6 +1238,26 @@ export const Table = {
     return !!Store.masterData?.plants?.find(p => p.plant === plant)?.routing_runtime_enabled;
   },
 
+  /** A runtime hold can recover its known SAP start; other holds require
+   *  their own resolution. Never invent a placement for an undated order. */
+  _runtimeEditAnchor(task: NimbusTask): Date | null {
+    return Util.parseDate(task.start_date) || (
+      task.planning_status === 'needs_planning' && task.planning_reason?.code === 'runtime_unknown'
+        ? Util.parseDate(task.BASIC_START_DATE) : null
+    );
+  },
+
+  _unplacedMachineRuntime(task: NimbusTask, machine: string): Partial<NimbusTask> {
+    if (!Table._routingEnabledForTask(task) || machine === task.MACHINE ||
+        (task.run_time_source !== 'routing' && task.RUN_TIME != null)) return {};
+    const result = Runtime.resolve(task, machine);
+    return result.ok ? {
+      RUN_TIME: result.hours,
+      run_time_source: result.basis.source,
+      run_time_basis: result.basis as unknown as Record<string, unknown>,
+    } : {};
+  },
+
   /** Called when a grid cell is edited. Push the change through the store. */
   _onCellChanged(p: TableCellValueChangedEvent): void {
     const field = p.colDef.field;
@@ -1255,16 +1275,10 @@ export const Table = {
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(String(p.newValue)) || 0;
       changes.RUN_TIME = h;
-      // A manual RUN_TIME edit is only reachable while the order is held for
-      // an unresolved routing runtime (gated by the column's own `editable`)
-      // — accepting it releases the hold and marks the source manual,
-      // mirroring the server's own authoritative behavior on save
-      // (ROUTING_RUNTIME_DESIGN.md §8.2/§8.5).
+      // Release the runtime hold only after constructing a valid placement.
       changes.run_time_source = 'manual';
-      changes.planning_status = 'scheduled';
-      changes.planning_reason = null;
       scheduleTask = { ...p.data, RUN_TIME: h };
-      requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
+      requestedStart = Table._runtimeEditAnchor(p.data);
     } else if (field === 'MACHINE') {
       const newMachine = String(p.newValue || 'Unknown');
       // AG Grid's default valueSetter already wrote p.newValue onto
@@ -1288,8 +1302,10 @@ export const Table = {
         return;
       }
       changes.MACHINE = newMachine;
+      scheduleTask = { ...p.data, MACHINE: priorMachine };
       requestedLine = changes.MACHINE;
-      requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
+      requestedStart = Table._runtimeEditAnchor(p.data);
+      if (!requestedStart) Object.assign(changes, Table._unplacedMachineRuntime(scheduleTask, newMachine));
     } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(p.data)) {
       const pv = String(p.newValue ?? '');
       changes.PRODUCTION_VERSION = pv;
@@ -1299,7 +1315,7 @@ export const Table = {
         changes.run_time_source = result.basis.source;
         changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
         scheduleTask = { ...p.data, PRODUCTION_VERSION: pv, RUN_TIME: result.hours };
-        requestedStart = p.data.start_date ? new Date(p.data.start_date) : null;
+        requestedStart = Table._runtimeEditAnchor(p.data);
       } else {
         // Same "held, no fallback" shape setup-scheduler.mts uses for a
         // needs_planning disposition — null committed dates/segments so the
@@ -1338,13 +1354,21 @@ export const Table = {
 
     if (requestedStart) {
       const targetLine = requestedLine || p.data.MACHINE || 'Unknown';
-      const schedule = Engine.manualSchedulePatchFor(scheduleTask, targetLine, requestedStart);
+      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedStart);
       if (!schedule?.start_date || !schedule.end_date) {
+        // AG Grid has already applied the edited cell to the Store object.
+        // Restore it when allocating the candidate duration fails.
+        if (field) Object.assign(p.data, { [field]: p.oldValue });
         Toast.show('Could not regenerate the order in the available calendar window.', 'error');
         Table._api!.refreshCells({ rowNodes: [p.node] });
         return;
       }
       Object.assign(changes, schedule);
+      if (changes.RUN_TIME != null && p.data.planning_status === 'needs_planning' &&
+          p.data.planning_reason?.code === 'runtime_unknown') {
+        changes.planning_status = 'scheduled';
+        changes.planning_reason = null;
+      }
     }
 
     Store.updateTask(id, changes, 'table');
@@ -1461,7 +1485,7 @@ export const Table = {
       return;
     }
 
-    const schedule = Engine.manualSchedulePatchFor(t, newLine, newStart);
+    const schedule = Engine.manualRoutingSchedulePatchFor(t, newLine, newStart);
     if (!schedule?.start_date || !schedule.end_date) {
       Toast.show('Could not regenerate the order in the available calendar window.', 'error');
       return;
@@ -2346,16 +2370,10 @@ export const Inspector = {
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(value) || 0;
       changes.RUN_TIME = h;
-      // A manual RUN_TIME edit is only reachable while the order is held for
-      // an unresolved routing runtime (the input is disabled otherwise) —
-      // accepting it releases the hold and marks the source manual,
-      // mirroring the server's own authoritative behavior on save
-      // (ROUTING_RUNTIME_DESIGN.md §8.2/§8.5).
+      // Release the runtime hold only after constructing a valid placement.
       changes.run_time_source = 'manual';
-      changes.planning_status = 'scheduled';
-      changes.planning_reason = null;
       scheduleTask = { ...t, RUN_TIME: h };
-      requestedStart = t.start_date ? new Date(t.start_date) : null;
+      requestedStart = Table._runtimeEditAnchor(t);
     } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(t)) {
       const result = Runtime.resolve({ ...t, PRODUCTION_VERSION: value });
       changes.PRODUCTION_VERSION = value;
@@ -2364,7 +2382,7 @@ export const Inspector = {
         changes.run_time_source = result.basis.source;
         changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
         scheduleTask = { ...t, PRODUCTION_VERSION: value, RUN_TIME: result.hours };
-        requestedStart = t.start_date ? new Date(t.start_date) : null;
+        requestedStart = Table._runtimeEditAnchor(t);
       } else {
         // Same "held, no fallback" shape setup-scheduler.mts uses for a
         // needs_planning disposition — null committed dates/segments so the
@@ -2402,19 +2420,25 @@ export const Inspector = {
           return;
         }
         requestedLine = newMachine;
-        requestedStart = t.start_date ? new Date(t.start_date) : null;
+        requestedStart = Table._runtimeEditAnchor(t);
+        if (!requestedStart) Object.assign(changes, Table._unplacedMachineRuntime(t, newMachine));
       }
       changes[field] = value;
     }
     if (requestedStart) {
       const targetLine = requestedLine || t.MACHINE || 'Unknown';
-      const schedule = Engine.manualSchedulePatchFor(scheduleTask, targetLine, requestedStart);
+      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedStart);
       if (!schedule?.start_date || !schedule.end_date) {
         Toast.show('Could not regenerate the order in the available calendar window.', 'error');
         Inspector._render(t);
         return;
       }
       Object.assign(changes, schedule);
+      if (changes.RUN_TIME != null && t.planning_status === 'needs_planning' &&
+          t.planning_reason?.code === 'runtime_unknown') {
+        changes.planning_status = 'scheduled';
+        changes.planning_reason = null;
+      }
     }
     Store.updateTask(id, changes, 'inspector');
     Alerts.scheduleRecompute();

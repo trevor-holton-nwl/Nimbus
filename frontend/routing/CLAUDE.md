@@ -17,11 +17,14 @@ Wired from:
 
 ## Consumers (§8.2/§8.3, shipped)
 
-All six re-place call sites now guard with `Runtime.eligible` before calling `Engine.manualSchedulePatchFor` (`frontend/optimization/engine.mts`, itself unmodified — only called, never changed):
+All six re-place call sites guard with `Runtime.eligible` before calling `Engine.manualRoutingSchedulePatchFor` (`frontend/optimization/engine.mts`). Routing-derived machine moves resolve the target duration before placement. Unchanged split durations translate their segments; changed productive totals use the plant's split policy:
 - `frontend/scheduling/gantt.mts`'s `Interaction._onDataSetUpdate`: single-item drag drop, multi-drag drop (dragged item + each companion), split-order re-place. Ineligible → revert via `Timeline._scheduleRebuild()` (the existing spring-back mechanism, same as the sub-order machine lock) + `toast.no_routing_at_workcenter`; a multi-drag reverts the whole selection on the first offender.
 - `frontend/scheduling/orders.mts`'s `Table._onCellChanged` (grid), `Inspector._onFieldChange`, `Table.applyOverride`: same MACHINE guard; a `PRODUCTION_VERSION` edit additionally calls `Runtime.resolve` to update `RUN_TIME`/`run_time_source`/`run_time_basis` locally (ok) or hold the task locally with `planning_reason.code = 'runtime_unknown'` (not ok) — server confirms/corrects on save (`backend/routing/resolver.py`'s `check_eligibility` + `db.py`'s `update_task_dates_bulk`, §8.5). `RUN_TIME` itself is editable client-side only while a task is so held (`Table._runTimeEditable`).
 
 ## Gotchas
+
+- Rate-map routing keys include material: `material|type|group|counter`, with `|workcenter` appended in `ops`. Both producer and consumer share a tested wire fixture; groups reused across materials must remain distinct.
+- Schedule saves resolve changed routing candidates inside the schedule transaction and return that transaction's version. A differing submitted duration is rejected as `runtime_preview_changed`; the browser reloads rates and uses guarded conflict recovery. Explicit PV edits opt back into routing; machine-only moves preserve manual/SAP/distributed runtimes.
 
 - The rate map's `ops` key already encodes §5.2 step 6/7's filtering (deleted/sequence/control-key/header-status) — `resolve()` therefore has no separate "no_routing" step; a missing routing and an empty-after-filtering routing both surface here as `no_operation_at_workcenter`, since the client never sees individual operation rows.
 - Never render/fetch a full plant matrix or an all-plants map — the rate map is fetched only for the selected, enabled plant (root `CLAUDE.md`'s Production Scale Roadmap applies here too).

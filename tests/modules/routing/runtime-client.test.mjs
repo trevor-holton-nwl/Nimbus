@@ -79,7 +79,7 @@ function selectOperations(operations, workcenter, rules) {
  *  produce through build_rate_map, scoped to just that case's one routing. */
 function buildRateMapForCase(caseDef) {
   const pvRow = caseDef.production_versions[0];
-  const routingKey = `${pvRow.task_list_type}|${pvRow.routing_group}|${pvRow.group_counter}`;
+  const routingKey = `${pvRow.material_id}|${pvRow.task_list_type}|${pvRow.routing_group}|${pvRow.group_counter}`;
   const pv = {
     [`${pvRow.material_id}|${pvRow.production_version}`]: {
       valid_from: pvRow.valid_from,

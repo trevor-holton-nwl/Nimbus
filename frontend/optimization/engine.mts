@@ -65,6 +65,7 @@
 // it referenced this locally-defined type without an import).
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
+import { Runtime } from '../routing/runtime-client.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
@@ -1104,17 +1105,46 @@ export const Engine = {
       : null;
   },
 
-  /** Apply a planner-requested parent start/line edit verbatim — no
-   * calendar-aware recomputation ever happens on a manual edit, and this is
-   * policy-independent by design (OD-B1a). A task with fewer than two
+  /** Resolve a moved routing-derived order before constructing its schedule.
+   * Manual/order-file runtimes keep their existing authority on machine moves. */
+  manualRoutingSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
+    const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
+    const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
+    if (!enabled || line === task.MACHINE || (task.run_time_source !== 'routing' && task.RUN_TIME != null)) {
+      return Engine.manualSchedulePatchFor(task, line, requestedStart);
+    }
+    const resolved = Runtime.resolve(task, line);
+    if (!resolved.ok) return null;
+    const changes = Engine.manualSchedulePatchFor({ ...task, RUN_TIME: resolved.hours }, line, requestedStart);
+    return changes ? {
+      ...changes, RUN_TIME: resolved.hours, run_time_source: 'routing',
+      run_time_basis: resolved.basis as unknown as Record<string, unknown>,
+    } : null;
+  },
+
+  /** Apply a planner-requested parent start/line edit verbatim while its
+   * productive duration is unchanged (OD-B1a). A task with fewer than two
    * existing schedule segments commits directly at the requested start; a
    * task that already has two or more segments (placed there by a prior
    * optimizer run) has its existing shape translated by the requested delta
-   * rather than destroyed or re-derived. */
+   * rather than destroyed or re-derived. If a runtime edit changes the
+   * productive total, regenerate the segments using the plant split policy. */
   manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
     const segments = task.scheduleSegments;
+    if (segments && segments.length >= 2) {
+      const productiveMinutes = Math.round(segments.reduce((sum, segment) =>
+        sum + (segment.endDate.getTime() - segment.startDate.getTime()) / Config.MS_MIN, 0));
+      if (productiveMinutes !== runtimeMinutes) {
+        // A rate/PV edit changes the amount of productive time. Translating
+        // old pieces would preserve an invalid aggregate; use the plant's
+        // existing allocation policy while retaining ordinary drag behavior.
+        const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+        const allocated = Engine.schedulePatchFor(task, line, Util.snap(requestedStart), Engine.splitOrderPolicyFor(plant));
+        return allocated ? { ...allocated, MACHINE: line } : null;
+      }
+    }
     if (!segments || segments.length < 2 || !task.start_date) {
       const start = Util.snap(requestedStart);
       return {

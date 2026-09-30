@@ -525,7 +525,7 @@ def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch
     assert result["rejection_reasons"] == {"r-bad": "no_operation_at_workcenter"}
 
 
-def test_update_task_dates_bulk_accepts_an_eligible_machine_change_and_reresolves_the_plant(monkeypatch):
+def test_update_task_dates_bulk_accepts_an_eligible_machine_change_in_one_transaction(monkeypatch):
     eff_rows = [_routing_eff_row("r-good")]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
     pool = _FakeSegmentPool(cursor)
@@ -540,7 +540,7 @@ def test_update_task_dates_bulk_accepts_an_eligible_machine_change_and_reresolve
 
     assert result["invalid_ids"] == []
     assert result["persisted"] == 1
-    assert resolved_plants == ["PLANT-R"]
+    assert resolved_plants == []  # runtime/basis are written with the original schedule/version
     # The connection passed to check_eligibility must be the SAME connection
     # this function's own write transaction used -- proven by the fact the
     # (mocked) call above never needed a second pooled connection to succeed;

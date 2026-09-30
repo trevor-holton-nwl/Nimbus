@@ -47,6 +47,15 @@ type BulkUpdateResult     = components['schemas']['BulkUpdateResult'];
 type TasksRefreshResponse = components['schemas']['TasksRefreshResponse'];
 type BaselineCorrectResult = components['schemas']['BaselineCorrectResult'];
 
+interface RefreshBaseline {
+  edits: string;
+  generation: number;
+  collection: number;
+  version: NimbusTask['row_version'];
+}
+const taskEditGenerations = new Map<string, number>();
+let taskCollectionGeneration = 0;
+
 // -- Local type declarations (Phase 4 conversion; scoped to this file, for the
 //    endpoints Task 1 did not add a backend response_model= for) ------------
 
@@ -174,6 +183,7 @@ export const Persistence = {
   _horizonsFetchedAt: {} as Record<string, number>,
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
+  _conflictedIds: new Set<string>(),  // retained local edits cannot adopt a server version without reconciliation
   async confirmPlantSwitch(plant: string | null): Promise<boolean> {
     if (plant === Store.selectedPlant || Persistence._dirtyIds.size === 0) return true;
     const discard = await Modal.confirm({
@@ -185,6 +195,7 @@ export const Persistence = {
     if (!discard) return false;
     Persistence._dirtyIds.clear();
     Persistence._forceIds.clear();
+    Persistence._conflictedIds.clear();
     // A later re-selection of the outgoing plant must fetch its saved state,
     // including when the user cleared the selector before re-selecting it.
     Persistence._currentLoadedPlant = null;
@@ -1330,6 +1341,16 @@ export const Persistence = {
     };
   },
 
+  _refreshBaseline(t: NimbusTask): RefreshBaseline {
+    return { edits: JSON.stringify(Persistence._taskEditSnapshot(t)),
+      generation: taskEditGenerations.get(String(t.id)) ?? 0,
+      collection: taskCollectionGeneration, version: t.row_version };
+  },
+
+  _warnUnresolvedConflict(): void {
+    Toast.show('Conflicting changes remain unsaved. Reload discards these local edits and loads the server schedule.', 'warn', 8000);
+  },
+
   saveAll(): void {
     // In sandbox, promote-then-save runs through Sandbox.exit(true), which itself
     // calls saveAll() after teardown — so return here to avoid a double POST (the
@@ -1348,14 +1369,22 @@ export const Persistence = {
       ErrorLog.warn('persistence', 'saveAll() called while a save is already in flight — skipping');
       return;
     }
-    Persistence._saveInFlight = true;
-    Persistence._saveCache();
-
     // Send changed task aggregates (dates, planning state, segments and editable
     // attributes). Reload clears dirty state; undo is a new dependent edit.
-    const dirtyTasks = Persistence._dirtyIds.size > 0
+    let dirtyTasks = Persistence._dirtyIds.size > 0
       ? Store.tasksArr.filter(t => Persistence._dirtyIds.has(String(t.id)))
       : [];
+    const atomicOptimizer = dirtyTasks.some(t => Persistence._forceIds.has(String(t.id)));
+    if (dirtyTasks.some(t => Persistence._conflictedIds.has(String(t.id)))) {
+      Persistence._warnUnresolvedConflict();
+      if (atomicOptimizer) return;
+      dirtyTasks = dirtyTasks.filter(t => !Persistence._conflictedIds.has(String(t.id)));
+      if (!dirtyTasks.length) return;
+    }
+    Persistence._saveInFlight = true;
+    Persistence._saveCache();
+    const saveCollection = taskCollectionGeneration;
+    const refreshBaselines = new Map(dirtyTasks.map(t => [String(t.id), Persistence._refreshBaseline(t)]));
     // Send only the fields the backend consumes, plus the optimistic-concurrency
     // token (row_version → base_version). Optimizer edits use atomic validation
     // and cannot bypass a concurrent editor's version.
@@ -1364,7 +1393,6 @@ export const Persistence = {
     // Date() parses as LOCAL — so a raw Date here round-trips shifted by the
     // client's UTC offset for any non-UTC user. Mirrors _relayDueDateCorrections;
     // see Util.toLocalSeconds and _taskEditSnapshot above.
-    const atomicOptimizer = dirtyTasks.some(t => Persistence._forceIds.has(String(t.id)));
     const taskPayload = dirtyTasks.map(t => ({
       id: t.id,
       ...Persistence._taskEditSnapshot(t),
@@ -1407,12 +1435,24 @@ export const Persistence = {
 
     _post(1)
       .then(result => {
+        if (saveCollection !== taskCollectionGeneration) return;
+        const runtimePreviewChanged = Object.values(result.rejection_reasons || {}).includes('runtime_preview_changed');
+        if (runtimePreviewChanged) {
+          // Rate-map changes can invalidate a locally valid preview without an
+          // order version change. Refresh the cache for the next edit/retry;
+          // ordinary stale reconciliation below still protects newer local work.
+          void Runtime.load(Store.selectedPlant);
+          ErrorLog.warn('persistence', 'Routing rates changed; rejected runtime previews require review', result.rejection_reasons);
+          Toast.show(atomicOptimizer
+            ? 'Routing rates changed. Optimizer changes remain unsaved. Review the updated rates and optimize again.'
+            : 'Routing rates changed. Rejected orders are being refreshed. Review the schedule before retrying your changes.', 'warn', 8000);
+        }
         if (atomicOptimizer && (result.status === 'error' || (result.persisted ?? 0) !== taskPayload.length
           || (result.stale || []).length || (result.invalid_ids || []).length || (result.not_found_ids || []).length)) {
           ErrorLog.warn('persistence', 'Optimizer save rejected; all dependent changes remain unsaved', result);
           if (result.error_code === 'schedule.conflicts') {
             Toast.show(Util.t('toast.optimizer_conflicts', { count: (result.conflicts || []).length }), 'warn', 8000);
-          } else {
+          } else if (!runtimePreviewChanged) {
             Toast.show('Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.', 'warn', 8000);
           }
           return;
@@ -1441,14 +1481,14 @@ export const Persistence = {
         }
         const stale = result.stale || [];
         // Clear dirty/force ONLY for ids the backend actually accounted for (R7):
-        // persisted (versions), concurrency-stale (refetched, last-writer-loses), and
-        // terminally rejected (invalid range / not in DB — a corrected edit re-dirties).
+        // persisted (versions) and terminally rejected (invalid range / not in DB
+        // — a corrected edit re-dirties). Stale rows stay dirty until their
+        // guarded authoritative refresh succeeds.
         // Any sent id that is NONE of these — e.g. a row lost between SELECT FOR UPDATE
         // and the UPDATE — stays dirty so the next save retries it instead of silently
         // dropping the edit. Previously both sets were .clear()'d unconditionally.
         const accounted = new Set([
           ...Object.keys(versions),
-          ...stale,
           ...(result.invalid_ids || []),
           ...(result.not_found_ids || []),
         ].map(String));
@@ -1472,8 +1512,8 @@ export const Persistence = {
         }
         if (stale.length) {
           ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
-          Persistence._refreshTasks(stale);
-          Toast.show(Util.t('toast.concurrent_edit_conflict', { count: stale.length }), 'warn', 7000);
+          Persistence._refreshTasks(stale, refreshBaselines);
+          if (!runtimePreviewChanged) Toast.show(Util.t('toast.concurrent_edit_conflict', { count: stale.length }), 'warn', 7000);
         }
         // N3: the server scanned the written machines inside the save
         // transaction. Advisory — rows are persisted; surface the overlaps now
@@ -1526,18 +1566,38 @@ export const Persistence = {
       const id = String(rawId);
       Persistence._dirtyIds.delete(id);
       Persistence._forceIds.delete(id);
+      Persistence._conflictedIds.delete(id);
       if (Store.removeTask(id, 'persistence')) removed++;
     }
     return removed;
   },
 
-  /** Optimistic-concurrency reconciliation: pull the server's current dates +
-   *  row_version for orders a concurrent editor changed underneath us, and overwrite
-   *  the stale local copies. Writes _state directly and emits ONCE with source
+  /** Optimistic-concurrency reconciliation: replace the complete server aggregate
+   *  only when the rejected edit is still current. Newer local edits retain their
+   *  old version and stay unresolved until explicit reload/discard. Emits once with source
    *  'refresh' — the dirty/autosave subscribers ignore that source so we don't
    *  re-dirty or write the rows we just pulled (see project_store_fanout). */
-  _refreshTasks(ids: string[]): void {
+  _refreshTasks(ids: string[], savedBaselines?: Map<string, RefreshBaseline>): void {
     if (!ids || !ids.length) return;
+    const collection = taskCollectionGeneration;
+    const baselines = savedBaselines ?? new Map(ids.flatMap(id => {
+      const task = Store.tasks[String(id)];
+      return task ? [[String(id), Persistence._refreshBaseline(task)] as const] : [];
+    }));
+    for (const rawId of ids) {
+      const id = String(rawId);
+      if (Store.tasks[id]) {
+        Persistence._conflictedIds.add(id);
+        Persistence._dirtyIds.add(id);
+      }
+    }
+    const unchanged = (id: string): boolean => {
+      const task = Store.tasks[id], baseline = baselines.get(id);
+      return !!task && !!baseline && baseline.collection === taskCollectionGeneration
+        && baseline.generation === (taskEditGenerations.get(id) ?? 0)
+        && baseline.version === task.row_version
+        && baseline.edits === JSON.stringify(Persistence._taskEditSnapshot(task));
+    };
     Util.fetchTraced(`${Config.API_BASE}/tasks/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1545,10 +1605,20 @@ export const Persistence = {
     })
       .then(r => r.ok ? r.json() as Promise<TasksRefreshResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(({ data, missing }) => {
+        if (collection !== taskCollectionGeneration) return;
         const applied: string[] = [];
+        let retained = false;
         for (const row of (data || [])) {
           const tk = Store.tasks[String(row.id)];
           if (!tk) continue;
+          if (!unchanged(String(row.id))) { retained = true; continue; }
+          tk.MACHINE = row.MACHINE ?? '';
+          tk.PRT_01 = row.PRT_01 ?? '';
+          tk.PRT_02 = row.PRT_02 ?? '';
+          tk.PRODUCTION_VERSION = row.PRODUCTION_VERSION ?? '';
+          tk.RUN_TIME = row.RUN_TIME ?? null;
+          tk.run_time_source = row.run_time_source;
+          tk.run_time_basis = row.run_time_basis;
           tk.start_date  = Util.parseDate(row.start_date);
           tk.end_date    = Util.parseDate(row.end_date);
           const planning = row as unknown as { planning_status?: NimbusTask['planning_status']; planning_reason?: NimbusTask['planning_reason'] };
@@ -1560,15 +1630,21 @@ export const Persistence = {
           tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
+          Persistence._conflictedIds.delete(String(row.id));
           applied.push(String(row.id));
         }
         if (applied.length) {
+          Store.rebuildPlantIndex();
           Store.emit({ type: 'tasks:bulkUpdate', ids: applied, source: 'refresh' });
         }
         // PR-1: ids the server says no longer exist (deleted by another
         // session, a purge, an upload, etc.) — remove the ghost from Store
         // instead of silently leaving it to be re-persisted by _saveCache.
-        const missingIds = (missing || []).map(String);
+        const missingIds = (missing || []).map(String).filter(id => {
+          if (!Store.tasks[id] || unchanged(id)) return true;
+          retained = true;
+          return false;
+        });
         if (missingIds.length) {
           const removed = Persistence._removeMissingTasks(missingIds);
           if (removed) {
@@ -1576,10 +1652,16 @@ export const Persistence = {
             Toast.show(Util.t('toast.orders_removed_remotely', { count: removed }), 'warn', 6000);
           }
         }
+        if (retained) Persistence._warnUnresolvedConflict();
       })
       .catch(e => {
         ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids);
         Toast.show(Util.t('toast.conflict_refresh_failed'), 'error', 8000);
+      })
+      .finally(() => {
+        if (collection !== taskCollectionGeneration) return;
+        Persistence._syncUnsaved();
+        Persistence._saveCache();
       });
   },
 
@@ -1834,4 +1916,19 @@ export const Persistence = {
     Persistence._saveCache();
   }, 1200)
 };
+
+// Track edits even when a value changes and is subsequently changed back. A
+// failed save's refresh must only reconcile the rejected edit, never newer work.
+Store.subscribe(evt => {
+  if (evt.type === 'tasks:bulk') {
+    taskCollectionGeneration++;
+    taskEditGenerations.clear();
+    if (evt.source === 'persistence') Persistence._conflictedIds.clear();
+    return;
+  }
+  if (evt.source === 'refresh') return;
+  const ids = evt.type === 'task:update' ? [String(evt.id)]
+    : evt.type === 'tasks:bulkUpdate' ? (evt.ids as Array<string | number>).map(String) : [];
+  for (const id of ids) taskEditGenerations.set(id, (taskEditGenerations.get(id) ?? 0) + 1);
+}, 'Persistence.conflictGenerations');
 

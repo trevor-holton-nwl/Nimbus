@@ -246,7 +246,8 @@ class TestRateMapParity:
 
         pv_row = pv_lookup[(order["plant"], order["material_number"], order["production_version"])]
         workcenter = machine_workcenter[order["machine"]]
-        routing_key = f"{pv_row['task_list_type']}|{pv_row['routing_group']}|{pv_row['group_counter']}|{workcenter}"
+        routing_key = (f"{order['material_number']}|{pv_row['task_list_type']}|"
+                       f"{pv_row['routing_group']}|{pv_row['group_counter']}|{workcenter}")
 
         ops_map = _build_ops_map(op_lookup, rules)
         assert routing_key in ops_map, f"{case['name']}: ops map is missing key {routing_key!r}"

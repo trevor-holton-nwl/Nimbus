@@ -18,7 +18,7 @@ import type { NimbusTask } from '../platform/types.mjs';
 /** §8.1's rate-map payload shape (`GET /routing/{plant}/rate-map`), verbatim
  *  from `backend/routing/resolver.py`'s `build_rate_map`/`_build_pv_map`/
  *  `_build_ops_map`. `pv` is keyed `"<material_id>|<production_version>"`;
- *  `ops` is keyed `"<task_list_type>|<routing_group>|<group_counter>|<sap_workcenter>"`
+ *  `ops` is keyed `"<material_id>|<task_list_type>|<routing_group>|<group_counter>|<sap_workcenter>"`
  *  (the same string `pv[...].key` is a prefix of, joined with the target
  *  work center) and carries a PRE-AGGREGATED `minutes_per_unit` — already
  *  summed across every counted operation at that routing+workcenter, at

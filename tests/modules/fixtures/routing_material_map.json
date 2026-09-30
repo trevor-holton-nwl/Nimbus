@@ -1,0 +1,13 @@
+{
+  "plant": "P",
+  "generated_at": "",
+  "machines": { "M": "WC" },
+  "pv": {
+    "MAT-A|0001": { "key": "MAT-A|N|GROUP|01", "valid_from": null, "valid_to": null, "lot_from": null, "lot_to": null },
+    "MAT-B|0001": { "key": "MAT-B|N|GROUP|01", "valid_from": null, "valid_to": null, "lot_from": null, "lot_to": null }
+  },
+  "ops": {
+    "MAT-A|N|GROUP|01|WC": { "minutes_per_unit": 1 },
+    "MAT-B|N|GROUP|01|WC": { "minutes_per_unit": 3 }
+  }
+}

@@ -814,7 +814,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                seg.schedule_segments,
                {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
                o.plant, o.planning_status, o.planning_reason,
-               o.run_time_source, o.run_time_basis
+               o.run_time_source, o.run_time_basis,
+               o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -835,6 +836,11 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "planning_reason": r[8],
             "run_time_source": r[9],
             "run_time_basis": r[10],
+            "MACHINE": r[11],
+            "PRT_01": r[12],
+            "PRT_02": r[13],
+            "PRODUCTION_VERSION": r[14],
+            "RUN_TIME": r[15],
         }
         for r in rows
     ]
@@ -1092,10 +1098,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     # Deferred import (never module-level -- avoids a backend.routing <->
     # db.py import cycle, matching this codebase's established convention;
     # see backend/distribution/data.py, backend/integration/sap_sync.py).
-    # Used both for the per-item eligibility gate below (a read inside THIS
-    # function's own open, uncommitted transaction) and, after commit, to
-    # re-resolve any plant whose accepted MACHINE/PRODUCTION_VERSION edit
-    # needs a fresh run_time (ROUTING_RUNTIME_DESIGN.md §8.5).
+    # Resolve candidate runtime inside this transaction so its schedule,
+    # provenance and returned optimistic-lock token describe the same write.
     import backend.routing.resolver as routing_resolver
 
     ids = [it["id"] for it in items if it.get("id")]
@@ -1185,6 +1189,15 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if allowed_plants is not None and current["plant"] not in allowed_plants:
                 not_found_ids.append(tid)   # out-of-scope looks identical to nonexistent
                 continue
+            # A stale runtime/attribute snapshot is a concurrency conflict,
+            # not an invalid attempt to override authoritative runtime.
+            base_version = it.get("base_version")
+            if atomic_optimizer and base_version is None:
+                invalid_ids.append(tid)
+                continue
+            if (atomic_optimizer or not it.get("force")) and base_version is not None and base_version != current["row_version"]:
+                stale.append(tid)
+                continue
             # The browser's save snapshot includes these fields on every edit.
             # Only changed values are edits for the child-machine lock and the
             # routing eligibility/runtime gates below.
@@ -1213,12 +1226,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # validation failure, same as any other single-aspect edit conflict
             # below (e.g. the queued-order date check just past this).
             manual_runtime_release = False
-            if has_runtime and current["routing_runtime_enabled"]:
-                if not (current["planning_status"] == "needs_planning"
-                        and current["reason_code"] == "runtime_unknown"):
-                    invalid_ids.append(tid)
-                    continue
-                manual_runtime_release = True
+            resolved_runtime = None
 
             # Routing runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.5): a
             # MACHINE or PRODUCTION_VERSION edit on an order whose run_time is
@@ -1227,10 +1235,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # accepted -- otherwise the order could land on a machine/version
             # its routing can't resolve, silently keeping a stale run_time
             # until the next plant-wide recompute. Only gated when the
-            # plant's switch is on AND the row's run_time is either
-            # routing-sourced or still unknown; a manual/distributed/
-            # sap_order/legacy value is the planner's/ingest's own call and
-            # is never second-guessed here. Material, quantity, and start
+            # plant's switch is on. Explicit PV changes opt into routing;
+            # machine-only moves preserve manual/distributed/SAP runtimes.
+            # Material, quantity, and start
             # date are never edited by this endpoint, so they always come
             # from the row's own current values; machine/production version
             # come from the candidate edit when present, else the row's
@@ -1238,7 +1245,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # connection -- never a second connection mid-write.
             if (("MACHINE" in attrs or "PRODUCTION_VERSION" in attrs)
                     and current["routing_runtime_enabled"]
-                    and (current["run_time_source"] == "routing" or current["run_time"] is None)):
+                    and ("PRODUCTION_VERSION" in attrs
+                         or current["run_time_source"] == "routing" or current["run_time"] is None)):
                 candidate_machine = attrs.get("MACHINE", current["machine"])
                 candidate_pv = attrs.get("PRODUCTION_VERSION", current["production_version"])
                 eligibility = routing_resolver.check_eligibility(
@@ -1269,8 +1277,27 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     rejection_reasons[tid] = eligibility.get("step") or "no_operation_at_workcenter"
                     invalid_ids.append(tid)
                     continue
+                # Resolve and persist the candidate in THIS transaction. The
+                # client preview is not a manual override, nor authoritative.
+                resolved_runtime = eligibility
+                if ("RUN_TIME" in it and _canonical_runtime_minutes(it["RUN_TIME"])
+                        != _canonical_runtime_minutes(eligibility["hours"])):
+                    # The client scheduled against an obsolete rate map. Do not
+                    # acknowledge its preview with a version for a different
+                    # duration; use guarded conflict recovery and reload rates.
+                    stale.append(tid)
+                    rejection_reasons[tid] = "runtime_preview_changed"
+                    continue
+                has_runtime = True
 
-            cur_start, cur_end, cur_ver = current["start"], current["end"], current["row_version"]
+            if has_runtime and current["routing_runtime_enabled"] and resolved_runtime is None:
+                if not (current["planning_status"] == "needs_planning"
+                        and current["reason_code"] == "runtime_unknown"):
+                    invalid_ids.append(tid)
+                    continue
+                manual_runtime_release = True
+
+            cur_start, cur_end = current["start"], current["end"]
             new_start = start if start is not None else cur_start
             new_end   = end   if end   is not None else cur_end
             if has_planning and (planning_status not in ("scheduled", "needs_planning") or
@@ -1283,16 +1310,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if queued and (start is not None or end is not None or it.get("schedule_segments")):
                 invalid_ids.append(tid)
                 continue
-            base_version = it.get("base_version")
-            if atomic_optimizer and base_version is None:
-                invalid_ids.append(tid)
-                continue
-            if (atomic_optimizer or not it.get("force")) and base_version is not None and base_version != cur_ver:
-                stale.append(tid)   # someone else wrote since the client's read
-                continue
-
             current_runtime_minutes = _canonical_runtime_minutes(current["run_time"])
-            requested_runtime = it.get("RUN_TIME") if has_runtime else current["run_time"]
+            requested_runtime = (resolved_runtime["hours"] if resolved_runtime is not None
+                                 else it.get("RUN_TIME") if has_runtime else current["run_time"])
             requested_runtime_minutes = _canonical_runtime_minutes(requested_runtime)
             runtime_changed = has_runtime and requested_runtime_minutes != current_runtime_minutes
             segment_rows: list[dict] | None = None
@@ -1347,7 +1367,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             row_planning_status = planning_status if has_planning else (
                 "scheduled" if start is not None or end is not None or has_segments else None)
             row_planning_reason = planning_reason if queued else None
-            if manual_runtime_release:
+            if manual_runtime_release and not queued:
                 # Releasing a routing hold with a keyed-in value re-enters the
                 # order at 'scheduled' with the reason cleared, in the same
                 # write as the run_time itself (§5.5/§8.2).
@@ -1365,6 +1385,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "run_time": requested_runtime,
                 "has_runtime": has_runtime,
                 "manual_runtime_release": manual_runtime_release,
+                "resolved_runtime": resolved_runtime,
                 "segments": segment_rows,
                 "clear_runtime_mismatch": has_segments or start is not None or end is not None,
                 # The conflict scan below (_scan_conflicts_for_rows) filters by
@@ -1404,6 +1425,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                         params.append(row["run_time"])
                     if row["manual_runtime_release"]:
                         sets.append("run_time_source = 'manual'")
+                    if row["resolved_runtime"] is not None:
+                        sets.extend(["run_time_source = 'routing'", "run_time_basis = %s"])
+                        params.append(Jsonb(row["resolved_runtime"]["basis"]))
                     if row["clear_runtime_mismatch"]:
                         sets.append("runtime_schedule_mismatch = FALSE")
                     attr_columns = {
@@ -1484,28 +1508,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 failed = len(update_rows)
                 raise
 
-    # Routing runtime re-resolve (ROUTING_RUNTIME_DESIGN.md §8.5): any
-    # accepted MACHINE/PRODUCTION_VERSION edit on an enabled-plant order
-    # needs a fresh run_time now that the new combination has committed.
-    # Runs AFTER this function's own transaction has committed and its
-    # connection has been returned to the pool -- resolve_orders opens its
-    # OWN separate connection and commits it itself, matching every other
-    # call site of this function (backend/distribution/data.py,
-    # backend/integration/sap_sync.py). Never called with this function's
-    # own still-open conn -- that's only for the read-only eligibility
-    # check above, inside the write transaction.
-    if update_rows:
-        routing_plants: set[str] = set()
-        for row in update_rows:
-            if row["id"] not in versions:
-                continue  # not actually persisted (e.g. an aborted batch)
-            if "MACHINE" not in row["attrs"] and "PRODUCTION_VERSION" not in row["attrs"]:
-                continue
-            current = eff[row["id"]]
-            if current["routing_runtime_enabled"]:
-                routing_plants.add(current["plant"])
-        for plant in sorted(routing_plants):
-            routing_resolver.resolve_orders(plant)
+    # Candidate runtime/basis were persisted with the schedule above. A second
+    # plant-wide resolve here would invalidate the versions we are returning.
 
     return {"applied": applied, "persisted": persisted, "failed": failed,
             "invalid": len(invalid_ids), "not_found": len(not_found_ids),

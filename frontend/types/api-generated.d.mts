@@ -124,7 +124,7 @@ export interface paths {
          *                          PRODUCTION_VERSION?, base_version?, force? }],
          *                blocks?, calendars? }
          *     Response: { status, updated, persisted, failed, invalid, not_found,
-         *                 invalid_ids, not_found_ids, stale, versions }
+         *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons }
          */
         post: operations["tasks_update_tasks_update_post"];
         delete?: never;
@@ -147,7 +147,7 @@ export interface paths {
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
          *     Payload: [{ id, start_date?, end_date?, base_version? }]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
-         *                 invalid_ids, not_found_ids, stale, versions }
+         *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons }
          *
          *     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
          *     external caller may not bypass the base_version check. A stale row is
@@ -1343,6 +1343,115 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/routing/upload/production-versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Production Versions
+         * @description .xlsx -> upsert-by-key `production_version` (ROUTING_RUNTIME_DESIGN.md
+         *     §6). Rows referencing a plant/material/work center unknown to NIMBUS are
+         *     rejected individually (reported in `warnings`/`rejected`), never failing
+         *     the whole file -- mirroring `/bom/upload`'s own per-row rejection shape.
+         */
+        post: operations["upload_production_versions_routing_upload_production_versions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routing/upload/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Operations
+         * @description .xlsx -> scoped-replace `routing_operation` (ROUTING_RUNTIME_DESIGN.md
+         *     §6/§6.2). Every routing key present in the file has its existing
+         *     operations deleted and replaced by that key's rows; a routing not
+         *     mentioned in the file is left untouched.
+         */
+        post: operations["upload_operations_routing_upload_operations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routing/{plant}/recompute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Recompute Plant
+         * @description §6/§6.4: run resolver.py's §5 logic over every in-scope order in
+         *     `plant` and return the §5.6 recompute report. Also the hook TARGET
+         *     called (best-effort, deferred-imported) after any bulk save/upload/
+         *     delete that touches production_version/routing_operation/routing_rules/
+         *     machine, or a plants.routing_runtime_enabled flip, for the affected
+         *     plant(s) -- see this file's `_recompute_after_write` and
+         *     backend/master_data/routes.py's `md_bulk`/`md_delete_filtered`.
+         *
+         *     Guard shape copied from backend/distribution/routes.py's
+         *     `_distribution_plant_guard`: `md.PlantNotAllowed` -> 403,
+         *     plain `ValueError` (blank/whitespace plant) -> 400.
+         */
+        post: operations["recompute_plant_routing__plant__recompute_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routing/{plant}/rate-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Rate Map
+         * @description §8.1/§6's P3 client-side rate-map mirror -- `frontend/routing/
+         *     runtime-client.mts`'s `Runtime.load(plant)` fetches this once per
+         *     selected/enabled plant so local edits (machine/production-version
+         *     changes, drag re-place eligibility) can resolve/estimate without a round
+         *     trip per edit. Read-only, `require_authenticated` + plant scope (no
+         *     `require_api_key`/`require_admin` -- matches every other plant-scoped
+         *     read in this app, e.g. `backend/priority_lists/routes.py`'s
+         *     `GET /priority-rank-maps`). `Cache-Control: no-store`: the corporate
+         *     proxy in front of this app caches by URL, and a stale rate map after a
+         *     routing upload/recompute must never be served.
+         *
+         *     `routing_resolver.build_rate_map` is a literal parity port of
+         *     `resolve_one`'s own §5.4 math (see that function's docstring) -- this
+         *     route does no calculation of its own.
+         */
+        get: operations["get_rate_map_routing__plant__rate_map_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit/log": {
         parameters: {
             query?: never;
@@ -1550,6 +1659,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/master-data/_routing-pv-grid": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Md Routing Pv Grid
+         * @description Read-only "Routing & Production Versions" Master Data sub-tab
+         *     (ROUTING_RUNTIME_DESIGN.md §7.3). Registered BEFORE the generic
+         *     GET /master-data/{table} below -- same single-segment route-shadowing
+         *     hazard as `_material-grid`/`_material-plant-grid` (see this file's
+         *     module docstring and backend/master_data/CLAUDE.md).
+         */
+        get: operations["md_routing_pv_grid_master_data__routing_pv_grid_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/master-data/{table}": {
         parameters: {
             query?: never;
@@ -1620,6 +1753,33 @@ export interface paths {
          * @description Apply upserts and deletes in one transaction. Payload: { upserts: row[], deletes: key[] }
          */
         post: operations["md_bulk_master_data__table__bulk_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/master-data/{table}/delete-filtered": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Delete Filtered
+         * @description Filtered mass delete (ROUTING_RUNTIME_DESIGN.md §6.3). `table` must be
+         *     in `md.MASS_DELETABLE_TABLES` (production_version/routing_operation/
+         *     routing_rules today) or this 404s. Payload: {plant, search, expected_count}.
+         *     The server re-counts rows matching (plant [+ search]) -- the SAME
+         *     predicate `list_rows`' ILIKE search filter uses -- and refuses with a 409
+         *     if it doesn't match the caller's `expected_count` (the grid's own
+         *     `meta.total` from the load that preceded this call), so a stale filter
+         *     can never delete a different row set than what the admin was shown.
+         */
+        post: operations["md_delete_filtered_master_data__table__delete_filtered_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2598,6 +2758,11 @@ export interface components {
             /** File */
             file: string;
         };
+        /** Body_upload_operations_routing_upload_operations_post */
+        Body_upload_operations_routing_upload_operations_post: {
+            /** File */
+            file: string;
+        };
         /** Body_upload_orders_upload_post */
         Body_upload_orders_upload_post: {
             /** File */
@@ -2616,6 +2781,11 @@ export interface components {
             value_column?: string | null;
             /** Rank Column */
             rank_column?: string | null;
+        };
+        /** Body_upload_production_versions_routing_upload_production_versions_post */
+        Body_upload_production_versions_routing_upload_production_versions_post: {
+            /** File */
+            file: string;
         };
         /**
          * BulkApplyResult
@@ -2673,6 +2843,10 @@ export interface components {
             error_code?: string | null;
             /** Cause */
             cause?: string | null;
+            /** Rejection Reasons */
+            rejection_reasons?: {
+                [key: string]: string;
+            };
         };
         /**
          * BulkUsersResult
@@ -2743,6 +2917,17 @@ export interface components {
         ClientConfigResult: {
             /** Apikey */
             apiKey: string;
+        };
+        /**
+         * DeleteFilteredResult
+         * @description master_data.delete_filtered()'s shape (POST /master-data/{table}/
+         *     delete-filtered, ROUTING_RUNTIME_DESIGN.md §6.3) -- a filtered mass
+         *     delete, count-checked against the client's `expected_count` before
+         *     anything is deleted.
+         */
+        DeleteFilteredResult: {
+            /** Deleted */
+            deleted: number;
         };
         /**
          * DueDateCorrection
@@ -2965,6 +3150,24 @@ export interface components {
             };
         };
         /**
+         * RoutingUploadResult
+         * @description Shape returned by both POST /routing/upload/production-versions and
+         *     POST /routing/upload/operations (ROUTING_RUNTIME_DESIGN.md §6).
+         */
+        RoutingUploadResult: {
+            /** Inserted */
+            inserted: number;
+            /** Updated */
+            updated: number;
+            /** Rejected */
+            rejected: number;
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: components["schemas"]["UploadWarning"][];
+        };
+        /**
          * ScheduleConflict
          * @description One same-machine strict overlap detected inside the save transaction (N3).
          *     order_a < order_b lexicographically; overlap_minutes is summed across segments.
@@ -3148,6 +3351,12 @@ export interface components {
              */
             planning_status: "scheduled" | "needs_planning";
             planning_reason?: components["schemas"]["PlanningReason"] | null;
+            /** Run Time Source */
+            run_time_source?: string | null;
+            /** Run Time Basis */
+            run_time_basis?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * TaskDateUpdate
@@ -3174,6 +3383,8 @@ export interface components {
             PRT_02?: string | null;
             /** Production Version */
             PRODUCTION_VERSION?: string | null;
+            /** Machine */
+            MACHINE?: string | null;
             /** Run Time */
             RUN_TIME?: number | null;
             /** Schedule Segments */
@@ -3239,6 +3450,16 @@ export interface components {
             end_date?: string | null;
             /** Row Version */
             row_version?: number | null;
+            /** Machine */
+            MACHINE?: string | null;
+            /** Prt 01 */
+            PRT_01?: string | null;
+            /** Prt 02 */
+            PRT_02?: string | null;
+            /** Production Version */
+            PRODUCTION_VERSION?: string | null;
+            /** Run Time */
+            RUN_TIME?: number | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentDTO"][];
             /**
@@ -3253,6 +3474,12 @@ export interface components {
              */
             planning_status: "scheduled" | "needs_planning";
             planning_reason?: components["schemas"]["PlanningReason"] | null;
+            /** Run Time Source */
+            run_time_source?: string | null;
+            /** Run Time Basis */
+            run_time_basis?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * TasksRefreshResponse
@@ -3328,6 +3555,25 @@ export interface components {
             first_name?: string | null;
             /** Last Name */
             last_name?: string | null;
+        };
+        /**
+         * UploadWarning
+         * @description One informational-or-rejection finding from an ingest parse
+         *     (backend/routing/ingest.py) -- e.g. an unknown/ignored header, or a
+         *     per-row rejection reason. `row` is the 1-based source row number when
+         *     the finding is row-scoped; omitted for a file-level finding (e.g. an
+         *     unknown-header list).
+         */
+        UploadWarning: {
+            /**
+             * Level
+             * @default warn
+             */
+            level: string;
+            /** Msg */
+            msg: string;
+            /** Row */
+            row?: number | null;
         };
         /**
          * UpsertUserSettingsResult
@@ -3999,7 +4245,9 @@ export interface operations {
     md_set_material_plant_attributes_master_data_material_plants_attributes_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -5602,6 +5850,140 @@ export interface operations {
             };
         };
     };
+    upload_production_versions_routing_upload_production_versions_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_production_versions_routing_upload_production_versions_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutingUploadResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_operations_routing_upload_operations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_operations_routing_upload_operations_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutingUploadResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recompute_plant_routing__plant__recompute_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_rate_map_routing__plant__rate_map_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_audit_log_audit_log_get: {
         parameters: {
             query?: {
@@ -5900,6 +6282,41 @@ export interface operations {
             };
         };
     };
+    md_routing_pv_grid_master_data__routing_pv_grid_get: {
+        parameters: {
+            query: {
+                /** @description Required. Returns production_version rows for this plant, LEFT JOINed with their routing_operation rows and the machines mapped to each operation's work center. */
+                plant: string;
+                search?: string | null;
+                limit?: number | null;
+                offset?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GridResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     md_list_master_data__table__get: {
         parameters: {
             query?: {
@@ -6005,6 +6422,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BulkApplyResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_delete_filtered_master_data__table__delete_filtered_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                table: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteFilteredResult"];
                 };
             };
             /** @description Validation Error */

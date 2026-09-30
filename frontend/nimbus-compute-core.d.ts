@@ -48,7 +48,7 @@ declare global {
     id: string;
     text?: string;
     MACHINE?: string;
-    RUN_TIME?: number | string;
+    RUN_TIME?: number | string | null;
     start_date?: Date | null;
     end_date?: Date | null;
     firmed?: boolean; // manual firm mirror
