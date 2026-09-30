@@ -545,6 +545,16 @@ import backend.distribution.data as distribution_data  # noqa: E402
 import backend.routing.resolver as routing_resolver  # noqa: E402
 
 
+def _seed_distribution_material(cur, material, plant):
+    """Honor the fresh-schema parent FK; fixtures must not depend on pilot data."""
+    assert len(material) <= 18
+    cur.execute("INSERT INTO materials (material_id) VALUES (%s) ON CONFLICT DO NOTHING", (material,))
+    cur.execute(
+        "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (material, plant),
+    )
+
+
 def _snapshot_header(db_, plant, order, material):
     with db_._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -625,10 +635,7 @@ class TestPlanApplyIdempotency:
                 (self.SUB, self.PLANT, self.L1, self.WC, 60,
                  self.SUB, self.PLANT, self.L2, self.WC, 40),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (self.MAT, self.PLANT),
-            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
             conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -646,6 +653,7 @@ class TestPlanApplyIdempotency:
                     (self.PLANT, self.WC))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
                     (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
 
     def _row(self):
         return {
@@ -725,10 +733,7 @@ class TestApplyReplanAfterConcurrentReweight:
                 "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
                 (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (self.MAT, self.PLANT),
-            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
             conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -746,6 +751,7 @@ class TestApplyReplanAfterConcurrentReweight:
                     (self.PLANT, self.WC))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
                     (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
 
     def _row(self):
         return {
@@ -848,10 +854,7 @@ class TestPlanApplyAnchorCarry:
                 "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
                 (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (self.MAT, self.PLANT),
-            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
             # The plain order arrived BEFORE the work center was configured --
             # it is already scheduled by a planner (scheduled_start set) and
             # carries a note.
@@ -881,6 +884,7 @@ class TestPlanApplyAnchorCarry:
                     (self.PLANT, self.WC))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
                     (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
 
     def test_anchor_and_notes_carried_old_plain_row_deleted(self, pg):
         db_ = pg
@@ -939,10 +943,7 @@ class TestApplyPreservesReviewedAndDefaultBasis:
                 "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
                 (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (self.MAT, self.PLANT),
-            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
             conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -960,6 +961,7 @@ class TestApplyPreservesReviewedAndDefaultBasis:
                     (self.PLANT, self.WC))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
                     (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
 
     def _row(self, qty, run_time):
         return {
@@ -1038,10 +1040,7 @@ class TestPlanRerouteRecordsPreviousWorkcenter:
                 (self.SUB, self.PLANT, self.L1, self.WC1, self.SUB, self.PLANT, self.L2, self.WC1,
                  self.SUB, self.PLANT, self.M1, self.WC2),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (self.MAT, self.PLANT),
-            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
             conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -1059,6 +1058,7 @@ class TestPlanRerouteRecordsPreviousWorkcenter:
                     (self.PLANT, self.WC1, self.WC2))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
                     (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
 
     def _row(self, machine):
         return {
@@ -1258,6 +1258,7 @@ class TestDistributionReadRoutes:
                     (self.PLANT, self.WC))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
                     (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
 
     @pytest.fixture(autouse=True)
     def _seed(self, pg):
@@ -1274,10 +1275,7 @@ class TestDistributionReadRoutes:
                 (self.SUB, self.PLANT, self.L1, self.WC, 60,
                  self.SUB, self.PLANT, self.L2, self.WC, 40),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (self.MAT, self.PLANT),
-            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
             conn.commit()
 
         batch_id = str(uuid.uuid4())
@@ -1369,6 +1367,13 @@ class TestDistributionReadRoutes:
         assert row["child_count"] == 2
         assert row["sum_child_quantity"] == pytest.approx(100.0)
         assert len(row["children"]) == 2
+        # Child runtimes are 6/4 hours; the header runtime is 10. Alias
+        # qualification must retain child timing, never the header's finish.
+        assert row["start"] == "2026-10-01T08:00:00"
+        assert row["finish"] == "2026-10-01T14:00:00"
+        assert {child["machine"]: child["end"] for child in row["children"]} == {
+            self.L1: "2026-10-01T14:00:00", self.L2: "2026-10-01T12:00:00",
+        }
 
     def test_aggregate_csv_export(self, client):
         response = client.get(f"/distribution/{self.PLANT}/aggregate",
@@ -1409,6 +1414,7 @@ class _ReweightFixtureBase:
         cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)", (self.PLANT, l1, l2))
         cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s", (self.PLANT, wc))
         cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s", (self.PLANT, mat))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (mat,))
 
     def _seed_header(self, db_, wc, l1, l2, ord_, mat):
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -1422,10 +1428,7 @@ class _ReweightFixtureBase:
                 "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
                 (self.SUB, self.PLANT, l1, wc, 60, self.SUB, self.PLANT, l2, wc, 40),
             )
-            cur.execute(
-                "INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (mat, self.PLANT),
-            )
+            _seed_distribution_material(cur, mat, self.PLANT)
             conn.commit()
         batch_id = str(uuid.uuid4())
         row = {
@@ -1576,7 +1579,7 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
     land on the new bare id, not be discarded."""
     WC = "ZZTEST_WC_RWCOLLAPSE"
     L1, L2 = "ZZTEST_L1_RWCOLLAPSE", "ZZTEST_L2_RWCOLLAPSE"
-    ORD, MAT = "ZZTEST_ORD_RWCOLLAPSE", "ZZTEST_MAT_RWCOLLAPSE"
+    ORD, MAT = "ZZTEST_ORD_RWCOLLAPSE", "ZZTEST_MAT_RWCOL"
 
     @pytest.fixture(autouse=True)
     def _seed(self, pg):
@@ -1782,7 +1785,7 @@ class TestChildUpsertNeverAutoFlagsRuntimeMismatch(_ReweightFixtureBase):
     never computes or sets it from the refreshed facts."""
     WC = "ZZTEST_WC_MISMATCH"
     L1, L2 = "ZZTEST_L1_MISMATCH", "ZZTEST_L2_MISMATCH"
-    ORD, MAT = "ZZTEST_ORD_MISMATCH", "ZZTEST_MAT_MISMATCH"
+    ORD, MAT = "ZZTEST_ORD_MISMATCH", "ZZTEST_MAT_MISMTCH"
 
     @pytest.fixture(autouse=True)
     def _seed(self, pg):
@@ -1850,7 +1853,7 @@ class TestResolverCallSitesAfterRealDistributionWrites(_ReweightFixtureBase):
     patched attribute is what gets called regardless of the import site."""
     WC = "ZZTEST_WC_RESOLVER"
     L1, L2 = "ZZTEST_L1_RESOLVER", "ZZTEST_L2_RESOLVER"
-    ORD, MAT = "ZZTEST_ORD_RESOLVER", "ZZTEST_MAT_RESOLVER"
+    ORD, MAT = "ZZTEST_ORD_RESOLVER", "ZZTEST_MAT_RESOLVE"
 
     @pytest.fixture(autouse=True)
     def _seed(self, pg):
@@ -1911,3 +1914,112 @@ class TestResolverCallSitesAfterRealDistributionWrites(_ReweightFixtureBase):
             real_result = distribution_data.resolve(self.PLANT, "repair", dry_run=False)
             assert real_result["repaired"] >= 1
             fake_resolve.assert_called_once_with(self.PLANT)
+
+
+@pytest.mark.pg
+class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
+    WC = "ZZTEST_WC_CANONICAL"
+    L1, L2 = "ZZTEST_L1_CANONICAL", "ZZTEST_L2_CANONICAL"
+    L3 = "ZZTEST_L3_CANONICAL"
+    ORD, MAT = "ZZTEST_ORD_CANON", "ZZTEST_MAT_CANON"
+
+    def _cleanup(self, cur, wc, l1, l2, ord_, mat):
+        cur.execute("UPDATE machine SET sap_workcenter=NULL WHERE plant=%s AND machine=%s", (self.PLANT, self.L3))
+        super()._cleanup(cur, wc, l1, l2, ord_, mat)
+        cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, self.L3))
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_reset_links_new_member_and_next_removal_guards_and_deletes_its_child(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                " VALUES (%s,%s,%s,%s,40)", (self.SUB, self.PLANT, self.L3, self.WC),
+            )
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        result = distribution_data.reset_one_header(self.PLANT, self.ORD, self.MAT, header["xmin"])
+        added = next(c for c in result["children"] if c["machine"] == self.L3)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT child_id FROM order_distribution_share WHERE plant=%s AND production_order=%s"
+                " AND material_number=%s AND machine=%s", (self.PLANT, self.ORD, self.MAT, self.L3),
+            )
+            assert cur.fetchone()[0] == added["id"]
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s WHERE id=%s",
+                        (dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 12), added["id"]))
+            conn.commit()
+        desired = [{"machine": self.L1, "weight": 60}, {"machine": self.L2, "weight": 40},
+                   {"machine": self.L3, "weight": 0}]
+        with pytest.raises(distribution_data.DistributionChildrenScheduled):
+            distribution_data.reweight_shares(self.PLANT, self.ORD, self.MAT, desired, result["base_version"])
+        removed = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, desired, result["base_version"], confirm_remove_scheduled=True,
+        )
+        assert added["id"] in removed["removed"]
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id=%s", (added["id"],))
+            assert cur.fetchone()[0] == 0
+
+    def test_collapse_response_carries_preserved_segment_aggregate(self, pg):
+        survivor = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        segments = [(1, dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 11)),
+                    (2, dt.datetime(2026, 10, 1, 12), dt.datetime(2026, 10, 1, 15))]
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s WHERE id=%s",
+                        (segments[0][1], segments[-1][2], survivor["id"]))
+            cur.executemany(
+                "INSERT INTO order_schedule_segments (order_id,segment_no,scheduled_start,scheduled_end)"
+                " VALUES (%s,%s,%s,%s)", [(survivor["id"], *segment) for segment in segments],
+            )
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        result = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 1}], header["xmin"],
+            confirm_remove_scheduled=True,
+        )
+        child = result["children"][0]
+        assert child["id"] != survivor["id"]
+        assert child["plant"] == self.PLANT and child["material_number"] == self.MAT
+        assert len(child["schedule_segments"]) == 2
+        for actual, (sequence, start, end) in zip(child["schedule_segments"], segments, strict=True):
+            assert actual["sequence"] == sequence
+            assert dt.datetime.fromisoformat(actual["start_date"]) == start
+            assert dt.datetime.fromisoformat(actual["end_date"]) == end
+        assert child["runtime_schedule_mismatch"] is True  # preserved pieces total 6 h, parent now 10 h
+
+    @pytest.mark.parametrize("operation", ["shares", "reset"])
+    def test_response_reads_runtime_attributes_and_version_after_resolver_commit(self, pg, operation):
+        def resolve_after_commit(plant):
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET run_time=1.5, run_time_source='routing',"
+                    " run_time_basis='{}'::jsonb, prt_01='CURRENT-TOOL', production_version='0002'"
+                    " WHERE plant=%s AND parent_production_order=%s", (plant, self.ORD),
+                )
+                conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        with mock.patch.object(routing_resolver, "resolve_orders", side_effect=resolve_after_commit):
+            if operation == "shares":
+                result = distribution_data.reweight_shares(
+                    self.PLANT, self.ORD, self.MAT,
+                    [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}], header["xmin"],
+                )
+            else:
+                result = distribution_data.reset_one_header(self.PLANT, self.ORD, self.MAT, header["xmin"])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            for child in result["children"]:
+                cur.execute("SELECT xmin::text::bigint FROM orders WHERE id=%s", (child["id"],))
+                assert child["base_version"] == cur.fetchone()[0]
+                assert result["versions"][child["id"]] == child["base_version"]
+                assert child["run_time"] == Decimal('1.5')
+                assert child["run_time_source"] == 'routing'
+                assert child["run_time_basis"] == {}
+                assert child["prt_01"] == 'CURRENT-TOOL'
+                assert child["production_version"] == '0002'

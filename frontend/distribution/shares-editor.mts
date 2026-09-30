@@ -11,18 +11,10 @@
 // tests/modules/distribution/distribution-pane.test.mjs (extended for P2-16)
 // can exercise all of it without any fetch/DOM mocking.
 //
-// Wire shapes below are hand-typed from backend/distribution/data.py's
-// `_materialize_reweight` (dry-run branch, ~line 2487) and its real-write
-// return (~line 2574) — NOT from aggregate_to_detail.md's prose, which
-// (correctly, for the dry-run `plan` shape) matches, but for the real-write
-// `children` DTO does NOT match the design doc's "full child DTOs" claim:
-// the actual code returns a small hand-built lowercase dict (id,
-// production_order, machine, order_quantity, run_time, labor_hours,
-// machine_hours, scheduled_start, scheduled_end, basic_start_date,
-// basic_finish_date, notes, planning_status, planning_reason,
-// distribution_letter, parent_production_order, base_version), not the full
-// uppercase `/tasks` TaskDTO shape. distribution-pane.mts's Store-patching
-// code is written against this real shape.
+// Wire shapes match backend/distribution/data.py's `_materialize_reweight`
+// preview and `_read_write_children` committed response. Children carry
+// canonical schedule aggregates and editable attributes in lowercase;
+// distribution-pane hydrates them through the shared task decoder.
 
 /** One row of a dry run's (or a real write's) `plan` array — verified against
  *  `_materialize_reweight`'s `plan_entries.append({...})` (data.py ~line 2480). */
@@ -64,6 +56,9 @@ export interface DryRunResult {
 export interface WriteResultChild {
   id: string;
   production_order: string;
+  plant: string;
+  material_number: string;
+  material_description: string | null;
   machine: string;
   order_quantity: number | null;
   run_time: number | null;
@@ -71,6 +66,8 @@ export interface WriteResultChild {
   machine_hours: number | null;
   scheduled_start: string | null;
   scheduled_end: string | null;
+  start_date: string | null;
+  end_date: string | null;
   basic_start_date: string | null;
   basic_finish_date: string | null;
   notes: string | null;
@@ -79,6 +76,16 @@ export interface WriteResultChild {
   distribution_letter: string | null;
   parent_production_order: string | null;
   base_version: number;
+  schedule_segments: Array<{ sequence: number; start_date: string; end_date: string }>;
+  runtime_schedule_mismatch: boolean;
+  run_time_source: string | null;
+  run_time_basis: Record<string, unknown> | null;
+  prt_01: string | null;
+  prt_02: string | null;
+  production_version: string | null;
+  firming_indicator: string | null;
+  color: string | null;
+  form_size: string | null;
 }
 
 /** A real (non-dry-run) `.../shares` or `.../reset` write response

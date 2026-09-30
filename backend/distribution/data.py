@@ -39,6 +39,7 @@ the `order_distribution` HEADER table (this file's `plan`/`apply`), not to the
 only). `save_workcenter` stays a plain last-write-wins transaction, the same
 shape as master_data.py's other narrow single-purpose admin writers.
 """
+import re
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
 from datetime import datetime, timedelta, timezone
@@ -1920,9 +1921,15 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
         "CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
         "ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END"
     )
+    # Headers share the runtime/date names with orders. Qualify only bare
+    # operands of the shared expression, preserving its fallback precedence.
+    order_end_sql = re.sub(
+        r"(?<![\w.])(scheduled_start|basic_start_date|run_time|scheduled_end|basic_finish_date)\b",
+        r"o.\1", db._EFF_END_SQL,
+    )
     eff_end_sql = (
         f"CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
-        f"ELSE COALESCE(seg.last_end, {db._EFF_END_SQL}) END"
+        f"ELSE COALESCE(seg.last_end, {order_end_sql}) END"
     )
 
     query = f"""
@@ -2381,6 +2388,55 @@ def _fetch_children_by_machine(cur, plant: str, order: str, material: str) -> di
     return out
 
 
+def _read_write_children(cur, child_ids) -> list[dict]:
+    """Read complete child aggregates for Store hydration and subsequent saves.
+
+    Reuse the scheduling projections so segmented, queued and legacy orders
+    have the same effective dates and mismatch flags as /tasks/refresh.
+    """
+    if not child_ids:
+        return []
+    cur.execute(
+        f"""
+        SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
+               o.labor_hours, o.machine_hours, o.scheduled_start, o.scheduled_end,
+               o.basic_start_date, o.basic_finish_date, o.notes,
+               o.planning_status, o.planning_reason, o.distribution_letter, o.parent_production_order,
+               o.xmin::text::bigint AS base_version,
+               o.plant, o.material_number, o.material_description,
+               o.prt_01, o.prt_02, o.production_version, o.firming_indicator, o.color, o.form_size,
+               o.run_time_source, o.run_time_basis,
+               CASE WHEN o.planning_status = 'needs_planning' THEN '[]'::jsonb
+                    ELSE seg.schedule_segments END AS schedule_segments,
+               {db._SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
+               CASE WHEN o.planning_status = 'needs_planning' THEN NULL
+                    ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END AS start_date,
+               CASE WHEN o.planning_status = 'needs_planning' THEN NULL
+                    ELSE COALESCE(seg.last_end, {db._EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS end_date
+          FROM orders o
+          {db._SCHEDULE_SEGMENTS_LATERAL_SQL}
+         WHERE o.id = ANY(%s)
+         ORDER BY o.id
+        """,
+        (sorted(child_ids),),
+    )
+    columns = [column.name for column in cur.description]
+    return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+
+def _refresh_write_children(result: dict) -> None:
+    """Replace the pre-resolve snapshot with the final committed task versions.
+
+    One SELECT reads fields, segments and xmin from one MVCC snapshot. A
+    later concurrent edit may stale that version, as with any task read,
+    but the returned version never acknowledges fields from an older read.
+    """
+    ids = [child["id"] for child in result["children"]]
+    with _pool.connection() as conn, conn.cursor() as cur:
+        result["children"] = _read_write_children(cur, ids)
+    result["versions"] = {child["id"]: child["base_version"] for child in result["children"]}
+
+
 def _materialize_reweight(cur, plant: str, order: str, material: str, header: dict,
                           existing_shares: dict[str, dict], mat_attrs: dict,
                           desired_weights: dict[str, Decimal], letters: dict[str, str], *,
@@ -2516,8 +2572,8 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
         _collapse_to_survivor(cur, collapse["old_child_id"], collapse["new_child_id"])
     superseded = previous_child_ids - intended_child_ids
     deleted = _delete_superseded_children(cur, superseded)
-    _update_share_child_ids(cur, parent_stub)
     _write_reweight_shares(cur, plant, order, material, letters, desired_weights)
+    _update_share_child_ids(cur, parent_stub)
 
     reviewed_val, reviewed_by, reviewed_at, reviewed_quantity = _resolve_review_stamp(header, reviewed, actor)
     _write_reweight_header(
@@ -2541,28 +2597,7 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
         }), actor),
     )
 
-    if intended_child_ids:
-        cur.execute(
-            "SELECT id, production_order, machine, order_quantity, run_time, labor_hours, machine_hours,"
-            " scheduled_start, scheduled_end, basic_start_date, basic_finish_date, notes,"
-            " planning_status, planning_reason, distribution_letter, parent_production_order,"
-            " xmin::text::bigint"
-            " FROM orders WHERE id = ANY(%s)",
-            (sorted(intended_child_ids),),
-        )
-        children_out = [
-            {
-                "id": r[0], "production_order": r[1], "machine": r[2], "order_quantity": r[3],
-                "run_time": r[4], "labor_hours": r[5], "machine_hours": r[6],
-                "scheduled_start": r[7], "scheduled_end": r[8], "basic_start_date": r[9],
-                "basic_finish_date": r[10], "notes": r[11], "planning_status": r[12],
-                "planning_reason": r[13], "distribution_letter": r[14],
-                "parent_production_order": r[15], "base_version": r[16],
-            }
-            for r in cur.fetchall()
-        ]
-    else:
-        children_out = []
+    children_out = _read_write_children(cur, intended_child_ids)
     versions = {c["id"]: c["base_version"] for c in children_out}
 
     previous_shares_out = [
@@ -2628,6 +2663,7 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
         # (e.g. backend/routing/routes.py, backend/master_data/routes.py).
         import backend.routing.resolver as routing_resolver
         routing_resolver.resolve_orders(plant)
+        _refresh_write_children(result)
     return result
 
 
@@ -2675,6 +2711,7 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
         # See reweight_shares' identical call -- same gap, same fix.
         import backend.routing.resolver as routing_resolver
         routing_resolver.resolve_orders(plant)
+        _refresh_write_children(result)
     return result
 
 

@@ -80,6 +80,51 @@ import type {
   WriteResult, WriteResultChild,
 } from './shares-editor.mjs';
 
+/** Decode the authoritative child aggregate through the same segment/date
+ *  decoder as /tasks. Nulls replace stale values on kept children too. */
+export function hydrateDistributionChild(child: WriteResultChild, existing?: NimbusTask): NimbusTask {
+  return Persistence._prepTask({
+    ...existing,
+    id: child.id,
+    text: child.material_description || child.production_order,
+    ORDER: child.production_order,
+    PRODUCTION_ORDER: child.production_order,
+    MATERIAL_NUMBER: child.material_number,
+    MATERIAL_DESCRIPTION: child.material_description,
+    MACHINE: child.machine,
+    plant: child.plant,
+    PLANT: child.plant,
+    RUN_TIME: child.run_time,
+    notes: child.notes,
+    PARENT_ORDER: child.parent_production_order,
+    DISTRIBUTION_LETTER: child.distribution_letter,
+    row_version: child.base_version,
+    start_date: child.start_date,
+    end_date: child.end_date,
+    BASIC_START_DATE: child.basic_start_date,
+    BASIC_FINISH_DATE: child.basic_finish_date,
+    original_start_date: child.basic_start_date,
+    original_end_date: child.basic_finish_date,
+    user_scheduled: child.scheduled_start !== null,
+    planning_status: child.planning_status,
+    planning_reason: child.planning_reason,
+    schedule_segments: child.schedule_segments,
+    runtime_schedule_mismatch: child.runtime_schedule_mismatch,
+    run_time_source: child.run_time_source,
+    run_time_basis: child.run_time_basis,
+    PRT_01: child.prt_01,
+    PRT_02: child.prt_02,
+    PRODUCTION_VERSION: child.production_version,
+    COLOR: child.color,
+    FORM_SIZE: child.form_size,
+    ecc_firmed: child.firming_indicator === 'X',
+    firmed: existing?.firmed ?? false,
+    'ORDER_QUANTITY_(GMEIN)': child.order_quantity,
+    'LABOR_HOURS_(MEINH)': child.labor_hours,
+    'MACHINE_HOURS_(MEINH)': child.machine_hours,
+  });
+}
+
 /* ============================================================================
    WIRE TYPES — hand-typed from backend/distribution/routes.py + data.py
    (read in full for this task; NOT guessed from the design doc). Same
@@ -1000,41 +1045,12 @@ export const DistributionPane = (() => {
    *  field names for those two values, confirmed rather than guessed. */
   function _upsertChildTask(child: WriteResultChild): void {
     const existing = Store.tasks[child.id];
-    const changes: Partial<NimbusTask> & Record<string, unknown> = {
-      MACHINE: child.machine,
-      RUN_TIME: child.run_time ?? (existing?.RUN_TIME as number | undefined) ?? 0,
-      notes: child.notes,
-      PARENT_ORDER: child.parent_production_order,
-      DISTRIBUTION_LETTER: child.distribution_letter,
-      row_version: child.base_version,
-      runtime_schedule_mismatch: false,
-      start_date: child.scheduled_start ? Util.parseDate(child.scheduled_start) : (existing?.start_date ?? null),
-      end_date: child.scheduled_end ? Util.parseDate(child.scheduled_end) : (existing?.end_date ?? null),
-      BASIC_START_DATE: child.basic_start_date ? Util.parseDate(child.basic_start_date) : (existing?.BASIC_START_DATE ?? null),
-      BASIC_FINISH_DATE: child.basic_finish_date ? Util.parseDate(child.basic_finish_date) : (existing?.BASIC_FINISH_DATE ?? null),
-      'ORDER_QUANTITY_(GMEIN)': child.order_quantity,
-      'LABOR_HOURS_(MEINH)': child.labor_hours,
-      'MACHINE_HOURS_(MEINH)': child.machine_hours,
-    };
+    const task = hydrateDistributionChild(child, existing);
     if (existing) {
-      Object.assign(existing, changes);
+      Object.assign(existing, task);
       Store._normalizeDates(existing);
       return;
     }
-    const plant = Store.selectedPlant;
-    const task = {
-      id: child.id,
-      text: child.production_order,
-      PRODUCTION_ORDER: child.production_order,
-      ORDER: child.production_order,
-      MATERIAL_NUMBER: _detail?.header.material_number,
-      plant, PLANT: plant || undefined,
-      firmed: false,
-      row_version: child.base_version,
-      planning_status: child.planning_status === 'needs_planning' ? 'needs_planning' : 'scheduled',
-      planning_reason: (child.planning_reason as NimbusTask['planning_reason']) ?? null,
-      ...changes,
-    } as unknown as NimbusTask;
     Store._normalizeDates(task);
     Store.tasks[child.id] = task;
   }
