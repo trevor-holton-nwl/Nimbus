@@ -182,12 +182,10 @@ export const Compute = (() => {
     });
   }
 
-  // Alerts/Utilization compute never read these (docs/scheduling_priority.md
-  // R10) — dropped before the structured-clone postMessage, the documented
-  // dominant main-thread cost of the Worker.* round trip. Excludes only the
-  // three fields Stage 1 added; every other field ships exactly as before.
+  // Tool-conflict alerts consume PRT_01/PRT_02. Only production version is
+  // unused after setup observation has been derived from the full source.
   function _stripPriorityFields(t: NimbusTask): NimbusTask {
-    const { PRT_01, PRT_02, PRODUCTION_VERSION, ...rest } = t;
+    const { PRODUCTION_VERSION, ...rest } = t;
     return rest as NimbusTask;
   }
 
@@ -195,8 +193,8 @@ export const Compute = (() => {
     const plant = Store.selectedPlant;
     if (!plant) {
       // Setup state must be resolved from the un-stripped source: stateForOrder
-      // reads PRT_01/PRT_02/PRODUCTION_VERSION, and _stripPriorityFields deletes
-      // exactly those before transport. Deriving from the stripped copy would
+      // reads PRODUCTION_VERSION, which is omitted from task transport.
+      // Deriving from the stripped copy would
       // silently blank every state for any definition using those fields.
       const src = Store.tasksArr;
       const setup = deriveSetupObservation(Store.setupSnapshot, src, undefined, {
