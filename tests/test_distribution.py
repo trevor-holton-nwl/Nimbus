@@ -2505,6 +2505,129 @@ class TestResolveRepairRecoversIncompleteHeader(_ReweightFixtureBase):
         assert "incomplete" not in this_header2["statuses"]
 
 
+@pytest.mark.pg
+class TestPurgeRetiresShareAndResetRevives(_ReweightFixtureBase):
+    """B6/D02 (owner decision): a purge of a finished sub-order's date
+    window retires its distribution share (`purged_at` stamped, `child_id`
+    cleared) instead of leaving it dangling. Repair leaves it purged; an
+    explicit Reset is the one path that brings it back; a header left with
+    no live share anywhere is deleted outright so a later re-upload starts
+    fresh."""
+    WC = "ZZTEST_WC_PURGEREVIVE"
+    L1, L2 = "ZZTEST_L1_PURGEREVIVE", "ZZTEST_L2_PURGEREVIVE"
+    ORD, MAT = "ZZTEST_ORD_PURGEREVIVE", "ZZT_MAT_PURGEREV"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _schedule(self, pg, child_id, start, end):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE id = %s",
+                (start, end, child_id),
+            )
+            conn.commit()
+
+    def test_purge_retires_one_share_repair_leaves_it_reset_revives_it(self, pg):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        l1_child = next(c for c in children if c["machine"] == self.L1)
+        l2_child = next(c for c in children if c["machine"] == self.L2)
+
+        # Only L1 falls inside the purge window; L2 is scheduled well
+        # outside it and must survive untouched.
+        self._schedule(pg, l1_child["id"], dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 12, 0))
+        self._schedule(pg, l2_child["id"], dt.datetime(2026, 11, 5, 8, 0), dt.datetime(2026, 11, 5, 12, 0))
+
+        result = pg.purge_orders_by_date(
+            self.PLANT, dt.datetime(2026, 10, 1, 0, 0), dt.datetime(2026, 10, 1, 23, 59),
+            machines=[self.L1], user_email="tester@example.com",
+        )
+        assert result["deleted"] == 1
+        assert result["shares_purged"] == 1
+        assert result.get("headers_deleted", 0) == 0
+
+        shares = {s["machine"]: s for s in _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)}
+        assert shares[self.L1]["purged_at"] is not None
+        assert shares[self.L1]["child_id"] is None
+        assert shares[self.L2]["purged_at"] is None, "L2's share must be untouched by L1's purge"
+
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            rows = distribution_data._fetch_header_rows(cur, self.PLANT)
+            distribution_data._hydrate_headers(cur, self.PLANT, rows)
+        this_header = next(h for h in rows if h["production_order"] == self.ORD)
+        assert "purged" in this_header["statuses"]
+        assert "incomplete" not in this_header["statuses"], \
+            "a purged share with no child is consistent, not incomplete"
+
+        # Repair must leave the purged share exactly alone.
+        distribution_data.resolve(self.PLANT, "repair", dry_run=False)
+        after_repair = _snapshot_children(pg, self.PLANT, self.ORD)
+        assert all(c["machine"] != self.L1 for c in after_repair), \
+            "repair must never recreate a purged share's child"
+
+        # Reset revives it: a fresh default weight lands on L1 and clears
+        # its purge mark; L2 keeps its own default weight too.
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reset_one_header(self.PLANT, self.ORD, self.MAT, header["xmin"])
+
+        shares_after_reset = {
+            s["machine"]: s for s in _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)
+        }
+        assert shares_after_reset[self.L1]["purged_at"] is None
+        assert shares_after_reset[self.L1]["weight"] > 0
+        assert shares_after_reset[self.L2]["weight"] > 0
+
+        children_after_reset = {c["machine"]: c for c in _snapshot_children(pg, self.PLANT, self.ORD)}
+        assert self.L1 in children_after_reset, "Reset must recreate L1's child"
+        assert self.L2 in children_after_reset
+
+    def test_fully_purged_header_is_deleted_and_reupload_creates_fresh_header(self, pg):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        l1_child = next(c for c in children if c["machine"] == self.L1)
+        l2_child = next(c for c in children if c["machine"] == self.L2)
+
+        # Both children fall inside the same purge window this time.
+        self._schedule(pg, l1_child["id"], dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 12, 0))
+        self._schedule(pg, l2_child["id"], dt.datetime(2026, 10, 1, 9, 0), dt.datetime(2026, 10, 1, 13, 0))
+
+        result = pg.purge_orders_by_date(
+            self.PLANT, dt.datetime(2026, 10, 1, 0, 0), dt.datetime(2026, 10, 1, 23, 59),
+        )
+        assert result["deleted"] == 2
+        assert result["shares_purged"] == 2
+        assert result["headers_deleted"] == 1
+
+        assert _snapshot_header(pg, self.PLANT, self.ORD, self.MAT) is None, \
+            "a header with no remaining live share must be deleted"
+        assert _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT) == [], \
+            "shares must cascade-delete with their header"
+
+        # A later upload of the same parent must create a fresh header, not
+        # resurrect the dead one.
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
+            "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+        _, plan_structure, _ = distribution_data.plan([row], batch_id)
+        with pg._pool.connection() as conn:
+            distribution_data.apply(plan_structure, batch_id, conn)
+
+        fresh_header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        assert fresh_header is not None
+        fresh_shares = _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)
+        assert fresh_shares, "the fresh header must have its own shares"
+        assert all(s["purged_at"] is None for s in fresh_shares)
+
+
 # =====================================================================
 # ROUTING_RUNTIME_DESIGN.md §4 item 4 -- _CHILD_UPSERT_SQL's run_time guard,
 # the runtime_schedule_mismatch no-auto-flag fix, and the three resolver call

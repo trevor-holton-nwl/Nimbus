@@ -1738,6 +1738,20 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
     versa). The audit's order_ids list is capped at 200 (~7KB of JSONB; see the
     material_ids[:50] capping precedent in master_data.py) — deleted count and
     plant/range are always present in full regardless of that cap.
+
+    `order_distribution_share.child_id` is a SOFT reference (no FK,
+    schema.sql ~183) -- a deleted order would otherwise leave its share
+    dangling, pointing at an id that no longer exists. In the SAME
+    transaction, every share that pointed at a just-deleted id is retired
+    (`purged_at` stamped, `child_id` cleared) rather than left dangling; its
+    `letter`/`weight` are left alone so an explicit Reset (D02) can revive it
+    later (`backend/distribution/data.py::_write_reweight_shares`). A header
+    left with no remaining live share (every share now weight-0 or purged) is
+    then deleted outright -- shares cascade (schema.sql ~187-188) -- so a
+    later re-upload of the same parent creates a fresh header instead of
+    resurrecting a dead one. `shares_purged`/`headers_deleted` are added to
+    the audit JSON and the return value only when nonzero, keeping the return
+    shape unchanged for every caller that never touches distribution.
     """
     where, params = _purge_scope_sql_params(plant, start, end, machines)
     sql = f"DELETE FROM orders WHERE {where} RETURNING id"
@@ -1746,21 +1760,69 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
             cur.execute(sql, params)
             ids = [row[0] for row in cur.fetchall()]
             deleted = len(ids)
+
+            shares_purged = 0
+            headers_deleted = 0
+            if ids:
+                # Scope by `plant =` so this at least narrows via
+                # idx_ods_machine(plant, machine) -- child_id itself has no
+                # index.
+                cur.execute(
+                    """
+                    UPDATE order_distribution_share
+                       SET purged_at = now(), child_id = NULL
+                     WHERE plant = %(plant)s AND child_id = ANY(%(ids)s)
+                     RETURNING production_order, material_number
+                    """,
+                    {"plant": plant, "ids": ids},
+                )
+                purged_rows = cur.fetchall()
+                shares_purged = len(purged_rows)
+                if purged_rows:
+                    prods = [row[0] for row in purged_rows]
+                    mats = [row[1] for row in purged_rows]
+                    cur.execute(
+                        """
+                        DELETE FROM order_distribution od
+                         WHERE plant = %(plant)s
+                           AND (production_order, material_number) IN (
+                               SELECT unnest(%(prods)s::text[]), unnest(%(mats)s::text[])
+                           )
+                           AND NOT EXISTS (
+                               SELECT 1 FROM order_distribution_share s
+                                WHERE s.plant = od.plant
+                                  AND s.production_order = od.production_order
+                                  AND s.material_number = od.material_number
+                                  AND s.weight > 0 AND s.purged_at IS NULL
+                           )
+                         RETURNING production_order, material_number
+                        """,
+                        {"plant": plant, "prods": prods, "mats": mats},
+                    )
+                    headers_deleted = len(cur.fetchall())
+
+            audit_details = {"plant": plant, "machines": list(machines or []),
+                    "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
+                    "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
+                    "deleted": deleted, "order_ids": ids[:200],
+                    "order_id_count": len(ids), "truncated": len(ids) > 200}
+            if shares_purged:
+                audit_details["shares_purged"] = shares_purged
+                audit_details["headers_deleted"] = headers_deleted
             cur.execute(
                 "INSERT INTO admin_audit (table_name, action, details, user_email)"
                 " VALUES ('orders', 'purge_by_date_range', %s, %s)",
-                (Jsonb({"plant": plant, "machines": list(machines or []),
-                        "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
-                        "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
-                        "deleted": deleted, "order_ids": ids[:200],
-                        "order_id_count": len(ids), "truncated": len(ids) > 200}),
-                 user_email),
+                (Jsonb(audit_details), user_email),
             )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-    return {"status": "ok", "deleted": deleted, "plant": plant, "machines": list(machines or [])}
+    result = {"status": "ok", "deleted": deleted, "plant": plant, "machines": list(machines or [])}
+    if shares_purged:
+        result["shares_purged"] = shares_purged
+        result["headers_deleted"] = headers_deleted
+    return result
 
 
 def clear_upload_audit() -> dict:

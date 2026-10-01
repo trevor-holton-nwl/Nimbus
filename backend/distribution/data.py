@@ -2447,11 +2447,17 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
 def _write_reweight_shares(cur, plant: str, order: str, material: str,
                           letters: dict[str, str], desired_weights: dict[str, Decimal]) -> None:
     """Upsert every share this materialization touches (every machine in
-    `letters`), guarded so an unchanged letter/weight is a no-op. Never
-    touches `purged_at` or `child_id` (those are `_update_share_child_ids`'s
-    and purge's jobs respectively) -- a purged machine can only ever appear
-    here at weight 0 (validation refuses a positive weight on it), so this
-    leaves it untouched in substance even though the guarded UPDATE runs."""
+    `letters`), guarded so an unchanged letter/weight/purged-state is a
+    no-op. `child_id` is still `_update_share_child_ids`'s job, not this
+    function's -- but `purged_at` IS this function's job for the one case
+    D02 (owner decision) assigns it: a Reset (`reset_one_header`) or admin
+    reapply-defaults, which shares this core, REVIVES a purged share the
+    moment it receives a positive weight again, clearing the purge mark in
+    the same write that brings the weight back. `reweight_shares` can never
+    reach that branch itself -- `_validate_share_payload`'s `share_purged`
+    check refuses a positive weight on an already-purged share before this
+    runs -- and `_repair_one_header` excludes purged shares from its desired
+    weights entirely, so only Reset/reapply ever revives one."""
     for machine, letter in letters.items():
         weight = desired_weights.get(machine, Decimal(0))
         cur.execute(
@@ -2460,9 +2466,12 @@ def _write_reweight_shares(cur, plant: str, order: str, material: str,
                 (plant, production_order, material_number, machine, letter, weight)
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (plant, production_order, material_number, machine) DO UPDATE
-                SET letter = EXCLUDED.letter, weight = EXCLUDED.weight
+                SET letter = EXCLUDED.letter, weight = EXCLUDED.weight,
+                    purged_at = CASE WHEN EXCLUDED.weight > 0 THEN NULL
+                                     ELSE order_distribution_share.purged_at END
             WHERE order_distribution_share.letter IS DISTINCT FROM EXCLUDED.letter
                OR order_distribution_share.weight IS DISTINCT FROM EXCLUDED.weight
+               OR (EXCLUDED.weight > 0 AND order_distribution_share.purged_at IS NOT NULL)
             """,
             (plant, order, material, machine, letter, weight),
         )
@@ -2819,7 +2828,17 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
     a planner-typed payload. Raises the same `DistributionHeaderNotFound` /
     `DistributionStaleVersion` / `DistributionChildrenScheduled` /
     `ValueError` family; `reset_orders` (the bulk route entry point) catches
-    them per item."""
+    them per item.
+
+    D02 (owner decision): a purge retires a finished sub-order's share
+    (`purged_at` set, `child_id` cleared, letter/weight left alone) rather
+    than deleting it, and Reset is the one path that brings it back --
+    `default_shares` assigns it a fresh positive weight the same as any other
+    current member, and `_write_reweight_shares` clears `purged_at` the
+    moment that positive weight lands. Admin reapply-defaults shares this
+    same core, so it revives purged shares identically. Repair
+    (`_repair_one_header`) and a planner re-weight (`reweight_shares`) both
+    deliberately leave a purged share purged."""
     with _pool.connection() as conn, conn.cursor() as cur:
         header = _lock_one_header(cur, plant, order, material)
         if header is None:
