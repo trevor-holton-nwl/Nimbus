@@ -1392,7 +1392,7 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
         final_rows = self._children_state(
             db_, "planning_status, planning_reason, scheduled_start, scheduled_end, run_time, run_time_source")
         assert len(final_rows) == 2
-        for planning_status, planning_reason, scheduled_start, scheduled_end, run_time, run_time_source in final_rows:
+        for planning_status, planning_reason, scheduled_start, _scheduled_end, run_time, run_time_source in final_rows:
             assert planning_status == "scheduled"
             assert planning_reason is None
             assert scheduled_start == self.anchor_start  # untouched by the resolve
@@ -1506,7 +1506,6 @@ class TestPlanZeroWeightWorkcenterStaysPlain:
         }
 
     def test_zero_weights_warning_present_and_row_stays_plain(self, pg):
-        db_ = pg
         batch_id = str(uuid.uuid4())
         rows_out, plan_structure, warnings = distribution_data.plan([self._row()], batch_id)
 
