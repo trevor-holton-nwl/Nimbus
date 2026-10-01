@@ -604,14 +604,14 @@ def _extract_parent_facts(row: dict) -> tuple[dict, bool]:
     already use, e.g. from db.ingest_orders_from_excel's per-row dict build).
 
     `runtime_defaulted` is read from an optional row key,
-    `_run_time_was_defaulted`, that the (not-yet-wired) ingest call site would
-    need to set BEFORE db.py's own RUN_TIME->1.0 fallback
-    (db.py's ingest_orders_from_excel, `df["RUN_TIME"] = pd.to_numeric(...).fillna(1.0)`)
-    overwrites the original absence -- by the time `rows` reaches `plan()`
-    that upstream default has already happened and is no longer detectable
-    from the row alone. Defaults to False when the flag is absent, which is
-    always true today since nothing sets it yet (see this file's module
-    docstring on the wiring boundary)."""
+    `_run_time_was_defaulted`, that db.py's ingest_orders_from_excel sets
+    BEFORE its own RUN_TIME->1.0 fallback (`df["_RUN_TIME_DEFAULTED"] =
+    _rt.isna()`, computed off `pd.to_numeric(RUN_TIME, errors="coerce")`
+    ahead of `df["RUN_TIME"] = _rt.fillna(1.0)`) overwrites the original
+    absence -- by the time `rows` reaches `plan()` that upstream default has
+    already happened and is no longer detectable from the row alone except
+    via this flag. Defaults to False when the flag is absent (e.g. a row
+    built by some other call site that never set it)."""
     runtime_defaulted = bool(row.get("_run_time_was_defaulted", False))
     facts = {
         "material_description": row.get("material_description"),

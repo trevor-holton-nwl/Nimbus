@@ -2856,7 +2856,7 @@ def extract_upload_plants(file_bytes: bytes) -> list[str] | None:
         df = df.rename(columns={"WERKS": "PLANT"})
     if "PLANT" not in df.columns:
         return None
-    plants = sorted({str(p).strip() for p in df["PLANT"].dropna().unique() if str(p).strip()})
+    plants = sorted({_str_id(p) for p in df["PLANT"].dropna().unique() if _str_id(p)})
     return plants or None
 
 
@@ -2942,10 +2942,16 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     # heuristic (which only recognizes "== start" or "== start + RUN_TIME
     # hours") never matched, permanently misclassifying those orders as
     # already-correct.
-    df["RUN_TIME"] = pd.to_numeric(
-        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(1.0, index=df.index),
+    # D54: capture whether RUN_TIME was genuinely absent/unparseable BEFORE the
+    # fillna(1.0) default overwrites that absence — as a column (not a boolean
+    # mask) because the dropna().reset_index(drop=True) a few lines below would
+    # misalign a mask built against the pre-dropna index.
+    _rt = pd.to_numeric(
+        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(float("nan"), index=df.index),
         errors="coerce",
-    ).fillna(1.0)
+    )
+    df["_RUN_TIME_DEFAULTED"] = _rt.isna()
+    df["RUN_TIME"] = _rt.fillna(1.0)
 
     bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
     df.loc[bad, "BASIC_FINISH_DATE"] = (
@@ -3021,10 +3027,11 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "material_number": _str_id(r.get("MATERIAL_NUMBER", "")),
             "material_description": _v(r, "MATERIAL_DESCRIPTION"),
             "machine": _v(r, "MACHINE"),
-            "plant": _v(r, "PLANT"),
+            "plant": _str_id(_v(r, "PLANT")) or None,
             "basic_start_date": _ts(r["BASIC_START_DATE"]),
             "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),
             "run_time": float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
+            "_run_time_was_defaulted": bool(r["_RUN_TIME_DEFAULTED"]),
             "color": _v(r, "COLOR"),
             # ROUTING_RUNTIME_DESIGN.md §4 item 2: read PRODUCTION_VERSION into
             # orders.production_version (upper/strip); zero-padded centrally in
