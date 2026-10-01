@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { App, PlantSelector, EmptyState, SessionUIAdapter, showLoginScreen, Settings } from '../../frontend/shell/application-shell.mjs';
 import { Util } from '../../frontend/platform/foundation.mjs';
+import { Persistence } from '../../frontend/scheduling/persistence.mjs';
+import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
 
 test('application-shell exposes the documented public API', () => {
   assert.equal(typeof App.goto, 'function');
@@ -117,5 +119,73 @@ test('SessionUIAdapter._landingSubDefs(\'gantt\') is built from the registry and
     ]);
   } finally {
     globalThis.window = priorWindow;
+  }
+});
+
+// D08 — 'Persistence.dirty' subscriber body extracted to App._trackDirty(evt)
+// (subscribed as `evt => App._trackDirty(evt)`) so it's callable directly in a
+// test without standing up App.init()'s full DOM wiring. Distribution's own
+// save path (frontend/distribution/distribution-pane.mts) writes task rows
+// via Store.updateMany(patches, 'distribution') for its own persistence —
+// routing that same write through the schedule's "N unsaved" badge/dirty-id
+// tracking would be a false positive, so 'distribution' joins the existing
+// 'refresh'/'note' skip list. A reconcile-resized bar (source
+// 'engine-runtime-reconcile', emitted by Engine.reconcileRuntimeSchedules via
+// Store.updateMany) is NOT skipped — it genuinely needs saving.
+test('App._trackDirty skips distribution-sourced writes but still marks engine-runtime-reconcile dirty (D08)', () => {
+  const priorDirtyIds = new Set(Persistence._dirtyIds);
+  const priorForceIds = new Set(Persistence._forceIds);
+  Persistence._dirtyIds.clear();
+  Persistence._forceIds.clear();
+  try {
+    assert.equal(typeof App._trackDirty, 'function', 'the subscriber body must be extracted to App._trackDirty');
+
+    App._trackDirty({ type: 'tasks:bulkUpdate', ids: ['dist-1', 'dist-2'], source: 'distribution', revision: 1, mode: 'live' });
+    assert.equal(Persistence._dirtyIds.size, 0, "a 'distribution' source must leave Persistence._dirtyIds empty");
+
+    App._trackDirty({ type: 'tasks:bulkUpdate', ids: ['reconcile-1'], source: 'engine-runtime-reconcile', revision: 2, mode: 'live' });
+    assert.ok(Persistence._dirtyIds.has('reconcile-1'), 'an engine-runtime-reconcile source must still mark the task dirty');
+  } finally {
+    Persistence._dirtyIds.clear();
+    Persistence._forceIds.clear();
+    priorDirtyIds.forEach(id => Persistence._dirtyIds.add(id));
+    priorForceIds.forEach(id => Persistence._forceIds.add(id));
+  }
+});
+
+// D48 (shell part) — gotoGanttSub already deactivates the Distribution pane
+// when switching to a *different gantt sub-tab* (see its own
+// `if (App._ganttSub === 'distribution') DistributionPane.setActive(false)`),
+// but that method is only reached while staying inside the gantt tab. Leaving
+// the gantt tab entirely (e.g. goto('home')) never called gotoGanttSub at
+// all, so the pane's debounced Store-event refresh kept doing background
+// network work off-tab. App.goto now also deactivates it on that path.
+test("App.goto deactivates the Distribution pane when leaving gantt entirely while it is the active sub-tab (D48 shell part)", (t) => {
+  const priorDocument = globalThis.document;
+  const priorSub = App._ganttSub;
+  const priorCurrentTab = App._currentTab;
+  const priorSetActive = DistributionPane.setActive;
+  const calls = [];
+  DistributionPane.setActive = (active) => { calls.push(active); };
+  const homeTabEl = { classList: { add() {}, remove() {} } };
+  globalThis.document = {
+    body: { dataset: {} },
+    getElementById(id) { return id === 'home-tab' ? homeTabEl : null; },
+    querySelector() { return null; },
+    querySelectorAll() { return { forEach() {} }; },
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    App._currentTab = 'gantt';
+    App._ganttSub = 'distribution';
+    App.goto('home');
+    assert.deepEqual(calls, [false], 'leaving gantt while on the distribution sub must deactivate the pane exactly once');
+    assert.equal(App._currentTab, 'home');
+  } finally {
+    t.mock.timers.reset();
+    DistributionPane.setActive = priorSetActive;
+    globalThis.document = priorDocument;
+    App._ganttSub = priorSub;
+    App._currentTab = priorCurrentTab;
   }
 });

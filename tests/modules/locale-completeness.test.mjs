@@ -402,6 +402,32 @@ test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
   }
 });
 
+test('F10 (D34) — every dist_/wc_-family key in en.js exists in all 5 locales', () => {
+  // Task F10's parity test (docs/archive/… brief): derive the distribution/
+  // work-center family from en.js itself rather than hand-listing every key
+  // (the existing "Order Distribution feature" test above already does
+  // that for an older snapshot) — this way a NEW dist_/wc_ key added later
+  // without its translations fails here too, not just in en.js.
+  const FAMILY_RE = /^(ui|btn|toast|err|empty|ph|col|aria)\.(dist_|wc_)|^ui\.review_distributions$|^col\.(max_separation|distribution_mode|open_distributions)$|^ui\.(conflicting_parent_rows|ambiguous_plant_conflicts|workcenter_without_members|default_machine_invalid)$/;
+  // Fix round 1: the regex alone can't reach plain column/empty-state names
+  // that have no dist_/wc_ infix (col.description/col.machine/col.weight/
+  // col.effective_pct are shared Work Centers-tab column headers, and
+  // empty.no_work_centers is the tab's empty state) — widening the regex to
+  // match any col.*/empty.* would over-match unrelated keys like col.id or
+  // empty.no_alerts, so these five are listed explicitly instead.
+  const EXTRA_REQUIRED = ['col.description', 'col.machine', 'col.weight', 'col.effective_pct', 'empty.no_work_centers'];
+  const en = keysOf('en');
+  const family = [...new Set([...[...en].filter(k => FAMILY_RE.test(k)), ...EXTRA_REQUIRED])];
+  assert.ok(family.length > 0, 'the dist_/wc_ family regex matched nothing in en.js — regex or fixture drifted');
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of family) {
+    assert.ok(en.has(key), `en.js itself is missing distribution/work-center key "${key}"`);
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing distribution/work-center key "${key}"`);
+    }
+  }
+});
+
 test('en.js is the superset — no locale has a key en.js lacks', () => {
   const en = keysOf('en');
   for (const locale of LOCALES.filter(l => l !== 'en')) {

@@ -381,3 +381,72 @@ def test_resolve_fn_called_once_per_plant_after_apply_before_audit(monkeypatch):
         assert w["level"] == "info"
         assert w["resolved"] == 1
     assert {"level": "info", "msg": "fake apply ran"} in result["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# 7. D04: plan()'s own warnings_entry surfaces when no parent was planned.
+# ---------------------------------------------------------------------------
+def test_distribution_warnings_entry_surfaces_when_plan_has_no_parents_but_warned(monkeypatch):
+    """No parent was planned this batch -- apply_fn must NOT run (same guard
+    TestUpsertOrdersDistributionSeamWiring.test_apply_fn_skipped_when_plan_has_no_parents
+    pins in tests/test_distribution.py) -- but plan_fn still raised a real
+    ingest-time warning (conflicting_parent_rows here): plan_structure's own
+    `warnings_entry` must still land in the upload's warnings list instead of
+    being silently dropped."""
+    cursor = _Cursor()
+    monkeypatch.setattr(db, "_pool", _Pool(cursor))
+
+    warnings_entry = {
+        "category": "distribution", "level": "warn",
+        "msg": "No aggregate orders distributed this batch",
+        "conflicting_parent_rows": [{"production_order": "PO1", "material_number": "M1"}],
+    }
+
+    def fake_plan(rows, batch_id):
+        return (
+            rows,
+            {"parents": {}, "warnings_entry": warnings_entry},
+            {"conflicting_parent_rows": [{"production_order": "PO1", "material_number": "M1"}],
+             "single_rewrites": 0},
+        )
+
+    def fake_apply(*args, **kwargs):
+        raise AssertionError("apply_fn must not be called for an empty plan")
+
+    rows = [{"id": "A1", "production_order": "PO1", "material_number": "M1",
+             "machine": "MC1", "plant": "5501", "run_time": 3.0}]
+    result = db.upsert_orders(
+        rows, batch_id="batch-7", source="excel", filename="f.xlsx",
+        plan_fn=fake_plan, apply_fn=fake_apply,
+    )
+
+    assert warnings_entry in result["warnings"]
+
+
+def test_distribution_warnings_entry_not_surfaced_when_only_single_rewrites(monkeypatch):
+    """A batch whose only ingest-time count is single_rewrites (a routine
+    machine-code rewrite, not itself warn-worthy) must NOT surface plan()'s
+    zero-counter entry -- `single_rewrites` is explicitly excluded from the
+    "any warning list non-empty" check."""
+    cursor = _Cursor()
+    monkeypatch.setattr(db, "_pool", _Pool(cursor))
+
+    warnings_entry = {
+        "category": "distribution", "level": "info",
+        "msg": "No aggregate orders distributed this batch",
+    }
+
+    def fake_plan(rows, batch_id):
+        return rows, {"parents": {}, "warnings_entry": warnings_entry}, {"single_rewrites": 1}
+
+    def fake_apply(*args, **kwargs):
+        raise AssertionError("apply_fn must not be called for an empty plan")
+
+    rows = [{"id": "A1", "production_order": "PO1", "material_number": "M1",
+             "machine": "MC1", "plant": "5501", "run_time": 3.0}]
+    result = db.upsert_orders(
+        rows, batch_id="batch-8", source="excel", filename="f.xlsx",
+        plan_fn=fake_plan, apply_fn=fake_apply,
+    )
+
+    assert warnings_entry not in result["warnings"]

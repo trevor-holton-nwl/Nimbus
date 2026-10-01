@@ -109,6 +109,16 @@ def _zero_pad(value, width: int):
     return value.zfill(width) if value else value
 
 
+def _like_contains(s: str) -> str:
+    """Build an ILIKE "contains" pattern for `s` with its own special
+    characters (`\\`, `%`, `_`) escaped, so a user's free-text search can
+    never accidentally use ILIKE's wildcard syntax (e.g. a material number
+    containing "_" matching more than that literal underscore). Callers
+    MUST pair this with `ILIKE %s ESCAPE '\\'` -- the escape character this
+    helper's own escaping assumes."""
+    return "%" + s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def make_id(production_order, material_number) -> str:
     """MD5 of 'PRODUCTION_ORDER|MATERIAL_NUMBER' — deterministic across reloads."""
     key = f"{_str_id(production_order)}|{_str_id(material_number)}"
@@ -1738,6 +1748,22 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
     versa). The audit's order_ids list is capped at 200 (~7KB of JSONB; see the
     material_ids[:50] capping precedent in master_data.py) — deleted count and
     plant/range are always present in full regardless of that cap.
+
+    `order_distribution_share.child_id` is a SOFT reference (no FK,
+    schema.sql ~183) -- a deleted order would otherwise leave its share
+    dangling, pointing at an id that no longer exists. In the SAME
+    transaction, every share that pointed at a just-deleted id is retired
+    (`purged_at` stamped, `child_id` cleared) rather than left dangling; its
+    `letter`/`weight` are left alone -- D02 (owner decision): an upload of the
+    parent, Reset, and reapply-defaults revive a purged share; Repair and
+    re-weight never do (`backend/distribution/data.py::_write_reweight_shares`).
+    A header left with no remaining live share (every share now weight-0 or
+    purged) is then deleted outright -- shares cascade (schema.sql ~187-188)
+    -- so a later re-upload of the same parent creates a fresh header instead
+    of resurrecting a dead one. `shares_purged`/`headers_deleted` are always
+    present in the admin_audit JSON (0 when nothing was touched), but are
+    added to the RETURN value only when nonzero, keeping the return shape
+    unchanged for every caller that never touches distribution.
     """
     where, params = _purge_scope_sql_params(plant, start, end, machines)
     sql = f"DELETE FROM orders WHERE {where} RETURNING id"
@@ -1746,21 +1772,67 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
             cur.execute(sql, params)
             ids = [row[0] for row in cur.fetchall()]
             deleted = len(ids)
+
+            shares_purged = 0
+            headers_deleted = 0
+            if ids:
+                # Scope by `plant =` so this at least narrows via
+                # idx_ods_machine(plant, machine) -- child_id itself has no
+                # index.
+                cur.execute(
+                    """
+                    UPDATE order_distribution_share
+                       SET purged_at = now(), child_id = NULL
+                     WHERE plant = %(plant)s AND child_id = ANY(%(ids)s)
+                     RETURNING production_order, material_number
+                    """,
+                    {"plant": plant, "ids": ids},
+                )
+                purged_rows = cur.fetchall()
+                shares_purged = len(purged_rows)
+                if purged_rows:
+                    prods = [row[0] for row in purged_rows]
+                    mats = [row[1] for row in purged_rows]
+                    cur.execute(
+                        """
+                        DELETE FROM order_distribution od
+                         WHERE plant = %(plant)s
+                           AND (production_order, material_number) IN (
+                               SELECT unnest(%(prods)s::text[]), unnest(%(mats)s::text[])
+                           )
+                           AND NOT EXISTS (
+                               SELECT 1 FROM order_distribution_share s
+                                WHERE s.plant = od.plant
+                                  AND s.production_order = od.production_order
+                                  AND s.material_number = od.material_number
+                                  AND s.weight > 0 AND s.purged_at IS NULL
+                           )
+                         RETURNING production_order, material_number
+                        """,
+                        {"plant": plant, "prods": prods, "mats": mats},
+                    )
+                    headers_deleted = len(cur.fetchall())
+
+            audit_details = {"plant": plant, "machines": list(machines or []),
+                    "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
+                    "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
+                    "deleted": deleted, "order_ids": ids[:200],
+                    "order_id_count": len(ids), "truncated": len(ids) > 200,
+                    "shares_purged": shares_purged, "headers_deleted": headers_deleted}
             cur.execute(
                 "INSERT INTO admin_audit (table_name, action, details, user_email)"
                 " VALUES ('orders', 'purge_by_date_range', %s, %s)",
-                (Jsonb({"plant": plant, "machines": list(machines or []),
-                        "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
-                        "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
-                        "deleted": deleted, "order_ids": ids[:200],
-                        "order_id_count": len(ids), "truncated": len(ids) > 200}),
-                 user_email),
+                (Jsonb(audit_details), user_email),
             )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-    return {"status": "ok", "deleted": deleted, "plant": plant, "machines": list(machines or [])}
+    result = {"status": "ok", "deleted": deleted, "plant": plant, "machines": list(machines or [])}
+    if shares_purged:
+        result["shares_purged"] = shares_purged
+        result["headers_deleted"] = headers_deleted
+    return result
 
 
 def clear_upload_audit() -> dict:
@@ -2488,7 +2560,12 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         (`apply_fn` commits its own transaction on it; nothing here commits or
         rolls back around that call). Its `warnings_entry` is folded into the
         `warnings` list feeding the `upload_audit` row exactly like the
-        `missing_master_data` entry below.
+        `missing_master_data` entry below. When `apply_fn` does NOT run (no
+        planned parent this batch) but `plan_fn` still raised a real
+        ingest-time warning (any warning list other than `single_rewrites` is
+        non-empty), `plan_structure`'s own `warnings_entry` (D04, built from
+        zero distribution counters) is folded in instead, so that warning is
+        never silently dropped.
       - `resolve_fn` is the optional routing-runtime ingest seam
         (ROUTING_RUNTIME_DESIGN.md §4/§5) — also defaults to None. When given,
         it is called as `resolve_fn(plant, conn=conn)` — matching
@@ -2544,7 +2621,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # over the resolved rows. `plan_structure` is held onto for `apply_fn` below.
     distribution_plan: dict = {}
     if plan_fn is not None:
-        rows, distribution_plan, _distribution_ingest_warnings = plan_fn(rows, batch_id)
+        rows, distribution_plan, distribution_ingest_warnings = plan_fn(rows, batch_id)
 
     # The "Unknown production line" soft-warning (backend/integration/routes.py)
     # must see the RESOLVED machine values — i.e. after plan_fn's single-mode
@@ -2765,6 +2842,17 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # one dict, `level`/`msg` are the two fields the cockpit's
                 # warning list actually reads.
                 warnings.append(apply_res["warnings_entry"])
+            elif (distribution_plan.get("warnings_entry")
+                  and any(v for k, v in distribution_ingest_warnings.items() if k != "single_rewrites")):
+                # D04: no parent was planned this batch (apply_fn never ran,
+                # above), but plan_fn still raised a real ingest-time warning
+                # (a conflicting/ambiguous row, a zero-weight work center,
+                # etc.) — fold plan()'s own zero-counter entry in instead of
+                # letting that warning silently vanish. `single_rewrites` is
+                # excluded: it's a routine, not-warn-worthy count (a single-
+                # mode machine-code rewrite), never by itself a reason to
+                # surface this entry.
+                warnings.append(distribution_plan["warnings_entry"])
             # ---------- Routing runtime: resolve() seam (ROUTING_RUNTIME_DESIGN.md §4 item 4) ----------
             # Runs after Order Distribution's plan/apply step (so each sub-order
             # resolves at its own machine/quantity) and after the new-order hold
@@ -2840,7 +2928,7 @@ def extract_upload_plants(file_bytes: bytes) -> list[str] | None:
         df = df.rename(columns={"WERKS": "PLANT"})
     if "PLANT" not in df.columns:
         return None
-    plants = sorted({str(p).strip() for p in df["PLANT"].dropna().unique() if str(p).strip()})
+    plants = sorted({_str_id(p) for p in df["PLANT"].dropna().unique() if _str_id(p)})
     return plants or None
 
 
@@ -2926,10 +3014,16 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     # heuristic (which only recognizes "== start" or "== start + RUN_TIME
     # hours") never matched, permanently misclassifying those orders as
     # already-correct.
-    df["RUN_TIME"] = pd.to_numeric(
-        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(1.0, index=df.index),
+    # D54: capture whether RUN_TIME was genuinely absent/unparseable BEFORE the
+    # fillna(1.0) default overwrites that absence — as a column (not a boolean
+    # mask) because the dropna().reset_index(drop=True) a few lines below would
+    # misalign a mask built against the pre-dropna index.
+    _rt = pd.to_numeric(
+        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(float("nan"), index=df.index),
         errors="coerce",
-    ).fillna(1.0)
+    )
+    df["_RUN_TIME_DEFAULTED"] = _rt.isna()
+    df["RUN_TIME"] = _rt.fillna(1.0)
 
     bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
     df.loc[bad, "BASIC_FINISH_DATE"] = (
@@ -3005,10 +3099,11 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "material_number": _str_id(r.get("MATERIAL_NUMBER", "")),
             "material_description": _v(r, "MATERIAL_DESCRIPTION"),
             "machine": _v(r, "MACHINE"),
-            "plant": _v(r, "PLANT"),
+            "plant": _str_id(_v(r, "PLANT")) or None,
             "basic_start_date": _ts(r["BASIC_START_DATE"]),
             "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),
             "run_time": float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
+            "_run_time_was_defaulted": bool(r["_RUN_TIME_DEFAULTED"]),
             "color": _v(r, "COLOR"),
             # ROUTING_RUNTIME_DESIGN.md §4 item 2: read PRODUCTION_VERSION into
             # orders.production_version (upper/strip); zero-padded centrally in

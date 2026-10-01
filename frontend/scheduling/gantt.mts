@@ -585,7 +585,18 @@ export const Timeline = {
   _itemPatchFor(id: string): TimelineVisItem | null {
     const t = Store.tasks[id];
     if (!t || !t.start_date || !t.end_date) return null;
-    return Timeline._itemsForTask(t)[0] || null;
+    const patch = Timeline._itemsForTask(t)[0] || null;
+    // _itemForTask (via _itemsForTask) builds className fresh, with no
+    // knowledge of the sibling highlight (D51) — restore it here so a
+    // single-item patch (e.g. a drag commit) doesn't silently drop
+    // .dist-sibling off an item that was highlighted before the patch.
+    if (patch && Interaction._distSiblingItemIds.has(String(patch.id))) {
+      const cls = patch.className || '';
+      if (!cls.split(' ').includes('dist-sibling')) {
+        patch.className = cls ? `${cls} dist-sibling` : 'dist-sibling';
+      }
+    }
+    return patch;
   },
 
   _applyTaskPatch(id: string): void {
@@ -705,8 +716,7 @@ export const Timeline = {
     const prefix = firmed ? '🔒 ' : '';
     let distPart = '';
     if (t.PARENT_ORDER && t.DISTRIBUTION_LETTER) {
-      const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
-      const count = scoped.filter(x => x.PARENT_ORDER === t.PARENT_ORDER).length;
+      const count = (Store.siblingsByParent().get(t.PARENT_ORDER) || []).length;
       distPart = `<span class="split-order-part dist-part">${Util.escapeHtml(t.DISTRIBUTION_LETTER)}·${count}</span>`;
     }
     return {
@@ -1279,6 +1289,12 @@ export const Timeline = {
         ErrorLog.info('timeline',
           `diff-rebuild: +${toAdd.length} ~${toUpdate.length} -${toRemove.length} (kept sel: ${keep.length})`);
       }
+      // D51: the items just written above came from _itemForTask, which builds
+      // className fresh with no knowledge of the sibling highlight — any item
+      // that had .dist-sibling lost it. Reset the tracked set and recompute
+      // from the just-resynced selection so the highlight survives a rebuild.
+      Interaction._distSiblingItemIds = new Set();
+      Interaction._applyDistSiblingHighlight(keep);
     }
     // Fit the vis-timeline height to its visible groups — fixes the giant
     // empty area that `height: '100%'` reserves when 1-2 lines are filtered.
@@ -3719,8 +3735,7 @@ export const Interaction = {
       const firmedBadge = Engine.firmingStatus(t).firmed
         ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '';
       const suborderHtml = t.PARENT_ORDER ? (() => {
-        const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
-        const siblings = scoped.filter(x => x.PARENT_ORDER === t.PARENT_ORDER);
+        const siblings = Store.siblingsByParent().get(t.PARENT_ORDER) || [];
         const getQty = (task: any) => {
           const q = task['ORDER_QUANTITY_(GMEIN)'];
           return (typeof q === 'number' ? q : typeof q === 'string' ? parseFloat(q) : 0) || 0;
@@ -4122,7 +4137,7 @@ export const Interaction = {
       Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
       'warn', 4000,
       {
-        label: 'Open Order Distribution',
+        label: Util.t('btn.insp_dist_open'),
         run: () => {
           const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
           app?.gotoGanttSub?.('distribution');
@@ -4168,7 +4183,6 @@ export const Interaction = {
   _distSiblingItemIds: new Set<string>(),
   _applyDistSiblingHighlight(selectedIds: string[]): void {
     if (!Timeline._items) return;
-    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
     const parents = new Set<string>();
     for (const id of selectedIds) {
       const t = Store.tasks[id];
@@ -4176,10 +4190,12 @@ export const Interaction = {
     }
     const nextIds = new Set<string>();
     if (parents.size) {
-      for (const task of scoped) {
-        if (!task.PARENT_ORDER || !parents.has(task.PARENT_ORDER)) continue;
-        if (selectedIds.includes(String(task.id))) continue;
-        for (const itemId of Timeline.itemIdsForTask(task.id)) nextIds.add(itemId);
+      const siblingsByParent = Store.siblingsByParent();
+      for (const parent of parents) {
+        for (const task of siblingsByParent.get(parent) || []) {
+          if (selectedIds.includes(String(task.id))) continue;
+          for (const itemId of Timeline.itemIdsForTask(task.id)) nextIds.add(itemId);
+        }
       }
     }
     const updates: Array<{ id: string; className: string }> = [];

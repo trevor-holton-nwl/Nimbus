@@ -8,7 +8,9 @@ import { readFileSync } from 'node:fs';
 import { Plant, ProdLines, MasterData, WorkCenters } from '../../../frontend/master-data/admin-ui.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Modal, Toast, Util } from '../../../frontend/platform/foundation.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
+import { Alerts } from '../../../frontend/insights/services.mjs';
 
 test('Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof Plant.init, 'function');
@@ -365,4 +367,245 @@ test('MasterData bulk-save for routing_rules calls Runtime.load for each distinc
   assert.match(source, /new Set<string>\(\)/);
   assert.match(source, /affectedPlants\.add\(plant\)/);
   assert.match(source, /affectedPlants\.forEach\(\(plant\) => Runtime\.load\(plant\)\)/);
+});
+
+// D38 (aggregate_to_detail.md audit): a successful autosave used to patch only
+// this pane's own `_rows`/`_machines` — Store.masterData.workcenters (what
+// Alerts/the optimizer actually read) stayed on the pre-edit snapshot until
+// some unrelated full master-data refresh happened to land. _write now
+// patches the matching Store row and schedules an alerts recompute too, but
+// only for the currently selected plant (F7 scoped Store.masterData.workcenters
+// per plant) — a save that lands for a different (background) plant must not
+// touch the live Store other tabs are reading.
+test('WorkCenters._write patches the matching Store.masterData.workcenters row and schedules an alerts recompute, scoped to the selected plant', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorIsAdmin = Session.isAdmin;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorDocument = globalThis.document;
+  const priorCSS = globalThis.CSS;
+  const priorRows = WorkCenters._rows;
+  const priorMachines = WorkCenters._machines;
+  const priorSelected = WorkCenters._selected;
+  const priorLoadedPlant = WorkCenters._loadedPlant;
+
+  let recomputeCalls = 0;
+  Session.isAdmin = () => true;
+  Alerts.scheduleRecompute = () => { recomputeCalls += 1; };
+  globalThis.document = { querySelector: () => null, getElementById: () => null };
+  // _refreshSidebarRow (called from _write's success path) uses CSS.escape —
+  // a real browser global, absent in this node:test (no jsdom) environment.
+  globalThis.CSS = { escape: (s) => s };
+  Util.fetchTraced = () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({
+      description: 'Updated', distribution_mode: 'distribute', default_machine: null,
+      max_separation: 'day', review_required: true, distribute_tooled: true,
+      weights: { M1: 1, M2: 2 },
+    }),
+  });
+
+  try {
+    WorkCenters._rows = [];
+    WorkCenters._machines = [];
+    WorkCenters._selected = null;
+    WorkCenters._loadedPlant = null;
+    Store.setSelectedPlant('P1', 'test');
+    Store.setMasterData({
+      plants: [], lines: [],
+      workcenters: [
+        { plant: 'P1', sap_workcenter: 'WC-1', description: 'Old', distribution_mode: 'single', default_machine: 'M1', max_separation: 'none', review_required: false, distribute_tooled: false },
+        { plant: 'P2', sap_workcenter: 'WC-1', description: 'Other plant, same code', distribution_mode: 'single', default_machine: null, max_separation: 'none', review_required: false, distribute_tooled: false },
+      ],
+    }, 'test');
+
+    // Selected-plant save: patches the matching row, leaves the other plant's
+    // same-code row untouched, and schedules a recompute.
+    await WorkCenters._write('P1', 'WC-1', {
+      description: 'Updated', distribution_mode: 'distribute', default_machine: null,
+      max_separation: 'day', review_required: true, distribute_tooled: true,
+      weights: { M1: 1, M2: 2 },
+    }, ['M1', 'M2'], WorkCenters._editSeq);
+
+    const patched = Store.masterData.workcenters.find((w) => w.plant === 'P1' && w.sap_workcenter === 'WC-1');
+    assert.deepEqual(patched, {
+      plant: 'P1', sap_workcenter: 'WC-1', description: 'Updated', distribution_mode: 'distribute',
+      default_machine: null, max_separation: 'day', review_required: true, distribute_tooled: true,
+    });
+    const otherPlantRow = Store.masterData.workcenters.find((w) => w.plant === 'P2');
+    assert.equal(otherPlantRow.description, 'Other plant, same code');
+    assert.equal(recomputeCalls, 1);
+
+    // Background-plant save (plant !== Store.selectedPlant, which is still
+    // 'P1'): must not touch Store.masterData or fire a recompute.
+    Store.setMasterData({
+      plants: [], lines: [],
+      workcenters: [
+        { plant: 'P2', sap_workcenter: 'WC-9', description: 'Before', distribution_mode: 'single', default_machine: 'M9', max_separation: 'none', review_required: false, distribute_tooled: false },
+      ],
+    }, 'test');
+    recomputeCalls = 0;
+    await WorkCenters._write('P2', 'WC-9', {
+      description: 'Should not land', distribution_mode: 'single', default_machine: 'M9',
+      max_separation: 'none', review_required: false, distribute_tooled: false, weights: {},
+    }, ['M9'], WorkCenters._editSeq);
+    assert.equal(Store.masterData.workcenters.find((w) => w.plant === 'P2').description, 'Before');
+    assert.equal(recomputeCalls, 0);
+  } finally {
+    Session.isAdmin = priorIsAdmin;
+    Alerts.scheduleRecompute = priorRecompute;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    if (priorCSS === undefined) delete globalThis.CSS; else globalThis.CSS = priorCSS;
+    WorkCenters._rows = priorRows;
+    WorkCenters._machines = priorMachines;
+    WorkCenters._selected = priorSelected;
+    WorkCenters._loadedPlant = priorLoadedPlant;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+});
+
+// D28 (aggregate_to_detail.md audit): _queued used to hold a single slot and
+// the queued write fired un-awaited ("fire-and-forget") right as _saving was
+// cleared — a fresh debounced autosave for the row the admin had moved on to
+// could then start a SECOND concurrent PUT while that queued one was still
+// in flight. _queued is now a Map keyed by plant+code (so edits to different
+// work centers queue independently, and a repeat edit to the SAME work
+// center replaces its earlier queued payload) and _autosave drains it in a
+// loop inside the same try/finally that holds _saving true, so the queue is
+// fully serialized and a concurrent _autosave() call is blocked until the
+// whole drain settles.
+test('WorkCenters._autosave serializes queued writes for different work centers, sends only the latest payload for a repeated code, and blocks a concurrent autosave until the drain finishes', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorFetch = Util.fetchTraced;
+  const priorIsAdmin = Session.isAdmin;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorDocument = globalThis.document;
+  const priorCSS = globalThis.CSS;
+  const priorRows = WorkCenters._rows;
+  const priorMachines = WorkCenters._machines;
+  const priorSelected = WorkCenters._selected;
+  const priorLoadedPlant = WorkCenters._loadedPlant;
+  const priorStaged = WorkCenters._staged;
+  const priorBaseline = WorkCenters._baseline;
+  const priorQueued = WorkCenters._queued;
+  const priorSaving = WorkCenters._saving;
+  const priorDirty = WorkCenters._dirty;
+
+  const calls = []; // { code, body, resolve }
+  Session.isAdmin = () => true;
+  Alerts.scheduleRecompute = () => {};
+  globalThis.document = { querySelector: () => null, getElementById: () => null };
+  // _refreshSidebarRow (called from _write's success path) uses CSS.escape —
+  // a real browser global, absent in this node:test (no jsdom) environment.
+  globalThis.CSS = { escape: (s) => s };
+  Util.fetchTraced = (url, init) => {
+    const code = decodeURIComponent(String(url).split('/').pop());
+    return new Promise((resolve) => {
+      calls.push({
+        code,
+        body: JSON.parse(init.body),
+        settle: (body) => resolve({ ok: true, json: () => Promise.resolve(body ?? { ...JSON.parse(init.body), weights: {} }) }),
+      });
+    });
+  };
+
+  const staged = (description, machine) => ({
+    description, distribution_mode: 'single', default_machine: machine,
+    max_separation: 'none', review_required: false, distribute_tooled: false, weights: {},
+  });
+
+  try {
+    WorkCenters._queued = new Map();
+    WorkCenters._saving = false;
+    WorkCenters._dirty = false;
+    Store.setSelectedPlant('P1', 'test');
+    WorkCenters._loadedPlant = 'P1';
+    WorkCenters._machines = [
+      { machine: 'MA', sap_workcenter: 'WC-A' },
+      { machine: 'MB', sap_workcenter: 'WC-B' },
+      { machine: 'MC', sap_workcenter: 'WC-C' },
+      { machine: 'MD', sap_workcenter: 'WC-D' },
+    ];
+
+    // Kick off the first write for WC-A (fetch deferred — nothing resolves yet).
+    WorkCenters._selected = 'WC-A';
+    WorkCenters._staged = staged('A1', 'MA');
+    WorkCenters._markDirty();
+    const done = WorkCenters._autosave();
+    await Promise.resolve();
+    assert.equal(calls.length, 1, 'WC-A write must fire immediately');
+    assert.equal(calls[0].code, 'WC-A');
+    assert.equal(WorkCenters._saving, true);
+
+    // While WC-A is still in flight, flush edits for WC-B and WC-C — these
+    // must queue (no new fetch calls yet), not fire.
+    WorkCenters._selected = 'WC-B';
+    WorkCenters._staged = staged('B1', 'MB');
+    WorkCenters._markDirty();
+    WorkCenters._flushPending();
+    WorkCenters._selected = 'WC-C';
+    WorkCenters._staged = staged('C1', 'MC');
+    WorkCenters._markDirty();
+    WorkCenters._flushPending();
+    assert.equal(calls.length, 1, 'queuing must not fire a write while one is in flight');
+    assert.equal(WorkCenters._queued.size, 2);
+
+    // A second edit to WC-B before it has been sent must REPLACE the queued
+    // payload, not add a third queue entry.
+    WorkCenters._selected = 'WC-B';
+    WorkCenters._staged = staged('B2-latest', 'MB');
+    WorkCenters._markDirty();
+    WorkCenters._flushPending();
+    assert.equal(WorkCenters._queued.size, 2, 'repeat edit to the same work center must replace, not add');
+    assert.equal(WorkCenters._queued.get('P1\u0000WC-B').payload.description, 'B2-latest');
+
+    // Settle WC-A. The drain should pick up WC-B next, still inside the same
+    // _saving window — a concurrent autosave attempt must be blocked.
+    calls[0].settle();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(calls.length, 2, 'WC-B must be sent once WC-A settles');
+    assert.equal(calls[1].code, 'WC-B');
+    assert.equal(calls[1].body.description, 'B2-latest', 'the latest queued payload must be the one sent');
+
+    // Prove the overlap D28 fixes is actually closed: with the drain mid-way
+    // (WC-B in flight, WC-C still queued), a fresh debounced autosave for yet
+    // another row must not start a concurrent PUT.
+    WorkCenters._selected = 'WC-D';
+    WorkCenters._staged = staged('D1', 'MD');
+    WorkCenters._markDirty();
+    void WorkCenters._autosave();
+    assert.equal(calls.length, 2, 'a concurrent autosave must be blocked while the drain is still in flight');
+    assert.equal(WorkCenters._saving, true);
+    WorkCenters._dirty = false; // not under test here — avoid it feeding a trailing drain below
+
+    calls[1].settle();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(calls.length, 3, 'WC-C must be sent once WC-B settles');
+    assert.equal(calls[2].code, 'WC-C');
+
+    calls[2].settle();
+    await done;
+
+    assert.equal(WorkCenters._saving, false);
+    assert.equal(WorkCenters._queued.size, 0);
+  } finally {
+    Session.isAdmin = priorIsAdmin;
+    Alerts.scheduleRecompute = priorRecompute;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    if (priorCSS === undefined) delete globalThis.CSS; else globalThis.CSS = priorCSS;
+    WorkCenters._rows = priorRows;
+    WorkCenters._machines = priorMachines;
+    WorkCenters._selected = priorSelected;
+    WorkCenters._loadedPlant = priorLoadedPlant;
+    WorkCenters._staged = priorStaged;
+    WorkCenters._baseline = priorBaseline;
+    WorkCenters._queued = priorQueued;
+    WorkCenters._saving = priorSaving;
+    WorkCenters._dirty = priorDirty;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
 });

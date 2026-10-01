@@ -33,7 +33,7 @@ which do the actual validation/materialization/writing.
 """
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
@@ -120,18 +120,28 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-def _parse_iso_date(value: str | None, field: str) -> datetime | None:
+def _parse_iso_date(value: str | None, field: str, *, end_of_day: bool = False) -> datetime | None:
     """`from`/`to` query params -- naive plant-local wall-clock timestamps,
     same convention `basic_start_date` itself is stored under (no further tz
     conversion, matching `_horizon_boundary_core`'s documented convention);
-    an explicit offset in the input is simply dropped, not converted."""
+    an explicit offset in the input is simply dropped, not converted.
+
+    D57: a date-only `to=YYYY-MM-DD` means midnight, so orders starting later
+    that same day were silently dropped from the filter. `end_of_day=True`
+    (used for `to` on the list/aggregate routes only) widens a date-only
+    input to that day's last instant; an input that already carries a time
+    component is left exactly as given."""
     if value is None or not value.strip():
         return None
+    raw = value.strip()
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{field} must be an ISO date/datetime") from exc
-    return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+    parsed = parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+    if end_of_day and "T" not in raw and " " not in raw:
+        return datetime.combine(parsed.date(), time.max)
+    return parsed
 
 
 @router.get("/distribution/{plant}", dependencies=[Depends(auth.require_authenticated)])
@@ -158,7 +168,7 @@ def list_distribution(
     _no_store(response)
     machine_list = [m.strip() for m in machines.split(",") if m.strip()] if machines else None
     date_from = _parse_iso_date(from_, "from")
-    date_to = _parse_iso_date(to_, "to")
+    date_to = _parse_iso_date(to_, "to", end_of_day=True)
     return distribution_data.list_headers_for_plant(
         plant, search=search, workcenter=workcenter, machines=machine_list,
         reviewed=reviewed, bucket=(bucket or status), batch=batch,
@@ -197,7 +207,7 @@ def get_distribution_aggregate(
     _distribution_plant_guard(plant, allowed_plants)
     _no_store(response)
     date_from = _parse_iso_date(from_, "from")
-    date_to = _parse_iso_date(to_, "to")
+    date_to = _parse_iso_date(to_, "to", end_of_day=True)
     rows = distribution_data.get_aggregate(plant, workcenter=workcenter, date_from=date_from, date_to=date_to)
     if format == "csv":
         buf = io.StringIO()
@@ -256,6 +266,51 @@ def get_distribution_detail(plant: str, order: str, material: str, response: Res
 # `save_workcenter` above and every admin route in backend/setup/routes.py use.
 # =====================================================================
 
+_MAX_BULK_ORDERS = 500
+
+
+def _require_base_version(value) -> int:
+    """D18: `base_version` must be present and an actual `int` -- `bool` is a
+    Python `int` subclass, so `isinstance(value, bool)` is checked first and
+    rejected too. Missing/null/boolean all return the same structured 400;
+    `reapply-defaults` (an admin bulk sweep, not an edit against a
+    client-held header version) never calls this."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise HTTPException(status_code=400, detail={
+            "code": "base_version_required",
+            "message": "base_version is required and must be an integer",
+        })
+    return value
+
+
+def _validate_bulk_orders(orders, *, required: bool = True, max_items: int = _MAX_BULK_ORDERS) -> list[dict] | None:
+    """D20 shared validator for the `orders[]` body every bulk distribution
+    write (review/reset/reapply-defaults) takes: caps the list at
+    `max_items` and checks each item is a dict with string
+    `production_order`/`material_number` -- malformed input is rejected here
+    with a 400, instead of reaching data.py and surfacing as an unhandled
+    500. `required=False` (reapply-defaults only) allows `orders` to be
+    omitted/`None` entirely (meaning "sweep every matching header")."""
+    if orders is None and not required:
+        return None
+    if not isinstance(orders, list) or (required and not orders):
+        raise HTTPException(status_code=400, detail="orders must be a non-empty list")
+    if len(orders) > max_items:
+        raise HTTPException(status_code=400, detail={
+            "code": "too_many_orders",
+            "message": f"orders must not exceed {max_items} items",
+        })
+    for item in orders:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("production_order"), str)
+                or not isinstance(item.get("material_number"), str)):
+            raise HTTPException(
+                status_code=400,
+                detail="each order item must include production_order and material_number",
+            )
+    return orders
+
+
 def _distribution_conflict(exc) -> HTTPException:
     """Structured 409 body for the two named conflicts SS5.5 defines --
     `stale` (base_version mismatch) and `children_scheduled` (a destructive
@@ -287,10 +342,11 @@ def save_distribution_shares(plant: str, order: str, material: str, request: Req
     previous_shares, versions, base_version}`."""
     _distribution_plant_guard(plant, allowed_plants)
     _set_admin_log_details(request, plant=plant, production_order=order, material_number=material)
+    base_version = _require_base_version(body.get("base_version"))
     dry_run = bool(body.get("dry_run"))
     try:
         result = distribution_data.reweight_shares(
-            plant, order, material, body.get("shares"), body.get("base_version"),
+            plant, order, material, body.get("shares"), base_version,
             reviewed=body.get("reviewed"), allow_stale=bool(body.get("allow_stale")),
             confirm_remove_scheduled=bool(body.get("confirm_remove_scheduled")),
             dry_run=dry_run, actor=actor,
@@ -317,11 +373,19 @@ def review_distribution_orders(plant: str, request: Request, body: dict = Body(d
     clear `sap_facts.previous_workcenter` (SS5.7 -- that needs a materializing
     re-weight or reset)."""
     _distribution_plant_guard(plant, allowed_plants)
-    orders = body.get("orders")
-    if not isinstance(orders, list) or not orders:
-        raise HTTPException(status_code=400, detail="orders must be a non-empty list")
-    _set_admin_log_details(request, plant=plant, count=len(orders), reviewed=bool(body.get("reviewed")))
-    result = distribution_data.review_orders(plant, orders, bool(body.get("reviewed")), actor=actor)
+    orders = _validate_bulk_orders(body.get("orders"))
+    reviewed = body.get("reviewed")
+    if not isinstance(reviewed, bool):
+        # D20: a missing/non-bool `reviewed` used to silently un-review
+        # (bool(None) == False) -- require it explicitly instead.
+        raise HTTPException(status_code=400, detail={
+            "code": "reviewed_required",
+            "message": "reviewed is required and must be a boolean",
+        })
+    for item in orders:
+        _require_base_version(item.get("base_version"))
+    _set_admin_log_details(request, plant=plant, count=len(orders), reviewed=reviewed)
+    result = distribution_data.review_orders(plant, orders, reviewed, actor=actor)
     return result
 
 
@@ -336,9 +400,9 @@ def reset_distribution_orders(plant: str, request: Request, body: dict = Body(de
     results, same shape `shares` returns per item (or `dry_run`'s preview
     shape per item)."""
     _distribution_plant_guard(plant, allowed_plants)
-    orders = body.get("orders")
-    if not isinstance(orders, list) or not orders:
-        raise HTTPException(status_code=400, detail="orders must be a non-empty list")
+    orders = _validate_bulk_orders(body.get("orders"))
+    for item in orders:
+        _require_base_version(item.get("base_version"))
     _set_admin_log_details(request, plant=plant, count=len(orders))
     result = distribution_data.reset_orders(
         plant, orders, confirm_remove_scheduled=bool(body.get("confirm_remove_scheduled")),
@@ -359,10 +423,11 @@ def reapply_distribution_defaults(plant: str, request: Request, body: dict = Bod
     does. Body: `{workcenter?, orders?, only_unreviewed: true,
     confirm_remove_scheduled?}` -> counts."""
     _distribution_plant_guard(plant, allowed_plants)
+    orders = _validate_bulk_orders(body.get("orders"), required=False)
     _set_admin_log_details(request, plant=plant, workcenter=body.get("workcenter"))
     try:
         result = distribution_data.reapply_defaults(
-            plant, workcenter=body.get("workcenter"), orders=body.get("orders"),
+            plant, workcenter=body.get("workcenter"), orders=orders,
             only_unreviewed=body.get("only_unreviewed", True),
             confirm_remove_scheduled=bool(body.get("confirm_remove_scheduled")), actor=actor,
         )

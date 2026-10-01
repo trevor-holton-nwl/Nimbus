@@ -5088,6 +5088,58 @@ test('checkDistributionSeparation stays silent when siblings share a bucket, the
   }
 });
 
+// D50: an undated sibling (no start_date yet) must be excluded from both the
+// group-size gate and the bucket comparison — mirroring nimbus-compute-core.js's
+// computeAlerts, which filters to `dated` before either check. Before the fix,
+// every group member (dated or not) was bucketed, so a still-undated sibling
+// — whose bucket key is a constant distinct from any real date's — made
+// `buckets.some(bucket => bucket !== buckets[0])` true even when the dated
+// siblings genuinely agreed, raising a false finding.
+test('checkDistributionSeparationForTest ignores an undated sibling: two dated siblings sharing a bucket plus one undated gives no finding', () => {
+  const parent = 'PO-DIST-UNDATED';
+  const material = 'MAT-DIST-UNDATED';
+  const dated1 = { id: 'dist-undated-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
+  const dated2 = { id: 'dist-undated-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T14:00:00') };
+  const undated = { id: 'dist-undated-c', MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
+  const snapshot = setupSnapshot([dated1, dated2, undated]);
+  snapshot.masterData = distributionMasterData();
+
+  const findings = SetupScheduler.checkDistributionSeparationForTest([], snapshot)
+    .filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 0,
+    'an undated sibling must not be bucketed as its own mismatching group of one when the dated siblings genuinely share a bucket');
+});
+
+test('checkDistributionSeparationForTest still requires at least two DATED siblings: one dated plus one undated gives no finding', () => {
+  const parent = 'PO-DIST-UNDATED-SOLO';
+  const material = 'MAT-DIST-UNDATED-SOLO';
+  const dated = { id: 'dist-solo-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
+  const undated = { id: 'dist-solo-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
+  const snapshot = setupSnapshot([dated, undated]);
+  snapshot.masterData = distributionMasterData();
+
+  const findings = SetupScheduler.checkDistributionSeparationForTest([], snapshot)
+    .filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 0,
+    'a group with fewer than two DATED siblings has nothing to compare and must never raise a finding');
+});
+
+test('checkDistributionSeparationForTest still flags dated siblings landing in different buckets with an undated sibling present', () => {
+  const parent = 'PO-DIST-UNDATED-MISMATCH';
+  const material = 'MAT-DIST-UNDATED-MISMATCH';
+  const dated1 = { id: 'dist-mis-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
+  const dated2 = { id: 'dist-mis-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-05T08:00:00') };
+  const undated = { id: 'dist-mis-c', MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
+  const snapshot = setupSnapshot([dated1, dated2, undated]);
+  snapshot.masterData = distributionMasterData();
+
+  const findings = SetupScheduler.checkDistributionSeparationForTest([], snapshot)
+    .filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 1, 'genuinely different-bucket DATED siblings must still raise the finding');
+  assert.deepEqual(findings[0].parents.slice().sort(), ['dist-mis-a', 'dist-mis-b'],
+    'the undated sibling must not appear in parents — it was never part of the comparison');
+});
+
 // Regression: fillPlanningGaps used to silently discard distribution_separation
 // findings whenever it had at least one pending order to try (the common
 // case), because its final `result.validationFindings = validateCandidate(...)`

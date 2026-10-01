@@ -422,8 +422,7 @@ export const Table = {
     const text = Util.escapeHtml(p.value ?? '');
     const task = p.data;
     if (!task?.PARENT_ORDER || !task.DISTRIBUTION_LETTER) return text;
-    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
-    const count = scoped.filter(t => t.PARENT_ORDER === task.PARENT_ORDER).length;
+    const count = (Store.siblingsByParent().get(task.PARENT_ORDER) || []).length;
     return `${text}<span class="split-order-part dist-part">${Util.escapeHtml(task.DISTRIBUTION_LETTER)}·${count}</span>`;
   },
 
@@ -1078,12 +1077,21 @@ export const Table = {
       // _buildLineChipDropdown's own onToggle callback already did this locally.
       Table._buildLineChipDropdown();
       Table._api.onFilterChanged();
+    } else if (evt.type === 'task:remove') {
+      if (evt.prev) Table._api.applyTransaction({ remove: [evt.prev] });
+      Table._renderEmptyState();
     } else if (evt.type === 'tasks:bulkUpdate') {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
-      const updated = ids
+      const inPlant = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant);
-      Table._api.applyTransaction({ update: updated });
+        .filter((t): t is NimbusTask => !!t && (t.PLANT || Store.getPlantForLine(t.MACHINE)) === Store.selectedPlant);
+      const add: NimbusTask[] = [];
+      const update: NimbusTask[] = [];
+      for (const t of inPlant) {
+        (Table._api.getRowNode(String(t.id)) ? update : add).push(t);
+      }
+      Table._api.applyTransaction({ add, update });
+      if (add.length) Table._refreshChipDropdowns();
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'task:update') {
       const t = Store.tasks[String(evt.id)];
@@ -1204,7 +1212,7 @@ export const Table = {
       Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
       'warn', 4000,
       {
-        label: 'Open Order Distribution',
+        label: Util.t('btn.insp_dist_open'),
         run: () => {
           const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
           app?.gotoGanttSub?.('distribution');
@@ -1455,7 +1463,7 @@ export const Table = {
       Table._fpOvrStart = Util.fpDatetime('#ovr-start');
     }
     Table._fpOvrStart.setDate(t.start_date!, false);
-    const lines = Table._getLineOptions();
+    const lines = Table._getLineOptions(t);
     lineEl.innerHTML = lines.map(l => `<option value="${Util.escapeHtml(l)}" ${l === t.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('');
     firmEl.checked = !!t.firmed;
     Modal.open('modal-override');
@@ -1475,6 +1483,14 @@ export const Table = {
     const newLine  = lineEl.value;
     const alsoFirm = firmEl.checked;
     if (!newStart) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
+
+    // Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
+    // (PARENT_ORDER set) may not change machine via the Override dialog
+    // either — same guard as the grid-edit path in _onCellChanged.
+    if (t.PARENT_ORDER && newLine !== (t.MACHINE || 'Unknown')) {
+      Table._rejectDistMachineMove(t);
+      return;
+    }
 
     // Routing eligibility guard (§8.3): the Override dialog can move an
     // order to a different machine, so it must be checked the same as the
@@ -2081,7 +2097,7 @@ export const Inspector = {
     // currently in Store sharing the same PARENT_ORDER — deleted/completed
     // orders are never in Store, so this is "living" by construction).
     const distSiblings = task.PARENT_ORDER
-      ? (Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr).filter(x => x.PARENT_ORDER === task.PARENT_ORDER)
+      ? (Store.siblingsByParent().get(task.PARENT_ORDER) || [])
       : [];
     const distTotalQty = distSiblings.reduce((sum, s) => sum + (Number(s['ORDER_QUANTITY_(GMEIN)']) || 0), 0);
     const distThisQty = Number(task['ORDER_QUANTITY_(GMEIN)']) || 0;

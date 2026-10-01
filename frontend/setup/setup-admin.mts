@@ -33,8 +33,22 @@ interface ComboboxOpts {
   onSelect?: (value: string) => void;
 }
 
+// D48 (part 2) — one AbortController per LIVE container for _mkCombobox's
+// document-level click listener, keyed by the container element — a single
+// shared module-level controller is wrong whenever two comboboxes are
+// mounted at once (e.g. master-data/admin-ui.mts's BOM plant/material
+// pickers and plant-settings line-override pickers): rendering the second
+// would abort the first's still-live listener. Re-rendering into the SAME
+// container still aborts that container's own previous listener, via the
+// WeakMap lookup (mirrored from distribution/distribution-pane.mts's copy —
+// keep in sync with that file and master-data/admin-ui.mts's copy).
+const _comboAborts = new WeakMap<HTMLElement, AbortController>();
+
 function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
   if (!containerEl) return;
+  _comboAborts.get(containerEl)?.abort();
+  const _comboAbort = new AbortController();
+  _comboAborts.set(containerEl, _comboAbort);
   containerEl.innerHTML = `
     <div class="hps-combobox md-bom-combobox">
       <input type="text" class="hps-input" placeholder="${Util.escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"
@@ -105,7 +119,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
   input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
   clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
   clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-  document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); });
+  document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboAbort.signal });
 
   reflect();
 }

@@ -34,6 +34,8 @@ Coverage, per the plan:
 None of these tests require a live database -- confirmed via `ast.parse`
 (this docstring) and, where noted, by mocking the data-layer call.
 """
+from datetime import datetime
+
 import pytest
 
 try:
@@ -42,6 +44,7 @@ try:
 
     import backend.security.auth as auth
     import brain
+    from backend.distribution.routes import _parse_iso_date
 except Exception as exc:  # pragma: no cover - depends on local application imports
     pytest.skip(f"brain/TestClient unavailable in this environment: {exc}", allow_module_level=True)
 
@@ -546,6 +549,30 @@ def test_distribution_shares_maps_children_scheduled_to_409_with_children_list(d
     assert detail["children"][0]["id"] == "x"
 
 
+def test_distribution_shares_maps_children_scheduled_to_409_with_a_real_timestamp_not_500(
+        distribution_planner_client, monkeypatch):
+    """D10: `_error_response` builds a plain `JSONResponse`, which can't
+    serialize a raw `datetime` -- the pin test above uses an empty
+    `scheduled_start`, which hides this. A real timestamp must still come
+    back as a 409 with an ISO string, not degrade into an unhandled 500."""
+    def fake_reweight_shares(*a, **k):
+        raise distribution_data.DistributionChildrenScheduled(
+            [{"id": "x", "production_order": "A-ORDER1", "machine": "M1",
+              "scheduled_start": datetime(2026, 10, 1, 8), "frozen": False}]
+        )
+
+    monkeypatch.setattr(distribution_data, "reweight_shares", fake_reweight_shares)
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/ORDER1/MAT1/shares",
+        json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
+        params={"confirm": "false"},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "children_scheduled"
+    assert detail["children"][0]["scheduled_start"] == "2026-10-01T08:00:00"
+
+
 def test_distribution_shares_maps_header_not_found_to_404(distribution_planner_client, monkeypatch):
     def fake_reweight_shares(*a, **k):
         raise distribution_data.DistributionHeaderNotFound("nope")
@@ -556,6 +583,20 @@ def test_distribution_shares_maps_header_not_found_to_404(distribution_planner_c
         json={"shares": [{"machine": "M1", "weight": 1}], "base_version": 1},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("body_overrides", [
+    {},                        # D18: base_version key omitted entirely
+    {"base_version": None},    # D18: explicit JSON null
+    {"base_version": True},    # D18: bool is an int subtype -- must still be rejected
+], ids=["missing", "null", "boolean"])
+def test_distribution_shares_rejects_a_non_int_base_version(distribution_planner_client, body_overrides):
+    body = {"shares": [{"machine": "M1", "weight": 1}], **body_overrides}
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/ORDER1/MAT1/shares", json=body,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "base_version_required"
 
 
 def test_distribution_review_rejects_an_out_of_scope_plant(distribution_planner_client):
@@ -580,6 +621,59 @@ def test_distribution_review_rejects_an_empty_orders_list(distribution_planner_c
         f"/distribution/{DIST_PLANT_A}/review", json={"orders": [], "reviewed": True},
     )
     assert response.status_code == 400
+
+
+def test_distribution_review_rejects_more_than_500_orders(distribution_planner_client):
+    """D20: an unbounded `orders[]` bulk request is capped at 500."""
+    orders = [{"production_order": f"O{i}", "material_number": "M1", "base_version": 1} for i in range(501)]
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/review", json={"orders": orders, "reviewed": True},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "too_many_orders"
+
+
+@pytest.mark.parametrize("bad_orders", [
+    "not-a-list",
+    [123],
+    [{"production_order": "O1"}],
+    [{"production_order": 1, "material_number": "M1"}],
+], ids=["not-a-list", "non-dict-item", "missing-material-number", "non-string-field"])
+def test_distribution_review_rejects_malformed_order_item_shape_with_400_not_500(
+        distribution_planner_client, bad_orders):
+    """D20: a malformed `orders[]` item (wrong container type, missing keys,
+    or non-string identifiers) must be rejected at the route with a 400,
+    never reach data.py and surface as an unhandled 500."""
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/review", json={"orders": bad_orders, "reviewed": True},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("body_overrides", [
+    {},                      # D20: `reviewed` key omitted -- today this silently un-reviews
+    {"reviewed": None},
+    {"reviewed": "true"},
+], ids=["missing", "null", "non-bool"])
+def test_distribution_review_rejects_a_non_bool_reviewed(distribution_planner_client, body_overrides):
+    body = {"orders": [{"production_order": "O1", "material_number": "M1", "base_version": 1}], **body_overrides}
+    response = distribution_planner_client.post(f"/distribution/{DIST_PLANT_A}/review", json=body)
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "reviewed_required"
+
+
+@pytest.mark.parametrize("item_overrides", [
+    {},                      # D18: base_version key omitted entirely
+    {"base_version": None},
+    {"base_version": True},
+], ids=["missing", "null", "boolean"])
+def test_distribution_review_rejects_an_item_with_a_non_int_base_version(distribution_planner_client, item_overrides):
+    item = {"production_order": "O1", "material_number": "M1", **item_overrides}
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/review", json={"orders": [item], "reviewed": True},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "base_version_required"
 
 
 def test_distribution_review_allows_a_planner_through_to_the_data_layer(distribution_planner_client, monkeypatch):
@@ -614,6 +708,44 @@ def test_distribution_reset_maps_blank_plant_to_400_not_500(distribution_planner
     )
     assert response.status_code == 400
     assert "plant is required" in response.json()["detail"]
+
+
+def test_distribution_reset_rejects_more_than_500_orders(distribution_planner_client):
+    """D20: same 500-item cap as /review."""
+    orders = [{"production_order": f"O{i}", "material_number": "M1", "base_version": 1} for i in range(501)]
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/reset", json={"orders": orders},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "too_many_orders"
+
+
+@pytest.mark.parametrize("bad_orders", [
+    "not-a-list",
+    [123],
+    [{"production_order": "O1"}],
+    [{"production_order": 1, "material_number": "M1"}],
+], ids=["not-a-list", "non-dict-item", "missing-material-number", "non-string-field"])
+def test_distribution_reset_rejects_malformed_order_item_shape_with_400_not_500(
+        distribution_planner_client, bad_orders):
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/reset", json={"orders": bad_orders},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("item_overrides", [
+    {},                      # D18: base_version key omitted entirely
+    {"base_version": None},
+    {"base_version": True},
+], ids=["missing", "null", "boolean"])
+def test_distribution_reset_rejects_an_item_with_a_non_int_base_version(distribution_planner_client, item_overrides):
+    item = {"production_order": "O1", "material_number": "M1", **item_overrides}
+    response = distribution_planner_client.post(
+        f"/distribution/{DIST_PLANT_A}/reset", json={"orders": [item]},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "base_version_required"
 
 
 def test_distribution_reset_allows_a_planner_through_to_the_data_layer(distribution_planner_client, monkeypatch):
@@ -702,6 +834,39 @@ def test_distribution_reapply_defaults_allows_an_admin_through_to_the_data_layer
     assert calls == [{"plant": DIST_PLANT_A}]
 
 
+def test_distribution_reapply_defaults_rejects_more_than_500_orders(distribution_reapply_admin_client):
+    """D20: the same 500-item cap applies to reapply-defaults' optional
+    explicit `orders` list (an admin bulk sweep of ALL headers when `orders`
+    is omitted is unaffected -- only an explicit oversized list is capped)."""
+    orders = [{"production_order": f"O{i}", "material_number": "M1"} for i in range(501)]
+    response = distribution_reapply_admin_client.post(
+        f"/distribution/{DIST_PLANT_A}/reapply-defaults", json={"orders": orders},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "too_many_orders"
+
+
+def test_distribution_reapply_defaults_does_not_require_base_version_per_item(
+        distribution_reapply_admin_client, monkeypatch):
+    """D18 explicitly exempts reapply-defaults: it's an admin bulk sweep, not
+    an edit against a client-held header version, so an `orders` item
+    without `base_version` must still reach the data layer."""
+    calls = []
+
+    def fake_reapply_defaults(plant, **kwargs):
+        calls.append({"plant": plant, "orders": kwargs.get("orders")})
+        return {"headers_processed": 0, "children_upserted": 0, "children_deleted": 0,
+                "skipped": 0, "children_scheduled": 0}
+
+    monkeypatch.setattr(distribution_data, "reapply_defaults", fake_reapply_defaults)
+    response = distribution_reapply_admin_client.post(
+        f"/distribution/{DIST_PLANT_A}/reapply-defaults",
+        json={"orders": [{"production_order": "O1", "material_number": "M1"}]},
+    )
+    assert response.status_code == 200
+    assert calls == [{"plant": DIST_PLANT_A, "orders": [{"production_order": "O1", "material_number": "M1"}]}]
+
+
 def test_distribution_resolve_rejects_an_out_of_scope_plant(distribution_reapply_admin_client):
     response = distribution_reapply_admin_client.post(f"/distribution/{DIST_PLANT_B}/resolve", json={})
     assert response.status_code == 403
@@ -751,3 +916,46 @@ def test_distribution_resolve_rejects_an_invalid_scope(distribution_reapply_admi
         f"/distribution/{DIST_PLANT_A}/resolve", json={"scope": "bogus"},
     )
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# D57 -- `_parse_iso_date`'s `to` handling. A date-only `YYYY-MM-DD` input
+# means midnight, so orders starting later that same day were silently
+# dropped from a `to=<that day>` filter. `end_of_day=True` (used for `to` on
+# the list and aggregate routes only) widens a date-only input to the last
+# instant of that day; an input that already carries a time component is
+# left alone.
+# ---------------------------------------------------------------------------
+def test_parse_iso_date_date_only_with_end_of_day_returns_the_last_instant_of_the_day():
+    result = _parse_iso_date("2026-10-01", "to", end_of_day=True)
+    assert result == datetime(2026, 10, 1, 23, 59, 59, 999999)
+
+
+def test_parse_iso_date_date_only_without_end_of_day_stays_at_midnight():
+    result = _parse_iso_date("2026-10-01", "to")
+    assert result == datetime(2026, 10, 1, 0, 0, 0)
+
+
+def test_parse_iso_date_with_an_explicit_time_ignores_end_of_day():
+    result = _parse_iso_date("2026-10-01T08:30:00", "to", end_of_day=True)
+    assert result == datetime(2026, 10, 1, 8, 30, 0)
+
+
+def test_parse_iso_date_none_ignores_end_of_day():
+    assert _parse_iso_date(None, "to", end_of_day=True) is None
+
+
+def test_distribution_list_to_date_is_widened_to_the_end_of_the_day(scoped_client, monkeypatch):
+    """Route-level pin: GET /distribution/{plant}?to=<date-only> must reach
+    distribution_data.list_headers_for_plant with date_to already widened to
+    23:59:59.999999, not raw midnight."""
+    captured = {}
+
+    def fake_list_headers_for_plant(plant, **kwargs):
+        captured["date_to"] = kwargs.get("date_to")
+        return {"data": [], "total": 0}
+
+    monkeypatch.setattr(distribution_data, "list_headers_for_plant", fake_list_headers_for_plant)
+    response = scoped_client.get(f"/distribution/{PLANT_A}?to=2026-10-01")
+    assert response.status_code == 200
+    assert captured["date_to"] == datetime(2026, 10, 1, 23, 59, 59, 999999)

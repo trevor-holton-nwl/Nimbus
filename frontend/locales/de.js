@@ -1808,9 +1808,9 @@ window.__NIMBUS_LOCALES.de = {
   'toast.wc_save_failed':               'Speichern fehlgeschlagen: {{msg}}',
 
   // Distribution errors
-  'err.dist_weights_empty':             'Mindestens eine Maschine benötigt eine positive Gewichtung.',
+  'err.dist_weights_empty':             'Mindestens eine Maschine benötigt eine positive Gewichtung. Falls dies von Zurücksetzen kam, sind die Standardgewichtungen des Arbeitszentrums alle null.',
   'err.dist_duplicate_machine':         'Eine Maschine kann nur einmal in der Anteilsliste vorkommen.',
-  'err.dist_share_purged':              'Dieser Unterauftrag wurde gelöscht — nur ein neuer Upload belebt ihn.',
+  'err.dist_share_purged':              'Dieser Unterauftrag wurde gelöscht — verwenden Sie Zurücksetzen oder laden Sie den übergeordneten Auftrag erneut hoch, um ihn wiederherzustellen.',
   'err.dist_stale_machine':             'Diese Maschine ist kein Mitglied dieses Arbeitszentrums mehr.',
   'err.dist_workcenter_missing':        'Das Arbeitszentrum für diesen Auftrag existiert nicht mehr.',
 
@@ -1827,4 +1827,53 @@ window.__NIMBUS_LOCALES.de = {
 
   // Distribution KPI
   'kpi.orders_sub_counted':             'Unteraufträge einzeln gezählt',
+
+  // F10 (D34) — Order Distribution i18n completion: übersetzte die zuvor
+  // englischsprachige dist_/wc_-Familie, ergänzte die Fehlercodes und
+  // barrierefreien Namen aus der jüngsten Verteilungsarbeit und formulierte
+  // err.dist_share_purged/err.dist_weights_empty oben neu (Controller-Nachtrag).
+  'ui.review_distributions':            '{{count}} Verteilungen prüfen',
+  'ui.conflicting_parent_rows':         'Widersprüchliche übergeordnete Aufträge',
+  'ui.ambiguous_plant_conflicts':       'Mehrdeutige Werkskonflikte',
+  'ui.workcenter_without_members':      'Arbeitszentrum ohne Mitglieder',
+  'ui.default_machine_invalid':         'Ungültige Standardmaschine',
+  'col.distribution_mode':              'Verteilungsmodus',
+  'col.max_separation':                 'Max. Trennung',
+  'col.open_distributions':             'Offene Verteilungen',
+  'col.description':                    'Beschreibung',
+  'col.machine':                        'Maschine',
+  'col.weight':                         'Gewichtung',
+  'col.effective_pct':                  'Effektiv %',
+  'empty.no_work_centers':              'Noch keine Arbeitszentren.',
+  'ph.dist_search':                     'SAP-Auftrag oder Material suchen…',
+  'btn.dist_open_workcenters':          'Arbeitszentren öffnen',
+  'btn.dist_even':                      'Gleichmäßig',
+  'btn.dist_only_this_machine':         'Nur diese Maschine',
+  'btn.dist_by_quantity':               'Nach Menge',
+  'btn.dist_by_weight':                 'Nach Gewichtung',
+  'btn.dist_reset_defaults':            'Auf Arbeitszentrum-Standard zurücksetzen',
+  'btn.dist_undo':                      'Letzte Änderung rückgängig machen',
+  'btn.dist_show_on_gantt':             'Im Gantt-Diagramm anzeigen',
+  'btn.dist_open_inspector':            'Im Inspector öffnen',
+  'btn.dist_confirm_remove':            'Entfernen und speichern',
+  'btn.dist_save_schedule':             'Zeitplan speichern',
+  'btn.dist_bulk_mark_reviewed':        '{{n}} als geprüft markieren',
+  'btn.dist_bulk_reset':                'Zurücksetzen',
+  'ui.dist_list_truncated':             'Zeigt die ältesten 5.000 Aufträge — grenzen Sie die Filter ein, um den Rest zu sehen.',
+  'err.dist_unknown_machine':           'Diese Maschine gehört nicht zu diesem Arbeitszentrum oder zur Aufteilung dieses Auftrags.',
+  'err.dist_weight_invalid':            'Jede Gewichtung muss eine Zahl sein, die nicht größer als 1.000.000.000 ist.',
+  'err.dist_base_version_required':     'In dieser Anfrage fehlt die aktuelle Version des Auftrags — neu laden und erneut versuchen.',
+  'err.dist_too_many_orders':           'Zu viele Aufträge gleichzeitig ausgewählt — Auswahl verkleinern und erneut versuchen.',
+  'err.dist_reviewed_required':         'Die Prüfanfrage war unvollständig — laden Sie die Seite neu und versuchen Sie es erneut.',
+  'ui.dist_guard_unsaved':              'Speichern oder laden Sie die betroffenen Zeitplanänderungen neu, bevor Sie die Verteilung ändern.',
+  'ui.dist_no_selection':               'Kein Werk oder Auftrag ausgewählt.',
+  'ui.dist_bulk_status_ok':             'OK',
+  'ui.dist_bulk_status_stale':          'Seit dem Laden geändert',
+  'ui.dist_bulk_status_not_found':      'Nicht gefunden',
+  'ui.dist_bulk_status_children_scheduled': 'Unteraufträge bereits eingeplant',
+  'ui.dist_bulk_status_error':          'Fehler',
+  'aria.dist_remove':                   'Entfernen',
+  'aria.dist_weight_input':             'Gewichtung für {{machine}}',
+  'aria.dist_qty_input':                'Menge für {{machine}}',
+  'aria.dist_select_row':               'Auftrag {{order}} auswählen',
 };

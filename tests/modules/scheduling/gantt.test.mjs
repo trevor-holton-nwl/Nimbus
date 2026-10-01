@@ -1760,3 +1760,71 @@ test('Interaction._applyDistSiblingHighlight adds .dist-sibling to items sharing
     Store.setSelectedPlant(priorPlant, 'test');
   }
 });
+
+test('D51: a rebuild that strips .dist-sibling (fresh className, stale tracked ids) is corrected by resetting and re-applying the highlight', () => {
+  const priorPlant = Store.selectedPlant;
+  Store.setSelectedPlant(null, 'test');
+  const line = 'DIST-SIB-REBUILD-L';
+  Store.setTasks([
+    { id: 'rb-sib-a', PARENT_ORDER: '9106', DISTRIBUTION_LETTER: 'A', MACHINE: line, start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+    { id: 'rb-sib-b', PARENT_ORDER: '9106', DISTRIBUTION_LETTER: 'B', MACHINE: line, start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+  ], 'test');
+
+  const classNames = { 'rb-sib-a': 'order-standard', 'rb-sib-b': 'order-standard' };
+  Timeline._items = {
+    get: (i) => (classNames[i] != null ? { className: classNames[i] } : undefined),
+    update: (updates) => {
+      const arr = Array.isArray(updates) ? updates : [updates];
+      arr.forEach(u => { classNames[u.id] = u.className; });
+    },
+  };
+
+  try {
+    Interaction._applyDistSiblingHighlight(['rb-sib-a']);
+    assert.match(classNames['rb-sib-b'], /\bdist-sibling\b/, 'highlight applied before the simulated rebuild');
+
+    // Simulate rebuild()'s diff-flush: it rewrites every item's className from
+    // scratch via _itemForTask (no highlight awareness), stripping the class,
+    // while Interaction._distSiblingItemIds still (wrongly, pre-D51) names
+    // the now-stale item id.
+    classNames['rb-sib-b'] = 'order-standard';
+
+    // The D51 fix: rebuild()'s selection re-sync resets the tracked set and
+    // re-applies the highlight from the resynced selection (`keep`).
+    Interaction._distSiblingItemIds = new Set();
+    Interaction._applyDistSiblingHighlight(['rb-sib-a']);
+
+    assert.match(classNames['rb-sib-b'], /\bdist-sibling\b/, 'the highlight must be restored after the rebuild strip');
+  } finally {
+    Timeline._items = undefined;
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
+
+test('D51: Timeline._itemPatchFor restores .dist-sibling for an id the highlight set still tracks (single-item patch path, e.g. a drag commit)', () => {
+  const priorPlant = Store.selectedPlant;
+  const priorDistSiblingIds = Interaction._distSiblingItemIds;
+  Store.setSelectedPlant(null, 'test');
+  const line = 'DIST-SIB-PATCH-L';
+  Store.setTasks([
+    { id: 'patch-sib-a', PARENT_ORDER: '9107', DISTRIBUTION_LETTER: 'A', MACHINE: line, start_date: new Date('2026-09-21T08:00:00'), end_date: new Date('2026-09-21T10:00:00') },
+  ], 'test');
+  try {
+    // _itemForTask itself has no highlight awareness (matches the rebuild test above).
+    const fresh = Timeline._itemForTask(Store.tasks['patch-sib-a']);
+    assert.doesNotMatch(fresh.className, /dist-sibling/);
+
+    Interaction._distSiblingItemIds = new Set(['patch-sib-a']);
+    const patch = Timeline._itemPatchFor('patch-sib-a');
+    assert.match(patch.className, /\bdist-sibling\b/, '_itemPatchFor must restore the tracked highlight');
+
+    Interaction._distSiblingItemIds = new Set();
+    const unhighlighted = Timeline._itemPatchFor('patch-sib-a');
+    assert.doesNotMatch(unhighlighted.className, /dist-sibling/, 'only ids still in the tracked set get the class appended');
+  } finally {
+    Interaction._distSiblingItemIds = priorDistSiblingIds;
+    Store.setTasks([], 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});

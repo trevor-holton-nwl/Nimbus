@@ -39,6 +39,7 @@ the `order_distribution` HEADER table (this file's `plan`/`apply`), not to the
 only). `save_workcenter` stays a plain last-write-wins transaction, the same
 shape as master_data.py's other narrow single-purpose admin writers.
 """
+import math
 import re
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
@@ -53,6 +54,13 @@ from db import _pool
 
 VALID_DISTRIBUTION_MODES = frozenset({"single", "distribute"})
 VALID_MAX_SEPARATIONS = frozenset({"none", "hour", "day", "week"})
+
+# D21: a weight of inf/nan (JSON's non-standard `Infinity`/`NaN` constants, or
+# an exponent large enough to overflow to inf) or anything above a generous
+# ceiling is rejected in both validators below -- before any `< 0` comparison,
+# since a non-finite Decimal raises `decimal.InvalidOperation` on ordering
+# comparisons rather than comparing cleanly.
+_MAX_WEIGHT = 1e9
 
 
 def _clean_optional_str(value) -> str | None:
@@ -89,9 +97,20 @@ def _clean_weights(weights) -> dict[str, float | None]:
             continue
         if isinstance(weight, bool) or not isinstance(weight, (int, float)):
             raise ValueError(f"weight for {machine_name!r} must be numeric or null")
-        if weight < 0:
+        # Route through Decimal(str(...)) first, same as _validate_share_payload
+        # below -- a huge JSON integer (e.g. a ~400-digit literal) overflows
+        # `float()` directly with an OverflowError, not a ValueError, which
+        # would escape the route's `except ValueError` as a 500 instead of
+        # the intended weight_invalid 400. Decimal(str(int)) never overflows
+        # (arbitrary precision); converting THAT to float cleanly yields inf.
+        w = float(Decimal(str(weight)))
+        if not math.isfinite(w) or w > _MAX_WEIGHT:
+            raise ValueError(
+                f"weight_invalid: weight for {machine_name!r} must be finite and <= {_MAX_WEIGHT:g}"
+            )
+        if w < 0:
             raise ValueError(f"weight for {machine_name!r} must be >= 0")
-        cleaned[machine_name] = float(weight)
+        cleaned[machine_name] = w
     return cleaned
 
 
@@ -311,47 +330,79 @@ def _empty_ingest_warnings() -> dict:
     }
 
 
-def _dedupe_and_filter_conflicts(rows: list[dict], warnings: dict) -> list[dict]:
-    """§5.1 step 1, run BEFORE plant resolution/classification (it only
-    compares the raw MACHINE column, so dropped/skipped rows never need a
-    plant/classification lookup at all).
+def _dedupe_and_filter_conflicts(items: list[dict], existing_headers: dict, warnings: dict) -> set[int]:
+    """§5.1 step 1 -- moved (D04) to run AFTER plant resolution/classification
+    and the existing-header load, so it can tell a plain, never-to-be-
+    distributed duplicate apart from a genuine distribution duplicate/
+    conflict. Running this rule on the raw upload (its original position, a
+    plain pre-classification pass over the whole batch) dropped/skipped
+    EVERY duplicate (production_order, material_number) pair in the file --
+    including ones with no distribution involvement at all -- when
+    `upsert_orders`' own id loop already handles that ordinary case correctly
+    (keeps every row, suffixing later copies `_1`/`_2`, one summary warning).
 
-    One row per (production_order, material_number). A second row for the
-    same parent with the SAME machine/work-center value is a duplicate --
-    dropped, counted in `duplicate_parent_rows` (otherwise db.py's own
-    batch-local id dedup would `_1`-suffix a second, orphaned set of
-    children). A second row with a DIFFERENT value is a conflict: the WHOLE
-    parent is skipped -- no row is emitted for it at all -- and recorded in
+    Grouped by (production_order, material_number) over every `items` entry
+    (ambiguous-plant rows included, so they still occupy a slot in their
+    group). A group is "involved" -- i.e. subject to this rule at all -- only
+    when at least one member resolves to a plant AND either classifies
+    `distribute` or its (plant, production_order, material_number) key already
+    has a distribution header on file (`existing_headers`). An ambiguous-
+    plant member's `classification` is always None, so it never makes a group
+    involved by itself ("rows whose plant is ambiguous count as not
+    involved"). An uninvolved group's rows are left completely alone here --
+    `_plan_core`'s normal per-row handling (including the id-loop's
+    duplicate-suffix behavior further downstream in `upsert_orders`) takes
+    over for every member exactly as if this function didn't exist.
+
+    For an involved group with 2+ rows: identical `machine` values across the
+    group keeps the first row and drops the rest -- counted in
+    `duplicate_parent_rows` (otherwise db.py's own batch-local id dedup would
+    `_1`-suffix a second, orphaned set of children). Differing values drop the
+    WHOLE group -- no row is emitted for any member -- recorded in
     `conflicting_parent_rows`.
+
+    Returns the set of `items` indices to exclude entirely from the rest of
+    `_plan_core`'s processing (both the dropped duplicates and every member of
+    a skipped conflict group).
     """
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str], list[int]] = {}
     order: list[tuple[str, str]] = []
-    for row in rows:
+    for idx, it in enumerate(items):
+        row = it["row"]
         key = (db._str_id(row.get("production_order")), db._str_id(row.get("material_number")))
         if key not in groups:
             groups[key] = []
             order.append(key)
-        groups[key].append(row)
+        groups[key].append(idx)
 
-    survivors: list[dict] = []
+    excluded: set[int] = set()
     for key in order:
-        group = groups[key]
-        if len(group) == 1:
-            survivors.append(group[0])
+        idxs = groups[key]
+        if len(idxs) == 1:
             continue
-        machine_values = {r.get("machine") for r in group}
+        involved = any(
+            items[i]["classification"] is not None and (
+                items[i]["classification"]["type"] == "distribute"
+                or items[i]["key"] in existing_headers
+            )
+            for i in idxs
+        )
+        if not involved:
+            continue
+        machine_values = {items[i]["row"].get("machine") for i in idxs}
         if len(machine_values) == 1:
-            survivors.append(group[0])
             warnings["duplicate_parent_rows"].append({
                 "production_order": key[0], "material_number": key[1],
-                "dropped": len(group) - 1,
+                "dropped": len(idxs) - 1,
             })
+            excluded.update(idxs[1:])
         else:
             warnings["conflicting_parent_rows"].append({
                 "production_order": key[0], "material_number": key[1],
                 "values": sorted(str(v) for v in machine_values),
             })
-    return survivors
+            excluded.update(idxs)
+    return excluded
 
 
 def _load_lookups(cur) -> tuple[dict, dict]:
@@ -553,14 +604,14 @@ def _extract_parent_facts(row: dict) -> tuple[dict, bool]:
     already use, e.g. from db.ingest_orders_from_excel's per-row dict build).
 
     `runtime_defaulted` is read from an optional row key,
-    `_run_time_was_defaulted`, that the (not-yet-wired) ingest call site would
-    need to set BEFORE db.py's own RUN_TIME->1.0 fallback
-    (db.py's ingest_orders_from_excel, `df["RUN_TIME"] = pd.to_numeric(...).fillna(1.0)`)
-    overwrites the original absence -- by the time `rows` reaches `plan()`
-    that upstream default has already happened and is no longer detectable
-    from the row alone. Defaults to False when the flag is absent, which is
-    always true today since nothing sets it yet (see this file's module
-    docstring on the wiring boundary)."""
+    `_run_time_was_defaulted`, that db.py's ingest_orders_from_excel sets
+    BEFORE its own RUN_TIME->1.0 fallback (`df["_RUN_TIME_DEFAULTED"] =
+    _rt.isna()`, computed off `pd.to_numeric(RUN_TIME, errors="coerce")`
+    ahead of `df["RUN_TIME"] = _rt.fillna(1.0)`) overwrites the original
+    absence -- by the time `rows` reaches `plan()` that upstream default has
+    already happened and is no longer detectable from the row alone except
+    via this flag. Defaults to False when the flag is absent (e.g. a row
+    built by some other call site that never set it)."""
     runtime_defaulted = bool(row.get("_run_time_was_defaulted", False))
     facts = {
         "material_description": row.get("material_description"),
@@ -645,12 +696,19 @@ def _build_child_rows(plant: str, production_order: str, material_number: str,
     labor_hours = parent_facts.get("labor_hours")
     labor_alloc: dict[str, Decimal] = {}
     if labor_hours is not None:
-        labor_alloc = service.apportion(_dec(labor_hours), positive, _HOURS_APPORTION_UNIT, tie_order)
+        # D53: round_total=True here only -- labor/machine hours carry more
+        # decimal precision than their 0.01 unit, which overshoots without
+        # it. The quantity (unit = incremental_lot_size, a real H6 lot-size
+        # rule) and run-time-minutes (unit = 1, already integral minutes)
+        # calls above must NOT opt in -- see apportion()'s own docstring.
+        labor_alloc = service.apportion(
+            _dec(labor_hours), positive, _HOURS_APPORTION_UNIT, tie_order, round_total=True)
 
     machine_hours = parent_facts.get("machine_hours")
     machine_alloc: dict[str, Decimal] = {}
     if machine_hours is not None:
-        machine_alloc = service.apportion(_dec(machine_hours), positive, _HOURS_APPORTION_UNIT, tie_order)
+        machine_alloc = service.apportion(
+            _dec(machine_hours), positive, _HOURS_APPORTION_UNIT, tie_order, round_total=True)
 
     min_lot_size = mat_attrs.get("min_lot_size")
 
@@ -805,11 +863,11 @@ def _plan_one_parent(plant: str, production_order: str, material_number: str, ro
     return parent_plan, child_rows
 
 
-def _plan_core(cur, survivors: list[dict], batch_id: str, warnings: dict) -> tuple[list[dict], dict]:
+def _plan_core(cur, rows: list[dict], batch_id: str, warnings: dict) -> tuple[list[dict], dict]:
     machine_lookup, workcenter_lookup = _load_lookups(cur)
 
     items = []
-    for row in survivors:
+    for row in rows:
         plant, plant_warning = service.resolve_plant(row, machine_lookup, workcenter_lookup)
         if plant_warning:
             warnings["ambiguous_workcenter_plant"].append({
@@ -831,10 +889,18 @@ def _plan_core(cur, survivors: list[dict], batch_id: str, warnings: dict) -> tup
     anchor_sources = _load_anchor_sources(cur, list(plain_ids.values()))
     material_attrs = _load_material_attrs(cur, {(k[0], k[2]) for k in keys})
 
+    # D04: the duplicate/conflict rule now runs HERE -- after classification
+    # and the existing-header load -- so it only touches groups actually
+    # involved with distribution (see _dedupe_and_filter_conflicts' own
+    # docstring). Excluded indices are skipped below without emitting a row.
+    excluded = _dedupe_and_filter_conflicts(items, existing_headers, warnings)
+
     rows_out: list[dict] = []
     parents_plan: dict[tuple[str, str, str], dict] = {}
 
-    for it in items:
+    for idx, it in enumerate(items):
+        if idx in excluded:
+            continue
         row, plant, classification, key = it["row"], it["plant"], it["classification"], it["key"]
         if plant is None:
             rows_out.append(row)
@@ -867,6 +933,33 @@ def _plan_core(cur, survivors: list[dict], batch_id: str, warnings: dict) -> tup
             continue
 
         mat_attrs = material_attrs.get((plant, key[2]), {})
+
+        # D03: a brand-new distribute-mode header whose default shares come
+        # out all-zero (every member weight 0/NULL-and-no-material-default)
+        # has no actual distribution policy -- distributing it would create
+        # an all-zero-share header with zero-quantity children, same failure
+        # mode as the memberless `distribute_no_members` case above. Must
+        # live HERE, not in classify_row, because a material_default /
+        # tooled_single rule can still yield a valid 100% share even when
+        # every workcenter weight is 0 -- classify_row has no material
+        # context to make that call. Self-contained on purpose: B4
+        # restructures _plan_core to move the duplicate/conflict filter
+        # after classification, and this branch must survive that move
+        # unchanged.
+        if existing is None and ctype == "distribute":
+            wc = workcenter_lookup.get(plant, {}).get(classification["machine"], {})
+            member_pairs = [(m, wc.get("member_weights", {}).get(m)) for m in wc.get("members", [])]
+            default_shares, _default_basis = service.compute_default_shares(mat_attrs, wc, member_pairs)
+            if not any(w > 0 for w in default_shares.values()):
+                warnings["workcenter_without_members"].append({
+                    "plant": plant, "production_order": key[1], "material_number": key[2],
+                    "sap_workcenter": classification["machine"], "reason": "zero_weights",
+                })
+                row = dict(row)
+                row["plant"] = plant
+                rows_out.append(row)
+                continue
+
         parent_plan, child_rows = _plan_one_parent(
             plant, key[1], key[2], row, classification, existing, workcenter_lookup,
             mat_attrs, anchor_sources, plain_ids.get(key), batch_id, warnings,
@@ -899,23 +992,35 @@ def plan(rows: list[dict], batch_id: str, conn=None) -> tuple[list[dict], dict, 
       - rows_out: the parent row replaced by its per-machine child rows (or
         left as a single, possibly machine-rewritten, row) -- feed this into
         db.upsert_orders unchanged.
-      - plan_structure: {"batch_id", "parents": {key: {...}}, "ingest_warnings"}
-        -- everything `apply()` needs per parent, including the
-        `ingest_warnings` dict itself (apply() has no separate parameter for
-        it, so it rides along on the plan structure it returns).
+      - plan_structure: {"batch_id", "parents": {key: {...}}, "ingest_warnings",
+        "warnings_entry"} -- everything `apply()` needs per parent, including
+        the `ingest_warnings` dict itself (apply() has no separate parameter
+        for it, so it rides along on the plan structure it returns).
+        `warnings_entry` (D04) is this function's OWN upload_audit.warnings
+        entry, built from zero distribution counters since no parent has
+        actually been distributed yet at this point (apply() hasn't run) --
+        `db.upsert_orders` falls back to it when apply_fn never runs (no
+        parent this batch) but this function still raised a real ingest
+        warning (e.g. a conflicting/ambiguous row, or a zero-weight work
+        center), so that warning isn't silently dropped.
       - warnings: aggregate_to_detail.md §5.1-§5.3's warning codes, ready to
         fold into the final `upload_audit.warnings` entry `apply()` helps
         build.
     """
     warnings = _empty_ingest_warnings()
-    survivors = _dedupe_and_filter_conflicts(rows, warnings)
 
     if conn is not None:
         with conn.cursor() as cur:
-            rows_out, plan_structure = _plan_core(cur, survivors, batch_id, warnings)
+            rows_out, plan_structure = _plan_core(cur, rows, batch_id, warnings)
     else:
         with _pool.connection() as new_conn, new_conn.cursor() as cur:
-            rows_out, plan_structure = _plan_core(cur, survivors, batch_id, warnings)
+            rows_out, plan_structure = _plan_core(cur, rows, batch_id, warnings)
+
+    zero_counters = {
+        "parents_distributed": 0, "children_upserted": 0, "children_deleted": 0,
+        "headers_created": 0, "headers_refreshed": 0, "replanned_after_reweight": 0,
+    }
+    plan_structure["warnings_entry"] = _build_warnings_entry(warnings, zero_counters, no_parents=True)
 
     return rows_out, plan_structure, warnings
 
@@ -935,21 +1040,28 @@ def _insert_new_header(cur, parent: dict, batch_id: str) -> bool:
     sap_facts = _build_sap_facts(facts, None, parent.get("runtime_defaulted"))
     review_required = parent.get("review_required")
     reviewed = not review_required if review_required is not None else False
+    # D16: a policy-reviewed insert (review_required = FALSE) must stamp
+    # reviewed_at/reviewed_quantity the same way a manual review does
+    # (_resolve_review_stamp) -- otherwise qty_changed can never fire for a
+    # header that was never manually reviewed, since reviewed_quantity stays
+    # NULL forever.
+    reviewed_at = datetime.now(timezone.utc) if reviewed else None
+    reviewed_quantity = facts.get("order_quantity") if reviewed else None
     cur.execute(
         """
         INSERT INTO order_distribution (
             plant, production_order, material_number, sap_workcenter,
             order_quantity, run_time, basic_start_date, basic_finish_date,
             firming_indicator, sap_facts, source, default_basis,
-            reviewed, reviewed_by, last_batch_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default', %s, %s, %s, %s)
+            reviewed, reviewed_by, reviewed_at, reviewed_quantity, last_batch_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default', %s, %s, %s, %s, %s, %s)
         ON CONFLICT (plant, production_order, material_number) DO NOTHING
         """,
         (parent["plant"], parent["production_order"], parent["material_number"],
          parent["sap_workcenter"], facts.get("order_quantity"), facts.get("run_time"),
          facts.get("basic_start_date"), facts.get("basic_finish_date"),
          facts.get("firming_indicator"), Jsonb(sap_facts), parent["default_basis"],
-         reviewed, "policy" if reviewed else None, batch_id),
+         reviewed, "policy" if reviewed else None, reviewed_at, reviewed_quantity, batch_id),
     )
     return cur.rowcount == 1
 
@@ -1025,18 +1137,28 @@ def _write_shares(cur, parent: dict) -> None:
         )
 
 
-def _lock_one_header(cur, plant: str, production_order: str, material_number: str) -> dict | None:
-    """FOR UPDATE lock + read of exactly one header, used for the "someone
-    else created/changed this concurrently" race branches in `apply()`."""
+def _lock_one_header(cur, plant: str, production_order: str, material_number: str,
+                     *, for_update: bool = True) -> dict | None:
+    """Lock (by default `FOR UPDATE`) + read of exactly one header, used for
+    the "someone else created/changed this concurrently" race branches in
+    `apply()`, and for every single-header planner-write call site below.
+
+    `for_update=False` (D56): a dry run never writes (see
+    `_materialize_reweight`'s `if dry_run: return ...` -- every line above
+    that return is pure computation), so a dry-run caller passes
+    `for_update=False` to read the header WITHOUT taking the row lock at
+    all, instead of taking-then-releasing it. Every other caller keeps the
+    default and locks as before."""
+    lock_clause = "FOR UPDATE" if for_update else ""
     cur.execute(
-        """
+        f"""
         SELECT plant, production_order, material_number, sap_workcenter, order_quantity,
                run_time, basic_start_date, basic_finish_date, firming_indicator, sap_facts,
                source, default_basis, reviewed, reviewed_by, reviewed_at, reviewed_quantity,
                updated_by, last_batch_id, xmin::text::bigint
           FROM order_distribution
          WHERE plant = %s AND production_order = %s AND material_number = %s
-         FOR UPDATE
+         {lock_clause}
         """,
         (plant, production_order, material_number),
     )
@@ -1209,11 +1331,14 @@ def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> Non
         """
         UPDATE orders
            SET scheduled_start = %(start)s, scheduled_end = %(end)s,
-               notes = %(notes)s, updated_at = NOW()
+               notes = %(notes)s, planning_status = 'scheduled',
+               planning_reason = NULL, updated_at = NOW()
          WHERE id = %(id)s
            AND (scheduled_start IS DISTINCT FROM %(start)s
              OR scheduled_end IS DISTINCT FROM %(end)s
-             OR notes IS DISTINCT FROM %(notes)s)
+             OR notes IS DISTINCT FROM %(notes)s
+             OR planning_status IS DISTINCT FROM 'scheduled'
+             OR planning_reason IS NOT NULL)
         """,
         {"start": start, "end": end, "notes": anchor.get("notes"), "id": child_id},
     )
@@ -1291,12 +1416,18 @@ def _update_share_child_ids(cur, parent: dict) -> None:
         )
 
 
-def _build_warnings_entry(ingest_warnings: dict, counters: dict) -> dict:
+def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: bool = False) -> dict:
     """Build the ONE `upload_audit.warnings` entry this whole ingest run
     contributes (§5.4 step 7) -- shape mirrors the existing
     `missing_master_data` entry (db.py's own `upsert_orders`): only `level`
     and `msg` are guaranteed read by the cockpit's warning list; everything
-    else is this entry's own detail."""
+    else is this entry's own detail.
+
+    `no_parents=True` (D04) is passed from `plan()`, where `counters` is
+    always all-zero because apply() hasn't run yet -- the summary clause is
+    phrased accordingly instead of claiming "0 aggregate order(s)
+    distributed", which would misleadingly read as a failed distribution
+    attempt rather than as "none was needed this batch"."""
     duplicates_dropped = len(ingest_warnings.get("duplicate_parent_rows", []))
     conflicting = ingest_warnings.get("conflicting_parent_rows", [])
     ambiguous = ingest_warnings.get("ambiguous_workcenter_plant", [])
@@ -1331,8 +1462,14 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict) -> dict:
     n, m, k, p = (counters["parents_distributed"], counters["children_upserted"],
                  counters["children_deleted"], len(conflicting))
     entry["level"] = "warn" if warn_worthy else "info"
-    entry["msg"] = (f"{n} aggregate order(s) distributed into {m} sub-order(s) "
-                    f"({k} deleted, {p} parent(s) ambiguous)")
+    if no_parents:
+        entry["msg"] = (
+            f"No aggregate orders distributed this batch ({p} parent(s) ambiguous)" if p
+            else "No aggregate orders distributed this batch"
+        )
+    else:
+        entry["msg"] = (f"{n} aggregate order(s) distributed into {m} sub-order(s) "
+                        f"({k} deleted, {p} parent(s) ambiguous)")
     return entry
 
 
@@ -1574,13 +1711,16 @@ def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter
                        date_from=None, date_to=None, machines: list | None = None,
                        limit_cap: int | None = _LIST_CANDIDATE_CAP) -> list[dict]:
     """Every header matching the SQL-expressible filters (§6 "Data"), ordered
-    `basic_start_date ASC, reviewed ASC` (§6's stated default sort). Bucket/
-    status filtering happens afterward in Python (see module note above)."""
+    `basic_start_date ASC, reviewed ASC` (§6's stated default sort), with
+    `production_order ASC, material_number ASC` appended as a stable
+    tiebreaker (D42) so paging never reorders same-start-date rows between
+    pages. Bucket/status filtering happens afterward in Python (see module
+    note above)."""
     where = ["plant = %s"]
     params: list = [plant]
     if search:
-        where.append("(production_order ILIKE %s OR material_number ILIKE %s)")
-        like = f"%{search}%"
+        where.append("(production_order ILIKE %s ESCAPE '\\' OR material_number ILIKE %s ESCAPE '\\')")
+        like = db._like_contains(search)
         params.extend([like, like])
     if workcenter:
         where.append("sap_workcenter = %s")
@@ -1616,7 +1756,7 @@ def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter
         SELECT {_HEADER_COLUMNS_SQL}
           FROM order_distribution
          WHERE {where_sql}
-         ORDER BY basic_start_date ASC NULLS LAST, reviewed ASC
+         ORDER BY basic_start_date ASC NULLS LAST, reviewed ASC, production_order ASC, material_number ASC
          {limit_sql}
         """,
         params,
@@ -1804,12 +1944,19 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
     `bucket` accepts `all`, one of the three §6 buckets (`needs_review`,
     `changed`, `problems`), or an individual status code directly (deep
     links); `None`/`''`/`'all'` means unfiltered.
+
+    `meta.truncated` (D13) is True when the plant's SQL-filterable candidate
+    header set exceeds `_LIST_CANDIDATE_CAP` -- `total`/bucket counts then
+    reflect only the capped candidate set, not the plant's true header count.
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         headers = _fetch_header_rows(
             cur, plant, search=search, workcenter=workcenter, reviewed=reviewed,
             batch=batch, date_from=date_from, date_to=date_to, machines=machines,
+            limit_cap=_LIST_CANDIDATE_CAP + 1,
         )
+        truncated = len(headers) > _LIST_CANDIDATE_CAP
+        headers = headers[:_LIST_CANDIDATE_CAP]
         _hydrate_headers(cur, plant, headers)
 
     if bucket and bucket != "all":
@@ -1830,7 +1977,10 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
         }
         for h in page
     ]
-    return {"data": data, "meta": {"total": total, "scheduled_children": scheduled_children}}
+    return {
+        "data": data,
+        "meta": {"total": total, "scheduled_children": scheduled_children, "truncated": truncated},
+    }
 
 
 def get_header_detail(plant: str, order: str, material: str) -> dict | None:
@@ -1877,15 +2027,20 @@ def get_summary(plant: str) -> dict:
     problems}` counts over the plant's headers, classified by the SAME
     `classify_bucket_membership` this module's `list_headers_for_plant`
     `bucket` filter uses -- the two can't drift apart because they share
-    this one function."""
+    this one function. `truncated` (D13) mirrors the list route's
+    `meta.truncated`: True when the plant's candidate header set exceeds
+    `_LIST_CANDIDATE_CAP`, so the counts above are then a lower bound."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        headers = _fetch_header_rows(cur, plant)
+        headers = _fetch_header_rows(cur, plant, limit_cap=_LIST_CANDIDATE_CAP + 1)
+        truncated = len(headers) > _LIST_CANDIDATE_CAP
+        headers = headers[:_LIST_CANDIDATE_CAP]
         _hydrate_headers(cur, plant, headers)
 
     counts = {"needs_review": 0, "changed": 0, "problems": 0}
     for h in headers:
         for bucket_name in classify_bucket_membership(h["statuses"]):
             counts[bucket_name] += 1
+    counts["truncated"] = truncated
     return counts
 
 
@@ -2211,6 +2366,14 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
         if not isinstance(machine, str) or not machine.strip():
             raise ValueError("each share entry needs a non-blank machine")
         machine = machine.strip()
+        # D22: a machine that is neither a current work-center member nor the
+        # owner of an existing share is rejected outright -- at any weight
+        # (including 0) and regardless of `allow_stale`, which only waives
+        # staleness for a share that once existed. This never trips for a
+        # current member with no share row yet (SS5.7's "joining" case).
+        if machine not in existing_shares and machine not in current_members:
+            raise ValueError(f"unknown_machine: {machine!r} is not a current work-center "
+                             f"member or an existing share")
         if machine in desired:
             raise ValueError(f"duplicate_machine: {machine!r} appears more than once in shares")
         weight = entry.get("weight")
@@ -2220,24 +2383,33 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
             raise ValueError(f"weight for {machine!r} must be numeric or null")
         else:
             weight_dec = Decimal(str(weight))
+        # D21: check finiteness/ceiling via a plain float BEFORE any Decimal
+        # ordering comparison -- a NaN/Infinity Decimal raises
+        # decimal.InvalidOperation on `<`/`>` rather than comparing cleanly.
+        weight_float = float(weight_dec)
+        if not math.isfinite(weight_float) or weight_float > _MAX_WEIGHT:
+            raise ValueError(
+                f"weight_invalid: weight for {machine!r} must be finite and <= {_MAX_WEIGHT:g}"
+            )
         if weight_dec < 0:
             raise ValueError(f"weight for {machine!r} must be >= 0")
         if weight_dec > 0:
             existing = existing_shares.get(machine)
             if existing is not None and existing.get("purged_at") is not None:
-                raise ValueError(f"share_purged: {machine!r} is purged; only a fresh upload revives it")
+                raise ValueError(
+                    f"share_purged: {machine!r} is purged; an upload of the parent, Reset, "
+                    f"or reapply-defaults revives it")
             is_current_member = machine in current_members
             has_existing_share = existing is not None
             # SS5.7: "A share is stale when its machine is not a current
-            # member or no longer exists" -- both a never-seen machine and an
-            # existing share whose machine has since left the work center
-            # need allow_stale to receive a positive weight. A CURRENT member
-            # with no share row yet (SS5.7's "joining" case) needs neither --
-            # that's the ordinary new-member path, handled by
-            # `_reweight_letters` assigning it a fresh letter below.
-            if not has_existing_share and not is_current_member and not allow_stale:
-                raise ValueError(f"stale_machine: {machine!r} is not a current work-center "
-                                 f"member or an existing share")
+            # member or no longer exists" -- an existing share whose machine
+            # has since left the work center needs allow_stale to receive a
+            # positive weight. A brand-new non-member is now rejected
+            # unconditionally above (unknown_machine) before weight is even
+            # considered. A CURRENT member with no share row yet (SS5.7's
+            # "joining" case) needs neither -- that's the ordinary new-member
+            # path, handled by `_reweight_letters` assigning it a fresh letter
+            # below.
             if has_existing_share and not is_current_member and not allow_stale:
                 raise ValueError(f"stale_machine: {machine!r} is no longer a current member "
                                  f"of the work center")
@@ -2305,11 +2477,18 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
 def _write_reweight_shares(cur, plant: str, order: str, material: str,
                           letters: dict[str, str], desired_weights: dict[str, Decimal]) -> None:
     """Upsert every share this materialization touches (every machine in
-    `letters`), guarded so an unchanged letter/weight is a no-op. Never
-    touches `purged_at` or `child_id` (those are `_update_share_child_ids`'s
-    and purge's jobs respectively) -- a purged machine can only ever appear
-    here at weight 0 (validation refuses a positive weight on it), so this
-    leaves it untouched in substance even though the guarded UPDATE runs."""
+    `letters`), guarded so an unchanged letter/weight/purged-state is a
+    no-op. `child_id` is still `_update_share_child_ids`'s job, not this
+    function's -- but `purged_at` IS this function's job for the one case
+    D02 (owner decision) assigns it: this clears a purged share's
+    `purged_at` the moment it receives a positive weight again, in the same
+    write that brings the weight back. D02: an upload of the parent, Reset,
+    and reapply-defaults revive a purged share; Repair and re-weight never
+    do -- `reweight_shares` can never reach this branch itself
+    (`_validate_share_payload`'s `share_purged` check refuses a positive
+    weight on an already-purged share before this runs), and
+    `_repair_one_header` excludes purged shares from its desired weights
+    entirely."""
     for machine, letter in letters.items():
         weight = desired_weights.get(machine, Decimal(0))
         cur.execute(
@@ -2318,9 +2497,12 @@ def _write_reweight_shares(cur, plant: str, order: str, material: str,
                 (plant, production_order, material_number, machine, letter, weight)
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (plant, production_order, material_number, machine) DO UPDATE
-                SET letter = EXCLUDED.letter, weight = EXCLUDED.weight
+                SET letter = EXCLUDED.letter, weight = EXCLUDED.weight,
+                    purged_at = CASE WHEN EXCLUDED.weight > 0 THEN NULL
+                                     ELSE order_distribution_share.purged_at END
             WHERE order_distribution_share.letter IS DISTINCT FROM EXCLUDED.letter
                OR order_distribution_share.weight IS DISTINCT FROM EXCLUDED.weight
+               OR (EXCLUDED.weight > 0 AND order_distribution_share.purged_at IS NOT NULL)
             """,
             (plant, order, material, machine, letter, weight),
         )
@@ -2626,13 +2808,19 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
     material_number`, which a single-row lock trivially satisfies, so the two
     can never deadlock each other.
 
-    For `dry_run=True`, no `conn.commit()` is ever called -- exiting the
-    `with _pool.connection()` block below rolls the transaction back,
-    releasing the `FOR UPDATE` lock immediately (SS5.5 step 8: "no lock held
-    past the read").
+    For `dry_run=True`, `_lock_one_header` is called with `for_update=False`
+    (D56) instead -- a dry run never writes anything (every line of
+    `_materialize_reweight` above its `if dry_run: return ...` is pure
+    computation), so there is no row lock to take in the first place. This
+    is NOT about releasing a lock early: psycopg_pool's `connection()`
+    context manager is `with conn: yield conn`, and `Connection.__exit__`
+    COMMITS on a clean exit (it only rolls back when an exception
+    propagates) -- so a dry run that took the lock would still hold it for
+    the connection's full lifetime, same as a real write. Skipping the lock
+    read entirely is what keeps a dry run from blocking a concurrent writer.
     """
     with _pool.connection() as conn, conn.cursor() as cur:
-        header = _lock_one_header(cur, plant, order, material)
+        header = _lock_one_header(cur, plant, order, material, for_update=not dry_run)
         if header is None:
             raise DistributionHeaderNotFound(f"no distribution header at {plant}/{order}/{material}")
         _check_base_version(header, base_version)
@@ -2669,7 +2857,7 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
 
 def reset_one_header(plant: str, order: str, material: str, base_version, *,
                      confirm_remove_scheduled: bool = False, dry_run: bool = False,
-                     actor: str = "system") -> dict:
+                     require_unreviewed: bool = False, actor: str = "system") -> dict:
     """`POST /distribution/{plant}/reset`'s per-parent core (SS5.2's default
     precedence, `source = 'default'`) -- shares the SAME
     `_materialize_reweight` engine `reweight_shares` uses, just with the
@@ -2677,12 +2865,37 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
     a planner-typed payload. Raises the same `DistributionHeaderNotFound` /
     `DistributionStaleVersion` / `DistributionChildrenScheduled` /
     `ValueError` family; `reset_orders` (the bulk route entry point) catches
-    them per item."""
+    them per item.
+
+    `require_unreviewed=True` (D19) raises `ValueError("already_reviewed: ...")`
+    under the lock when the header is already reviewed -- `reapply_defaults`
+    passes this for both of its candidate paths (the `NOT reviewed` DB query
+    AND an explicit `orders` list, which previously skipped that filter
+    entirely) so a reviewed header is never silently re-defaulted by a bulk
+    sweep; `reset_orders`' single/bulk reset route keeps the default
+    (`False`) since an explicit Reset is allowed on a reviewed header.
+    Raising here (inside the `with` block, under the lock) rolls the
+    transaction back and releases the lock, same as any other guard above.
+
+    D02 (owner decision): a purge retires a finished sub-order's share
+    (`purged_at` set, `child_id` cleared, letter/weight left alone) rather
+    than deleting it. An upload of the parent, Reset, and reapply-defaults
+    revive a purged share; Repair and re-weight never do. Here, `default_shares`
+    assigns the purged machine a fresh positive weight the same as any other
+    current member, and `_write_reweight_shares` clears `purged_at` the
+    moment that positive weight lands. Admin reapply-defaults shares this
+    same core, so it revives purged shares identically. Repair
+    (`_repair_one_header`) and a planner re-weight (`reweight_shares`) both
+    deliberately leave a purged share purged."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        header = _lock_one_header(cur, plant, order, material)
+        header = _lock_one_header(cur, plant, order, material, for_update=not dry_run)
         if header is None:
             raise DistributionHeaderNotFound(f"no distribution header at {plant}/{order}/{material}")
         _check_base_version(header, base_version)
+        if require_unreviewed and header["reviewed"]:
+            raise ValueError(
+                f"already_reviewed: {plant!r}/{order!r}/{material!r} is already reviewed"
+            )
 
         workcenter = _load_workcenter_for_plant(cur, plant, header["sap_workcenter"])
         if workcenter is None:
@@ -2692,6 +2905,13 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
 
         member_pairs = [(m, workcenter["member_weights"].get(m)) for m in workcenter["members"]]
         default_shares, default_basis = service.compute_default_shares(mat_attrs, workcenter, member_pairs)
+        if not any(w > 0 for w in default_shares.values()):
+            # D03: same zero-weights policy as the ingest-side check in
+            # _plan_core -- resetting to a default that is itself all-zero
+            # would silently zero out every child; reapply_defaults already
+            # counts a ValueError as skipped (not a hard failure).
+            raise ValueError(
+                f"weights_empty: default shares for {plant!r}/{order!r}/{material!r} are all zero")
         desired_weights = {m: Decimal(0) for m in existing_shares}
         desired_weights.update({m: _dec(w) for m, w in default_shares.items()})
         letters = _reweight_letters(existing_shares, set(workcenter["members"]))
@@ -2726,15 +2946,54 @@ def review_orders(plant: str, items: list[dict], reviewed: bool, actor: str = "s
     unreviewed. One partial-success pass over `items`: an individual stale/
     not-found item is recorded in its own result and does not abort the rest
     of the batch (each header is an independent row, locked and updated
-    within the same transaction one at a time)."""
+    within the same transaction one at a time).
+
+    D20 (lock order): every targeted header is locked up front, in ONE
+    `unnest`-driven `FOR UPDATE` statement ordered `plant, production_order,
+    material_number` -- the SAME key order `apply()`'s multi-header lock
+    uses. Locking one at a time in REQUEST order (the previous shape) could
+    deadlock against a concurrent `apply()` or another `review_orders` call
+    that targets the same two headers in the opposite order. Per-item
+    processing below is otherwise unchanged (still one UPDATE per item, in
+    the caller's original order) and the response's per-item order still
+    matches `items`."""
     results = []
     ok_count = 0
     with _pool.connection() as conn, conn.cursor() as cur:
+        locked: dict[tuple[str, str], dict] = {}
+        if items:
+            orders_l = [item.get("production_order") for item in items]
+            mats_l = [item.get("material_number") for item in items]
+            cur.execute(
+                """
+                SELECT plant, production_order, material_number, sap_workcenter, order_quantity,
+                       run_time, basic_start_date, basic_finish_date, firming_indicator, sap_facts,
+                       source, default_basis, reviewed, reviewed_by, reviewed_at, reviewed_quantity,
+                       updated_by, last_batch_id, xmin::text::bigint
+                  FROM order_distribution
+                 WHERE plant = %s AND (production_order, material_number)
+                       IN (SELECT * FROM unnest(%s::text[], %s::text[]))
+                 ORDER BY plant, production_order, material_number
+                 FOR UPDATE
+                """,
+                (plant, orders_l, mats_l),
+            )
+            for r in cur.fetchall():
+                locked[(r[1], r[2])] = {
+                    "plant": r[0], "production_order": r[1], "material_number": r[2],
+                    "sap_workcenter": r[3], "order_quantity": r[4], "run_time": r[5],
+                    "basic_start_date": r[6], "basic_finish_date": r[7], "firming_indicator": r[8],
+                    "sap_facts": r[9] or {}, "source": r[10], "default_basis": r[11],
+                    "reviewed": r[12], "reviewed_by": r[13], "reviewed_at": r[14],
+                    "reviewed_quantity": r[15], "updated_by": r[16], "last_batch_id": r[17],
+                    "xmin": r[18],
+                }
+
         for item in items:
             order = item.get("production_order")
             material = item.get("material_number")
             base_version = item.get("base_version")
-            header = _lock_one_header(cur, plant, order, material)
+            header = locked.get((order, material))
             if header is None:
                 results.append({"production_order": order, "material_number": material, "status": "not_found"})
                 continue
@@ -2823,7 +3082,17 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
     material_number}) when given; else every header in `plant` (optionally
     filtered to `workcenter`) that is `NOT reviewed` when `only_unreviewed`
     (the default and, per SS7, the only mode this route documents), or every
-    matching header when `only_unreviewed` is explicitly False."""
+    matching header when `only_unreviewed` is explicitly False.
+
+    D19: the DB-query candidate path already filters to `NOT reviewed` when
+    `only_unreviewed`, but an explicit `orders` list bypassed that filter
+    entirely -- `reset_one_header`'s own `require_unreviewed` guard now
+    covers BOTH paths uniformly (whichever path built `keys`, every key is
+    passed through the SAME `reset_one_header` call below), so an already-
+    reviewed header named in an explicit `orders` list is skipped (its
+    `ValueError("already_reviewed: ...")` is caught by the generic
+    `except ValueError` below, same as any other skip) instead of silently
+    re-defaulted."""
     with _pool.connection() as conn, conn.cursor() as cur:
         if orders:
             keys = [(o.get("production_order"), o.get("material_number")) for o in orders]
@@ -2847,7 +3116,8 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
         try:
             result = reset_one_header(
                 plant, order, material, base_version=None,
-                confirm_remove_scheduled=confirm_remove_scheduled, dry_run=False, actor=actor,
+                confirm_remove_scheduled=confirm_remove_scheduled, dry_run=False,
+                require_unreviewed=bool(only_unreviewed), actor=actor,
             )
         except DistributionHeaderNotFound:
             counters["skipped"] += 1
@@ -2862,6 +3132,22 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
         counters["children_upserted"] += len(result.get("children", []))
         counters["children_deleted"] += len(result.get("removed", []))
     return counters
+
+
+def _insert_admin_audit(cur, table: str, action: str, details: dict, actor: str) -> None:
+    """D55: the one-line `admin_audit` insert pattern `save_workcenter` uses
+    inline, factored out for the two `resolve` scopes below -- `_resolve_wc_codes`
+    and `_resolve_machines` each write real rows (new headers, rewritten
+    `orders.machine`/`parent_production_order`) but previously left no
+    `admin_audit` trail at all. Call this on the SAME cursor/transaction as
+    the writes it's auditing, before whichever branch commits, so the audit
+    row lands in the SAME commit as the writes it describes -- never used
+    for `repair` (that scope's writes already go through
+    `_materialize_reweight`, which audits itself)."""
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES (%s, %s, %s, %s)",
+        (table, action, Jsonb(details), actor),
+    )
 
 
 def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
@@ -2928,6 +3214,17 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
                 "UPDATE orders SET machine = %s, updated_at = NOW() WHERE id = %s AND machine IS DISTINCT FROM %s",
                 (row.get("machine"), oid, row.get("machine")),
             )
+
+        # D55: one admin_audit row per `resolve` call, written on THIS cursor
+        # before either commit branch below -- `apply()` commits internally
+        # on the first branch, so the row must already be part of that same
+        # transaction to land at all.
+        _insert_admin_audit(
+            cur, "order_distribution", "resolve_wc_codes",
+            {"plant": plant, "candidates": len(candidates), "single_rewrites": single_rewrites,
+             "headers_created": len(distributed_keys), "skipped": max(skipped, 0)},
+            actor,
+        )
 
         apply_result = {"headers_created": 0, "children_upserted": 0}
         if plan_structure.get("parents"):
@@ -3015,6 +3312,14 @@ def _resolve_machines(plant: str, workcenter: str, actor: str, dry_run: bool) ->
                 (order, oid),
             )
             headers_created += 1
+        # D55: one admin_audit row per `resolve` call -- same cursor/
+        # transaction as the writes above, before the commit.
+        _insert_admin_audit(
+            cur, "order_distribution", "resolve_machines",
+            {"plant": plant, "workcenter": workcenter, "candidates": len(candidates),
+             "headers_created": headers_created, "skipped": len(candidates) - headers_created},
+            actor,
+        )
         conn.commit()
     return {"headers_created": headers_created, "children_upserted": headers_created,
             "single_rewrites": 0, "repaired": 0, "skipped": len(candidates) - headers_created}

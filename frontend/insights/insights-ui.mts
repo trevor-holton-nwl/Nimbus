@@ -136,7 +136,7 @@ export const Dashboard = {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate'
           || evt.type === 'task:update' || evt.type === 'alerts:change'
           || evt.type === 'calendar:change' || evt.type === 'blocks:change'
-          || evt.type === 'firmed:change') {
+          || evt.type === 'firmed:change' || evt.type === 'distribution:summary') {
         if (evt.type === 'tasks:bulk') {
           Dashboard._prevKpi = {};
           Dashboard._latenessDrillKey = null;
@@ -371,6 +371,18 @@ export const Dashboard = {
     }
   },
 
+  // Orders-today tile subtitle: "{n} total" plus the sub-orders note, but only
+  // when the current plant actually has sub-orders — `Store.distributionSummary`
+  // (needs_review/changed/problems/truncated, D52) carries no such field, so this
+  // checks Store.siblingsByParent() (D40's PARENT_ORDER map, already plant-scoped)
+  // instead of the summary's mere presence.
+  _ordersTileSubtitle(tasks: NimbusTask[]): string {
+    const base = Util.t('kpi.orders_total', { n: tasks.length });
+    return Store.siblingsByParent().size > 0
+      ? base + ' · ' + Util.t('kpi.orders_sub_counted')
+      : base;
+  },
+
   _renderKPIs(matrix7?: DashboardUtilMatrix, tasksArg?: NimbusTask[]): void {
     const tasks = tasksArg !== undefined ? tasksArg : Dashboard._filteredTasks();
     const today = Util.startOfDay(new Date());
@@ -409,9 +421,7 @@ export const Dashboard = {
     // (alert-summary-count, the firmed-orders list) so nothing is lost, just decluttered.
     const tiles: DashboardKpiTile[] = [
       { k: Util.t('kpi.orders_today'),             v: String(todayOrders.length),
-        d: Store.distributionSummary
-          ? Util.t('kpi.orders_total', { n: tasks.length }) + ' · ' + Util.t('kpi.orders_sub_counted')
-          : Util.t('kpi.orders_total', { n: tasks.length }),
+        d: Dashboard._ordersTileSubtitle(tasks),
         action: 'orders-today' },
       { k: Util.t('kpi.conflicts_pending'),         v: String(conflictsToday),
         d: conflictsToday === 0 ? Util.t('kpi.none_blocking') : Util.t('kpi.blocking_fix_now'),

@@ -312,6 +312,69 @@ def test_extract_upload_plants_reads_plant_column(tmp_path):
     assert db.extract_upload_plants(b"not an xlsx file") is None
 
 
+def test_ingest_orders_from_excel_normalizes_plant_and_flags_defaulted_run_time(monkeypatch):
+    """D24: PLANT must come through db._str_id (same normalization as
+    production_order/material_number) so a numeric or float-typed Excel cell
+    lands as a plain string, not a raw int/float/np.float64. D54: a blank
+    RUN_TIME cell must be flagged via `_run_time_was_defaulted` BEFORE db.py's
+    own RUN_TIME->1.0 fallback overwrites the original absence — this is the
+    row key backend/distribution/data.py's _extract_parent_facts already
+    reads, previously never set by any ingest call site."""
+    import io
+
+    import pandas as pd
+
+    import db
+
+    captured_rows = []
+
+    def _fake_upsert_orders(rows, **kwargs):
+        captured_rows.append(rows)
+        return {"status": "ok", "batch_id": kwargs.get("batch_id"),
+                "inserted": len(rows), "updated": 0, "warnings": [], "lines": []}
+
+    monkeypatch.setattr(db, "upsert_orders", _fake_upsert_orders)
+
+    def _xlsx_bytes(df):
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False)
+        return buf.getvalue()
+
+    # First upload: a plain integer PLANT cell (no NaN in the column, so
+    # pandas/openpyxl round-trip it as a Python int) together with a filled
+    # RUN_TIME.
+    int_plant_df = pd.DataFrame({
+        "PRODUCTION_ORDER": ["PO-1"],
+        "MATERIAL_NUMBER": ["MAT-1"],
+        "BASIC_START_DATE": pd.to_datetime(["2026-01-01"]),
+        "PLANT": [1000],
+        "RUN_TIME": [5.0],
+    })
+    result = db.ingest_orders_from_excel(_xlsx_bytes(int_plant_df), "int_plant.xlsx")
+    assert result["status"] == "ok"
+    row = captured_rows[-1][0]
+    assert row["plant"] == "1000"
+    assert row["_run_time_was_defaulted"] is False
+
+    # Second upload: a genuinely float-typed PLANT column (forced by a NaN
+    # elsewhere in the same column) plus one row with a blank RUN_TIME.
+    float_plant_df = pd.DataFrame({
+        "PRODUCTION_ORDER": ["PO-2", "PO-3"],
+        "MATERIAL_NUMBER": ["MAT-2", "MAT-3"],
+        "BASIC_START_DATE": pd.to_datetime(["2026-01-02", "2026-01-03"]),
+        "PLANT": [1000.0, None],
+        "RUN_TIME": [None, 3.0],
+    })
+    result = db.ingest_orders_from_excel(_xlsx_bytes(float_plant_df), "float_plant.xlsx")
+    assert result["status"] == "ok"
+    rows = captured_rows[-1]
+    assert isinstance(float_plant_df["PLANT"][0], float)  # sanity: genuinely float, not int
+    assert rows[0]["plant"] == "1000"
+    assert rows[0]["_run_time_was_defaulted"] is True
+    assert rows[1]["plant"] is None
+    assert rows[1]["_run_time_was_defaulted"] is False
+
+
 async def _async_bytes(value):
     return value
 

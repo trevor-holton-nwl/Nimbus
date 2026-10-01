@@ -48,6 +48,7 @@ import uuid
 import pandas as pd
 import psycopg
 from fastapi import FastAPI, HTTPException, Request  # noqa: F401 — HTTPException: back-compat, see below
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -531,9 +532,17 @@ def _error_response(status_code: int, message: str, rid: str | None,
     headers = dict(extra_headers or {})
     if rid:
         headers["x-request-id"] = rid
+    # D10: `detail` can carry non-JSON-native values (e.g. backend/distribution's
+    # `_distribution_conflict` puts a raw `datetime` in `detail.children[*].scheduled_start`)
+    # -- a plain JSONResponse can't serialize those, so every such error degraded
+    # into an unhandled 500 instead of the real status code. jsonable_encoder
+    # recursively converts datetimes/Decimals/etc. to JSON-native types first.
+    content = jsonable_encoder({
+        "status": "error", "message": message, "detail": message if detail is None else detail,
+    })
     return JSONResponse(
         status_code=status_code,
-        content={"status": "error", "message": message, "detail": message if detail is None else detail},
+        content=content,
         headers=headers or None,
     )
 

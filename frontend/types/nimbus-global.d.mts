@@ -31,6 +31,13 @@ declare global {
            *  whose "Open Work Centers" button navigates to Master Data ›
            *  Work Centers the same way `App.gotoMasterSub` does internally. */
           gotoMasterSub?(sub: string): void;
+          /** Switches the Gantt tab's active sub-pane (e.g. 'distribution').
+           *  `goto('gantt')` must be called first to switch the top-level tab —
+           *  this alone does not. Pre-existing call sites in
+           *  `frontend/scheduling/orders.mts` reach it via a local cast instead
+           *  of this ambient declaration; left as-is (see that file's own
+           *  comment). */
+          gotoGanttSub?(sub: string): void;
         };
         Inspector?: {
           show?(task: NimbusTask): void;

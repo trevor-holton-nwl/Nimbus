@@ -22,6 +22,7 @@ import pytest
 from psycopg import errors as pg_errors
 from psycopg.pq import DiagnosticField
 
+import db
 import master_data as md
 
 
@@ -376,3 +377,64 @@ def test_bulk_apply_mid_batch_failure_still_rolls_back_the_whole_transaction(mon
     assert cursor.rolled_back is True
     _, params_list = _upsert_call(cursor)
     assert len(params_list) == 2, "both rows must have been submitted in the one failing batch"
+
+
+# =====================================================================
+# D59 — db._like_contains + list_rows'/delete_filtered's ILIKE ESCAPE use
+# =====================================================================
+def test_like_contains_escapes_backslash_percent_and_underscore():
+    """`db._like_contains` must escape its OWN backslash first (so a
+    literal backslash in the search term doesn't get reinterpreted as the
+    start of an escape sequence for the `%`/`_` escaping that follows), then
+    wrap the result in `%`...`%` for a literal "contains" ILIKE match."""
+    assert db._like_contains("abc") == "%abc%"
+    assert db._like_contains("a_b") == "%a\\_b%"
+    assert db._like_contains("a%b") == "%a\\%b%"
+    assert db._like_contains("a\\b") == "%a\\\\b%"
+
+
+def _material_plants_column_meta():
+    return [
+        {"column_name": "material_id", "display_label": "Material", "is_locked": True,
+         "column_order": 1, "sql_type": "TEXT", "is_nullable": False, "column_default": None},
+        {"column_name": "plant", "display_label": "Plant", "is_locked": True,
+         "column_order": 2, "sql_type": "TEXT", "is_nullable": False, "column_default": None},
+    ]
+
+
+def test_list_rows_search_binds_the_escaped_ilike_pattern(monkeypatch):
+    """`list_rows`' search predicate must bind `db._like_contains`'s escaped
+    pattern (D59), not a raw `%<term>%` built straight from the user's
+    input — confirmed here with a search term containing an underscore,
+    over `material_plants` (D27's `_SEARCH_COLUMNS` override: just
+    `('material_id',)`, so exactly one bound search param)."""
+    monkeypatch.setattr(md, "_column_meta", lambda cur, table: _material_plants_column_meta())
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    md.list_rows("material_plants", search="a_b")
+
+    stmt, params = cursor.executed[-1]
+    # `str()` on a psycopg Composed object is a debug repr (nested
+    # SQL()/Identifier() wrappers, inner quotes re-escaped), not the literal
+    # SQL text, so check for the clause's pieces rather than an exact
+    # substring match.
+    assert "ILIKE %s" in stmt
+    assert "ESCAPE" in stmt
+    assert params == ["%a\\_b%"]
+
+
+# =====================================================================
+# D27 — every multi-key table has an explicit _SEARCH_COLUMNS entry
+# =====================================================================
+def test_every_multi_key_table_has_an_explicit_search_columns_entry():
+    """`list_rows`'/`delete_filtered`'s fallback heuristic picks
+    `frozenset(_KEY_COLUMNS[table])[-1]` for a table with no `_SEARCH_COLUMNS`
+    override — for any table with MORE than one key column, iterating a
+    frozenset has no guaranteed order, so that fallback picks an arbitrary,
+    hash-seed-dependent column across runs. Every such table must therefore
+    have a fixed, explicit override; a single-key table has no such
+    instability (its one key is the only candidate) and is exempt."""
+    multi_key_tables = {table for table, keys in md._KEY_COLUMNS.items() if len(keys) > 1}
+    missing = multi_key_tables - md._SEARCH_COLUMNS.keys()
+    assert not missing, f"multi-key tables missing a _SEARCH_COLUMNS override: {sorted(missing)}"

@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS order_distribution (
 );
 CREATE INDEX IF NOT EXISTS idx_order_distribution_wc
     ON order_distribution(plant, sap_workcenter, reviewed);
+CREATE INDEX IF NOT EXISTS idx_order_distribution_plant_start
+    ON order_distribution (plant, basic_start_date, reviewed, production_order, material_number);
 
 CREATE TABLE IF NOT EXISTS order_distribution_share (
     plant            TEXT NOT NULL,

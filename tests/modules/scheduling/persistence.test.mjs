@@ -968,3 +968,104 @@ test('Persistence.refreshHorizons non-OK response resolves false and does not ap
   }
 });
 
+// ---------------------------------------------------------------------------
+// D25 — sap_workcenter is per-plant master data (never a global/all-plants
+// fetch); the plant-load paths must scope the request, and the three
+// master-data `.then` handlers (no-plant/zero-task/main) must discard a
+// response superseded by a newer load() before it can clobber Store.
+// ---------------------------------------------------------------------------
+
+test('D25: a plant load fetches sap_workcenter scoped to that plant (?plant=)', async () => {
+  const originalFetch = globalThis.fetch;
+  const priorMasterData = Store.masterData;
+  const priorLoadsInFlight = Persistence._loadsInFlight;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.includes('/tasks?')) return { ok: true, json: async () => ({ data: [] }) };
+    if (u.includes('/master-data/')) return { ok: true, json: async () => ({ rows: [] }) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  try {
+    Persistence.load({ plant: 'PLANT-SCOPE' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const wcCall = calls.find(u => u.includes('/master-data/sap_workcenter'));
+    assert.ok(wcCall, 'sap_workcenter must still be fetched when a plant is loaded');
+    assert.ok(wcCall.includes('?plant=PLANT-SCOPE'), `sap_workcenter fetch must be scoped to the loaded plant, got: ${wcCall}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Persistence._loadsInFlight = priorLoadsInFlight;
+  }
+});
+
+test('D25: loading with no plant selected never fetches sap_workcenter and sets workcenters to []', async () => {
+  const originalFetch = globalThis.fetch;
+  const priorMasterData = Store.masterData;
+  const priorLoadsInFlight = Persistence._loadsInFlight;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    return { ok: true, json: async () => ({ rows: [] }) };
+  };
+  try {
+    await Persistence.load({ plant: null });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(!calls.some(u => u.includes('/master-data/sap_workcenter')),
+      'the no-plant path must skip the sap_workcenter fetch entirely');
+    assert.deepEqual(Store.masterData?.workcenters, [], 'workcenters must still be set to [] without fetching');
+  } finally {
+    globalThis.fetch = originalFetch;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Persistence._loadsInFlight = priorLoadsInFlight;
+  }
+});
+
+test('D25: a late Plant A master-data response after switching to Plant B is discarded, not overwriting Plant B\'s master data', async () => {
+  const originalFetch = globalThis.fetch;
+  const priorMasterData = Store.masterData;
+  const priorLoadsInFlight = Persistence._loadsInFlight;
+  const pendingWc = {};
+  globalThis.fetch = (url) => {
+    const u = String(url);
+    if (u.includes('/tasks?')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ data: [] }) });
+    if (u.includes('/master-data/sap_workcenter')) {
+      return new Promise(resolve => { pendingWc[u] = resolve; });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  try {
+    const loadA = Persistence.load({ plant: 'PLANT-A' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const loadB = Persistence.load({ plant: 'PLANT-B' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const aKey = Object.keys(pendingWc).find(u => u.includes('PLANT-A'));
+    const bKey = Object.keys(pendingWc).find(u => u.includes('PLANT-B'));
+    assert.ok(aKey && bKey, 'both plants must have an in-flight sap_workcenter fetch at this point');
+
+    // B's response lands first and hydrates Store normally.
+    pendingWc[bKey]({ ok: true, json: () => Promise.resolve({ rows: [{ plant: 'PLANT-B', sap_workcenter: 'WC-B' }] }) });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(Store.masterData.workcenters, [{ plant: 'PLANT-B', sap_workcenter: 'WC-B' }]);
+
+    // A's late response arrives after — it belongs to a load() generation the
+    // user has since navigated away from and must be discarded outright.
+    pendingWc[aKey]({ ok: true, json: () => Promise.resolve({ rows: [{ plant: 'PLANT-A', sap_workcenter: 'WC-A' }] }) });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(Store.masterData.workcenters, [{ plant: 'PLANT-B', sap_workcenter: 'WC-B' }],
+      'a late Plant A master-data response must not overwrite Plant B\'s already-applied master data');
+
+    await Promise.all([loadA, loadB]).catch(() => {});
+  } finally {
+    globalThis.fetch = originalFetch;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Persistence._loadsInFlight = priorLoadsInFlight;
+  }
+});
+

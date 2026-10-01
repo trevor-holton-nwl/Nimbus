@@ -334,16 +334,21 @@ export const Persistence = {
       Persistence._currentLoadedPlant = null;
       Persistence.loadPriorityRankMaps(null);
       Runtime.load(null);
+      // No plant selected means no workcenters belong to this screen either —
+      // sap_workcenter is per-plant (D25), so there is nothing to scope the
+      // fetch to; skip it entirely rather than fetch every plant's rows.
       return Promise.all([
         Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
         Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-        Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
-      ]).then(([pData, lData, wcData]) => {
-        if (pData || lData || wcData) {
+      ]).then(([pData, lData]) => {
+        // A newer load() may have started (and even resolved) while this was in
+        // flight — discard rather than let a stale response overwrite it.
+        if (loadGeneration !== Persistence._loadRequest) return;
+        if (pData || lData) {
           Store.setMasterData({
             plants: pData?.rows ?? [],
             lines:  lData?.rows ?? [],
-            workcenters: wcData?.rows ?? [],
+            workcenters: [],
           }, 'persistence');
         }
       }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (no-plant path): ${e.message}`));
@@ -419,8 +424,12 @@ export const Persistence = {
           Promise.all([
             Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-            Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
+            Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
           ]).then(([pData, lData, wcData]) => {
+            // A newer load() (e.g. the user switched plants again) may have
+            // started while this was in flight — discard rather than let a
+            // stale plant's response clobber the now-current one.
+            if (loadGeneration !== Persistence._loadRequest) return;
             if (pData || lData || wcData) {
               Store.setMasterData({
                 plants: pData?.rows ?? [],
@@ -566,8 +575,12 @@ export const Persistence = {
           Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
-          Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
+          Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
         ]).then(([pData, lData, ssData, wcData]) => {
+          // A newer load() (e.g. the user switched plants again) may have
+          // started while this was in flight — discard rather than let a
+          // stale plant's response clobber the now-current one.
+          if (loadGeneration !== Persistence._loadRequest) return;
           if (pData || lData || wcData) {
             Store.setMasterData({
               plants: pData?.rows ?? [],
