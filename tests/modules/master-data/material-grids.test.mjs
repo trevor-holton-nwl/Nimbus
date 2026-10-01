@@ -126,16 +126,14 @@ test('save failure retains the current edit for retry', async t => {
   f.respond(f.requests.at(-1), { updated: 1 }); await settle();
 });
 
-for (const returnToA of [false, true]) {
-  test(`old plant response cannot mutate new generation${returnToA ? ' after returning to A' : ''}`, async t => {
+test('old plant response cannot mutate the new plant while its own write is pending', async t => {
     const f = await gridFixture(t);
     await f.load('A', 'white'); f.edit('red'); f.grid._save('material-plant');
     const old = f.requests.at(-1);
     await f.load('B', 'green');
-    if (returnToA) await f.load('A', 'yellow');
     f.edit('blue'); f.grid._save('material-plant');
     const current = f.requests.at(-1);
-    assert.notEqual(current, old, 'new generation may save independently');
+    assert.notEqual(current, old, 'different plants may save independently');
     assert.equal(current.opts?.method, 'POST');
     f.respond(old, { updated: 1 }); await settle();
     assert.equal(f.rows()[0].color, 'blue');
@@ -144,8 +142,7 @@ for (const returnToA of [false, true]) {
     assert.equal(f.rows()[0].color, 'blue');
     f.edit('purple'); f.grid._discard('material-plant');
     assert.equal(f.rows()[0].color, 'blue', 'baseline is only the new generation acknowledgement');
-  });
-}
+});
 
 test('late forbidden response cannot mark a new plant read-only', async t => {
   const f = await gridFixture(t);
@@ -158,5 +155,75 @@ test('late forbidden response cannot mark a new plant read-only', async t => {
   assert.equal(Toast.show.mock.calls.some(call => call.arguments[1] === 'error'), false);
   f.grid._save('material-plant');
   assert.equal(JSON.parse(f.requests.at(-1).opts.body).plant, 'B');
+  f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+});
+
+test('A-B-A blocks a second same-plant write until the first commits', async t => {
+  const f = await gridFixture(t);
+  let databaseColor = 'white';
+  await f.load('A', databaseColor); f.edit('red'); f.grid._save('material-plant');
+  const older = f.requests.at(-1);
+  await f.load('B', 'green'); await f.load('A', databaseColor);
+  f.edit('blue');
+  assert.equal(f.saveButton().disabled, true);
+  const count = f.requests.length;
+  f.grid._save('material-plant');
+  assert.equal(f.requests.length, count, 'same plant must have only one outstanding POST');
+  databaseColor = JSON.parse(older.opts.body).updates[0].color;
+  f.respond(older, { updated: 1 }); await settle();
+  assert.equal(f.rows()[0].color, 'blue');
+  assert.equal(f.saveButton().disabled, false);
+  f.grid._save('material-plant');
+  const newer = f.requests.at(-1);
+  assert.deepEqual(JSON.parse(newer.opts.body).updates, [{ material_id: 'MAT', color: 'blue' }]);
+  databaseColor = JSON.parse(newer.opts.body).updates[0].color;
+  f.respond(newer, { updated: 1 }); await settle();
+  assert.equal(databaseColor, 'blue');
+  assert.equal(f.saveButton().disabled, true);
+});
+
+for (const edited of [false, true]) {
+  test(`returning to A reconciles its committed baseline with ${edited ? 'a reverted newer edit' : 'no newer edit'}`, async t => {
+    const f = await gridFixture(t);
+    await f.load('A', 'white'); f.edit('red'); f.grid._save('material-plant');
+    const older = f.requests.at(-1);
+    await f.load('B', 'green'); await f.load('A', 'white');
+    if (edited) { f.edit('blue'); f.edit('white'); }
+    f.respond(older, { updated: 1 }); await settle();
+    assert.equal(f.rows()[0].color, edited ? 'white' : 'red');
+    assert.equal(f.saveButton().disabled, !edited);
+    if (edited) {
+      f.grid._save('material-plant');
+      assert.equal(JSON.parse(f.requests.at(-1).opts.body).updates[0].color, 'white');
+      f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+    }
+    f.edit('purple'); f.grid._discard('material-plant');
+    assert.equal(f.rows()[0].color, edited ? 'white' : 'red');
+  });
+}
+
+test('a GET started before the pending write settles cannot reinstall its stale baseline', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white'); f.edit('red'); f.grid._save('material-plant');
+  const older = f.requests.at(-1);
+  await f.load('B', 'green'); f.switchPlant('A');
+  const staleGet = f.requests.at(-1);
+  f.respond(older, { updated: 1 }); await settle();
+  f.respond(staleGet, { rows: [{ material_id: 'MAT', plant: 'A', color: 'white' }] }); await settle();
+  assert.equal(f.rows()[0].color, 'red');
+  f.edit('purple'); f.grid._discard('material-plant');
+  assert.equal(f.rows()[0].color, 'red');
+});
+
+test('a failed old-generation A write releases A for retry without clearing newer edits', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white'); f.edit('red'); f.grid._save('material-plant');
+  const older = f.requests.at(-1);
+  await f.load('B', 'green'); await f.load('A', 'white'); f.edit('blue');
+  f.respond(older, { detail: 'failed' }, 500); await settle();
+  assert.equal(f.rows()[0].color, 'blue');
+  assert.equal(f.saveButton().disabled, false);
+  f.grid._save('material-plant');
+  assert.deepEqual(JSON.parse(f.requests.at(-1).opts.body).updates, [{ material_id: 'MAT', color: 'blue' }]);
   f.respond(f.requests.at(-1), { updated: 1 }); await settle();
 });
