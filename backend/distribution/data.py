@@ -1137,18 +1137,28 @@ def _write_shares(cur, parent: dict) -> None:
         )
 
 
-def _lock_one_header(cur, plant: str, production_order: str, material_number: str) -> dict | None:
-    """FOR UPDATE lock + read of exactly one header, used for the "someone
-    else created/changed this concurrently" race branches in `apply()`."""
+def _lock_one_header(cur, plant: str, production_order: str, material_number: str,
+                     *, for_update: bool = True) -> dict | None:
+    """Lock (by default `FOR UPDATE`) + read of exactly one header, used for
+    the "someone else created/changed this concurrently" race branches in
+    `apply()`, and for every single-header planner-write call site below.
+
+    `for_update=False` (D56): a dry run never writes (see
+    `_materialize_reweight`'s `if dry_run: return ...` -- every line above
+    that return is pure computation), so a dry-run caller passes
+    `for_update=False` to read the header WITHOUT taking the row lock at
+    all, instead of taking-then-releasing it. Every other caller keeps the
+    default and locks as before."""
+    lock_clause = "FOR UPDATE" if for_update else ""
     cur.execute(
-        """
+        f"""
         SELECT plant, production_order, material_number, sap_workcenter, order_quantity,
                run_time, basic_start_date, basic_finish_date, firming_indicator, sap_facts,
                source, default_basis, reviewed, reviewed_by, reviewed_at, reviewed_quantity,
                updated_by, last_batch_id, xmin::text::bigint
           FROM order_distribution
          WHERE plant = %s AND production_order = %s AND material_number = %s
-         FOR UPDATE
+         {lock_clause}
         """,
         (plant, production_order, material_number),
     )
@@ -2780,13 +2790,19 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
     material_number`, which a single-row lock trivially satisfies, so the two
     can never deadlock each other.
 
-    For `dry_run=True`, no `conn.commit()` is ever called -- exiting the
-    `with _pool.connection()` block below rolls the transaction back,
-    releasing the `FOR UPDATE` lock immediately (SS5.5 step 8: "no lock held
-    past the read").
+    For `dry_run=True`, `_lock_one_header` is called with `for_update=False`
+    (D56) instead -- a dry run never writes anything (every line of
+    `_materialize_reweight` above its `if dry_run: return ...` is pure
+    computation), so there is no row lock to take in the first place. This
+    is NOT about releasing a lock early: psycopg_pool's `connection()`
+    context manager is `with conn: yield conn`, and `Connection.__exit__`
+    COMMITS on a clean exit (it only rolls back when an exception
+    propagates) -- so a dry run that took the lock would still hold it for
+    the connection's full lifetime, same as a real write. Skipping the lock
+    read entirely is what keeps a dry run from blocking a concurrent writer.
     """
     with _pool.connection() as conn, conn.cursor() as cur:
-        header = _lock_one_header(cur, plant, order, material)
+        header = _lock_one_header(cur, plant, order, material, for_update=not dry_run)
         if header is None:
             raise DistributionHeaderNotFound(f"no distribution header at {plant}/{order}/{material}")
         _check_base_version(header, base_version)
@@ -2823,7 +2839,7 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
 
 def reset_one_header(plant: str, order: str, material: str, base_version, *,
                      confirm_remove_scheduled: bool = False, dry_run: bool = False,
-                     actor: str = "system") -> dict:
+                     require_unreviewed: bool = False, actor: str = "system") -> dict:
     """`POST /distribution/{plant}/reset`'s per-parent core (SS5.2's default
     precedence, `source = 'default'`) -- shares the SAME
     `_materialize_reweight` engine `reweight_shares` uses, just with the
@@ -2832,6 +2848,16 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
     `DistributionStaleVersion` / `DistributionChildrenScheduled` /
     `ValueError` family; `reset_orders` (the bulk route entry point) catches
     them per item.
+
+    `require_unreviewed=True` (D19) raises `ValueError("already_reviewed: ...")`
+    under the lock when the header is already reviewed -- `reapply_defaults`
+    passes this for both of its candidate paths (the `NOT reviewed` DB query
+    AND an explicit `orders` list, which previously skipped that filter
+    entirely) so a reviewed header is never silently re-defaulted by a bulk
+    sweep; `reset_orders`' single/bulk reset route keeps the default
+    (`False`) since an explicit Reset is allowed on a reviewed header.
+    Raising here (inside the `with` block, under the lock) rolls the
+    transaction back and releases the lock, same as any other guard above.
 
     D02 (owner decision): a purge retires a finished sub-order's share
     (`purged_at` set, `child_id` cleared, letter/weight left alone) rather
@@ -2844,10 +2870,14 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
     (`_repair_one_header`) and a planner re-weight (`reweight_shares`) both
     deliberately leave a purged share purged."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        header = _lock_one_header(cur, plant, order, material)
+        header = _lock_one_header(cur, plant, order, material, for_update=not dry_run)
         if header is None:
             raise DistributionHeaderNotFound(f"no distribution header at {plant}/{order}/{material}")
         _check_base_version(header, base_version)
+        if require_unreviewed and header["reviewed"]:
+            raise ValueError(
+                f"already_reviewed: {plant!r}/{order!r}/{material!r} is already reviewed"
+            )
 
         workcenter = _load_workcenter_for_plant(cur, plant, header["sap_workcenter"])
         if workcenter is None:
@@ -2898,15 +2928,54 @@ def review_orders(plant: str, items: list[dict], reviewed: bool, actor: str = "s
     unreviewed. One partial-success pass over `items`: an individual stale/
     not-found item is recorded in its own result and does not abort the rest
     of the batch (each header is an independent row, locked and updated
-    within the same transaction one at a time)."""
+    within the same transaction one at a time).
+
+    D20 (lock order): every targeted header is locked up front, in ONE
+    `unnest`-driven `FOR UPDATE` statement ordered `plant, production_order,
+    material_number` -- the SAME key order `apply()`'s multi-header lock
+    uses. Locking one at a time in REQUEST order (the previous shape) could
+    deadlock against a concurrent `apply()` or another `review_orders` call
+    that targets the same two headers in the opposite order. Per-item
+    processing below is otherwise unchanged (still one UPDATE per item, in
+    the caller's original order) and the response's per-item order still
+    matches `items`."""
     results = []
     ok_count = 0
     with _pool.connection() as conn, conn.cursor() as cur:
+        locked: dict[tuple[str, str], dict] = {}
+        if items:
+            orders_l = [item.get("production_order") for item in items]
+            mats_l = [item.get("material_number") for item in items]
+            cur.execute(
+                """
+                SELECT plant, production_order, material_number, sap_workcenter, order_quantity,
+                       run_time, basic_start_date, basic_finish_date, firming_indicator, sap_facts,
+                       source, default_basis, reviewed, reviewed_by, reviewed_at, reviewed_quantity,
+                       updated_by, last_batch_id, xmin::text::bigint
+                  FROM order_distribution
+                 WHERE plant = %s AND (production_order, material_number)
+                       IN (SELECT * FROM unnest(%s::text[], %s::text[]))
+                 ORDER BY plant, production_order, material_number
+                 FOR UPDATE
+                """,
+                (plant, orders_l, mats_l),
+            )
+            for r in cur.fetchall():
+                locked[(r[1], r[2])] = {
+                    "plant": r[0], "production_order": r[1], "material_number": r[2],
+                    "sap_workcenter": r[3], "order_quantity": r[4], "run_time": r[5],
+                    "basic_start_date": r[6], "basic_finish_date": r[7], "firming_indicator": r[8],
+                    "sap_facts": r[9] or {}, "source": r[10], "default_basis": r[11],
+                    "reviewed": r[12], "reviewed_by": r[13], "reviewed_at": r[14],
+                    "reviewed_quantity": r[15], "updated_by": r[16], "last_batch_id": r[17],
+                    "xmin": r[18],
+                }
+
         for item in items:
             order = item.get("production_order")
             material = item.get("material_number")
             base_version = item.get("base_version")
-            header = _lock_one_header(cur, plant, order, material)
+            header = locked.get((order, material))
             if header is None:
                 results.append({"production_order": order, "material_number": material, "status": "not_found"})
                 continue
@@ -2995,7 +3064,17 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
     material_number}) when given; else every header in `plant` (optionally
     filtered to `workcenter`) that is `NOT reviewed` when `only_unreviewed`
     (the default and, per SS7, the only mode this route documents), or every
-    matching header when `only_unreviewed` is explicitly False."""
+    matching header when `only_unreviewed` is explicitly False.
+
+    D19: the DB-query candidate path already filters to `NOT reviewed` when
+    `only_unreviewed`, but an explicit `orders` list bypassed that filter
+    entirely -- `reset_one_header`'s own `require_unreviewed` guard now
+    covers BOTH paths uniformly (whichever path built `keys`, every key is
+    passed through the SAME `reset_one_header` call below), so an already-
+    reviewed header named in an explicit `orders` list is skipped (its
+    `ValueError("already_reviewed: ...")` is caught by the generic
+    `except ValueError` below, same as any other skip) instead of silently
+    re-defaulted."""
     with _pool.connection() as conn, conn.cursor() as cur:
         if orders:
             keys = [(o.get("production_order"), o.get("material_number")) for o in orders]
@@ -3019,7 +3098,8 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
         try:
             result = reset_one_header(
                 plant, order, material, base_version=None,
-                confirm_remove_scheduled=confirm_remove_scheduled, dry_run=False, actor=actor,
+                confirm_remove_scheduled=confirm_remove_scheduled, dry_run=False,
+                require_unreviewed=bool(only_unreviewed), actor=actor,
             )
         except DistributionHeaderNotFound:
             counters["skipped"] += 1
@@ -3034,6 +3114,22 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
         counters["children_upserted"] += len(result.get("children", []))
         counters["children_deleted"] += len(result.get("removed", []))
     return counters
+
+
+def _insert_admin_audit(cur, table: str, action: str, details: dict, actor: str) -> None:
+    """D55: the one-line `admin_audit` insert pattern `save_workcenter` uses
+    inline, factored out for the two `resolve` scopes below -- `_resolve_wc_codes`
+    and `_resolve_machines` each write real rows (new headers, rewritten
+    `orders.machine`/`parent_production_order`) but previously left no
+    `admin_audit` trail at all. Call this on the SAME cursor/transaction as
+    the writes it's auditing, before whichever branch commits, so the audit
+    row lands in the SAME commit as the writes it describes -- never used
+    for `repair` (that scope's writes already go through
+    `_materialize_reweight`, which audits itself)."""
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email) VALUES (%s, %s, %s, %s)",
+        (table, action, Jsonb(details), actor),
+    )
 
 
 def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
@@ -3100,6 +3196,17 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
                 "UPDATE orders SET machine = %s, updated_at = NOW() WHERE id = %s AND machine IS DISTINCT FROM %s",
                 (row.get("machine"), oid, row.get("machine")),
             )
+
+        # D55: one admin_audit row per `resolve` call, written on THIS cursor
+        # before either commit branch below -- `apply()` commits internally
+        # on the first branch, so the row must already be part of that same
+        # transaction to land at all.
+        _insert_admin_audit(
+            cur, "order_distribution", "resolve_wc_codes",
+            {"plant": plant, "candidates": len(candidates), "single_rewrites": single_rewrites,
+             "headers_created": len(distributed_keys), "skipped": max(skipped, 0)},
+            actor,
+        )
 
         apply_result = {"headers_created": 0, "children_upserted": 0}
         if plan_structure.get("parents"):
@@ -3187,6 +3294,14 @@ def _resolve_machines(plant: str, workcenter: str, actor: str, dry_run: bool) ->
                 (order, oid),
             )
             headers_created += 1
+        # D55: one admin_audit row per `resolve` call -- same cursor/
+        # transaction as the writes above, before the commit.
+        _insert_admin_audit(
+            cur, "order_distribution", "resolve_machines",
+            {"plant": plant, "workcenter": workcenter, "candidates": len(candidates),
+             "headers_created": headers_created, "skipped": len(candidates) - headers_created},
+            actor,
+        )
         conn.commit()
     return {"headers_created": headers_created, "children_upserted": headers_created,
             "single_rewrites": 0, "repaired": 0, "skipped": len(candidates) - headers_created}

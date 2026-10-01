@@ -2214,6 +2214,35 @@ class _ReweightFixtureBase:
             distribution_data.apply(plan_structure, batch_id, conn)
 
 
+class TestLockOneHeaderForUpdateFlag:
+    """D56 unit test (no DB): `_lock_one_header`'s new `for_update` flag must
+    control whether the generated SQL carries a `FOR UPDATE` clause at all --
+    a fake cursor is enough to check the executed SQL text."""
+
+    class _FakeCursor:
+        def __init__(self, row=None):
+            self.queries = []
+            self._row = row
+
+        def execute(self, sql, params=None):
+            self.queries.append(sql)
+
+        def fetchone(self):
+            return self._row
+
+    def test_for_update_true_default_includes_for_update_clause(self):
+        cur = self._FakeCursor(row=None)
+        distribution_data._lock_one_header(cur, "1006", "ORD", "MAT")
+        assert len(cur.queries) == 1
+        assert "FOR UPDATE" in cur.queries[0]
+
+    def test_for_update_false_omits_for_update_clause(self):
+        cur = self._FakeCursor(row=None)
+        distribution_data._lock_one_header(cur, "1006", "ORD", "MAT", for_update=False)
+        assert len(cur.queries) == 1
+        assert "FOR UPDATE" not in cur.queries[0]
+
+
 @pytest.mark.pg
 class TestReweightSharesGuards(_ReweightFixtureBase):
     """409 `stale` / 409 `children_scheduled` guards on POST .../shares."""
@@ -2309,6 +2338,55 @@ class TestReweightSharesDryRunParity(_ReweightFixtureBase):
             previewed_hours = dry_by_machine[machine]["hours_after"]
             written_hours = real_by_machine[machine]["run_time"]
             assert previewed_hours == pytest.approx(float(written_hours))
+
+
+@pytest.mark.pg
+class TestDryRunSkipsRowLock(_ReweightFixtureBase):
+    """D56 database test: a dry run must not take `FOR UPDATE` on the header
+    row at all -- it returns promptly even while a SEPARATE connection holds
+    `FOR UPDATE` on that same row (the old code took the lock either way and
+    only released it when the `with _pool.connection()` block exited)."""
+    WC = "ZZTEST_WC_DRYNOLOCK"
+    L1, L2 = "ZZTEST_L1_DRYNOLOCK", "ZZTEST_L2_DRYNOLOCK"
+    ORD, MAT = "ZZTEST_ORD_DRYNOLOCK", "ZZT_MAT_DRYNOLOCK"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_dry_run_reweight_returns_while_another_connection_holds_for_update(self, pg):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        holder_conn = pg._pool.getconn()
+        try:
+            with holder_conn.cursor() as holder_cur:
+                holder_cur.execute(
+                    "SELECT 1 FROM order_distribution WHERE plant=%s AND production_order=%s"
+                    " AND material_number=%s FOR UPDATE",
+                    (self.PLANT, self.ORD, self.MAT),
+                )
+                holder_cur.fetchone()
+
+                # If reweight_shares' dry-run path still took FOR UPDATE, this
+                # call would block on holder_conn's open transaction and the
+                # test would hang/time out instead of returning.
+                result = distribution_data.reweight_shares(
+                    self.PLANT, self.ORD, self.MAT,
+                    [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}],
+                    base_version=header["xmin"], dry_run=True, actor="tester",
+                )
+                assert "plan" in result
+
+                reset_result = distribution_data.reset_one_header(
+                    self.PLANT, self.ORD, self.MAT, header["xmin"], dry_run=True,
+                )
+                assert "plan" in reset_result
+        finally:
+            holder_conn.rollback()
+            pg._pool.putconn(holder_conn)
 
 
 @pytest.mark.pg
@@ -2442,6 +2520,122 @@ class TestResetOneHeaderRaisesOnZeroWeights(_ReweightFixtureBase):
 
 
 @pytest.mark.pg
+class TestReapplyDefaultsSkipsAlreadyReviewed(_ReweightFixtureBase):
+    """D19: the DB-query candidate path already filters to `NOT reviewed`,
+    but an explicit `orders` list previously bypassed that filter entirely --
+    a reviewed header named explicitly must still be skipped, with its
+    shares left untouched."""
+    WC = "ZZTEST_WC_REAPPLYREV"
+    L1, L2 = "ZZTEST_L1_REAPPLYREV", "ZZTEST_L2_REAPPLYREV"
+    ORD, MAT = "ZZTEST_ORD_REAPPLYREV", "ZZT_MAT_REAPPLYREV"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE order_distribution SET reviewed = TRUE, reviewed_by = 'tester',"
+                " reviewed_at = now(), reviewed_quantity = order_quantity"
+                " WHERE plant = %s AND production_order = %s AND material_number = %s",
+                (self.PLANT, self.ORD, self.MAT),
+            )
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_explicit_orders_list_still_skips_an_already_reviewed_header(self, pg):
+        shares_before = _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)
+
+        result = distribution_data.reapply_defaults(
+            self.PLANT, orders=[{"production_order": self.ORD, "material_number": self.MAT}],
+        )
+
+        assert result["skipped"] == 1
+        assert result["headers_processed"] == 0
+        shares_after = _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)
+        assert shares_after == shares_before
+
+    def test_only_unreviewed_false_still_resets_an_explicit_reviewed_order(self, pg):
+        # only_unreviewed=False means "process every matching header
+        # regardless of review state" -- an explicit reviewed order must
+        # still go through in that mode.
+        result = distribution_data.reapply_defaults(
+            self.PLANT, orders=[{"production_order": self.ORD, "material_number": self.MAT}],
+            only_unreviewed=False,
+        )
+        assert result["skipped"] == 0
+        assert result["headers_processed"] == 1
+
+
+@pytest.mark.pg
+class TestReviewOrdersLockOrderAvoidsDeadlock(_ReweightFixtureBase):
+    """D20 (Review Focus 4): two concurrent `review_orders` calls targeting
+    the SAME two headers in OPPOSITE request order must never deadlock --
+    both calls now lock every targeted header up front in ONE statement,
+    ordered `plant, production_order, material_number` (the same key order
+    `apply()` uses), instead of one `_lock_one_header` call per item in
+    request order (which could grab the two headers in opposite order on
+    each side and deadlock)."""
+    WC_X = "ZZTEST_WC_RODLOCKX"
+    L1_X, L2_X = "ZZTEST_L1_RODLOCKX", "ZZTEST_L2_RODLOCKX"
+    ORD_X, MAT_X = "ZZTEST_ORD_RODLOCKX", "ZZT_MAT_RODLOCKX"
+    WC_Y = "ZZTEST_WC_RODLOCKY"
+    L1_Y, L2_Y = "ZZTEST_L1_RODLOCKY", "ZZTEST_L2_RODLOCKY"
+    ORD_Y, MAT_Y = "ZZTEST_ORD_RODLOCKY", "ZZT_MAT_RODLOCKY"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC_X, self.L1_X, self.L2_X, self.ORD_X, self.MAT_X)
+        self._seed_header(pg, self.WC_Y, self.L1_Y, self.L2_Y, self.ORD_Y, self.MAT_Y)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC_X, self.L1_X, self.L2_X, self.ORD_X, self.MAT_X)
+            self._cleanup(cur, self.WC_Y, self.L1_Y, self.L2_Y, self.ORD_Y, self.MAT_Y)
+            conn.commit()
+
+    def test_opposite_order_concurrent_reviews_never_deadlock(self, pg):
+        import threading
+
+        items_forward = [
+            {"production_order": self.ORD_X, "material_number": self.MAT_X, "base_version": None},
+            {"production_order": self.ORD_Y, "material_number": self.MAT_Y, "base_version": None},
+        ]
+        items_reverse = [
+            {"production_order": self.ORD_Y, "material_number": self.MAT_Y, "base_version": None},
+            {"production_order": self.ORD_X, "material_number": self.MAT_X, "base_version": None},
+        ]
+        barrier = threading.Barrier(2)
+        outcomes = {}
+        errors = {}
+
+        def _run(name, items):
+            try:
+                barrier.wait(timeout=10)
+                outcomes[name] = distribution_data.review_orders(
+                    self.PLANT, items, reviewed=True, actor=name,
+                )
+            except Exception as exc:  # noqa: BLE001 -- surfaced via errors dict below
+                errors[name] = exc
+
+        t1 = threading.Thread(target=_run, args=("forward", items_forward))
+        t2 = threading.Thread(target=_run, args=("reverse", items_reverse))
+        t1.start()
+        t2.start()
+        t1.join(timeout=20)
+        t2.join(timeout=20)
+
+        assert not t1.is_alive() and not t2.is_alive(), "a call hung -- possible deadlock/timeout"
+        assert not errors, f"review_orders raised: {errors}"
+        assert "forward" in outcomes and "reverse" in outcomes
+        for name in ("forward", "reverse"):
+            statuses = {r["production_order"]: r["status"] for r in outcomes[name]["results"]}
+            assert statuses[self.ORD_X] == "ok"
+            assert statuses[self.ORD_Y] == "ok"
+
+
+@pytest.mark.pg
 class TestResolveRepairRecoversIncompleteHeader(_ReweightFixtureBase):
     """`resolve` scope `repair`: a header whose children set doesn't match
     its positive/unpurged shares (`incomplete`) gets its missing child
@@ -2503,6 +2697,121 @@ class TestResolveRepairRecoversIncompleteHeader(_ReweightFixtureBase):
             distribution_data._hydrate_headers(cur, self.PLANT, rows2)
         this_header2 = next(h for h in rows2 if h["production_order"] == self.ORD)
         assert "incomplete" not in this_header2["statuses"]
+
+
+def _count_admin_audit(db_, action: str, plant: str) -> int:
+    with db_._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM admin_audit"
+            " WHERE table_name = 'order_distribution' AND action = %s AND details->>'plant' = %s",
+            (action, plant),
+        )
+        return cur.fetchone()[0]
+
+
+@pytest.mark.pg
+class TestResolveWcCodesWritesAdminAudit(_ReweightFixtureBase):
+    """D55: `resolve` scope `wc_codes` previously wrote no `admin_audit` row
+    at all -- a real (non-dry-run) call must now write exactly one, in the
+    SAME transaction as the `plan()`/`apply()` writes it triggers."""
+    WC = "ZZTEST_WC_RESOLVEAUDIT"
+    L1, L2 = "ZZTEST_L1_RESOLVEAUDIT", "ZZTEST_L2_RESOLVEAUDIT"
+    ORD, MAT = "ZZTEST_ORD_RESOLVEAUDIT", "ZZT_MAT_RSVAUD"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.plain_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, 60, self.SUB, self.PLANT, self.L2, self.WC, 40),
+            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            # A plain order that arrived BEFORE the work center was
+            # configured -- its `machine` is the WC CODE itself, not yet a
+            # distribution header.
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, run_time, order_quantity) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.plain_id, self.ORD, self.MAT, self.WC, self.PLANT,
+                 dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 18, 0), 10.0, 100.0),
+            )
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_resolve_wc_codes_writes_exactly_one_audit_row(self, pg):
+        before = _count_admin_audit(pg, "resolve_wc_codes", self.PLANT)
+
+        result = distribution_data.resolve(self.PLANT, "wc_codes", dry_run=False, actor="tester")
+        assert result["headers_created"] >= 1
+
+        after = _count_admin_audit(pg, "resolve_wc_codes", self.PLANT)
+        assert after == before + 1
+
+        # A dry run must write no audit row at all (it returns before the
+        # insert, same as it writes no header/children).
+        distribution_data.resolve(self.PLANT, "wc_codes", dry_run=True, actor="tester")
+        assert _count_admin_audit(pg, "resolve_wc_codes", self.PLANT) == after
+
+
+@pytest.mark.pg
+class TestResolveMachinesWritesAdminAudit(_ReweightFixtureBase):
+    """D55: `resolve` scope `machines` previously wrote no `admin_audit` row
+    either -- a real call must now write exactly one."""
+    WC = "ZZTEST_WC_RESOLVEMACHAUDIT"
+    L1, L2 = "ZZTEST_L1_RESOLVEMACHAUDIT", "ZZTEST_L2_RESOLVEMACHAUDIT"
+    ORD, MAT = "ZZTEST_ORD_RESOLVEMACHAUDIT", "ZZT_MAT_RSVMACH"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.plain_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, 60, self.SUB, self.PLANT, self.L2, self.WC, 40),
+            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            # A plain order already correctly sitting on a CURRENT member
+            # machine, with no order_distribution header yet.
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, run_time, order_quantity) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.plain_id, self.ORD, self.MAT, self.L1, self.PLANT,
+                 dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 18, 0), 10.0, 100.0),
+            )
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_resolve_machines_writes_exactly_one_audit_row(self, pg):
+        before = _count_admin_audit(pg, "resolve_machines", self.PLANT)
+
+        result = distribution_data.resolve(
+            self.PLANT, "machines", workcenter=self.WC, dry_run=False, actor="tester",
+        )
+        assert result["headers_created"] >= 1
+
+        after = _count_admin_audit(pg, "resolve_machines", self.PLANT)
+        assert after == before + 1
 
 
 @pytest.mark.pg
