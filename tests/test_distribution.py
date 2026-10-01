@@ -2126,7 +2126,8 @@ class TestDistributionReadRoutes:
         assert response.status_code == 200
         body = response.json()
         assert body["needs_review"] >= 1
-        assert set(body.keys()) == {"needs_review", "changed", "problems"}
+        assert set(body.keys()) == {"needs_review", "changed", "problems", "truncated"}
+        assert body["truncated"] is False
 
     def test_aggregate_rolls_up_one_row_per_header(self, client):
         response = client.get(f"/distribution/{self.PLANT}/aggregate", params={"workcenter": self.WC})
@@ -2241,6 +2242,107 @@ class TestLockOneHeaderForUpdateFlag:
         distribution_data._lock_one_header(cur, "1006", "ORD", "MAT", for_update=False)
         assert len(cur.queries) == 1
         assert "FOR UPDATE" not in cur.queries[0]
+
+
+class TestFetchHeaderRowsOrderByAndSearch:
+    """D42 + D59 unit tests (no DB): `_fetch_header_rows` must append a
+    stable `production_order ASC, material_number ASC` tiebreaker after its
+    stated default sort (paging happens in Python afterward -- see the
+    module note above `_LIST_CANDIDATE_CAP` -- so a stable ORDER BY is all
+    that's required, no keyset pagination), and its `search` predicate must
+    escape the user's own ILIKE wildcard characters via `db._like_contains`
+    + `ESCAPE '\\'` (D59) rather than embedding the raw term."""
+
+    class _FakeCursor:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, sql, params=None):
+            self.queries.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    def test_order_by_ends_with_production_order_then_material_number(self):
+        cur = self._FakeCursor()
+        distribution_data._fetch_header_rows(cur, "1006")
+        assert len(cur.queries) == 1
+        sql_text = cur.queries[0][0]
+        assert ("ORDER BY basic_start_date ASC NULLS LAST, reviewed ASC, "
+                "production_order ASC, material_number ASC") in sql_text
+
+    def test_search_predicate_uses_escaped_ilike(self):
+        cur = self._FakeCursor()
+        distribution_data._fetch_header_rows(cur, "1006", search="a_b")
+        sql_text, params = cur.queries[0]
+        assert "ILIKE %s ESCAPE '\\'" in sql_text
+        assert params[1:3] == ["%a\\_b%", "%a\\_b%"]
+
+
+@pytest.mark.pg
+class TestListAndSummaryReportCandidateSetTruncation:
+    """D13: when a plant's SQL-filterable candidate header set exceeds
+    `_LIST_CANDIDATE_CAP`, both the list route's `meta.truncated` and the
+    summary route's top-level `truncated` must say so, rather than silently
+    reporting counts/filters over only the first `_LIST_CANDIDATE_CAP` rows
+    with no signal that more exist. Monkeypatches the cap down to 2 and
+    seeds 3 bare headers (no shares/children needed -- only the candidate
+    count matters here) so the fetch-time `+1` cap probe actually trips."""
+    PLANT = "1006"
+    WC = "ZZTEST_WC_TRUNC"
+    MAT = "ZZTEST_MAT_TRUNC"
+    ORDS = ["ZZTEST_ORD_TRUNC_1", "ZZTEST_ORD_TRUNC_2", "ZZTEST_ORD_TRUNC_3"]
+
+    def _cleanup(self, cur):
+        cur.execute(
+            "DELETE FROM order_distribution WHERE plant = %s AND production_order = ANY(%s)",
+            (self.PLANT, self.ORDS),
+        )
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg, monkeypatch):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'single')", (self.PLANT, self.WC),
+            )
+            for ord_ in self.ORDS:
+                cur.execute(
+                    "INSERT INTO order_distribution (plant, production_order, material_number,"
+                    " sap_workcenter, order_quantity, run_time, basic_start_date, basic_finish_date)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (self.PLANT, ord_, self.MAT, self.WC, 10.0, 1.0,
+                     dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 9, 0)),
+                )
+            conn.commit()
+        monkeypatch.setattr(distribution_data, "_LIST_CANDIDATE_CAP", 2)
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    @pytest.fixture
+    def client(self):
+        brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [self.PLANT]
+        brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+        try:
+            yield TestClient(brain.api)
+        finally:
+            brain.api.dependency_overrides.clear()
+
+    def test_list_reports_truncated(self, client):
+        response = client.get(f"/distribution/{self.PLANT}", params={"search": "ZZTEST_ORD_TRUNC"})
+        assert response.status_code == 200
+        assert response.json()["meta"]["truncated"] is True
+
+    def test_summary_reports_truncated(self, client):
+        response = client.get(f"/distribution/{self.PLANT}/summary")
+        assert response.status_code == 200
+        assert response.json()["truncated"] is True
 
 
 @pytest.mark.pg

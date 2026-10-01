@@ -87,6 +87,24 @@ def test_workcenter_exists_before_distribution_foreign_key():
     )
 
 
+def test_order_distribution_plant_start_index_in_schema_and_migration():
+    """D42: `_fetch_header_rows`' ORDER BY (plant WHERE + basic_start_date,
+    reviewed, production_order, material_number) needs a matching index — it
+    must exist both in schema.sql (the always-safe-to-reapply baseline) and
+    in the dated migrations/ file deploys actually apply (root CLAUDE.md:
+    "Deploys apply migrations/, never schema.sql")."""
+    index_stmt = (
+        "CREATE INDEX IF NOT EXISTS idx_order_distribution_plant_start\n"
+        "    ON order_distribution (plant, basic_start_date, reviewed, production_order, material_number);"
+    )
+    assert index_stmt in _schema_text()
+
+    migration_path = os.path.join(ROOT, "migrations", "2026-10-01-order-distribution-plant-start-index.sql")
+    with open(migration_path, encoding="utf-8") as f:
+        migration_text = f.read()
+    assert index_stmt in migration_text
+
+
 def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     """The smoke script replays only migrations safe after current schema.sql.
 
@@ -136,6 +154,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-18-sap-workcenter-allow-unconfigured.sql",
         "2026-09-25-routing-production-version-backfill.sql",
         "2026-09-24-routing-production-version-structure.sql",
+        "2026-10-01-order-distribution-plant-start-index.sql",
     }
     all_names = {
         os.path.basename(path)

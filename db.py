@@ -109,6 +109,16 @@ def _zero_pad(value, width: int):
     return value.zfill(width) if value else value
 
 
+def _like_contains(s: str) -> str:
+    """Build an ILIKE "contains" pattern for `s` with its own special
+    characters (`\\`, `%`, `_`) escaped, so a user's free-text search can
+    never accidentally use ILIKE's wildcard syntax (e.g. a material number
+    containing "_" matching more than that literal underscore). Callers
+    MUST pair this with `ILIKE %s ESCAPE '\\'` -- the escape character this
+    helper's own escaping assumes."""
+    return "%" + s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def make_id(production_order, material_number) -> str:
     """MD5 of 'PRODUCTION_ORDER|MATERIAL_NUMBER' — deterministic across reloads."""
     key = f"{_str_id(production_order)}|{_str_id(material_number)}"

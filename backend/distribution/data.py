@@ -1711,13 +1711,16 @@ def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter
                        date_from=None, date_to=None, machines: list | None = None,
                        limit_cap: int | None = _LIST_CANDIDATE_CAP) -> list[dict]:
     """Every header matching the SQL-expressible filters (§6 "Data"), ordered
-    `basic_start_date ASC, reviewed ASC` (§6's stated default sort). Bucket/
-    status filtering happens afterward in Python (see module note above)."""
+    `basic_start_date ASC, reviewed ASC` (§6's stated default sort), with
+    `production_order ASC, material_number ASC` appended as a stable
+    tiebreaker (D42) so paging never reorders same-start-date rows between
+    pages. Bucket/status filtering happens afterward in Python (see module
+    note above)."""
     where = ["plant = %s"]
     params: list = [plant]
     if search:
-        where.append("(production_order ILIKE %s OR material_number ILIKE %s)")
-        like = f"%{search}%"
+        where.append("(production_order ILIKE %s ESCAPE '\\' OR material_number ILIKE %s ESCAPE '\\')")
+        like = db._like_contains(search)
         params.extend([like, like])
     if workcenter:
         where.append("sap_workcenter = %s")
@@ -1753,7 +1756,7 @@ def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter
         SELECT {_HEADER_COLUMNS_SQL}
           FROM order_distribution
          WHERE {where_sql}
-         ORDER BY basic_start_date ASC NULLS LAST, reviewed ASC
+         ORDER BY basic_start_date ASC NULLS LAST, reviewed ASC, production_order ASC, material_number ASC
          {limit_sql}
         """,
         params,
@@ -1941,12 +1944,19 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
     `bucket` accepts `all`, one of the three §6 buckets (`needs_review`,
     `changed`, `problems`), or an individual status code directly (deep
     links); `None`/`''`/`'all'` means unfiltered.
+
+    `meta.truncated` (D13) is True when the plant's SQL-filterable candidate
+    header set exceeds `_LIST_CANDIDATE_CAP` -- `total`/bucket counts then
+    reflect only the capped candidate set, not the plant's true header count.
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         headers = _fetch_header_rows(
             cur, plant, search=search, workcenter=workcenter, reviewed=reviewed,
             batch=batch, date_from=date_from, date_to=date_to, machines=machines,
+            limit_cap=_LIST_CANDIDATE_CAP + 1,
         )
+        truncated = len(headers) > _LIST_CANDIDATE_CAP
+        headers = headers[:_LIST_CANDIDATE_CAP]
         _hydrate_headers(cur, plant, headers)
 
     if bucket and bucket != "all":
@@ -1967,7 +1977,10 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
         }
         for h in page
     ]
-    return {"data": data, "meta": {"total": total, "scheduled_children": scheduled_children}}
+    return {
+        "data": data,
+        "meta": {"total": total, "scheduled_children": scheduled_children, "truncated": truncated},
+    }
 
 
 def get_header_detail(plant: str, order: str, material: str) -> dict | None:
@@ -2014,15 +2027,20 @@ def get_summary(plant: str) -> dict:
     problems}` counts over the plant's headers, classified by the SAME
     `classify_bucket_membership` this module's `list_headers_for_plant`
     `bucket` filter uses -- the two can't drift apart because they share
-    this one function."""
+    this one function. `truncated` (D13) mirrors the list route's
+    `meta.truncated`: True when the plant's candidate header set exceeds
+    `_LIST_CANDIDATE_CAP`, so the counts above are then a lower bound."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        headers = _fetch_header_rows(cur, plant)
+        headers = _fetch_header_rows(cur, plant, limit_cap=_LIST_CANDIDATE_CAP + 1)
+        truncated = len(headers) > _LIST_CANDIDATE_CAP
+        headers = headers[:_LIST_CANDIDATE_CAP]
         _hydrate_headers(cur, plant, headers)
 
     counts = {"needs_review": 0, "changed": 0, "problems": 0}
     for h in headers:
         for bucket_name in classify_bucket_membership(h["statuses"]):
             counts[bucket_name] += 1
+    counts["truncated"] = truncated
     return counts
 
 

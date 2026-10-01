@@ -16,8 +16,9 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-# Import the shared pool + SAP-numeric-ID normalizer from the existing db module.
-from db import _pool, _str_id
+# Import the shared pool + SAP-numeric-ID normalizer + ILIKE-escape helper
+# from the existing db module.
+from db import _pool, _str_id, _like_contains
 
 # Child of brain.py's `nimbus.*` structured-logging tree (propagates up), so a
 # narrowed-but-unexpected error class here still reaches the operator log.
@@ -97,14 +98,24 @@ _KEY_COLUMNS = {
 }
 
 # Explicit search-column overrides for list_rows' ILIKE search filter, keyed
-# by table. list_rows' default heuristic (last key column + `description`,
-# when present) picks an arbitrary/unhelpful column for these three tables,
-# so each gets a fixed, meaningful set instead. Any table NOT listed here
-# keeps falling through to that same default heuristic, unchanged.
+# by table. list_rows' default heuristic (`frozenset(_KEY_COLUMNS[table])`'s
+# arbitrary, hash-seed-dependent `[-1]` + `description`, when present, D27)
+# picks an unhelpful -- and run-to-run UNSTABLE -- column for any multi-key
+# table with no override, so every multi-key table gets a fixed, meaningful
+# set here instead. A single-key table (e.g. `subnetworks`, `roles`,
+# `materials`) has no such instability (`key_cols[-1]` is just its one key)
+# and is left on the default heuristic. Any table NOT listed here keeps
+# falling through to that same default heuristic, unchanged.
 _SEARCH_COLUMNS: dict[str, tuple[str, ...]] = {
     'production_version': ('material_id', 'production_version'),
     'routing_operation': ('material_id', 'routing_group', 'activity'),
     'routing_rules': ('code',),
+    'sap_workcenter': ('sap_workcenter', 'description'),
+    'plants': ('plant', 'description'),
+    'machine': ('machine',),
+    'material_plants': ('material_id',),
+    'bom_items': ('material_id', 'component_id'),
+    'role_plants': ('role',),
 }
 
 # The ONLY material_plants columns POST /master-data/material-plants/attributes
@@ -291,8 +302,10 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
         honored when the table actually has one; ignored otherwise). Used by
         the BOM tab, which requires a plant + material pick before browsing
         rather than ever loading the full (potentially huge) bom_items table.
-      - `search`: case-insensitive substring search (ILIKE) over the key column
-        and `description` column (when present).
+      - `search`: case-insensitive substring search (ILIKE, with the term's
+        own backslash/percent/underscore escaped via `db._like_contains`,
+        D59) over `_SEARCH_COLUMNS[table]` when registered, else the default
+        heuristic (the last key column + `description`, when present).
       - `limit`/`offset`: parameterized LIMIT/OFFSET page window.
     When any of these are supplied, `meta.total` carries the full row count for
     the same filter (ignoring limit/offset) so callers can paginate.
@@ -341,11 +354,13 @@ def list_rows(table: str, limit: int | None = None, offset: int | None = None,
                     search_cols.append(sql.Identifier("description"))
             if search_cols:
                 search_clause = sql.SQL(" OR ").join(
-                    sql.SQL("{col} ILIKE %s").format(col=col) for col in search_cols
+                    sql.SQL("{col} ILIKE %s ESCAPE '\\'").format(col=col) for col in search_cols
                 )
                 where_parts.append(sql.SQL("({})").format(search_clause))
-                # Add the search term for each column (prepended/appended with %)
-                search_term = f"%{search}%"
+                # Add the search term for each column -- `_like_contains` escapes
+                # the user's own `\`/`%`/`_` so a literal substring search can
+                # never accidentally use ILIKE's wildcard syntax (D59).
+                search_term = _like_contains(search)
                 where_params.extend([search_term] * len(search_cols))
         where_sql = (sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)) if where_parts else sql.SQL("")
 
@@ -1244,10 +1259,10 @@ def delete_filtered(table: str, plant: str, search: str | None, expected_count: 
                     search_cols.append(sql.Identifier("description"))
             if search_cols:
                 search_clause = sql.SQL(" OR ").join(
-                    sql.SQL("{col} ILIKE %s").format(col=col) for col in search_cols
+                    sql.SQL("{col} ILIKE %s ESCAPE '\\'").format(col=col) for col in search_cols
                 )
                 where_parts.append(sql.SQL("({})").format(search_clause))
-                term = f"%{search}%"
+                term = _like_contains(search)
                 params.extend([term] * len(search_cols))
         where_sql = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
 
