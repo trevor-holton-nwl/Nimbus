@@ -1243,7 +1243,7 @@ export const Table = {
   _runtimeEditAnchor(task: NimbusTask): Date | null {
     return Util.parseDate(task.start_date) || (
       task.planning_status === 'needs_planning' && task.planning_reason?.code === 'runtime_unknown'
-        ? Util.parseDate(task.BASIC_START_DATE) : null
+        ? Util.parseDate(task.BASIC_START_DATE === undefined ? task.original_start_date : task.BASIC_START_DATE) : null
     );
   },
 

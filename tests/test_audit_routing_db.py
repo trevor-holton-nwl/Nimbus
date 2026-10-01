@@ -9,6 +9,8 @@ from decimal import Decimal
 import pytest
 
 from backend.routing import resolver
+from backend.scheduling.models import TaskRefreshPayload, TasksRefreshResponse, TasksUpdatePayload
+from backend.scheduling.routes import tasks_refresh, tasks_update
 
 
 @pytest.mark.pg
@@ -97,6 +99,106 @@ class TestRoutingEditTransactions:
             [{"id": row["id"], "base_version": row["version"], **patch}],
             allowed_plants=[self.PLANT], **options,
         )
+
+    def _refresh_route(self, ids=None, allowed_plants=None):
+        response = tasks_refresh(TaskRefreshPayload(ids=ids or [self.ids[0]]),
+                                 allowed_plants=[self.PLANT] if allowed_plants is None else allowed_plants)
+        return TasksRefreshResponse.model_validate(response).model_dump(mode="json", by_alias=True)
+
+    def _save_route(self, snapshot, patch):
+        return tasks_update(TasksUpdatePayload(tasks=[{
+            "id": snapshot["id"], "base_version": snapshot["row_version"], **patch,
+        }]), allowed_plants=[self.PLANT])
+
+    @pytest.mark.parametrize("pv_echo", [None, "", "   "])
+    def test_refresh_null_pv_ordinary_edit_saves_through_route(self, pg, pv_echo):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET production_version=NULL,run_time=2,run_time_source='manual' WHERE id=%s",
+                        (self.ids[0],))
+            conn.commit()
+        fresh = self._refresh_route()["data"][0]
+        assert fresh["PRODUCTION_VERSION"] is None
+        result = self._save_route(fresh, {
+            "PRODUCTION_VERSION": pv_echo, "RUN_TIME": fresh["RUN_TIME"], "PRT_01": "NEW-TOOL",
+            "start_date": self.START.isoformat(), "end_date": (self.START + dt.timedelta(hours=2)).isoformat(),
+        })
+        assert result["persisted"] == 1 and result["rejection_reasons"] == {}
+        assert self._row(pg)["production_version"] is None
+        assert self._row(pg)["prt_01"] == "NEW-TOOL"
+
+    @pytest.mark.parametrize("pv_clear", [None, "", "   "])
+    def test_explicit_pv_clear_still_runs_eligibility_gate(self, pg, pv_clear):
+        fresh = self._refresh_route()["data"][0]
+        before = self._row(pg)
+        result = self._save_route(fresh, {"PRODUCTION_VERSION": pv_clear, "PRT_01": "NEW-TOOL"})
+        assert result["persisted"] == 0
+        assert result["rejection_reasons"] == {self.ids[0]: "pv_missing"}
+        assert self._row(pg) == before
+
+    def test_omitted_pv_and_explicit_null_machine_retain_distinct_semantics(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET run_time_source='manual' WHERE id=%s", (self.ids[0],))
+            conn.commit()
+        fresh = self._refresh_route()["data"][0]
+        result = self._save_route(fresh, {"MACHINE": None, "PRT_01": None})
+        assert result["persisted"] == 1
+        row = self._row(pg)
+        assert row["machine"] is None and row["prt_01"] is None
+        assert row["production_version"] == "0001"
+
+    @pytest.mark.parametrize("pv,hours,accepted", [("0002", 9, True), ("9999", 2, False)])
+    def test_explicit_pv_edit_on_null_manual_order_still_opts_into_routing(self, pg, pv, hours, accepted):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET production_version=NULL,run_time=2,run_time_source='manual' WHERE id=%s",
+                        (self.ids[0],))
+            conn.commit()
+        fresh = self._refresh_route()["data"][0]
+        before = self._row(pg)
+        result = self._save_route(fresh, {"PRODUCTION_VERSION": pv, "RUN_TIME": hours,
+                                        "start_date": self.START.isoformat(),
+                                        "end_date": (self.START + dt.timedelta(hours=hours)).isoformat()})
+        if accepted:
+            assert result["persisted"] == 1
+            row = self._row(pg)
+            assert row["production_version"] == pv and row["run_time"] == Decimal(hours)
+            assert row["run_time_source"] == "routing"
+        else:
+            assert result["persisted"] == 0
+            assert result["rejection_reasons"] == {self.ids[0]: "pv_not_found"}
+            assert self._row(pg) == before
+
+    def test_refresh_quantity_and_raw_baseline_allow_correct_machine_preview(self, pg):
+        baseline = dt.datetime(2026, 11, 10, 9)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET order_quantity=20,basic_start_date=%s,run_time=6 WHERE id=%s",
+                        (baseline, self.ids[0]))
+            conn.commit()
+        fresh = self._refresh_route()["data"][0]
+        assert fresh["ORDER_QUANTITY_(GMEIN)"] == 20
+        assert fresh["MATERIAL_NUMBER"] == self.MATERIAL and fresh["PLANT"] == self.PLANT
+        assert fresh["original_start_date"] == baseline.isoformat()
+        assert fresh["start_date"] == self.START.isoformat()  # baseline is not scheduled placement
+        assert fresh["row_version"] == self._row(pg)["version"]
+        hours = fresh["ORDER_QUANTITY_(GMEIN)"] * 6 / 10
+        result = self._save_route(fresh, {"MACHINE": self.M2, "RUN_TIME": hours,
+                                        "start_date": fresh["start_date"],
+                                        "end_date": (self.START + dt.timedelta(hours=hours)).isoformat()})
+        assert result["persisted"] == 1 and result["rejection_reasons"] == {}
+        assert self._row(pg)["run_time"] == Decimal(12)
+
+    def test_refresh_changed_baseline_controls_pv_validity(self, pg):
+        baseline = dt.datetime(2028, 1, 1, 8)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET basic_start_date=%s WHERE id=%s", (baseline, self.ids[0]))
+            conn.commit()
+        fresh = self._refresh_route()["data"][0]
+        assert fresh["original_start_date"] == baseline.isoformat()
+        result = self._save_route(fresh, {"PRODUCTION_VERSION": "0002", "RUN_TIME": 9})
+        assert result["persisted"] == 0 and result["rejection_reasons"] == {self.ids[0]: "pv_expired"}
+
+    def test_refresh_runtime_inputs_remain_plant_scoped(self, pg):
+        result = self._refresh_route(allowed_plants=["UNAUTHORIZED"])
+        assert result == {"data": [], "missing": [self.ids[0]]}
 
     def test_pv_edit_commits_candidate_runtime_and_response_version_then_next_save_succeeds(self, pg):
         before = self._row(pg)

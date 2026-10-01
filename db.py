@@ -272,6 +272,11 @@ def _min_segment_minutes_by_plant(cur, plants) -> dict[str, int]:
     return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
 
 
+def _canonical_nullable_attribute(value):
+    """Use the same nullable text representation for snapshots and persisted edits."""
+    return (value.strip() or None) if isinstance(value, str) else value
+
+
 def _canonical_runtime_minutes(value) -> int | None:
     """Return the scheduling runtime in integral minutes, or None when absent.
 
@@ -794,15 +799,12 @@ def backfill_machine_keys() -> int:
 
 def get_task_versions(ids: list[str]) -> list[dict]:
     """
-    Lean refetch for optimistic-concurrency conflict reconciliation: current effective
-    dates + xmin row version for specific order ids only. No color-merge / link
-    machinery — the client uses this to overwrite the stale copies a concurrent edit
-    changed underneath it.
+    Refetch the writable aggregate and authoritative runtime inputs with its xmin
+    version in one read. No color-merge / link machinery is needed for reconciliation.
 
     Also selects o.plant so callers can apply server-side plant scoping. The
-    `plant` key is for that filtering only — it is not part of the
-    TaskVersionRow wire contract and callers must strip it before returning
-    the row to a client.
+    `plant` key is for that filtering only; callers expose it as `PLANT` only
+    after authorization, using the same snapshot as the runtime inputs.
     """
     if not ids:
         return []
@@ -815,7 +817,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
                o.plant, o.planning_status, o.planning_reason,
                o.run_time_source, o.run_time_basis,
-               o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time
+               o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time,
+               o.order_quantity, o.material_number, o.basic_start_date
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -841,6 +844,9 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "PRT_02": r[13],
             "PRODUCTION_VERSION": r[14],
             "RUN_TIME": r[15],
+            "ORDER_QUANTITY_(GMEIN)": r[16],
+            "MATERIAL_NUMBER": r[17],
+            "original_start_date": r[18].strftime("%Y-%m-%dT%H:%M:%S") if r[18] else None,
         }
         for r in rows
     ]
@@ -1167,7 +1173,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
             attrs = {
-                field: it[field]
+                field: _canonical_nullable_attribute(it[field])
                 for field in ("PRT_01", "PRT_02", "PRODUCTION_VERSION", "MACHINE")
                 if field in it
             }
@@ -1201,9 +1207,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # The browser's save snapshot includes these fields on every edit.
             # Only changed values are edits for the child-machine lock and the
             # routing eligibility/runtime gates below.
-            if attrs.get("MACHINE") == current["machine"]:
+            if "MACHINE" in attrs and attrs["MACHINE"] == _canonical_nullable_attribute(current["machine"]):
                 attrs.pop("MACHINE", None)
-            if attrs.get("PRODUCTION_VERSION") == current["production_version"]:
+            if ("PRODUCTION_VERSION" in attrs
+                    and attrs["PRODUCTION_VERSION"] == _canonical_nullable_attribute(current["production_version"])):
                 attrs.pop("PRODUCTION_VERSION", None)
             if has_runtime and (_canonical_runtime_minutes(it.get("RUN_TIME"))
                                 == _canonical_runtime_minutes(current["run_time"])):

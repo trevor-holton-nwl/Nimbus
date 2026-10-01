@@ -584,9 +584,9 @@ def tasks_refresh(payload: TaskRefreshPayload,
 
     Rows outside `allowed_plants` (None for an unrestricted/admin caller) are
     silently dropped rather than 403'd — matching GET /tasks's silent-bound
-    behavior for unscoped pulls. `plant` is only used for this server-side
-    filter and is stripped before the response leaves — it isn't part of the
-    TaskVersionRow wire contract.
+    behavior for unscoped pulls. Only authorized rows expose their plant as
+    `PLANT`, alongside the material, quantity and raw SAP baseline date used
+    by runtime calculation. These inputs and the version come from one read.
 
     `missing` mirrors the not_found_ids convention from the /tasks/update family
     (BulkUpdateResult): requested ids that no longer exist in `orders` (deleted
@@ -604,7 +604,7 @@ def tasks_refresh(payload: TaskRefreshPayload,
         found_ids = {r["id"] for r in rows}
     missing = [i for i in payload.ids if i not in found_ids]
     for row in rows:
-        row.pop("plant", None)
+        row["PLANT"] = row.pop("plant", None)
         row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
     return {"data": rows, "missing": missing}
 

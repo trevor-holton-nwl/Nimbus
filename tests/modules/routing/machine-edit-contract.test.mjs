@@ -6,6 +6,7 @@ import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { Table, Inspector } from '../../../frontend/scheduling/orders.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Toast } from '../../../frontend/platform/foundation.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 
 globalThis.window = {};
 globalThis.document = { getElementById: () => null };
@@ -92,9 +93,10 @@ test('changed runtime of an existing split aggregate is reallocated, unchanged r
 function heldEditFixture(t, { anchor = new Date('2026-09-30T08:00:00'), reason = 'runtime_unknown' } = {}) {
   seed();
   const task = Store.tasks.move;
-  Object.assign(task, { start_date: null, end_date: null, BASIC_START_DATE: anchor,
+  Object.assign(task, Persistence._prepTask({ start_date: null, end_date: null,
+    original_start_date: anchor instanceof Date && Number.isFinite(anchor.getTime()) ? '2026-09-30T08:00:00' : null,
     RUN_TIME: null, run_time_source: null, planning_status: 'needs_planning',
-    planning_reason: { code: reason, message: 'Awaiting routing' }, scheduleSegments: [] });
+    planning_reason: { code: reason, message: 'Awaiting routing' }, schedule_segments: [] }));
   Runtime._rateMap.pv['MAT|0002'] = { key: 'MAT|N|G|01', valid_from: null, valid_to: null };
   t.mock.method(Toast, 'show', () => {});
   t.mock.method(Alerts, 'scheduleRecompute', () => {});
@@ -126,6 +128,9 @@ for (const surface of ['table', 'inspector']) {
       assert.equal(task.planning_reason, null);
       assert.equal(task.start_date?.getTime(), new Date('2026-09-30T08:00:00').getTime());
       assert.equal((task.end_date - task.start_date) / 3600000, hours);
+      const snapshot = Persistence._taskEditSnapshot(task);
+      assert.equal(snapshot.start_date, '2026-09-30T08:00:00');
+      assert.equal(snapshot.RUN_TIME, hours);
     });
   }
   for (const [field, value, hours] of [

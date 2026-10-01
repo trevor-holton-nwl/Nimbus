@@ -28,6 +28,8 @@ This domain's frontend files do not call `db.py`/`master_data.py` directly — t
 
 ## Key invariants & hazards
 
+- **Authoritative runtime inputs and recovery (2026-10-01):** `/tasks/refresh` carries quantity, material, plant and raw SAP start with its runtime/version snapshot. `_prepTask` preserves the raw SAP start as `BASIC_START_DATE` before calendar snapping adjusts `original_start_date`. Explicit `reload()` discards cached task edits only after successful hydration; failed loads and edits made during that request retain the local conflict. Ordinary startup `load()` continues to restore cache edits.
+
 - **Needs Planning (2026-09-09):** `planning_status='needs_planning'` means null committed dates and empty `scheduleSegments`; preserve SAP baseline dates. `_prepTask`, Store normalization, cache overlay, calendar normalization and refresh enforce this. Explicit start edits return the task to `scheduled`. Orders exposes status/reason/window and the Needs Planning status filter.
 - **Atomic optimizer saves:** `_forceIds` is a historical name for dependent optimizer/undo edits. It now opts `/tasks/update` into `atomic_optimizer=true` with `force=false` for every row. Any rejection preserves all local edits/dirty flags; there is no per-row stale refresh. `schedule-unsaved` remains visible. Offline cache retains `_optimizerDirtyIds` and cannot evict a partial dependent task set; online reload excludes that group's cached positions. Legacy non-optimizer partial-save behavior remains as described below.
 

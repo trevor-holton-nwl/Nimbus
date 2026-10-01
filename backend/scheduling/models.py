@@ -164,8 +164,8 @@ class BulkUpdateResult(BaseModel):
 
 
 class TaskVersionRow(BaseModel):
-    """One row of GET-equivalent /tasks/refresh's `data` array — db.get_task_versions'
-    shape exactly (db.py:437-445)."""
+    """Current task aggregate and runtime inputs from one versioned database read."""
+    model_config = ConfigDict(populate_by_name=True)
     id: str
     start_date: str | None = None
     end_date: str | None = None
@@ -175,6 +175,10 @@ class TaskVersionRow(BaseModel):
     PRT_02: str | None = None
     PRODUCTION_VERSION: str | None = None
     RUN_TIME: float | None = None
+    order_quantity_gmein: float | None = Field(default=None, alias="ORDER_QUANTITY_(GMEIN)")
+    MATERIAL_NUMBER: str | None = None
+    PLANT: str | None = None
+    original_start_date: str | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"

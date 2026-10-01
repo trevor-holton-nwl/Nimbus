@@ -171,7 +171,7 @@ export const Runtime = {
     const pvRow = map.pv[`${material}|${pvValue}`];
     if (!pvRow) return { ok: false, step: 'pv_not_found' };
 
-    const startDate = _asDate(task.BASIC_START_DATE);
+    const startDate = _asDate(task.BASIC_START_DATE === undefined ? task.original_start_date : task.BASIC_START_DATE);
     if (startDate && !_withinValidity(startDate, pvRow.valid_from, pvRow.valid_to)) {
       return { ok: false, step: 'pv_expired' };
     }

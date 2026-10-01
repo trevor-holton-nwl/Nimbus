@@ -179,9 +179,9 @@ export interface paths {
          *
          *     Rows outside `allowed_plants` (None for an unrestricted/admin caller) are
          *     silently dropped rather than 403'd — matching GET /tasks's silent-bound
-         *     behavior for unscoped pulls. `plant` is only used for this server-side
-         *     filter and is stripped before the response leaves — it isn't part of the
-         *     TaskVersionRow wire contract.
+         *     behavior for unscoped pulls. Only authorized rows expose their plant as
+         *     `PLANT`, alongside the material, quantity and raw SAP baseline date used
+         *     by runtime calculation. These inputs and the version come from one read.
          *
          *     `missing` mirrors the not_found_ids convention from the /tasks/update family
          *     (BulkUpdateResult): requested ids that no longer exist in `orders` (deleted
@@ -3438,8 +3438,7 @@ export interface components {
         };
         /**
          * TaskVersionRow
-         * @description One row of GET-equivalent /tasks/refresh's `data` array — db.get_task_versions'
-         *     shape exactly (db.py:437-445).
+         * @description Current task aggregate and runtime inputs from one versioned database read.
          */
         TaskVersionRow: {
             /** Id */
@@ -3460,6 +3459,14 @@ export interface components {
             PRODUCTION_VERSION?: string | null;
             /** Run Time */
             RUN_TIME?: number | null;
+            /** Order Quantity (Gmein) */
+            "ORDER_QUANTITY_(GMEIN)"?: number | null;
+            /** Material Number */
+            MATERIAL_NUMBER?: string | null;
+            /** Plant */
+            PLANT?: string | null;
+            /** Original Start Date */
+            original_start_date?: string | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentDTO"][];
             /**

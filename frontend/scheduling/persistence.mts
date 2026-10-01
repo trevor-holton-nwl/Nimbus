@@ -267,7 +267,18 @@ export const Persistence = {
    *  comment above for exactly which paths increment/decrement it. */
   isLoading(): boolean { return Persistence._loadsInFlight > 0; },
 
-  load({ force = false, plant = null }: { force?: boolean; plant?: string | null } = {}): Promise<void> {
+  load({ force = false, plant = null, discardLocalEdits = false }: {
+    force?: boolean; plant?: string | null; discardLocalEdits?: boolean;
+  } = {}): Promise<void> {
+    const discardBaseline = discardLocalEdits
+      ? JSON.stringify(Store.tasksArr.map(t => [t.id, Persistence._refreshBaseline(t)])) : null;
+    const acceptDiscard = (): void => {
+      if (!discardLocalEdits) return;
+      Persistence._dirtyIds.clear();
+      Persistence._forceIds.clear();
+      Persistence._conflictedIds.clear();
+      for (const key of Object.keys(Store.dependencies)) delete Store.dependencies[key];
+    };
     // Captured before any async work starts; every continuation below that would
     // otherwise mutate Store/_currentLoadedPlant checks this against the live
     // counter and discards itself if a newer load() has since started. See the
@@ -356,6 +367,12 @@ export const Persistence = {
             `Discarding stale /tasks response for plant=${plant ?? 'all'} (superseded by a newer load)`);
           return;
         }
+        if (discardLocalEdits && discardBaseline !==
+            JSON.stringify(Store.tasksArr.map(t => [t.id, Persistence._refreshBaseline(t)]))) {
+          Toast.show('New edits were made while reloading. They remain unsaved; reload again to discard them.', 'warn', 8000);
+          return;
+        }
+        if (!Array.isArray(payload?.data)) throw new Error('Invalid /tasks response');
         // A successful HTTP 200 is authoritative — after this point we
         // refuse to silently fall back to cache even if downstream throws.
         stats.source = 'backend';
@@ -387,7 +404,9 @@ export const Persistence = {
         if (!stats.raw_received) {
           ErrorLog.warn('persistence', 'Backend returned zero rows — nothing to render');
           Toast.show(Util.t('toast.backend_zero_orders'), 'warn');
+          acceptDiscard();
           Store.setTasks([], 'persistence');
+          if (discardLocalEdits) { Persistence._syncUnsaved(); Persistence._saveCache(); }
           Persistence._currentLoadedPlant = plant;
           // Restore cached non-task state (blocks/calendars/lineSettings) so a plant
           // with no orders still shows its saved config; the backend overlay follows.
@@ -452,6 +471,9 @@ export const Persistence = {
             return null;
           }
         }).filter(Boolean) as NimbusTask[];
+        if (discardLocalEdits && (stats.errors || tasks.length !== payload.data.length)) {
+          throw new Error('Incomplete task hydration; local edits retained');
+        }
 
         // Restore user state (blocks, calendars, firmedIds, lineSettings) from localStorage
         // before setTasks so alerts compute with the correct context. The backend is
@@ -479,7 +501,7 @@ export const Persistence = {
         // _snapToWorkingHours detects them via startMoved and skips re-snap. Only tasks
         // where the cached start differs from the cached original baseline are overlaid.
         let restoredDirtyIds: string[] = [];
-        if (cacheData?.tasks?.length) {
+        if (!discardLocalEdits && cacheData?.tasks?.length) {
           const optimizerIds = new Set<string>(cacheData._optimizerDirtyIds ?? []);
           const dirtyIds = cacheData._dirtyIds == null ? null : new Set<string>(cacheData._dirtyIds);
           restoredDirtyIds = Persistence._overlayUserMoves(tasks, cacheData.tasks.filter((task: NimbusTask) =>
@@ -496,9 +518,10 @@ export const Persistence = {
         // post-hydration re-snap in CalendarSync._applyConfig persists it.
         Persistence._snapToWorkingHours(tasks, plant);
 
+        acceptDiscard();
         const setResult = Store.setTasks(tasks, 'persistence');
         for (const id of restoredDirtyIds) Persistence._dirtyIds.add(id);
-        for (const id of cacheData?._optimizerDirtyIds ?? []) {
+        for (const id of (discardLocalEdits ? [] : cacheData?._optimizerDirtyIds) ?? []) {
           if (Store.tasks[id]) { Persistence._dirtyIds.add(id); Persistence._forceIds.add(id); }
         }
         Persistence._syncUnsaved();
@@ -580,6 +603,10 @@ export const Persistence = {
         // for a plant the user has since switched away from must not fall back to
         // cache/demo and clobber the newer load()'s already-rendered board.
         if (loadGeneration !== Persistence._loadRequest) return;
+        if (discardLocalEdits) {
+          Toast.show('Reload failed. Your local edits remain unsaved; try reloading again when the server is available.', 'error', 8000);
+          return;
+        }
         // Only fall back to cache / demo if we never got a successful response.
         if (stats.source !== 'backend') {
           if (Persistence._loadCache()) {
@@ -729,6 +756,12 @@ export const Persistence = {
   },
 
   _prepTask(raw: Record<string, unknown>): NimbusTask {
+    // /tasks exposes the SAP baseline as original_start_date. Keep a raw copy
+    // before calendar hydration adjusts the display baseline. Existing cached
+    // raw dates remain authoritative on subsequent cache decoding.
+    if (!Object.prototype.hasOwnProperty.call(raw, 'BASIC_START_DATE')) {
+      raw.BASIC_START_DATE = raw.original_start_date ?? null;
+    }
     if (raw.planning_status === 'needs_planning') {
       raw.start_date = null;
       raw.end_date = null;
@@ -1615,7 +1648,12 @@ export const Persistence = {
           tk.MACHINE = row.MACHINE ?? '';
           tk.PRT_01 = row.PRT_01 ?? '';
           tk.PRT_02 = row.PRT_02 ?? '';
-          tk.PRODUCTION_VERSION = row.PRODUCTION_VERSION ?? '';
+          tk.PRODUCTION_VERSION = row.PRODUCTION_VERSION ?? null;
+          tk['ORDER_QUANTITY_(GMEIN)'] = row['ORDER_QUANTITY_(GMEIN)'] ?? null;
+          tk.MATERIAL_NUMBER = row.MATERIAL_NUMBER ?? '';
+          tk.PLANT = row.PLANT ?? '';
+          tk.original_start_date = Util.parseDate(row.original_start_date);
+          tk.BASIC_START_DATE = Util.parseDate(row.original_start_date);
           tk.RUN_TIME = row.RUN_TIME ?? null;
           tk.run_time_source = row.run_time_source;
           tk.run_time_basis = row.run_time_basis;
@@ -1667,10 +1705,8 @@ export const Persistence = {
 
   /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
   reload(): Promise<void> {
-    ErrorLog.info('persistence', 'Manual reload triggered — clearing dependencies');
-    const deps = Store.dependencies;
-    for (const k of Object.keys(deps)) delete deps[k];
-    return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant });
+    ErrorLog.info('persistence', 'Manual reload triggered — discarding local edits after successful hydration');
+    return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant, discardLocalEdits: true });
   },
 
   /** Fetch tasks for a specific plant, replacing whatever is currently in Store.

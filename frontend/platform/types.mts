@@ -60,7 +60,7 @@ export interface NimbusTask {
    *  exists or is planned; ranks resolve client-side from per-plant maps. */
   PRT_01?: string;
   PRT_02?: string;
-  PRODUCTION_VERSION?: string;
+  PRODUCTION_VERSION?: string | null;
   FORM_SIZE?: string;
   MATERIAL_NUMBER?: string;
   MATERIAL_DESCRIPTION?: string;
