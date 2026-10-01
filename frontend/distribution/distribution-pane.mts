@@ -503,7 +503,10 @@ export const DistributionPane = (() => {
       }
       if (evt.type === 'sandbox:entered' || evt.type === 'sandbox:exited') {
         // What-If guard (§6): Save/Reviewed/Reset/Undo must flip disabled the
-        // instant the sandbox toggles, not just on the next unrelated render.
+        // instant the sandbox toggles, not just on the next unrelated render —
+        // the list's own Reviewed checkbox/badge actions need the same
+        // immediate refresh, not just the detail panel.
+        if (_active) _renderList();
         if (_active && _selectedKey) _renderDetail();
       }
     }, 'distribution-pane');
@@ -670,6 +673,39 @@ export const DistributionPane = (() => {
     }));
   }
 
+  /** Shared review POST behind both the list's one-click `_markReviewed` and
+   *  the detail panel's own `_onReviewedToggle` (D45) — a single place that
+   *  owns the What-If gate (D05) and the backend's per-item status vocabulary
+   *  (`reset_orders`/`review_orders` share the same `{results: [{status}]}`
+   *  shape, data.py), so neither caller can independently forget to check
+   *  `results[0].status` the way `_markReviewed` used to (it only checked
+   *  `resp.ok`, so a 200 response carrying `status: 'stale'` was reported as
+   *  a success). Callers own all UI side effects (toasts, refetch, re-open);
+   *  this function is a pure network call returning an outcome code. */
+  async function _postReview(plant: string, header: DistHeader, reviewed: boolean): Promise<'ok' | 'stale' | 'not_found' | 'error'> {
+    if (Sandbox.active) return 'error';
+    try {
+      const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}/review`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          orders: [{ production_order: header.production_order, material_number: header.material_number, base_version: header.base_version }],
+          reviewed,
+        }),
+      });
+      if (!resp.ok) return 'error';
+      const body = await resp.json() as { results: Array<{ status: string }> };
+      const status = body.results?.[0]?.status;
+      if (status === 'stale') return 'stale';
+      if (status === 'not_found') return 'not_found';
+      if (status === 'error') return 'error';
+      return 'ok';
+    } catch (e) {
+      ErrorLog.error('distribution', `Review call failed: ${(e as Error).message}`, {}, { errorCode: 'distribution.review_failed' });
+      return 'error';
+    }
+  }
+
   /** Wired for `needs_review` (checkbox → review true) and the indeterminate
    *  `qty_changed` re-stamp (same call — the backend sets `reviewed_quantity`
    *  from the header's current `order_quantity` on every `review` call). Every
@@ -682,28 +718,20 @@ export const DistributionPane = (() => {
   async function _markReviewed(header: DistHeader): Promise<void> {
     const plant = Store.selectedPlant;
     if (!plant) return;
-    try {
-      const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}/review`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          orders: [{ production_order: header.production_order, material_number: header.material_number, base_version: header.base_version }],
-          reviewed: true,
-        }),
-      });
-      if (!resp.ok) {
-        const err = await Util.parseBackendError(resp);
-        Toast.show(err.message || Util.t('toast.dist_review_failed'), 'error');
-        return;
-      }
-      Toast.show(Util.t('toast.dist_reviewed'), 'success');
+    const status = await _postReview(plant, header, true);
+    if (status === 'stale') {
       await _fetchAndRenderList();
-      if (_selectedKey === _rowKey(header)) void _openDetail(_selectedKey);
-      void loadDistributionSummary();
-    } catch (e) {
-      ErrorLog.error('distribution', `Review call failed: ${(e as Error).message}`, {}, { errorCode: 'distribution.review_failed' });
-      Toast.show(Util.t('toast.dist_review_failed'), 'error');
+      Toast.show(Util.t('toast.dist_stale_refetched'), 'warn');
+      return;
     }
+    if (status === 'not_found' || status === 'error') {
+      Toast.show(Util.t('toast.dist_review_failed'), 'error');
+      return;
+    }
+    Toast.show(Util.t('toast.dist_reviewed'), 'success');
+    await _fetchAndRenderList();
+    if (_selectedKey === _rowKey(header)) void _openDetail(_selectedKey);
+    void loadDistributionSummary();
   }
 
   /* ---------------------------------------------------------------------
@@ -969,13 +997,17 @@ export const DistributionPane = (() => {
       if (!ok) return;
       confirmRemoveScheduled = true;
     }
-    if (_detail !== detail || !preview.guard || !_writeViewIsCurrent(preview.guard)) return;
+    // Re-check Sandbox.active here too (D05) — What-If can flip on while this
+    // preview request is in flight, between the entry guard above and this
+    // point; without this, a sandbox entered mid-preview would let the real
+    // (non-dry-run) write through.
+    if (_detail !== detail || !preview.guard || !_writeViewIsCurrent(preview.guard) || Sandbox.active) return;
     let real = await _postDistWrite(kind, false, confirmRemoveScheduled);
     if (real.kind === 'stale') { await _handleStaleHeader(); return; }
     if (real.kind === 'children_scheduled') {
       const ok = await _confirmRemoval(real.children || []);
       if (!ok) return;
-      if (_detail !== detail || !_writeViewIsCurrent(preview.guard)) return;
+      if (_detail !== detail || !_writeViewIsCurrent(preview.guard) || Sandbox.active) return;
       real = await _postDistWrite(kind, false, true);
     }
     if (real.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return; }
@@ -1010,13 +1042,16 @@ export const DistributionPane = (() => {
       if (!ok) return;
       confirmRemoveScheduled = true;
     }
-    if (_detail !== detail || !_writeViewIsCurrent(initialGuard)) return;
+    // Same mid-flight re-check as _runWritePipeline (D05): What-If can flip on
+    // during the Modal.confirm await above (or even synchronously between the
+    // entry check and here), and Save must not proceed once it has.
+    if (_detail !== detail || !_writeViewIsCurrent(initialGuard) || Sandbox.active) return;
     let real = await _postDistWrite('shares', false, confirmRemoveScheduled);
     if (real.kind === 'stale') { await _handleStaleHeader(); return; }
     if (real.kind === 'children_scheduled') {
       const ok = await _confirmRemoval(real.children || []);
       if (!ok) return;
-      if (_detail !== detail || !_writeViewIsCurrent(initialGuard)) return;
+      if (_detail !== detail || !_writeViewIsCurrent(initialGuard) || Sandbox.active) return;
       real = await _postDistWrite('shares', false, true);
     }
     if (real.kind === 'error' || real.kind === 'not_found' || real.kind === 'children_scheduled') {
@@ -1055,23 +1090,14 @@ export const DistributionPane = (() => {
     const header = _detail.header;
     const plant = Store.selectedPlant;
     if (!plant) return;
+    const status = await _postReview(plant, header, checked);
+    if (status === 'stale') { await _handleStaleHeader(); return; }
+    if (status === 'not_found' || status === 'error') {
+      Toast.show(Util.t('toast.dist_review_failed'), 'error');
+      _renderDetail();
+      return;
+    }
     try {
-      const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}/review`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          orders: [{ production_order: header.production_order, material_number: header.material_number, base_version: header.base_version }],
-          reviewed: checked,
-        }),
-      });
-      if (!resp.ok) {
-        const err = await _parseDistError(resp);
-        Toast.show(_distErrorMessage(err.code, err.message), 'error');
-        _renderDetail();
-        return;
-      }
-      const body = await resp.json() as { results: Array<{ status: string }> };
-      if (body.results?.[0]?.status === 'stale') { await _handleStaleHeader(); return; }
       Toast.show(Util.t('toast.dist_reviewed'), 'success');
       if (_selectedKey) await _openDetail(_selectedKey);
       await _fetchAndRenderList();
@@ -1181,7 +1207,16 @@ export const DistributionPane = (() => {
     _renderDetail();
   }
 
+  /** Banner "Save schedule" (§6) AND the list's `runtime_mismatch` badge
+   *  one-click action (same destination — see the `dist-list-tbody` click
+   *  delegate's badge dispatch below) — gated (D05): `Persistence.saveAll()`
+   *  itself treats an active What-If sandbox as "promote and save"
+   *  (`Sandbox.exit(true)`, which then recurses into `saveAll()` —
+   *  persistence.mts), so calling it unguarded here would silently promote
+   *  the sandbox to the live schedule instead of leaving the planner in
+   *  What-If mode. */
   function _onSaveScheduleClick(): void {
+    if (Sandbox.active) return;
     Persistence.saveAll();
   }
 
@@ -1516,7 +1551,9 @@ export const DistributionPane = (() => {
           const { code } = pickPrimaryBadge(found.statuses);
           if (code === 'needs_review' || code === 'qty_changed') { void _markReviewed(found.header); return; }
           if (code === 'incomplete') { void _repairRow(found); return; }
-          if (code === 'runtime_mismatch') { Persistence.saveAll(); return; }
+          // Same gated handler the reconcile banner's "Save schedule" button
+          // uses (D05) — never call Persistence.saveAll() directly here.
+          if (code === 'runtime_mismatch') { _onSaveScheduleClick(); return; }
           if (code === 'purged') return;
           // separation_violated ("Show on Gantt") and every multi-choice
           // status open the detail panel below.
@@ -1604,7 +1641,7 @@ export const DistributionPane = (() => {
       if (target.closest('#dist-show-gantt-btn')) { _onShowOnGantt(); return; }
       if (target.closest('#dist-open-inspector-btn')) { _onOpenInInspector(); return; }
       if (target.closest('#dist-banner-save-schedule')) { _onSaveScheduleClick(); return; }
-      if (target.closest('#dist-banner-undo')) { _banner?.undo(); return; }
+      if (target.closest('#dist-banner-undo')) { if (!Sandbox.active) _banner?.undo(); return; }
 
       if (target.closest('#dist-editor-even-btn')) {
         const rows = _editorRows();
@@ -1935,6 +1972,16 @@ export const DistributionPane = (() => {
     const revState = reviewedCheckboxState(row.header, row.statuses);
     const badgeText = primary.code ? Util.t(`ui.dist_status_${primary.code}`) : '';
     const extraBadge = primary.extra.length ? `<span class="sap-pill neutral dist-badge-extra" title="${Util.escapeHtml(primary.extra.join(', '))}">+${primary.extra.length}</span>` : '';
+    // What-If guard (D05): the badge's one-click action and the Reviewed
+    // checkbox both resolve to a gated handler (_markReviewed/_repairRow/
+    // _onSaveScheduleClick all check Sandbox.active themselves), but the row
+    // also needs to LOOK blocked — a `disabled` modifier class (badges are
+    // `<span>`s, which have no native `disabled` attribute) plus the same
+    // `ui.dist_whatif_blocked` hint text used elsewhere in this pane,
+    // surfaced here as the badge's tooltip rather than a per-row span (one
+    // per data row would be noisy at the 50+ rows this list can hold).
+    const whatIf = Sandbox.active;
+    const badgeTitle = whatIf ? Util.t('ui.dist_whatif_blocked') : Util.t(`ui.dist_status_${primary.code}_tip`);
     return `
       <tr data-key="${Util.escapeHtml(key)}" class="dist-row${active ? ' active' : ''}">
         <td class="dist-col-check"><input type="checkbox" class="dist-bulk-check" ${_checkedKeys.has(key) ? 'checked' : ''}></td>
@@ -1945,12 +1992,13 @@ export const DistributionPane = (() => {
         <td>${Util.escapeHtml(Util.fmtDT(row.header.basic_start_date))}</td>
         <td>${Util.escapeHtml(formatSubOrders(row.shares))}</td>
         <td>
-          ${primary.code ? `<span class="sap-pill ${primary.tier} dist-badge-action" title="${Util.escapeHtml(Util.t(`ui.dist_status_${primary.code}_tip`))}">${Util.escapeHtml(badgeText)}</span>` : ''}
+          ${primary.code ? `<span class="sap-pill ${primary.tier} dist-badge-action${whatIf ? ' disabled' : ''}" title="${Util.escapeHtml(badgeTitle)}">${Util.escapeHtml(badgeText)}</span>` : ''}
           ${extraBadge}
         </td>
         <td><input type="checkbox" class="dist-reviewed-check"
               ${revState === 'checked' ? 'checked' : ''}
-              data-indeterminate="${revState === 'indeterminate' ? '1' : '0'}"></td>
+              data-indeterminate="${revState === 'indeterminate' ? '1' : '0'}"
+              ${whatIf ? 'disabled' : ''}></td>
       </tr>`;
   }
 
@@ -2137,6 +2185,7 @@ export const DistributionPane = (() => {
    *  them). */
   function _renderReconcileBanner(): string {
     if (!_banner) return '';
+    const whatIf = Sandbox.active;
     const firmedList = _banner.firmedIds.length
       ? `<div class="dist-banner-firmed">${Util.escapeHtml(Util.t('ui.dist_banner_firmed_left', { n: String(_banner.firmedIds.length) }))}</div>`
       : '';
@@ -2145,8 +2194,9 @@ export const DistributionPane = (() => {
         <div class="dist-banner-text">${Util.escapeHtml(Util.t('ui.dist_saved_reconcile', { n: String(_banner.count) }))}</div>
         ${firmedList}
         <div class="dist-banner-actions">
-          <button type="button" class="btn btn-primary sm" id="dist-banner-save-schedule">${Util.escapeHtml(Util.t('btn.dist_save_schedule'))}</button>
-          <button type="button" class="btn btn-ghost sm" id="dist-banner-undo">${Util.escapeHtml(Util.t('btn.undo'))}</button>
+          <button type="button" class="btn btn-primary sm" id="dist-banner-save-schedule" ${whatIf ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_save_schedule'))}</button>
+          <button type="button" class="btn btn-ghost sm" id="dist-banner-undo" ${whatIf ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.undo'))}</button>
+          ${whatIf ? `<span class="dist-whatif-hint">${Util.escapeHtml(Util.t('ui.dist_whatif_blocked'))}</span>` : ''}
         </div>
       </div>`;
   }
