@@ -1,6 +1,6 @@
 # September 30 audit repairs
 
-> Subsequent independent review found three introduced regressions and three incomplete repairs. The passing gates below remain valid, but the branch is not ready for release. See [the review and required corrections](AUDIT_REPAIR_REVIEW_2026-09-30.md).
+> Subsequent independent review found three introduced regressions and three incomplete repairs. Those findings and their evidence remain in [the review](AUDIT_REPAIR_REVIEW_2026-09-30.md); the [October 1 follow-up](AUDIT_FOLLOWUP_FIXES_2026-10-01.md) records their corrections and current verification.
 
 Base: `main@9f21d9c`. Implementation branch: `fix/audit-0930`.
 Scope: twelve validated findings from `Code_Review_09_30.md`, plus the aggregate export SQL failure exposed by real database tests.

@@ -1,6 +1,8 @@
 # Independent review of the September 30 repairs
 
-**Verdict: changes required before merge or deployment.**
+**Historical verdict at `a8671f2`: changes required before merge or deployment.**
+
+The six findings below were subsequently addressed in the [October 1 follow-up repairs](AUDIT_FOLLOWUP_FIXES_2026-10-01.md), which records the corrections and current verification. This document retains the original review evidence.
 
 Reviewed `9f21d9c..a8671f2` on `fix/audit-0930` (five commits, 39 changed files). This review traces the changed code through its callers, API payloads, Store subscriptions, cache recovery and database writes. It supersedes the earlier repair report's readiness assessment. The earlier passing tests are real, but do not cover the interactions below.
 
