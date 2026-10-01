@@ -39,6 +39,7 @@ the `order_distribution` HEADER table (this file's `plan`/`apply`), not to the
 only). `save_workcenter` stays a plain last-write-wins transaction, the same
 shape as master_data.py's other narrow single-purpose admin writers.
 """
+import math
 import re
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
@@ -53,6 +54,13 @@ from db import _pool
 
 VALID_DISTRIBUTION_MODES = frozenset({"single", "distribute"})
 VALID_MAX_SEPARATIONS = frozenset({"none", "hour", "day", "week"})
+
+# D21: a weight of inf/nan (JSON's non-standard `Infinity`/`NaN` constants, or
+# an exponent large enough to overflow to inf) or anything above a generous
+# ceiling is rejected in both validators below -- before any `< 0` comparison,
+# since a non-finite Decimal raises `decimal.InvalidOperation` on ordering
+# comparisons rather than comparing cleanly.
+_MAX_WEIGHT = 1e9
 
 
 def _clean_optional_str(value) -> str | None:
@@ -89,9 +97,14 @@ def _clean_weights(weights) -> dict[str, float | None]:
             continue
         if isinstance(weight, bool) or not isinstance(weight, (int, float)):
             raise ValueError(f"weight for {machine_name!r} must be numeric or null")
-        if weight < 0:
+        w = float(weight)
+        if not math.isfinite(w) or w > _MAX_WEIGHT:
+            raise ValueError(
+                f"weight_invalid: weight for {machine_name!r} must be finite and <= {_MAX_WEIGHT:g}"
+            )
+        if w < 0:
             raise ValueError(f"weight for {machine_name!r} must be >= 0")
-        cleaned[machine_name] = float(weight)
+        cleaned[machine_name] = w
     return cleaned
 
 
@@ -2211,6 +2224,14 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
         if not isinstance(machine, str) or not machine.strip():
             raise ValueError("each share entry needs a non-blank machine")
         machine = machine.strip()
+        # D22: a machine that is neither a current work-center member nor the
+        # owner of an existing share is rejected outright -- at any weight
+        # (including 0) and regardless of `allow_stale`, which only waives
+        # staleness for a share that once existed. This never trips for a
+        # current member with no share row yet (SS5.7's "joining" case).
+        if machine not in existing_shares and machine not in current_members:
+            raise ValueError(f"unknown_machine: {machine!r} is not a current work-center "
+                             f"member or an existing share")
         if machine in desired:
             raise ValueError(f"duplicate_machine: {machine!r} appears more than once in shares")
         weight = entry.get("weight")
@@ -2220,6 +2241,14 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
             raise ValueError(f"weight for {machine!r} must be numeric or null")
         else:
             weight_dec = Decimal(str(weight))
+        # D21: check finiteness/ceiling via a plain float BEFORE any Decimal
+        # ordering comparison -- a NaN/Infinity Decimal raises
+        # decimal.InvalidOperation on `<`/`>` rather than comparing cleanly.
+        weight_float = float(weight_dec)
+        if not math.isfinite(weight_float) or weight_float > _MAX_WEIGHT:
+            raise ValueError(
+                f"weight_invalid: weight for {machine!r} must be finite and <= {_MAX_WEIGHT:g}"
+            )
         if weight_dec < 0:
             raise ValueError(f"weight for {machine!r} must be >= 0")
         if weight_dec > 0:
@@ -2229,15 +2258,14 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
             is_current_member = machine in current_members
             has_existing_share = existing is not None
             # SS5.7: "A share is stale when its machine is not a current
-            # member or no longer exists" -- both a never-seen machine and an
-            # existing share whose machine has since left the work center
-            # need allow_stale to receive a positive weight. A CURRENT member
-            # with no share row yet (SS5.7's "joining" case) needs neither --
-            # that's the ordinary new-member path, handled by
-            # `_reweight_letters` assigning it a fresh letter below.
-            if not has_existing_share and not is_current_member and not allow_stale:
-                raise ValueError(f"stale_machine: {machine!r} is not a current work-center "
-                                 f"member or an existing share")
+            # member or no longer exists" -- an existing share whose machine
+            # has since left the work center needs allow_stale to receive a
+            # positive weight. A brand-new non-member is now rejected
+            # unconditionally above (unknown_machine) before weight is even
+            # considered. A CURRENT member with no share row yet (SS5.7's
+            # "joining" case) needs neither -- that's the ordinary new-member
+            # path, handled by `_reweight_letters` assigning it a fresh letter
+            # below.
             if has_existing_share and not is_current_member and not allow_stale:
                 raise ValueError(f"stale_machine: {machine!r} is no longer a current member "
                                  f"of the work center")

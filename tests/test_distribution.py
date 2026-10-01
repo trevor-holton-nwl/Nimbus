@@ -26,6 +26,8 @@ from backend.distribution.data import (
     PROBLEM_STATUSES,
     classify_bucket_membership,
     status_matches_filter,
+    _clean_weights,
+    _validate_share_payload,
 )
 
 
@@ -339,6 +341,79 @@ class TestApportion:
         assert sum(result.values()) == Decimal(100)
         # L2 (3x weight) should get roughly 3x the quantity
         assert result["L2"] >= result["L1"] * 2
+
+
+class TestCleanWeights:
+    """D21: `_clean_weights` rejects non-finite/over-ceiling weights before
+    the existing `< 0` check (save_workcenter's {machine: weight} map)."""
+
+    @pytest.mark.parametrize("bad_weight", [float("inf"), float("-inf"), float("nan"), 1e999, 1e10])
+    def test_non_finite_or_over_ceiling_raises(self, bad_weight):
+        with pytest.raises(ValueError, match="weight_invalid"):
+            _clean_weights({"M1": bad_weight})
+
+    @pytest.mark.parametrize("good_weight", [0, 1, 1e9])
+    def test_finite_within_ceiling_passes(self, good_weight):
+        cleaned = _clean_weights({"M1": good_weight})
+        assert cleaned["M1"] == float(good_weight)
+
+
+class TestValidateSharePayload:
+    """D21/D22: `_validate_share_payload` weight-ceiling and unknown-machine
+    guards (reweight_shares' {shares:[{machine, weight}]} payload)."""
+
+    @pytest.mark.parametrize("bad_weight", [float("inf"), float("nan"), 1e999, 1e10])
+    def test_weight_non_finite_or_over_ceiling_raises(self, bad_weight):
+        # M2 carries a valid positive weight so "weights_empty" never masks
+        # the weight_invalid check under test on M1.
+        shares = [{"machine": "M1", "weight": bad_weight}, {"machine": "M2", "weight": 1}]
+        with pytest.raises(ValueError, match="weight_invalid"):
+            _validate_share_payload(shares, {}, {"M1", "M2"}, allow_stale=False)
+
+    @pytest.mark.parametrize("good_weight", [0, 1, 1e9])
+    def test_weight_finite_within_ceiling_passes(self, good_weight):
+        shares = [{"machine": "M1", "weight": good_weight}, {"machine": "M2", "weight": 1}]
+        desired = _validate_share_payload(shares, {}, {"M1", "M2"}, allow_stale=False)
+        assert desired["M1"] == Decimal(str(good_weight))
+
+    def test_unknown_machine_weight_zero_without_allow_stale_raises(self):
+        shares = [{"machine": "GHOST", "weight": 0}, {"machine": "M2", "weight": 1}]
+        with pytest.raises(ValueError, match="unknown_machine"):
+            _validate_share_payload(shares, {}, {"M2"}, allow_stale=False)
+
+    def test_unknown_machine_weight_zero_with_allow_stale_still_raises(self):
+        shares = [{"machine": "GHOST", "weight": 0}, {"machine": "M2", "weight": 1}]
+        with pytest.raises(ValueError, match="unknown_machine"):
+            _validate_share_payload(shares, {}, {"M2"}, allow_stale=True)
+
+    def test_unknown_machine_positive_weight_without_allow_stale_raises(self):
+        shares = [{"machine": "GHOST", "weight": 5}]
+        with pytest.raises(ValueError, match="unknown_machine"):
+            _validate_share_payload(shares, {}, {"M2"}, allow_stale=False)
+
+    def test_unknown_machine_positive_weight_with_allow_stale_still_raises(self):
+        """allow_stale waives staleness for a share that once existed -- never
+        for a machine that was never a member and never had a share row."""
+        shares = [{"machine": "GHOST", "weight": 5}]
+        with pytest.raises(ValueError, match="unknown_machine"):
+            _validate_share_payload(shares, {}, {"M2"}, allow_stale=True)
+
+    def test_current_member_with_no_share_row_passes(self):
+        """SS5.7 'joining' case: a current member with no existing share row
+        needs neither allow_stale nor a prior share -- ordinary new-member path."""
+        shares = [{"machine": "M_NEW", "weight": 5}]
+        desired = _validate_share_payload(shares, {}, {"M_NEW"}, allow_stale=False)
+        assert desired["M_NEW"] == Decimal(5)
+
+    def test_stale_existing_share_needs_allow_stale(self):
+        """An existing share whose machine has left the work center is the
+        ONLY case allow_stale waives."""
+        existing_shares = {"M_OLD": {"purged_at": None}}
+        shares = [{"machine": "M_OLD", "weight": 5}]
+        with pytest.raises(ValueError, match="stale_machine"):
+            _validate_share_payload(shares, existing_shares, set(), allow_stale=False)
+        desired = _validate_share_payload(shares, existing_shares, set(), allow_stale=True)
+        assert desired["M_OLD"] == Decimal(5)
 
 
 class TestComputeDerivedStatuses:
