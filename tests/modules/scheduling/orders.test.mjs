@@ -577,6 +577,183 @@ test('Table._getLineOptions returns only the sub-order\'s current machine (PAREN
   assert.deepEqual(Table._getLineOptions({ MACHINE: null, PARENT_ORDER: '9002' }), ['Unknown']);
 });
 
+// --- D12 (Distribution_Audit_10_01.md): Table._onStore keeps pace with
+// removals and newly-added sub-orders instead of only ever updating rows
+// already present in the grid. ------------------------------------------
+
+function _stubTableApiForOnStore(overrides = {}) {
+  return {
+    applyTransaction: () => {},
+    getRowNode: () => undefined,
+    isAnyFilterPresent: () => false,
+    onFilterChanged: () => {},
+    getDisplayedRowCount: () => 0,
+    ...overrides,
+  };
+}
+
+test('Table._onStore task:remove applies a grid remove transaction for the removed task and refreshes the empty state', () => {
+  const priorTableApi = Table._api;
+  const priorRenderEmptyState = Table._renderEmptyState;
+  const prev = { id: 'removed-order-1', MACHINE: 'L9' };
+  const txns = [];
+  let emptyStateCalls = 0;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: txn => txns.push(txn) });
+  Table._renderEmptyState = () => { emptyStateCalls++; };
+  try {
+    Table._onStore({ type: 'task:remove', id: 'removed-order-1', prev, source: 'distribution' });
+    assert.deepEqual(txns, [{ remove: [prev] }]);
+    assert.equal(emptyStateCalls, 1);
+  } finally {
+    Table._api = priorTableApi;
+    Table._renderEmptyState = priorRenderEmptyState;
+  }
+});
+
+test('Table._onStore task:remove with no evt.prev applies no transaction (nothing to remove)', () => {
+  const priorTableApi = Table._api;
+  const priorRenderEmptyState = Table._renderEmptyState;
+  const txns = [];
+  let emptyStateCalls = 0;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: txn => txns.push(txn) });
+  Table._renderEmptyState = () => { emptyStateCalls++; };
+  try {
+    Table._onStore({ type: 'task:remove', id: 'never-existed', prev: null, source: 'distribution' });
+    assert.deepEqual(txns, []);
+    assert.equal(emptyStateCalls, 1);
+  } finally {
+    Table._api = priorTableApi;
+    Table._renderEmptyState = priorRenderEmptyState;
+  }
+});
+
+test('Table._onStore tasks:bulkUpdate adds a row for an id not yet in the grid (a new sub-order) instead of silently dropping it', () => {
+  const priorPlant = Store.selectedPlant;
+  const priorTableApi = Table._api;
+  const priorDropdowns = Table._refreshChipDropdowns;
+  const plant = 'P-BULK-ADD';
+  const id = 'bulk-new-child';
+  Store.setSelectedPlant(plant, 'test');
+  // MACHINE deliberately isn't a line master data knows about — rowData's own
+  // plant test (t.PLANT || Store.getPlantForLine(t.MACHINE)) must fall back to
+  // PLANT so this new child isn't dropped.
+  Store.tasks[id] = { id, PLANT: plant, MACHINE: 'NEW-LINE-NOT-IN-MASTER-DATA' };
+  let dropdownCalls = 0;
+  Table._refreshChipDropdowns = () => { dropdownCalls++; };
+  let txn = null;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: t => { txn = t; }, getRowNode: () => undefined });
+  try {
+    Table._onStore({ type: 'tasks:bulkUpdate', ids: [id], source: 'distribution' });
+    assert.deepEqual(txn.add, [Store.tasks[id]]);
+    assert.deepEqual(txn.update, []);
+    assert.equal(dropdownCalls, 1, '_refreshChipDropdowns must run once a row was added');
+  } finally {
+    Table._api = priorTableApi;
+    Table._refreshChipDropdowns = priorDropdowns;
+    delete Store.tasks[id];
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
+
+test('Table._onStore tasks:bulkUpdate updates (not re-adds) a row already present in the grid, and does not refresh the chip dropdowns', () => {
+  const priorPlant = Store.selectedPlant;
+  const priorTableApi = Table._api;
+  const priorDropdowns = Table._refreshChipDropdowns;
+  const plant = 'P-BULK-UPDATE';
+  const id = 'bulk-existing-row';
+  Store.setSelectedPlant(plant, 'test');
+  Store.tasks[id] = { id, PLANT: plant, MACHINE: 'L1' };
+  let dropdownCalls = 0;
+  Table._refreshChipDropdowns = () => { dropdownCalls++; };
+  let txn = null;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: t => { txn = t; }, getRowNode: () => ({}) });
+  try {
+    Table._onStore({ type: 'tasks:bulkUpdate', ids: [id], source: 'distribution' });
+    assert.deepEqual(txn.update, [Store.tasks[id]]);
+    assert.deepEqual(txn.add, []);
+    assert.equal(dropdownCalls, 0, '_refreshChipDropdowns must not run when nothing was added');
+  } finally {
+    Table._api = priorTableApi;
+    Table._refreshChipDropdowns = priorDropdowns;
+    delete Store.tasks[id];
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
+
+test('Table._onStore tasks:bulkUpdate excludes an id whose task belongs to a different plant', () => {
+  const priorPlant = Store.selectedPlant;
+  const priorTableApi = Table._api;
+  const priorDropdowns = Table._refreshChipDropdowns;
+  const id = 'bulk-other-plant';
+  Store.setSelectedPlant('P-HERE', 'test');
+  Store.tasks[id] = { id, PLANT: 'P-ELSEWHERE', MACHINE: 'SOME-LINE' };
+  let dropdownCalls = 0;
+  Table._refreshChipDropdowns = () => { dropdownCalls++; };
+  let txn = null;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: t => { txn = t; }, getRowNode: () => undefined });
+  try {
+    Table._onStore({ type: 'tasks:bulkUpdate', ids: [id], source: 'distribution' });
+    assert.deepEqual(txn.add, []);
+    assert.deepEqual(txn.update, []);
+    assert.equal(dropdownCalls, 0);
+  } finally {
+    Table._api = priorTableApi;
+    Table._refreshChipDropdowns = priorDropdowns;
+    delete Store.tasks[id];
+    Store.setSelectedPlant(priorPlant, 'test');
+  }
+});
+
+// --- D29 (Distribution_Audit_10_01.md): the Override dialog must honor the
+// same machine lock as the grid/Inspector/Gantt-drag edit paths for a
+// sub-order (PARENT_ORDER set) — see the cross-machine MACHINE edit test
+// above (`Table._onCellChanged rejects a cross-machine MACHINE edit...`). ---
+
+test('Table.applyOverride rejects a cross-machine override on a sub-order (PARENT_ORDER set): shows the distribution-lock toast, does not reschedule', () => {
+  const priorTableApi = Table._api;
+  const priorToastShow = Toast.show;
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorSelectedId = Table._selectedId;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.dist_machine_locked': '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.' } };
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  let applyTransactionCalls = 0;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: () => { applyTransactionCalls++; } });
+
+  const elements = {
+    'ovr-start': { value: '2026-09-21 08:00' },
+    'ovr-line': { value: 'L2' },
+    'ovr-firm': { checked: false },
+  };
+  globalThis.document.getElementById = id => elements[id] || null;
+
+  Store.setTasks([{
+    id: 'dist-child-override', PRODUCTION_ORDER: 'A-9201', ORDER: 'A-9201',
+    PARENT_ORDER: '9201', DISTRIBUTION_LETTER: 'A', MACHINE: 'L1',
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T10:00:00'),
+  }], 'test');
+  Table._selectedId = 'dist-child-override';
+
+  try {
+    Table.applyOverride();
+    assert.equal(Store.tasks['dist-child-override'].MACHINE, 'L1', 'MACHINE must be untouched');
+    assert.equal(applyTransactionCalls, 0, 'no grid transaction must be applied');
+    assert.equal(toastCalls.length, 1, 'the distribution-lock toast must fire exactly once');
+    assert.equal(toastCalls[0].type, 'warn');
+    assert.match(toastCalls[0].msg, /A-9201/);
+    assert.match(toastCalls[0].msg, /L1/);
+  } finally {
+    Table._api = priorTableApi;
+    Toast.show = priorToastShow;
+    globalThis.document.getElementById = priorGetElementById;
+    Table._selectedId = priorSelectedId;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+  }
+});
+
 test('Inspector._render disables the MACHINE select with an explanatory title for a sub-order (PARENT_ORDER set)', () => {
   const priorGetElementById = globalThis.document.getElementById;
   const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
