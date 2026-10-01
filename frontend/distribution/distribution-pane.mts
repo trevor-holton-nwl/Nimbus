@@ -493,8 +493,8 @@ export const DistributionPane = (() => {
   async function _latched(fn: () => Promise<void>): Promise<void> {
     if (_writeBusy) return;
     _writeBusy = true;
-    _setWriteButtonsDisabled(true);
     try {
+      _setWriteButtonsDisabled(true);
       await fn();
     } finally {
       _writeBusy = false;
@@ -879,7 +879,9 @@ export const DistributionPane = (() => {
         _renderDetail();
         return;
       }
-      _dryRun = await resp.json() as DryRunResult;
+      const body = await resp.json() as DryRunResult;
+      if (!stillCurrent()) return; // the detail/selection could have changed during this second await too
+      _dryRun = body;
       _dryRunStatus = 'ready';
       _dryRunSignature = signature;
     } catch (e) {
@@ -1149,13 +1151,24 @@ export const DistributionPane = (() => {
    *  click can't race the snapshot/mutation below. D46: snapshots the
    *  editor's current state before speculatively applying the undo weights,
    *  so a pipeline that never actually writes (a cancelled removal
-   *  confirm, a stale header, a real error — `_runWritePipeline` returning
-   *  `false`) restores exactly what the planner had typed rather than
-   *  leaving the undo's speculative weights stuck in the editor. */
+   *  confirm, a stale header, a real error, or even a THROWN error —
+   *  `_runWritePipeline` returning `false`, or rejecting) restores exactly
+   *  what the planner had typed rather than leaving the undo's speculative
+   *  weights stuck in the editor. The restore is additionally gated on
+   *  `_detail === detail` (the object captured BEFORE the pipeline ran): a
+   *  `stale` outcome inside the pipeline already drove `_handleStaleHeader`
+   *  -> `_openDetail`, which re-syncs `_detail`/the editor weights/the
+   *  dry-run state from the server's fresh values and reassigns `_detail`
+   *  to a brand-new object — restoring the pre-undo snapshot ON TOP of that
+   *  fresh resync would silently resurrect stale weights and price them
+   *  against the NEW `base_version` next preview (a lost-update bug). Same
+   *  reasoning covers a plain order switch mid-Undo (also reassigns
+   *  `_detail`). */
   async function _onUndoClick(): Promise<void> {
     await _latched(async () => {
       if (!_detail || !_lastWrite || Sandbox.active) return;
       if (isUndoDisabled(_lastWrite.baseVersionAfterWrite, _detail.header.base_version)) return;
+      const detail = _detail;
       const snapshot = {
         editorWeights: { ..._editorWeights },
         editorByQty: new Set(_editorByQty),
@@ -1169,8 +1182,14 @@ export const DistributionPane = (() => {
       _editorByQty = new Set();
       _editorQtyDraft = {};
       _invalidateDryRun();
-      const applied = await _runWritePipeline('shares');
-      if (!applied) {
+      let applied = false;
+      try {
+        applied = await _runWritePipeline('shares');
+      } catch (e) {
+        ErrorLog.error('distribution', `Undo failed: ${(e as Error).message}`, {}, { errorCode: 'distribution.undo_failed' });
+        applied = false;
+      }
+      if (!applied && _detail === detail) {
         _editorWeights = snapshot.editorWeights;
         _editorByQty = snapshot.editorByQty;
         _editorQtyDraft = snapshot.editorQtyDraft;
@@ -1735,10 +1754,14 @@ export const DistributionPane = (() => {
       // the header's total order quantity — see quantityToWeight's own doc
       // comment. `'all'` (q >= Q, or every other row already zeroed) maps to
       // the same "only this machine" weight map the dedicated button uses,
-      // rather than a weight this function has no finite value for.
-      if (raw !== undefined && raw.trim() !== '' && Number.isFinite(qty) && qty >= 0 && _detail) {
+      // rather than a weight this function has no finite value for. A
+      // header with no (or a non-positive) `order_quantity` has no usable
+      // Q to divide by at all — `?? 0` used to make every typed quantity
+      // look like `q >= Q` and silently collapse to "only this machine";
+      // skip the conversion entirely instead, leaving the weight unchanged.
+      const totalQty = _detail?.header.order_quantity;
+      if (raw !== undefined && raw.trim() !== '' && Number.isFinite(qty) && qty >= 0 && _detail && totalQty != null && totalQty > 0) {
         const rows = _editorRows();
-        const totalQty = _detail.header.order_quantity ?? 0;
         const othersWeightSum = rows
           .filter(r => r.machine !== machine)
           .reduce((sum, r) => sum + resolvedWeight(r.weight, r.purged), 0);

@@ -254,15 +254,28 @@ test('resolvedWeight — an explicit weight (including 0) is sent as-is when not
 });
 
 test('buildSharesPayload — By-quantity conversion end to end: typed quantities become the wire shares payload', () => {
+  // Simulates a planner typing M1's target quantity first (M2 is still
+  // unset, so its weight is the implicit "even" default of 1), THEN M2's
+  // target quantity (M1's weight is now whatever the first conversion just
+  // produced, not still 1) — the same sequential, one-row-at-a-time update
+  // the editor's blur handler does, not two independent calls against a
+  // static placeholder othersWeightSum for both rows.
+  const totalQty = 1000;
+  const w1 = quantityToWeight(300, totalQty, 1); // M2 still unset => weight 1
+  const w2 = quantityToWeight(700, totalQty, w1); // M1's weight is now w1
   const rows = [
-    { machine: 'M1', weight: quantityToWeight(300, 1000, 1), purged: false },
-    { machine: 'M2', weight: quantityToWeight(700, 1000, 1), purged: false },
+    { machine: 'M1', weight: w1, purged: false },
+    { machine: 'M2', weight: w2, purged: false },
   ];
   const payload = buildSharesPayload(rows);
   assert.equal(payload[0].machine, 'M1');
-  assert.ok(Math.abs(payload[0].weight - (300 / 700)) < 1e-9);
   assert.equal(payload[1].machine, 'M2');
-  assert.ok(Math.abs(payload[1].weight - (700 / 300)) < 1e-9);
+  // 300/1000 and 700/1000 typed in sequence must reproduce the 30/70 split
+  // a planner actually asked for, not the ~15/85 a static othersWeightSum=1
+  // for both rows would have given.
+  const total = payload[0].weight + payload[1].weight;
+  assert.ok(Math.abs(payload[0].weight / total - 0.3) < 1e-9, `expected M1 ≈30%, got ${payload[0].weight / total}`);
+  assert.ok(Math.abs(payload[1].weight / total - 0.7) < 1e-9, `expected M2 ≈70%, got ${payload[1].weight / total}`);
 });
 
 test('buildSharesPayload — Only-this-machine end to end', () => {

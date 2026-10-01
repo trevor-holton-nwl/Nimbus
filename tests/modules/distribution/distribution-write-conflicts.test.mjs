@@ -477,3 +477,25 @@ test('D46 — Undo cancelled at the removal-confirm step leaves _editorWeights u
   } finally { Modal.confirm = originalConfirm; }
   assert.deepEqual(p.editorWeights(), before);
 });
+
+test('D46 fix review #1 — a stale-header preview during Undo keeps the fresh server resync, not the stale pre-undo snapshot', async () => {
+  // fixture(true) keeps the REAL _openDetail wired, so _handleStaleHeader's
+  // own re-fetch (triggered by the preview's 409 stale) actually re-syncs
+  // _detail/_editorWeights from the server, reassigning _detail to a new
+  // object — the scenario the _detail === detail guard exists for.
+  const p = await fixture(true);
+  p.setLastWrite({ previousShares: [{ machine: 'L1', weight: 5, letter: 'A' }], baseVersionAfterWrite: header.base_version });
+  const freshShares = [{ machine: 'L1', weight: 9, letter: 'A', start: null }];
+  const freshDetail = {
+    header: { ...header, base_version: header.base_version + 1 },
+    shares: freshShares, statuses: [], base_version: header.base_version + 1,
+  };
+  const staleResp = { ok: false, status: 409, json: async () => ({ detail: { code: 'stale', message: 'stale' } }) };
+  staleResp.clone = () => staleResp;
+  Util.fetchTraced = async (_url, options) => (options?.method === 'POST' ? staleResp : ok(freshDetail));
+  await p._onUndoClick();
+  // The editor now reflects the FRESH server weights _openDetail resynced,
+  // not the planner's stale pre-undo snapshot (weight 1, from the original
+  // fixture detail) nor the speculative undo weight (5).
+  assert.deepEqual(p.editorWeights(), { L1: 9 });
+});
