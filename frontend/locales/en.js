@@ -1955,6 +1955,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.dist_col_status':                'Status',
   'ui.dist_col_reviewed':              'Reviewed',
   'ui.dist_showing_count':             'Showing {{shown}} of {{total}}',
+  'ui.dist_list_truncated':            'Showing the oldest 5,000 orders — narrow the filters to see the rest.',
   'ui.dist_batch_chip':                'Upload · {{when}} ×',
   'ui.dist_detail_empty':              'Select an order to see its distribution.',
   'ui.dist_detail_window':             'Basic start → finish',

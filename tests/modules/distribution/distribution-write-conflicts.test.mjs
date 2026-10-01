@@ -11,16 +11,22 @@ import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 // Exercise the real private handlers with only DOM rendering and list refresh
 // suppressed. This follows the independent review's hydration reproduction.
+// `realList` (D26/D32, Task F4) keeps the real `_fetchAndRenderList`/
+// `_fetchMoreAndAppend` wired instead of stubbing them to a no-op, so a test
+// can drive the real stale-response guard and paging math directly —
+// `_renderList`/`_renderDetail` stay stubbed regardless, since this harness
+// has no DOM.
 let imports = 0;
-async function pane(realDetail = false) {
+async function pane(realDetail = false, realList = false) {
   const url = new URL('../../../frontend/distribution/distribution-pane.mts', import.meta.url);
   let source = fs.readFileSync(url, 'utf8').replace('return { init, render, setActive };', `
-    _fetchAndRenderList = async () => {};
+    ${realList ? '' : '_fetchAndRenderList = async () => {};'}
     ${realDetail ? '' : '_openDetail = async () => {};'}
     _renderDetail = () => {};
     _renderList = () => {};
     return { _onSaveClick, _onUndoClick, _runWritePipeline, _onBulkReset, _repairRow, _openDetail,
       _markReviewed, _onSaveScheduleClick, _postReview, _runDryRun,
+      _fetchAndRenderList, _fetchMoreAndAppend,
       switchDetail(detail) { _detail = detail; _selectedKey = _rowKey(detail.header); _lastWrite = null; },
       lastWrite() { return _lastWrite; },
       setLastWrite(lw) { _lastWrite = lw; },
@@ -29,6 +35,13 @@ async function pane(realDetail = false) {
       dryRunStatus() { return _dryRunStatus; },
       editorWeights() { return { ..._editorWeights }; },
       addRow(row) { _rows.push(row); },
+      rows() { return _rows.slice(); },
+      total() { return _total; },
+      truncated() { return _truncated; },
+      page() { return _page; },
+      setPage(p) { _page = p; },
+      checkedKeys() { return new Set(_checkedKeys); },
+      checkKey(key) { _checkedKeys.add(key); },
       saveDisabled() {
         const rows = _editorRows();
         return computeSaveButtonState({
@@ -498,4 +511,86 @@ test('D46 fix review #1 — a stale-header preview during Undo keeps the fresh s
   // not the planner's stale pre-undo snapshot (weight 1, from the original
   // fixture detail) nor the speculative undo weight (5).
   assert.deepEqual(p.editorWeights(), { L1: 9 });
+});
+
+/* ===========================================================================
+   D26/D32/D13 — list stale-response guard, "refresh covers every loaded
+   page" paging, and the server-truncated-result notice (Task F4). Exercised
+   against the REAL `_fetchAndRenderList`/`_fetchMoreAndAppend` (pane(_, true)),
+   since these are list-fetch behaviors, not editor-write ones — _renderList/
+   _renderDetail stay stubbed, this harness has no DOM.
+   ========================================================================= */
+
+function listRow(order) {
+  return {
+    header: { plant: 'P', production_order: order, material_number: 'MAT', base_version: 1 },
+    shares: [], statuses: [],
+    children_summary: { count: 0, total_quantity: 0, earliest_start: null },
+  };
+}
+
+test('D26 — a late list response for a plant the user already left never replaces the new plant\'s rows', async () => {
+  const p = await pane(false, true);
+  Store.setSelectedPlant('P1', 'persistence');
+  let releaseP1;
+  Util.fetchTraced = () => new Promise(resolve => { releaseP1 = resolve; });
+  const pendingP1 = p._fetchAndRenderList();
+  await turn();
+  assert.equal(typeof releaseP1, 'function');
+
+  // The user switches to P2 before P1's response arrives, and P2's own (real)
+  // list fetch completes first.
+  Store.setSelectedPlant('P2', 'persistence');
+  Util.fetchTraced = async () => ok({ data: [listRow('900')], meta: { total: 1 } });
+  await p._fetchAndRenderList();
+  assert.equal(p.rows().length, 1);
+  assert.equal(p.rows()[0].header.production_order, '900');
+
+  // P1's late response now resolves — it must be dropped, not overwrite P2's rows.
+  releaseP1(ok({ data: [listRow('100')], meta: { total: 99 } }));
+  await pendingP1;
+  assert.equal(p.rows().length, 1, 'the stale P1 response must not replace P2\'s already-rendered rows');
+  assert.equal(p.rows()[0].header.production_order, '900');
+  assert.equal(p.total(), 1, 'the stale P1 response\'s meta.total must not overwrite P2\'s count either');
+});
+
+test('D32 — a refresh from page 1 re-fetches offset=0 covering both pages already loaded, and resets _page to match', async () => {
+  const p = await pane(false, true);
+  Store.setSelectedPlant('P1', 'persistence');
+  p.setPage(1);
+  let capturedUrl;
+  Util.fetchTraced = async (url) => { capturedUrl = url; return ok({ data: [], meta: { total: 0 } }); };
+  await p._fetchAndRenderList();
+  const params = new URL(capturedUrl, 'http://unit-test').searchParams;
+  assert.equal(params.get('offset'), '0');
+  assert.equal(params.get('limit'), '100');
+  assert.equal(p.page(), 1, '_page is reset to (limit / 50) - 1 = 1, matching the 100 rows actually requested');
+});
+
+test('D13 — meta.truncated on the list response is captured for the pane to surface as a notice', async () => {
+  const p = await pane(false, true);
+  Store.setSelectedPlant('P1', 'persistence');
+  Util.fetchTraced = async () => ok({ data: [listRow('100')], meta: { total: 1, truncated: true } });
+  await p._fetchAndRenderList();
+  assert.equal(p.truncated(), true);
+
+  Util.fetchTraced = async () => ok({ data: [listRow('100')], meta: { total: 1 } });
+  await p._fetchAndRenderList();
+  assert.equal(p.truncated(), false, 'an absent meta.truncated must read as false, not stick from a prior truncated fetch');
+});
+
+test('D26 — a checked (bulk-select) key dropped from the next accepted list fetch is pruned', async () => {
+  const p = await pane(false, true);
+  Store.setSelectedPlant('P1', 'persistence');
+  Util.fetchTraced = async () => ok({ data: [listRow('100'), listRow('200')], meta: { total: 2 } });
+  await p._fetchAndRenderList();
+  p.checkKey('100|MAT');
+  p.checkKey('200|MAT');
+  assert.equal(p.checkedKeys().size, 2);
+
+  // A filter change drops row '200' from the next (replacing) fetch.
+  Util.fetchTraced = async () => ok({ data: [listRow('100')], meta: { total: 1 } });
+  await p._fetchAndRenderList();
+  assert.deepEqual([...p.checkedKeys()], ['100|MAT'],
+    'a checked key whose row is no longer present after an accepted fetch must be pruned');
 });

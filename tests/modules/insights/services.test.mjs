@@ -23,9 +23,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Compute, Alerts, Utilization, scheduleAlertsForPatches } from '../../../frontend/insights/services.mjs';
+import { Compute, Alerts, Utilization, scheduleAlertsForPatches, loadDistributionSummary } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
+import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
@@ -406,4 +408,58 @@ test('scheduleAlertsForPatches still scopes to lines when no moved task carries 
 // bugfix pinned here: respectFirmed must gate ECC-firmed orders exactly like
 // it gates manual firms, while the frozen-horizon fold is unconditional.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// D26 — loadDistributionSummary request-identity guard (Task F4). A response
+// captured under an older plant selection must never clobber a newer one.
+// ---------------------------------------------------------------------------
+
+test('loadDistributionSummary drops a response that lands after the user switched plants', async () => {
+  const priorFetch = Util.fetchTraced;
+  const priorMasterData = Store.masterData;
+  const priorPlant = Store.selectedPlant;
+  const priorSandboxActive = Sandbox.active;
+  try {
+    // Sandbox.active = true blocks the reactive 'plant:selected' subscriber
+    // (services.mts's own `distribution-loader` subscription) from firing a
+    // real, unstubbed fetch while we get into position — it would otherwise
+    // run here with Util.fetchTraced still unstubbed.
+    Sandbox.active = true;
+    Store.setSelectedPlant('DIST-A', 'unit-test');
+    Store.setMasterData({ plants: [], lines: [] }, 'unit-test'); // non-null, so the function under test doesn't early-return
+
+    let releaseA;
+    let fetchCalls = 0;
+    Util.fetchTraced = () => {
+      fetchCalls++;
+      // Call 1 is this test's own explicit call, for plant A (deferred, under
+      // our control below). Call 2+ is the reactive 'plant:selected'
+      // subscriber's OWN loadDistributionSummary(), fired the moment plant B
+      // is selected below — left permanently pending so it cannot write
+      // Store.distributionSummary either, keeping this test's only
+      // observable write the one under test (plant A's late response).
+      if (fetchCalls === 1) return new Promise(resolve => { releaseA = resolve; });
+      return new Promise(() => {});
+    };
+
+    Sandbox.active = false; // re-enable: our explicit call below must take the real guard path
+    const pending = loadDistributionSummary();
+    await new Promise(resolve => setImmediate(resolve)); // let the fetch call happen
+    assert.equal(typeof releaseA, 'function');
+
+    Store.setSelectedPlant('DIST-B', 'unit-test'); // reactively fires a second, permanently-pending load for B
+    assert.equal(Store.distributionSummary, null, 'switching plants resets the summary synchronously');
+
+    releaseA({ ok: true, json: async () => ({ needs_review: 99, changed: 99, problems: 99 }) });
+    await pending;
+    assert.equal(Store.distributionSummary, null,
+      'plant A\'s late response must never overwrite the summary once the user has switched to plant B');
+  } finally {
+    Sandbox.active = true; // block the reactive subscriber again while unwinding, same reason as setup
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Util.fetchTraced = priorFetch;
+    Sandbox.active = priorSandboxActive;
+  }
+});
 

@@ -192,7 +192,10 @@ interface DistListRow {
 
 interface DistListResponse {
   data: DistListRow[];
-  meta: { total: number; scheduled_children: number };
+  // D13: present (true) when the backend's result set itself was capped —
+  // the list is showing only the oldest N matching headers, not all of them.
+  // Absent (or false) means not truncated.
+  meta: { total: number; scheduled_children: number; truncated?: boolean };
 }
 
 /** `GET /distribution/{plant}/{order}/{material}` (`get_header_detail`). */
@@ -421,6 +424,10 @@ function _rowKey(header: Pick<DistHeader, 'production_order' | 'material_number'
    ========================================================================== */
 
 const PAGE_SIZE = 50;
+// D32 — the backend caps `limit` at 200 (backend/distribution/routes.py); a
+// re-fetch-from-the-top never asks for more than that, regardless of how
+// many pages "Load more" had accumulated client-side.
+const DIST_LIST_MAX_LIMIT = 200;
 
 export const DistributionPane = (() => {
   const API = Config.API_BASE;
@@ -433,7 +440,13 @@ export const DistributionPane = (() => {
   let _page = 0;
   let _rows: DistListRow[] = [];
   let _total = 0;
+  let _truncated = false; // D13 — the server's own result set was capped
   let _loading = false;
+  // D26 — request-identity guard: bumped by every `_fetchAndRenderList` call
+  // (a filter/plant/page-reset fetch), and captured (not bumped) by
+  // `_fetchMoreAndAppend` so a "Load more" response also drops itself if a
+  // newer list fetch or a plant switch landed while it was in flight.
+  let _listSeq = 0;
 
   let _workcentersPlant: string | null = null;
   let _workcenters: WorkCenterOption[] = [];
@@ -462,6 +475,13 @@ export const DistributionPane = (() => {
   let _dryRunSignature: string | null = null;
   let _dryRunSeq = 0; // guards a stale async dry-run response from clobbering a newer one
   let _detailSeq = 0;
+  // D47 — set by the qty-input blur handler (via relatedTarget) right before
+  // it calls _renderDetail(); consumed (and cleared back to `undefined`) by
+  // the very next _renderDetail() call. Tri-state: `undefined` means "not in
+  // that call path, fall back to reading document.activeElement"; `null` or
+  // an element means the blur handler's relatedTarget is authoritative (even
+  // `null`, meaning focus is leaving the pane entirely — don't restore).
+  let _pendingDetailFocusTarget: HTMLElement | null | undefined;
   let _lastWrite: {
     previousShares: Array<{ machine: string; letter: string | null; weight: number | null }>;
     baseVersionAfterWrite: number;
@@ -571,6 +591,7 @@ export const DistributionPane = (() => {
     _plant = Store.selectedPlant;
     if (!_plant) { _renderList(); _renderDetail(); return; }
     _loadFilterState();
+    _syncControlsFromFilters();
     void _loadWorkcentersIfNeeded(_plant).then(() => {
       _renderWorkcenterCombobox();
       _page = 0;
@@ -591,15 +612,39 @@ export const DistributionPane = (() => {
     Session.setPref('distributionFilters', toPersistedFilters(_filters));
   }
 
+  /** D36 — push the just-loaded `_filters` (persisted per-user state) into the
+   *  toolbar controls `_ensureShell` built. Without this, a saved filter is
+   *  silently applied to the fetch but the toolbar keeps showing its
+   *  hardcoded defaults ("Needs review" / empty search), misleading the user
+   *  about what's actually filtering the list. `_ensureShell` always runs
+   *  (from `init()`) before `render()`'s first `_loadFilterState()` call, so
+   *  the controls already exist by the time this runs. `fire: false` on the
+   *  date pickers avoids re-triggering their own onChange -> re-fetch loop. */
+  function _syncControlsFromFilters(): void {
+    const search = document.getElementById('dist-search') as HTMLInputElement | null;
+    if (search) search.value = _filters.search || '';
+    const bucketSel = document.getElementById('dist-bucket-select') as HTMLSelectElement | null;
+    if (bucketSel) bucketSel.value = _filters.bucket;
+    _setDatePickerValue('dist-date-from', _filters.from);
+    _setDatePickerValue('dist-date-to', _filters.to);
+  }
+
   async function _loadWorkcentersIfNeeded(plant: string): Promise<void> {
     if (_workcentersPlant === plant) return;
     try {
       const resp = await Util.fetchTraced(`${API}/master-data/sap_workcenter?${new URLSearchParams({ plant, limit: '500' }).toString()}`);
+      // D26: a plant switch while this request was in flight means this
+      // response belongs to a plant the user already left — never commit it
+      // (not even to mark the OLD plant as loaded), so the new plant's own
+      // _loadWorkcentersIfNeeded call still fetches fresh instead of finding
+      // _workcentersPlant already (wrongly) settled.
+      if (Store.selectedPlant !== plant) return;
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json() as { rows: WorkCenterOption[] };
       _workcenters = data.rows || [];
       _workcentersPlant = plant;
     } catch (e) {
+      if (Store.selectedPlant !== plant) return;
       ErrorLog.error('distribution', `Failed to load work centers: ${(e as Error).message}`, { plant }, { errorCode: 'distribution.workcenters_load' });
       _workcenters = [];
       _workcentersPlant = plant;
@@ -613,6 +658,16 @@ export const DistributionPane = (() => {
   async function _fetchAndRenderList(): Promise<void> {
     const plant = Store.selectedPlant;
     if (!plant) return;
+    // D32: re-fetch from the top, covering every page already loaded, rather
+    // than just the current page — so a refresh (filter/plant change, write
+    // completion, debounced Store-event refresh) never drops rows 1..N that
+    // "Load more" had already appended. _page resets to match what was
+    // actually fetched, so a later "Load more" click continues from there.
+    const pagesLoaded = _page + 1;
+    const limit = Math.min(pagesLoaded * PAGE_SIZE, DIST_LIST_MAX_LIMIT);
+    _page = (limit / PAGE_SIZE) - 1;
+    const seq = ++_listSeq;
+    const stillCurrent = (): boolean => seq === _listSeq && Store.selectedPlant === plant;
     _loading = true;
     _renderList();
     try {
@@ -625,20 +680,40 @@ export const DistributionPane = (() => {
       const from = _effectiveFrom(); if (from) params.set('from', from);
       const to = _effectiveTo(); if (to) params.set('to', to);
       if (_batch) params.set('batch', _batch.id);
-      params.set('limit', String(PAGE_SIZE));
-      params.set('offset', String(_page * PAGE_SIZE));
+      params.set('limit', String(limit));
+      params.set('offset', '0');
       const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}?${params.toString()}`);
+      // D26: drop this response if a newer list fetch started, or the
+      // selected plant changed, while it was in flight — never let an older
+      // plant's/filter's rows or count land over a newer selection.
+      if (!stillCurrent()) return;
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json() as DistListResponse;
+      if (!stillCurrent()) return;
       _rows = data.data || [];
       _total = data.meta?.total ?? _rows.length;
+      _truncated = data.meta?.truncated === true;
+      _pruneCheckedKeys();
     } catch (e) {
+      if (!stillCurrent()) return;
       ErrorLog.error('distribution', `Failed to load distribution list: ${(e as Error).message}`, { plant }, { errorCode: 'distribution.list_load' });
       Toast.show(Util.t('toast.dist_load_failed'), 'error');
       _rows = []; _total = 0;
     }
     _loading = false;
     _renderList();
+  }
+
+  /** D26 — drop any checked (bulk-select) key whose row is no longer present
+   *  in `_rows` after an accepted list fetch (a replace OR an append): a
+   *  filter/page change can drop rows the user had checked, and leaving them
+   *  in `_checkedKeys` would silently include them in the next bulk action. */
+  function _pruneCheckedKeys(): void {
+    if (!_checkedKeys.size) return;
+    const present = new Set(_rows.map(r => _rowKey(r.header)));
+    for (const key of _checkedKeys) {
+      if (!present.has(key)) _checkedKeys.delete(key);
+    }
   }
 
   async function _openDetail(key: string): Promise<void> {
@@ -1745,6 +1820,12 @@ export const DistributionPane = (() => {
       if (!(target instanceof HTMLElement) || !target.matches('.dist-qty-input')) return;
       const row = target.closest('tr[data-machine]') as HTMLElement | null;
       if (!row) return;
+      // D47: this handler ends by calling _renderDetail() below, which
+      // replaces the whole panel's innerHTML and would otherwise drop focus
+      // on whatever the blur was moving it TO (e.g. Tab to the next row's
+      // weight input) — relatedTarget names that element while the browser
+      // may have already updated document.activeElement to it.
+      _pendingDetailFocusTarget = (e as FocusEvent).relatedTarget as HTMLElement | null;
       const machine = row.dataset.machine as string;
       const raw = _editorQtyDraft[machine];
       delete _editorQtyDraft[machine];
@@ -1910,6 +1991,15 @@ export const DistributionPane = (() => {
     if (el) el.value = iso || '';
   }
 
+  // D48 (part 2) — one module-level AbortController for _mkCombobox's
+  // document-level click listener. Each call aborts the previous controller
+  // before creating a new one, so a combobox re-rendered onto a fresh
+  // container (e.g. _renderWorkcenterCombobox() after a plant/workcenter
+  // list reload) detaches its OLD document listener instead of leaving it
+  // permanently attached — otherwise every re-render accumulates one more
+  // listener closing over a dead, detached `root`, forever.
+  let _comboboxAbort: AbortController | null = null;
+
   /** Minimal self-contained searchable combobox for the work-center filter —
    *  duplicated (not imported) from frontend/setup/setup-admin.mts's own copy
    *  of the same helper, the established pattern for a small, self-contained
@@ -1921,6 +2011,8 @@ export const DistributionPane = (() => {
    *  helper mirrored in the setup-admin.mts / master-data/admin-ui.mts copies. */
   function _mkCombobox(containerEl: HTMLElement | null, options: string[], opts: { value?: string; placeholder?: string; onSelect?: (value: string) => void } = {}): void {
     if (!containerEl) return;
+    _comboboxAbort?.abort();
+    _comboboxAbort = new AbortController();
     const { value = '', placeholder = '', onSelect } = opts;
     containerEl.innerHTML = `
       <div class="hps-combobox md-bom-combobox">
@@ -1990,7 +2082,7 @@ export const DistributionPane = (() => {
     input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
     clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
     clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); });
+    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboboxAbort.signal });
 
     reflect();
   }
@@ -2076,7 +2168,12 @@ export const DistributionPane = (() => {
     if (footer) {
       const shown = _rows.length;
       const hasMore = (_page + 1) * PAGE_SIZE < _total;
+      // D13 — one line surfacing a server-side truncated result set (the
+      // list is only showing the oldest N matching headers).
+      const truncatedNotice = _truncated
+        ? `<div class="dist-list-truncated-notice">${Util.escapeHtml(Util.t('ui.dist_list_truncated'))}</div>` : '';
       footer.innerHTML = `
+        ${truncatedNotice}
         <span class="dist-list-count">${Util.escapeHtml(Util.t('ui.dist_showing_count', { shown: String(shown), total: String(_total) }))}</span>
         ${hasMore ? `<button type="button" class="btn btn-ghost sm" id="dist-load-more">${Util.escapeHtml(Util.t('btn.load_more'))}</button>` : ''}`;
       document.getElementById('dist-load-more')?.addEventListener('click', () => {
@@ -2092,6 +2189,10 @@ export const DistributionPane = (() => {
     // master-data/admin-ui.mts is the precedent this mirrors).
     const plant = Store.selectedPlant;
     if (!plant) return;
+    // D26 — captured (not bumped): a newer _fetchAndRenderList (or another
+    // plant switch) mid-flight must still drop this "Load more" response.
+    const seq = _listSeq;
+    const stillCurrent = (): boolean => seq === _listSeq && Store.selectedPlant === plant;
     try {
       const params = new URLSearchParams();
       if (_filters.search) params.set('search', _filters.search);
@@ -2105,11 +2206,16 @@ export const DistributionPane = (() => {
       params.set('limit', String(PAGE_SIZE));
       params.set('offset', String(_page * PAGE_SIZE));
       const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}?${params.toString()}`);
+      if (!stillCurrent()) return;
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json() as DistListResponse;
+      if (!stillCurrent()) return;
       _rows = _rows.concat(data.data || []);
       _total = data.meta?.total ?? _rows.length;
+      _truncated = data.meta?.truncated === true;
+      _pruneCheckedKeys();
     } catch (e) {
+      if (!stillCurrent()) return;
       ErrorLog.error('distribution', `Failed to load more: ${(e as Error).message}`);
       Toast.show(Util.t('toast.dist_load_failed'), 'error');
     }
@@ -2190,9 +2296,32 @@ export const DistributionPane = (() => {
     document.getElementById('dist-list-empty')?.remove();
   }
 
+  /** D47 — identify the currently-focused editor input (if any) inside the
+   *  detail pane, as a {machine, cls} pair `_renderDetail` can re-find after
+   *  it replaces the whole panel's innerHTML (which otherwise unconditionally
+   *  drops focus, even mid-keystroke on a debounced dry-run settle). Prefers
+   *  `_pendingDetailFocusTarget` when the qty-blur handler set it (its value
+   *  there is authoritative, including an explicit `null` meaning "blurring
+   *  to outside the pane — don't restore"); otherwise falls back to reading
+   *  `document.activeElement` directly, covering every other call site
+   *  (`_runDryRun`'s settle, the write-busy latch, sandbox toggle, etc.). */
+  function _consumeFocusRestoreTarget(pane: HTMLElement): { machine: string; cls: string } | null {
+    const hintProvided = _pendingDetailFocusTarget !== undefined;
+    const candidate = hintProvided ? _pendingDetailFocusTarget : (document.activeElement as HTMLElement | null);
+    _pendingDetailFocusTarget = undefined;
+    if (!candidate || !pane.contains(candidate)) return null;
+    const row = candidate.closest('tr[data-machine]') as HTMLElement | null;
+    const machine = row?.dataset.machine;
+    if (!machine) return null;
+    if (candidate.matches('.dist-weight-input')) return { machine, cls: 'dist-weight-input' };
+    if (candidate.matches('.dist-qty-input')) return { machine, cls: 'dist-qty-input' };
+    return null;
+  }
+
   function _renderDetail(): void {
     const el = document.getElementById('dist-detail-pane');
     if (!el) return;
+    const focusTarget = _consumeFocusRestoreTarget(el);
     if (!_selectedKey) {
       el.innerHTML = `<div class="dist-detail-empty">${Util.escapeHtml(Util.t('ui.dist_detail_empty'))}</div>`;
       return;
@@ -2228,6 +2357,14 @@ export const DistributionPane = (() => {
     // attribute — same two-step convention _renderList() uses.
     const reviewedToggle = document.getElementById('dist-reviewed-toggle') as HTMLInputElement | null;
     if (reviewedToggle) reviewedToggle.indeterminate = reviewedToggle.dataset.indeterminate === '1';
+    // D47 — restore focus (not caret: these are type="number" inputs) onto
+    // the equivalent freshly-rendered input, if the row/column it belonged to
+    // still exists in the new markup.
+    if (focusTarget) {
+      const row = el.querySelector(`tr[data-machine="${CSS.escape(focusTarget.machine)}"]`);
+      const input = row?.querySelector<HTMLElement>(`.${focusTarget.cls}`);
+      input?.focus();
+    }
   }
 
   /** P2-16 — the shares editor body (`#dist-shares-editor-placeholder`'s

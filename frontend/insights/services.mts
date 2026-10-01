@@ -575,13 +575,23 @@ export function scheduleAlertsForPatches(
   Alerts.scheduleRecomputeLines(lines);
 }
 
+// D26 — request-identity guard for loadDistributionSummary. A later call
+// (another plant switch, or the reactive plant:selected/schedule:hydrated
+// subscriber firing again) bumps this; a response captured under an older
+// sequence number is dropped rather than clobbering a newer/empty summary.
+let _summarySeq = 0;
+
 /** Load the order distribution summary for the currently-selected plant.
  *  Calls GET /distribution/{plant}/summary and sets Store.distributionSummary.
  *  Exported so the Distribution tab (when it exists) can call this after a
  *  distribution write to refresh the counts. Should also be called on
  *  plant:selected and schedule:hydrated events (see the wired subscriber below).
  *  Skips loading if in What-If mode (Sandbox.active) or before any schedule
- *  has been hydrated (Store.masterData is null until Persistence.load completes). */
+ *  has been hydrated (Store.masterData is null until Persistence.load completes).
+ *  D26: drops its own response (never writes Store.distributionSummary) if the
+ *  plant changed, or a newer call started, while the request was in flight —
+ *  otherwise an older plant's response can land after the user has already
+ *  switched, overwriting the new plant's (or the reset-to-null) summary. */
 export async function loadDistributionSummary(): Promise<void> {
   const plant = Store.selectedPlant;
   // Skip loading for: no plant selected, What-If mode active (Sandbox is
@@ -592,11 +602,14 @@ export async function loadDistributionSummary(): Promise<void> {
     Store.setDistributionSummary(null, 'distribution-loader');
     return;
   }
+  const seq = ++_summarySeq;
+  const stillCurrent = (): boolean => seq === _summarySeq && Store.selectedPlant === plant;
   try {
     const response = await Util.fetchTraced(
       `/distribution/${encodeURIComponent(plant)}/summary`,
       { method: 'GET' }
     );
+    if (!stillCurrent()) return;
     if (!response.ok) {
       ErrorLog.error('distribution', `Failed to load distribution summary (${response.status})`,
         { plant }, { errorCode: 'distribution.summary_load' });
@@ -604,8 +617,10 @@ export async function loadDistributionSummary(): Promise<void> {
       return;
     }
     const summary = await response.json();
+    if (!stillCurrent()) return;
     Store.setDistributionSummary(summary, 'distribution-loader');
   } catch (err) {
+    if (!stillCurrent()) return;
     ErrorLog.error('distribution', `Error loading distribution summary: ${String(err)}`,
       { plant }, { errorCode: 'distribution.summary_fetch' });
     Store.setDistributionSummary(null, 'distribution-loader');

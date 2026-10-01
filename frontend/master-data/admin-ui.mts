@@ -2790,8 +2790,18 @@ interface ComboboxOpts {
 // priority-list line-override picker (`_renderOptimization` above) — moved
 // to true module top-level (out of MasterData's IIFE, where it previously
 // lived) so both call sites can reach it as a bare identifier.
+// D48 (part 2) — one module-level AbortController for _mkCombobox's
+// document-level click listener; each call aborts the previous controller
+// before creating a new one, so re-rendering the combobox onto a fresh
+// container detaches its OLD document listener instead of leaking one more
+// forever (mirrored from distribution/distribution-pane.mts's copy — keep
+// in sync with that file and setup/setup-admin.mts's copy).
+let _comboboxAbort: AbortController | null = null;
+
 function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value = '', placeholder = '', onSelect }: ComboboxOpts = {}): void {
   if (!containerEl) return;
+  _comboboxAbort?.abort();
+  _comboboxAbort = new AbortController();
   // Options were previously always DB-backed plant/material names (BOM's two
   // pickers); Task 12 added a third call site whose options list is line
   // names, and the dropdown's own option-row rendering below never escaped
@@ -2866,7 +2876,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
   input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
   clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
   clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-  document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); });
+  document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboboxAbort.signal });
 
   reflect();
 }
