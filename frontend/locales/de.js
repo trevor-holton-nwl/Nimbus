@@ -1808,7 +1808,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.wc_save_failed':               'Speichern fehlgeschlagen: {{msg}}',
 
   // Distribution errors
-  'err.dist_weights_empty':             'Die Standardgewichtungen dieses Arbeitszentrums sind alle null, es gibt also nichts, worauf zurückgesetzt werden könnte.',
+  'err.dist_weights_empty':             'Mindestens eine Maschine benötigt eine positive Gewichtung. Falls dies von Zurücksetzen kam, sind die Standardgewichtungen des Arbeitszentrums alle null.',
   'err.dist_duplicate_machine':         'Eine Maschine kann nur einmal in der Anteilsliste vorkommen.',
   'err.dist_share_purged':              'Dieser Unterauftrag wurde gelöscht — verwenden Sie Zurücksetzen oder laden Sie den übergeordneten Auftrag erneut hoch, um ihn wiederherzustellen.',
   'err.dist_stale_machine':             'Diese Maschine ist kein Mitglied dieses Arbeitszentrums mehr.',
@@ -1860,11 +1860,11 @@ window.__NIMBUS_LOCALES.de = {
   'btn.dist_bulk_mark_reviewed':        '{{n}} als geprüft markieren',
   'btn.dist_bulk_reset':                'Zurücksetzen',
   'ui.dist_list_truncated':             'Zeigt die ältesten 5.000 Aufträge — grenzen Sie die Filter ein, um den Rest zu sehen.',
-  'err.dist_unknown_machine':           'Diese Maschine existiert nicht in diesem Werk.',
-  'err.dist_weight_invalid':            'Geben Sie für jede Maschine eine Gewichtung von null oder mehr ein.',
+  'err.dist_unknown_machine':           'Diese Maschine gehört nicht zu diesem Arbeitszentrum oder zur Aufteilung dieses Auftrags.',
+  'err.dist_weight_invalid':            'Jede Gewichtung muss eine Zahl sein, die nicht größer als 1.000.000.000 ist.',
   'err.dist_base_version_required':     'In dieser Anfrage fehlt die aktuelle Version des Auftrags — neu laden und erneut versuchen.',
   'err.dist_too_many_orders':           'Zu viele Aufträge gleichzeitig ausgewählt — Auswahl verkleinern und erneut versuchen.',
-  'err.dist_reviewed_required':         'Die Verteilung dieses Auftrags muss geprüft werden, bevor diese Aktion fortgesetzt werden kann.',
+  'err.dist_reviewed_required':         'Die Prüfanfrage war unvollständig — laden Sie die Seite neu und versuchen Sie es erneut.',
   'ui.dist_guard_unsaved':              'Speichern oder laden Sie die betroffenen Zeitplanänderungen neu, bevor Sie die Verteilung ändern.',
   'ui.dist_no_selection':               'Kein Werk oder Auftrag ausgewählt.',
   'ui.dist_bulk_status_ok':             'OK',
