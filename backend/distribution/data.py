@@ -2368,7 +2368,9 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
         if weight_dec > 0:
             existing = existing_shares.get(machine)
             if existing is not None and existing.get("purged_at") is not None:
-                raise ValueError(f"share_purged: {machine!r} is purged; only a fresh upload revives it")
+                raise ValueError(
+                    f"share_purged: {machine!r} is purged; an upload of the parent, Reset, "
+                    f"or reapply-defaults revives it")
             is_current_member = machine in current_members
             has_existing_share = existing is not None
             # SS5.7: "A share is stale when its machine is not a current
@@ -2450,14 +2452,15 @@ def _write_reweight_shares(cur, plant: str, order: str, material: str,
     `letters`), guarded so an unchanged letter/weight/purged-state is a
     no-op. `child_id` is still `_update_share_child_ids`'s job, not this
     function's -- but `purged_at` IS this function's job for the one case
-    D02 (owner decision) assigns it: a Reset (`reset_one_header`) or admin
-    reapply-defaults, which shares this core, REVIVES a purged share the
-    moment it receives a positive weight again, clearing the purge mark in
-    the same write that brings the weight back. `reweight_shares` can never
-    reach that branch itself -- `_validate_share_payload`'s `share_purged`
-    check refuses a positive weight on an already-purged share before this
-    runs -- and `_repair_one_header` excludes purged shares from its desired
-    weights entirely, so only Reset/reapply ever revives one."""
+    D02 (owner decision) assigns it: this clears a purged share's
+    `purged_at` the moment it receives a positive weight again, in the same
+    write that brings the weight back. D02: an upload of the parent, Reset,
+    and reapply-defaults revive a purged share; Repair and re-weight never
+    do -- `reweight_shares` can never reach this branch itself
+    (`_validate_share_payload`'s `share_purged` check refuses a positive
+    weight on an already-purged share before this runs), and
+    `_repair_one_header` excludes purged shares from its desired weights
+    entirely."""
     for machine, letter in letters.items():
         weight = desired_weights.get(machine, Decimal(0))
         cur.execute(
@@ -2832,8 +2835,9 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
 
     D02 (owner decision): a purge retires a finished sub-order's share
     (`purged_at` set, `child_id` cleared, letter/weight left alone) rather
-    than deleting it, and Reset is the one path that brings it back --
-    `default_shares` assigns it a fresh positive weight the same as any other
+    than deleting it. An upload of the parent, Reset, and reapply-defaults
+    revive a purged share; Repair and re-weight never do. Here, `default_shares`
+    assigns the purged machine a fresh positive weight the same as any other
     current member, and `_write_reweight_shares` clears `purged_at` the
     moment that positive weight lands. Admin reapply-defaults shares this
     same core, so it revives purged shares identically. Repair

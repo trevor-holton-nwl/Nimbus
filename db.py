@@ -1744,14 +1744,16 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
     dangling, pointing at an id that no longer exists. In the SAME
     transaction, every share that pointed at a just-deleted id is retired
     (`purged_at` stamped, `child_id` cleared) rather than left dangling; its
-    `letter`/`weight` are left alone so an explicit Reset (D02) can revive it
-    later (`backend/distribution/data.py::_write_reweight_shares`). A header
-    left with no remaining live share (every share now weight-0 or purged) is
-    then deleted outright -- shares cascade (schema.sql ~187-188) -- so a
-    later re-upload of the same parent creates a fresh header instead of
-    resurrecting a dead one. `shares_purged`/`headers_deleted` are added to
-    the audit JSON and the return value only when nonzero, keeping the return
-    shape unchanged for every caller that never touches distribution.
+    `letter`/`weight` are left alone -- D02 (owner decision): an upload of the
+    parent, Reset, and reapply-defaults revive a purged share; Repair and
+    re-weight never do (`backend/distribution/data.py::_write_reweight_shares`).
+    A header left with no remaining live share (every share now weight-0 or
+    purged) is then deleted outright -- shares cascade (schema.sql ~187-188)
+    -- so a later re-upload of the same parent creates a fresh header instead
+    of resurrecting a dead one. `shares_purged`/`headers_deleted` are always
+    present in the admin_audit JSON (0 when nothing was touched), but are
+    added to the RETURN value only when nonzero, keeping the return shape
+    unchanged for every caller that never touches distribution.
     """
     where, params = _purge_scope_sql_params(plant, start, end, machines)
     sql = f"DELETE FROM orders WHERE {where} RETURNING id"
@@ -1805,10 +1807,8 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
                     "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
                     "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
                     "deleted": deleted, "order_ids": ids[:200],
-                    "order_id_count": len(ids), "truncated": len(ids) > 200}
-            if shares_purged:
-                audit_details["shares_purged"] = shares_purged
-                audit_details["headers_deleted"] = headers_deleted
+                    "order_id_count": len(ids), "truncated": len(ids) > 200,
+                    "shares_purged": shares_purged, "headers_deleted": headers_deleted}
             cur.execute(
                 "INSERT INTO admin_audit (table_name, action, details, user_email)"
                 " VALUES ('orders', 'purge_by_date_range', %s, %s)",

@@ -2551,6 +2551,16 @@ class TestPurgeRetiresShareAndResetRevives(_ReweightFixtureBase):
         assert result["shares_purged"] == 1
         assert result.get("headers_deleted", 0) == 0
 
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT details FROM admin_audit
+                    WHERE table_name = 'orders' AND action = 'purge_by_date_range'
+                    ORDER BY id DESC LIMIT 1""",
+            )
+            audit_details = cur.fetchone()[0]
+        assert audit_details["shares_purged"] == 1
+        assert audit_details["headers_deleted"] == 0
+
         shares = {s["machine"]: s for s in _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)}
         assert shares[self.L1]["purged_at"] is not None
         assert shares[self.L1]["child_id"] is None
@@ -2585,6 +2595,13 @@ class TestPurgeRetiresShareAndResetRevives(_ReweightFixtureBase):
         children_after_reset = {c["machine"]: c for c in _snapshot_children(pg, self.PLANT, self.ORD)}
         assert self.L1 in children_after_reset, "Reset must recreate L1's child"
         assert self.L2 in children_after_reset
+
+        # D02 pinned: the fixture's 60/40 default split lands exactly, and
+        # B (never purged) keeps its original child -- it is not recreated.
+        assert float(children_after_reset[self.L1]["order_quantity"]) == 60
+        assert float(children_after_reset[self.L2]["order_quantity"]) == 40
+        assert children_after_reset[self.L2]["id"] == l2_child["id"], \
+            "L2's child must be kept, not recreated, by L1's revival"
 
     def test_fully_purged_header_is_deleted_and_reupload_creates_fresh_header(self, pg):
         children = _snapshot_children(pg, self.PLANT, self.ORD)
