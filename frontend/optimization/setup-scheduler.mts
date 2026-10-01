@@ -6372,13 +6372,19 @@ function checkDistributionSeparation(
       if (policy?.max_separation) { maxSeparation = policy.max_separation; break; }
     }
     if (!maxSeparation || maxSeparation === 'none') continue;
-    const buckets = group.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.start_date, maxSeparation));
+    // D50: mirror nimbus-compute-core.js's computeAlerts — an undated sibling
+    // (no start_date yet, e.g. still mid-placement) is not yet part of the
+    // "do these siblings start together" question and must not be bucketed at
+    // all, let alone bucketed as its own mismatching group of one.
+    const dated = group.filter(task => task.start_date);
+    if (dated.length < 2) continue;
+    const buckets = dated.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.start_date, maxSeparation));
     if (buckets.some(bucket => bucket !== buckets[0])) {
       findings.push({
         code: 'distribution_separation',
         severity: 'warning',
-        parents: group.map(taskId),
-        message: `Sub-orders of ${group[0].PARENT_ORDER} start in different ${maxSeparation} buckets.`,
+        parents: dated.map(taskId),
+        message: `Sub-orders of ${dated[0].PARENT_ORDER} start in different ${maxSeparation} buckets.`,
       });
     }
   }
@@ -6942,3 +6948,4 @@ function coversInterval(free: readonly PlacementInterval[], interval: PlacementI
 }
 
 export const fragmentObjectiveFactsForTest = fragmentObjectiveFacts;
+export const checkDistributionSeparationForTest = checkDistributionSeparation;
