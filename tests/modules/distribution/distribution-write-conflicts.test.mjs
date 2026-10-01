@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
-import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
-import { weightsSignature } from '../../../frontend/distribution/shares-editor.mjs';
+import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
+import { dryRunSignature } from '../../../frontend/distribution/shares-editor.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
@@ -19,12 +19,24 @@ async function pane(realDetail = false) {
     ${realDetail ? '' : '_openDetail = async () => {};'}
     _renderDetail = () => {};
     _renderList = () => {};
-    return { _onSaveClick, _runWritePipeline, _onBulkReset, _repairRow, _openDetail,
-      _markReviewed, _onSaveScheduleClick, _postReview,
+    return { _onSaveClick, _onUndoClick, _runWritePipeline, _onBulkReset, _repairRow, _openDetail,
+      _markReviewed, _onSaveScheduleClick, _postReview, _runDryRun,
       switchDetail(detail) { _detail = detail; _selectedKey = _rowKey(detail.header); _lastWrite = null; },
       lastWrite() { return _lastWrite; },
+      setLastWrite(lw) { _lastWrite = lw; },
       detail() { return _detail; },
       detailLoading() { return _detailLoading; },
+      dryRunStatus() { return _dryRunStatus; },
+      editorWeights() { return { ..._editorWeights }; },
+      addRow(row) { _rows.push(row); },
+      saveDisabled() {
+        const rows = _editorRows();
+        return computeSaveButtonState({
+          dryRunStatus: _dryRunStatus, dryRunSignature: _dryRunSignature,
+          currentSignature: dryRunSignature(_detail.header, rows),
+          removedScheduledCount: _dryRun?.removed_scheduled?.length || 0, whatIfBlocked: Sandbox.active,
+        }).disabled;
+      },
       setup(detail, signature) {
         _detail = detail; _selectedKey = _rowKey(detail.header);
         _rows = [detail]; _checkedKeys.clear(); _checkedKeys.add(_rowKey(detail.header));
@@ -67,7 +79,7 @@ async function fixture(realDetail = false) {
   Util.debounce = () => () => {};
   let p;
   try { p = await pane(realDetail); } finally { Util.debounce = debounce; }
-  p.setup(detail, weightsSignature([{ machine: 'L1', letter: 'A', weight: 1, purged: false, stale: false, currentStart: null }]));
+  p.setup(detail, dryRunSignature(header, [{ machine: 'L1', letter: 'A', weight: 1, purged: false, stale: false, currentStart: null }]));
   return p;
 }
 
@@ -405,4 +417,63 @@ test('_markReviewed shows the generic failure toast (never success) on an HTTP e
   await p._markReviewed(header);
   assert.ok(!toasts.some(t => t.msg === 'toast.dist_reviewed'));
   assert.ok(toasts.some(t => t.msg === 'toast.dist_review_failed'));
+});
+
+/* ===========================================================================
+   D09/D44/D46 — dry-run preview identity, write-busy latch, Undo restore
+   (Task F3).
+   ========================================================================= */
+
+test('D09 — switching detail while a dry run is in flight invalidates it, so a late response cannot mark Save ready for the new detail', async () => {
+  const p = await fixture(true);
+  const headerB = { ...header, production_order: '200' };
+  const detailB = { header: headerB, shares: [{ machine: 'L1', weight: 1, letter: 'A' }], statuses: [], base_version: headerB.base_version };
+  p.addRow({ header: headerB, shares: detailB.shares, statuses: [], children_summary: { count: 0, total_quantity: 0, earliest_start: null } });
+  let releaseA;
+  Util.fetchTraced = async (_url, options) => {
+    if (options?.method === 'POST') return new Promise(resolve => { releaseA = resolve; });
+    return ok(detailB);
+  };
+  const pendingA = p._runDryRun();
+  await turn();
+  assert.equal(typeof releaseA, 'function');
+  // Switch the selection to order B through the REAL _openDetail (fixture(true))
+  // before A's dry run resolves.
+  await p._openDetail('200|MAT');
+  releaseA(ok({ plan: [], removed_scheduled: [], base_version: header.base_version }));
+  await pendingA;
+  assert.notEqual(p.dryRunStatus(), 'ready');
+  assert.equal(p.saveDisabled(), true);
+});
+
+test('D44 — two quick Save clicks produce exactly one write request', async () => {
+  const p = await fixture();
+  let posts = 0;
+  Util.fetchTraced = async (_url, options) => {
+    if (options?.method === 'POST') posts++;
+    return ok(result);
+  };
+  const first = p._onSaveClick();
+  const second = p._onSaveClick();
+  await Promise.all([first, second]);
+  assert.equal(posts, 1);
+});
+
+test('D46 — Undo cancelled at the removal-confirm step leaves _editorWeights unchanged', async () => {
+  const p = await fixture();
+  p.setLastWrite({ previousShares: [{ machine: 'L1', weight: 5, letter: 'A' }], baseVersionAfterWrite: header.base_version });
+  const before = p.editorWeights();
+  Util.fetchTraced = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    if (payload.dry_run) {
+      return ok({ removed_scheduled: [{ id: 'x', production_order: header.production_order, machine: 'L1', scheduled_start: null, frozen: false }] });
+    }
+    throw new Error('must not reach the real write once the removal confirm is cancelled');
+  };
+  const originalConfirm = Modal.confirm;
+  Modal.confirm = async () => false;
+  try {
+    await p._onUndoClick();
+  } finally { Modal.confirm = originalConfirm; }
+  assert.deepEqual(p.editorWeights(), before);
 });

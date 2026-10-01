@@ -71,9 +71,9 @@ import { Engine } from '../optimization/engine.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import type { NimbusTask } from '../platform/types.mjs';
 import {
-  onlyThisMachine, evenWeights, quantityToWeight, buildSharesPayload, weightsSignature,
-  mergeRowsWithDryRun, computeTotals, computeSaveButtonState, needsRemovalConfirm,
-  sortRemovedFrozenFirst, isUndoDisabled, previousSharesToWeightMap, distErrorLocaleKey,
+  onlyThisMachine, evenWeights, quantityToWeight, resolvedWeight, buildSharesPayload,
+  dryRunSignature, mergeRowsWithDryRun, computeTotals, computeSaveButtonState, needsRemovalConfirm,
+  sortRemovedFrozenFirst, isUndoDisabled, undoWeightMap, distErrorLocaleKey,
 } from './shares-editor.mjs';
 import type {
   WeightMap, DryRunResult, DryRunStatus, EditorRowBase, EditorRowView, RemovedScheduledEntry,
@@ -444,6 +444,11 @@ export const DistributionPane = (() => {
 
   const _checkedKeys = new Set<string>(); // bulk-select column, wired below (P2-16)
   let _bulkBusy = false;
+  // D44: single write-busy latch shared by Save/Reset/Undo/Repair (the bulk
+  // handlers have their own _bulkBusy above, but also check this one) — a
+  // double-click, or any overlapping write trigger, must produce exactly ONE
+  // request rather than two in flight.
+  let _writeBusy = false;
 
   // --- P2-16 shares-editor state, scoped to whichever header is currently
   // open in the detail panel; reset on a genuine selection change, but
@@ -463,6 +468,47 @@ export const DistributionPane = (() => {
   } | null = null;
   let _banner: { count: number; firmedIds: string[]; undo: () => void } | null = null;
   type DistWriteKind = 'shares' | 'reset';
+
+  /** D09 — invalidate the editor's current dry-run result (and the
+   *  signature it was computed for), and bump `_dryRunSeq` so a dry-run
+   *  request already in flight for a now-stale header/inputs combination
+   *  cannot land and mark Save ready once it eventually resolves (see
+   *  `_runDryRun`'s own `stillCurrent()` check). Centralizes what used to be
+   *  six separate inline `_dryRunStatus = 'idle'; _dryRun = null;
+   *  _dryRunSignature = null;` resets scattered across every place that
+   *  changes the editor's inputs or the selected header. */
+  function _invalidateDryRun(): void {
+    _dryRunSeq++;
+    _dryRunStatus = 'idle';
+    _dryRun = null;
+    _dryRunSignature = null;
+  }
+
+  /** D44 — runs `fn` under the single write-busy latch: sets `_writeBusy`
+   *  (and synchronously disables the Save/Reset/Undo buttons, so a second
+   *  click arriving before the first microtask even runs still sees them
+   *  disabled) BEFORE `fn` starts, and always clears the latch + re-renders
+   *  the detail panel in `finally`, regardless of how `fn` finishes. A
+   *  second call while one is already in flight is a silent no-op. */
+  async function _latched(fn: () => Promise<void>): Promise<void> {
+    if (_writeBusy) return;
+    _writeBusy = true;
+    _setWriteButtonsDisabled(true);
+    try {
+      await fn();
+    } finally {
+      _writeBusy = false;
+      _renderDetail();
+    }
+  }
+
+  function _setWriteButtonsDisabled(disabled: boolean): void {
+    if (typeof document === 'undefined') return;
+    for (const id of ['dist-save-btn', 'dist-reset-btn', 'dist-undo-btn']) {
+      const btn = document.getElementById(id) as HTMLButtonElement | null;
+      if (btn) btn.disabled = disabled;
+    }
+  }
 
   function _todayIso(): string { return Util.dayKey(new Date()); }
   function _horizonEndIso(): string { return Store.visibilityHorizonEnd ? Util.dayKey(Store.visibilityHorizonEnd) : ''; }
@@ -488,6 +534,7 @@ export const DistributionPane = (() => {
       }
       if (evt.type === 'plant:selected') {
         _detailSeq++;
+        _invalidateDryRun();
         _detailLoading = false;
         _selectedKey = null; _detail = null; _batch = null;
         _workcentersPlant = null; // force a re-fetch for the new plant
@@ -595,6 +642,7 @@ export const DistributionPane = (() => {
   }
 
   async function _openDetail(key: string): Promise<void> {
+    _invalidateDryRun();
     const seq = ++_detailSeq;
     const plant = Store.selectedPlant;
     const tasks = Store.tasks;
@@ -615,7 +663,7 @@ export const DistributionPane = (() => {
       if (!current()) return;
       _detail = detail;
       if (isNewSelection) _resetEditorForNewHeader(); else _resyncEditorWeightsFromDetail();
-      _dryRunStatus = 'idle'; _dryRun = null; _dryRunSignature = null;
+      _invalidateDryRun();
       _scheduleDryRun();
     } catch (e) {
       if (!current()) return;
@@ -802,8 +850,15 @@ export const DistributionPane = (() => {
     const rows = _editorRows();
     if (!rows.length) return;
     const payload = buildSharesPayload(rows);
-    const signature = weightsSignature(rows);
+    const signature = dryRunSignature(header, rows);
     const seq = ++_dryRunSeq;
+    // D09: a dry run is priced for a specific header OBJECT as well as a
+    // specific `_dryRunSeq` — `_invalidateDryRun()` bumps the seq on every
+    // selection change, but comparing `_detail?.header` too is a second,
+    // independent guard against a late response landing for whatever header
+    // happens to be open once it resolves (every detail refresh assigns a
+    // brand-new header object, even a same-order refresh).
+    const stillCurrent = (): boolean => seq === _dryRunSeq && _detail?.header === header;
     _dryRunStatus = 'pending';
     _renderSaveState();
     try {
@@ -815,7 +870,7 @@ export const DistributionPane = (() => {
           body: JSON.stringify({ shares: payload, base_version: header.base_version, dry_run: true }),
         },
       );
-      if (seq !== _dryRunSeq) return; // superseded by a later keystroke's dry run
+      if (!stillCurrent()) return; // superseded by a later keystroke's dry run, or the detail changed under us
       if (!resp.ok) {
         const err = await _parseDistError(resp);
         if (err.code === 'stale') { await _handleStaleHeader(); return; }
@@ -828,7 +883,7 @@ export const DistributionPane = (() => {
       _dryRunStatus = 'ready';
       _dryRunSignature = signature;
     } catch (e) {
-      if (seq !== _dryRunSeq) return;
+      if (!stillCurrent()) return;
       _dryRunStatus = 'error';
       ErrorLog.error('distribution', `Dry run failed: ${(e as Error).message}`, {}, { errorCode: 'distribution.dry_run_failed' });
     }
@@ -986,107 +1041,145 @@ export const DistributionPane = (() => {
    *  appeared between this pane's dry run and the real call — re-shown with
    *  FRESH data, per §6). Used by Undo and Reset; Save (below) skips the
    *  redundant first preview fetch since its own debounced `_dryRun` is
-   *  already fresh for the current inputs. */
-  async function _runWritePipeline(kind: DistWriteKind): Promise<void> {
-    if (!_detail || Sandbox.active) return;
+   *  already fresh for the current inputs. D46: returns whether a real write
+   *  actually landed (`_finishWrite` ran) so Undo can tell "nothing happened"
+   *  (cancelled confirm, stale header, a real error) apart from success and
+   *  restore its pre-undo editor state in the former case; `_onResetClick`
+   *  and the test harness ignore the return value, which is safe — neither
+   *  needs to roll anything back on a no-op. */
+  async function _runWritePipeline(kind: DistWriteKind): Promise<boolean> {
+    if (!_detail || Sandbox.active) return false;
     const detail = _detail;
     const preview = await _postDistWrite(kind, true, false);
-    if (preview.kind === 'stale') { await _handleStaleHeader(); return; }
-    if (preview.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return; }
+    if (preview.kind === 'stale') { await _handleStaleHeader(); return false; }
+    if (preview.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return false; }
     if (preview.kind === 'error') {
       Toast.show(_distErrorMessage(preview.code ?? null, preview.message || Util.t('toast.dist_shares_save_failed')), 'error');
-      return;
+      return false;
     }
     const removed = preview.dryRun?.removed_scheduled || [];
     let confirmRemoveScheduled = false;
     if (needsRemovalConfirm(removed)) {
       const ok = await _confirmRemoval(removed);
-      if (!ok) return;
+      if (!ok) return false;
       confirmRemoveScheduled = true;
     }
     // Re-check Sandbox.active here too (D05) — What-If can flip on while this
     // preview request is in flight, between the entry guard above and this
     // point; without this, a sandbox entered mid-preview would let the real
     // (non-dry-run) write through.
-    if (_detail !== detail || !preview.guard || !_writeViewIsCurrent(preview.guard) || Sandbox.active) return;
+    if (_detail !== detail || !preview.guard || !_writeViewIsCurrent(preview.guard) || Sandbox.active) return false;
     let real = await _postDistWrite(kind, false, confirmRemoveScheduled);
-    if (real.kind === 'stale') { await _handleStaleHeader(); return; }
+    if (real.kind === 'stale') { await _handleStaleHeader(); return false; }
     if (real.kind === 'children_scheduled') {
       const ok = await _confirmRemoval(real.children || []);
-      if (!ok) return;
-      if (_detail !== detail || !_writeViewIsCurrent(preview.guard) || Sandbox.active) return;
+      if (!ok) return false;
+      if (_detail !== detail || !_writeViewIsCurrent(preview.guard) || Sandbox.active) return false;
       real = await _postDistWrite(kind, false, true);
     }
-    if (real.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return; }
+    if (real.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return false; }
     if (real.kind === 'error' || real.kind === 'children_scheduled') {
       Toast.show(_distErrorMessage(real.code ?? null, real.message || Util.t('toast.dist_shares_save_failed')), 'error');
-      return;
+      return false;
     }
-    if (real.write && real.guard) await _finishWrite(real.write, real.guard);
+    if (real.write && real.guard) { await _finishWrite(real.write, real.guard); return true; }
+    return false;
   }
 
   /** Save (§6 "Save flow"). Reuses the CURRENT settled `_dryRun` (the button
    *  is disabled until one matches the current inputs, so there is always a
-   *  fresh one here) rather than re-fetching a redundant preview. */
+   *  fresh one here) rather than re-fetching a redundant preview. D44:
+   *  wrapped in `_latched` so a second click arriving before this one
+   *  finishes produces no second request. */
   async function _onSaveClick(): Promise<void> {
-    if (!_detail || Sandbox.active) return;
-    const detail = _detail;
-    const plant = Store.selectedPlant;
-    if (!plant) return;
-    const initialGuard = _captureWriteGuard(plant, [detail.header]);
-    if (!initialGuard) return;
-    const rows = _editorRows();
-    const sig = weightsSignature(rows);
-    const state = computeSaveButtonState({
-      dryRunStatus: _dryRunStatus, dryRunSignature: _dryRunSignature, currentSignature: sig,
-      removedScheduledCount: _dryRun?.removed_scheduled?.length || 0, whatIfBlocked: Sandbox.active,
-    });
-    if (state.disabled) return;
-    const removed = _dryRun?.removed_scheduled || [];
-    let confirmRemoveScheduled = false;
-    if (needsRemovalConfirm(removed)) {
-      const ok = await _confirmRemoval(removed);
-      if (!ok) return;
-      confirmRemoveScheduled = true;
-    }
-    // Same mid-flight re-check as _runWritePipeline (D05): What-If can flip on
-    // during the Modal.confirm await above (or even synchronously between the
-    // entry check and here), and Save must not proceed once it has.
-    if (_detail !== detail || !_writeViewIsCurrent(initialGuard) || Sandbox.active) return;
-    let real = await _postDistWrite('shares', false, confirmRemoveScheduled);
-    if (real.kind === 'stale') { await _handleStaleHeader(); return; }
-    if (real.kind === 'children_scheduled') {
-      const ok = await _confirmRemoval(real.children || []);
-      if (!ok) return;
+    await _latched(async () => {
+      if (!_detail || Sandbox.active) return;
+      const detail = _detail;
+      const plant = Store.selectedPlant;
+      if (!plant) return;
+      const initialGuard = _captureWriteGuard(plant, [detail.header]);
+      if (!initialGuard) return;
+      const rows = _editorRows();
+      const sig = dryRunSignature(detail.header, rows);
+      const state = computeSaveButtonState({
+        dryRunStatus: _dryRunStatus, dryRunSignature: _dryRunSignature, currentSignature: sig,
+        removedScheduledCount: _dryRun?.removed_scheduled?.length || 0, whatIfBlocked: Sandbox.active,
+      });
+      if (state.disabled) return;
+      const removed = _dryRun?.removed_scheduled || [];
+      let confirmRemoveScheduled = false;
+      if (needsRemovalConfirm(removed)) {
+        const ok = await _confirmRemoval(removed);
+        if (!ok) return;
+        confirmRemoveScheduled = true;
+      }
+      // Same mid-flight re-check as _runWritePipeline (D05): What-If can flip on
+      // during the Modal.confirm await above (or even synchronously between the
+      // entry check and here), and Save must not proceed once it has.
       if (_detail !== detail || !_writeViewIsCurrent(initialGuard) || Sandbox.active) return;
-      real = await _postDistWrite('shares', false, true);
-    }
-    if (real.kind === 'error' || real.kind === 'not_found' || real.kind === 'children_scheduled') {
-      Toast.show(_distErrorMessage(real.code ?? null, real.message || Util.t('toast.dist_shares_save_failed')), 'error');
-      return;
-    }
-    if (real.write && real.guard) await _finishWrite(real.write, real.guard);
+      let real = await _postDistWrite('shares', false, confirmRemoveScheduled);
+      if (real.kind === 'stale') { await _handleStaleHeader(); return; }
+      if (real.kind === 'children_scheduled') {
+        const ok = await _confirmRemoval(real.children || []);
+        if (!ok) return;
+        if (_detail !== detail || !_writeViewIsCurrent(initialGuard) || Sandbox.active) return;
+        real = await _postDistWrite('shares', false, true);
+      }
+      if (real.kind === 'error' || real.kind === 'not_found' || real.kind === 'children_scheduled') {
+        Toast.show(_distErrorMessage(real.code ?? null, real.message || Util.t('toast.dist_shares_save_failed')), 'error');
+        return;
+      }
+      if (real.write && real.guard) await _finishWrite(real.write, real.guard);
+    });
   }
 
   /** Reset to work-center defaults (§6) — same dry-run-preview-then-confirm
-   *  pattern as Save, driven through the SAME `_runWritePipeline`. */
+   *  pattern as Save, driven through the SAME `_runWritePipeline`. D44:
+   *  wrapped in `_latched`. */
   async function _onResetClick(): Promise<void> {
-    await _runWritePipeline('reset');
+    await _latched(async () => { await _runWritePipeline('reset'); });
   }
 
-  /** Undo last change (§6) — re-posts `_lastWrite.previousShares` as a new
-   *  `shares` write, through the SAME dry-run/confirm pipeline ("same
-   *  guards as a normal save"). Disabled state itself is computed by
-   *  `isUndoDisabled` at render time; this is the defensive re-check for a
-   *  stale click. */
+  /** Undo last change (§6) — re-posts a weight map derived from
+   *  `_lastWrite.previousShares` as a new `shares` write, through the SAME
+   *  dry-run/confirm pipeline ("same guards as a normal save"). Disabled
+   *  state itself is computed by `isUndoDisabled` at render time; this is
+   *  the defensive re-check for a stale click. D44: wrapped in `_latched`
+   *  BEFORE this function touches any editor state, so an overlapping
+   *  click can't race the snapshot/mutation below. D46: snapshots the
+   *  editor's current state before speculatively applying the undo weights,
+   *  so a pipeline that never actually writes (a cancelled removal
+   *  confirm, a stale header, a real error — `_runWritePipeline` returning
+   *  `false`) restores exactly what the planner had typed rather than
+   *  leaving the undo's speculative weights stuck in the editor. */
   async function _onUndoClick(): Promise<void> {
-    if (!_detail || !_lastWrite || Sandbox.active) return;
-    if (isUndoDisabled(_lastWrite.baseVersionAfterWrite, _detail.header.base_version)) return;
-    _editorWeights = previousSharesToWeightMap(_lastWrite.previousShares);
-    _editorByQty = new Set();
-    _editorQtyDraft = {};
-    _dryRunStatus = 'idle'; _dryRun = null; _dryRunSignature = null;
-    await _runWritePipeline('shares');
+    await _latched(async () => {
+      if (!_detail || !_lastWrite || Sandbox.active) return;
+      if (isUndoDisabled(_lastWrite.baseVersionAfterWrite, _detail.header.base_version)) return;
+      const snapshot = {
+        editorWeights: { ..._editorWeights },
+        editorByQty: new Set(_editorByQty),
+        editorQtyDraft: { ..._editorQtyDraft },
+        dryRun: _dryRun,
+        dryRunStatus: _dryRunStatus,
+        dryRunSignature: _dryRunSignature,
+      };
+      const rows = _editorRows();
+      _editorWeights = undoWeightMap(_lastWrite.previousShares, rows.map(r => r.machine));
+      _editorByQty = new Set();
+      _editorQtyDraft = {};
+      _invalidateDryRun();
+      const applied = await _runWritePipeline('shares');
+      if (!applied) {
+        _editorWeights = snapshot.editorWeights;
+        _editorByQty = snapshot.editorByQty;
+        _editorQtyDraft = snapshot.editorQtyDraft;
+        _dryRun = snapshot.dryRun;
+        _dryRunStatus = snapshot.dryRunStatus;
+        _dryRunSignature = snapshot.dryRunSignature;
+        _scheduleDryRun();
+      }
+    });
   }
 
   /** Detail panel's own Reviewed checkbox/indeterminate re-stamp (§6) — same
@@ -1312,7 +1405,7 @@ export const DistributionPane = (() => {
   }
 
   async function _onBulkReview(): Promise<void> {
-    if (_bulkBusy || Sandbox.active) return;
+    if (_bulkBusy || _writeBusy || Sandbox.active) return;
     const orders = _checkedOrders();
     if (!orders.length) return;
     const plant = Store.selectedPlant;
@@ -1344,7 +1437,7 @@ export const DistributionPane = (() => {
   }
 
   async function _onBulkReset(): Promise<void> {
-    if (_bulkBusy || Sandbox.active) return;
+    if (_bulkBusy || _writeBusy || Sandbox.active) return;
     const orders = _checkedOrders();
     if (!orders.length) return;
     const plant = Store.selectedPlant;
@@ -1619,7 +1712,7 @@ export const DistributionPane = (() => {
       if (target.matches('.dist-weight-input')) {
         const raw = (target as HTMLInputElement).value.trim();
         _editorWeights[machine] = raw === '' ? null : Number(raw);
-        _dryRunStatus = 'idle';
+        _invalidateDryRun();
         _scheduleDryRun();
         _renderSaveState();
       } else if (target.matches('.dist-qty-input')) {
@@ -1637,10 +1730,24 @@ export const DistributionPane = (() => {
       const raw = _editorQtyDraft[machine];
       delete _editorQtyDraft[machine];
       const qty = raw === undefined ? NaN : Number(raw);
-      if (raw !== undefined && raw.trim() !== '' && Number.isFinite(qty) && qty >= 0) {
-        _editorWeights[machine] = quantityToWeight(qty);
+      // D35: a typed target quantity converts to a RELATIVE weight against
+      // the OTHER rows' current (already-resolved) weight total, scaled by
+      // the header's total order quantity — see quantityToWeight's own doc
+      // comment. `'all'` (q >= Q, or every other row already zeroed) maps to
+      // the same "only this machine" weight map the dedicated button uses,
+      // rather than a weight this function has no finite value for.
+      if (raw !== undefined && raw.trim() !== '' && Number.isFinite(qty) && qty >= 0 && _detail) {
+        const rows = _editorRows();
+        const totalQty = _detail.header.order_quantity ?? 0;
+        const othersWeightSum = rows
+          .filter(r => r.machine !== machine)
+          .reduce((sum, r) => sum + resolvedWeight(r.weight, r.purged), 0);
+        const result = quantityToWeight(qty, totalQty, othersWeightSum);
+        _editorWeights = result === 'all'
+          ? onlyThisMachine(rows.map(r => r.machine), machine)
+          : { ..._editorWeights, [machine]: result };
       }
-      _dryRunStatus = 'idle';
+      _invalidateDryRun();
       _scheduleDryRun();
       _renderDetail();
     }, true);
@@ -1665,7 +1772,7 @@ export const DistributionPane = (() => {
         const rows = _editorRows();
         _editorWeights = evenWeights(rows.map(r => r.machine));
         _editorByQty.clear();
-        _dryRunStatus = 'idle';
+        _invalidateDryRun();
         _scheduleDryRun();
         _renderDetail();
         return;
@@ -1678,7 +1785,7 @@ export const DistributionPane = (() => {
         const rows = _editorRows();
         _editorWeights = onlyThisMachine(rows.map(r => r.machine), machine);
         _editorByQty.clear();
-        _dryRunStatus = 'idle';
+        _invalidateDryRun();
         _scheduleDryRun();
         _renderDetail();
         return;
@@ -1715,38 +1822,41 @@ export const DistributionPane = (() => {
   /** `incomplete`'s one-click action (§6): re-post the header's CURRENT
    *  stored shares unchanged, letting the shared materialization engine
    *  reconcile children to match (backend/distribution/CLAUDE.md's "resolve
-   *  scope repair" precedent, run here per-row from the list instead). */
+   *  scope repair" precedent, run here per-row from the list instead). D44:
+   *  wrapped in `_latched`. */
   async function _repairRow(row: DistListRow): Promise<void> {
-    const plant = Store.selectedPlant;
-    if (!plant || Sandbox.active) return;
-    const guard = _captureWriteGuard(plant, [row.header]);
-    if (!guard) return;
-    const shares = (row.shares || []).map(s => ({ machine: s.machine, weight: s.weight ?? 0 }));
-    try {
-      const resp = await Util.fetchTraced(
-        `${API}/distribution/${encodeURIComponent(plant)}/${encodeURIComponent(row.header.production_order)}/${encodeURIComponent(row.header.material_number)}/shares`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ shares, base_version: row.header.base_version }),
-        },
-      );
-      if (!resp.ok) {
-        const err = await _parseDistError(resp);
-        if (err.code === 'stale') { await _fetchAndRenderList(); Toast.show(Util.t('toast.dist_stale_refetched'), 'warn'); return; }
-        Toast.show(_distErrorMessage(err.code, err.message), 'error');
-        return;
+    await _latched(async () => {
+      const plant = Store.selectedPlant;
+      if (!plant || Sandbox.active) return;
+      const guard = _captureWriteGuard(plant, [row.header]);
+      if (!guard) return;
+      const shares = (row.shares || []).map(s => ({ machine: s.machine, weight: s.weight ?? 0 }));
+      try {
+        const resp = await Util.fetchTraced(
+          `${API}/distribution/${encodeURIComponent(plant)}/${encodeURIComponent(row.header.production_order)}/${encodeURIComponent(row.header.material_number)}/shares`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ shares, base_version: row.header.base_version }),
+          },
+        );
+        if (!resp.ok) {
+          const err = await _parseDistError(resp);
+          if (err.code === 'stale') { await _fetchAndRenderList(); Toast.show(Util.t('toast.dist_stale_refetched'), 'warn'); return; }
+          Toast.show(_distErrorMessage(err.code, err.message), 'error');
+          return;
+        }
+        const result = await resp.json() as WriteResult;
+        if (!_applyWriteResult(result, guard)) return;
+        Toast.show(Util.t('toast.dist_repaired'), 'success');
+        await _fetchAndRenderList();
+        if (_selectedKey === _rowKey(row.header)) void _openDetail(_selectedKey);
+        void loadDistributionSummary();
+      } catch (e) {
+        ErrorLog.error('distribution', `Repair failed: ${(e as Error).message}`, {}, { errorCode: 'distribution.repair_failed' });
+        Toast.show(Util.t('toast.dist_repair_failed'), 'error');
       }
-      const result = await resp.json() as WriteResult;
-      if (!_applyWriteResult(result, guard)) return;
-      Toast.show(Util.t('toast.dist_repaired'), 'success');
-      await _fetchAndRenderList();
-      if (_selectedKey === _rowKey(row.header)) void _openDetail(_selectedKey);
-      void loadDistributionSummary();
-    } catch (e) {
-      ErrorLog.error('distribution', `Repair failed: ${(e as Error).message}`, {}, { errorCode: 'distribution.repair_failed' });
-      Toast.show(Util.t('toast.dist_repair_failed'), 'error');
-    }
+    });
   }
 
   /** Lazily-initialized module-level Flatpickr instance per input id, the
@@ -2108,7 +2218,7 @@ export const DistributionPane = (() => {
     const view = mergeRowsWithDryRun(rows, _dryRun);
     const totals = computeTotals(view);
     const whatIf = Sandbox.active;
-    const sig = weightsSignature(rows);
+    const sig = dryRunSignature(h, rows);
     const saveState = computeSaveButtonState({
       dryRunStatus: _dryRunStatus, dryRunSignature: _dryRunSignature, currentSignature: sig,
       removedScheduledCount: _dryRun?.removed_scheduled?.length || 0, whatIfBlocked: whatIf,
@@ -2147,7 +2257,7 @@ export const DistributionPane = (() => {
         </table>
         <div class="dist-editor-actions">
           <button type="button" class="btn btn-ghost sm" id="dist-editor-even-btn" ${whatIf ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_even'))}</button>
-          <button type="button" class="btn btn-primary" id="dist-save-btn" ${saveState.disabled ? 'disabled' : ''}>${Util.escapeHtml(saveLabel)}</button>
+          <button type="button" class="btn btn-primary" id="dist-save-btn" ${saveState.disabled || _writeBusy ? 'disabled' : ''}>${Util.escapeHtml(saveLabel)}</button>
           <label class="dist-reviewed-toggle-label">
             <input type="checkbox" id="dist-reviewed-toggle"
                    ${revState === 'checked' ? 'checked' : ''}
@@ -2155,8 +2265,8 @@ export const DistributionPane = (() => {
                    ${whatIf ? 'disabled' : ''}>
             ${Util.escapeHtml(Util.t('ui.dist_col_reviewed'))}
           </label>
-          <button type="button" class="btn btn-ghost sm" id="dist-reset-btn" ${whatIf ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_reset_defaults'))}</button>
-          <button type="button" class="btn btn-ghost sm" id="dist-undo-btn" ${undoDisabled ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_undo'))}</button>
+          <button type="button" class="btn btn-ghost sm" id="dist-reset-btn" ${whatIf || _writeBusy ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_reset_defaults'))}</button>
+          <button type="button" class="btn btn-ghost sm" id="dist-undo-btn" ${undoDisabled || _writeBusy ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_undo'))}</button>
           <button type="button" class="btn btn-ghost sm" id="dist-show-gantt-btn">${Util.escapeHtml(Util.t('btn.dist_show_on_gantt'))}</button>
           <button type="button" class="btn btn-ghost sm" id="dist-open-inspector-btn">${Util.escapeHtml(Util.t('btn.dist_open_inspector'))}</button>
           ${whatIf ? `<span class="dist-whatif-hint">${Util.escapeHtml(Util.t('ui.dist_whatif_blocked'))}</span>` : ''}
@@ -2224,15 +2334,16 @@ export const DistributionPane = (() => {
    *  without re-rendering (and stealing focus from) the row the planner is
    *  typing into. */
   function _renderSaveState(): void {
+    if (typeof document === 'undefined') return;
     const btn = document.getElementById('dist-save-btn') as HTMLButtonElement | null;
     if (!btn || !_detail) return;
     const rows = _editorRows();
-    const sig = weightsSignature(rows);
+    const sig = dryRunSignature(_detail.header, rows);
     const state = computeSaveButtonState({
       dryRunStatus: _dryRunStatus, dryRunSignature: _dryRunSignature, currentSignature: sig,
       removedScheduledCount: _dryRun?.removed_scheduled?.length || 0, whatIfBlocked: Sandbox.active,
     });
-    btn.disabled = state.disabled;
+    btn.disabled = state.disabled || _writeBusy;
     btn.textContent = Util.t(state.labelKey, { n: String(state.removedCount) });
   }
 

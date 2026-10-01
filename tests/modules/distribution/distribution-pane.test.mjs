@@ -31,6 +31,7 @@ import {
   resolvedWeight,
   buildSharesPayload,
   weightsSignature,
+  dryRunSignature,
   mergeRowsWithDryRun,
   computeTotals,
   computeSaveButtonState,
@@ -38,6 +39,7 @@ import {
   sortRemovedFrozenFirst,
   isUndoDisabled,
   previousSharesToWeightMap,
+  undoWeightMap,
   distErrorLocaleKey,
 } from '../../../frontend/distribution/shares-editor.mjs';
 
@@ -212,15 +214,28 @@ test('evenWeights — clears every row to null (resolves to an equal implicit sh
   assert.deepEqual(evenWeights(['M1', 'M2']), { M1: null, M2: null });
 });
 
-test('quantityToWeight — a typed quantity converts 1:1 into a relative weight', () => {
-  assert.equal(quantityToWeight(300), 300);
-  assert.equal(quantityToWeight(0), 0);
+test('quantityToWeight — q===0 always gives weight 0, regardless of Q/othersWeightSum', () => {
+  assert.equal(quantityToWeight(0, 1000, 2), 0);
 });
 
-test('quantityToWeight — refuses negative/non-finite input rather than silently producing a bad weight', () => {
-  assert.throws(() => quantityToWeight(-1), RangeError);
-  assert.throws(() => quantityToWeight(NaN), RangeError);
-  assert.throws(() => quantityToWeight(Infinity), RangeError);
+test('quantityToWeight — q >= Q, or othersWeightSum===0, gives "all" (maps to Only-this-machine, not a division by zero)', () => {
+  assert.equal(quantityToWeight(1000, 1000, 2), 'all');
+  assert.equal(quantityToWeight(1200, 1000, 2), 'all');
+  assert.equal(quantityToWeight(300, 1000, 0), 'all');
+});
+
+test('quantityToWeight — otherwise, solves for the relative weight that reproduces the typed quantity\'s share of Q', () => {
+  // 300 of 1,000 with two other rows at weight 1 each (sum 2) => ~0.857,
+  // which alongside that sum of 2 is 0.857/2.857 ≈ 30% — matching 300/1000.
+  const w = quantityToWeight(300, 1000, 2);
+  assert.ok(Math.abs(w - 300 * 2 / 700) < 1e-9, `expected ≈${300 * 2 / 700}, got ${w}`);
+  assert.ok(Math.abs(w - 0.857142857) < 1e-6);
+});
+
+test('quantityToWeight — refuses negative/non-finite qty rather than silently producing a bad weight', () => {
+  assert.throws(() => quantityToWeight(-1, 1000, 2), RangeError);
+  assert.throws(() => quantityToWeight(NaN, 1000, 2), RangeError);
+  assert.throws(() => quantityToWeight(Infinity, 1000, 2), RangeError);
 });
 
 test('resolvedWeight — a purged row is ALWAYS 0 regardless of its (inert) input value', () => {
@@ -240,13 +255,14 @@ test('resolvedWeight — an explicit weight (including 0) is sent as-is when not
 
 test('buildSharesPayload — By-quantity conversion end to end: typed quantities become the wire shares payload', () => {
   const rows = [
-    { machine: 'M1', weight: quantityToWeight(300), purged: false },
-    { machine: 'M2', weight: quantityToWeight(700), purged: false },
+    { machine: 'M1', weight: quantityToWeight(300, 1000, 1), purged: false },
+    { machine: 'M2', weight: quantityToWeight(700, 1000, 1), purged: false },
   ];
-  assert.deepEqual(buildSharesPayload(rows), [
-    { machine: 'M1', weight: 300 },
-    { machine: 'M2', weight: 700 },
-  ]);
+  const payload = buildSharesPayload(rows);
+  assert.equal(payload[0].machine, 'M1');
+  assert.ok(Math.abs(payload[0].weight - (300 / 700)) < 1e-9);
+  assert.equal(payload[1].machine, 'M2');
+  assert.ok(Math.abs(payload[1].weight - (700 / 300)) < 1e-9);
 });
 
 test('buildSharesPayload — Only-this-machine end to end', () => {
@@ -269,6 +285,30 @@ test('weightsSignature — a changed weight produces a different signature', () 
   const a = [{ machine: 'M1', weight: 1, purged: false }];
   const b = [{ machine: 'M1', weight: 2, purged: false }];
   assert.notEqual(weightsSignature(a), weightsSignature(b));
+});
+
+/* --- Dry-run preview identity (D09) --------------------------------------- */
+
+test('dryRunSignature — differs per order and per material even with identical weights', () => {
+  const rows = [{ machine: 'M1', weight: 1, purged: false }];
+  const headerA = { production_order: '100', material_number: 'MAT', base_version: 1 };
+  const headerB = { production_order: '200', material_number: 'MAT', base_version: 1 };
+  const headerC = { production_order: '100', material_number: 'OTHER', base_version: 1 };
+  assert.notEqual(dryRunSignature(headerA, rows), dryRunSignature(headerB, rows));
+  assert.notEqual(dryRunSignature(headerA, rows), dryRunSignature(headerC, rows));
+});
+
+test('dryRunSignature — differs per base_version, so a write that moves the header invalidates a prior settled preview', () => {
+  const rows = [{ machine: 'M1', weight: 1, purged: false }];
+  const header = { production_order: '100', material_number: 'MAT', base_version: 1 };
+  const headerAfterWrite = { ...header, base_version: 2 };
+  assert.notEqual(dryRunSignature(header, rows), dryRunSignature(headerAfterWrite, rows));
+});
+
+test('dryRunSignature — identical header and weights produce the same signature', () => {
+  const rows = [{ machine: 'M2', weight: 5, purged: false }, { machine: 'M1', weight: null, purged: false }];
+  const header = { production_order: '100', material_number: 'MAT', base_version: 1 };
+  assert.equal(dryRunSignature(header, rows), dryRunSignature({ ...header }, [...rows]));
 });
 
 const DRY_RUN_FIXTURE = {
@@ -410,6 +450,15 @@ test('isUndoDisabled — disabled once the header moved to a NEWER base_version 
 test('previousSharesToWeightMap — converts a captured previous_shares snapshot back into a weight map', () => {
   const previousShares = [{ machine: 'M1', letter: 'A', weight: 30 }, { machine: 'M2', letter: 'B', weight: null }];
   assert.deepEqual(previousSharesToWeightMap(previousShares), { M1: 30, M2: null });
+});
+
+/* --- Undo weight map (D46) ------------------------------------------------ */
+
+test('undoWeightMap — restores each current machine\'s previous weight, or 0 for one the last write added', () => {
+  const previousShares = [{ machine: 'M1', weight: 5 }, { machine: 'M2', weight: null }];
+  // M3 has no entry in previousShares — the last write added it — so Undo
+  // zeroes it rather than falling through to its current (post-write) weight.
+  assert.deepEqual(undoWeightMap(previousShares, ['M1', 'M2', 'M3']), { M1: 5, M2: null, M3: 0 });
 });
 
 /* --- Error mapping -------------------------------------------------------- */

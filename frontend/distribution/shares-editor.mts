@@ -136,17 +136,28 @@ export function evenWeights(machines: readonly string[]): WeightMap {
 }
 
 /** "By quantity" toggle's on-blur conversion (§6: "converted to weights on
- *  blur"). Weights are already relative to each other, so a typed target
- *  quantity converts 1:1 into a relative weight — two rows typed 300/700
- *  produce the same 30/70 split as two rows typed 3/7. Non-finite or
- *  negative input has no sane weight; callers should not call this for such
- *  input (kept as a hard boundary rather than silently clamping, so a caller
- *  bug is loud instead of silently producing a 0 row). */
-export function quantityToWeight(qty: number): number {
+ *  blur"). D35: weights are RELATIVE, so a typed target quantity cannot
+ *  convert 1:1 (that silently misweighted every row but the one being
+ *  typed) — it must be solved for the weight that, alongside the OTHER
+ *  rows' current (already-relative) weight total, reproduces the typed
+ *  quantity's share of the header's total order quantity `Q`:
+ *  `weight = qty * othersWeightSum / (Q - qty)`. `qty === 0` is simply 0 (no
+ *  share). `qty >= Q`, or every other row already explicitly zeroed
+ *  (`othersWeightSum === 0`, which would otherwise divide by the remaining
+ *  weight budget of zero), has no finite relative weight that expresses "all
+ *  of it" — the caller maps that case to `onlyThisMachine` instead (the
+ *  literal "all of it" state) rather than this function returning `Infinity`.
+ *  Non-finite or negative `qty` has no sane weight at all; callers should
+ *  not call this for such input (kept as a hard boundary rather than
+ *  silently clamping, so a caller bug is loud instead of silently producing
+ *  a bad row). */
+export function quantityToWeight(qty: number, totalQty: number, othersWeightSum: number): number | 'all' {
   if (!Number.isFinite(qty) || qty < 0) {
     throw new RangeError(`quantityToWeight: qty must be a finite, non-negative number, got ${qty}`);
   }
-  return qty;
+  if (qty === 0) return 0;
+  if (qty >= totalQty || othersWeightSum === 0) return 'all';
+  return qty * othersWeightSum / (totalQty - qty);
 }
 
 /** A row's weight as it will actually be sent on the wire: a purged row is
@@ -179,6 +190,28 @@ export function weightsSignature(rows: readonly WeightRow[]): string {
     .map(r => `${r.machine}=${r.weight}`)
     .sort()
     .join('|');
+}
+
+/** The identifying fields of a header a dry run is priced against — just
+ *  enough of `DistHeader` (which lives in distribution-pane.mts, not this
+ *  DOM-free module) for `dryRunSignature` to key on. */
+export interface DryRunSignatureHeader {
+  production_order: string;
+  material_number: string;
+  base_version: number;
+}
+
+/** D09 — a dry run is priced for a specific HEADER (order/material/
+ *  base_version) as well as a specific set of weight inputs; `weightsSignature`
+ *  alone can't tell two different orders' previews apart (nor the same order
+ *  before/after a `base_version`-moving write), so a dry run settled for one
+ *  header/base_version could otherwise be mistaken for "ready" against a
+ *  different one the planner has since switched to or written. Composed as
+ *  `production_order|material_number|base_version#<weightsSignature>` so it
+ *  changes on every axis that actually invalidates a previously-settled
+ *  preview. */
+export function dryRunSignature(header: DryRunSignatureHeader, rows: readonly WeightRow[]): string {
+  return `${header.production_order}|${header.material_number}|${header.base_version}#${weightsSignature(rows)}`;
 }
 
 /* ============================================================================
@@ -329,6 +362,24 @@ export function previousSharesToWeightMap(
 ): WeightMap {
   const out: WeightMap = {};
   for (const s of previousShares) out[s.machine] = s.weight;
+  return out;
+}
+
+/** D46 — Undo's weight map, built against the CURRENT row set rather than
+ *  blindly reposting `previousShares` (`previousSharesToWeightMap`'s job):
+ *  a machine the last write ADDED has no entry in `previousShares` at all
+ *  (it didn't exist before that write), so naively looking it up would fall
+ *  through to the editor's current (post-write) weight instead of being
+ *  undone — this gives it an explicit 0 (the undo state "this machine wasn't
+ *  part of the distribution") for any machine `previousShares` doesn't
+ *  mention. */
+export function undoWeightMap(
+  previousShares: readonly { machine: string; weight: number | null }[],
+  currentMachines: readonly string[],
+): WeightMap {
+  const prev = new Map(previousShares.map(s => [s.machine, s.weight]));
+  const out: WeightMap = {};
+  for (const m of currentMachines) out[m] = prev.has(m) ? prev.get(m)! : 0;
   return out;
 }
 
