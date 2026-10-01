@@ -157,6 +157,10 @@ export const Store = {
   // assigned in a constructor, need their type fixed at the literal's declaration.
   _alertsByTaskSrc: null as NimbusAlert[] | null,
   _alertsByTask: new Map<string, NimbusAlert[]>(),
+  // Lazily populated by siblingsByParent() below — same reasoning as
+  // _alertsByTaskSrc above (plain object-literal property, type fixed here).
+  _siblingsByParentSrc: null as { rev: number; plant: string | null; tasks: Record<string, NimbusTask> } | null,
+  _siblingsByParent: new Map<string, NimbusTask[]>(),
   // Set by emit() on first mutation; read by rev(). Same reasoning as above.
   _rev: 0,
 
@@ -825,6 +829,36 @@ export const Store = {
       this._alertsByTask = m;
     }
     return this._alertsByTask;
+  },
+  /** Map<PARENT_ORDER, sibling tasks> for O(1) distribution-sibling lookups
+   *  (aggregate_to_detail.md §8) — replaces the repeated
+   *  `(selectedPlant ? tasksForSelectedPlant() : tasksArr).filter(x => x.PARENT_ORDER === ...)`
+   *  scans in the Gantt bar pill/hover card/sibling highlight and the Orders
+   *  grid renderer/Inspector (D40). Each parent's array is self-inclusive
+   *  (matches what those call sites filtered before this memo existed) —
+   *  callers that need "other siblings" still subtract the current task.
+   *  Memoized like alertsByTask() but on (rev, selectedPlant, tasks) since
+   *  siblings are themselves plant-scoped and removeTask() splices the tasks
+   *  object in place (no new reference) — rev is the only reliable signal.
+   *  Treat as read-only. */
+  siblingsByParent(): Map<string, NimbusTask[]> {
+    const rev = this._rev;
+    const plant = this._state.selectedPlant;
+    const tasks = this._state.tasks;
+    const src = this._siblingsByParentSrc;
+    if (!src || src.rev !== rev || src.plant !== plant || src.tasks !== tasks) {
+      const scoped = plant ? this.tasksForSelectedPlant() : this.tasksArr;
+      const m = new Map<string, NimbusTask[]>();
+      for (const t of scoped) {
+        if (!t.PARENT_ORDER) continue;
+        let arr = m.get(t.PARENT_ORDER);
+        if (!arr) m.set(t.PARENT_ORDER, arr = []);
+        arr.push(t);
+      }
+      this._siblingsByParentSrc = { rev, plant, tasks };
+      this._siblingsByParent = m;
+    }
+    return this._siblingsByParent;
   },
   setUserSettings(patch: Record<string, unknown>, source?: string): void {
     Object.assign(this._state.userSettings, patch);

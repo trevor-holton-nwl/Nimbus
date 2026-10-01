@@ -422,8 +422,7 @@ export const Table = {
     const text = Util.escapeHtml(p.value ?? '');
     const task = p.data;
     if (!task?.PARENT_ORDER || !task.DISTRIBUTION_LETTER) return text;
-    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr;
-    const count = scoped.filter(t => t.PARENT_ORDER === task.PARENT_ORDER).length;
+    const count = (Store.siblingsByParent().get(task.PARENT_ORDER) || []).length;
     return `${text}<span class="split-order-part dist-part">${Util.escapeHtml(task.DISTRIBUTION_LETTER)}·${count}</span>`;
   },
 
@@ -2098,7 +2097,7 @@ export const Inspector = {
     // currently in Store sharing the same PARENT_ORDER — deleted/completed
     // orders are never in Store, so this is "living" by construction).
     const distSiblings = task.PARENT_ORDER
-      ? (Store.selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr).filter(x => x.PARENT_ORDER === task.PARENT_ORDER)
+      ? (Store.siblingsByParent().get(task.PARENT_ORDER) || [])
       : [];
     const distTotalQty = distSiblings.reduce((sum, s) => sum + (Number(s['ORDER_QUANTITY_(GMEIN)']) || 0), 0);
     const distThisQty = Number(task['ORDER_QUANTITY_(GMEIN)']) || 0;

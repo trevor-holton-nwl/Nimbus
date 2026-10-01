@@ -144,6 +144,39 @@ test('Store.removeTask removes the task from its cached plant bucket', () => {
   assert.equal(Store.tasksByPlant('P-INDEX').length, 0);
 });
 
+test('Store.siblingsByParent groups by PARENT_ORDER and returns the same Map for an unchanged rev', () => {
+  const priorPlant = Store.selectedPlant;
+  Store.setSelectedPlant(null, 'unit-test');
+  Store.setTasks([
+    { id: 'sib-a', PARENT_ORDER: 'SAP-1', DISTRIBUTION_LETTER: 'A', MACHINE: 'L1' },
+    { id: 'sib-b', PARENT_ORDER: 'SAP-1', DISTRIBUTION_LETTER: 'B', MACHINE: 'L1' },
+    { id: 'sib-solo', MACHINE: 'L1' },
+  ], 'unit-test');
+  const first = Store.siblingsByParent();
+  assert.deepEqual(first.get('SAP-1').map(t => t.id).sort(), ['sib-a', 'sib-b']);
+  assert.equal(first.has('sib-solo'), false, 'tasks without PARENT_ORDER are not grouped');
+  assert.equal(Store.siblingsByParent(), first, 'same Map instance for an unchanged rev');
+
+  Store.setTasks([{ id: 'sib-c', PARENT_ORDER: 'SAP-2', MACHINE: 'L1' }], 'unit-test'); // bumps rev via emit
+  const second = Store.siblingsByParent();
+  assert.notEqual(second, first, 'rebuilds after an emit bumps rev');
+  assert.deepEqual(second.get('SAP-2').map(t => t.id), ['sib-c']);
+  Store.setSelectedPlant(priorPlant, 'unit-test');
+});
+
+test('Store.siblingsByParent reflects Store.removeTask (in-place splice, caught only via rev)', () => {
+  const priorPlant = Store.selectedPlant;
+  Store.setSelectedPlant(null, 'unit-test');
+  Store.setTasks([
+    { id: 'rm-sib-a', PARENT_ORDER: 'SAP-RM', MACHINE: 'L1' },
+    { id: 'rm-sib-b', PARENT_ORDER: 'SAP-RM', MACHINE: 'L1' },
+  ], 'unit-test');
+  assert.equal(Store.siblingsByParent().get('SAP-RM').length, 2);
+  Store.removeTask('rm-sib-a', 'unit-test');
+  assert.deepEqual(Store.siblingsByParent().get('SAP-RM').map(t => t.id), ['rm-sib-b']);
+  Store.setSelectedPlant(priorPlant, 'unit-test');
+});
+
 test('UndoStack.push caps at MAX(10) entries', () => {
   for (let i = 0; i < 12; i++) UndoStack.push(`entry-${i}`, () => {});
   assert.ok(UndoStack._entries.length <= UndoStack.MAX);
