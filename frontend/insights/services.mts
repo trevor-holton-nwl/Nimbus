@@ -594,6 +594,16 @@ let _summarySeq = 0;
  *  switched, overwriting the new plant's (or the reset-to-null) summary. */
 export async function loadDistributionSummary(): Promise<void> {
   const plant = Store.selectedPlant;
+  // Fix round 1: bump _summarySeq BEFORE the early-return guard below, not
+  // after it. An older call's in-flight request checks `stillCurrent()`
+  // (seq === _summarySeq) when its response lands; this call's own
+  // null-and-return (no plant / What-If / no masterData yet) must supersede
+  // that older call just as surely as a full request would — otherwise an
+  // in-flight request started before the user entered What-If mode (or
+  // cleared the plant) could still land afterward and overwrite the
+  // null this call just set.
+  const seq = ++_summarySeq;
+  const stillCurrent = (): boolean => seq === _summarySeq && Store.selectedPlant === plant;
   // Skip loading for: no plant selected, What-If mode active (Sandbox is
   // a real cross-file import, so this is safe to reference inside a method
   // body; see this file's header comment about the Sandbox ↔ Store ESM cycle),
@@ -602,8 +612,6 @@ export async function loadDistributionSummary(): Promise<void> {
     Store.setDistributionSummary(null, 'distribution-loader');
     return;
   }
-  const seq = ++_summarySeq;
-  const stillCurrent = (): boolean => seq === _summarySeq && Store.selectedPlant === plant;
   try {
     const response = await Util.fetchTraced(
       `/distribution/${encodeURIComponent(plant)}/summary`,

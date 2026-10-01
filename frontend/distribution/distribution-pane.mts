@@ -699,6 +699,7 @@ export const DistributionPane = (() => {
       ErrorLog.error('distribution', `Failed to load distribution list: ${(e as Error).message}`, { plant }, { errorCode: 'distribution.list_load' });
       Toast.show(Util.t('toast.dist_load_failed'), 'error');
       _rows = []; _total = 0;
+      _truncated = false; // fix round 1: a failed fetch must not leave a stale truncated-notice showing
     }
     _loading = false;
     _renderList();
@@ -1991,14 +1992,18 @@ export const DistributionPane = (() => {
     if (el) el.value = iso || '';
   }
 
-  // D48 (part 2) — one module-level AbortController for _mkCombobox's
-  // document-level click listener. Each call aborts the previous controller
-  // before creating a new one, so a combobox re-rendered onto a fresh
-  // container (e.g. _renderWorkcenterCombobox() after a plant/workcenter
-  // list reload) detaches its OLD document listener instead of leaving it
-  // permanently attached — otherwise every re-render accumulates one more
-  // listener closing over a dead, detached `root`, forever.
-  let _comboboxAbort: AbortController | null = null;
+  // D48 (part 2) — one AbortController per LIVE container for _mkCombobox's
+  // document-level click listener, keyed by the container element rather
+  // than a single module-level slot: this pane currently mounts only one
+  // combobox at a time, but a single shared controller is still wrong in
+  // general — it would abort a SIBLING combobox's still-mounted listener the
+  // moment a second one renders on the same gate (the fix-round-1 defect
+  // found in master-data/admin-ui.mts's BOM plant/material pickers and
+  // plant-settings line-override pickers, which really do render two at
+  // once). Re-rendering into the SAME container still aborts that
+  // container's own previous listener, via the WeakMap lookup. Keep this
+  // mirrored in setup-admin.mts / master-data/admin-ui.mts's copies.
+  const _comboAborts = new WeakMap<HTMLElement, AbortController>();
 
   /** Minimal self-contained searchable combobox for the work-center filter —
    *  duplicated (not imported) from frontend/setup/setup-admin.mts's own copy
@@ -2011,8 +2016,9 @@ export const DistributionPane = (() => {
    *  helper mirrored in the setup-admin.mts / master-data/admin-ui.mts copies. */
   function _mkCombobox(containerEl: HTMLElement | null, options: string[], opts: { value?: string; placeholder?: string; onSelect?: (value: string) => void } = {}): void {
     if (!containerEl) return;
-    _comboboxAbort?.abort();
-    _comboboxAbort = new AbortController();
+    _comboAborts.get(containerEl)?.abort();
+    const _comboAbort = new AbortController();
+    _comboAborts.set(containerEl, _comboAbort);
     const { value = '', placeholder = '', onSelect } = opts;
     containerEl.innerHTML = `
       <div class="hps-combobox md-bom-combobox">
@@ -2082,7 +2088,7 @@ export const DistributionPane = (() => {
     input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
     clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
     clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboboxAbort.signal });
+    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboAbort.signal });
 
     reflect();
   }
@@ -2177,6 +2183,13 @@ export const DistributionPane = (() => {
         <span class="dist-list-count">${Util.escapeHtml(Util.t('ui.dist_showing_count', { shown: String(shown), total: String(_total) }))}</span>
         ${hasMore ? `<button type="button" class="btn btn-ghost sm" id="dist-load-more">${Util.escapeHtml(Util.t('btn.load_more'))}</button>` : ''}`;
       document.getElementById('dist-load-more')?.addEventListener('click', () => {
+        // Fix round 1: a refresh (_fetchAndRenderList) already in flight has
+        // its own, up-to-date idea of how many pages are loaded and will
+        // re-render the footer (and this button) itself when it completes —
+        // racing a "Load more" against it would increment _page on top of
+        // whatever the in-flight refresh is about to resolve to, and append
+        // onto rows the refresh may be about to replace outright.
+        if (_loading) return;
         _page += 1;
         void _fetchMoreAndAppend();
       });

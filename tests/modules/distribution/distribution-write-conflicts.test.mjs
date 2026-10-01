@@ -26,7 +26,7 @@ async function pane(realDetail = false, realList = false) {
     _renderList = () => {};
     return { _onSaveClick, _onUndoClick, _runWritePipeline, _onBulkReset, _repairRow, _openDetail,
       _markReviewed, _onSaveScheduleClick, _postReview, _runDryRun,
-      _fetchAndRenderList, _fetchMoreAndAppend,
+      _fetchAndRenderList, _fetchMoreAndAppend, _mkCombobox,
       switchDetail(detail) { _detail = detail; _selectedKey = _rowKey(detail.header); _lastWrite = null; },
       lastWrite() { return _lastWrite; },
       setLastWrite(lw) { _lastWrite = lw; },
@@ -579,6 +579,18 @@ test('D13 — meta.truncated on the list response is captured for the pane to su
   assert.equal(p.truncated(), false, 'an absent meta.truncated must read as false, not stick from a prior truncated fetch');
 });
 
+test('fix round 1 — D13 — a failed list fetch clears a prior truncated flag instead of leaving a stale notice', async () => {
+  const p = await pane(false, true);
+  Store.setSelectedPlant('P1', 'persistence');
+  Util.fetchTraced = async () => ok({ data: [listRow('100')], meta: { total: 1, truncated: true } });
+  await p._fetchAndRenderList();
+  assert.equal(p.truncated(), true);
+
+  Util.fetchTraced = async () => { throw new Error('network down'); };
+  await p._fetchAndRenderList();
+  assert.equal(p.truncated(), false, 'a failed fetch must not leave a stale truncated-notice showing');
+});
+
 test('D26 — a checked (bulk-select) key dropped from the next accepted list fetch is pruned', async () => {
   const p = await pane(false, true);
   Store.setSelectedPlant('P1', 'persistence');
@@ -593,4 +605,147 @@ test('D26 — a checked (bulk-select) key dropped from the next accepted list fe
   await p._fetchAndRenderList();
   assert.deepEqual([...p.checkedKeys()], ['100|MAT'],
     'a checked key whose row is no longer present after an accepted fetch must be pruned');
+});
+
+/* ===========================================================================
+   Fix round 1 — D48 (part 2) plan-defect fix: _mkCombobox now keys its
+   AbortController per CONTAINER (a WeakMap) rather than one shared
+   module-level slot, which would abort a sibling combobox's still-mounted
+   listener the moment a second one renders on the same gate (the real shape
+   of master-data/admin-ui.mts's BOM plant/material pickers and
+   plant-settings line-override pickers). A minimal hand-built stand-in for
+   `containerEl`/`root`/its children is used instead of a real DOM (this
+   suite has no jsdom) — just enough surface for _mkCombobox to run: each
+   call to a container's `querySelector('.hps-combobox')` returns a FRESH
+   root/dropdown pair (mirroring a real `innerHTML =` re-render producing new
+   nodes), and `root.contains()` always returns false, so every event
+   dispatched on the (real, native EventTarget) fake `document` counts as an
+   "outside click" — exactly the real target real DOM delivers to a
+   document-level listener dispatched from `document` itself.
+   ========================================================================= */
+
+function stubComboboxChild() {
+  return { addEventListener() {}, setAttribute() {}, querySelectorAll: () => [], value: '', hidden: false };
+}
+
+/** A stand-in `containerEl`. Each `querySelector('.hps-combobox')` call
+ *  builds a brand-new root/dropdown pair — `lastDropdown()` returns the most
+ *  recently built one, the one the most recent `_mkCombobox(container, ...)`
+ *  call is actually operating on. */
+function stubComboboxContainer() {
+  let dropdowns = [];
+  return {
+    innerHTML: '',
+    querySelector(sel) {
+      if (sel !== '.hps-combobox') return null;
+      const input = stubComboboxChild();
+      const clearBtn = stubComboboxChild();
+      const dropdown = stubComboboxChild();
+      dropdowns.push(dropdown);
+      return {
+        classList: { toggle() {} },
+        contains() { return false; },
+        querySelector(childSel) {
+          if (childSel === '.hps-input') return input;
+          if (childSel === '.hps-clear') return clearBtn;
+          if (childSel === '.hps-dropdown') return dropdown;
+          return null;
+        },
+      };
+    },
+    lastDropdown() { return dropdowns[dropdowns.length - 1]; },
+  };
+}
+
+test('D48 (part 2) fix review — rendering a combobox into a different container does not abort a still-mounted one\'s outside-click listener', async () => {
+  const p = await pane(false, false);
+  const priorDocument = globalThis.document;
+  globalThis.document = new EventTarget();
+  try {
+    const containerA = stubComboboxContainer();
+    const containerB = stubComboboxContainer();
+    p._mkCombobox(containerA, []);
+    p._mkCombobox(containerB, []); // must NOT abort A's listener (the plan-defect bug)
+    const dropdownA = containerA.lastDropdown();
+    const dropdownB = containerB.lastDropdown();
+    dropdownA.hidden = false;
+    dropdownB.hidden = false;
+
+    globalThis.document.dispatchEvent(new Event('click'));
+    assert.equal(dropdownA.hidden, true, 'A\'s own outside-click listener must still be alive after B rendered');
+    assert.equal(dropdownB.hidden, true, 'B\'s outside-click listener must also be alive');
+  } finally {
+    globalThis.document = priorDocument;
+  }
+});
+
+test('D48 (part 2) fix review — re-rendering into the SAME container still aborts that container\'s own previous listener', async () => {
+  const p = await pane(false, false);
+  const priorDocument = globalThis.document;
+  globalThis.document = new EventTarget();
+  try {
+    const containerA = stubComboboxContainer();
+    p._mkCombobox(containerA, []);
+    const firstDropdown = containerA.lastDropdown();
+    p._mkCombobox(containerA, []); // re-render into the SAME container
+    const secondDropdown = containerA.lastDropdown();
+    assert.notEqual(firstDropdown, secondDropdown);
+    firstDropdown.hidden = false;
+    secondDropdown.hidden = false;
+
+    globalThis.document.dispatchEvent(new Event('click'));
+    assert.equal(secondDropdown.hidden, true, 'the current render\'s outside-click listener must be alive');
+    assert.equal(firstDropdown.hidden, false,
+      'the PREVIOUS render\'s listener for the same container must have been aborted, not just left to leak');
+  } finally {
+    globalThis.document = priorDocument;
+  }
+});
+
+/* ===========================================================================
+   Fix round 1 — Load More racing an in-flight refresh. The pane's "Load
+   more" click handler now returns early when `_loading` is true, before
+   bumping `_page` (DOM-level, not independently exercised here — this
+   harness has no real button/click event, consistently with every other
+   test in this file). This scenario-level test pins the underlying
+   consequence: a Load More already in flight when a refresh lands must be
+   dropped outright (via the existing _listSeq/stillCurrent guard), never
+   appending onto — or disturbing the page/count of — what the refresh set.
+   ========================================================================= */
+
+test('fix round 1 — a Load More already in flight is dropped by a concurrent refresh, leaving _page/rows consistent', async () => {
+  const p = await pane(false, true);
+  Store.setSelectedPlant('P1', 'persistence');
+
+  // Page 0 baseline.
+  Util.fetchTraced = async () => ok({ data: [listRow('100')], meta: { total: 3 } });
+  await p._fetchAndRenderList();
+  assert.equal(p.page(), 0);
+
+  // The user clicks "Load more" (the click handler's own `_page += 1`
+  // already ran) and the request is slow.
+  p.setPage(1);
+  let releaseLoadMore;
+  Util.fetchTraced = () => new Promise(resolve => { releaseLoadMore = resolve; });
+  const pendingLoadMore = p._fetchMoreAndAppend();
+  await turn();
+  assert.equal(typeof releaseLoadMore, 'function');
+
+  // A concurrent refresh (write completion / debounced Store-event refresh)
+  // starts and completes BEFORE the Load More — it re-fetches from the top,
+  // covering both pages already "loaded" (D32), superseding the pending
+  // Load More outright.
+  Util.fetchTraced = async () => ok({ data: [listRow('100'), listRow('200')], meta: { total: 2 } });
+  await p._fetchAndRenderList();
+  assert.equal(p.rows().length, 2);
+  assert.equal(p.total(), 2);
+  assert.equal(p.page(), 1, '_page stays at the depth the refresh actually covered (100 rows worth)');
+
+  // The stale Load More now resolves — it must be dropped entirely, not
+  // appended onto the refreshed rows, and must not touch _page/_total either.
+  releaseLoadMore(ok({ data: [listRow('900')], meta: { total: 99 } }));
+  await pendingLoadMore;
+  assert.equal(p.rows().length, 2, 'the stale Load More response must not append onto the refreshed rows');
+  assert.equal(p.total(), 2, 'the stale Load More\'s meta.total must not overwrite the refresh\'s count');
+  assert.equal(p.page(), 1, '_page must remain exactly what the refresh set it to');
 });

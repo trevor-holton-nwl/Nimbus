@@ -463,3 +463,45 @@ test('loadDistributionSummary drops a response that lands after the user switche
   }
 });
 
+test('fix round 1 — a stale in-flight request must not overwrite the null a later early-return call sets (seq bumped before the guard)', async () => {
+  // Pins the fix: `const seq = ++_summarySeq` now runs BEFORE the
+  // no-plant/What-If/no-masterData early return, not after it, so a call
+  // that itself takes the early-return path still supersedes an OLDER
+  // call's in-flight request.
+  const priorFetch = Util.fetchTraced;
+  const priorMasterData = Store.masterData;
+  const priorPlant = Store.selectedPlant;
+  const priorSandboxActive = Sandbox.active;
+  try {
+    Sandbox.active = true; // keep the reactive 'plant:selected' subscriber quiet while getting into position
+    Store.setSelectedPlant('DIST-SEQ', 'unit-test');
+    Store.setMasterData({ plants: [], lines: [] }, 'unit-test');
+    Sandbox.active = false;
+
+    let release;
+    Util.fetchTraced = () => new Promise(resolve => { release = resolve; });
+    const pending = loadDistributionSummary(); // call 1: real request, deferred
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(typeof release, 'function');
+
+    // Call 2, same plant, no Store event: takes the early-return path
+    // (What-If now active) without ever calling fetchTraced again.
+    Sandbox.active = true;
+    await loadDistributionSummary();
+    assert.equal(Store.distributionSummary, null);
+
+    // Call 1's request now resolves — it must be dropped, not overwrite the
+    // null call 2 just set.
+    release({ ok: true, json: async () => ({ needs_review: 7, changed: 7, problems: 7 }) });
+    await pending;
+    assert.equal(Store.distributionSummary, null,
+      'a stale in-flight request must not overwrite the summary a later early-returning call already nulled');
+  } finally {
+    Sandbox.active = true;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Util.fetchTraced = priorFetch;
+    Sandbox.active = priorSandboxActive;
+  }
+});
+
