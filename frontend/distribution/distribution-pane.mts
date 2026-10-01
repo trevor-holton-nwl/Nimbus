@@ -456,6 +456,7 @@ export const DistributionPane = (() => {
   let _dryRunStatus: DryRunStatus = 'idle';
   let _dryRunSignature: string | null = null;
   let _dryRunSeq = 0; // guards a stale async dry-run response from clobbering a newer one
+  let _detailSeq = 0;
   let _lastWrite: {
     previousShares: Array<{ machine: string; letter: string | null; weight: number | null }>;
     baseVersionAfterWrite: number;
@@ -486,6 +487,8 @@ export const DistributionPane = (() => {
         return;
       }
       if (evt.type === 'plant:selected') {
+        _detailSeq++;
+        _detailLoading = false;
         _selectedKey = null; _detail = null; _batch = null;
         _workcentersPlant = null; // force a re-fetch for the new plant
         if (_active) render();
@@ -589,6 +592,11 @@ export const DistributionPane = (() => {
   }
 
   async function _openDetail(key: string): Promise<void> {
+    const seq = ++_detailSeq;
+    const plant = Store.selectedPlant;
+    const tasks = Store.tasks;
+    const current = (): boolean => seq === _detailSeq && _selectedKey === key
+      && Store.selectedPlant === plant && Store.tasks === tasks;
     const isNewSelection = key !== _selectedKey;
     _selectedKey = key;
     const row = _rows.find(r => _rowKey(r.header) === key);
@@ -597,20 +605,26 @@ export const DistributionPane = (() => {
     _detailLoading = true;
     _renderDetail();
     try {
-      const plant = Store.selectedPlant;
       const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(String(plant))}/${encodeURIComponent(row.header.production_order)}/${encodeURIComponent(row.header.material_number)}`);
+      if (!current()) return;
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      _detail = await resp.json() as DistDetailResponse;
+      const detail = await resp.json() as DistDetailResponse;
+      if (!current()) return;
+      _detail = detail;
       if (isNewSelection) _resetEditorForNewHeader(); else _resyncEditorWeightsFromDetail();
       _dryRunStatus = 'idle'; _dryRun = null; _dryRunSignature = null;
       _scheduleDryRun();
     } catch (e) {
+      if (!current()) return;
       ErrorLog.error('distribution', `Failed to load distribution detail: ${(e as Error).message}`, {}, { errorCode: 'distribution.detail_load' });
       Toast.show(Util.t('toast.dist_detail_load_failed'), 'error');
       _detail = null;
+    } finally {
+      if (seq === _detailSeq) {
+        _detailLoading = false;
+        _renderDetail();
+      }
     }
-    _detailLoading = false;
-    _renderDetail();
   }
 
   /** A genuinely new header was selected — every editor/undo/dry-run state
@@ -803,12 +817,46 @@ export const DistributionPane = (() => {
     children?: RemovedScheduledEntry[];
     message?: string;
     code?: string | null;
+    guard?: DistWriteGuard;
+  }
+
+  interface DistWriteGuard {
+    plant: string;
+    tasks: typeof Store.tasks;
+    orders: Array<Pick<DistHeader, 'production_order' | 'material_number'>>;
+    baselines: Map<string, string>;
+  }
+
+  function _affectedTasks(plant: string, orders: DistWriteGuard['orders']): NimbusTask[] {
+    return Store.tasksByPlant(plant).filter(task => orders.some(order =>
+      String(task.PARENT_ORDER || task.ORDER) === order.production_order
+      && String(task.MATERIAL_NUMBER) === order.material_number));
+  }
+
+  /** Distribution never submits planner edits. Resolve them before a write,
+   *  then compare the same persistence baseline before installing any tokens. */
+  function _captureWriteGuard(plant: string, orders: DistWriteGuard['orders']): DistWriteGuard | null {
+    const tasks = _affectedTasks(plant, orders);
+    if (tasks.some(task => Persistence._dirtyIds.has(String(task.id))
+      || Persistence._conflictedIds.has(String(task.id)))) {
+      Toast.show('Save or reload the affected schedule edits before changing distribution.', 'warn', 8000);
+      return null;
+    }
+    return { plant, orders, tasks: Store.tasks,
+      baselines: new Map(tasks.map(task => [String(task.id), JSON.stringify(Persistence._refreshBaseline(task))])) };
+  }
+
+  function _writeViewIsCurrent(guard: DistWriteGuard): boolean {
+    return Store.selectedPlant === guard.plant && Store.tasks === guard.tasks;
   }
 
   async function _postDistWrite(kind: DistWriteKind, dryRun: boolean, confirmRemoveScheduled: boolean): Promise<DistWriteOutcome> {
     const plant = Store.selectedPlant;
     if (!plant || !_detail) return { kind: 'error', dryRun: null, write: null, message: 'No plant or order selected.' };
     const header = _detail.header;
+    const guard = _captureWriteGuard(plant, [header]);
+    if (!guard) return { kind: 'error', dryRun: null, write: null,
+      message: 'Save or reload the affected schedule edits before changing distribution.' };
 
     if (kind === 'shares') {
       const payload = buildSharesPayload(_editorRows());
@@ -825,8 +873,8 @@ export const DistributionPane = (() => {
       );
       if (resp.ok) {
         const body = await resp.json();
-        return dryRun ? { kind: 'ok', dryRun: body as DryRunResult, write: null }
-                       : { kind: 'ok', dryRun: null, write: body as WriteResult };
+        return dryRun ? { kind: 'ok', dryRun: body as DryRunResult, write: null, guard }
+                       : { kind: 'ok', dryRun: null, write: body as WriteResult, guard };
       }
       const err = await _parseDistError(resp);
       if (err.code === 'stale') return { kind: 'stale', dryRun: null, write: null };
@@ -857,8 +905,8 @@ export const DistributionPane = (() => {
     if (status === 'children_scheduled') return { kind: 'children_scheduled', dryRun: null, write: null, children: (item.children as RemovedScheduledEntry[]) || [] };
     if (status === 'not_found') return { kind: 'not_found', dryRun: null, write: null };
     if (status === 'error') return { kind: 'error', dryRun: null, write: null, message: String(item.message || 'error') };
-    return dryRun ? { kind: 'ok', dryRun: item as unknown as DryRunResult, write: null }
-                   : { kind: 'ok', dryRun: null, write: item as unknown as WriteResult };
+    return dryRun ? { kind: 'ok', dryRun: item as unknown as DryRunResult, write: null, guard }
+                   : { kind: 'ok', dryRun: null, write: item as unknown as WriteResult, guard };
   }
 
   /** §6 "Save flow": lists removals frozen-first, in a `Modal.confirm({tone:
@@ -884,12 +932,16 @@ export const DistributionPane = (() => {
    *  endpoint produced it: patch the Store (no full reload — §6 "Save flow"),
    *  remember `previous_shares`/the resulting `base_version` for Undo, run
    *  the reconcile pass, then refresh the detail/list/badge from the server. */
-  async function _finishWrite(result: WriteResult, plant: string): Promise<void> {
-    _applyWriteResult(result);
-    _lastWrite = { previousShares: result.previous_shares, baseVersionAfterWrite: result.base_version };
+  async function _finishWrite(result: WriteResult, guard: DistWriteGuard): Promise<void> {
+    if (!_applyWriteResult(result, guard)) return;
+    const plant = guard.plant;
+    const key = _rowKey(guard.orders[0]!);
+    const selected = _selectedKey === key && !!_detail && _rowKey(_detail.header) === key;
+    if (selected) _lastWrite = { previousShares: result.previous_shares, baseVersionAfterWrite: result.base_version };
     Toast.show(Util.t('toast.dist_shares_saved'), 'success');
-    _reconcileAfterSave(plant, result.children.map(c => c.id));
-    if (_selectedKey) await _openDetail(_selectedKey);
+    _reconcileAfterSave(plant, result.children.map(c => c.id), selected);
+    if (selected) await _openDetail(key);
+    if (!_writeViewIsCurrent(guard)) return;
     await _fetchAndRenderList();
     void loadDistributionSummary();
   }
@@ -902,6 +954,7 @@ export const DistributionPane = (() => {
    *  already fresh for the current inputs. */
   async function _runWritePipeline(kind: DistWriteKind): Promise<void> {
     if (!_detail || Sandbox.active) return;
+    const detail = _detail;
     const preview = await _postDistWrite(kind, true, false);
     if (preview.kind === 'stale') { await _handleStaleHeader(); return; }
     if (preview.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return; }
@@ -916,11 +969,13 @@ export const DistributionPane = (() => {
       if (!ok) return;
       confirmRemoveScheduled = true;
     }
+    if (_detail !== detail || !preview.guard || !_writeViewIsCurrent(preview.guard)) return;
     let real = await _postDistWrite(kind, false, confirmRemoveScheduled);
     if (real.kind === 'stale') { await _handleStaleHeader(); return; }
     if (real.kind === 'children_scheduled') {
       const ok = await _confirmRemoval(real.children || []);
       if (!ok) return;
+      if (_detail !== detail || !_writeViewIsCurrent(preview.guard)) return;
       real = await _postDistWrite(kind, false, true);
     }
     if (real.kind === 'not_found') { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return; }
@@ -928,8 +983,7 @@ export const DistributionPane = (() => {
       Toast.show(_distErrorMessage(real.code ?? null, real.message || Util.t('toast.dist_shares_save_failed')), 'error');
       return;
     }
-    const plant = Store.selectedPlant;
-    if (real.write && plant) await _finishWrite(real.write, plant);
+    if (real.write && real.guard) await _finishWrite(real.write, real.guard);
   }
 
   /** Save (§6 "Save flow"). Reuses the CURRENT settled `_dryRun` (the button
@@ -937,6 +991,11 @@ export const DistributionPane = (() => {
    *  fresh one here) rather than re-fetching a redundant preview. */
   async function _onSaveClick(): Promise<void> {
     if (!_detail || Sandbox.active) return;
+    const detail = _detail;
+    const plant = Store.selectedPlant;
+    if (!plant) return;
+    const initialGuard = _captureWriteGuard(plant, [detail.header]);
+    if (!initialGuard) return;
     const rows = _editorRows();
     const sig = weightsSignature(rows);
     const state = computeSaveButtonState({
@@ -951,19 +1010,20 @@ export const DistributionPane = (() => {
       if (!ok) return;
       confirmRemoveScheduled = true;
     }
+    if (_detail !== detail || !_writeViewIsCurrent(initialGuard)) return;
     let real = await _postDistWrite('shares', false, confirmRemoveScheduled);
     if (real.kind === 'stale') { await _handleStaleHeader(); return; }
     if (real.kind === 'children_scheduled') {
       const ok = await _confirmRemoval(real.children || []);
       if (!ok) return;
+      if (_detail !== detail || !_writeViewIsCurrent(initialGuard)) return;
       real = await _postDistWrite('shares', false, true);
     }
     if (real.kind === 'error' || real.kind === 'not_found' || real.kind === 'children_scheduled') {
       Toast.show(_distErrorMessage(real.code ?? null, real.message || Util.t('toast.dist_shares_save_failed')), 'error');
       return;
     }
-    const plant = Store.selectedPlant;
-    if (real.write && plant) await _finishWrite(real.write, plant);
+    if (real.write && real.guard) await _finishWrite(real.write, real.guard);
   }
 
   /** Reset to work-center defaults (§6) — same dry-run-preview-then-confirm
@@ -1027,12 +1087,35 @@ export const DistributionPane = (() => {
      P2-16 — patch the returned children/removed into Store (no full reload).
      ------------------------------------------------------------------- */
 
-  function _applyWriteResult(result: WriteResult): void {
-    if (!result.children.length && !result.removed.length) return;
+  function _applyWriteResult(result: WriteResult, guard: DistWriteGuard): boolean {
+    if (Store.selectedPlant !== guard.plant) return false;
+    // Include the original group, deleted ids, and newly appeared/colliding ids.
+    // One unresolved child retains the entire group so replacements and removals
+    // cannot leave a mixture of old local edits and fresh server row versions.
+    const ids = new Set([...guard.baselines.keys(), ...result.children.map(child => String(child.id)),
+      ...result.removed.map(String), ..._affectedTasks(guard.plant, guard.orders).map(task => String(task.id))]);
+    const changed = Store.tasks !== guard.tasks || [...ids].some(id => {
+      const task = Store.tasks[id], baseline = guard.baselines.get(id);
+      if (!task) return baseline !== undefined;
+      return baseline !== JSON.stringify(Persistence._refreshBaseline(task))
+        || Persistence._dirtyIds.has(id) || Persistence._conflictedIds.has(id);
+    });
+    if (changed) {
+      for (const id of ids) if (Store.tasks[id]) {
+        Persistence._dirtyIds.add(id);
+        Persistence._conflictedIds.add(id);
+      }
+      Persistence._syncUnsaved();
+      Persistence._saveCache();
+      Persistence._warnUnresolvedConflict();
+      return false;
+    }
+    if (!result.children.length && !result.removed.length) return true;
     for (const child of result.children) _upsertChildTask(child);
     for (const id of result.removed) Store.removeTask(id, 'distribution');
     Store.rebuildPlantIndex();
     Store.emit({ type: 'tasks:bulkUpdate', ids: result.children.map(c => c.id), source: 'distribution' });
+    return true;
   }
 
   /** Patch an existing child in place (mutate, don't replace the reference —
@@ -1074,10 +1157,11 @@ export const DistributionPane = (() => {
      actually blocked on unfirming it — but the underlying premise that firmed
      children are excluded from this pass is doc drift, not current behavior;
      see this feature's report for the flagged gap. */
-  function _reconcileAfterSave(plant: string, childIds: string[]): void {
+  function _reconcileAfterSave(plant: string, childIds: string[], showBanner = true): void {
     if (!childIds.length) return;
     const snapshot = UndoStack.snapshotTasks(childIds);
     Engine.reconcileRuntimeSchedules(plant);
+    if (!showBanner) return;
     const resizedIds = childIds.filter(id => {
       const before = snapshot.find(t => String(t.id) === id);
       const after = Store.tasks[id];
@@ -1218,6 +1302,8 @@ export const DistributionPane = (() => {
     if (!orders.length) return;
     const plant = Store.selectedPlant;
     if (!plant) return;
+    const initialGuard = _captureWriteGuard(plant, orders);
+    if (!initialGuard) return;
     _bulkBusy = true;
     try {
       const previewResp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}/reset`, {
@@ -1234,6 +1320,9 @@ export const DistributionPane = (() => {
         if (!ok) return;
         confirmRemoveScheduled = true;
       }
+      if (!_writeViewIsCurrent(initialGuard)) return;
+      const guards = new Map(orders.map(order => [_rowKey(order), _captureWriteGuard(plant, [order])]));
+      if ([...guards.values()].some(guard => !guard)) return;
       const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}/reset`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1243,9 +1332,11 @@ export const DistributionPane = (() => {
       const body = await resp.json() as {
         results: Array<{ production_order: string; material_number: string; status: string; message?: string; children?: WriteResultChild[]; removed?: string[] }>;
       };
+      if (Store.selectedPlant !== plant) return;
       for (const item of body.results) {
-        if (item.status === 'ok' && item.children) {
-          _applyWriteResult({ status: 'ok', children: item.children, removed: item.removed || [], previous_shares: [], versions: {}, base_version: 0 });
+        const guard = guards.get(_rowKey(item));
+        if (item.status === 'ok' && item.children && guard) {
+          _applyWriteResult({ status: 'ok', children: item.children, removed: item.removed || [], previous_shares: [], versions: {}, base_version: 0 }, guard);
         }
       }
       await _reportBulkResults(body.results, Util.t('ui.dist_bulk_reset_result_title'));
@@ -1573,6 +1664,8 @@ export const DistributionPane = (() => {
   async function _repairRow(row: DistListRow): Promise<void> {
     const plant = Store.selectedPlant;
     if (!plant || Sandbox.active) return;
+    const guard = _captureWriteGuard(plant, [row.header]);
+    if (!guard) return;
     const shares = (row.shares || []).map(s => ({ machine: s.machine, weight: s.weight ?? 0 }));
     try {
       const resp = await Util.fetchTraced(
@@ -1590,7 +1683,7 @@ export const DistributionPane = (() => {
         return;
       }
       const result = await resp.json() as WriteResult;
-      _applyWriteResult(result);
+      if (!_applyWriteResult(result, guard)) return;
       Toast.show(Util.t('toast.dist_repaired'), 'success');
       await _fetchAndRenderList();
       if (_selectedKey === _rowKey(row.header)) void _openDetail(_selectedKey);
