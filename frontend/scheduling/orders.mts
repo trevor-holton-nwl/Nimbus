@@ -1212,7 +1212,7 @@ export const Table = {
       Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
       'warn', 4000,
       {
-        label: 'Open Order Distribution',
+        label: Util.t('btn.insp_dist_open'),
         run: () => {
           const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
           app?.gotoGanttSub?.('distribution');

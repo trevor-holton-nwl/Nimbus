@@ -84,6 +84,10 @@ window.__NIMBUS_LOCALES.en = {
   'btn.discard_and_switch':             'Discard and switch',
   'tab.routing_pv':                    'Routing & Production Versions',
   'ui.review_distributions':            'Review {{count}} distributions',
+  'ui.conflicting_parent_rows':         'Conflicting parent orders',
+  'ui.ambiguous_plant_conflicts':       'Ambiguous plant conflicts',
+  'ui.workcenter_without_members':      'Work center without members',
+  'ui.default_machine_invalid':         'Invalid default machine',
   'toast.delete_filtered_done':         'Deleted {{count}} filtered rows',
   'toast.delete_filtered_failed':       'Could not delete filtered rows: {{msg}}',
   // PR-1 (2026-09-17): /tasks/refresh's `missing` + /tasks/update's `not_found_ids`
@@ -1935,10 +1939,9 @@ window.__NIMBUS_LOCALES.en = {
   'cmdp.sub_save_checkpoint_now':      'Save a Time Machine checkpoint now',
 
   /* ── Order Distribution tab (P2-15, aggregate_to_detail.md §6) ──────────────
-     English-only for now, per the established pattern in every prior
-     distribution commit (tests/modules/locale-completeness.test.mjs's own
-     "en.js is the superset" test only requires OTHER locales never carry a
-     key en.js lacks — it does not require en.js keys to exist everywhere). */
+     Was English-only; F10 (D34) translated every remaining key in this
+     family into de/es/fr/pt (tests/modules/locale-completeness.test.mjs's
+     derived dist_/wc_ parity test now requires it). */
   'ph.dist_search':                    'Search SAP order or material…',
   'ui.dist_filter_from':               'From',
   'ui.dist_filter_to':                 'To',
@@ -2056,11 +2059,27 @@ window.__NIMBUS_LOCALES.en = {
   'toast.dist_repaired':                'Sub-orders repaired to match the current shares.',
   'toast.dist_repair_failed':           'Could not repair sub-orders.',
   'toast.dist_bulk_done':               '{{n}} order(s) updated.',
-  'err.dist_weights_empty':             'At least one machine needs a positive weight.',
+  'err.dist_weights_empty':             "This work center's default weights are all zero, so there is nothing to reset to.",
   'err.dist_duplicate_machine':         'A machine can only appear once in the shares list.',
-  'err.dist_share_purged':              'That sub-order was purged — only a fresh upload revives it.',
+  'err.dist_share_purged':              'That sub-order was purged — use Reset or re-upload the parent to bring it back.',
   'err.dist_stale_machine':             'That machine is no longer a member of this work center.',
   'err.dist_workcenter_missing':        'The work center for this order no longer exists.',
+  'err.dist_unknown_machine':           'That machine does not exist in this plant.',
+  'err.dist_weight_invalid':            'Enter a weight of zero or more for each machine.',
+  'err.dist_base_version_required':     "This request is missing the order's current version — reload and try again.",
+  'err.dist_too_many_orders':           'Too many orders selected at once — reduce the selection and try again.',
+  'err.dist_reviewed_required':         "This order's distribution must be reviewed before this action can continue.",
+  'ui.dist_guard_unsaved':              'Save or reload the affected schedule edits before changing distribution.',
+  'ui.dist_no_selection':               'No plant or order selected.',
+  'ui.dist_bulk_status_ok':             'OK',
+  'ui.dist_bulk_status_stale':          'Changed since loaded',
+  'ui.dist_bulk_status_not_found':      'Not found',
+  'ui.dist_bulk_status_children_scheduled': 'Sub-orders already scheduled',
+  'ui.dist_bulk_status_error':          'Error',
+  'aria.dist_remove':                   'Remove',
+  'aria.dist_weight_input':             'Weight for {{machine}}',
+  'aria.dist_qty_input':                'Quantity for {{machine}}',
+  'aria.dist_select_row':               'Select order {{order}}',
 
   // Machines pane SAP Work Center reassignment confirm dialog (P2-11b,
   // aggregate_to_detail.md §4.2) — English-only per this section's own

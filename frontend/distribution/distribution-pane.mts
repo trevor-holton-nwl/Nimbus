@@ -1007,7 +1007,7 @@ export const DistributionPane = (() => {
     const tasks = _affectedTasks(plant, orders);
     if (tasks.some(task => Persistence._dirtyIds.has(String(task.id))
       || Persistence._conflictedIds.has(String(task.id)))) {
-      Toast.show('Save or reload the affected schedule edits before changing distribution.', 'warn', 8000);
+      Toast.show(Util.t('ui.dist_guard_unsaved'), 'warn', 8000);
       return null;
     }
     return { plant, orders, tasks: Store.tasks,
@@ -1020,11 +1020,11 @@ export const DistributionPane = (() => {
 
   async function _postDistWrite(kind: DistWriteKind, dryRun: boolean, confirmRemoveScheduled: boolean): Promise<DistWriteOutcome> {
     const plant = Store.selectedPlant;
-    if (!plant || !_detail) return { kind: 'error', dryRun: null, write: null, message: 'No plant or order selected.' };
+    if (!plant || !_detail) return { kind: 'error', dryRun: null, write: null, message: Util.t('ui.dist_no_selection') };
     const header = _detail.header;
     const guard = _captureWriteGuard(plant, [header]);
     if (!guard) return { kind: 'error', dryRun: null, write: null,
-      message: 'Save or reload the affected schedule edits before changing distribution.' };
+      message: Util.t('ui.dist_guard_unsaved') };
 
     if (kind === 'shares') {
       const payload = buildSharesPayload(_editorRows());
@@ -1072,7 +1072,7 @@ export const DistributionPane = (() => {
     if (status === 'stale') return { kind: 'stale', dryRun: null, write: null };
     if (status === 'children_scheduled') return { kind: 'children_scheduled', dryRun: null, write: null, children: (item.children as RemovedScheduledEntry[]) || [] };
     if (status === 'not_found') return { kind: 'not_found', dryRun: null, write: null };
-    if (status === 'error') return { kind: 'error', dryRun: null, write: null, message: String(item.message || 'error') };
+    if (status === 'error') return { kind: 'error', dryRun: null, write: null, message: item.message ? String(item.message) : undefined };
     return dryRun ? { kind: 'ok', dryRun: item as unknown as DryRunResult, write: null, guard }
                    : { kind: 'ok', dryRun: null, write: item as unknown as WriteResult, guard };
   }
@@ -1479,6 +1479,16 @@ export const DistributionPane = (() => {
     return out;
   }
 
+  /** `ok`/`stale`/`not_found`/`children_scheduled`/`error` -> translated label
+   *  (`ui.dist_bulk_status_<code>`), so the bulk-result dialog never shows a
+   *  raw backend status word. Falls back to the raw code if a status this
+   *  endpoint hasn't shipped yet shows up untranslated. */
+  function _bulkStatusLabel(status: string): string {
+    const key = `ui.dist_bulk_status_${status}`;
+    const translated = Util.t(key);
+    return translated === key ? status : translated;
+  }
+
   async function _reportBulkResults(
     results: Array<{ production_order: string; material_number: string; status: string; message?: string }>,
     title: string,
@@ -1489,7 +1499,7 @@ export const DistributionPane = (() => {
       return;
     }
     const detail = '<ul>' + problems.map(r => (
-      `<li>${Util.escapeHtml(r.production_order)} — ${Util.escapeHtml(r.status)}`
+      `<li>${Util.escapeHtml(r.production_order)} — ${Util.escapeHtml(_bulkStatusLabel(r.status))}`
       + (r.message ? `: ${Util.escapeHtml(r.message)}` : '') + '</li>'
     )).join('') + '</ul>';
     await Modal.confirm({
@@ -2131,7 +2141,7 @@ export const DistributionPane = (() => {
     if (chip) {
       if (_batch) {
         chip.hidden = false;
-        chip.innerHTML = `${Util.escapeHtml(Util.t('ui.dist_batch_chip', { when: _batch.label }))} <span class="dist-batch-chip-x" role="button" aria-label="Remove">&times;</span>`;
+        chip.innerHTML = `${Util.escapeHtml(Util.t('ui.dist_batch_chip', { when: _batch.label }))} <span class="dist-batch-chip-x" role="button" aria-label="${Util.escapeHtml(Util.t('aria.dist_remove'))}">&times;</span>`;
       } else {
         chip.hidden = true;
         chip.innerHTML = '';
@@ -2254,7 +2264,7 @@ export const DistributionPane = (() => {
     const badgeTitle = whatIf ? Util.t('ui.dist_whatif_blocked') : Util.t(`ui.dist_status_${primary.code}_tip`);
     return `
       <tr data-key="${Util.escapeHtml(key)}" class="dist-row${active ? ' active' : ''}">
-        <td class="dist-col-check"><input type="checkbox" class="dist-bulk-check" ${_checkedKeys.has(key) ? 'checked' : ''}></td>
+        <td class="dist-col-check"><input type="checkbox" class="dist-bulk-check" aria-label="${Util.escapeHtml(Util.t('aria.dist_select_row', { order: row.header.production_order }))}" ${_checkedKeys.has(key) ? 'checked' : ''}></td>
         <td title="${Util.escapeHtml(String(row.header.sap_facts?.order_category ?? ''))}">${Util.escapeHtml(row.header.production_order)}</td>
         <td>${Util.escapeHtml(row.header.material_number)}</td>
         <td>${Util.escapeHtml(row.header.sap_workcenter || '')}</td>
@@ -2420,7 +2430,7 @@ export const DistributionPane = (() => {
           <tfoot>
             <tr class="dist-editor-total-row">
               <td colspan="2">${Util.escapeHtml(Util.t('ui.dist_editor_total'))}</td>
-              <td>${totals.weight}</td>
+              <td>${new Intl.NumberFormat(Util.locale(), { maximumFractionDigits: 3 }).format(totals.weight)}</td>
               <td>${totals.effectivePct.toFixed(1)}%</td>
               <td>${totals.qtyAfter}</td>
               <td>${totals.hoursAfter.toFixed(2)}</td>
@@ -2466,8 +2476,8 @@ export const DistributionPane = (() => {
         <td>${r.letter ? Util.escapeHtml(r.letter) : ''}</td>
         <td>${Util.escapeHtml(r.machine)}${r.purged ? ` <span class="dist-row-no-suborder">${Util.escapeHtml(Util.t('ui.dist_no_suborder'))}</span>` : ''}</td>
         <td>${byQty
-          ? `<input type="number" class="input dist-qty-input" min="0" step="any" value="${Util.escapeHtml(qtyVal)}" ${disabled ? 'disabled' : ''}>`
-          : `<input type="number" class="input dist-weight-input" min="0" step="any" placeholder="1" value="${Util.escapeHtml(weightVal)}" ${disabled ? 'disabled' : ''}>`}
+          ? `<input type="number" class="input dist-qty-input" aria-label="${Util.escapeHtml(Util.t('aria.dist_qty_input', { machine: r.machine }))}" min="0" step="any" value="${Util.escapeHtml(qtyVal)}" ${disabled ? 'disabled' : ''}>`
+          : `<input type="number" class="input dist-weight-input" aria-label="${Util.escapeHtml(Util.t('aria.dist_weight_input', { machine: r.machine }))}" min="0" step="any" placeholder="1" value="${Util.escapeHtml(weightVal)}" ${disabled ? 'disabled' : ''}>`}
         </td>
         <td>${r.effectivePct != null ? r.effectivePct.toFixed(1) + '%' : ''}</td>
         <td>${r.qtyAfter != null ? r.qtyAfter : ''}</td>

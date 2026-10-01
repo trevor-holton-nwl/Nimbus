@@ -6,6 +6,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Interface } from '../../../frontend/integration/sap-interface-ui.mjs';
 
+// Same split-realm/no-DOM situation documented in
+// tests/modules/admin-ops/admin-ui.test.mjs: Util.t() reads window.__NIMBUS_LOCALES
+// (optionally — undefined falls through to the key itself, which is all the
+// F10 translation keys in _renderSapDistributionWarning need here), but needs
+// the bare `window` global to exist at all.
+globalThis.window = globalThis.window || {};
+
 test('Interface exposes its documented public API', () => {
   assert.equal(typeof Interface.render, 'function');
 });

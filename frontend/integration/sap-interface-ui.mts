@@ -870,7 +870,7 @@ export const Interface = (() => {
       link.style.color = 'var(--accent,#0066cc)';
       link.style.textDecoration = 'underline';
       link.style.fontSize = '13px';
-      link.textContent = `Review ${total} distribution${total === 1 ? '' : 's'}`;
+      link.textContent = Util.t('ui.review_distributions', { count: total });
       link.addEventListener('click', (e: MouseEvent) => {
         e.preventDefault();
         const nimbus = typeof NIMBUS !== 'undefined' ? NIMBUS : undefined;
@@ -883,10 +883,10 @@ export const Interface = (() => {
 
     // Expandable lists for detail items
     const listFields: Array<{ key: keyof SapUploadWarning; label: string }> = [
-      { key: 'conflicting_parent_rows', label: 'Conflicting parent orders' },
-      { key: 'ambiguous_plant', label: 'Ambiguous plant conflicts' },
-      { key: 'workcenter_without_members', label: 'Work center without members' },
-      { key: 'default_machine_invalid', label: 'Invalid default machine' },
+      { key: 'conflicting_parent_rows', label: 'ui.conflicting_parent_rows' },
+      { key: 'ambiguous_plant', label: 'ui.ambiguous_plant_conflicts' },
+      { key: 'workcenter_without_members', label: 'ui.workcenter_without_members' },
+      { key: 'default_machine_invalid', label: 'ui.default_machine_invalid' },
     ];
 
     for (const field of listFields) {
@@ -899,7 +899,7 @@ export const Interface = (() => {
       header.style.cursor = 'pointer';
       header.style.fontSize = '12px';
       header.style.color = 'var(--text-muted,#666)';
-      header.textContent = `${field.label} (${items.length}) ▾`;
+      header.textContent = `${Util.t(field.label)} (${items.length}) ▾`;
       row.appendChild(header);
 
       const detail = document.createElement('div');
@@ -920,8 +920,8 @@ export const Interface = (() => {
       header.addEventListener('click', () => {
         detail.style.display = detail.style.display === 'none' ? '' : 'none';
         header.textContent = detail.style.display === 'none'
-          ? `${field.label} (${items.length}) ▾`
-          : `${field.label} (${items.length}) ▴`;
+          ? `${Util.t(field.label)} (${items.length}) ▾`
+          : `${Util.t(field.label)} (${items.length}) ▴`;
       });
       frag.appendChild(row);
     }
