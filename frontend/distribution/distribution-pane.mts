@@ -681,9 +681,12 @@ export const DistributionPane = (() => {
    *  `results[0].status` the way `_markReviewed` used to (it only checked
    *  `resp.ok`, so a 200 response carrying `status: 'stale'` was reported as
    *  a success). Callers own all UI side effects (toasts, refetch, re-open);
-   *  this function is a pure network call returning an outcome code. */
-  async function _postReview(plant: string, header: DistHeader, reviewed: boolean): Promise<'ok' | 'stale' | 'not_found' | 'error'> {
-    if (Sandbox.active) return 'error';
+   *  this function is a pure network call returning an outcome code.
+   *  `'blocked'` (the What-If gate — distinct from `'error'`, a real
+   *  server-side failure) lets callers show the neutral `ui.dist_whatif_blocked`
+   *  hint instead of the "could not mark as reviewed" failure toast. */
+  async function _postReview(plant: string, header: DistHeader, reviewed: boolean): Promise<'ok' | 'stale' | 'not_found' | 'error' | 'blocked'> {
+    if (Sandbox.active) return 'blocked';
     try {
       const resp = await Util.fetchTraced(`${API}/distribution/${encodeURIComponent(plant)}/review`, {
         method: 'POST',
@@ -719,6 +722,10 @@ export const DistributionPane = (() => {
     const plant = Store.selectedPlant;
     if (!plant) return;
     const status = await _postReview(plant, header, true);
+    if (status === 'blocked') {
+      Toast.show(Util.t('ui.dist_whatif_blocked'), 'info');
+      return;
+    }
     if (status === 'stale') {
       await _fetchAndRenderList();
       Toast.show(Util.t('toast.dist_stale_refetched'), 'warn');
@@ -1091,6 +1098,11 @@ export const DistributionPane = (() => {
     const plant = Store.selectedPlant;
     if (!plant) return;
     const status = await _postReview(plant, header, checked);
+    if (status === 'blocked') {
+      Toast.show(Util.t('ui.dist_whatif_blocked'), 'info');
+      _renderDetail();
+      return;
+    }
     if (status === 'stale') { await _handleStaleHeader(); return; }
     if (status === 'not_found' || status === 'error') {
       Toast.show(Util.t('toast.dist_review_failed'), 'error');
@@ -1545,7 +1557,13 @@ export const DistributionPane = (() => {
       // on the row already does, since the editor is where that choice is
       // made; `purged` has no action at all.
       const badge = target.closest('.dist-badge-action') as HTMLElement | null;
-      if (badge) {
+      // What-If guard (D05): CSS (`.dist-badge-action.disabled`) already
+      // turns off pointer-events, but a JS-level guard on the same class
+      // covers browsers/overlays where that doesn't apply — a disabled
+      // badge dispatches no action at all, including the separation_violated
+      // Show-on-Gantt jump below.
+      const badgeEnabled = !!badge && !badge.classList.contains('disabled');
+      if (badgeEnabled) {
         const found = _rows.find(r => _rowKey(r.header) === key);
         if (found) {
           const { code } = pickPrimaryBadge(found.statuses);
@@ -1562,7 +1580,7 @@ export const DistributionPane = (() => {
 
       void _openDetail(key).then(() => {
         const found = _rows.find(r => _rowKey(r.header) === key);
-        if (badge && found && pickPrimaryBadge(found.statuses).code === 'separation_violated') _onShowOnGantt();
+        if (badgeEnabled && found && pickPrimaryBadge(found.statuses).code === 'separation_violated') _onShowOnGantt();
       });
     });
 

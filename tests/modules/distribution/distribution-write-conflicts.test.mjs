@@ -304,6 +304,32 @@ test('_markReviewed makes no request while What-If is active', async () => {
   assert.equal(calls, 0);
 });
 
+test('_postReview returns "blocked" (distinct from a real "error") while What-If is active', async () => {
+  const p = await fixture();
+  let calls = 0;
+  Util.fetchTraced = async () => { calls++; return ok({ results: [{ status: 'ok' }] }); };
+  Sandbox.active = true;
+  let status;
+  try {
+    status = await p._postReview('P', header, true);
+  } finally { Sandbox.active = false; }
+  assert.equal(status, 'blocked');
+  assert.equal(calls, 0);
+});
+
+test('_markReviewed shows the What-If-blocked message (never the failure toast) while What-If is active', async () => {
+  const p = await fixture();
+  const toasts = [];
+  Toast.show = (msg, kind) => toasts.push({ msg, kind });
+  Util.fetchTraced = async () => { throw new Error('must not be called while blocked'); };
+  Sandbox.active = true;
+  try {
+    await p._markReviewed(header);
+  } finally { Sandbox.active = false; }
+  assert.ok(!toasts.some(t => t.msg === 'toast.dist_review_failed'));
+  assert.ok(toasts.some(t => t.msg === 'ui.dist_whatif_blocked'));
+});
+
 test('_onSaveScheduleClick (banner "Save schedule") makes no Persistence.saveAll call while What-If is active', async () => {
   const p = await fixture();
   const originalSaveAll = Persistence.saveAll;
