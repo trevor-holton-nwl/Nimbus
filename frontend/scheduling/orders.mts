@@ -1488,7 +1488,7 @@ export const Table = {
     // Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
     // (PARENT_ORDER set) may not change machine via the Override dialog
     // either — same guard as the grid-edit path in _onCellChanged.
-    if (t.PARENT_ORDER && newLine !== t.MACHINE) {
+    if (t.PARENT_ORDER && newLine !== (t.MACHINE || 'Unknown')) {
       Table._rejectDistMachineMove(t);
       return;
     }

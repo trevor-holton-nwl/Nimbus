@@ -627,6 +627,22 @@ test('Table._onStore task:remove with no evt.prev applies no transaction (nothin
   }
 });
 
+test('Table._onStore task:remove for a task not present in the grid (e.g. another plant\'s task) does not throw', () => {
+  const priorTableApi = Table._api;
+  const priorRenderEmptyState = Table._renderEmptyState;
+  Table._api = _stubTableApiForOnStore();
+  Table._renderEmptyState = () => {};
+  const prev = { id: 'other-plant-task', MACHINE: 'L1', PLANT: 'P-OTHER' };
+  try {
+    assert.doesNotThrow(() => {
+      Table._onStore({ type: 'task:remove', id: 'other-plant-task', prev, source: 'distribution' });
+    });
+  } finally {
+    Table._api = priorTableApi;
+    Table._renderEmptyState = priorRenderEmptyState;
+  }
+});
+
 test('Table._onStore tasks:bulkUpdate adds a row for an id not yet in the grid (a new sub-order) instead of silently dropping it', () => {
   const priorPlant = Store.selectedPlant;
   const priorTableApi = Table._api;
@@ -750,6 +766,57 @@ test('Table.applyOverride rejects a cross-machine override on a sub-order (PAREN
     globalThis.document.getElementById = priorGetElementById;
     Table._selectedId = priorSelectedId;
     globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+  }
+});
+
+test('Table.applyOverride does not reject a date/firm-only Override on a sub-order with no MACHINE (the dialog\'s only option is "Unknown")', () => {
+  // Fix round 1: the guard compared newLine !== t.MACHINE raw. For a
+  // sub-order with MACHINE: null, _getLineOptions(t) offers only 'Unknown'
+  // (Table._getLineOptions: `[forTask.MACHINE || 'Unknown']`) — resubmitting
+  // that same (only) option must NOT be treated as a machine move. The brief's
+  // normalized comparison is newLine !== (t.MACHINE || 'Unknown').
+  const priorTableApi = Table._api;
+  const priorToastShow = Toast.show;
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorSelectedId = Table._selectedId;
+  const priorPatchFor = Engine.manualRoutingSchedulePatchFor;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  Alerts.scheduleRecompute = () => {};
+  const newStart = new Date('2026-09-21T08:00:00');
+  const newEnd = new Date('2026-09-21T10:00:00');
+  Engine.manualRoutingSchedulePatchFor = () => ({ start_date: newStart, end_date: newEnd });
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  let applyTransactionCalls = 0;
+  Table._api = _stubTableApiForOnStore({ applyTransaction: () => { applyTransactionCalls++; } });
+
+  const elements = {
+    'ovr-start': { value: '2026-09-21 08:00' },
+    'ovr-line': { value: 'Unknown' },
+    'ovr-firm': { checked: false },
+  };
+  globalThis.document.getElementById = id => elements[id] || null;
+
+  Store.setTasks([{
+    id: 'dist-child-no-machine', PRODUCTION_ORDER: 'A-9202', ORDER: 'A-9202', PLANT: 'P-DIST-NO-MACHINE',
+    PARENT_ORDER: '9202', DISTRIBUTION_LETTER: 'A', MACHINE: null,
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T10:00:00'),
+  }], 'test');
+  Table._selectedId = 'dist-child-no-machine';
+
+  try {
+    Table.applyOverride();
+    assert.equal(toastCalls.some(c => c.type === 'warn'), false, 'no distribution-lock toast must fire for a resubmitted "Unknown" machine');
+    assert.equal(applyTransactionCalls, 1, 'the edit must proceed instead of being discarded');
+    assert.equal(Store.tasks['dist-child-no-machine'].start_date.getTime(), newStart.getTime());
+  } finally {
+    Table._api = priorTableApi;
+    Toast.show = priorToastShow;
+    globalThis.document.getElementById = priorGetElementById;
+    Table._selectedId = priorSelectedId;
+    Engine.manualRoutingSchedulePatchFor = priorPatchFor;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
     Store.setTasks([], 'test');
   }
 });
