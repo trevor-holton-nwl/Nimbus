@@ -357,6 +357,14 @@ class TestCleanWeights:
         cleaned = _clean_weights({"M1": good_weight})
         assert cleaned["M1"] == float(good_weight)
 
+    def test_huge_int_literal_raises_value_error_not_overflow_error(self):
+        """A ~400-digit JSON integer is a Python int; float() on it directly
+        raises OverflowError (not ValueError), which would escape
+        save_workcenter's `except ValueError` as a 500 instead of the
+        intended weight_invalid 400."""
+        with pytest.raises(ValueError, match="weight_invalid"):
+            _clean_weights({"M": 10**400})
+
 
 class TestValidateSharePayload:
     """D21/D22: `_validate_share_payload` weight-ceiling and unknown-machine
@@ -375,6 +383,13 @@ class TestValidateSharePayload:
         shares = [{"machine": "M1", "weight": good_weight}, {"machine": "M2", "weight": 1}]
         desired = _validate_share_payload(shares, {}, {"M1", "M2"}, allow_stale=False)
         assert desired["M1"] == Decimal(str(good_weight))
+
+    def test_huge_int_literal_raises_value_error_not_overflow_error(self):
+        """Parity with _clean_weights: a ~400-digit JSON integer must raise
+        ValueError (weight_invalid), not OverflowError."""
+        shares = [{"machine": "M1", "weight": 10**400}, {"machine": "M2", "weight": 1}]
+        with pytest.raises(ValueError, match="weight_invalid"):
+            _validate_share_payload(shares, {}, {"M1", "M2"}, allow_stale=False)
 
     def test_unknown_machine_weight_zero_without_allow_stale_raises(self):
         shares = [{"machine": "GHOST", "weight": 0}, {"machine": "M2", "weight": 1}]

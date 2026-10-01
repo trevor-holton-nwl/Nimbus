@@ -97,7 +97,13 @@ def _clean_weights(weights) -> dict[str, float | None]:
             continue
         if isinstance(weight, bool) or not isinstance(weight, (int, float)):
             raise ValueError(f"weight for {machine_name!r} must be numeric or null")
-        w = float(weight)
+        # Route through Decimal(str(...)) first, same as _validate_share_payload
+        # below -- a huge JSON integer (e.g. a ~400-digit literal) overflows
+        # `float()` directly with an OverflowError, not a ValueError, which
+        # would escape the route's `except ValueError` as a 500 instead of
+        # the intended weight_invalid 400. Decimal(str(int)) never overflows
+        # (arbitrary precision); converting THAT to float cleanly yields inf.
+        w = float(Decimal(str(weight)))
         if not math.isfinite(w) or w > _MAX_WEIGHT:
             raise ValueError(
                 f"weight_invalid: weight for {machine_name!r} must be finite and <= {_MAX_WEIGHT:g}"
