@@ -897,6 +897,117 @@ class TestPlanApplyIdempotency:
 
 
 @pytest.mark.pg
+class TestDedupeAndFilterConflicts:
+    """D04: the duplicate/conflict rule now runs AFTER classification and the
+    existing-header load, so it only touches groups actually involved with
+    distribution -- a plain duplicate (production_order, material_number)
+    pair with no distribution involvement at all must pass straight through
+    unfiltered (upsert_orders' own id loop is what suffixes a second copy
+    `_1`/`_2`, with one summary warning), while the SAME pair still gets
+    caught by the rule once both rows resolve to distribute-mode work
+    centers."""
+    PLANT = "1006"
+    SUB = "WTG"
+    ORD, MAT = "ZZTEST_DEDUPE_ORD", "ZZTEST_DEDUPE_MAT"
+    M1, M2 = "ZZTEST_DEDUPE_M1", "ZZTEST_DEDUPE_M2"
+    WC1, WC2 = "ZZTEST_DEDUPE_WC1", "ZZTEST_DEDUPE_WC2"
+    WC1_MEMBER, WC2_MEMBER = "ZZTEST_DEDUPE_WC1_MEM", "ZZTEST_DEDUPE_WC2_MEM"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        self._cleanup(db_)
+        yield
+        self._cleanup(db_)
+
+    def _cleanup(self, db_):
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                (self.ORD, self.ORD),
+            )
+            cur.execute(
+                "DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                (self.PLANT, self.ORD),
+            )
+            cur.execute(
+                "DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s, %s, %s)",
+                (self.PLANT, self.M1, self.M2, self.WC1_MEMBER, self.WC2_MEMBER),
+            )
+            cur.execute(
+                "DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter IN (%s, %s)",
+                (self.PLANT, self.WC1, self.WC2),
+            )
+            conn.commit()
+
+    def _row(self, machine):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": machine, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+    def test_plain_duplicate_on_non_distributed_plant_passes_through_unfiltered(self, pg):
+        """Order 2000 on M1 and M2, both plain machines (no distribution
+        involvement at all): both rows must reach rows_out unchanged -- no
+        duplicate/conflict warning is raised here; upsert_orders' own id loop
+        is what suffixes the second one `_1`."""
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine) VALUES (%s,%s,%s),(%s,%s,%s)",
+                (self.SUB, self.PLANT, self.M1, self.SUB, self.PLANT, self.M2),
+            )
+            conn.commit()
+
+        batch_id = str(uuid.uuid4())
+        rows = [self._row(self.M1), self._row(self.M2)]
+        rows_out, plan_structure, warnings = distribution_data.plan(rows, batch_id)
+
+        assert len(rows_out) == 2, "both rows must reach rows_out, not just one survivor"
+        assert {r["machine"] for r in rows_out} == {self.M1, self.M2}
+        assert warnings["duplicate_parent_rows"] == []
+        assert warnings["conflicting_parent_rows"] == []
+        assert plan_structure["parents"] == {}
+
+    def test_same_rows_on_distribute_work_centers_still_filtered_as_conflict(self, pg):
+        """The SAME (production_order, material_number) pair, this time each
+        row's machine resolves to a DIFFERENT distribute-mode work center:
+        the group is now involved, and the two different machine values make
+        it a conflict -- the WHOLE parent is skipped (no row emitted for
+        either side) and recorded in conflicting_parent_rows."""
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s,%s,'distribute'),(%s,%s,'distribute')",
+                (self.PLANT, self.WC1, self.PLANT, self.WC2),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.WC1_MEMBER, self.WC1, 100,
+                 self.SUB, self.PLANT, self.WC2_MEMBER, self.WC2, 100),
+            )
+            conn.commit()
+
+        batch_id = str(uuid.uuid4())
+        rows = [self._row(self.WC1), self._row(self.WC2)]
+        rows_out, plan_structure, warnings = distribution_data.plan(rows, batch_id)
+
+        assert rows_out == [], "a conflicting group emits no row for either side"
+        assert plan_structure["parents"] == {}
+        assert warnings["duplicate_parent_rows"] == []
+        assert len(warnings["conflicting_parent_rows"]) == 1
+        entry = warnings["conflicting_parent_rows"][0]
+        assert entry["production_order"] == self.ORD
+        assert entry["material_number"] == self.MAT
+        assert entry["values"] == sorted([self.WC1, self.WC2])
+
+
+@pytest.mark.pg
 class TestApplyReplanAfterConcurrentReweight:
     """Simulates a planner re-weight landing between plan()'s snapshot and
     apply()'s lock: apply() must detect the xmin mismatch and re-plan from
@@ -1416,10 +1527,21 @@ class TestPlanZeroWeightWorkcenterStaysPlain:
     def test_zero_weight_order_survives_the_upload_as_plain(self, pg):
         db_ = pg
         batch_id = str(uuid.uuid4())
-        db_.upsert_orders(
+        result = db_.upsert_orders(
             [self._row()], batch_id=batch_id, source="excel", filename="zero-weight-test.xlsx",
             plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
         )
+
+        # D04: no parent was planned (apply_fn never runs), but the
+        # workcenter_without_members/zero_weights warning raised by plan()
+        # must still surface in the upload's audit/warnings list instead of
+        # being silently dropped.
+        distribution_entries = [w for w in result["warnings"] if w.get("category") == "distribution"]
+        assert len(distribution_entries) == 1
+        assert distribution_entries[0]["workcenter_without_members"], \
+            "the zero_weights entry must ride along on the distribution warnings entry"
+        assert distribution_entries[0]["msg"] == "No aggregate orders distributed this batch", \
+            "must not read as '0 aggregate order(s) distributed' when nothing was ever planned"
 
         plain_id = db_.make_id(self.ORD, self.MAT)
         with db_._pool.connection() as conn, conn.cursor() as cur:

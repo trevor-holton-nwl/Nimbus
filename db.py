@@ -2488,7 +2488,12 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         (`apply_fn` commits its own transaction on it; nothing here commits or
         rolls back around that call). Its `warnings_entry` is folded into the
         `warnings` list feeding the `upload_audit` row exactly like the
-        `missing_master_data` entry below.
+        `missing_master_data` entry below. When `apply_fn` does NOT run (no
+        planned parent this batch) but `plan_fn` still raised a real
+        ingest-time warning (any warning list other than `single_rewrites` is
+        non-empty), `plan_structure`'s own `warnings_entry` (D04, built from
+        zero distribution counters) is folded in instead, so that warning is
+        never silently dropped.
       - `resolve_fn` is the optional routing-runtime ingest seam
         (ROUTING_RUNTIME_DESIGN.md §4/§5) — also defaults to None. When given,
         it is called as `resolve_fn(plant, conn=conn)` — matching
@@ -2544,7 +2549,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # over the resolved rows. `plan_structure` is held onto for `apply_fn` below.
     distribution_plan: dict = {}
     if plan_fn is not None:
-        rows, distribution_plan, _distribution_ingest_warnings = plan_fn(rows, batch_id)
+        rows, distribution_plan, distribution_ingest_warnings = plan_fn(rows, batch_id)
 
     # The "Unknown production line" soft-warning (backend/integration/routes.py)
     # must see the RESOLVED machine values — i.e. after plan_fn's single-mode
@@ -2765,6 +2770,17 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # one dict, `level`/`msg` are the two fields the cockpit's
                 # warning list actually reads.
                 warnings.append(apply_res["warnings_entry"])
+            elif (distribution_plan.get("warnings_entry")
+                  and any(v for k, v in distribution_ingest_warnings.items() if k != "single_rewrites")):
+                # D04: no parent was planned this batch (apply_fn never ran,
+                # above), but plan_fn still raised a real ingest-time warning
+                # (a conflicting/ambiguous row, a zero-weight work center,
+                # etc.) — fold plan()'s own zero-counter entry in instead of
+                # letting that warning silently vanish. `single_rewrites` is
+                # excluded: it's a routine, not-warn-worthy count (a single-
+                # mode machine-code rewrite), never by itself a reason to
+                # surface this entry.
+                warnings.append(distribution_plan["warnings_entry"])
             # ---------- Routing runtime: resolve() seam (ROUTING_RUNTIME_DESIGN.md §4 item 4) ----------
             # Runs after Order Distribution's plan/apply step (so each sub-order
             # resolves at its own machine/quantity) and after the new-order hold

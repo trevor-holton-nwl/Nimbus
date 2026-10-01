@@ -330,47 +330,79 @@ def _empty_ingest_warnings() -> dict:
     }
 
 
-def _dedupe_and_filter_conflicts(rows: list[dict], warnings: dict) -> list[dict]:
-    """§5.1 step 1, run BEFORE plant resolution/classification (it only
-    compares the raw MACHINE column, so dropped/skipped rows never need a
-    plant/classification lookup at all).
+def _dedupe_and_filter_conflicts(items: list[dict], existing_headers: dict, warnings: dict) -> set[int]:
+    """§5.1 step 1 -- moved (D04) to run AFTER plant resolution/classification
+    and the existing-header load, so it can tell a plain, never-to-be-
+    distributed duplicate apart from a genuine distribution duplicate/
+    conflict. Running this rule on the raw upload (its original position, a
+    plain pre-classification pass over the whole batch) dropped/skipped
+    EVERY duplicate (production_order, material_number) pair in the file --
+    including ones with no distribution involvement at all -- when
+    `upsert_orders`' own id loop already handles that ordinary case correctly
+    (keeps every row, suffixing later copies `_1`/`_2`, one summary warning).
 
-    One row per (production_order, material_number). A second row for the
-    same parent with the SAME machine/work-center value is a duplicate --
-    dropped, counted in `duplicate_parent_rows` (otherwise db.py's own
-    batch-local id dedup would `_1`-suffix a second, orphaned set of
-    children). A second row with a DIFFERENT value is a conflict: the WHOLE
-    parent is skipped -- no row is emitted for it at all -- and recorded in
+    Grouped by (production_order, material_number) over every `items` entry
+    (ambiguous-plant rows included, so they still occupy a slot in their
+    group). A group is "involved" -- i.e. subject to this rule at all -- only
+    when at least one member resolves to a plant AND either classifies
+    `distribute` or its (plant, production_order, material_number) key already
+    has a distribution header on file (`existing_headers`). An ambiguous-
+    plant member's `classification` is always None, so it never makes a group
+    involved by itself ("rows whose plant is ambiguous count as not
+    involved"). An uninvolved group's rows are left completely alone here --
+    `_plan_core`'s normal per-row handling (including the id-loop's
+    duplicate-suffix behavior further downstream in `upsert_orders`) takes
+    over for every member exactly as if this function didn't exist.
+
+    For an involved group with 2+ rows: identical `machine` values across the
+    group keeps the first row and drops the rest -- counted in
+    `duplicate_parent_rows` (otherwise db.py's own batch-local id dedup would
+    `_1`-suffix a second, orphaned set of children). Differing values drop the
+    WHOLE group -- no row is emitted for any member -- recorded in
     `conflicting_parent_rows`.
+
+    Returns the set of `items` indices to exclude entirely from the rest of
+    `_plan_core`'s processing (both the dropped duplicates and every member of
+    a skipped conflict group).
     """
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str], list[int]] = {}
     order: list[tuple[str, str]] = []
-    for row in rows:
+    for idx, it in enumerate(items):
+        row = it["row"]
         key = (db._str_id(row.get("production_order")), db._str_id(row.get("material_number")))
         if key not in groups:
             groups[key] = []
             order.append(key)
-        groups[key].append(row)
+        groups[key].append(idx)
 
-    survivors: list[dict] = []
+    excluded: set[int] = set()
     for key in order:
-        group = groups[key]
-        if len(group) == 1:
-            survivors.append(group[0])
+        idxs = groups[key]
+        if len(idxs) == 1:
             continue
-        machine_values = {r.get("machine") for r in group}
+        involved = any(
+            items[i]["classification"] is not None and (
+                items[i]["classification"]["type"] == "distribute"
+                or items[i]["key"] in existing_headers
+            )
+            for i in idxs
+        )
+        if not involved:
+            continue
+        machine_values = {items[i]["row"].get("machine") for i in idxs}
         if len(machine_values) == 1:
-            survivors.append(group[0])
             warnings["duplicate_parent_rows"].append({
                 "production_order": key[0], "material_number": key[1],
-                "dropped": len(group) - 1,
+                "dropped": len(idxs) - 1,
             })
+            excluded.update(idxs[1:])
         else:
             warnings["conflicting_parent_rows"].append({
                 "production_order": key[0], "material_number": key[1],
                 "values": sorted(str(v) for v in machine_values),
             })
-    return survivors
+            excluded.update(idxs)
+    return excluded
 
 
 def _load_lookups(cur) -> tuple[dict, dict]:
@@ -831,11 +863,11 @@ def _plan_one_parent(plant: str, production_order: str, material_number: str, ro
     return parent_plan, child_rows
 
 
-def _plan_core(cur, survivors: list[dict], batch_id: str, warnings: dict) -> tuple[list[dict], dict]:
+def _plan_core(cur, rows: list[dict], batch_id: str, warnings: dict) -> tuple[list[dict], dict]:
     machine_lookup, workcenter_lookup = _load_lookups(cur)
 
     items = []
-    for row in survivors:
+    for row in rows:
         plant, plant_warning = service.resolve_plant(row, machine_lookup, workcenter_lookup)
         if plant_warning:
             warnings["ambiguous_workcenter_plant"].append({
@@ -857,10 +889,18 @@ def _plan_core(cur, survivors: list[dict], batch_id: str, warnings: dict) -> tup
     anchor_sources = _load_anchor_sources(cur, list(plain_ids.values()))
     material_attrs = _load_material_attrs(cur, {(k[0], k[2]) for k in keys})
 
+    # D04: the duplicate/conflict rule now runs HERE -- after classification
+    # and the existing-header load -- so it only touches groups actually
+    # involved with distribution (see _dedupe_and_filter_conflicts' own
+    # docstring). Excluded indices are skipped below without emitting a row.
+    excluded = _dedupe_and_filter_conflicts(items, existing_headers, warnings)
+
     rows_out: list[dict] = []
     parents_plan: dict[tuple[str, str, str], dict] = {}
 
-    for it in items:
+    for idx, it in enumerate(items):
+        if idx in excluded:
+            continue
         row, plant, classification, key = it["row"], it["plant"], it["classification"], it["key"]
         if plant is None:
             rows_out.append(row)
@@ -952,23 +992,35 @@ def plan(rows: list[dict], batch_id: str, conn=None) -> tuple[list[dict], dict, 
       - rows_out: the parent row replaced by its per-machine child rows (or
         left as a single, possibly machine-rewritten, row) -- feed this into
         db.upsert_orders unchanged.
-      - plan_structure: {"batch_id", "parents": {key: {...}}, "ingest_warnings"}
-        -- everything `apply()` needs per parent, including the
-        `ingest_warnings` dict itself (apply() has no separate parameter for
-        it, so it rides along on the plan structure it returns).
+      - plan_structure: {"batch_id", "parents": {key: {...}}, "ingest_warnings",
+        "warnings_entry"} -- everything `apply()` needs per parent, including
+        the `ingest_warnings` dict itself (apply() has no separate parameter
+        for it, so it rides along on the plan structure it returns).
+        `warnings_entry` (D04) is this function's OWN upload_audit.warnings
+        entry, built from zero distribution counters since no parent has
+        actually been distributed yet at this point (apply() hasn't run) --
+        `db.upsert_orders` falls back to it when apply_fn never runs (no
+        parent this batch) but this function still raised a real ingest
+        warning (e.g. a conflicting/ambiguous row, or a zero-weight work
+        center), so that warning isn't silently dropped.
       - warnings: aggregate_to_detail.md §5.1-§5.3's warning codes, ready to
         fold into the final `upload_audit.warnings` entry `apply()` helps
         build.
     """
     warnings = _empty_ingest_warnings()
-    survivors = _dedupe_and_filter_conflicts(rows, warnings)
 
     if conn is not None:
         with conn.cursor() as cur:
-            rows_out, plan_structure = _plan_core(cur, survivors, batch_id, warnings)
+            rows_out, plan_structure = _plan_core(cur, rows, batch_id, warnings)
     else:
         with _pool.connection() as new_conn, new_conn.cursor() as cur:
-            rows_out, plan_structure = _plan_core(cur, survivors, batch_id, warnings)
+            rows_out, plan_structure = _plan_core(cur, rows, batch_id, warnings)
+
+    zero_counters = {
+        "parents_distributed": 0, "children_upserted": 0, "children_deleted": 0,
+        "headers_created": 0, "headers_refreshed": 0, "replanned_after_reweight": 0,
+    }
+    plan_structure["warnings_entry"] = _build_warnings_entry(warnings, zero_counters, no_parents=True)
 
     return rows_out, plan_structure, warnings
 
@@ -1354,12 +1406,18 @@ def _update_share_child_ids(cur, parent: dict) -> None:
         )
 
 
-def _build_warnings_entry(ingest_warnings: dict, counters: dict) -> dict:
+def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: bool = False) -> dict:
     """Build the ONE `upload_audit.warnings` entry this whole ingest run
     contributes (§5.4 step 7) -- shape mirrors the existing
     `missing_master_data` entry (db.py's own `upsert_orders`): only `level`
     and `msg` are guaranteed read by the cockpit's warning list; everything
-    else is this entry's own detail."""
+    else is this entry's own detail.
+
+    `no_parents=True` (D04) is passed from `plan()`, where `counters` is
+    always all-zero because apply() hasn't run yet -- the summary clause is
+    phrased accordingly instead of claiming "0 aggregate order(s)
+    distributed", which would misleadingly read as a failed distribution
+    attempt rather than as "none was needed this batch"."""
     duplicates_dropped = len(ingest_warnings.get("duplicate_parent_rows", []))
     conflicting = ingest_warnings.get("conflicting_parent_rows", [])
     ambiguous = ingest_warnings.get("ambiguous_workcenter_plant", [])
@@ -1394,8 +1452,14 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict) -> dict:
     n, m, k, p = (counters["parents_distributed"], counters["children_upserted"],
                  counters["children_deleted"], len(conflicting))
     entry["level"] = "warn" if warn_worthy else "info"
-    entry["msg"] = (f"{n} aggregate order(s) distributed into {m} sub-order(s) "
-                    f"({k} deleted, {p} parent(s) ambiguous)")
+    if no_parents:
+        entry["msg"] = (
+            f"No aggregate orders distributed this batch ({p} parent(s) ambiguous)" if p
+            else "No aggregate orders distributed this batch"
+        )
+    else:
+        entry["msg"] = (f"{n} aggregate order(s) distributed into {m} sub-order(s) "
+                        f"({k} deleted, {p} parent(s) ambiguous)")
     return entry
 
 
