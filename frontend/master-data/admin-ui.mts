@@ -13,6 +13,7 @@ import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
+import { Alerts } from '../insights/services.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
 import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
@@ -4562,7 +4563,14 @@ export const WorkCenters = {
   _dirty: false,      // true from the moment _staged diverges from what's been sent until a write for it is actually dispatched
   _saving: false,     // a PUT is in flight
   _editSeq: 0,        // bumped on every _staged mutation/replacement; lets a slow response detect it's now stale
-  _queued: null as WorkCenterWriteRequest | null, // a flushed-but-can't-send-yet write, captured against the row it belonged to — see _flushPending
+  // Flushed-but-can't-send-yet writes, captured against the row(s) they
+  // belonged to and keyed by `${plant}\u0000${code}` so a later edit to the
+  // SAME work center replaces the earlier queued one (the payload is always
+  // the full current state, so the latest capture is a strict superset of
+  // the earlier one's intent) while edits to DIFFERENT work centers queue
+  // independently. See _flushPending (what queues) and _autosave (what
+  // drains, serialized, still inside the write that preceded it).
+  _queued: new Map<string, WorkCenterWriteRequest>(),
 
   // Fires _autosave() ~500ms after the last Description/weight keystroke.
   // Util.debounce (foundation.mts) has no cancel/flush handle, so
@@ -5152,13 +5160,15 @@ export const WorkCenters = {
   _flushPending(): void {
     if (WorkCenters._saving && WorkCenters._dirty) {
       // A write is already in flight and the caller is about to replace
-      // _staged (row or plant switch). Left alone, the trailing retry in
-      // _autosave's finally would find _dirty already cleared by the
-      // caller (_selectRow/render both do) and silently drop this edit.
-      // Capture it as a concrete payload against the CURRENT (about to
-      // become old) plant/code instead, so that retry has something to send.
+      // _staged (row or plant switch). Left alone, the trailing drain in
+      // _autosave would find _dirty already cleared by the caller
+      // (_selectRow/render both do) and silently drop this edit. Capture it
+      // as a concrete payload against the CURRENT (about to become old)
+      // plant/code instead, keyed so the drain has something to send — and
+      // so a repeat capture for the SAME work center (two flushes before the
+      // in-flight write settles) replaces rather than stacks.
       const q = WorkCenters._buildWrite();
-      if (q) { WorkCenters._queued = q; WorkCenters._dirty = false; }
+      if (q) { WorkCenters._queued.set(`${q.plant}\u0000${q.code}`, q); WorkCenters._dirty = false; }
       return;
     }
     void WorkCenters._autosave();
@@ -5237,7 +5247,21 @@ export const WorkCenters = {
   // flag (set by _markDirty, cleared here right before dispatch) instead of
   // a separate "pending" flag — _dirty already means exactly "there's an
   // edit that hasn't been handed to _write yet", which is also exactly what
-  // the trailing-retry check in the `finally` below needs.
+  // the trailing-drain check at the bottom of the `finally` below needs.
+  //
+  // _saving stays true for the ENTIRE duration below, including while
+  // draining anything _flushPending queued against a different work center
+  // while the first write was in flight — not just for the first _write
+  // call. Only clearing it in `finally`, after the drain loop, is what
+  // actually fixes D28: the old shape cleared `_saving` right after the
+  // first write and then fired the queued one with `void` (fire-and-forget,
+  // not awaited), so a debounced autosave for whatever is now selected could
+  // start a SECOND concurrent PUT while that queued one was still in
+  // flight. Draining here instead serializes every write this session picks
+  // up, one at a time, before any caller ever sees _saving go false again.
+  // `_write` swallows its own errors (see its own try/catch), so this loop
+  // always reaches the next iteration or the end — a failed PUT never
+  // leaves the queue stuck.
   async _autosave(): Promise<void> {
     if (WorkCenters._saving) return; // in-flight write's own finally() retries once it settles, since _dirty stays true
     if (!WorkCenters._dirty) return;
@@ -5258,25 +5282,31 @@ export const WorkCenters = {
 
     try {
       await WorkCenters._write(build.plant, build.code, build.payload, build.members, seq);
-    } finally {
-      WorkCenters._saving = false;
-      const q = WorkCenters._queued;
-      if (q) {
-        WorkCenters._queued = null;
-        // Selection has already moved on by the time a queued write drains
-        // (that's exactly why _flushPending queued it instead of just
-        // firing), so pass the CURRENT _editSeq here, not an older captured
-        // one — _write's `_selected === code` guard is already false for
-        // this request either way, so it never re-bases or rolls back
-        // `_staged`/`_baseline`; it only persists q's old-row payload and
-        // patches `_rows`/`_machines`, which are code-keyed and safe
+      // Drain whatever _flushPending queued (possibly for several different
+      // work centers) while the write above — or a prior iteration of this
+      // same loop — was in flight. Map insertion order is iteration order,
+      // so a first-queued code is sent first; a repeat capture for the SAME
+      // code already replaced its earlier entry in place (see
+      // _flushPending), so only the latest payload per code is ever sent.
+      while (WorkCenters._queued.size > 0) {
+        const nextKey = WorkCenters._queued.keys().next().value as string;
+        const q = WorkCenters._queued.get(nextKey) as WorkCenterWriteRequest;
+        WorkCenters._queued.delete(nextKey);
+        // Selection has typically moved on by the time a queued write
+        // drains (that's exactly why _flushPending queued it instead of
+        // just firing), so pass the CURRENT _editSeq here, not an older
+        // captured one — _write's `_selected === code` guard is already
+        // false for this request either way, so it never re-bases or rolls
+        // back `_staged`/`_baseline`; it only persists q's old-row payload
+        // and patches `_rows`/`_machines`, which are code-keyed and safe
         // regardless of what's currently selected. Don't "fix" this by
         // capturing an older seq — there's nothing left for it to guard
         // once the row has changed.
-        void WorkCenters._write(q.plant, q.code, q.payload, q.members, WorkCenters._editSeq);
-      } else if (WorkCenters._dirty) {
-        void WorkCenters._autosave();
+        await WorkCenters._write(q.plant, q.code, q.payload, q.members, WorkCenters._editSeq);
       }
+    } finally {
+      WorkCenters._saving = false;
+      if (WorkCenters._dirty) void WorkCenters._autosave();
     }
   },
 
@@ -5329,6 +5359,34 @@ export const WorkCenters = {
         if (mach) mach.distribution_weight = res.weights[m] ?? null;
       }
       WorkCenters._refreshSidebarRow(code);
+
+      // D38: Store.masterData.workcenters (the Alerts/optimizer-facing copy,
+      // distinct from this pane's own `_rows`/`_machines` above) only reflects
+      // the saved fields once this patches it too — otherwise a save here
+      // leaves Alerts computing against the pre-edit distribution_mode/
+      // default_machine/max_separation/review_required/distribute_tooled
+      // until the admin happens to navigate away and back (whatever next
+      // triggers a full master-data refresh). Scoped to the selected plant
+      // like every other per-plant Store slice (F7); a save for a background
+      // plant still lands in `_rows`/`_machines` above (this pane's own
+      // state) but doesn't touch the live Store others read.
+      if (plant === Store.selectedPlant && Store.masterData) {
+        const widx = Store.masterData.workcenters.findIndex((w) => w.plant === plant && w.sap_workcenter === code);
+        if (widx >= 0) {
+          const wcs = [...Store.masterData.workcenters];
+          wcs[widx] = {
+            ...wcs[widx],
+            description:       res.description ?? null,
+            distribution_mode: res.distribution_mode,
+            default_machine:   res.default_machine ?? null,
+            max_separation:    res.max_separation,
+            review_required:   res.review_required,
+            distribute_tooled: res.distribute_tooled,
+          };
+          Store.setMasterData({ ...Store.masterData, workcenters: wcs }, 'work-centers');
+          Alerts.scheduleRecompute();
+        }
+      }
 
       // A slow response landing after a plant/row switch must not touch the
       // live edit buffer for whatever is now selected instead.
