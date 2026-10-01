@@ -664,12 +664,19 @@ def _build_child_rows(plant: str, production_order: str, material_number: str,
     labor_hours = parent_facts.get("labor_hours")
     labor_alloc: dict[str, Decimal] = {}
     if labor_hours is not None:
-        labor_alloc = service.apportion(_dec(labor_hours), positive, _HOURS_APPORTION_UNIT, tie_order)
+        # D53: round_total=True here only -- labor/machine hours carry more
+        # decimal precision than their 0.01 unit, which overshoots without
+        # it. The quantity (unit = incremental_lot_size, a real H6 lot-size
+        # rule) and run-time-minutes (unit = 1, already integral minutes)
+        # calls above must NOT opt in -- see apportion()'s own docstring.
+        labor_alloc = service.apportion(
+            _dec(labor_hours), positive, _HOURS_APPORTION_UNIT, tie_order, round_total=True)
 
     machine_hours = parent_facts.get("machine_hours")
     machine_alloc: dict[str, Decimal] = {}
     if machine_hours is not None:
-        machine_alloc = service.apportion(_dec(machine_hours), positive, _HOURS_APPORTION_UNIT, tie_order)
+        machine_alloc = service.apportion(
+            _dec(machine_hours), positive, _HOURS_APPORTION_UNIT, tie_order, round_total=True)
 
     min_lot_size = mat_attrs.get("min_lot_size")
 

@@ -234,6 +234,8 @@ def apportion(
     weights: dict[str, Decimal],
     unit: Decimal,
     tie_order: Optional[list[str]] = None,
+    *,
+    round_total: bool = False,
 ) -> dict[str, Decimal]:
     """
     Hamilton / largest-remainder apportionment (§5.3 bullet "Quantity apportionment").
@@ -249,28 +251,35 @@ def apportion(
       - reuse for both quantity apportionment and run-time apportionment
 
     D53: `total` carrying more decimal precision than `unit` (e.g. labor/
-    machine hours) is rounded to the nearest whole multiple of `unit`
-    (ROUND_HALF_UP) FIRST -- otherwise the floor-then-largest-remainder loop
-    below is left with a leftover that isn't itself a clean multiple of
-    `unit`, and silently overshoots the total by up to one unit (2.3333
-    split three ways in 0.01 units summed to 2.34, not 2.33). A negative
-    total is handled symmetrically (apportion the positive magnitude, then
-    negate every result) rather than raising -- this function must never
-    raise, since `plan_fn` runs outside `upsert_orders`' `try`. (The
-    quantity rule itself -- `_quantity_unit` and its integer-unit callers --
-    is H6, deferred, and untouched here.)
+    machine hours) silently overshoots by up to one unit when the
+    floor-then-largest-remainder loop below is left with a leftover that
+    isn't itself a clean multiple of `unit` (2.3333 split three ways in 0.01
+    units summed to 2.34, not 2.33). `round_total=True` (opt-in, default
+    False) rounds `total` to the nearest whole multiple of `unit`
+    (ROUND_HALF_UP) FIRST to fix that -- gated behind a flag because the
+    QUANTITY path calls this same function with `unit = incremental_lot_size`
+    (a real, meaningful lot-size split, H6, deliberately out of scope here),
+    and unconditionally rounding there would silently change lot-size split
+    results. Only the labor_hours/machine_hours callers
+    (`data.py::_build_child_rows`) pass `round_total=True`; the quantity and
+    run-time-minutes callers are byte-for-byte unchanged from base
+    behavior. A negative total is handled symmetrically regardless of
+    `round_total` (apportion the positive magnitude, then negate every
+    result) rather than raising -- this function must never raise, since
+    `plan_fn` runs outside `upsert_orders`' `try`.
 
     Returns:
       {machine: quantity_in_units}
     """
     if total < 0:
-        negated = apportion(-total, weights, unit, tie_order)
+        negated = apportion(-total, weights, unit, tie_order, round_total=round_total)
         return {m: -v for m, v in negated.items()}
 
     if not weights or all(w == 0 for w in weights.values()):
         return {m: Decimal(0) for m in weights}
 
-    total = (total / unit).to_integral_value(rounding=ROUND_HALF_UP) * unit
+    if round_total:
+        total = (total / unit).to_integral_value(rounding=ROUND_HALF_UP) * unit
 
     # Normalize weights
     total_weight = sum(w for w in weights.values() if w > 0)

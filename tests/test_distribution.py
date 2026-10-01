@@ -366,28 +366,41 @@ class TestApportion:
         # L2 (3x weight) should get roughly 3x the quantity
         assert result["L2"] >= result["L1"] * 2
 
-    def test_fine_total_rounded_to_unit_before_split(self):
-        """D53: a total with more decimal precision than `unit` (e.g. labor
-        hours) must round to the unit FIRST -- without that, 2.3333 split
-        three ways in 0.01-hour units silently overshoots to 2.34."""
+    def test_fine_total_rounded_to_unit_before_split_when_opted_in(self):
+        """D53: with `round_total=True` (the labor/machine-hours callers'
+        opt-in), a total with more decimal precision than `unit` rounds to
+        the unit FIRST -- without that, 2.3333 split three ways in
+        0.01-hour units silently overshoots to 2.34."""
+        total = Decimal("2.3333")
+        weights = {"L1": Decimal(1), "L2": Decimal(1), "L3": Decimal(1)}
+        unit = Decimal("0.01")
+        result = apportion(total, weights, unit, round_total=True)
+        assert sum(result.values()) == Decimal("2.33")
+
+    def test_fine_total_not_rounded_by_default(self):
+        """D53: `round_total` defaults to False -- a caller that doesn't opt
+        in (quantity, run-time-minutes) still overshoots exactly as it did
+        on base 515417a; this function must not change their behavior."""
         total = Decimal("2.3333")
         weights = {"L1": Decimal(1), "L2": Decimal(1), "L3": Decimal(1)}
         unit = Decimal("0.01")
         result = apportion(total, weights, unit)
-        assert sum(result.values()) == Decimal("2.33")
+        assert sum(result.values()) == Decimal("2.34")
 
-    def test_single_child_rounds_half_up(self):
-        """D53: a lone child's total is still rounded to the unit (ROUND_HALF_UP)."""
+    def test_single_child_rounds_half_up_when_opted_in(self):
+        """D53: a lone child's total is still rounded to the unit
+        (ROUND_HALF_UP) when `round_total=True`."""
         total = Decimal("1.005")
         weights = {"L1": Decimal(1)}
         unit = Decimal("0.01")
-        result = apportion(total, weights, unit)
+        result = apportion(total, weights, unit, round_total=True)
         assert result["L1"] == Decimal("1.01")
 
     def test_negative_total_apportions_symmetrically(self):
         """D53: a negative total must never raise -- it apportions the
         positive magnitude and negates every result (plan_fn runs outside
-        upsert_orders' try, so apportion() can't afford to crash it)."""
+        upsert_orders' try, so apportion() can't afford to crash it). Applies
+        regardless of `round_total`."""
         total = Decimal(-10)
         weights = {"L1": Decimal(1), "L2": Decimal(1)}
         unit = Decimal(1)
@@ -395,6 +408,21 @@ class TestApportion:
         assert result["L1"] == Decimal(-5)
         assert result["L2"] == Decimal(-5)
         assert sum(result.values()) == Decimal(-10)
+
+    def test_quantity_lot_size_split_unaffected_by_round_total_gate(self):
+        """D53 review finding 1: the QUANTITY path calls apportion() with
+        `unit = incremental_lot_size` (a real H6 lot-size rule, out of scope
+        for this plan) and never passes `round_total`. A 104-unit order on a
+        10-unit lot, split 50/50, must give the EXACT SAME result as on base
+        515417a: {"L1": 60, "L2": 50} (sum 110, the pre-existing lot-size
+        largest-remainder behavior -- H6 territory, untouched here)."""
+        total = Decimal(104)
+        weights = {"L1": Decimal(1), "L2": Decimal(1)}
+        unit = Decimal(10)
+        tie_order = ["L1", "L2"]
+        result = apportion(total, weights, unit, tie_order)
+        assert result == {"L1": Decimal(60), "L2": Decimal(50)}
+        assert sum(result.values()) == Decimal(110)
 
 
 class TestCleanWeights:
@@ -1089,11 +1117,18 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
     orders" step upstream had already set (`needs_planning` + a non-NULL
     reason) -- violating `orders_planning_state_check` (schema.sql) and
     failing the whole upload. The fix folds planning_status='scheduled',
-    planning_reason=NULL into that same UPDATE."""
+    planning_reason=NULL into that same UPDATE.
+
+    A production_version/routing_operation pair is seeded (via the
+    material's `default_production_version`) so the resolver's `scheduled`
+    outcome is genuinely exercised end-to-end, not just the `needs_planning`
+    (pv_missing) hold fallback."""
     SUB, PLANT = "ZZTEST_D01_SUB", "ZZT_D01_PL"
     WC = "ZZTEST_D01_WC"
     L1, L2 = "ZZTEST_D01_L1", "ZZTEST_D01_L2"
     ORD, MAT = "ZZTEST_D01_ORD", "ZZTEST_D01_MAT"
+    PV, ROUTING_GROUP = "0001", "ZZD01GRP"
+    CUTOVER_SEED_ORD = "ZZTEST_D01_CUTOVER_SEED"
 
     @pytest.fixture(autouse=True)
     def _seed(self, pg):
@@ -1119,6 +1154,32 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
                  self.SUB, self.PLANT, self.L2, self.WC, 40),
             )
             _seed_distribution_material(cur, self.MAT, self.PLANT)
+            # Give every child a resolvable production_version via the
+            # material's default (ROUTING_RUNTIME_DESIGN.md's own
+            # production_version precedence: order's own edit, or the
+            # Material Plant default) -- children never carry their own
+            # production_version from distribution, so without this the
+            # resolver would always hold on pv_missing.
+            cur.execute(
+                "UPDATE material_plants SET default_production_version = %s "
+                "WHERE plant = %s AND material_id = %s",
+                (self.PV, self.PLANT, self.MAT),
+            )
+            cur.execute(
+                "INSERT INTO production_version (plant, material_id, production_version, "
+                "task_list_type, routing_group, group_counter, valid_from, valid_to, sap_workcenter) "
+                "VALUES (%s,%s,%s,'N',%s,'01','2026-01-01','2027-12-31',%s)",
+                (self.PLANT, self.MAT, self.PV, self.ROUTING_GROUP, self.WC),
+            )
+            # One operation at WC, category 0001 (machine), base_quantity 10,
+            # 3 std machine hours -- both L1 and L2 map to WC (seeded above).
+            cur.execute(
+                "INSERT INTO routing_operation (plant, material_id, task_list_type, routing_group, "
+                "group_counter, sequence_no, activity, sap_workcenter, workcenter_category, "
+                "base_quantity, std_value_machine, std_value_unit_machine) "
+                "VALUES (%s,%s,'N',%s,'01','000000','0010',%s,'0001',10,3,'H')",
+                (self.PLANT, self.MAT, self.ROUTING_GROUP, self.WC),
+            )
             # The plain order arrived BEFORE the work center was configured --
             # it is already scheduled by a planner (scheduled_start set,
             # planning_status defaults to 'scheduled').
@@ -1139,9 +1200,14 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
 
     def _cleanup(self, cur):
         cur.execute("DELETE FROM orders WHERE plant = %s AND (parent_production_order = %s "
-                    "OR production_order = %s)", (self.PLANT, self.ORD, self.ORD))
+                    "OR production_order IN (%s, %s))",
+                    (self.PLANT, self.ORD, self.ORD, self.CUTOVER_SEED_ORD))
         cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
                     (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM routing_operation WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM production_version WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
         cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
                     (self.PLANT, self.L1, self.L2))
         cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
@@ -1152,10 +1218,8 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
         cur.execute("DELETE FROM plants WHERE plant = %s AND subnetwork = %s", (self.PLANT, self.SUB))
         cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
 
-    def test_upload_succeeds_distributes_and_never_breaks_planning_state_check(self, pg):
-        db_ = pg
-        batch_id = str(uuid.uuid4())
-        row = {
+    def _row(self):
+        return {
             "production_order": self.ORD, "material_number": self.MAT,
             "machine": self.WC, "plant": self.PLANT,
             "basic_start_date": dt.datetime(2026, 10, 1, 0, 0),
@@ -1163,12 +1227,27 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
             "order_quantity": 100.0, "run_time": 10.0,
         }
 
-        # Must not raise -- the pre-fix code violated orders_planning_state_check
-        # inside _carry_anchor_onto_new_child's UPDATE and the whole upload failed.
+    def _children_state(self, db_, cols):
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {cols} FROM orders WHERE plant = %s AND parent_production_order = %s",
+                (self.PLANT, self.ORD),
+            )
+            return cur.fetchall()
+
+    def test_upload_then_resolve_pins_scheduled_anchor_then_resolved_runtime(self, pg):
+        db_ = pg
+        batch_id = str(uuid.uuid4())
+
+        # Step 1 -- db.upsert_orders WITHOUT resolve_fn: pins the state
+        # right after apply() (the anchor carried, planning_status fixed to
+        # 'scheduled') before any routing resolve has run. Must not raise --
+        # the pre-fix code violated orders_planning_state_check inside
+        # _carry_anchor_onto_new_child's UPDATE and failed the whole upload
+        # right here.
         result = db_.upsert_orders(
-            [row], batch_id=batch_id, source="excel", filename="d01-anchor-routing-test.xlsx",
+            [self._row()], batch_id=batch_id, source="excel", filename="d01-anchor-routing-test.xlsx",
             plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
-            resolve_fn=routing_resolver.resolve_orders,
         )
         assert result["status"] == "ok"
 
@@ -1177,35 +1256,86 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
             cur.execute("SELECT 1 FROM orders WHERE id = %s", (self.plain_id,))
             assert cur.fetchone() is None
 
-        # Both lettered sub-orders exist.
+        children = _snapshot_children(db_, self.PLANT, self.ORD)
+        assert len(children) == 2
+        for child in children:
+            assert child["scheduled_start"] == self.anchor_start
+            assert child["notes"] == "Planner note"
+
+        post_apply_rows = self._children_state(db_, "planning_status, planning_reason, run_time")
+        assert len(post_apply_rows) == 2
+        for planning_status, planning_reason, run_time in post_apply_rows:
+            assert planning_status == "scheduled"
+            assert planning_reason is None
+            # routing-enabled plant: upsert_orders blanked run_time on these
+            # same child-row dicts before insert; the resolver hasn't run yet.
+            assert run_time is None
+
+        # Step 2 -- run the resolver explicitly (the resolve_fn seam, called
+        # separately here so step 1's intermediate state above is pinned on
+        # its own). production_version/routing_operation were seeded, so
+        # this resolves successfully rather than holding on pv_missing.
+        report = routing_resolver.resolve_orders(self.PLANT)
+        assert report["resolved"] == 2
+
+        final_rows = self._children_state(
+            db_, "planning_status, planning_reason, scheduled_start, scheduled_end, run_time, run_time_source")
+        assert len(final_rows) == 2
+        for planning_status, planning_reason, scheduled_start, scheduled_end, run_time, run_time_source in final_rows:
+            assert planning_status == "scheduled"
+            assert planning_reason is None
+            assert scheduled_start == self.anchor_start  # untouched by the resolve
+            assert run_time is not None
+            assert run_time_source == "routing"
+
+    def test_same_scenario_on_an_already_cutover_plant_still_resolves_and_loads(self, pg):
+        """Review finding 2 (disputed): once the plant already has >= 1
+        routing-sourced order (`is_cutover = False` in `resolve_orders`),
+        does the carried child still get loaded and resolved? The reviewer
+        claimed a carried child ends up `scheduled` with a non-NULL
+        SAP-apportioned run_time and NULL run_time_source, which
+        `_load_orders`'s cutover-ONLY clause would then skip. Planning
+        traced that `upsert_orders` blanks `row['run_time']` on the SAME
+        child-row dicts (db.py ~2595-2597) regardless of cutover state, so
+        `_load_orders`'s unconditional `run_time IS NULL` clause (not just
+        the cutover-only one) picks the child up either way. Settled here
+        empirically rather than by re-reading the code: the reviewer's claim
+        does NOT hold -- the carried child is loaded and resolved exactly
+        like the non-cutover case in the test above."""
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "run_time, run_time_source) VALUES (%s,%s,%s,%s,%s,%s,'routing')",
+                (db_.make_id(self.CUTOVER_SEED_ORD, self.MAT), self.CUTOVER_SEED_ORD, self.MAT,
+                 self.L1, self.PLANT, 1.0),
+            )
+            conn.commit()
+            cur.execute(
+                "SELECT EXISTS(SELECT 1 FROM orders WHERE plant = %s AND run_time_source = 'routing')",
+                (self.PLANT,),
+            )
+            assert cur.fetchone()[0] is True, "seed must actually flip is_cutover to False"
+
+        batch_id = str(uuid.uuid4())
+        result = db_.upsert_orders(
+            [self._row()], batch_id=batch_id, source="excel", filename="d01-cutover-test.xlsx",
+            plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+            resolve_fn=routing_resolver.resolve_orders,
+        )
+        assert result["status"] == "ok"
+
         children = _snapshot_children(db_, self.PLANT, self.ORD)
         assert len(children) == 2
 
-        # No row may violate orders_planning_state_check: 'scheduled' always
-        # has a NULL planning_reason; 'needs_planning' always has NULL
-        # scheduled_start/scheduled_end and a non-NULL planning_reason. If
-        # the DB had rejected an inconsistent row this upload would already
-        # have raised above -- this is a direct, redundant confirmation of
-        # the final state every child landed in (either kept the anchor's
-        # schedule as 'scheduled', or got held by the resolver for missing
-        # routing data as 'needs_planning').
-        with db_._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT planning_status, planning_reason, scheduled_start, scheduled_end "
-                "FROM orders WHERE plant = %s AND parent_production_order = %s",
-                (self.PLANT, self.ORD),
-            )
-            rows = cur.fetchall()
+        rows = self._children_state(db_, "planning_status, planning_reason, run_time, run_time_source")
         assert len(rows) == 2
-        for planning_status, planning_reason, scheduled_start, scheduled_end in rows:
-            if planning_status == "scheduled":
-                assert planning_reason is None
-            elif planning_status == "needs_planning":
-                assert planning_reason is not None
-                assert scheduled_start is None
-                assert scheduled_end is None
-            else:
-                pytest.fail(f"unexpected planning_status {planning_status!r}")
+        for planning_status, planning_reason, run_time, run_time_source in rows:
+            # Loaded and resolved -- NOT skipped -- on an already-cut-over plant.
+            assert planning_status == "scheduled"
+            assert planning_reason is None
+            assert run_time is not None
+            assert run_time_source == "routing"
 
 
 @pytest.mark.pg
@@ -1308,6 +1438,49 @@ class TestPlanZeroWeightWorkcenterStaysPlain:
                 (self.PLANT, self.ORD, self.MAT),
             )
             assert cur.fetchone() is None, "no distribution header must be created"
+
+    def test_pre_existing_scheduled_plain_order_survives_with_schedule_intact(self, pg):
+        """D03 review finding 4b: the actual harm D03 prevents is a planner's
+        already-SCHEDULED plain order (for a work center that's since gone
+        zero-weight) getting swept into a brand-new distribution header on
+        the next re-ingest -- which would delete this exact row (superseded
+        child cleanup) and discard its schedule/notes. Pin that it instead
+        survives, untouched, as the SAME plain row."""
+        db_ = pg
+        plain_id = db_.make_id(self.ORD, self.MAT)
+        sched_start = dt.datetime(2026, 10, 3, 9, 0)
+        sched_end = dt.datetime(2026, 10, 3, 17, 0)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, scheduled_start, scheduled_end, notes, run_time) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (plain_id, self.ORD, self.MAT, self.WC, self.PLANT,
+                 dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 18, 0),
+                 sched_start, sched_end, "Planner note", 10.0),
+            )
+            conn.commit()
+
+        batch_id = str(uuid.uuid4())
+        result = db_.upsert_orders(
+            [self._row()], batch_id=batch_id, source="excel", filename="zero-weight-refresh-test.xlsx",
+            plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+        )
+        assert result["status"] == "ok"
+
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT machine, parent_production_order, scheduled_start, scheduled_end, notes "
+                "FROM orders WHERE id = %s",
+                (plain_id,),
+            )
+            row = cur.fetchone()
+        assert row is not None, "the already-scheduled plain order must survive the re-ingest"
+        assert row[0] == self.WC
+        assert row[1] is None, "must never be converted into a distribution child"
+        assert row[2] == sched_start, "the planner's schedule must survive untouched"
+        assert row[3] == sched_end
+        assert row[4] == "Planner note"
 
 
 @pytest.mark.pg
