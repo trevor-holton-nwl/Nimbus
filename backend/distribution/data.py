@@ -886,6 +886,33 @@ def _plan_core(cur, survivors: list[dict], batch_id: str, warnings: dict) -> tup
             continue
 
         mat_attrs = material_attrs.get((plant, key[2]), {})
+
+        # D03: a brand-new distribute-mode header whose default shares come
+        # out all-zero (every member weight 0/NULL-and-no-material-default)
+        # has no actual distribution policy -- distributing it would create
+        # an all-zero-share header with zero-quantity children, same failure
+        # mode as the memberless `distribute_no_members` case above. Must
+        # live HERE, not in classify_row, because a material_default /
+        # tooled_single rule can still yield a valid 100% share even when
+        # every workcenter weight is 0 -- classify_row has no material
+        # context to make that call. Self-contained on purpose: B4
+        # restructures _plan_core to move the duplicate/conflict filter
+        # after classification, and this branch must survive that move
+        # unchanged.
+        if existing is None and ctype == "distribute":
+            wc = workcenter_lookup.get(plant, {}).get(classification["machine"], {})
+            member_pairs = [(m, wc.get("member_weights", {}).get(m)) for m in wc.get("members", [])]
+            default_shares, _default_basis = service.compute_default_shares(mat_attrs, wc, member_pairs)
+            if not any(w > 0 for w in default_shares.values()):
+                warnings["workcenter_without_members"].append({
+                    "plant": plant, "production_order": key[1], "material_number": key[2],
+                    "sap_workcenter": classification["machine"], "reason": "zero_weights",
+                })
+                row = dict(row)
+                row["plant"] = plant
+                rows_out.append(row)
+                continue
+
         parent_plan, child_rows = _plan_one_parent(
             plant, key[1], key[2], row, classification, existing, workcenter_lookup,
             mat_attrs, anchor_sources, plain_ids.get(key), batch_id, warnings,
@@ -954,21 +981,28 @@ def _insert_new_header(cur, parent: dict, batch_id: str) -> bool:
     sap_facts = _build_sap_facts(facts, None, parent.get("runtime_defaulted"))
     review_required = parent.get("review_required")
     reviewed = not review_required if review_required is not None else False
+    # D16: a policy-reviewed insert (review_required = FALSE) must stamp
+    # reviewed_at/reviewed_quantity the same way a manual review does
+    # (_resolve_review_stamp) -- otherwise qty_changed can never fire for a
+    # header that was never manually reviewed, since reviewed_quantity stays
+    # NULL forever.
+    reviewed_at = datetime.now(timezone.utc) if reviewed else None
+    reviewed_quantity = facts.get("order_quantity") if reviewed else None
     cur.execute(
         """
         INSERT INTO order_distribution (
             plant, production_order, material_number, sap_workcenter,
             order_quantity, run_time, basic_start_date, basic_finish_date,
             firming_indicator, sap_facts, source, default_basis,
-            reviewed, reviewed_by, last_batch_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default', %s, %s, %s, %s)
+            reviewed, reviewed_by, reviewed_at, reviewed_quantity, last_batch_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default', %s, %s, %s, %s, %s, %s)
         ON CONFLICT (plant, production_order, material_number) DO NOTHING
         """,
         (parent["plant"], parent["production_order"], parent["material_number"],
          parent["sap_workcenter"], facts.get("order_quantity"), facts.get("run_time"),
          facts.get("basic_start_date"), facts.get("basic_finish_date"),
          facts.get("firming_indicator"), Jsonb(sap_facts), parent["default_basis"],
-         reviewed, "policy" if reviewed else None, batch_id),
+         reviewed, "policy" if reviewed else None, reviewed_at, reviewed_quantity, batch_id),
     )
     return cur.rowcount == 1
 
@@ -1228,11 +1262,14 @@ def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> Non
         """
         UPDATE orders
            SET scheduled_start = %(start)s, scheduled_end = %(end)s,
-               notes = %(notes)s, updated_at = NOW()
+               notes = %(notes)s, planning_status = 'scheduled',
+               planning_reason = NULL, updated_at = NOW()
          WHERE id = %(id)s
            AND (scheduled_start IS DISTINCT FROM %(start)s
              OR scheduled_end IS DISTINCT FROM %(end)s
-             OR notes IS DISTINCT FROM %(notes)s)
+             OR notes IS DISTINCT FROM %(notes)s
+             OR planning_status IS DISTINCT FROM 'scheduled'
+             OR planning_reason IS NOT NULL)
         """,
         {"start": start, "end": end, "notes": anchor.get("notes"), "id": child_id},
     )
@@ -2726,6 +2763,13 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
 
         member_pairs = [(m, workcenter["member_weights"].get(m)) for m in workcenter["members"]]
         default_shares, default_basis = service.compute_default_shares(mat_attrs, workcenter, member_pairs)
+        if not any(w > 0 for w in default_shares.values()):
+            # D03: same zero-weights policy as the ingest-side check in
+            # _plan_core -- resetting to a default that is itself all-zero
+            # would silently zero out every child; reapply_defaults already
+            # counts a ValueError as skipped (not a hard failure).
+            raise ValueError(
+                f"weights_empty: default shares for {plant!r}/{order!r}/{material!r} are all zero")
         desired_weights = {m: Decimal(0) for m in existing_shares}
         desired_weights.update({m: _dec(w) for m, w in default_shares.items()})
         letters = _reweight_letters(existing_shares, set(workcenter["members"]))

@@ -247,6 +247,30 @@ class TestComputeDefaultShares:
         assert shares["L2"] == Decimal(0)
         assert shares["L3"] == Decimal(25)
 
+    def test_all_zero_weights_gives_all_zero_shares(self):
+        """D03: every member explicitly weighted 0 (no material-default/tooled
+        rule) -> all-zero shares. _plan_core/reset_one_header rely on this to
+        detect a work center with no real distribution policy."""
+        members = [("L1", Decimal(0)), ("L2", Decimal(0))]
+        material_attrs = {}
+        workcenter = {}
+        shares, basis = compute_default_shares(material_attrs, workcenter, members)
+        assert basis == "workcenter_weights"
+        assert shares["L1"] == Decimal(0)
+        assert shares["L2"] == Decimal(0)
+
+    def test_blank_and_zero_weights_gives_all_zero_shares(self):
+        """D03: one NULL (blank) weight alongside one explicit 0 -- NULL
+        becomes 0 under the has-any-weight branch (not the even-split
+        branch, since 0 is not None) -> still all-zero."""
+        members = [("L1", None), ("L2", Decimal(0))]
+        material_attrs = {}
+        workcenter = {}
+        shares, basis = compute_default_shares(material_attrs, workcenter, members)
+        assert basis == "workcenter_weights"
+        assert shares["L1"] == Decimal(0)
+        assert shares["L2"] == Decimal(0)
+
 
 class TestAssignLetters:
     """§5.3 bullet 1: letter assignment (A, B, ..., Z, AA, AB, ...)."""
@@ -341,6 +365,36 @@ class TestApportion:
         assert sum(result.values()) == Decimal(100)
         # L2 (3x weight) should get roughly 3x the quantity
         assert result["L2"] >= result["L1"] * 2
+
+    def test_fine_total_rounded_to_unit_before_split(self):
+        """D53: a total with more decimal precision than `unit` (e.g. labor
+        hours) must round to the unit FIRST -- without that, 2.3333 split
+        three ways in 0.01-hour units silently overshoots to 2.34."""
+        total = Decimal("2.3333")
+        weights = {"L1": Decimal(1), "L2": Decimal(1), "L3": Decimal(1)}
+        unit = Decimal("0.01")
+        result = apportion(total, weights, unit)
+        assert sum(result.values()) == Decimal("2.33")
+
+    def test_single_child_rounds_half_up(self):
+        """D53: a lone child's total is still rounded to the unit (ROUND_HALF_UP)."""
+        total = Decimal("1.005")
+        weights = {"L1": Decimal(1)}
+        unit = Decimal("0.01")
+        result = apportion(total, weights, unit)
+        assert result["L1"] == Decimal("1.01")
+
+    def test_negative_total_apportions_symmetrically(self):
+        """D53: a negative total must never raise -- it apportions the
+        positive magnitude and negates every result (plan_fn runs outside
+        upsert_orders' try, so apportion() can't afford to crash it)."""
+        total = Decimal(-10)
+        weights = {"L1": Decimal(1), "L2": Decimal(1)}
+        unit = Decimal(1)
+        result = apportion(total, weights, unit)
+        assert result["L1"] == Decimal(-5)
+        assert result["L2"] == Decimal(-5)
+        assert sum(result.values()) == Decimal(-10)
 
 
 class TestCleanWeights:
@@ -453,6 +507,19 @@ class TestComputeDerivedStatuses:
         children = []
         statuses = compute_derived_statuses(header, shares, children, None, {})
         assert "qty_changed" in statuses
+
+    def test_qty_changed_requires_non_null_reviewed_quantity(self):
+        """D16: a reviewed header whose reviewed_quantity was never stamped
+        (NULL) must NOT show qty_changed just because NULL != order_quantity."""
+        header = {
+            "reviewed": True,
+            "order_quantity": Decimal(100),
+            "reviewed_quantity": None,
+        }
+        shares = []
+        children = []
+        statuses = compute_derived_statuses(header, shares, children, None, {})
+        assert "qty_changed" not in statuses
 
     def test_mode_mismatch(self):
         """Work center now in single mode."""
@@ -649,7 +716,8 @@ def _snapshot_header(db_, plant, order, material):
     with db_._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT sap_workcenter, order_quantity, run_time, reviewed, reviewed_by,
-                      default_basis, source, sap_facts, xmin::text::bigint, updated_at
+                      default_basis, source, sap_facts, xmin::text::bigint, updated_at,
+                      reviewed_quantity, reviewed_at
                  FROM order_distribution
                 WHERE plant = %s AND production_order = %s AND material_number = %s""",
             (plant, order, material),
@@ -661,6 +729,7 @@ def _snapshot_header(db_, plant, order, material):
         "sap_workcenter": row[0], "order_quantity": row[1], "run_time": row[2],
         "reviewed": row[3], "reviewed_by": row[4], "default_basis": row[5],
         "source": row[6], "sap_facts": row[7], "xmin": row[8], "updated_at": row[9],
+        "reviewed_quantity": row[10], "reviewed_at": row[11],
     }
 
 
@@ -1010,6 +1079,238 @@ class TestPlanApplyAnchorCarry:
 
 
 @pytest.mark.pg
+class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
+    """D01 (Review Focus 1): the SAME 1->N anchor carry as
+    TestPlanApplyAnchorCarry above, but through the REAL `db.upsert_orders`
+    wiring (plan_fn/apply_fn/resolve_fn) on a `routing_runtime_enabled`
+    plant. Before the fix, `_carry_anchor_onto_new_child`'s scheduled-anchor
+    UPDATE set scheduled_start on a brand-new child while leaving
+    planning_status/planning_reason at whatever the routing "hold new
+    orders" step upstream had already set (`needs_planning` + a non-NULL
+    reason) -- violating `orders_planning_state_check` (schema.sql) and
+    failing the whole upload. The fix folds planning_status='scheduled',
+    planning_reason=NULL into that same UPDATE."""
+    SUB, PLANT = "ZZTEST_D01_SUB", "ZZT_D01_PL"
+    WC = "ZZTEST_D01_WC"
+    L1, L2 = "ZZTEST_D01_L1", "ZZTEST_D01_L2"
+    ORD, MAT = "ZZTEST_D01_ORD", "ZZTEST_D01_MAT"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        self.plain_id = db_.make_id(self.ORD, self.MAT)
+        self.anchor_start = dt.datetime(2026, 10, 5, 6, 0)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'D01 routing audit test')",
+                        (self.SUB,))
+            cur.execute(
+                "INSERT INTO plants (subnetwork, plant, routing_runtime_enabled) VALUES (%s, %s, TRUE)",
+                (self.SUB, self.PLANT),
+            )
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, 60,
+                 self.SUB, self.PLANT, self.L2, self.WC, 40),
+            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            # The plain order arrived BEFORE the work center was configured --
+            # it is already scheduled by a planner (scheduled_start set,
+            # planning_status defaults to 'scheduled').
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, scheduled_start, scheduled_end, notes, run_time) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.plain_id, self.ORD, self.MAT, self.WC, self.PLANT,
+                 dt.datetime(2026, 10, 1, 0, 0), dt.datetime(2026, 10, 2, 0, 0),
+                 self.anchor_start, self.anchor_start + dt.timedelta(hours=10),
+                 "Planner note", 10.0),
+            )
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE plant = %s AND (parent_production_order = %s "
+                    "OR production_order = %s)", (self.PLANT, self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
+        cur.execute("DELETE FROM plants WHERE plant = %s AND subnetwork = %s", (self.PLANT, self.SUB))
+        cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+
+    def test_upload_succeeds_distributes_and_never_breaks_planning_state_check(self, pg):
+        db_ = pg
+        batch_id = str(uuid.uuid4())
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 0, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 2, 0, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+        # Must not raise -- the pre-fix code violated orders_planning_state_check
+        # inside _carry_anchor_onto_new_child's UPDATE and the whole upload failed.
+        result = db_.upsert_orders(
+            [row], batch_id=batch_id, source="excel", filename="d01-anchor-routing-test.xlsx",
+            plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+            resolve_fn=routing_resolver.resolve_orders,
+        )
+        assert result["status"] == "ok"
+
+        # The old plain row is superseded/deleted.
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM orders WHERE id = %s", (self.plain_id,))
+            assert cur.fetchone() is None
+
+        # Both lettered sub-orders exist.
+        children = _snapshot_children(db_, self.PLANT, self.ORD)
+        assert len(children) == 2
+
+        # No row may violate orders_planning_state_check: 'scheduled' always
+        # has a NULL planning_reason; 'needs_planning' always has NULL
+        # scheduled_start/scheduled_end and a non-NULL planning_reason. If
+        # the DB had rejected an inconsistent row this upload would already
+        # have raised above -- this is a direct, redundant confirmation of
+        # the final state every child landed in (either kept the anchor's
+        # schedule as 'scheduled', or got held by the resolver for missing
+        # routing data as 'needs_planning').
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT planning_status, planning_reason, scheduled_start, scheduled_end "
+                "FROM orders WHERE plant = %s AND parent_production_order = %s",
+                (self.PLANT, self.ORD),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        for planning_status, planning_reason, scheduled_start, scheduled_end in rows:
+            if planning_status == "scheduled":
+                assert planning_reason is None
+            elif planning_status == "needs_planning":
+                assert planning_reason is not None
+                assert scheduled_start is None
+                assert scheduled_end is None
+            else:
+                pytest.fail(f"unexpected planning_status {planning_status!r}")
+
+
+@pytest.mark.pg
+class TestPlanZeroWeightWorkcenterStaysPlain:
+    """D03: a brand-new distribute-mode parent whose work center members are
+    ALL weighted 0 (no material-default/tooled override) has no actual
+    distribution policy -- it must stay a plain order (no header/children
+    created) and surface a `workcenter_without_members` warning tagged
+    `reason: zero_weights`, same failure mode as a memberless work center."""
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_ZEROWEIGHT"
+    L1, L2 = "ZZTEST_L1_ZEROWEIGHT", "ZZTEST_L2_ZEROWEIGHT"
+    ORD, MAT = "ZZTEST_ORD_ZEROWEIGHT", "ZZT_MAT_ZEROWT"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight) "
+                "VALUES (%s,%s,%s,%s,%s),(%s,%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, 0,
+                 self.SUB, self.PLANT, self.L2, self.WC, 0),
+            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
+
+    def _row(self):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+    def test_zero_weights_warning_present_and_row_stays_plain(self, pg):
+        db_ = pg
+        batch_id = str(uuid.uuid4())
+        rows_out, plan_structure, warnings = distribution_data.plan([self._row()], batch_id)
+
+        header_key = (self.PLANT, self.ORD, self.MAT)
+        assert header_key not in plan_structure["parents"]
+
+        zero_weight_entries = [
+            w for w in warnings["workcenter_without_members"]
+            if w.get("production_order") == self.ORD and w.get("reason") == "zero_weights"
+        ]
+        assert len(zero_weight_entries) == 1
+        assert zero_weight_entries[0]["sap_workcenter"] == self.WC
+
+        assert len(rows_out) == 1
+        assert rows_out[0]["plant"] == self.PLANT
+        assert rows_out[0]["machine"] == self.WC
+
+    def test_zero_weight_order_survives_the_upload_as_plain(self, pg):
+        db_ = pg
+        batch_id = str(uuid.uuid4())
+        db_.upsert_orders(
+            [self._row()], batch_id=batch_id, source="excel", filename="zero-weight-test.xlsx",
+            plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+        )
+
+        plain_id = db_.make_id(self.ORD, self.MAT)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT machine, parent_production_order FROM orders WHERE id = %s", (plain_id,),
+            )
+            row = cur.fetchone()
+        assert row is not None, "the order must survive the upload as a plain row"
+        assert row[0] == self.WC
+        assert row[1] is None, "must never be converted into a distribution child"
+
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM order_distribution WHERE plant = %s AND production_order = %s "
+                "AND material_number = %s",
+                (self.PLANT, self.ORD, self.MAT),
+            )
+            assert cur.fetchone() is None, "no distribution header must be created"
+
+
+@pytest.mark.pg
 class TestApplyPreservesReviewedAndDefaultBasis:
     """§5.2 'Existing': a refresh (SAP facts only) must never touch shares,
     reviewed, reviewed_by, source, or default_basis -- confirmed by manually
@@ -1101,6 +1402,92 @@ class TestApplyPreservesReviewedAndDefaultBasis:
         assert after["default_basis"] == before["default_basis"]
         # ...and shares (letters/weights) are UNTOUCHED by ingest.
         assert shares_after == shares_before
+
+
+@pytest.mark.pg
+class TestApplyPolicyReviewedInsertStampsReviewedQuantity:
+    """D16: a policy-reviewed insert (sap_workcenter.review_required = FALSE)
+    must stamp reviewed_at/reviewed_quantity at INSERT time, the same as a
+    manual review does -- otherwise reviewed_quantity stays NULL forever and
+    qty_changed can never fire for a header nobody ever manually reviewed."""
+    SUB, PLANT = "WTG", "1006"
+    WC = "ZZTEST_WC_POLICY_REVIEWED"
+    L1, L2 = "ZZTEST_L1_POLICY_REVIEWED", "ZZTEST_L2_POLICY_REVIEWED"
+    ORD, MAT = "ZZTEST_ORD_POLICY_REVIEWED", "ZZT_MAT_POLREV"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode, review_required) "
+                "VALUES (%s, %s, 'distribute', FALSE)", (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC),
+            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                    (self.ORD, self.ORD))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                    (self.PLANT, self.ORD))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                    (self.PLANT, self.L1, self.L2))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                    (self.PLANT, self.WC))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                    (self.PLANT, self.MAT))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
+
+    def _row(self, qty):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": qty, "run_time": 10.0,
+        }
+
+    def test_policy_reviewed_insert_stamps_reviewed_quantity_and_qty_changed_fires_on_refresh(self, pg):
+        db_ = pg
+        batch_1 = str(uuid.uuid4())
+        rows_1, plan_1, _ = distribution_data.plan([self._row(100.0)], batch_1)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_1, batch_1, conn)
+
+        after_insert = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        assert after_insert["reviewed"] is True
+        assert after_insert["reviewed_quantity"] == 100
+        assert after_insert["reviewed_at"] is not None
+
+        # Second ingest with a CHANGED quantity -- a plain refresh (§5.2
+        # "Existing") updates order_quantity but must never touch
+        # reviewed_quantity.
+        batch_2 = str(uuid.uuid4())
+        rows_2, plan_2, _ = distribution_data.plan([self._row(200.0)], batch_2)
+        with db_._pool.connection() as conn:
+            distribution_data.apply(plan_2, batch_2, conn)
+
+        after_refresh = _snapshot_header(db_, self.PLANT, self.ORD, self.MAT)
+        assert after_refresh["order_quantity"] == 200
+        assert after_refresh["reviewed_quantity"] == 100  # untouched by refresh
+
+        statuses = compute_derived_statuses(
+            {"reviewed": after_refresh["reviewed"], "order_quantity": after_refresh["order_quantity"],
+             "reviewed_quantity": after_refresh["reviewed_quantity"]},
+            [], [], None, {},
+        )
+        assert "qty_changed" in statuses
 
 
 @pytest.mark.pg
@@ -1727,6 +2114,36 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
         assert new_row[2] == "keep me"
         assert segment_owner is not None and segment_owner[0] == new_bare_id, \
             "the segment must be re-pointed onto the new bare id, not cascade-deleted"
+
+
+@pytest.mark.pg
+class TestResetOneHeaderRaisesOnZeroWeights(_ReweightFixtureBase):
+    """D03: `reset_one_header` must refuse (not silently zero every share)
+    when the work center's CURRENT weights are all zero -- `reapply_defaults`
+    already counts a ValueError as skipped, so this surfaces as a skip, not
+    a crash, for a bulk reapply."""
+    WC = "ZZTEST_WC_RESETZERO"
+    L1, L2 = "ZZTEST_L1_RESETZERO", "ZZTEST_L2_RESETZERO"
+    ORD, MAT = "ZZTEST_ORD_RESETZERO", "ZZT_MAT_RESETZERO"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_reset_raises_weights_empty_when_all_member_weights_zero(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE machine SET distribution_weight = 0 WHERE plant = %s AND machine IN (%s, %s)",
+                (self.PLANT, self.L1, self.L2),
+            )
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        with pytest.raises(ValueError, match="weights_empty"):
+            distribution_data.reset_one_header(self.PLANT, self.ORD, self.MAT, header["xmin"])
 
 
 @pytest.mark.pg

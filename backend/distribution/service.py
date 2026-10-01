@@ -14,7 +14,7 @@ Unit-testable without a DB connection; called from backend/distribution/data.py
 and the ingest post-hook in db.py.
 """
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 
 # Exact match to frontend/nimbus-compute-core.js:391 — parity test in test_distribution.py
@@ -248,11 +248,29 @@ def apportion(
       - total smaller than number of positive-weight shares (some shares end up 0)
       - reuse for both quantity apportionment and run-time apportionment
 
+    D53: `total` carrying more decimal precision than `unit` (e.g. labor/
+    machine hours) is rounded to the nearest whole multiple of `unit`
+    (ROUND_HALF_UP) FIRST -- otherwise the floor-then-largest-remainder loop
+    below is left with a leftover that isn't itself a clean multiple of
+    `unit`, and silently overshoots the total by up to one unit (2.3333
+    split three ways in 0.01 units summed to 2.34, not 2.33). A negative
+    total is handled symmetrically (apportion the positive magnitude, then
+    negate every result) rather than raising -- this function must never
+    raise, since `plan_fn` runs outside `upsert_orders`' `try`. (The
+    quantity rule itself -- `_quantity_unit` and its integer-unit callers --
+    is H6, deferred, and untouched here.)
+
     Returns:
       {machine: quantity_in_units}
     """
+    if total < 0:
+        negated = apportion(-total, weights, unit, tie_order)
+        return {m: -v for m, v in negated.items()}
+
     if not weights or all(w == 0 for w in weights.values()):
         return {m: Decimal(0) for m in weights}
+
+    total = (total / unit).to_integral_value(rounding=ROUND_HALF_UP) * unit
 
     # Normalize weights
     total_weight = sum(w for w in weights.values() if w > 0)
@@ -325,8 +343,11 @@ def compute_derived_statuses(
     if not header.get("reviewed"):
         statuses.add("needs_review")
 
-    # qty_changed: reviewed header with order_quantity != reviewed_quantity
-    if header.get("reviewed") and header.get("order_quantity") != header.get("reviewed_quantity"):
+    # qty_changed: reviewed header with order_quantity != reviewed_quantity.
+    # D16: a NULL reviewed_quantity (never stamped) must never compare
+    # unequal to a real order_quantity and falsely fire qty_changed.
+    if (header.get("reviewed") and header.get("reviewed_quantity") is not None
+            and header.get("order_quantity") != header.get("reviewed_quantity")):
         statuses.add("qty_changed")
 
     # incomplete: positive, unpurged share has no living child, or child exists with no share
