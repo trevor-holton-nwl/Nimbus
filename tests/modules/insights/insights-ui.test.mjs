@@ -8,6 +8,7 @@ import { Dashboard, AlertsUIAdapter } from '../../../frontend/insights/insights-
 import { Table } from '../../../frontend/scheduling/orders.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Util } from '../../../frontend/platform/foundation.mjs';
 
 // Same split-realm/no-DOM situation documented in
 // tests/modules/optimization/engine.test.mjs and
@@ -218,25 +219,43 @@ test('alert drawer host binds the delegated action handler even in its empty sta
   }
 });
 
-test('Dashboard KPI orders_total subtitle includes distribution note when distributionSummary is set', () => {
+test('Dashboard._ordersTileSubtitle appends the sub-orders note only when the current plant has sub-orders, regardless of distributionSummary', () => {
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasks);
   const priorDistribution = Store.distributionSummary;
   try {
-    // Test 1: No distribution summary
-    Store._state.distributionSummary = null;
-    // Simulate the tile building from _renderKPIs — just check the subtitle logic
-    const subtitle1 = Store.distributionSummary
-      ? 'with note'
-      : 'without note';
-    assert.equal(subtitle1, 'without note', 'no subtitle note when distributionSummary is null');
+    Store.setSelectedPlant('P-SUBTITLE-TEST', 'unit-test');
 
-    // Test 2: With distribution summary
+    // No sub-orders for this plant (no PARENT_ORDER) — plain total, even
+    // though a distribution summary is set (D52: the summary carries no
+    // "has sub-orders" field, so its mere presence must not drive this).
+    Store.setTasks([
+      { id: 'subtitle-solo', PLANT: 'P-SUBTITLE-TEST', MACHINE: 'L1' },
+    ], 'unit-test');
     Store._state.distributionSummary = { needs_review: 3, changed: 2, problems: 0 };
-    const subtitle2 = Store.distributionSummary
-      ? 'with note'
-      : 'without note';
-    assert.equal(subtitle2, 'with note', 'subtitle note added when distributionSummary is set');
+    const soloTasks = Store.tasksForSelectedPlant();
+    assert.equal(
+      Dashboard._ordersTileSubtitle(soloTasks),
+      Util.t('kpi.orders_total', { n: soloTasks.length }),
+      'no sub-orders note when the plant has no PARENT_ORDER tasks'
+    );
+
+    // Plant has at least one sub-order group — note appended.
+    Store.setTasks([
+      { id: 'subtitle-a', PLANT: 'P-SUBTITLE-TEST', PARENT_ORDER: 'SAP-SUBTITLE', DISTRIBUTION_LETTER: 'A', MACHINE: 'L1' },
+      { id: 'subtitle-b', PLANT: 'P-SUBTITLE-TEST', PARENT_ORDER: 'SAP-SUBTITLE', DISTRIBUTION_LETTER: 'B', MACHINE: 'L1' },
+    ], 'unit-test');
+    Store._state.distributionSummary = null;
+    const subTasks = Store.tasksForSelectedPlant();
+    assert.equal(
+      Dashboard._ordersTileSubtitle(subTasks),
+      Util.t('kpi.orders_total', { n: subTasks.length }) + ' · ' + Util.t('kpi.orders_sub_counted'),
+      'sub-orders note appended when the plant has a PARENT_ORDER task, even with no distributionSummary'
+    );
   } finally {
     Store._state.distributionSummary = priorDistribution;
+    Store.setTasks(Object.values(priorTasks), 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
 

@@ -3,6 +3,7 @@
 // plant-and-administration.mts (Phase P2 of
 // docs/architecture/domain-refactor-plan.md, which split that
 // 11,308-line mega-module into 9 domain files).
+/* global NIMBUS */
 import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 
@@ -824,6 +825,23 @@ export const Interface = (() => {
     const frag = document.createDocumentFragment();
     if (entry.category !== 'distribution' || !entry.msg) return frag;
 
+    // Formats one detail-list item (D49) — duplicated locally, same as
+    // admin-ui.mts's _renderDistributionWarning (the established convention
+    // for these two renderers): a string stays as-is; an object assembles
+    // whichever of order/material/work-center/values it carries, joined with
+    // ' · '. Fixes the previous `String(i)` -> "[object Object]" output.
+    const fmt = (i: unknown): string => {
+      if (typeof i === 'string') return i;
+      if (i == null || typeof i !== 'object') return String(i);
+      const o = i as Record<string, unknown>;
+      const parts: string[] = [];
+      if (o.production_order != null) parts.push(String(o.production_order));
+      if (o.material_number != null) parts.push(String(o.material_number));
+      if (o.sap_workcenter != null) parts.push(String(o.sap_workcenter));
+      if (Array.isArray(o.values)) parts.push((o.values as unknown[]).join('/'));
+      return parts.join(' · ');
+    };
+
     // Main summary line
     const summary = document.createElement('div');
     summary.className = 'sap-dist-summary';
@@ -848,11 +866,17 @@ export const Interface = (() => {
       const linkRow = document.createElement('div');
       linkRow.style.padding = '4px 0';
       const link = document.createElement('a');
-      link.href = `#gantt/distribution?batch=${encodeURIComponent(batchId)}`;
+      link.href = '#';
       link.style.color = 'var(--accent,#0066cc)';
       link.style.textDecoration = 'underline';
       link.style.fontSize = '13px';
       link.textContent = `Review ${total} distribution${total === 1 ? '' : 's'}`;
+      link.addEventListener('click', (e: MouseEvent) => {
+        e.preventDefault();
+        const nimbus = typeof NIMBUS !== 'undefined' ? NIMBUS : undefined;
+        nimbus?.App?.goto?.('gantt');
+        nimbus?.App?.gotoGanttSub?.('distribution');
+      });
       linkRow.appendChild(link);
       frag.appendChild(linkRow);
     }
@@ -889,7 +913,7 @@ export const Interface = (() => {
       pre.style.whiteSpace = 'pre-wrap';
       pre.style.wordBreak = 'break-word';
       pre.style.fontSize = '11px';
-      pre.textContent = items.map(i => String(i)).join('\n');
+      pre.textContent = items.map(fmt).join('\n');
       detail.appendChild(pre);
       row.appendChild(detail);
 
@@ -905,6 +929,14 @@ export const Interface = (() => {
     return frag;
   }
 
-  return { render };
+  return {
+    render,
+    // Test-only hook (ForTest precedent: setup-scheduler.mts's
+    // fragmentObjectiveFactsForTest/checkDistributionSeparationForTest) —
+    // _renderSapDistributionWarning itself stays closure-private; this just
+    // exposes it to tests/modules/integration/sap-interface-ui.test.mjs,
+    // which otherwise cannot reach a non-exported module-scope function.
+    _renderSapDistributionWarningForTest: _renderSapDistributionWarning,
+  };
 })();
 

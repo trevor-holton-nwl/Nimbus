@@ -6,6 +6,7 @@
 // 11,308-line mega-module into 9 domain files) — two non-contiguous
 // source ranges combined into this one file per that phase's per-domain
 // grouping.
+/* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
@@ -1100,6 +1101,23 @@ export const AdminCockpit = {
     const frag = document.createDocumentFragment();
     if (entry.category !== 'distribution' || !entry.msg) return frag;
 
+    // Formats one detail-list item (D49): a string stays as-is; an object
+    // (conflicting_parent_rows/ambiguous_plant/workcenter_without_members/
+    // default_machine_invalid, per db.py's upload-warning shapes) assembles
+    // whichever of order/material/work-center/values it carries, joined with
+    // ' · '. Fixes the previous `String(i)` -> "[object Object]" output.
+    const fmt = (i: unknown): string => {
+      if (typeof i === 'string') return i;
+      if (i == null || typeof i !== 'object') return String(i);
+      const o = i as Record<string, unknown>;
+      const parts: string[] = [];
+      if (o.production_order != null) parts.push(String(o.production_order));
+      if (o.material_number != null) parts.push(String(o.material_number));
+      if (o.sap_workcenter != null) parts.push(String(o.sap_workcenter));
+      if (Array.isArray(o.values)) parts.push((o.values as unknown[]).join('/'));
+      return parts.join(' · ');
+    };
+
     // Main summary line
     const summary = document.createElement('div');
     summary.className = `admin-bwarn-row admin-bwarn-${entry.level || 'warn'}`;
@@ -1121,9 +1139,15 @@ export const AdminCockpit = {
       const linkRow = document.createElement('div');
       linkRow.className = 'admin-dist-link-row';
       const link = document.createElement('a');
-      link.href = `#gantt/distribution?batch=${encodeURIComponent(batchId)}`;
+      link.href = '#';
       link.className = 'admin-dist-link';
       link.textContent = Util.t('ui.review_distributions', { count: total });
+      link.addEventListener('click', (e: MouseEvent) => {
+        e.preventDefault();
+        const nimbus = typeof NIMBUS !== 'undefined' ? NIMBUS : undefined;
+        nimbus?.App?.goto?.('gantt');
+        nimbus?.App?.gotoGanttSub?.('distribution');
+      });
       linkRow.appendChild(link);
       frag.appendChild(linkRow);
     }
@@ -1162,7 +1186,7 @@ export const AdminCockpit = {
       pre.style.margin = '0';
       pre.style.whiteSpace = 'pre-wrap';
       pre.style.wordBreak = 'break-word';
-      pre.textContent = items.map(i => String(i)).join('\n');
+      pre.textContent = items.map(fmt).join('\n');
       detail.appendChild(pre);
       row.appendChild(detail);
 
