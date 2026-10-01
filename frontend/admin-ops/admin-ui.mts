@@ -1115,6 +1115,12 @@ export const AdminCockpit = {
       if (o.material_number != null) parts.push(String(o.material_number));
       if (o.sap_workcenter != null) parts.push(String(o.sap_workcenter));
       if (Array.isArray(o.values)) parts.push((o.values as unknown[]).join('/'));
+      // B3: a brand-new distribute-mode header whose default shares come out
+      // all-zero lands in `workcenter_without_members` too (data.py), tagged
+      // `reason: "zero_weights"` to distinguish it from the memberless case
+      // -- append a translated suffix so the planner sees WHY, not just
+      // which work center.
+      if (o.reason === 'zero_weights') parts.push(Util.t('ui.workcenter_zero_weights'));
       return parts.join(' · ');
     };
 

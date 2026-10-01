@@ -59,7 +59,10 @@ test('Interface._renderSapDistributionWarningForTest formats each warning-item s
       headers_refreshed: 0,
       conflicting_parent_rows: [{ production_order: 'PO1', material_number: 'MAT1', values: ['10', '20'] }],
       ambiguous_plant: [{ production_order: 'PO2', material_number: 'MAT2' }],
-      workcenter_without_members: [{ plant: 'P1', production_order: 'PO3', material_number: 'MAT3', sap_workcenter: 'WC1', reason: 'no machines mapped' }],
+      workcenter_without_members: [
+        { plant: 'P1', production_order: 'PO3', material_number: 'MAT3', sap_workcenter: 'WC1', reason: 'no machines mapped' },
+        { plant: 'P1', production_order: 'PO5', material_number: 'MAT5', sap_workcenter: 'WC2', reason: 'zero_weights' },
+      ],
       default_machine_invalid: [{ plant: 'P1', production_order: 'PO4', material_number: 'MAT4' }],
     };
 
@@ -69,7 +72,11 @@ test('Interface._renderSapDistributionWarningForTest formats each warning-item s
     const preTextOf = row => row.children[1].children[0].textContent;
     assert.equal(preTextOf(detailRows[0]), 'PO1 · MAT1 · 10/20', 'conflicting_parent_rows: order · material · values.join(\'/\')');
     assert.equal(preTextOf(detailRows[1]), 'PO2 · MAT2', 'ambiguous_plant: order · material');
-    assert.equal(preTextOf(detailRows[2]), 'PO3 · MAT3 · WC1', 'workcenter_without_members: order · material · work center');
+    assert.equal(
+      preTextOf(detailRows[2]),
+      'PO3 · MAT3 · WC1\nPO5 · MAT5 · WC2 · ui.workcenter_zero_weights',
+      'workcenter_without_members: a plain memberless item has no suffix; a `reason: "zero_weights"` item (B3) gets one',
+    );
     assert.equal(preTextOf(detailRows[3]), 'PO4 · MAT4', 'default_machine_invalid: order · material');
   });
 });

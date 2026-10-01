@@ -1830,12 +1830,12 @@ window.__NIMBUS_LOCALES.de = {
 
   // F10 (D34) — Order Distribution i18n completion: übersetzte die zuvor
   // englischsprachige dist_/wc_-Familie, ergänzte die Fehlercodes und
-  // barrierefreien Namen aus der jüngsten Verteilungsarbeit und formulierte
-  // err.dist_share_purged/err.dist_weights_empty oben neu (Controller-Nachtrag).
+  // barrierefreien Namen aus der jüngsten Verteilungsarbeit.
   'ui.review_distributions':            '{{count}} Verteilungen prüfen',
   'ui.conflicting_parent_rows':         'Widersprüchliche übergeordnete Aufträge',
   'ui.ambiguous_plant_conflicts':       'Mehrdeutige Werkskonflikte',
   'ui.workcenter_without_members':      'Arbeitszentrum ohne Mitglieder',
+  'ui.workcenter_zero_weights':          'alle Maschinengewichte sind 0',
   'ui.default_machine_invalid':         'Ungültige Standardmaschine',
   'col.distribution_mode':              'Verteilungsmodus',
   'col.max_separation':                 'Max. Trennung',
@@ -1859,7 +1859,7 @@ window.__NIMBUS_LOCALES.de = {
   'btn.dist_save_schedule':             'Zeitplan speichern',
   'btn.dist_bulk_mark_reviewed':        '{{n}} als geprüft markieren',
   'btn.dist_bulk_reset':                'Zurücksetzen',
-  'ui.dist_list_truncated':             'Zeigt die ältesten 5.000 Aufträge — grenzen Sie die Filter ein, um den Rest zu sehen.',
+  'ui.dist_list_truncated':             'Es wurden nur die ältesten 5.000 Aufträge geprüft — grenzen Sie die Filter ein, um den Rest zu sehen.',
   'err.dist_unknown_machine':           'Diese Maschine gehört nicht zu diesem Arbeitszentrum oder zur Aufteilung dieses Auftrags.',
   'err.dist_weight_invalid':            'Jede Gewichtung muss eine Zahl sein, die nicht größer als 1.000.000.000 ist.',
   'err.dist_base_version_required':     'In dieser Anfrage fehlt die aktuelle Version des Auftrags — neu laden und erneut versuchen.',

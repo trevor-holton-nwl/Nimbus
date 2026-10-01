@@ -2621,6 +2621,54 @@ class TestResetOneHeaderRaisesOnZeroWeights(_ReweightFixtureBase):
 
 
 @pytest.mark.pg
+class TestResetRouteSurfacesErrorCode(_ReweightFixtureBase):
+    """Audit fix item 1: a bulk `reset_orders` per-item ValueError (B3's
+    `weights_empty: ...`) must carry a structured `code` field through
+    `POST /distribution/{plant}/reset`, the same `<code>: <detail>`
+    partition rule `routes._distribution_error` uses for the single-item
+    `/shares` 400 -- not just a raw English `message` the planner-facing
+    frontend would otherwise show untranslated."""
+    WC = "ZZTEST_WC_RESETCODE"
+    L1, L2 = "ZZTEST_L1_RESETCODE", "ZZTEST_L2_RESETCODE"
+    ORD, MAT = "ZZTEST_ORD_RESETCODE", "ZZT_MAT_RESETCODE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE machine SET distribution_weight = 0 WHERE plant = %s AND machine IN (%s, %s)",
+                (self.PLANT, self.L1, self.L2),
+            )
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    @pytest.fixture
+    def client(self):
+        brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [self.PLANT]
+        brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+        try:
+            yield TestClient(brain.api)
+        finally:
+            brain.api.dependency_overrides.clear()
+
+    def test_reset_on_all_zero_workcenter_returns_item_with_weights_empty_code(self, pg, client):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        response = client.post(
+            f"/distribution/{self.PLANT}/reset",
+            json={"orders": [{"production_order": self.ORD, "material_number": self.MAT,
+                              "base_version": header["xmin"]}]},
+        )
+        assert response.status_code == 200
+        item = response.json()["results"][0]
+        assert item["status"] == "error"
+        assert item["code"] == "weights_empty"
+
+
+@pytest.mark.pg
 class TestReapplyDefaultsSkipsAlreadyReviewed(_ReweightFixtureBase):
     """D19: the DB-query candidate path already filters to `NOT reviewed`,
     but an explicit `orders` list previously bypassed that filter entirely --
@@ -3012,6 +3060,38 @@ class TestPurgeRetiresShareAndResetRevives(_ReweightFixtureBase):
         assert float(children_after_reset[self.L2]["order_quantity"]) == 40
         assert children_after_reset[self.L2]["id"] == l2_child["id"], \
             "L2's child must be kept, not recreated, by L1's revival"
+
+        # Review Focus 3: a later upload of the SAME parent (after the
+        # purge-then-reset cycle above) must be a no-op -- through the real
+        # plan()/apply() ingest path the other upload tests use, not another
+        # reset_one_header call -- same sub-order ids, same quantities, and
+        # no share left purged.
+        reupload_batch_id = str(uuid.uuid4())
+        reupload_row = {
+            "production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
+            "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+        _, reupload_plan, _ = distribution_data.plan([reupload_row], reupload_batch_id)
+        with pg._pool.connection() as conn:
+            distribution_data.apply(reupload_plan, reupload_batch_id, conn)
+
+        children_after_reupload = {c["machine"]: c for c in _snapshot_children(pg, self.PLANT, self.ORD)}
+        assert children_after_reupload[self.L1]["id"] == children_after_reset[self.L1]["id"], \
+            "a same-parent re-upload must not recreate L1's revived child"
+        assert children_after_reupload[self.L2]["id"] == l2_child["id"], \
+            "a same-parent re-upload must not recreate L2's never-purged child"
+        assert float(children_after_reupload[self.L1]["order_quantity"]) == 60
+        assert float(children_after_reupload[self.L2]["order_quantity"]) == 40
+
+        shares_after_reupload = {
+            s["machine"]: s for s in _snapshot_shares(pg, self.PLANT, self.ORD, self.MAT)
+        }
+        assert shares_after_reupload[self.L1]["purged_at"] is None, \
+            "the re-upload must not re-purge L1's just-revived share"
+        assert shares_after_reupload[self.L2]["purged_at"] is None
 
     def test_fully_purged_header_is_deleted_and_reupload_creates_fresh_header(self, pg):
         children = _snapshot_children(pg, self.PLANT, self.ORD)

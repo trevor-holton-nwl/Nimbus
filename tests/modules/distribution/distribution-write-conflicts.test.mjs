@@ -432,6 +432,82 @@ test('_markReviewed shows the generic failure toast (never success) on an HTTP e
   assert.ok(toasts.some(t => t.msg === 'toast.dist_review_failed'));
 });
 
+// Audit fix item 1: a bulk /reset per-item `status: 'error'` now carries a
+// `code` (data.py's `reset_orders`, e.g. B3's `weights_empty`) so the pane
+// can key UI copy off `err.dist_<code>` instead of showing raw English.
+// `Util.t` is stubbed as the identity function, the same no-op translation
+// stub every other test in this file uses — this still proves the pane
+// derived the RIGHT locale key and queried it (the only thing observable
+// through an identity stub; the actual translated text is a locale-data
+// concern `tests/modules/locale-completeness.test.mjs` already covers).
+test('a bulk reset error with a code looks up err.dist_<code>, not just the raw message', async () => {
+  const p = await fixture();
+  const tCalls = [];
+  Util.t = key => { tCalls.push(key); return key; };
+  const toasts = [];
+  Toast.show = (msg, kind) => toasts.push({ msg, kind });
+  Util.fetchTraced = async () => ok({
+    results: [{ status: 'error', code: 'weights_empty', message: 'weights_empty: all weights are zero' }],
+  });
+  await p._runWritePipeline('reset');
+  assert.equal(toasts.length, 1);
+  assert.equal(toasts[0].kind, 'error');
+  assert.ok(tCalls.includes('err.dist_weights_empty'),
+    `expected a Util.t lookup for err.dist_weights_empty, got: ${tCalls}`);
+});
+
+// Same fix, the fallback path: an item that only carries the raw `message`
+// (no `code` field — an older/un-migrated response) still gets parsed for
+// its `^code:` prefix instead of showing untranslated English verbatim.
+test('a bulk reset error with no code field still parses the message prefix into err.dist_<code>', async () => {
+  const p = await fixture();
+  const tCalls = [];
+  Util.t = key => { tCalls.push(key); return key; };
+  Toast.show = () => {};
+  Util.fetchTraced = async () => ok({
+    results: [{ status: 'error', message: 'weights_empty: all weights are zero' }],
+  });
+  await p._runWritePipeline('reset');
+  assert.ok(tCalls.includes('err.dist_weights_empty'),
+    `expected a Util.t lookup for err.dist_weights_empty, got: ${tCalls}`);
+});
+
+// Same fix, the bulk-result dialog path (`_onBulkReset` -> `_reportBulkResults`,
+// ~1502) rather than the single-header write pipeline above.
+test('_onBulkReset reports a weights_empty item via err.dist_<code> in the result dialog', async () => {
+  const p = await fixture();
+  const tCalls = [];
+  Util.t = key => { tCalls.push(key); return key; };
+  Modal.confirm = async () => true;
+  Util.fetchTraced = async () => ok({
+    results: [{ production_order: header.production_order, material_number: header.material_number,
+      status: 'error', code: 'weights_empty', message: 'weights_empty: all weights are zero' }],
+  });
+  await p._onBulkReset();
+  assert.ok(tCalls.includes('err.dist_weights_empty'),
+    `expected a Util.t lookup for err.dist_weights_empty, got: ${tCalls}`);
+});
+
+// Audit fix item 2: `_repairRow` must send weight 0 for a purged share, even
+// though B6 keeps that share's (greyed-out, inert) weight in the row data for
+// display -- posting its real weight verbatim gets the whole repair rejected
+// with 400 `share_purged`, matching `buildSharesPayload`/`resolvedWeight`'s
+// rule the editor's own Save path already follows.
+test('_repairRow posts weight 0 for a purged share and the live weight for the rest', async () => {
+  const p = await fixture();
+  let body = null;
+  Util.fetchTraced = async (_url, options) => { body = JSON.parse(options.body); return ok(result); };
+  const row = { header, shares: [
+    { machine: 'L1', weight: 500, purged: true, purged_at: '2026-01-01T00:00:00' },
+    { machine: 'L2', weight: 40, purged: false },
+  ] };
+  await p._repairRow(row);
+  assert.deepEqual(body.shares, [
+    { machine: 'L1', weight: 0 },
+    { machine: 'L2', weight: 40 },
+  ]);
+});
+
 /* ===========================================================================
    D09/D44/D46 — dry-run preview identity, write-busy latch, Undo restore
    (Task F3).

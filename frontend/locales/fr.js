@@ -1791,13 +1791,12 @@ window.__NIMBUS_LOCALES.fr = {
 
   // F10 (D34) — Order Distribution i18n completion : traduction de la
   // famille dist_/wc_ qui n'existait qu'en anglais, ajout des codes d'erreur
-  // et noms accessibles du dernier travail sur la distribution, et
-  // reformulation de err.dist_share_purged/err.dist_weights_empty
-  // ci-dessus (addendum du contrôleur).
+  // et noms accessibles du dernier travail sur la distribution.
   'ui.review_distributions':           'Vérifier {{count}} distributions',
   'ui.conflicting_parent_rows':        'Commandes parentes en conflit',
   'ui.ambiguous_plant_conflicts':      'Conflits d\'usine ambigus',
   'ui.workcenter_without_members':     'Centre de travail sans membres',
+  'ui.workcenter_zero_weights':        'tous les poids machine sont à 0',
   'ui.default_machine_invalid':        'Machine par défaut invalide',
   'col.distribution_mode':             'Mode de distribution',
   'col.max_separation':                'Séparation maximale',
@@ -1821,7 +1820,7 @@ window.__NIMBUS_LOCALES.fr = {
   'btn.dist_save_schedule':            'Enregistrer la planification',
   'btn.dist_bulk_mark_reviewed':       'Marquer {{n}} comme vérifié(s)',
   'btn.dist_bulk_reset':               'Réinitialiser',
-  'ui.dist_list_truncated':            'Affichage des 5 000 commandes les plus anciennes — affinez les filtres pour voir le reste.',
+  'ui.dist_list_truncated':            'Seules les 5 000 commandes les plus anciennes ont été vérifiées — affinez les filtres pour voir le reste.',
   'err.dist_unknown_machine':          'Cette machine ne fait partie ni de ce centre de travail ni de la répartition de cette commande.',
   'err.dist_weight_invalid':           'Chaque poids doit être un nombre ne dépassant pas 1 000 000 000.',
   'err.dist_base_version_required':    'Cette demande ne contient pas la version actuelle de la commande — rechargez et réessayez.',

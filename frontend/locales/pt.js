@@ -1790,13 +1790,12 @@ window.__NIMBUS_LOCALES.pt = {
 
   // F10 (D34) — Order Distribution i18n completion: traduziu a família
   // dist_/wc_ que só existia em inglês, adicionou os códigos de erro e
-  // nomes acessíveis do trabalho de distribuição mais recente, e reformulou
-  // err.dist_share_purged/err.dist_weights_empty acima (adendo do
-  // controlador).
+  // nomes acessíveis do trabalho de distribuição mais recente.
   'ui.review_distributions':           'Revisar {{count}} distribuições',
   'ui.conflicting_parent_rows':        'Pedidos principais conflitantes',
   'ui.ambiguous_plant_conflicts':      'Conflitos de planta ambíguos',
   'ui.workcenter_without_members':     'Centro de trabalho sem membros',
+  'ui.workcenter_zero_weights':        'todos os pesos das máquinas são 0',
   'ui.default_machine_invalid':        'Máquina padrão inválida',
   'col.distribution_mode':             'Modo de distribuição',
   'col.max_separation':                'Separação máxima',
@@ -1820,7 +1819,7 @@ window.__NIMBUS_LOCALES.pt = {
   'btn.dist_save_schedule':            'Salvar programação',
   'btn.dist_bulk_mark_reviewed':       'Marcar {{n}} como revisado(s)',
   'btn.dist_bulk_reset':               'Restaurar',
-  'ui.dist_list_truncated':            'Mostrando os 5.000 pedidos mais antigos — restrinja os filtros para ver o restante.',
+  'ui.dist_list_truncated':            'Apenas os 5.000 pedidos mais antigos foram verificados — restrinja os filtros para ver o restante.',
   'err.dist_unknown_machine':          'Essa máquina não pertence a este centro de trabalho nem à divisão deste pedido.',
   'err.dist_weight_invalid':           'Cada peso deve ser um número não maior que 1.000.000.000.',
   'err.dist_base_version_required':    'Esta solicitação não contém a versão atual do pedido — recarregue e tente novamente.',

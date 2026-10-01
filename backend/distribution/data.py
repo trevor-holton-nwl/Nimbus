@@ -3031,6 +3031,19 @@ def review_orders(plant: str, items: list[dict], reviewed: bool, actor: str = "s
     return {"results": results}
 
 
+def _bulk_item_error_code(message: str) -> str | None:
+    """Same `<code>: <detail>` partition rule as `routes._distribution_error`
+    (code is the part before ':' when it's alphabetic after removing '_';
+    else there's no structured code) -- applied here so a per-item bulk
+    error carries a `code` the frontend can key UI copy off of, the same way
+    the single-item `/shares` 400 path already does via `_distribution_error`.
+    """
+    code, sep, _rest = message.partition(":")
+    if sep and code.strip().replace("_", "").isalpha():
+        return code.strip()
+    return None
+
+
 def reset_orders(plant: str, items: list[dict], *, confirm_remove_scheduled: bool = False,
                  dry_run: bool = False, actor: str = "system") -> dict:
     """`POST /distribution/{plant}/reset`'s bulk entry point: one
@@ -3060,8 +3073,13 @@ def reset_orders(plant: str, items: list[dict], *, confirm_remove_scheduled: boo
                             "status": "children_scheduled", "children": exc.children})
             continue
         except ValueError as exc:
-            results.append({"production_order": order, "material_number": material,
-                            "status": "error", "message": str(exc)})
+            message = str(exc)
+            error_item = {"production_order": order, "material_number": material,
+                         "status": "error", "message": message}
+            code = _bulk_item_error_code(message)
+            if code:
+                error_item["code"] = code
+            results.append(error_item)
             continue
         results.append({"production_order": order, "material_number": material,
                         "status": "ok", **result})

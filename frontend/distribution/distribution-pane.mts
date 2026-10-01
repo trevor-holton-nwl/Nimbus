@@ -43,12 +43,14 @@
 // design doc's §6 says the machine→work-center map comes from
 // "Store.masterData.workcenters"/NimbusMasterLine gaining sap_workcenter —
 // that is NOT what shipped. Only `NimbusLineSetting` (Store.lineSettings)
-// gained `sapWorkcenter`/`distributionWeight`, and there is no
-// `Store.masterData.workcenters` cache anywhere in the app; the one existing
-// consumer (`WorkCenters` in master-data/admin-ui.mts) keeps its own
-// module-local `_rows` fetched straight from `GET /master-data/sap_workcenter`.
-// This module follows that SAME real pattern (its own local `_workcenters`
-// cache, re-fetched per plant) rather than a Store field that doesn't exist.
+// gained `sapWorkcenter`/`distributionWeight`. `Store.masterData.workcenters`
+// DOES exist now (D38, master-data/admin-ui.mts — the Alerts/optimizer-facing
+// copy, each row carrying its own `plant`, so the cache is per-plant data
+// even though `Store.masterData` itself is one flat array), but this module
+// still keeps its own local `_workcenters` cache, fetched straight from
+// `GET /master-data/sap_workcenter` per plant (`_loadWorkcentersIfNeeded`) --
+// the same real pattern `WorkCenters` in master-data/admin-ui.mts uses for
+// its own module-local `_rows` -- rather than reading the Store field.
 /* global NIMBUS */
 // NIMBUS is app.js's classic-script IIFE global — a bare reference resolves
 // correctly from a real ES module sharing the page realm, the same idiom
@@ -906,6 +908,17 @@ export const DistributionPane = (() => {
     return translated === key ? message : translated;
   }
 
+  /** A bulk per-item result's own `code` (reset/review/reapply-defaults —
+   *  data.py's `reset_orders` et al. now add it using the SAME `<code>:
+   *  <detail>` partition rule as `routes._distribution_error`), falling
+   *  back to parsing that prefix straight off `item.message` for a
+   *  response that hasn't been migrated to carry a structured `code`. */
+  function _bulkItemCode(item: { code?: string; message?: string }): string | null {
+    if (item.code) return item.code;
+    const match = /^([a-z_]+):\s*/.exec(item.message || '');
+    return match ? match[1]! : null;
+  }
+
   async function _handleStaleHeader(): Promise<void> {
     Toast.show(Util.t('toast.dist_stale_refetched'), 'warn');
     if (_selectedKey) await _openDetail(_selectedKey);
@@ -1072,7 +1085,11 @@ export const DistributionPane = (() => {
     if (status === 'stale') return { kind: 'stale', dryRun: null, write: null };
     if (status === 'children_scheduled') return { kind: 'children_scheduled', dryRun: null, write: null, children: (item.children as RemovedScheduledEntry[]) || [] };
     if (status === 'not_found') return { kind: 'not_found', dryRun: null, write: null };
-    if (status === 'error') return { kind: 'error', dryRun: null, write: null, message: item.message ? String(item.message) : undefined };
+    if (status === 'error') {
+      const message = item.message ? String(item.message) : undefined;
+      return { kind: 'error', dryRun: null, write: null, message,
+        code: _bulkItemCode(item as { code?: string; message?: string }) };
+    }
     return dryRun ? { kind: 'ok', dryRun: item as unknown as DryRunResult, write: null, guard }
                    : { kind: 'ok', dryRun: null, write: item as unknown as WriteResult, guard };
   }
@@ -1490,7 +1507,7 @@ export const DistributionPane = (() => {
   }
 
   async function _reportBulkResults(
-    results: Array<{ production_order: string; material_number: string; status: string; message?: string }>,
+    results: Array<{ production_order: string; material_number: string; status: string; message?: string; code?: string }>,
     title: string,
   ): Promise<void> {
     const problems = results.filter(r => r.status !== 'ok');
@@ -1500,7 +1517,7 @@ export const DistributionPane = (() => {
     }
     const detail = '<ul>' + problems.map(r => (
       `<li>${Util.escapeHtml(r.production_order)} — ${Util.escapeHtml(_bulkStatusLabel(r.status))}`
-      + (r.message ? `: ${Util.escapeHtml(r.message)}` : '') + '</li>'
+      + (r.message ? `: ${Util.escapeHtml(_distErrorMessage(_bulkItemCode(r), r.message))}` : '') + '</li>'
     )).join('') + '</ul>';
     await Modal.confirm({
       title, detail,
@@ -1575,7 +1592,7 @@ export const DistributionPane = (() => {
       });
       if (!resp.ok) { Toast.show(Util.t('toast.dist_reset_failed'), 'error'); return; }
       const body = await resp.json() as {
-        results: Array<{ production_order: string; material_number: string; status: string; message?: string; children?: WriteResultChild[]; removed?: string[] }>;
+        results: Array<{ production_order: string; material_number: string; status: string; message?: string; code?: string; children?: WriteResultChild[]; removed?: string[] }>;
       };
       if (Store.selectedPlant !== plant) return;
       for (const item of body.results) {
@@ -1945,7 +1962,14 @@ export const DistributionPane = (() => {
       if (!plant || Sandbox.active) return;
       const guard = _captureWriteGuard(plant, [row.header]);
       if (!guard) return;
-      const shares = (row.shares || []).map(s => ({ machine: s.machine, weight: s.weight ?? 0 }));
+      // D-fix (audit item 2): a purged share's weight (B6 keeps its weight,
+      // greyed-out and inert, for display) must still go out as 0 on the
+      // wire -- the backend refuses a positive weight on a purged share
+      // (400 `share_purged`), the same `resolvedWeight`/`buildSharesPayload`
+      // rule the editor's own Save path already follows.
+      const shares = (row.shares || []).map(s => ({
+        machine: s.machine, weight: (s.purged || s.purged_at) ? 0 : (s.weight ?? 0),
+      }));
       try {
         const resp = await Util.fetchTraced(
           `${API}/distribution/${encodeURIComponent(plant)}/${encodeURIComponent(row.header.production_order)}/${encodeURIComponent(row.header.material_number)}/shares`,

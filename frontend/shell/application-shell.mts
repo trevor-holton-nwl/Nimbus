@@ -2231,14 +2231,14 @@ const App = {
   // call it directly instead of standing up App.init()'s full DOM wiring.
   // 'refresh'/'note' sources were already skipped (rows already reconciled /
   // a note-only change). 'distribution' joins them: Order Distribution saves
-  // its own share edits via Store.updateMany(patches, 'distribution')
-  // (frontend/distribution/distribution-pane.mts), and that write must not
-  // trip the schedule's own "N unsaved" badge/dirty-id tracking — it's
-  // already persisted through its own save path. This is deliberately NOT
-  // the same as 'engine-runtime-reconcile' (Engine.reconcileRuntimeSchedules'
-  // own Store.updateMany source): a reconcile-resized bar genuinely still
-  // needs saving through the normal schedule save path, so that source stays
-  // un-skipped here.
+  // its own share edits via a direct `Store.emit({type:'tasks:bulkUpdate',
+  // source:'distribution'})` (frontend/distribution/distribution-pane.mts),
+  // and that write must not trip the schedule's own "N unsaved" badge/
+  // dirty-id tracking — it's already persisted through its own save path.
+  // This is deliberately NOT the same as 'engine-runtime-reconcile'
+  // (Engine.reconcileRuntimeSchedules' own Store.updateMany source): a
+  // reconcile-resized bar genuinely still needs saving through the normal
+  // schedule save path, so that source stays un-skipped here.
   _trackDirty(evt: StoreEvent): void {
     if (evt.source === 'refresh' || evt.source === 'note' || evt.source === 'distribution') return;
     const force = evt.source === 'engine' || evt.source === 'undo';
