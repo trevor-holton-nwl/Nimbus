@@ -5289,6 +5289,8 @@ export const WorkCenters = {
       // code already replaced its earlier entry in place (see
       // _flushPending), so only the latest payload per code is ever sent.
       while (WorkCenters._queued.size > 0) {
+        // Map iteration order is insertion order, so this peek is the
+        // oldest still-queued edit (FIFO drain).
         const nextKey = WorkCenters._queued.keys().next().value as string;
         const q = WorkCenters._queued.get(nextKey) as WorkCenterWriteRequest;
         WorkCenters._queued.delete(nextKey);
@@ -5340,19 +5342,32 @@ export const WorkCenters = {
         return r.json() as Promise<WorkCenterSaveResult>;
       });
 
+      // Shared field list for the two code-keyed row shapes this save patches
+      // below: this pane's own `WorkCenterRow` (`_rows[idx]`) and the Store's
+      // `NimbusMasterWorkcenter` (D38) — both carry the same six save-able
+      // fields, so one helper keeps that mapping written once.
+      const applySaveResult = <T extends {
+        description?: string | null;
+        distribution_mode: 'single' | 'distribute';
+        default_machine?: string | null;
+        max_separation: 'none' | 'hour' | 'day' | 'week';
+        review_required: boolean;
+        distribute_tooled: boolean;
+      }>(row: T): T => ({
+        ...row,
+        description:       res.description ?? null,
+        distribution_mode: res.distribution_mode,
+        default_machine:   res.default_machine ?? null,
+        max_separation:    res.max_separation,
+        review_required:   res.review_required,
+        distribute_tooled: res.distribute_tooled,
+      });
+
       // Code-keyed and safe unconditionally, even if the selection or plant
       // moved on while this request was in flight.
       const idx = WorkCenters._rows.findIndex((r) => r.sap_workcenter === code);
       if (idx >= 0) {
-        WorkCenters._rows[idx] = {
-          ...WorkCenters._rows[idx],
-          description:       res.description ?? null,
-          distribution_mode: res.distribution_mode,
-          default_machine:   res.default_machine ?? null,
-          max_separation:    res.max_separation,
-          review_required:   res.review_required,
-          distribute_tooled: res.distribute_tooled,
-        };
+        WorkCenters._rows[idx] = applySaveResult(WorkCenters._rows[idx]);
       }
       for (const m of members) {
         const mach = WorkCenters._machines.find((x) => x.machine === m);
@@ -5374,15 +5389,7 @@ export const WorkCenters = {
         const widx = Store.masterData.workcenters.findIndex((w) => w.plant === plant && w.sap_workcenter === code);
         if (widx >= 0) {
           const wcs = [...Store.masterData.workcenters];
-          wcs[widx] = {
-            ...wcs[widx],
-            description:       res.description ?? null,
-            distribution_mode: res.distribution_mode,
-            default_machine:   res.default_machine ?? null,
-            max_separation:    res.max_separation,
-            review_required:   res.review_required,
-            distribute_tooled: res.distribute_tooled,
-          };
+          wcs[widx] = applySaveResult(wcs[widx]);
           Store.setMasterData({ ...Store.masterData, workcenters: wcs }, 'work-centers');
           Alerts.scheduleRecompute();
         }
