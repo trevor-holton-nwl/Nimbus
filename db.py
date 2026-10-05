@@ -2336,8 +2336,16 @@ _UPSERT_SQL = """
         -- The post-upload resolve (batch_id) re-derives every non-manual row
         -- of the batch, so a kept value can't go stale when quantity changes.
         -- run_time_source/run_time_basis are never in this SET, so they carry
-        -- forward untouched. A disabled plant sends a real value: SAP wins.
+        -- forward untouched.
+        -- The manual/COALESCE arms apply ONLY to routing-enabled plants; a
+        -- disabled plant (even one holding a leftover 'manual' row) takes the
+        -- file's value as before.
         run_time              = CASE
+            WHEN NOT EXISTS (
+                SELECT 1 FROM plants rp
+                 WHERE rp.plant = COALESCE(EXCLUDED.plant, orders.plant)
+                   AND rp.routing_runtime_enabled = TRUE
+            ) THEN EXCLUDED.run_time
             WHEN orders.run_time_source = 'manual' THEN orders.run_time
             ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
         END,

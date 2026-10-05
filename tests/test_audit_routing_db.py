@@ -435,3 +435,9 @@ class TestRoutingEditTransactions:
         self._set(pg, "UPDATE plants SET routing_runtime_enabled=FALSE WHERE plant=%s", (self.PLANT,))
         self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT, run_time=99.0)])
         assert self._row(pg)["run_time"] == Decimal(99)
+
+    def test_disabled_plant_leftover_manual_row_sap_wins_on_reupload(self, pg):
+        self._set(pg, "UPDATE plants SET routing_runtime_enabled=FALSE WHERE plant=%s", (self.PLANT,))
+        self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT, run_time=99.0)])
+        assert self._row(pg)["run_time"] == Decimal(99)
