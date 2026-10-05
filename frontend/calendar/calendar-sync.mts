@@ -45,6 +45,29 @@ interface CalendarSyncResult {
   skipped?: boolean;
 }
 
+/* Blackout deletes that the server never confirmed, per plant. A delete is idempotent, so
+   it is safe to re-send on the next load; without this, the backend list re-hydrated on
+   the next load resurrects a blackout the planner had already removed. Hours/upsert edits
+   are NOT auto-replayed (a stale replay could overwrite a newer edit by another admin);
+   those get an honest toast with a manual Retry instead. */
+const PENDING_DELETES_KEY = 'nimbus.calendar.pendingDeletes';
+type PendingDeletes = Record<string, { line: string[]; plant: string[] }>;
+
+function _readPendingDeletes(): PendingDeletes {
+  try {
+    const raw = localStorage.getItem(PENDING_DELETES_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as PendingDeletes : {};
+  } catch { return {}; }
+}
+
+function _writePendingDeletes(pending: PendingDeletes): void {
+  try {
+    if (Object.keys(pending).length) localStorage.setItem(PENDING_DELETES_KEY, JSON.stringify(pending));
+    else localStorage.removeItem(PENDING_DELETES_KEY);
+  } catch { /* private window / storage blocked: the toast still tells the planner */ }
+}
+
 /* =============================================================================
    CALENDAR SYNC — backend-authoritative persistence of per-plant/per-line
    working hours + blackout blocks (dedicated /plant-calendar/* endpoints).
@@ -73,12 +96,54 @@ export const CalendarSync = {
     return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
                             { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PlantCalendarConfig> : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(cfg => CalendarSync._replayPendingDeletes(plant).then(() => CalendarSync._withoutPendingDeletes(plant, cfg)))
       .then(cfg => CalendarSync._applyConfig(plant, cfg))
       .catch(e => {
         // The localStorage restore already painted the UI — degrade gracefully.
         ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
         Toast.show(Util.t('toast.calendar_offline_cache'), 'info');
       });
+  },
+
+  /** Record (add=true) or clear (add=false) blackout ids whose server delete is unconfirmed. */
+  _trackPendingDeletes(plant: string, kind: 'line' | 'plant', ids: ReadonlyArray<string>, add: boolean): void {
+    if (!plant || !ids.length) return;
+    const pending = _readPendingDeletes();
+    const entry = pending[plant] ||= { line: [], plant: [] };
+    const set = new Set(entry[kind] || []);
+    for (const id of ids) { if (add) set.add(id); else set.delete(id); }
+    entry[kind] = [...set];
+    if (!(entry.line || []).length && !(entry.plant || []).length) delete pending[plant];
+    _writePendingDeletes(pending);
+  },
+
+  /** Re-send this plant's unconfirmed deletes BEFORE the backend list is applied. */
+  _replayPendingDeletes(plant: string): Promise<void> {
+    const entry = _readPendingDeletes()[plant];
+    if (!entry || (typeof Sandbox !== 'undefined' && Sandbox.active)) return Promise.resolve();
+    const jobs: Array<Promise<void>> = [];
+    for (const [kind, path] of [['line', '/plant-calendar/line-blackouts'], ['plant', '/plant-calendar/plant-blackouts']] as const) {
+      const ids = entry[kind] || [];
+      if (!ids.length) continue;
+      jobs.push(Util.fetchTraced(`${Config.API_BASE}${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plant, deletes: ids }), signal: AbortSignal.timeout(8000),
+      }).then(r => { if (r.ok) CalendarSync._trackPendingDeletes(plant, kind, ids, false); })
+        .catch(e => ErrorLog.warn('calendar-sync', `Replay of pending ${kind} blackout deletes failed: ${(e as Error).message}`)));
+    }
+    return Promise.all(jobs).then(() => undefined);
+  },
+
+  /** Drop still-pending (replay failed) ids from a fetched config so they stay deleted locally. */
+  _withoutPendingDeletes(plant: string, cfg: PlantCalendarConfig): PlantCalendarConfig {
+    const entry = _readPendingDeletes()[plant];
+    if (!entry || !cfg) return cfg;
+    const lineGone = new Set(entry.line || []), plantGone = new Set(entry.plant || []);
+    return {
+      ...cfg,
+      machine_blackouts: cfg.machine_blackouts?.filter(b => !lineGone.has(b.id)),
+      plant_blackouts: cfg.plant_blackouts?.filter(b => !plantGone.has(b.id)),
+    };
   },
 
   _applyConfig(plant: string, cfg: PlantCalendarConfig): void {
@@ -317,7 +382,7 @@ export const CalendarSync = {
   },
   saveLineBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
     if (!plant || !id) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/line-blackouts', { plant, deletes: [id] }, 'line-blackout-delete');
+    return this._trackedDelete(plant, 'line', [id], '/plant-calendar/line-blackouts', { plant, deletes: [id] }, 'line-blackout-delete');
   },
   savePlantBlackoutUpsert(block: NimbusPlantBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
@@ -325,7 +390,7 @@ export const CalendarSync = {
   },
   savePlantBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
     if (!plant || !id) return Promise.resolve({ ok: false });
-    return this._post('/plant-calendar/plant-blackouts', { plant, deletes: [id] }, 'plant-blackout-delete');
+    return this._trackedDelete(plant, 'plant', [id], '/plant-calendar/plant-blackouts', { plant, deletes: [id] }, 'plant-blackout-delete');
   },
 
   /** Promote path (What-If → live): push the plant's current calendar/blackout state
@@ -351,13 +416,13 @@ export const CalendarSync = {
     const lineBk = Store.blocks.filter(b => b.plant === plant);
     const lineDeletes = removed.line || [];
     if (lineBk.length || lineDeletes.length) {
-      this._post('/plant-calendar/line-blackouts',
+      this._trackedDelete(plant, 'line', lineDeletes, '/plant-calendar/line-blackouts',
         { plant, upserts: lineBk.map(b => this._blockPayload(b, true)), deletes: lineDeletes }, 'promote-line-blackouts');
     }
     const plantBk = Store.plantBlocks.filter(b => b.plant === plant);
     const plantDeletes = removed.plant || [];
     if (plantBk.length || plantDeletes.length) {
-      this._post('/plant-calendar/plant-blackouts',
+      this._trackedDelete(plant, 'plant', plantDeletes, '/plant-calendar/plant-blackouts',
         { plant, upserts: plantBk.map(b => this._blockPayload(b, false)), deletes: plantDeletes }, 'promote-plant-blackouts');
     }
   },
@@ -374,6 +439,17 @@ export const CalendarSync = {
     return o;
   },
 
+  /** A write that carries deletes: remember the ids as pending until the server confirms. */
+  _trackedDelete(plant: string, kind: 'line' | 'plant', ids: ReadonlyArray<string>, path: string,
+                 body: Record<string, unknown>, label: string): Promise<CalendarSyncResult> {
+    const blocked = this._hydrating || (typeof Sandbox !== 'undefined' && Sandbox.active);
+    if (!blocked) this._trackPendingDeletes(plant, kind, ids, true);
+    return this._post(path, body, label).then(res => {
+      if (res.ok && !blocked) this._trackPendingDeletes(plant, kind, ids, false);
+      return res;
+    });
+  },
+
   _post(path: string, body: Record<string, unknown>, label: string): Promise<CalendarSyncResult> {
     // Single choke point for every backend write. Two guards: never POST while
     // applying a backend GET (_hydrating), and never leak What-If edits (Sandbox).
@@ -388,7 +464,7 @@ export const CalendarSync = {
     }).then(r => {
       if (!r.ok) {
         if (r.status === 400 || r.status === 409) Toast.show(Util.t('toast.plant_not_mastered'), 'error', 6000);
-        else                                       Toast.show(Util.t('toast.calendar_saved_locally'), 'info');
+        else this._notifyUnsynced(path, body, label);
         ErrorLog.warn('calendar-sync', `${label} failed: HTTP ${r.status}`);
         return { ok: false, status: r.status };
       }
@@ -396,9 +472,19 @@ export const CalendarSync = {
     }).catch(e => {
       // The edit is already in Store + localStorage; only backend sync is deferred.
       ErrorLog.warn('calendar-sync', `${label} error: ${e.message}`);
-      Toast.show(Util.t('toast.calendar_saved_locally'), 'info');
+      this._notifyUnsynced(path, body, label);
       return { ok: false, error: e.message };
     });
+  },
+
+  /** Honest failure message. Deletes are retried automatically on the next load of the plant
+   *  (see _trackedDelete); anything else (hours, upserts) is NOT replayed automatically, so the
+   *  planner gets a Retry action instead of a promise the app does not keep. */
+  _notifyUnsynced(path: string, body: Record<string, unknown>, label: string): void {
+    const deletesOnly = Array.isArray(body.deletes) && body.deletes.length > 0 && !body.upserts;
+    if (deletesOnly) { Toast.show(Util.t('toast.calendar_delete_pending'), 'warn', 8000); return; }
+    Toast.show(Util.t('toast.calendar_save_failed'), 'warn', 10000,
+      { label: Util.t('btn.retry'), run: () => { void this._post(path, body, label); } });
   },
 };
 

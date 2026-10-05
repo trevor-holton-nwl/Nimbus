@@ -60,3 +60,53 @@ test('CalendarSync discards legacy global line blackout copies instead of fannin
     Store.replaceBlocks(priorBlocks, 'test-restore');
   }
 });
+
+test('a failed blackout delete is remembered per plant, replayed before hydration, and filtered meanwhile (#19)', async () => {
+  const { Toast } = await import('../../../frontend/platform/foundation.mjs');
+  globalThis.window = globalThis.window || {};
+  const priorFetch = globalThis.fetch, priorLs = globalThis.localStorage, priorToast = Toast.show;
+  const store = new Map();
+  globalThis.localStorage = { getItem: k => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
+  let ok = false;
+  const posted = [];
+  globalThis.fetch = (url, opts) => { posted.push({ url: String(url), body: JSON.parse(opts.body) }); return Promise.resolve({ ok, status: ok ? 200 : 503 }); };
+  const toasts = [];
+  Toast.show = (msg, type, ms, action) => { toasts.push({ msg, type, action }); };
+  try {
+    const res = await CalendarSync.saveLineBlackoutDelete('P1', 'blk-1');
+    assert.equal(res.ok, false);
+    assert.deepEqual(JSON.parse(store.get('nimbus.calendar.pendingDeletes')), { P1: { line: ['blk-1'], plant: [] } });
+    // While unconfirmed, the backend list must not resurrect it locally.
+    const cfg = { machine_blackouts: [{ id: 'blk-1' }, { id: 'blk-2' }], plant_blackouts: [] };
+    assert.deepEqual(CalendarSync._withoutPendingDeletes('P1', cfg).machine_blackouts.map(b => b.id), ['blk-2']);
+    // Next load: replay succeeds, pending list clears.
+    ok = true; posted.length = 0;
+    await CalendarSync._replayPendingDeletes('P1');
+    assert.equal(posted.length, 1);
+    assert.deepEqual(posted[0].body, { plant: 'P1', deletes: ['blk-1'] });
+    assert.equal(store.has('nimbus.calendar.pendingDeletes'), false);
+  } finally {
+    globalThis.fetch = priorFetch; Toast.show = priorToast;
+    if (priorLs === undefined) delete globalThis.localStorage; else globalThis.localStorage = priorLs;
+  }
+});
+
+test('a failed hours/upsert save toasts honestly with a Retry action instead of promising a sync (#19)', async () => {
+  const { Toast } = await import('../../../frontend/platform/foundation.mjs');
+  globalThis.window = globalThis.window || {};
+  const priorFetch = globalThis.fetch, priorToast = Toast.show;
+  let calls = 0;
+  globalThis.fetch = () => { calls += 1; return Promise.resolve({ ok: false, status: 503 }); };
+  const toasts = [];
+  Toast.show = (msg, type, ms, action) => { toasts.push({ msg, type, action }); };
+  try {
+    await CalendarSync.savePlantHours('P1', { 1: [8, 16] });
+    assert.equal(toasts.length, 1);
+    assert.ok(toasts[0].action && typeof toasts[0].action.run === 'function', 'a Retry action is attached');
+    toasts[0].action.run();
+    await new Promise(r => setTimeout(r, 5));
+    assert.equal(calls, 2, 'Retry re-sends the same write');
+  } finally {
+    globalThis.fetch = priorFetch; Toast.show = priorToast;
+  }
+});

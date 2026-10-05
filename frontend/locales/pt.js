@@ -1866,4 +1866,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.reject_no_routing': 'no routing',
   'ui.reject_no_operation_at_workcenter': 'machine\'s work center has no routing operation',
   'ui.reject_zero_runtime': 'calculated run time is zero',
+  'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
+  'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
+  'btn.retry': 'Retry',
 };
