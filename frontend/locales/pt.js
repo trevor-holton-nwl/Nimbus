@@ -68,6 +68,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.unscheduled_bulk':            '{{count}} ordens desagendadas',
   'toast.order_moved':                 '"{{name}}" movida para {{date}}',
   'toast.cannot_fix_task':             'Não é possível fixar: tarefa não encontrada',
+  'toast.cannot_fix_firmed': 'Não é possível corrigir automaticamente: esta ordem está firme (SAP, horizonte congelado ou manual). Remova primeiro o status firme.',
   'toast.commit_failed':               'Não foi possível confirmar o pedido no início solicitado.',
   'toast.save_rejected':               'Salvamento rejeitado: {{msg}}',
   'toast.saved_locally':               'Salvo localmente (servidor inacessível)',

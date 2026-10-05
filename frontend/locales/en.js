@@ -69,6 +69,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.unscheduled_bulk':            'Unscheduled {{count}} orders',
   'toast.order_moved':                 'Moved "{{name}}" to {{date}}',
   'toast.cannot_fix_task':             'Cannot fix: task not found',
+  'toast.cannot_fix_firmed': 'Cannot auto-fix: this order is firmed (SAP, frozen horizon or manual). Unfirm it first to move it.',
   'toast.commit_failed':               'Could not commit the order to the requested start.',
   'toast.dist_machine_locked':         '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.',
   'toast.no_routing_at_workcenter':    '{{order}} has no routing operation at {{machine}} — move blocked.',

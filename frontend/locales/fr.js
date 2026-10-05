@@ -68,6 +68,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé à {{date}}',
   'toast.cannot_fix_task':             'Impossible de fixer : tâche introuvable',
+  'toast.cannot_fix_firmed': 'Correction automatique impossible : cet ordre est ferme (SAP, horizon gelé ou manuel). Retirez d\'abord le statut ferme.',
   'toast.commit_failed':               'Impossible de valider la commande au démarrage demandé.',
   'toast.save_rejected':               'Sauvegarde refusée : {{msg}}',
   'toast.saved_locally':               'Enregistré localement (serveur inaccessible)',
