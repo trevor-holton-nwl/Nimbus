@@ -1,19 +1,16 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- CQ-1 Phase 4 Task 6: report-only CSP. Enforcement is explicitly deferred
-     until the remaining inline-handler backlog (see
-     docs/architecture/cq1-compatibility-inventory.md §7) is gone — this tag
-     only collects violation reports today, nothing is blocked. 'unsafe-inline'
-     stays in both script-src and style-src for that reason. script-src/
-     style-src/font-src are scoped to the CDN origins this app actually loads
-     from (unpkg.com + cdn.jsdelivr.net for scripts/styles, plus
-     fonts.googleapis.com/fonts.gstatic.com for the Google Fonts stylesheet) so
-     the collected reports reflect real gaps, not known-legitimate asset
-     loads. /csp-report is not a real endpoint yet — wiring one up is a
-     follow-up, not part of this task. -->
+<!-- NO Content-Security-Policy is set today: there is no CSP <meta> tag here and
+     brain.py sends no CSP header, so nothing is reported or blocked. (An earlier
+     comment here claimed a report-only CSP; that tag was never shipped.) Enabling
+     one is blocked on the remaining static inline on*= handlers (see
+     docs/architecture/cq1-compatibility-inventory.md section 7). Third-party
+     CDN assets below are protected by Subresource Integrity (integrity= +
+     crossorigin="anonymous"); the Google Fonts stylesheet cannot take SRI because
+     its content varies by user agent. -->
 <script>
 // Lock page zoom — Gantt timeline zoom via scroll is unaffected
 (function () {
@@ -37,17 +34,17 @@
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
 <!-- Timeline (unchanged — vis-timeline is still the best open Gantt for drag+drop) -->
-<script crossorigin="anonymous" src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
-<link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet">
+<script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js" integrity="sha384-MLX+7yEEPNEznaIWwQi2pBMODSBP6Qo6BOVpzjFWB0UkfEzEYsvHOo7ISLfcQeiI" crossorigin="anonymous"></script>
+<link href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet" integrity="sha384-N/4l0y8PNlO5uZuzP9PK3bAgJQ8ZChybZFXB2mpkZRUil/bui++mvYXPzPAHpbr6" crossorigin="anonymous">
 
 <!-- AG Grid Community — MIT licensed, chosen for best-in-class inline editing + filtering + pinning + validation -->
-<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/dist/ag-grid-community.min.js"></script>
-<link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-grid.css" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-theme-quartz.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/dist/ag-grid-community.min.js" integrity="sha384-0cD1zEe4XGTK8UhKDApU/gCZiWTHgDHKDV7g6/7SDKxCi3hjeBxmI2G04f2871jf" crossorigin="anonymous"></script>
+<link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-grid.css" rel="stylesheet" integrity="sha384-LNcL0K2K7L8L9H0XdFjFVke0Q1STyt3EhtpjMIai3xF3YpjvIOIoQlplKoTiaCS0" crossorigin="anonymous">
+<link href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.2/styles/ag-theme-quartz.css" rel="stylesheet" integrity="sha384-uTU2hjrm7DPUmOLAzmReq/x6GkOLV02xfmo+RhGpMCURmmNbiZGfGouIdpLh9m1u" crossorigin="anonymous">
 
 <!-- Flatpickr — styled date picker for optimization modal -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
-<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
 
 <!-- Build identifier — bump on every deploy so static assets are cache-busted
      and so exported diagnostics bundles can be tied back to a specific build. -->

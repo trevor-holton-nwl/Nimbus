@@ -1,8 +1,12 @@
 /* =============================================================================
    N.I.M.B.U.S. Intelligence Layer  (nimbus-intelligence.js)
-   Loaded after app.js — extends window.NIMBUS with 14 intelligence modules.
+   Loaded after app.js — extends window.NIMBUS with 10 intelligence modules.
 
    Modules:
+     IntelDB         — IndexedDB store backing history/patterns
+     NeedsEngine     — "needs attention" suggestions
+     DarkMode        — theme toggle
+     LangSwitcher    — language selector
      CommandPalette  — Cmd+K fuzzy search overlay
      TimeMachine     — IndexedDB-backed history scrubber
      Confidence      — live 0-100 schedule health score + sparkline
