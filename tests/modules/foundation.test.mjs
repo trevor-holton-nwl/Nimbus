@@ -516,7 +516,7 @@ test('Modal: Tab stays trapped (including focus on <body> and dialogs with no fo
     querySelectorAll(s) { return this.desc().filter(e => e.matches(s)); }
     addEventListener(t, f) { (this.L[t] ||= []).push(f); }
     removeEventListener(t, f) { this.L[t] = (this.L[t] || []).filter(x => x !== f); }
-    focus() { if (!this.isConnected || this.hidden || this.closest('[hidden]')) return; document.activeElement = this; }
+    focus() { if (!this.isConnected || this.hidden || this.closest('[hidden]')) return; globalThis.document.activeElement = this; }
     click() { for (const f of [...(this.L.click || [])]) f({ target: this }); }
   }
   root = new El('body');
@@ -542,25 +542,25 @@ test('Modal: Tab stays trapped (including focus on <body> and dialogs with no fo
   try {
     const A = mk('tabA', 2);
     Modal.open('tabA'); await sleep(5);
-    assert.equal(document.activeElement, A.btns[0], 'focus moves into the dialog');
+    assert.equal(globalThis.document.activeElement, A.btns[0], 'focus moves into the dialog');
     A.btns[1].focus();
     assert.equal(key(A.btns[1], 'Tab').prevented, true, 'Tab on the last control wraps');
-    assert.equal(document.activeElement, A.btns[0]);
+    assert.equal(globalThis.document.activeElement, A.btns[0]);
     assert.equal(key(A.btns[0], 'Tab', true).prevented, true, 'Shift+Tab on the first control wraps');
-    assert.equal(document.activeElement, A.btns[1]);
+    assert.equal(globalThis.document.activeElement, A.btns[1]);
 
-    document.activeElement = root; // a click on the backdrop left focus on <body>
+    globalThis.document.activeElement = root; // a click on the backdrop left focus on <body>
     assert.equal(key(root, 'Tab').prevented, true, 'Tab from <body> is pulled back into the open dialog');
-    assert.ok(A.m.contains(document.activeElement));
+    assert.ok(A.m.contains(globalThis.document.activeElement));
     Modal.close('tabA');
-    document.activeElement = root;
+    globalThis.document.activeElement = root;
     assert.equal(key(root, 'Tab').prevented, false, 'no trap once the dialog is closed');
 
     const E = mk('tabEmpty', 0); // nothing focusable inside
     Modal.open('tabEmpty'); await sleep(5);
-    document.activeElement = root;
+    globalThis.document.activeElement = root;
     assert.equal(key(root, 'Tab').prevented, true);
-    assert.equal(document.activeElement, E.m, 'the dialog container itself takes focus');
+    assert.equal(globalThis.document.activeElement, E.m, 'the dialog container itself takes focus');
     assert.equal(E.m.attrs.tabindex, '-1');
     Modal.close('tabEmpty');
 
