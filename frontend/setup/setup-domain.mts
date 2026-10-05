@@ -123,9 +123,9 @@ function matchingOverride(
 // Phase 1b — caller-owned prebuilt resolution index
 // ---------------------------------------------------------------------------
 
-/** Compound-key component join. Distinct from `stateSignature`'s '' join —
- * this joins independently-identified components (machine, order id, a
- * signature string). Joined with U+0000 (NUL), not a printable separator
+/** Compound-key component join. `stateSignature` also joins with NUL, but one
+ * level down (a state's own values); this joins independently-identified
+ * components (machine, order id, a signature string). Joined with U+0000 (NUL), not a printable separator
  * like a space: machine codes and state values are real, uncontrolled
  * strings (e.g. a machine literally named "LINE 1", or a PRT value like
  * "TOOL A") that legitimately contain spaces, so a space-joined key lets two

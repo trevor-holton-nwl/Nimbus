@@ -26,7 +26,7 @@ function intBetween(rng, min, max) {
 const FIELD_POOL = ['prt01', 'colorWheel', 'prt02', 'productionVersion'];
 // Deliberately short + overlapping value tokens (some concatenation-ambiguous,
 // e.g. 'A'+'BC' vs 'AB'+'C') AND space-containing tokens, to stress
-// stateSignature's '' join and joinIndexKey's NUL join under realistic
+// stateSignature's NUL join and joinIndexKey's NUL join under realistic
 // space-containing production values (e.g. a PRT/tool name like "TOOL A").
 const VALUE_POOL = ['A', 'B', 'AB', 'BC', 'ABC', 'RED', 'RE', 'D', 'TOOL A', 'X', '1 A'];
 const NONEMPTY_VALUE_POOL = VALUE_POOL.filter(v => v.length > 0);
@@ -440,12 +440,12 @@ test('a machine-row index never admits a row whose (machine, from) pair collides
   assert.deepEqual(indexed, unindexed);
 });
 
-test('a plant-row index never admits a row whose from/to pair collides under a naive space-joined key', () => {
+test('a plant-row index never admits a row whose from/to pair would collide under a naive (space- or empty-) joined key', () => {
   const definition = { plant: '5512', fields: ['prt01', 'colorWheel'], signature_version: 1, strict_blanks: true, active: true };
 
   // Row: from = [prt01="1", colorWheel="A"], to = [prt01="X", colorWheel="Y"].
-  // stateSignature (values joined with '') = "1A" for from, "XY" for to.
-  // Space-joined key: "1A XY".
+  // stateSignature (values joined with NUL) = "1 A" for from, "X Y" for to.
+  // A naive empty-joined signature would be "1A" / "XY" (space-joined key "1A XY").
   const row = {
     machine: '',
     signature_version: 1,
@@ -454,8 +454,9 @@ test('a plant-row index never admits a row whose from/to pair collides under a n
     setup_min: 7,
   };
   // Query: from = [prt01="1A", colorWheel=""], to = [prt01="X", colorWheel="Y"].
-  // stateSignature (values joined with '') = "1A" for from too — same
-  // signature string as the row's from_key, but a DIFFERENT value array.
+  // stateSignature = "1A " for from — distinct from the row's "1 A" now that
+  // the join is NUL; under a naive '' join both would be "1A" while the value
+  // arrays still differ, which is the collision this test guards.
   const query = {
     definition,
     machine: '',
@@ -471,7 +472,7 @@ test('a plant-row index never admits a row whose from/to pair collides under a n
 
   // Ground truth: statesEqual([prt01="1",colorWheel="A"], [prt01="1A",colorWheel=""])
   // is false (different value arrays), so this must NOT resolve as a
-  // plant-matrix hit despite the identical stateSignature string.
+  // plant-matrix hit.
   assert.equal(unindexed.source, 'uncovered');
   assert.deepEqual(indexed, unindexed);
 });
