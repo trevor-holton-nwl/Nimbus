@@ -434,6 +434,32 @@ class TestRoutingEditTransactions:
         assert any(w.get("category") == "routing_resolve" and w.get("plant") == self.PLANT
                    for w in res["warnings"])
 
+    def test_plantless_upload_new_row_is_held_runtime_pending_until_resolved(self, pg):
+        # Hold half of the no-PLANT path: plant is only known after the machine
+        # backfill, so the new row must still be held when the resolver is reached
+        # (and stay held if that resolve does nothing), then be released by a real one.
+        new_id = pg.make_id("ZZTEST_AR_O3", self.MATERIAL)
+        seen = {}
+
+        def spy(plant, *, conn, batch_id=None):
+            with conn.cursor() as cur:
+                cur.execute("SELECT planning_status, planning_reason->>'code' FROM orders WHERE id=%s",
+                            (new_id,))
+                seen[plant] = cur.fetchone()
+            return {"status": "ok"}
+
+        res = pg.upsert_orders([self._upload_row(new_id, quantity=30)], batch_id=str(uuid.uuid4()),
+                               source="excel", filename="f.xlsx", resolve_fn=spy)
+        assert res["status"] == "ok"
+        assert seen == {self.PLANT: ("needs_planning", "runtime_pending")}
+        held = self._row(pg, new_id)
+        assert held["planning_status"] == "needs_planning"
+        assert held["planning_reason"]["code"] == "runtime_pending"
+        resolver.resolve_orders(self.PLANT)
+        done = self._row(pg, new_id)
+        assert done["planning_status"] == "scheduled" and done["planning_reason"] is None
+        assert done["run_time"] == Decimal(9) and done["run_time_source"] == "routing"
+
     def test_runtime_pending_hold_is_released_by_resolve(self, pg):
         self._set(pg, "UPDATE orders SET planning_status='needs_planning', scheduled_start=NULL,"
                       " scheduled_end=NULL, run_time_source=NULL, run_time=NULL,"
