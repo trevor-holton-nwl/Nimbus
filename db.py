@@ -3070,7 +3070,11 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     # calendar date with no time-of-day — is likewise re-derived from
     # RUN_TIME rather than trusted as a bare midnight, mirroring app.js's
     # date-only-start handling (Persistence._snapToWorkingHours).
-    mask_notime = df["BASIC_FINISH_DATE"].dt.hour == 0
+    # Only an EXACT midnight can be date-only: read_excel yields 00:00:00 for a
+    # bare date cell, whereas a real 00:01-00:59 finish carries minutes/seconds
+    # (the old `.dt.hour == 0` test rewrote those as start + RUN_TIME).
+    _fin = df["BASIC_FINISH_DATE"]
+    mask_notime = _fin.notna() & (_fin == _fin.dt.normalize())
     df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
         df.loc[mask_notime, "BASIC_START_DATE"]
         + pd.to_timedelta(df.loc[mask_notime, "RUN_TIME"], unit="h")
@@ -3125,7 +3129,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "production_order": _str_id(r.get("PRODUCTION_ORDER", "")),
             "material_number": _str_id(r.get("MATERIAL_NUMBER", "")),
             "material_description": _v(r, "MATERIAL_DESCRIPTION"),
-            "machine": _v(r, "MACHINE"),
+            "machine": _str_id(_v(r, "MACHINE")) or None,
             "plant": _str_id(_v(r, "PLANT")) or None,
             "basic_start_date": _ts(r["BASIC_START_DATE"]),
             "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),

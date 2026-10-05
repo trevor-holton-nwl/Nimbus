@@ -283,3 +283,35 @@ class TestPurgeOrdersByDateRealDb:
             cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self.oid,))
             (gone,) = cur.fetchone()
         assert gone == 0
+
+    def test_finish_dates_and_numeric_machine_normalised(self, pg):
+        """Plan Part 1 #42/#44: a real 00:30 finish is kept (only an exact
+        midnight is date-only and re-derived from RUN_TIME), and a numeric
+        MACHINE cell is stored as clean text via _str_id."""
+        db_ = pg
+        order_b = self.ORDER + "_B"
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
+            conn.commit()
+        try:
+            workbook = _xlsx([
+                {"PRODUCTION_ORDER": self.ORDER, "MATERIAL_NUMBER": self.MATERIAL,
+                 "WERKS": self.PLANT, "MACHINE": 4001, "RUN_TIME": 2,
+                 "BASIC_START_DATE": "2026-09-10 08:00", "BASIC_FINISH_DATE": "2026-09-11 00:30"},
+                {"PRODUCTION_ORDER": order_b, "MATERIAL_NUMBER": self.MATERIAL,
+                 "WERKS": self.PLANT, "MACHINE": 4001, "RUN_TIME": 2,
+                 "BASIC_START_DATE": "2026-09-10 08:00", "BASIC_FINISH_DATE": "2026-09-11"},
+            ])
+            assert db_.ingest_orders_from_excel(workbook, "zztest_ingest_dates.xlsx")["status"] == "ok"
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT production_order, machine, basic_finish_date FROM orders"
+                    " WHERE production_order IN (%s, %s)", (self.ORDER, order_b))
+                got = {r[0]: r for r in cur.fetchall()}
+            assert got[self.ORDER][1] == "4001"
+            assert got[self.ORDER][2] == dt.datetime(2026, 9, 11, 0, 30)
+            assert got[order_b][2] == dt.datetime(2026, 9, 10, 10, 0)  # date-only -> start + 2h
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
+                conn.commit()
