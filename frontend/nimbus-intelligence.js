@@ -35,8 +35,7 @@
   // settings tab edits and shows), then the per-user setting, then 14 days. Reading only
   // the user setting made the score ignore the plant's configured horizon.
   function _confHorizonMinutes() {
-    const plant = (Store.masterData?.plants || []).find(r => r.plant === Store.selectedPlant);
-    return plant?.conf_score_horizon ?? Store.userSettings?.confidenceHorizonMinutes ?? 20160;
+    return Store.masterPlant(Store.selectedPlant)?.conf_score_horizon ?? Store.userSettings?.confidenceHorizonMinutes ?? 20160;
   }
 
   // H3f: command-palette actions used to push an empty undo, so Ctrl+Z reverted an

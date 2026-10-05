@@ -628,6 +628,7 @@
     "Store.distributionSummary",
     "Store.getPlantForLine",
     "Store.isFirmed",
+    "Store.masterPlant",
     "Store.plantBlocks",
     "Store.pref",
     "Store.rev",
