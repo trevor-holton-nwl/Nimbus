@@ -153,9 +153,9 @@ let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null 
 /** D29 - one short, translated line naming WHICH orders the server rejected and why
  *  (the save response's sparse `rejection_reasons` {id: step} map), instead of a bare
  *  "N/M persisted". Shows the first `limit` and a "+N more" tail; unknown codes fall
- *  back to the raw code. `runtime_preview_changed` is excluded: it has its own toast. */
+ *  back to the raw code. `runtime_preview_changed` and `machine_unknown` are excluded: each has its own toast. */
 export function describeRejections(reasons: Record<string, string> | undefined | null, limit = 3): string {
-  const entries = Object.entries(reasons || {}).filter(([, code]) => code !== 'runtime_preview_changed');
+  const entries = Object.entries(reasons || {}).filter(([, code]) => code !== 'runtime_preview_changed' && code !== 'machine_unknown');
   if (!entries.length) return '';
   const label = (code: string): string => {
     const key = `ui.reject_${code}`;

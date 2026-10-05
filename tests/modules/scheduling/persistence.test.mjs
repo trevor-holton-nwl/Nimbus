@@ -1211,6 +1211,7 @@ test('describeRejections names the rejected orders and their reasons, capped wit
   assert.equal(describeRejections({}), '');
   assert.equal(describeRejections(undefined), '');
   assert.equal(describeRejections({ A: 'runtime_preview_changed' }), '', 'preview changes have their own toast');
+  assert.equal(describeRejections({ A: 'machine_unknown' }), '', 'unknown machines have their own toast (no double report)');
   const text = describeRejections({ A: 'pv_expired', B: 'something_new', C: 'no_routing', D: 'zero_runtime' }, 3);
   assert.match(text, /^A: /);
   assert.match(text, /B: something_new/, 'unknown codes fall back to the raw code');
