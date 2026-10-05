@@ -50,9 +50,14 @@ def tc():
 
 @pytest.fixture(autouse=True)
 def _clean_ring():
+    import backend.admin_ops.routes as admin_routes
     brain._BACKEND_LOG.clear()
+    admin_routes._CSP_SEEN.clear()
+    admin_routes._CSP_RATE.update(window_start=0.0, admitted=0, dropped=0)
     yield
     brain._BACKEND_LOG.clear()
+    admin_routes._CSP_SEEN.clear()
+    admin_routes._CSP_RATE.update(window_start=0.0, admitted=0, dropped=0)
 
 
 def _seed(entries):
@@ -379,3 +384,41 @@ def test_csp_report_oversize_body_413_and_frontend_cap_is_1mb(tc):
     assert tc.post("/logs/csp-report", content="x" * 50000).status_code == 413
     assert len(brain._BACKEND_LOG) == n
     assert brain._BODY_CAPS[("POST", "/logs/frontend")] == 1024 * 1024
+
+
+def _csp(tc, directive="script-src-attr", blocked="inline", src="http://x/app.js", line=1):
+    body = ('{"csp-report": {"violated-directive": "%s", "blocked-uri": "%s", "source-file": "%s", "line-number": %d}}'
+            % (directive, blocked, src, line))
+    return tc.post("/logs/csp-report", content=body, headers={"content-type": "application/csp-report"})
+
+
+def test_csp_reports_are_deduplicated_with_a_counter(tc):
+    import backend.admin_ops.routes as admin_routes
+    for _ in range(250):
+        assert _csp(tc).status_code == 204
+    csp = [e for e in brain._BACKEND_LOG if e["category"] == "csp"]
+    # first sighting + the 10/100 milestones, never 250 entries
+    assert [e["ctx"].get("occurrences") for e in csp] == [None, 10, 100]
+    assert admin_routes._CSP_SEEN[("script-src-attr", "inline", "http://x/app.js", "1")] == 250
+    # a different line is a different violation
+    _csp(tc, line=2)
+    assert len([e for e in brain._BACKEND_LOG if e["category"] == "csp"]) == 4
+
+
+def test_csp_distinct_flood_is_rate_limited_and_cannot_evict_real_errors(tc, monkeypatch):
+    import backend.admin_ops.routes as admin_routes
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(admin_routes.time, "monotonic", lambda: clock["t"])
+    brain._log_event("error", "scheduling", "real error")
+    for i in range(500):
+        _csp(tc, blocked=f"https://evil{i}.example/x")
+    csp = [e for e in brain._BACKEND_LOG if e["category"] == "csp"]
+    assert len(csp) == admin_routes._CSP_MAX_DISTINCT_PER_MIN
+    assert any(e["msg"] == "real error" for e in brain._BACKEND_LOG)
+    assert admin_routes._CSP_RATE["dropped"] == 480
+    # next minute: the drop count is reported once and admission resumes
+    clock["t"] += 61
+    _csp(tc, blocked="https://another.example/")
+    msgs = [e["msg"] for e in brain._BACKEND_LOG if e["category"] == "csp"]
+    assert any("rate-limited: 480" in m for m in msgs)
+    assert any("another.example" in str(e["ctx"]) for e in brain._BACKEND_LOG if e["category"] == "csp")
