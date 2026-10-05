@@ -1098,3 +1098,36 @@ test('#24 reconnect reloads the plant that was ATTEMPTED, not the null _currentL
     globalThis.fetch = origFetch;
   }
 });
+
+test('#29 save POST carries a timeout signal, a timeout toasts an error (no blind retry), and a second Save while in flight toasts', async () => {
+  Store.setTasks([{
+    id: 'to1', MACHINE: 'L1', RUN_TIME: '1',
+    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5',
+  }], 'unit-test');
+  const calls = [];
+  const toasts = [];
+  const origFetch = globalThis.fetch;
+  const origToast = Toast.show;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  globalThis.fetch = (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
+  };
+  try {
+    Persistence._dirtyIds.add('to1');
+    Persistence.saveAll();
+    Persistence.saveAll(); // second Save while the first is still in flight
+    assert.ok(toasts.some(([m, t]) => m === 'toast.save_in_progress' && t === 'warn'), 'second save is reported, not just logged');
+    await new Promise(res => setTimeout(res, 20));
+    const saves = calls.filter(c => c.url.includes('/tasks/update'));
+    assert.equal(saves.length, 1, 'a timeout is not retried blind');
+    assert.ok(saves[0].opts.signal instanceof AbortSignal, 'save POST must carry an AbortSignal timeout');
+    assert.ok(toasts.some(([m, t]) => m === 'toast.save_timeout' && t === 'error'), 'timeout shows an error toast');
+    assert.equal(Persistence._saveInFlight, false, 'lock released after a timeout');
+    assert.ok(Persistence._dirtyIds.has('to1'), 'edit stays dirty after a timeout');
+  } finally {
+    globalThis.fetch = origFetch;
+    Toast.show = origToast;
+    Persistence._dirtyIds.delete('to1');
+  }
+});

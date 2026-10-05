@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.commit_failed':               'No se pudo confirmar el pedido en el inicio solicitado.',
   'toast.save_rejected':               'Guardado rechazado: {{msg}}',
   'toast.saved_locally':               'Guardado localmente (backend no disponible)',
+  'toast.save_timeout': 'Se agotó el tiempo al guardar. Sus cambios siguen sin guardar aquí - revise la conexión y guarde de nuevo.',
+  'toast.save_in_progress': 'Ya hay un guardado en curso. Espere a que termine y guarde de nuevo si hace falta.',
   'toast.saved_to_backend':            'Guardado en el servidor',
   'toast.partial_db_save':             '⚠ Solo {{persisted}}/{{total}} pedidos llegaron a la base de datos — revise los registros del servidor',
   'toast.concurrent_edit_conflict':    '⚠ Otra persona modificó {{count}} pedido(s) — actualizados a la última versión',

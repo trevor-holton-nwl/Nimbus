@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.commit_failed':               'Auftrag konnte nicht zum angeforderten Start übernommen werden.',
   'toast.save_rejected':               'Speichern abgelehnt: {{msg}}',
   'toast.saved_locally':               'Lokal gespeichert (Server nicht erreichbar)',
+  'toast.save_timeout': 'Zeitüberschreitung beim Speichern. Ihre Änderungen sind hier weiterhin ungespeichert - Verbindung prüfen und erneut speichern.',
+  'toast.save_in_progress': 'Ein Speichervorgang läuft bereits. Warten Sie, bis er abgeschlossen ist, und speichern Sie dann bei Bedarf erneut.',
   'toast.saved_to_backend':            'Auf dem Server gespeichert',
   'toast.partial_db_save':             '⚠ Nur {{persisted}}/{{total}} Aufträge in der Datenbank gespeichert — Backend-Protokoll prüfen',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} Auftrag/Aufträge wurden von jemand anderem geändert — auf die neueste Version aktualisiert',

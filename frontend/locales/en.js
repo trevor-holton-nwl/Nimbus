@@ -76,6 +76,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.production_version_runtime_unresolved': '{{order}} — runtime could not be resolved for production version {{pv}}; held for planning.',
   'toast.save_rejected':               'Save rejected: {{msg}}',
   'toast.saved_locally':               'Saved locally (backend unreachable)',
+  'toast.save_timeout': 'Save timed out. Your edits are still unsaved here - check the connection, then save again.',
+  'toast.save_in_progress': 'A save is already in progress. Wait for it to finish, then save again if needed.',
   'toast.saved_to_backend':            'Saved to backend',
   'toast.partial_db_save':             '⚠ Only {{persisted}}/{{total}} orders reached the DB — check backend logs',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} order(s) were changed by someone else — refreshed to the latest version',

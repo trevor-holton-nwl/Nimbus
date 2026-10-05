@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.commit_failed':               'Impossible de valider la commande au démarrage demandé.',
   'toast.save_rejected':               'Sauvegarde refusée : {{msg}}',
   'toast.saved_locally':               'Enregistré localement (serveur inaccessible)',
+  'toast.save_timeout': 'Délai d\'enregistrement dépassé. Vos modifications ne sont toujours pas enregistrées ici - vérifiez la connexion, puis réessayez.',
+  'toast.save_in_progress': 'Un enregistrement est déjà en cours. Attendez la fin, puis réenregistrez si nécessaire.',
   'toast.saved_to_backend':            'Enregistré sur le serveur',
   'toast.partial_db_save':             '⚠ Seulement {{persisted}}/{{total}} ordres ont atteint la base de données — vérifiez les journaux',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} ordre(s) ont été modifiés par quelqu’un d’autre — actualisés vers la dernière version',

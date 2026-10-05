@@ -72,6 +72,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.commit_failed':               'Não foi possível confirmar o pedido no início solicitado.',
   'toast.save_rejected':               'Salvamento rejeitado: {{msg}}',
   'toast.saved_locally':               'Salvo localmente (servidor inacessível)',
+  'toast.save_timeout': 'Tempo esgotado ao salvar. Suas alterações ainda não foram salvas aqui - verifique a conexão e salve novamente.',
+  'toast.save_in_progress': 'Já há um salvamento em andamento. Aguarde a conclusão e salve novamente, se necessário.',
   'toast.saved_to_backend':            'Salvo no servidor',
   'toast.partial_db_save':             '⚠ Apenas {{persisted}}/{{total}} ordens chegaram ao banco de dados — verifique os registros',
   'toast.concurrent_edit_conflict':    '⚠ {{count}} ordem(ns) foram alteradas por outra pessoa — atualizadas para a versão mais recente',

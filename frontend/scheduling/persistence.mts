@@ -92,10 +92,14 @@ interface HealthResponse {
   color_wheel?: unknown;
 }
 
+/** Per-attempt ceiling for the bulk save POST (loads use 5-8 s; a real bulk save is slower). */
+const SAVE_TIMEOUT_MS = 60_000;
+
 /** Lazily-added fields `saveAll`'s `_post` retry closure stamps onto a plain
  *  `Error` so both the retry-vs-terminal check and the rejection log can read
  *  them back — mirrors nimbus-worker.ts's `err as Error` idiom (Phase 0). */
 interface SaveError extends Error {
+  timedOut?: boolean;
   httpStatus?: number;
   errorCode?: string;
   reqId?: string;
@@ -1417,6 +1421,7 @@ export const Persistence = {
     // didn't actually send (see the per-id snapshot compare below).
     if (Persistence._saveInFlight) {
       ErrorLog.warn('persistence', 'saveAll() called while a save is already in flight — skipping');
+      Toast.show(Util.t('toast.save_in_progress'), 'warn', 4000);
       return;
     }
     // Send changed task aggregates (dates, planning state, segments and editable
@@ -1470,6 +1475,9 @@ export const Persistence = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
       body,
+      // A hung request would hold _saveInFlight forever (every later Save is skipped).
+      // Generous because a real bulk save is slow, but bounded.
+      signal: AbortSignal.timeout(SAVE_TIMEOUT_MS),
     }).then(async r => {
       if (!r.ok) {
         const parsed = await Util.parseBackendError(r);
@@ -1479,6 +1487,9 @@ export const Persistence = {
       }
       return r.json() as Promise<BulkUpdateResult>;
     }).catch(e => {
+      // A timed-out POST may still be applied server-side; retrying it blind could double-send.
+      // Surface it and let the planner re-save (version tokens reconcile any partial apply).
+      if ((e as Error)?.name === 'TimeoutError') { (e as SaveError).timedOut = true; throw e; }
       if (e.httpStatus || attempt >= 3) throw e;
       return new Promise(res => setTimeout(res, 2000)).then(() => _post(attempt + 1));
     });
@@ -1594,6 +1605,10 @@ export const Persistence = {
             { status: e.httpStatus, reqId: e.reqId },
             { reqId: e.reqId, errorCode: e.errorCode || 'http.status' });
           Toast.show(Util.t('toast.save_rejected', { msg: e.message }), 'error', 6000);
+        } else if (e.timedOut) {
+          ErrorLog.error('persistence', `Backend save timed out after ${SAVE_TIMEOUT_MS} ms`,
+            { reqId }, { reqId, errorCode: 'http.timeout' });
+          Toast.show(Util.t('toast.save_timeout'), 'error', 8000);
         } else {
           ErrorLog.warn('persistence', `Backend save failed: ${e.message}`,
             { reqId }, { reqId, errorCode: 'http.network' });
