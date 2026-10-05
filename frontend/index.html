@@ -2333,7 +2333,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="form-row">
         <label>New production line</label>
-        <select id="ovr-line"></select>
+        <select id="ovr-line" data-autofocus></select>
       </div>
       <div class="form-row chk-row">
         <label class="chk">
@@ -2401,7 +2401,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;">From <input type="text" id="print-start" class="input" style="font-size:13px;" readonly></label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;">To <input type="text" id="print-end" class="input" style="font-size:13px;" readonly></label>
-        <button class="btn btn-ghost sm" onclick="NIMBUS.Printer.preview()">Preview</button>
+        <button class="btn btn-ghost sm" data-autofocus onclick="NIMBUS.Printer.preview()">Preview</button>
       </div>
       <div id="print-results" style="margin-top:14px;overflow:auto;max-height:460px;"></div>
     </div>
@@ -2435,7 +2435,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="form-row">
         <label>Reason</label>
-        <input type="text" id="plant-blk-reason" placeholder="Holiday, shutdown, deep clean…" data-i18n-placeholder="ph.blackout_reason_plant">
+        <input type="text" id="plant-blk-reason" data-autofocus placeholder="Holiday, shutdown, deep clean…" data-i18n-placeholder="ph.blackout_reason_plant">
       </div>
     </div>
     <footer class="modal-foot">

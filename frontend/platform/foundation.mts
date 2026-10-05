@@ -1716,7 +1716,9 @@ function _modalClosed(id: string): void {
   const opener = _modalOpener.get(id);
   _modalOpener.delete(id);
   try {
-    if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+    // flatpickr opens its calendar on focus, so never restore focus onto a date input.
+    if (opener && opener.isConnected && typeof opener.focus === 'function'
+        && !(opener as HTMLElement & { _flatpickr?: unknown })._flatpickr) opener.focus();
   } catch { /* ignore */ }
 }
 
