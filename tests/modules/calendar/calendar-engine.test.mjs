@@ -60,3 +60,18 @@ test('nextAvailable rounds a 10:05 blackout end UP so the start is clear of the 
     Store.replaceBlocks(prior, 'unit-test');
   }
 });
+
+test('nextAvailable warns once per (line, duration) for an overlong order, not on every optimizer probe', async () => {
+  const { ErrorLog } = await import('../../../frontend/platform/foundation.mjs');
+  const all = (w) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  Store.setCalendar('NA-DEDUPE', all([8, 16]), 'unit-test');
+  const from = new Date('2031-03-03T09:00:00');
+  const origWarn = ErrorLog.warn; let warns = 0;
+  ErrorLog.warn = () => { warns++; };
+  try {
+    for (let i = 0; i < 50; i++) assert.equal(Calendar.nextAvailable('NA-DEDUPE', from, 11 * 3600 * 1000), null);
+    assert.equal(warns, 1);
+    Calendar.nextAvailable('NA-DEDUPE', from, 12 * 3600 * 1000);
+    assert.equal(warns, 2, 'a different duration still warns');
+  } finally { ErrorLog.warn = origWarn; }
+});
