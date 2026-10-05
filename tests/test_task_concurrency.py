@@ -147,6 +147,55 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = ANY(%s)", ([oid3, oid4],))
                 conn.commit()
 
+    def test_mixed_batch_leaves_seeded_unset_columns_untouched(self, pg):
+        """P6 (#26) mutation guard: every column is SEEDED non-NULL, then a mixed
+        batch saves a different subset per row. A batched UPDATE that wrote
+        NULL (or a default) for columns absent from a row's payload would wipe
+        the seeded scheduled_end / run_time / prt values -- they must survive."""
+        db_ = pg
+        sched_start = self.start + dt.timedelta(days=5)
+        sched_end = sched_start + dt.timedelta(hours=3)
+        oids = [db_.make_id(self.ORDER + f"_S{i}", self.MATERIAL) for i in range(3)]
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            for i, oid in enumerate(oids):
+                cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+                cur.execute(
+                    "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                    " basic_finish_date, scheduled_start, scheduled_end, run_time, prt_01, prt_02)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,6,'K1','K2')",
+                    (oid, self.ORDER + f"_S{i}", self.MATERIAL, self.MACHINE, self.PLANT,
+                     self.start, self.end, sched_start, sched_end),
+                )
+            conn.commit()
+        try:
+            def snap(oid):
+                with db_._pool.connection() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT scheduled_start, scheduled_end, run_time, prt_01, prt_02"
+                                " FROM orders WHERE id = %s", (oid,))
+                    return cur.fetchone()
+
+            new_start = sched_start + dt.timedelta(days=1)
+            new_end = sched_end + dt.timedelta(days=1)
+            res = db_.update_task_dates_bulk([
+                {"id": oids[0], "start": new_start, "end": new_end},          # dates only
+                {"id": oids[1], "PRT_01": "N1"},                              # attribute only
+                {"id": oids[2], "RUN_TIME": 9},                               # run time only
+            ])
+            assert res["persisted"] == 3 and res["invalid_ids"] == [] and res["stale"] == []
+            assert snap(oids[0]) == (new_start, new_end, 6, "K1", "K2")
+            assert snap(oids[1]) == (sched_start, sched_end, 6, "N1", "K2")
+            assert snap(oids[2]) == (sched_start, sched_end, 9, "K1", "K2")
+            # End-only / start-only edits must not clear the other boundary either.
+            early_start = sched_start - dt.timedelta(hours=1)
+            res = db_.update_task_dates_bulk([{"id": oids[1], "end": new_end}, {"id": oids[2], "start": early_start}])
+            assert res["persisted"] == 2
+            assert snap(oids[1]) == (sched_start, new_end, 6, "N1", "K2")
+            assert snap(oids[2]) == (early_start, sched_end, 9, "K1", "K2")
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (oids,))
+                conn.commit()
+
     def test_machine_edit_to_unknown_machine_is_rejected_with_reason(self, pg):
         """Plan Part 2 #27: a MACHINE the plant neither registers nor already
         holds orders on is rejected per item (200 envelope, rejection reason)."""
