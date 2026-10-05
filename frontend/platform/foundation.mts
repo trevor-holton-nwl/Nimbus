@@ -554,26 +554,37 @@ export const Util = {
   // FastAPI `detail` is a string for HTTPException but a LIST of {loc,msg,type} for 422
   // validation errors and may be an object ({message,...}) for structured 409s. Flatten any of
   // them to readable text so a toast never shows "[object Object]".
-  errorDetailText(d: unknown): string | null {
-    if (d == null || d === '') return null;
+  errorDetailText(d: unknown, _depth = 0): string | null {
+    if (_depth > 4) return null; // self-referential / absurdly nested payloads
+    // Empty / falsy scalars carry no message: callers fall back to the HTTP status.
+    if (d == null || d === '' || d === false || d === 0) return null;
     if (typeof d === 'string') return d;
     if (Array.isArray(d)) {
       const parts = d.map(item => {
         if (typeof item === 'string') return item;
         if (item && typeof item === 'object') {
           const o = item as { loc?: unknown; msg?: unknown; message?: unknown };
-          const text = Util.errorDetailText(o.msg ?? o.message);
+          const text = Util.errorDetailText(o.msg ?? o.message, _depth + 1);
           const loc = Array.isArray(o.loc) ? o.loc.filter(p => p !== 'body' && p !== 'query').join('.') : '';
           return text ? (loc ? `${loc}: ${text}` : text) : null;
         }
         return item == null ? null : String(item);
       }).filter(Boolean);
-      return parts.length ? parts.join('; ') : null;
+      if (!parts.length) return null;
+      // A large 422 list would flood a toast: keep the first few and count the rest.
+      const MAX_PARTS = 5;
+      return parts.length > MAX_PARTS
+        ? `${parts.slice(0, MAX_PARTS).join('; ')}; … (+${parts.length - MAX_PARTS})`
+        : parts.join('; ');
     }
     if (typeof d === 'object') {
-      const o = d as { message?: unknown; msg?: unknown; detail?: unknown };
-      const inner = Util.errorDetailText(o.message ?? o.msg ?? o.detail);
+      const o = d as { message?: unknown; msg?: unknown; detail?: unknown; error?: unknown; code?: unknown; error_code?: unknown };
+      const inner = Util.errorDetailText(o.message ?? o.msg ?? o.detail ?? o.error, _depth + 1);
       if (inner) return inner;
+      // `{code}`-only payloads: the code itself is the most readable thing we have.
+      const code = o.code ?? o.error_code;
+      if ((typeof code === 'string' && code) || typeof code === 'number') return String(code);
+      if (!Object.keys(d as object).length) return null; // `{}` says nothing
       try { return JSON.stringify(d).slice(0, 500); } catch { return null; }
     }
     return String(d);
@@ -584,7 +595,7 @@ export const Util = {
     const clone  = (() => { try { return resp?.clone() ?? null; } catch { return null; } })();
     const read   = clone
       ? clone.json().then(
-          j => ({ message: (j && (Util.errorDetailText(j.message) || Util.errorDetailText(j.detail))) || null, errorCode: (j && j.error_code) || null }),
+          j => ({ message: (j && (Util.errorDetailText(j.message) || Util.errorDetailText(j.detail) || Util.errorDetailText(j.error))) || null, errorCode: (j && j.error_code) || null }),
           () => clone.text().then(txt => ({ message: (txt || '').slice(0, 2000) || null, errorCode: null }), () => ({ message: null, errorCode: null }))
         )
       : Promise.resolve({ message: null, errorCode: null });
@@ -1563,7 +1574,14 @@ export const Toast = (function() {
     }
     entry.actionBtn.textContent = action.label;
     if (entry._actionHandler) entry.actionBtn.removeEventListener('click', entry._actionHandler);
-    const handler = (): void => { action.run(); _remove(entry); };
+    // One-shot: a double-click must not run the action twice (a retry/undo firing twice is a
+    // double write), and a throwing action must still dismiss the toast.
+    let fired = false;
+    const handler = (): void => {
+      if (fired) return;
+      fired = true;
+      try { action.run(); } finally { _remove(entry); }
+    };
     entry.actionBtn.addEventListener('click', handler);
     entry._actionHandler = handler;
   }
@@ -1653,7 +1671,17 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
    Node tests drive Modal with minimal fakes that have no querySelector/setAttribute. */
 const _MODAL_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 const _modalOpener = new Map<string, HTMLElement>();
-let _modalEscapeWired = false;
+let _modalEscapeWired: Document | null = null; // the document the global key handler is installed on
+/** Backdrops currently open, oldest first — the document-level Tab trap guards the topmost. */
+const _modalStack: HTMLElement[] = [];
+
+/** Move focus into `dlg`: its first focusable, else the dialog container itself
+ *  (tabindex=-1) so Tab can never fall through to the page behind. */
+function _modalFocusInto(dlg: HTMLElement, items: HTMLElement[], last = false): void {
+  if (items.length) { (last ? items[items.length - 1] : items[0]).focus(); return; }
+  if (typeof dlg.setAttribute === 'function' && dlg.getAttribute('tabindex') == null) dlg.setAttribute('tabindex', '-1');
+  dlg.focus();
+}
 
 function _modalFocusables(dlg: HTMLElement): HTMLElement[] {
   return Array.from(dlg.querySelectorAll<HTMLElement>(_MODAL_FOCUSABLE)).filter(el => !el.hidden && !el.closest('[hidden]'));
@@ -1680,12 +1708,13 @@ function _modalOpened(el: HTMLElement, id: string): void {
       el.addEventListener('keydown', (e: KeyboardEvent) => {
         if (e.key !== 'Tab') return;
         const items = _modalFocusables(dlg);
-        if (!items.length) return;
+        if (!items.length) { e.preventDefault(); _modalFocusInto(dlg, items); return; }
         const first = items[0], last = items[items.length - 1];
         if (e.shiftKey && (document.activeElement === first || !dlg.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
         else if (!e.shiftKey && (document.activeElement === last || !dlg.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
       });
     }
+    if (!_modalStack.includes(el)) _modalStack.push(el);
     // Deferred so a caller's own focus() right after open() (a search box, say) wins.
     setTimeout(() => {
       if (el.hidden || dlg.contains(document.activeElement)) return;
@@ -1697,10 +1726,21 @@ function _modalOpened(el: HTMLElement, id: string): void {
         ?? _modalFocusables(dlg)[0];
       target?.focus();
     }, 0);
-    if (!_modalEscapeWired && typeof document !== 'undefined' && document.addEventListener) {
-      _modalEscapeWired = true;
+    if (_modalEscapeWired !== document && typeof document !== 'undefined' && document.addEventListener) {
+      _modalEscapeWired = document;
       // Capture phase so an open confirm wins over the drawer's own Escape handler.
       document.addEventListener('keydown', (e: KeyboardEvent) => {
+        // Tab with focus outside the topmost open dialog (e.g. a click on the backdrop left it
+        // on <body>, where the dialog's own keydown listener never sees it): pull it back in.
+        if (e.key === 'Tab') {
+          const top = [..._modalStack].reverse().find(m => !m.hidden);
+          if (!top) return;
+          const topDlg = top.querySelector<HTMLElement>('.modal') ?? top;
+          if (topDlg.contains(document.activeElement)) return; // the dialog's own handler wraps
+          e.preventDefault();
+          _modalFocusInto(topDlg, _modalFocusables(topDlg), e.shiftKey);
+          return;
+        }
         if (e.key !== 'Escape') return;
         const confirmEl = document.getElementById('confirm-modal');
         if (confirmEl && !confirmEl.hidden) {
@@ -1713,6 +1753,9 @@ function _modalOpened(el: HTMLElement, id: string): void {
 }
 
 function _modalClosed(id: string): void {
+  const closing = document.getElementById(id);
+  const at = closing ? _modalStack.indexOf(closing) : -1;
+  if (at >= 0) _modalStack.splice(at, 1);
   const opener = _modalOpener.get(id);
   _modalOpener.delete(id);
   try {
