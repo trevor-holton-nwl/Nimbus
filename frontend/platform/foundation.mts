@@ -1644,9 +1644,97 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
   Modal.open('confirm-modal');
 }
 
+/* ── Modal accessibility (#49) ────────────────────────────────────────────────
+   Every dialog is a `.modal-backdrop` > `.modal`. Modal.open/close apply the dialog
+   semantics centrally so the ~40 call sites and the static index.html markup need no
+   per-modal wiring: role="dialog" + aria-modal + aria-labelledby (from the header
+   heading), focus moves into the dialog on open and returns to the opener on close,
+   Tab stays inside, and Escape cancels the confirm dialog. All DOM access is guarded:
+   Node tests drive Modal with minimal fakes that have no querySelector/setAttribute. */
+const _MODAL_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const _modalOpener = new Map<string, HTMLElement>();
+let _modalEscapeWired = false;
+
+function _modalFocusables(dlg: HTMLElement): HTMLElement[] {
+  return Array.from(dlg.querySelectorAll<HTMLElement>(_MODAL_FOCUSABLE)).filter(el => !el.hidden && !el.closest('[hidden]'));
+}
+
+function _modalOpened(el: HTMLElement, id: string): void {
+  try {
+    if (typeof el.querySelector !== 'function') return;
+    const dlg = el.querySelector<HTMLElement>('.modal') ?? el;
+    if (typeof dlg.setAttribute !== 'function') return;
+    if (!dlg.getAttribute('role')) dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-modal', 'true');
+    if (!dlg.getAttribute('aria-label') && !dlg.getAttribute('aria-labelledby')) {
+      const heading = dlg.querySelector<HTMLElement>('.modal-head h1, .modal-head h2, .modal-head h3, .modal-head h4');
+      if (heading) {
+        if (!heading.id) heading.id = `${id}-title`;
+        dlg.setAttribute('aria-labelledby', heading.id);
+      }
+    }
+    const active = typeof document !== 'undefined' ? document.activeElement as HTMLElement | null : null;
+    if (active && active !== document.body && !el.contains(active)) _modalOpener.set(id, active);
+    if (!(el as HTMLElement & { _modalKeysWired?: boolean })._modalKeysWired) {
+      (el as HTMLElement & { _modalKeysWired?: boolean })._modalKeysWired = true;
+      el.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key !== 'Tab') return;
+        const items = _modalFocusables(dlg);
+        if (!items.length) return;
+        const first = items[0], last = items[items.length - 1];
+        if (e.shiftKey && (document.activeElement === first || !dlg.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && (document.activeElement === last || !dlg.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+      });
+    }
+    // Deferred so a caller's own focus() right after open() (a search box, say) wins.
+    setTimeout(() => {
+      if (el.hidden || dlg.contains(document.activeElement)) return;
+      const explicit = dlg.querySelector<HTMLElement>('[data-autofocus], [autofocus]');
+      // A confirm defaults to Cancel: a stray Enter must never trigger the destructive action.
+      const target = explicit
+        ?? (id === 'confirm-modal' ? document.getElementById('confirm-cancel-btn') : null)
+        ?? dlg.querySelector<HTMLElement>('.modal-body input:not([disabled]):not([type="hidden"]), .modal-body select:not([disabled]), .modal-body textarea:not([disabled])')
+        ?? _modalFocusables(dlg)[0];
+      target?.focus();
+    }, 0);
+    if (!_modalEscapeWired && typeof document !== 'undefined' && document.addEventListener) {
+      _modalEscapeWired = true;
+      // Capture phase so an open confirm wins over the drawer's own Escape handler.
+      document.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key !== 'Escape') return;
+        const confirmEl = document.getElementById('confirm-modal');
+        if (confirmEl && !confirmEl.hidden) {
+          e.preventDefault(); e.stopPropagation();
+          document.getElementById('confirm-cancel-btn')?.click();
+        }
+      }, true);
+    }
+  } catch { /* a11y enhancement only - never break opening a dialog */ }
+}
+
+function _modalClosed(id: string): void {
+  const opener = _modalOpener.get(id);
+  _modalOpener.delete(id);
+  try {
+    if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+  } catch { /* ignore */ }
+}
+
 export const Modal = {
-  open(id: string): void  { const el = document.getElementById(id); if (el) el.hidden = false; },
-  close(id: string): void { const el = document.getElementById(id); if (el) el.hidden = true;  },
+  open(id: string): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wasHidden = el.hidden;
+    el.hidden = false;
+    if (wasHidden) _modalOpened(el, id);
+  },
+  close(id: string): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wasOpen = !el.hidden;
+    el.hidden = true;
+    if (wasOpen) _modalClosed(id);
+  },
 
   // Promise-based confirmation dialog.
   // opts: { title, message, detail (HTML string), confirmLabel, tone: 'danger'|'warn' }

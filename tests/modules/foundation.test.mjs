@@ -401,3 +401,40 @@ test('#33 matchPasteToCheckboxes with onBatch hands every newly matched box over
   assert.deepEqual(res, { matched: 3, total: 4 });
   assert.ok(boxes.every(b => b.events === 0), 'no per-box change events (each would rebuild the checklist and detach the rest)');
 });
+
+test('Modal.open applies dialog semantics, moves focus in, and Modal.close restores the opener (#49)', async () => {
+  const previousDocument = globalThis.document;
+  const attrs = {};
+  const opener = { focus() { opener.focused = true; }, isConnected: true };
+  const cancel = { focus() { cancel.focused = true; } };
+  const heading = { id: '' };
+  const dlg = {
+    getAttribute: k => attrs[k] ?? null, setAttribute: (k, v) => { attrs[k] = v; },
+    querySelector: sel => (sel.includes('.modal-head') ? heading : null),
+    querySelectorAll: () => [], contains: () => false,
+  };
+  const backdrop = {
+    hidden: true,
+    querySelector: sel => (sel === '.modal' ? dlg : null),
+    contains: () => false, addEventListener() {},
+  };
+  globalThis.document = {
+    activeElement: opener, body: {},
+    getElementById: id => (id === 'confirm-modal' ? backdrop : id === 'confirm-cancel-btn' ? cancel : null),
+    addEventListener() {},
+  };
+  try {
+    Modal.open('confirm-modal');
+    assert.equal(backdrop.hidden, false);
+    assert.equal(attrs.role, 'dialog');
+    assert.equal(attrs['aria-modal'], 'true');
+    assert.equal(attrs['aria-labelledby'], 'confirm-modal-title');
+    await new Promise(r => setTimeout(r, 5));
+    assert.equal(cancel.focused, true, 'a confirm focuses Cancel, never the destructive action');
+    Modal.close('confirm-modal');
+    assert.equal(backdrop.hidden, true);
+    assert.equal(opener.focused, true, 'focus returns to the element that opened the dialog');
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});

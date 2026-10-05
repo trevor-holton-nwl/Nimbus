@@ -2977,7 +2977,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
      CONFIRM MODAL (reusable, driven by Modal.confirm())
      ========================================================= -->
 <div class="modal-backdrop" id="confirm-modal" hidden>
-  <div class="modal modal-sm">
+  <div class="modal modal-sm" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
     <header class="modal-head">
       <h3 id="confirm-title">Confirm</h3>
       <button class="icon-btn" id="confirm-close-btn" aria-label="Close">✕</button>
