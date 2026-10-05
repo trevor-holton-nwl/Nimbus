@@ -959,3 +959,30 @@ def test_distribution_list_to_date_is_widened_to_the_end_of_the_day(scoped_clien
     response = scoped_client.get(f"/distribution/{PLANT_A}?to=2026-10-01")
     assert response.status_code == 200
     assert captured["date_to"] == datetime(2026, 10, 1, 23, 59, 59, 999999)
+
+
+@pytest.mark.pg
+def test_get_tasks_keeps_null_machine_orders_without_links(scoped_client, pg):
+    """Plan Part 1 #43: groupby("MACHINE") used to drop NULL-machine orders."""
+    from datetime import datetime, timedelta
+    start = datetime.now().replace(microsecond=0) + timedelta(hours=1)
+    ids = ["ZZTEST_NULLM_1", "ZZTEST_NULLM_2"]
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (ids,))
+        for i, oid in enumerate(ids):
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " basic_start_date, basic_finish_date, run_time) VALUES (%s,%s,%s,NULL,%s,%s,%s,2)",
+                (oid, oid, "ZZTEST_MAT", PLANT_A, start + timedelta(hours=3 * i),
+                 start + timedelta(hours=3 * i + 2)))
+        conn.commit()
+    try:
+        body = scoped_client.get(f"/tasks?plant={PLANT_A}").json()
+        got = {t["id"]: t for t in body["data"]}
+        assert set(ids) <= set(got)
+        assert got[ids[0]]["MACHINE"] == ""
+        assert not [lk for lk in body["links"] if lk["source"] in ids or lk["target"] in ids]
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (ids,))
+            conn.commit()

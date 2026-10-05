@@ -218,6 +218,12 @@ def assign_letters(members: list[str]) -> dict[str, str]:
     return letters
 
 
+def letter_sort_key(letter: str) -> tuple[int, str]:
+    """Spreadsheet-letter order: A..Z, then AA, AB... (plain string order puts
+    AA before B)."""
+    return (len(letter), letter)
+
+
 def _index_to_letter(index: int) -> str:
     """Convert 0-based index to letter: 0->A, 1->B, ..., 25->Z, 26->AA, ..."""
     result = ""

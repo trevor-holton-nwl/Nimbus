@@ -683,7 +683,7 @@ def _build_child_rows(plant: str, production_order: str, material_number: str,
     # Ties broken by LETTER (§5.3: "Hamilton / largest remainder, ties by letter"),
     # not raw machine-name alphabetical order -- they coincide at header-creation
     # time but need not stay coincident once a planner has re-weighted.
-    tie_order = sorted(positive.keys(), key=lambda m: letters.get(m, m))
+    tie_order = sorted(positive.keys(), key=lambda m: service.letter_sort_key(letters.get(m, m)))
 
     order_quantity = parent_facts.get("order_quantity")
     qty_alloc: dict[str, Decimal] = {}
@@ -2872,7 +2872,7 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     min_lot_size = mat_attrs.get("min_lot_size")
     total_weight = sum(w for w in desired_weights.values() if w > 0) or Decimal(0)
     plan_entries = []
-    for machine, letter in sorted(letters.items(), key=lambda kv: kv[1]):
+    for machine, letter in sorted(letters.items(), key=lambda kv: service.letter_sort_key(kv[1])):
         weight = desired_weights.get(machine, Decimal(0))
         before = children_before.get(machine)
         after = child_rows_by_machine.get(machine)

@@ -3892,3 +3892,10 @@ class TestBundle3RewriteSafety(_ReweightFixtureBase):
         assert (prt1, prt2, pv) == ("OLD1", "OLD2", "OLDPV")
         assert float(rt) == expect_runtime
         assert rts == source
+
+
+def test_letter_sort_key_orders_aa_after_z():
+    from backend.distribution.service import _index_to_letter, letter_sort_key
+    letters = [_index_to_letter(i) for i in (27, 0, 26, 1, 25)]   # AB, A, AA, B, Z
+    assert sorted(letters, key=letter_sort_key) == ["A", "B", "Z", "AA", "AB"]
+    assert sorted(letters)[:3] == ["A", "AA", "AB"]               # the old, wrong order
