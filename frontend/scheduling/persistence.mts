@@ -1493,6 +1493,10 @@ export const Persistence = {
             ? 'Routing rates changed. Optimizer changes remain unsaved. Review the updated rates and optimize again.'
             : 'Routing rates changed. Rejected orders are being refreshed. Review the schedule before retrying your changes.', 'warn', 8000);
         }
+        const unknownMachineCount = Object.values(result.rejection_reasons || {}).filter(r => r === 'machine_unknown').length;
+        if (unknownMachineCount) {
+          Toast.show(Util.t('toast.machine_rejected', { count: unknownMachineCount }), 'warn', 7000);
+        }
         if (atomicOptimizer && (result.status === 'error' || (result.persisted ?? 0) !== taskPayload.length
           || (result.stale || []).length || (result.invalid_ids || []).length || (result.not_found_ids || []).length)) {
           ErrorLog.warn('persistence', 'Optimizer save rejected; all dependent changes remain unsaved', result);

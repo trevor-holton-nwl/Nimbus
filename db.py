@@ -287,6 +287,23 @@ def _canonical_nullable_attribute(value):
     return (value.strip() or None) if isinstance(value, str) else value
 
 
+def _machine_match_key(machine) -> str:
+    """Case- and whitespace-insensitive comparison key for a machine code."""
+    return "".join(str(machine).split()).casefold()
+
+
+def _known_machine_keys(cur, plant: str) -> set[str]:
+    """Machines a MACHINE edit may target on `plant`: the plant's registered
+    machines plus any machine already holding orders there (legacy/unregistered
+    lines are legitimate move targets), as `_machine_match_key` values."""
+    cur.execute(
+        "SELECT machine FROM machine WHERE plant = %s"
+        " UNION SELECT machine FROM orders WHERE plant = %s AND machine IS NOT NULL",
+        (plant, plant),
+    )
+    return {_machine_match_key(r[0]) for r in cur.fetchall() if r[0]}
+
+
 def _canonical_runtime_minutes(value) -> int | None:
     """Return the scheduling runtime in integral minutes, or None when absent.
 
@@ -1138,6 +1155,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
 
         update_rows: list[dict] = []
         seen_ids: set[str] = set()
+        known_machines_by_plant: dict[str, set[str]] = {}
         eligibility_cache: dict = {}   # per-call plant lookups for check_eligibility (P7)
         for it in items:
             tid = it.get("id")
@@ -1196,6 +1214,18 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if "MACHINE" in attrs and current["parent_order"] is not None:
                 invalid_ids.append(tid)
                 continue
+            # Server-side MACHINE validation: the target must be a machine this
+            # plant knows (registered, or already holding orders there); anything
+            # else is a typo/forged value that would strand the order on a ghost
+            # line. Rejected per item inside the normal 200 envelope, with
+            # rejection_reasons[id] = "machine_unknown".
+            if attrs.get("MACHINE") and current["plant"]:
+                if current["plant"] not in known_machines_by_plant:
+                    known_machines_by_plant[current["plant"]] = _known_machine_keys(cur, current["plant"])
+                if _machine_match_key(attrs["MACHINE"]) not in known_machines_by_plant[current["plant"]]:
+                    rejection_reasons[tid] = "machine_unknown"
+                    invalid_ids.append(tid)
+                    continue
             # Routing runtime (ROUTING_RUNTIME_DESIGN.md §5.5/§8.2/§8.5): a client
             # RUN_TIME is only honored on a disabled plant (today's unconditional
             # behavior, preserved exactly) or to release an order currently held

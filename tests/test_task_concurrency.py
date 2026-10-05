@@ -103,6 +103,30 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert persisted_rows[0]["start_date"] == new_start_1.strftime("%Y-%m-%dT%H:%M:%S")
         assert persisted_rows[0]["end_date"] == new_end_1.strftime("%Y-%m-%dT%H:%M:%S")
 
+    def test_machine_edit_to_unknown_machine_is_rejected_with_reason(self, pg):
+        """Plan Part 2 #27: a MACHINE the plant neither registers nor already
+        holds orders on is rejected per item (200 envelope, rejection reason)."""
+        db_ = pg
+        result = db_.update_task_dates_bulk([
+            {"id": self.oid, "MACHINE": "ZZTEST_NOT_A_LINE", "base_version": self._current_version(db_)},
+        ])
+        assert result["invalid_ids"] == [self.oid]
+        assert result["rejection_reasons"] == {self.oid: "machine_unknown"}
+        assert result["persisted"] == 0
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT machine FROM orders WHERE id = %s", (self.oid,))
+            assert cur.fetchone()[0] == self.MACHINE
+
+    def test_machine_edit_accepts_case_space_variant_of_a_machine_holding_orders(self, pg):
+        """The seeded machine is unregistered but holds orders in the plant, so
+        a case/space variant of it is a legitimate target."""
+        db_ = pg
+        result = db_.update_task_dates_bulk([
+            {"id": self.oid2, "MACHINE": " " + self.MACHINE.lower() + " ",
+             "base_version": db_.get_task_versions([self.oid2])[0]["row_version"]},
+        ])
+        assert result["invalid_ids"] == [] and result["persisted"] == 1
+
     def test_force_true_bypasses_the_stale_check_and_persists_anyway(self, pg):
         """A `force: True` edit must succeed even against a stale base_version
         -- the optimizer's authoritative-bulk-reschedule escape hatch."""

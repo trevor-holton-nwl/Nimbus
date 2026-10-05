@@ -96,6 +96,7 @@ window.__NIMBUS_LOCALES.en = {
   // during the Order Distribution feature's locale pass (see persistence.mts's
   // _refreshTasks/saveAll comments).
   'toast.orders_removed_remotely':     '{{count}} order(s) were removed and are no longer shown',
+  'toast.machine_rejected':           '{{count}} order(s) could not be moved: the machine is not registered for this plant',
   'toast.save_conflicts':              '⚠ Saved, but {{count}} order(s) now overlap another order on the same machine — see Alerts',
   'toast.optimizer_conflicts':         'Optimizer changes were not saved: {{count}} machine conflict(s) detected. Re-run the optimizer.',
   'toast.backend_zero_orders':         'Backend returned zero orders — check brain.py log',

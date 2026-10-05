@@ -203,6 +203,8 @@ class _FakeSegmentCursor:
             self._pending = ("all", list(self.eff_rows))
         elif "FROM plants WHERE plant = ANY" in sql:
             self._pending = ("all", list(self.plant_rows))
+        elif "SELECT machine FROM machine WHERE plant" in sql:
+            self._pending = ("all", [("M1",), ("M2",)])   # known machines for the MACHINE-edit check
         elif sql.strip().startswith("UPDATE orders SET") and "RETURNING" in sql:
             self._pending = ("one", (params[-1], 999))
         else:
@@ -803,3 +805,14 @@ class TestOrdersRunTimeBoundsConstraint:
     def test_constraint_accepts_in_range_run_time(self, pg):
         exc = self._insert_run_time(pg, "40.5")
         assert exc is None
+
+
+def test_update_task_dates_bulk_rejects_an_unknown_machine_with_a_reason(monkeypatch):
+    """Plan Part 2 #27: an unregistered machine with no orders on the plant is
+    rejected per item with rejection_reasons == machine_unknown."""
+    cursor = _FakeSegmentCursor([_routing_eff_row("r-ghost")], plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    result = brain.db.update_task_dates_bulk([{"id": "r-ghost", "MACHINE": "NOT_A_LINE"}])
+    assert result["invalid_ids"] == ["r-ghost"]
+    assert result["rejection_reasons"] == {"r-ghost": "machine_unknown"}
+    assert result["persisted"] == 0
