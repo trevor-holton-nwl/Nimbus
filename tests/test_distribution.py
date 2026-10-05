@@ -6,6 +6,7 @@ NIMBUS_TEST_DB=1; auto-skipped otherwise, see tests/conftest.py).
 """
 
 import json
+import random
 import uuid
 import datetime as dt
 import unittest.mock as mock
@@ -2600,6 +2601,205 @@ class TestSqlStatusClassificationParityAndScale:
         out = distribution_data.list_headers_for_plant(self.PLANT, bucket="needs_review", limit=50, offset=5000)
         assert out["meta"]["total"] >= 5100 and len(out["data"]) == 50
         assert out["meta"]["truncated"] is False
+
+
+@pytest.mark.pg
+class TestSqlStatusRandomizedParityAndPagingStability:
+    """Seeded randomized parity between `_STATUS_SQL`/`_STATUS_FROM` and the
+    Python oracle `service.compute_derived_statuses`, plus tie-stable paging.
+    Every fixture row lives in plant 1006 under a ZZTEST_FZ_ prefix and is
+    removed on teardown."""
+    PLANT = "1006"
+    SUB = "WTG"
+    PFX = "ZZTEST_FZ_"
+    WCS = ["ZZTEST_WC_FZ0", "ZZTEST_WC_FZ1", "ZZTEST_WC_FZ2"]
+    MACHS = [f"ZZTEST_FZ_M{i}" for i in range(1, 7)]
+    MATS = ["ZZTEST_FZ_MAT1", "ZZTEST_FZ_MAT2", "ZZTEST_FZ_MAT3"]
+    SEEDS = (11, 2026, 90210)
+    N_PER_SEED = 260
+    FACTS = [None, {}, {"x": 1}, {"previous_workcenter": None}, {"previous_workcenter": ""},
+             {"previous_workcenter": "OLD"}, {"previous_workcenter": 0}, {"previous_workcenter": 0.0},
+             {"previous_workcenter": False}, {"previous_workcenter": []}, {"previous_workcenter": {}},
+             {"previous_workcenter": [0]}, {"previous_workcenter": {"a": 1}},
+             {"previous_workcenter": "0"}, {"previous_workcenter": 1}, {"previous_workcenter": True}]
+    STARTS = [dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 2), None]
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE plant = %s AND (id LIKE %s OR parent_production_order LIKE %s)",
+                    (self.PLANT, self.PFX + "%", self.PFX + "%"))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order LIKE %s",
+                    (self.PLANT, self.PFX + "%"))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine = ANY(%s)", (self.PLANT, self.MACHS))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = ANY(%s)",
+                    (self.PLANT, self.WCS))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = ANY(%s)",
+                    (self.PLANT, self.MATS))
+        cur.execute("DELETE FROM materials WHERE material_id = ANY(%s)", (self.MATS,))
+
+    @pytest.fixture(autouse=True)
+    def _env(self, pg):
+        self.db = pg
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _seed(self, seed, n_headers=None):
+        """Insert one random fixture set in a single transaction (replacing the
+        previous seed's rows); return the number of headers."""
+        rnd = random.Random(seed)
+        n_headers = n_headers or self.N_PER_SEED
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            members = {}
+            cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES "
+                        + ",".join(["(%s,%s,%s)"] * len(self.WCS)),
+                        [x for w in self.WCS for x in (self.PLANT, w, rnd.choice(["single", "distribute"]))])
+            mach_rows = []
+            for m in self.MACHS:
+                wc = rnd.choice(self.WCS + [None])
+                members.setdefault(wc, []).append(m)
+                mach_rows.append((self.SUB, self.PLANT, m, wc))
+            cur.executemany("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                            mach_rows)
+            for mat in self.MATS:
+                _seed_distribution_material(cur, mat, self.PLANT)
+                cur.execute("UPDATE material_plants SET min_lot_size = %s WHERE plant = %s AND material_id = %s",
+                            (rnd.choice([0, 0, 20, 50]), self.PLANT, mat))
+            hdrs, shares, kids = [], [], []
+            n_kid = 0
+            for i in range(n_headers):
+                po =f"{self.PFX}{seed % 1000:03d}_{i:04d}"
+                mat = rnd.choice(self.MATS)
+                wc = rnd.choice(self.WCS)
+                qty = rnd.choice([None, 0, 100, 100, 250])
+                reviewed = rnd.random() < 0.6
+                rq = rnd.choice([None, qty, qty, 77])
+                facts = rnd.choice(self.FACTS)
+                hdrs.append((self.PLANT, po, mat, wc, qty,
+                             rnd.choice(self.STARTS), reviewed, rq,
+                             None if facts is None else json.dumps(facts)))
+                coherent = rnd.random() < 0.6
+                if coherent:
+                    ms = list(members.get(wc, []))
+                else:
+                    ms = rnd.sample(self.MACHS, rnd.randrange(0, 4))
+                fault = rnd.choice(["none", "none", "drop_child", "extra_child", "purge", "zero", "nonmember",
+                                    "dropshare", "qty0", "lot", "mm", "nullm"]) if coherent else None
+                ms_sh = ms[1:] if fault == "dropshare" else list(ms)
+                nm_purge = False
+                if fault == "nonmember":
+                    extra = [m for m in self.MACHS if m not in ms]
+                    if extra:
+                        ms_sh.append(extra[0])
+                        nm_purge = rnd.random() < 0.5
+                for k, m in enumerate(ms_sh):
+                    if coherent:
+                        w = 0 if (fault == "zero" and k == 0) else rnd.choice([1, 2.5])
+                    else:
+                        w = rnd.choice([0, 1, 1, 2.5])
+                    purged = ((not coherent and rnd.random() < 0.2) or (fault == "purge" and k == 0)
+                              or (fault == "nonmember" and nm_purge and k == len(ms_sh) - 1 and m not in ms))
+                    shares.append((self.PLANT, po, mat, m, "ABCDEF"[k], w,
+                                   dt.datetime(2026, 1, 1) if purged else None))
+                if coherent:
+                    km = list(ms_sh)
+                    if fault == "drop_child" and km:
+                        km = km[1:]
+                    if fault == "extra_child":
+                        km.append(rnd.choice(self.MACHS))
+                    if fault == "nullm":
+                        km.append(None)
+                else:
+                    km = [m for m in ms if rnd.random() < 0.7]
+                    if rnd.random() < 0.3:
+                        km.append(rnd.choice(self.MACHS + [None]))
+                for m in km:
+                    n_kid += 1
+                    cid = f"{self.PFX}C{n_kid:06d}"
+                    if coherent:
+                        cq = 0 if fault == "qty0" and rnd.random() < .5 else (1 if fault == "lot" and rnd.random() < .5 else 60)
+                        mm = fault == "mm" and rnd.random() < .5
+                    else:
+                        cq, mm = rnd.choice([None, 0, 5, 10, 60, 100]), rnd.random() < 0.1
+                    kids.append((cid, cid, mat, m, self.PLANT, po, cq, mm,
+                                 dt.datetime(2026, 10, 3) if rnd.random() < 0.4 else None))
+            cur.executemany(
+                "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter,"
+                " order_quantity, run_time, basic_start_date, reviewed, reviewed_quantity, sap_facts)"
+                " VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s,%s::jsonb)", hdrs)
+            cur.executemany(
+                "INSERT INTO order_distribution_share (plant, production_order, material_number, machine,"
+                " letter, weight, purged_at) VALUES (%s,%s,%s,%s,%s,%s,%s)", shares)
+            cur.executemany(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " parent_production_order, order_quantity, runtime_schedule_mismatch, scheduled_start)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", kids)
+            conn.commit()
+        return len(hdrs)
+
+    def test_sql_statuses_equal_python_for_random_fixtures(self):
+        total = 0
+        seen = set()
+        for seed in self.SEEDS:
+            n = self._seed(seed)
+            with self.db._pool.connection() as conn, conn.cursor() as cur:
+                headers = distribution_data._fetch_header_rows(cur, self.PLANT, search=self.PFX)
+                distribution_data._hydrate_headers(cur, self.PLANT, headers)
+                py = {(h["production_order"], h["material_number"]): set(h["statuses"]) for h in headers}
+                assert len(py) == n
+                sql = {k: set() for k in py}
+                for code, expr in distribution_data._STATUS_SQL.items():
+                    cur.execute(
+                        "SELECT order_distribution.production_order, order_distribution.material_number"
+                        f" FROM {distribution_data._STATUS_FROM}"
+                        " WHERE order_distribution.plant = %s AND order_distribution.production_order LIKE %s"
+                        f" AND ({expr})",
+                        (self.PLANT,) * distribution_data._STATUS_FROM_NPLANT + (self.PLANT, self.PFX + "%"),
+                    )
+                    for po, mat in cur.fetchall():
+                        sql[(po, mat)].add(code)
+            bad = {k: (sorted(sql[k]), sorted(py[k])) for k in py if sql[k] != py[k]}
+            assert not bad, f"seed {seed}: SQL != Python for {len(bad)} headers, e.g. {dict(list(bad.items())[:3])}"
+            for st in py.values():
+                seen |= st
+            total += n
+        assert total == len(self.SEEDS) * self.N_PER_SEED
+        assert seen == set(distribution_data._STATUS_SQL), \
+            f"random fixtures must exercise every status; missing {set(distribution_data._STATUS_SQL) - seen}"
+
+    def test_paging_with_ties_is_stable_and_complete(self):
+        self._seed(self.SEEDS[0], n_headers=45)   # small: every page call hydrates + counts
+        for bucket in ("all", "incomplete"):
+            full = distribution_data.list_headers_for_plant(self.PLANT, search=self.PFX, bucket=bucket, limit=0)
+            keys = [(r["header"]["production_order"], r["header"]["material_number"]) for r in full["data"]]
+            assert keys and len(keys) == len(set(keys)) == full["meta"]["total"]
+            # many ties on basic_start_date / reviewed: order key must be non-decreasing
+            def order_key(r):
+                h = r["header"]
+                s = h["basic_start_date"]
+                return (s is None, s or dt.datetime.min, h["reviewed"], h["production_order"], h["material_number"])
+            ok = [order_key(r) for r in full["data"]]
+            assert ok == sorted(ok), bucket
+            if bucket == "all":
+                assert len({k[:3] for k in ok}) < len(ok), "fixture must contain date/reviewed ties"
+            for ps in (4, 7, 20):
+                cat, off = [], 0
+                while True:
+                    page = distribution_data.list_headers_for_plant(
+                        self.PLANT, search=self.PFX, bucket=bucket, limit=ps, offset=off)
+                    pk = [(r["header"]["production_order"], r["header"]["material_number"]) for r in page["data"]]
+                    assert page["meta"]["total"] == len(keys)
+                    if not pk:
+                        break
+                    assert len(pk) <= ps
+                    cat += pk
+                    off += ps
+                assert len(cat) == len(set(cat)), (bucket, ps, "duplicate across pages")
+                assert cat == keys, (bucket, ps)
 
 
 @pytest.mark.pg
