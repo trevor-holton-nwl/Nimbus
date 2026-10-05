@@ -31,6 +31,23 @@
 
   const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
 
+  // H3f: command-palette actions used to push an empty undo, so Ctrl+Z reverted an
+  // UNRELATED earlier edit. Snapshot the affected tasks (and which of them were firmed —
+  // firmedIds is a separate set that restoreTasks does not rebuild) before mutating.
+  function _pushTaskUndo(label, ids) {
+    const snap = UndoStack.snapshotTasks(ids);
+    const wasFirmed = new Set(ids.filter(id => Store.isFirmed(id)).map(String));
+    UndoStack.push(label, () => {
+      UndoStack.restoreTasks(snap);
+      const live = ids.filter(id => Store.tasks[id]);
+      const on  = live.filter(id => wasFirmed.has(String(id)));
+      const off = live.filter(id => !wasFirmed.has(String(id)));
+      if (on.length)  Store.setFirmed(on, true, 'undo');
+      if (off.length) Store.setFirmed(off, false, 'undo');
+      Alerts.scheduleRecompute();
+    });
+  }
+
   /* --- CSS injection ------------------------------------------------------- */
   (function _injectStyles() {
     const s = document.createElement('style');
@@ -698,9 +715,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '🔒',
           run() {
             CommandPalette.close();
-            NIMBUS.UndoStack?.push?.('Firm All (freeze)', () => {});
             const unfirmedIds = Store.tasksArr.filter(t => !Store.isFirmed(t.id)).map(t => t.id);
-            if (unfirmedIds.length) Store.setFirmed(unfirmedIds, true, 'cmd-palette');
+            if (unfirmedIds.length) {
+              _pushTaskUndo('Firm All (freeze)', unfirmedIds);
+              Store.setFirmed(unfirmedIds, true, 'cmd-palette');
+            }
             Alerts.scheduleRecompute();
             const label = `Frozen · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
             TimeMachine.snapshot(label);
@@ -1152,9 +1171,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         run() {
           CommandPalette.close();
           const newFirmed = !allFirmed;
-          NIMBUS.UndoStack?.push?.(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, () => {});
           const validIds = ids.filter(id => Store.tasks[id]);
-          if (validIds.length) Store.setFirmed(validIds, newFirmed, 'cmd-palette');
+          if (validIds.length) {
+            _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, validIds);
+            Store.setFirmed(validIds, newFirmed, 'cmd-palette');
+          }
           Alerts.scheduleRecompute();
           Toast.show(newFirmed ? t('toast.firmed_orders', { count: n }) : t('toast.unfirmed_orders', { count: n }), 'success', 1400);
         }
@@ -1168,7 +1189,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_shift_orders_1h'),
         run() {
           CommandPalette.close();
-          NIMBUS.UndoStack?.push?.(`Push ${n} orders +1h`, () => {});
           const patches = ids
             .filter(id => Store.tasks[id]?.start_date && Store.tasks[id]?.end_date)
             .map(id => {
@@ -1191,6 +1211,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             })
             .filter(Boolean);
           if (patches.length) {
+            _pushTaskUndo(`Push ${n} orders +1h`, patches.map(p => p.id));
             Store.updateMany(patches, 'cmd-palette');
           }
           Alerts.scheduleRecompute();
@@ -1213,9 +1234,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           // behind. Full unscheduling is a separate persistence behavior, so
           // leave split parents untouched rather than creating a partial edit.
           const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
-          NIMBUS.UndoStack?.push?.(`Unschedule ${eligibleIds.length} orders`, () => {});
           const unschPatches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
-          if (unschPatches.length) Store.updateMany(unschPatches, 'cmd-palette');
+          if (unschPatches.length) {
+            _pushTaskUndo(`Unschedule ${eligibleIds.length} orders`, eligibleIds);
+            Store.updateMany(unschPatches, 'cmd-palette');
+          }
           Alerts.scheduleRecompute();
           Toast.show(
             eligibleIds.length ? t('toast.unscheduled_bulk', { count: eligibleIds.length }) :

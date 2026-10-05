@@ -178,3 +178,60 @@ test('an early What-If discard re-arms the pending Confidence bootstrap', async 
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+test('#25 command-palette Firm/Unfirm/Push/Unschedule push a REAL undo that restores tasks and firmed ids', () => {
+  const { CommandPalette, UndoStack, Selection } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorEntries = UndoStack._entries.slice();
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  CommandPalette.close = () => {};
+  const mk = (id, h) => ({ id, PLANT: 'UNDO-P', MACHINE: 'UNDO-L', RUN_TIME: 1,
+    start_date: new Date(2026, 7, 3, h), end_date: new Date(2026, 7, 3, h + 1) });
+  const run = (labelRe) => {
+    const cmd = CommandPalette._buildSelectionCommands().find(c => labelRe.test(c.label));
+    assert.ok(cmd, `command ${labelRe} present`);
+    cmd.run();
+  };
+  try {
+    Store.setTasks([mk('u1', 8), mk('u2', 10)], 'test');
+    Store.setSelectedPlant('UNDO-P', 'test');
+    Store.setFirmed(['u2'], true, 'test');
+    Selection.set(['u1', 'u2']);
+    const depth = () => UndoStack._entries.length;
+    const startDepth = depth();
+
+    // Push +1h
+    const s1 = Store.tasks.u1.start_date.getTime();
+    run(/push/i);
+    assert.equal(depth(), startDepth + 1);
+    assert.notEqual(Store.tasks.u1.start_date.getTime(), s1, 'push moved the order');
+    UndoStack.pop();
+    assert.equal(Store.tasks.u1.start_date.getTime(), s1, 'undo restores the original start');
+
+    // Firm (u1 unfirmed, u2 firmed => not all firmed => Firm)
+    run(/(^|[._ ])firm_selected|^Firm selected/);
+    assert.equal(Store.isFirmed('u1'), true);
+    UndoStack.pop();
+    assert.equal(Store.isFirmed('u1'), false, 'undo of Firm unfirms u1');
+    assert.equal(Store.isFirmed('u2'), true, 'undo of Firm leaves the previously firmed u2 firmed');
+
+    // Unschedule
+    run(/unschedule/i);
+    assert.equal(Store.tasks.u1.start_date, null);
+    UndoStack.pop();
+    assert.equal(Store.tasks.u1.start_date.getTime(), s1, 'undo of Unschedule restores dates');
+    assert.equal(depth(), startDepth, 'each action pushed exactly one entry, each pop removed it');
+  } finally {
+    Selection.clear();
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
