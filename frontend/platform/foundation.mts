@@ -426,6 +426,33 @@ export const Util = {
     } as Record<string, string>)[c]));
   },
 
+  // Spreadsheet-formula guard for CSV exports. A TEXT value whose first character is
+  // = + - @ (or a tab/CR that Excel strips before re-reading the leading character) would
+  // be evaluated as a formula when the file is opened, so it is prefixed with a single
+  // quote. Non-strings (real numbers, dates, null) and numeric-looking strings such as
+  // "-5" or "+3.2" pass through untouched so exported numbers stay numbers.
+  csvGuardText<T>(value: T): T | string {
+    if (typeof value !== 'string') return value;
+    if (!/^[=+\-@\t\r]/.test(value)) return value;
+    if (/^[+-]?\d[\d,]*(\.\d+)?(e[+-]?\d+)?%?$/i.test(value)) return value;
+    return `'${value}`;
+  },
+
+  // AG Grid `processCellCallback` for exportDataAsCsv. Supplying any callback makes the grid
+  // skip its own valueFormatter step, so apply the column's formatter here first (keeps the
+  // export identical to the default), then formula-guard text. AG Grid does the quoting.
+  csvProcessCell(p: { value: unknown; formatValue?: (v: unknown) => unknown }): unknown {
+    return Util.csvGuardText(p.formatValue ? p.formatValue(p.value) : p.value);
+  },
+
+  // One RFC-4180 CSV field: formula-guarded, and quoted (inner quotes doubled) only when it
+  // contains a comma, quote, CR or LF.
+  csvCell(value: unknown): string {
+    if (value == null) return '';
+    const s = String(Util.csvGuardText(typeof value === 'number' ? value : String(value)));
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  },
+
   // User-facing order identifier. Backend task payloads expose the business
   // order number as ORDER; PRODUCTION_ORDER remains a legacy compatibility
   // field. Never fall back to the internal task ID in visible copy.

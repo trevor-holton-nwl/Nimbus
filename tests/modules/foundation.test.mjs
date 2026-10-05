@@ -322,3 +322,34 @@ test('Util.taskMatchesPasteSet also matches a task\'s PARENT_ORDER, so pasting t
   assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: '1000' }, idSet), true);
   assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: '3000' }, idSet), false);
 });
+
+test('Util.csvGuardText prefixes only text cells that start with = + - @ (never numbers)', () => {
+  assert.equal(Util.csvGuardText('=SUM(A1)'), "'=SUM(A1)");
+  assert.equal(Util.csvGuardText('+cmd|x'), "'+cmd|x");
+  assert.equal(Util.csvGuardText('-1+1'), "'-1+1");
+  assert.equal(Util.csvGuardText('@A1'), "'@A1");
+  assert.equal(Util.csvGuardText('\tx'), "'\tx");
+  assert.equal(Util.csvGuardText('plain'), 'plain');
+  // real numbers and numeric-looking strings stay numbers
+  assert.equal(Util.csvGuardText(-5), -5);
+  assert.equal(Util.csvGuardText('-5'), '-5');
+  assert.equal(Util.csvGuardText('+3.25'), '+3.25');
+  assert.equal(Util.csvGuardText('-1,234.5'), '-1,234.5');
+  assert.equal(Util.csvGuardText(null), null);
+});
+
+test('Util.csvCell is RFC-4180 quoted and formula-guarded', () => {
+  assert.equal(Util.csvCell('a,b'), '"a,b"');
+  assert.equal(Util.csvCell('say "hi"'), '"say ""hi"""');
+  assert.equal(Util.csvCell('l1\nl2'), '"l1\nl2"');
+  assert.equal(Util.csvCell('=HYPERLINK("x")'), `"'=HYPERLINK(""x"")"`);
+  assert.equal(Util.csvCell(-5), '-5');
+  assert.equal(Util.csvCell(null), '');
+});
+
+test('Util.csvProcessCell applies the column formatter, then the formula guard', () => {
+  const fmt = v => (v === 7 ? '=7' : v);
+  assert.equal(Util.csvProcessCell({ value: 7, formatValue: fmt }), "'=7");
+  assert.equal(Util.csvProcessCell({ value: -5, formatValue: v => v }), -5);
+  assert.equal(Util.csvProcessCell({ value: '@x' }), "'@x");
+});

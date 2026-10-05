@@ -1524,7 +1524,7 @@ export const Table = {
 
   exportCsv(): void {
     if (!Table._api) return;
-    Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv' });
+    Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv', processCellCallback: Util.csvProcessCell });
   },
 
   _toggleRangeMode(): void {
@@ -2701,19 +2701,21 @@ export const Printer = {
     if (!Printer._rows.length) { Toast.show(Util.t('toast.nothing_to_export'), 'warn'); return; }
     const fmtDt = (d: Date | null) => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
     const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
+    // RFC-4180 quoting + formula guard on every text field (Util.csvCell); BOM so Excel
+    // reads the file as UTF-8.
     const lines = [
-      headers.join(','),
+      headers.map(Util.csvCell).join(','),
       ...Printer._rows.map(t => [
         t.MACHINE || '',
         t.ORDER || t.PRODUCTION_ORDER || '',
         t.MATERIAL_NUMBER  || '',
-        (t.MATERIAL_DESCRIPTION || t.text || '').replace(/,/g, ';'),
+        t.MATERIAL_DESCRIPTION || t.text || '',
         fmtDt(t.start_date),
         fmtDt(t.end_date),
         Util.runHours(t).toFixed(1)
-      ].join(','))
+      ].map(Util.csvCell).join(','))
     ];
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.download = `nimbus-orders-${Util.dayKey(new Date())}.csv`;
     a.href = URL.createObjectURL(blob);

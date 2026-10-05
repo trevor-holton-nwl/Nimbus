@@ -1170,3 +1170,31 @@ test('Inspector._render disables the RUN_TIME input unless the order is held for
 test('Printer exposes the documented public API', () => {
   assert.equal(typeof Printer.open, 'function');
 });
+
+test('Printer.exportCsv quotes RFC-4180 fields and formula-guards text cells', async () => {
+  const priorDoc = globalThis.document;
+  const priorURL = globalThis.URL.createObjectURL;
+  const priorRevoke = globalThis.URL.revokeObjectURL;
+  const priorRows = Printer._rows;
+  let blob = null;
+  globalThis.document = { createElement: () => ({ click() {} }) };
+  globalThis.URL.createObjectURL = b => { blob = b; return 'blob:x'; };
+  globalThis.URL.revokeObjectURL = () => {};
+  try {
+    Printer._rows = [{
+      MACHINE: '=cmd', ORDER: '1001', MATERIAL_NUMBER: '-5',
+      MATERIAL_DESCRIPTION: 'Widget, "big"', start_date: null, end_date: null,
+    }];
+    Printer.exportCsv();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    assert.deepEqual([...bytes.slice(0, 3)], [0xEF, 0xBB, 0xBF], 'UTF-8 BOM for Excel');
+    const text = await blob.text();
+    const row = text.split('\r\n')[1];
+    assert.match(row, /^'=cmd,1001,-5,"Widget, ""big""",,,/);
+  } finally {
+    globalThis.document = priorDoc;
+    globalThis.URL.createObjectURL = priorURL;
+    globalThis.URL.revokeObjectURL = priorRevoke;
+    Printer._rows = priorRows;
+  }
+});

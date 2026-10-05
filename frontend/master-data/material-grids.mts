@@ -718,7 +718,7 @@ function _createGrid(spec: GridSpec): void {
   agGrid.createGrid(el, gridOptions as unknown as NimbusVendor.AgGridOptions);
 
   document.getElementById(`md-${GRID_ABBR[spec.id]}-export`)?.addEventListener('click', () => {
-    try { st.api?.exportDataAsCsv({ fileName: `nimbus-${spec.id}.csv` }); } catch {}
+    try { st.api?.exportDataAsCsv({ fileName: `nimbus-${spec.id}.csv`, processCellCallback: Util.csvProcessCell }); } catch {}
   });
 
   if (spec.saveUrl) {
