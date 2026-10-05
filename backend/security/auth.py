@@ -222,6 +222,9 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
     inserted = updated = deleted = 0
 
     with _pool.connection() as conn, conn.cursor() as cur:
+        # Serialise concurrent batches so two admins demoting each other cannot
+        # both pass the last-admin check against a pre-commit snapshot.
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext('user_security_admin'))")
         cur.execute("SELECT COUNT(*) FROM user_security WHERE role = 'admin'")
         admins_before = cur.fetchone()[0]
 

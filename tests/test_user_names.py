@@ -200,3 +200,29 @@ def test_new_name_keys_present_in_all_locales():
             text = f.read()
         for key in required:
             assert f"'{key}'" in text, f"{fname} is missing i18n key {key}"
+
+
+@pytest.mark.pg
+def test_bulk_upsert_waits_on_last_admin_advisory_lock(pg):
+    """Plan Part 1 #9: concurrent user batches serialise on one advisory lock."""
+    import threading
+    import time
+    db = pg
+    done = threading.Event()
+
+    def _run():
+        auth.bulk_upsert_users(upserts=[], deletes=[])
+        done.set()
+
+    try:
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('user_security_admin'))")
+            t = threading.Thread(target=_run)
+            t.start()
+            time.sleep(0.5)
+            assert not done.is_set()      # blocked behind our lock
+            conn.rollback()               # release
+        t.join(5)
+        assert done.is_set()
+    finally:
+        done.set()
