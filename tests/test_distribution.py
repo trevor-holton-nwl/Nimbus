@@ -4299,3 +4299,31 @@ class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
                 self._cleanup(cur, self.WC, self.L1, self.L2, oa, self.MAT)
                 conn.commit()
 
+
+
+def test_aggregate_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
+    """Exporter wiring (plan Part 1 #8): the aggregate CSV applies csv_row to
+    every data row and starts with the UTF-8 BOM. No DB needed -- the roll-up is stubbed."""
+    import csv as _csv
+    import io as _io
+    rows = [{
+        "production_order": "=1+1", "material_number": "+MAT", "machine": "-WC", "quantity": 10,
+        "sum_child_quantity": 10, "start": "2026-10-01T08:00:00", "finish": None, "child_count": 1,
+        "queued_children": 0, "all_scheduled": True, "firming_indicator": "@X", "reviewed": False,
+        "children": [{"production_order": "A-1000", "machine": "L1", "quantity": 10, "start": None, "end": None}],
+    }]
+    monkeypatch.setattr(distribution_data, "get_aggregate", lambda plant, **kw: rows)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+    try:
+        response = TestClient(brain.api).get("/distribution/ZZPLANT/aggregate", params={"format": "csv"})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    parsed = list(_csv.reader(_io.StringIO(response.content.decode("utf-8-sig"))))
+    assert parsed[0][0] == "production_order"
+    data = parsed[1]
+    assert data[:3] == ["'=1+1", "'+MAT", "'-WC"]
+    assert data[10] == "'@X"
+    assert data[3] == "10" and data[7] == "1"

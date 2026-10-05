@@ -500,3 +500,21 @@ def test_csv_cell_guards_text_formula_leads_only():
     assert csv_cell("") == ""
     # numbers (including negatives), None and bools are never touched
     assert csv_row([-5, 3.5, None, True, "ok"]) == [-5, 3.5, None, True, "ok"]
+
+
+@pytest.mark.pg
+def test_export_csv_neutralises_formula_leading_text_cells(zz_plants, pg):
+    """Exporter wiring (plan Part 1 #8): stream_csv_rows must pass each row
+    through csv_row -- a text cell starting with = + - @ gets a leading '."""
+    sub, plant_codes = zz_plants
+    payload = "=HYPERLINK(\"http://x\")"
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE plants SET timezone = %s WHERE subnetwork = %s AND plant = %s",
+                    (payload, sub, plant_codes[0]))
+        conn.commit()
+    text = "".join(at.stream_csv_rows("plants", filters={"subnetwork": [sub]}))
+    reader = csv.reader(io.StringIO(text.lstrip("﻿")))
+    header = next(reader)
+    tz_idx, plant_idx = header.index("timezone"), header.index("plant")
+    by_plant = {r[plant_idx]: r[tz_idx] for r in reader}
+    assert by_plant[plant_codes[0]] == "'" + payload

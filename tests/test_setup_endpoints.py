@@ -658,3 +658,34 @@ def test_stale_plant_matrix_token_maps_to_409(tc, monkeypatch):
     response = tc.post("/setup/5512/matrix/import",
                        json={"signature_version": 4, "rows": [], "plant_matrix_token": "old"})
     assert response.status_code == 409
+
+
+def test_setup_missing_pairs_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
+    """Exporter wiring (plan Part 1 #8): the missing-pairs CSV must run every
+    text cell through csv_row and start with the UTF-8 BOM -- a machine/scope/
+    plant beginning with = + - @ is neutralised with a leading apostrophe."""
+    def page(plant, kind, machine=None, offset=0, limit=100):
+        return {
+            "definition": {"signature_version": 4},
+            "page": {"rows": [{"machine": "=HYPERLINK(\"x\")", "scope": "+plant",
+                               "from_key": [{"fieldKey": "colorWheel", "value": "A"}],
+                               "to_key": [{"fieldKey": "colorWheel", "value": "B"}]}],
+                     "meta": {"total": 1, "offset": offset, "limit": limit}},
+        }
+
+    monkeypatch.setattr(brain.setup_data, "get_setup_missing_pairs_page", page, raising=False)
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "setup-test-key")
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester@example.com"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["@PLANT"]
+    try:
+        response = TestClient(brain.api).get("/setup/@PLANT/missing-pairs.csv")
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    import csv as _csv
+    import io as _io
+    rows = list(_csv.reader(_io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows[0][0] == "Plant"
+    assert rows[1][:3] == ["'@PLANT", "'=HYPERLINK(\"x\")", "'+plant"]
