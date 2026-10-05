@@ -142,3 +142,15 @@ Verification (counts):
 | R7 | save_in_progress toast | DONE | b363048 | persistence.test.mjs +1 | saveAll({silent}); passed by distribution-pane + optimize-ui promote |
 | R8 | nextAvailable overlong warn flood | DONE | ce30499 | calendar-engine.test.mjs +1 | bounded Set per (line,duration) |
 | R9 | stale signature-join comments | DONE | fc06ada | setup-resolution-index.test.mjs 10 pass | test file is LF/-text (NULs): keep LF |
+
+## Final verification (after merging fix/cr1005-review-be and fix/cr1005-review-fe)
+
+- Merge conflicts: only this ledger (kept both sections). No code conflicts.
+- NUL bytes: tests/modules/setup-resolution-index.test.mjs (4, in comments) and docs/superpowers/plans/archive/2026-08-17-setup-matrix-list-view.md (1) replaced with escapes; scan of all tracked .mts/.ts/.js/.mjs/.py/.md now finds 0. setup-resolution-index test: 10/10.
+- Migration runner (promote-azure apply-migrations.ps1): iterates only files present in top-level migrations/ (non-recursive) and checks them against the ledger; ledger rows for files moved to migrations/manual/ are never consulted, so they are harmless. No change needed.
+- npm run build ok; typecheck ok; lint 0 errors / 31 warnings; check:static-assets OK; check:legacy-surface no drift.
+- npm test: legacy 38/38; modules 990/990.
+- ruff check .: all checks passed.
+- pytest on fresh nimbus_test_final (this worktree's schema.sql, ON_ERROR_STOP=1): 952 passed, 1 skipped.
+- migrations/*.sql (34 files) onto DB from main's schema.sql, name order: pass 1 0 failures, pass 2 0 failures.
+- generate:api-types: no drift in frontend/types/api-generated.d.mts.
