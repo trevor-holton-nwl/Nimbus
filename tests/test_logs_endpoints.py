@@ -313,12 +313,13 @@ def test_diagnostics_deep_rejects_missing_api_key(tc, monkeypatch):
 
 
 def test_frontend_sink_caps_ctx_keys_and_values(tc):
+    from backend.admin_ops import routes as _ao_routes
     ctx = {f"k{i}" * 40: "x" * 2000 for i in range(60)}
     tc.post("/logs/frontend", json={"entries": [{"msg": "m", "ctx": ctx}]})
     got = brain._BACKEND_LOG[-1]["ctx"]
-    assert len(got) <= brain._FE_MAX_CTX_KEYS
-    assert all(len(k) <= brain._FE_MAX_CTX_KEY for k in got)
-    assert all(len(v) <= brain._FE_MAX_CTX_VALUE + len("…[truncated]") for v in got.values())
+    assert len(got) <= _ao_routes._FE_MAX_CTX_KEYS
+    assert all(len(k) <= _ao_routes._FE_MAX_CTX_KEY for k in got)
+    assert all(len(v) <= _ao_routes._FE_MAX_CTX_VALUE + len("…[truncated]") for v in got.values())
 
 
 def test_frontend_sink_rejects_oversize_body_413(tc):
