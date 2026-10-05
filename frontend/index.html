@@ -3,11 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- NO Content-Security-Policy is set today: there is no CSP <meta> tag here and
-     brain.py sends no CSP header, so nothing is reported or blocked. (An earlier
-     comment here claimed a report-only CSP; that tag was never shipped.) Enabling
-     one is blocked on the remaining static inline on*= handlers (see
-     docs/architecture/cq1-compatibility-inventory.md section 7). Third-party
+<!-- CSP is REPORT-ONLY: brain.py sends a Content-Security-Policy-Report-Only
+     header on this document (no meta tag) and reports go to /logs/csp-report;
+     nothing is blocked. Enforcing is blocked on the remaining static inline on*=
+     handlers and the document.write loader below (see frontend/shell/CLAUDE.md). Third-party
      CDN assets below are protected by Subresource Integrity (integrity= +
      crossorigin="anonymous"); the Google Fonts stylesheet cannot take SRI because
      its content varies by user agent. -->
