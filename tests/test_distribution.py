@@ -4078,3 +4078,171 @@ def test_apply_chunk_size_bounds_total_savepoints():
     for n in (2501, 10_000, 100_000):
         assert -(-n // f(n)) <= 50   # <= 50 chunk savepoints per apply()
 
+
+def _wait_for_lock_wait(db_, timeout=10.0):
+    """Deterministically wait until some backend of this DB is blocked on a
+    heavyweight lock (pg_stat_activity), instead of sleeping."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_stat_activity WHERE datname = current_database()"
+                        " AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' LIMIT 1")
+            if cur.fetchone():
+                return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.pg
+class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
+    """Senior audit #1/#2: apply() upserted children in letter order while a
+    /tasks save locks in id order (deadlock), and _resolve_repair held every
+    header lock across its loop in basic_start_date order (deadlock vs apply
+    and vs saves)."""
+    MAT = "ZZT_MAT_LOCKORD"
+    WC, L1, L2 = "ZZTEST_WC_LOCKORD", "ZZTEST_L1_LOCKORD", "ZZTEST_L2_LOCKORD"
+
+    def _children(self, pg, order):
+        return _snapshot_children(pg, self.PLANT, order)
+
+    def _row(self, order, qty=100.0):
+        return {"production_order": order, "material_number": self.MAT, "machine": self.WC,
+                "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
+                "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": qty, "run_time": 10.0}
+
+    def test_apply_vs_task_save_has_no_deadlock(self, pg):
+        import threading
+        order = next(o for o in (f"ZZLKA{i}" for i in range(500))
+                     if pg.make_id("A-" + o, self.MAT) > pg.make_id("B-" + o, self.MAT))
+        self._seed_header(pg, self.WC, self.L1, self.L2, order, self.MAT)
+        try:
+            ch = self._children(pg, order)
+            ids = sorted(c["id"] for c in ch)
+            vers = {c["id"]: c["xmin"] for c in ch}
+            bid = str(uuid.uuid4())
+            _, ps, _ = distribution_data.plan([self._row(order, 200.0)], bid)
+            real = distribution_data._apply_children
+            paused, release = threading.Event(), threading.Event()
+
+            def stepped(cur, parent):
+                rows = parent["child_rows"]
+                if len(rows) < 2:
+                    return real(cur, parent)
+                n = real(cur, dict(parent, child_rows=rows[:1]))
+                paused.set()
+                release.wait(30)
+                return n + real(cur, dict(parent, child_rows=rows[1:]))
+
+            res = {}
+
+            def do_apply():
+                try:
+                    with pg._pool.connection() as conn:
+                        res["apply"] = distribution_data.apply(ps, bid, conn)
+                except Exception as exc:  # noqa: BLE001
+                    res["apply"] = exc
+
+            def do_save():
+                t0 = dt.datetime(2026, 10, 2, 8)
+                try:
+                    res["save"] = pg.update_task_dates_bulk(
+                        [{"id": i, "start": t0, "end": t0 + dt.timedelta(hours=3), "base_version": vers[i]}
+                         for i in ids])
+                except Exception as exc:  # noqa: BLE001
+                    res["save"] = exc
+
+            with mock.patch.object(distribution_data, "_apply_children", stepped):
+                ta = threading.Thread(target=do_apply, daemon=True)
+                ta.start()
+                assert paused.wait(20)
+                ts = threading.Thread(target=do_save, daemon=True)
+                ts.start()
+                _wait_for_lock_wait(pg, 3.0)
+                release.set()
+                ta.join(40)
+                ts.join(40)
+            assert not ta.is_alive() and not ts.is_alive()
+            for name in ("apply", "save"):
+                assert not isinstance(res[name], Exception), f"{name} raised {res[name]!r}"
+            assert not res["apply"].get("ingest_warnings", {}).get("failed_parents"), res["apply"]
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur, self.WC, self.L1, self.L2, order, self.MAT)
+                conn.commit()
+
+    @pytest.mark.parametrize("mode", ["apply", "save"])
+    def test_repair_vs_apply_or_save_has_no_deadlock(self, pg, mode):
+        import threading
+        oa, ob = next((f"ZZLKRA{i}", f"ZZLKRB{i}") for i in range(500)
+                      if pg.make_id(f"A-ZZLKRA{i}", self.MAT) < pg.make_id(f"A-ZZLKRB{i}", self.MAT))
+        self._seed_header(pg, self.WC, self.L1, self.L2, oa, self.MAT)
+        batch = str(uuid.uuid4())
+        _, ps2, _ = distribution_data.plan([self._row(ob)], batch)
+        with pg._pool.connection() as conn:
+            distribution_data.apply(ps2, batch, conn)
+        try:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE order_distribution SET basic_start_date = basic_start_date - interval '2 days'"
+                            " WHERE plant=%s AND production_order=%s", (self.PLANT, ob))
+                for o in (oa, ob):
+                    cid = next(c["id"] for c in self._children(pg, o) if c["machine"] == self.L2)
+                    cur.execute("DELETE FROM orders WHERE id=%s", (cid,))
+                conn.commit()
+            real = distribution_data._repair_one_header
+            seen, first_done, release = [], threading.Event(), threading.Event()
+
+            def stepped(cur, plant, order, material, header):
+                r = real(cur, plant, order, material, header)
+                seen.append(order)
+                if len(seen) == 1:
+                    first_done.set()
+                    release.wait(30)
+                return r
+
+            res = {}
+
+            def run(name, fn):
+                try:
+                    res[name] = fn()
+                except Exception as exc:  # noqa: BLE001
+                    res[name] = exc
+
+            with mock.patch.object(distribution_data, "_repair_one_header", stepped):
+                tr = threading.Thread(target=run, daemon=True, args=(
+                    "repair", lambda: distribution_data.resolve(self.PLANT, "repair")))
+                tr.start()
+                assert first_done.wait(30)
+                assert seen[0] == ob, "repair must visit the chronologically-first header first"
+                if mode == "apply":
+                    b2 = str(uuid.uuid4())
+                    _, ps, _ = distribution_data.plan([self._row(oa), self._row(ob)], b2)
+
+                    def other():
+                        with pg._pool.connection() as conn:
+                            return distribution_data.apply(ps, b2, conn)
+                else:
+                    kids = [c for o in (oa, ob) for c in self._children(pg, o)]
+                    t0 = dt.datetime(2026, 10, 2, 8)
+                    items = [{"id": c["id"], "start": t0, "end": t0 + dt.timedelta(hours=3),
+                              "base_version": c["xmin"]} for c in sorted(kids, key=lambda c: c["id"])]
+
+                    def other():
+                        return pg.update_task_dates_bulk(items)
+                to = threading.Thread(target=run, args=("other", other), daemon=True)
+                to.start()
+                _wait_for_lock_wait(pg, 3.0)
+                release.set()
+                tr.join(40)
+                to.join(40)
+            assert not tr.is_alive() and not to.is_alive()
+            for name in ("repair", "other"):
+                assert not isinstance(res[name], Exception), f"{name} raised {res[name]!r}"
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE plant=%s AND (parent_production_order=%s OR production_order=%s)",
+                            (self.PLANT, ob, ob))
+                cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s", (self.PLANT, ob))
+                self._cleanup(cur, self.WC, self.L1, self.L2, oa, self.MAT)
+                conn.commit()
+

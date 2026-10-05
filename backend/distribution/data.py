@@ -1408,6 +1408,14 @@ def _apply_children(cur, parent: dict) -> int:
     previous_ids = parent["previous_child_ids"]
     anchor = parent.get("anchor")
     touched = 0
+    # Deadlock guard: a concurrent /tasks save locks child rows in id order,
+    # while the upserts below run in letter order. Lock every child this
+    # parent will touch (new + previous) in id order up front so the two
+    # writers can never hold the pair in opposite order.
+    lock_ids = sorted({db.make_id(r["production_order"], r["material_number"])
+                       for r in parent["child_rows"]} | set(previous_ids))
+    if lock_ids:
+        cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (lock_ids,))
     for child_row in parent["child_rows"]:
         child_id = db.make_id(child_row["production_order"], child_row["material_number"])
         is_new = child_id not in previous_ids
@@ -3726,15 +3734,18 @@ def _resolve_repair(plant: str, dry_run: bool) -> dict:
             # Own connection: must run before this loop takes its row locks,
             # but the header lock below is per-iteration so capture first.
             _capture_setup_states_for_reweight(plant, "system", "Distribution resolve repair")
+        # One transaction per header (the commit releases that header's row
+        # locks before the next is taken): holding every header lock across
+        # the loop in basic_start_date order could invert against apply()'s
+        # key-ordered locks and a /tasks save's id-ordered child locks.
         for h in incomplete:
             po, mat = h["production_order"], h["material_number"]
             current = _lock_one_header(cur, plant, po, mat)
-            if current is None:
-                continue
-            result = _repair_one_header(cur, plant, po, mat, current)
-            children_upserted += result["children_upserted"]
-            repaired += 1
-        conn.commit()
+            if current is not None:
+                result = _repair_one_header(cur, plant, po, mat, current)
+                children_upserted += result["children_upserted"]
+                repaired += 1
+            conn.commit()
     # Reached only on the real (non-dry-run) path -- the dry_run branch
     # above returns before any commit. See reweight_shares' identical call.
     import backend.routing.resolver as routing_resolver
