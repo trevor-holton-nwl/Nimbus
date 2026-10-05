@@ -551,3 +551,23 @@ class TestWriteChunkingAndPendingHold:
 
         assert _is_routing_hold({"code": "runtime_pending", "message": "x"})
         assert not _is_routing_hold({"code": "something_else"})
+
+
+def test_check_eligibility_cache_loads_plant_lookups_once_per_call_scope():
+    """Plan Part 2 #23 (P7): a caller-owned cache memoises the four per-plant
+    lookups, so N edits on one plant cost one load, not N."""
+    case = _ELIGIBILITY_CASES["category_0001_uses_machine_value"]
+    order = case["order"]
+    conn = _FakeEligibilityConnection(case)
+    opened = []
+    real_cursor = conn.cursor
+    conn.cursor = lambda: (opened.append(1), real_cursor())[1]
+    cache: dict = {}
+    args = (order["plant"], order["material_number"], order["production_version"],
+            order["machine"], order["order_quantity"], _parse_date(order.get("basic_start_date")))
+    first = check_eligibility(*args, conn=conn, cache=cache)
+    second = check_eligibility(*args, conn=conn, cache=cache)
+    assert first == second and first["ok"] is True
+    assert len(opened) == 1
+    check_eligibility(*args, conn=conn)          # no cache -> loads again
+    assert len(opened) == 2

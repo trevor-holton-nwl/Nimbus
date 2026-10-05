@@ -1138,6 +1138,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
 
         update_rows: list[dict] = []
         seen_ids: set[str] = set()
+        eligibility_cache: dict = {}   # per-call plant lookups for check_eligibility (P7)
         for it in items:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
@@ -1228,7 +1229,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 eligibility = routing_resolver.check_eligibility(
                     current["plant"], current["material_number"], candidate_pv,
                     candidate_machine, current["order_quantity"], current["basic_start_date"],
-                    conn=conn,
+                    conn=conn, cache=eligibility_cache,
                 )
                 if not eligibility["ok"]:
                     # Whole-item rejection, same as every other single-aspect

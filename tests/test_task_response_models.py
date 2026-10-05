@@ -501,7 +501,7 @@ def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch
     captured = {}
 
     def fake_check_eligibility(plant, material_number, production_version, machine,
-                               order_quantity, basic_start_date, *, conn=None):
+                               order_quantity, basic_start_date, *, conn=None, cache=None):
         captured["args"] = (plant, material_number, production_version, machine,
                             order_quantity, basic_start_date)
         captured["conn"] = conn

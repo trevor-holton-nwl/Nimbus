@@ -394,15 +394,23 @@ def resolve_one(order: dict, *, pv_lookup: dict, op_lookup: dict,
 # run_time to fall back to -- it either resolves via routing or it doesn't).
 # ===========================================================================
 def _check_eligibility_on_conn(plant: str, material_id: str, production_version,
-                               machine, order_quantity, sap_basic_start_date, conn) -> dict:
+                               machine, order_quantity, sap_basic_start_date, conn,
+                               cache: dict | None = None) -> dict:
     """Does the real work of `check_eligibility` on an already-open
     connection -- a pure read (reuses the SAME plant-reference-data loaders
-    `resolve_orders`/`build_rate_map` use), never writes."""
-    with conn.cursor() as cur:
-        pv_lookup = _load_pv_lookup(cur, plant)
-        op_lookup = _load_op_lookup(cur, plant)
-        machine_workcenter = _load_machine_workcenter(cur, plant)
-        rules = _load_rules(cur, plant)
+    `resolve_orders`/`build_rate_map` use), never writes.
+
+    `cache` (optional, caller-owned and scoped to ONE transaction, e.g. one
+    update_task_dates_bulk call) memoises the four per-plant lookups so a
+    batch of N edits on a plant loads them once, not N times."""
+    loaded = cache.get(plant) if cache is not None else None
+    if loaded is None:
+        with conn.cursor() as cur:
+            loaded = (_load_pv_lookup(cur, plant), _load_op_lookup(cur, plant),
+                      _load_machine_workcenter(cur, plant), _load_rules(cur, plant))
+        if cache is not None:
+            cache[plant] = loaded
+    pv_lookup, op_lookup, machine_workcenter, rules = loaded
 
     order = {
         "plant": plant,
@@ -420,7 +428,8 @@ def _check_eligibility_on_conn(plant: str, material_id: str, production_version,
 
 
 def check_eligibility(plant: str, material_id: str, production_version, machine,
-                      order_quantity, sap_basic_start_date, *, conn=None) -> dict:
+                      order_quantity, sap_basic_start_date, *, conn=None,
+                      cache: dict | None = None) -> dict:
     """§8.5's server-side eligibility check for a MACHINE/PRODUCTION_VERSION
     edit: runs the exact same §5.2 steps 1-8 `resolve_one` uses (via the
     shared `_resolve_steps` helper) for ONE hypothetical (material,
@@ -442,7 +451,8 @@ def check_eligibility(plant: str, material_id: str, production_version, machine,
     """
     if conn is not None:
         return _check_eligibility_on_conn(plant, material_id, production_version,
-                                          machine, order_quantity, sap_basic_start_date, conn)
+                                          machine, order_quantity, sap_basic_start_date, conn,
+                                          cache)
     with _pool.connection() as new_conn:
         return _check_eligibility_on_conn(plant, material_id, production_version,
                                           machine, order_quantity, sap_basic_start_date, new_conn)
