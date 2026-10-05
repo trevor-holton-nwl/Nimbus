@@ -1570,7 +1570,15 @@ def _empty_apply_result() -> dict:
     return {**counters, "warnings_entry": _build_warnings_entry({}, counters), "ingest_warnings": {}}
 
 
-_APPLY_CHUNK_PARENTS = 50  # D01: parents per SAVEPOINT in apply()
+_APPLY_CHUNK_PARENTS = 50  # D01: MINIMUM parents per SAVEPOINT in apply()
+_APPLY_MAX_CHUNKS = 50     # keeps total savepoints under Postgres' 64-subxact cache (overflow degrades every session)
+
+
+def _apply_chunk_size(n_parents: int) -> int:
+    """Size-adaptive chunk: >= 50 parents, grown so one apply() opens at most
+    ~50 chunk savepoints however large the upload (a failed chunk still retries
+    per parent, which only costs extra savepoints on the failure path)."""
+    return max(_APPLY_CHUNK_PARENTS, -(-n_parents // _APPLY_MAX_CHUNKS))
 
 
 def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
@@ -1724,8 +1732,9 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
             cur.execute(f"RELEASE SAVEPOINT {sp}")
             return True
 
-        for ci in range(0, len(keys), _APPLY_CHUNK_PARENTS):
-            chunk = keys[ci:ci + _APPLY_CHUNK_PARENTS]
+        chunk_size = _apply_chunk_size(len(keys))
+        for ci in range(0, len(keys), chunk_size):
+            chunk = keys[ci:ci + chunk_size]
             local = {name: 0 for name in counters}
             if _run_savepointed(f"dist_chunk_{ci}", chunk, local):
                 for name, n_ in local.items():

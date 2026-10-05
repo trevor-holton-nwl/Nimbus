@@ -4069,3 +4069,11 @@ class TestIngestFlagsScheduledChildRuntimeChange(_ReweightFixtureBase):
             flags = dict(cur.fetchall())
         assert flags[self.L1] is True
         assert flags[self.L2] is False
+
+
+def test_apply_chunk_size_bounds_total_savepoints():
+    f = distribution_data._apply_chunk_size
+    assert f(0) == 50 and f(10) == 50 and f(2500) == 50
+    for n in (2501, 10_000, 100_000):
+        assert -(-n // f(n)) <= 50   # <= 50 chunk savepoints per apply()
+
