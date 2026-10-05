@@ -2390,7 +2390,10 @@ _UPSERT_SQL = """
         -- docs/scheduling_priority.md).
         prt_01                = EXCLUDED.prt_01,
         prt_02                = EXCLUDED.prt_02,
-        production_version    = EXCLUDED.production_version,
+        -- A blank incoming production_version (SAP omits it) keeps the stored one,
+        -- so a planner-chosen version survives a re-upload (H7, PV half); the
+        -- kept cases are counted into the upload warnings (pv_kept_on_blank).
+        production_version    = COALESCE(NULLIF(EXCLUDED.production_version, ''), orders.production_version),
         order_quantity        = EXCLUDED.order_quantity,
         form_size             = EXCLUDED.form_size,
         firming_indicator     = EXCLUDED.firming_indicator,
@@ -2739,6 +2742,18 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             if pv:
                 row["production_version"] = _zero_pad(str(pv).strip().upper(), 4)
 
+    # ---------- Planner-chosen production_version kept on a blank re-upload (H7) ----------
+    # Counted BEFORE the upsert (afterwards the stored value is indistinguishable).
+    pv_kept_on_blank = 0
+    blank_pv_ids = [row["id"] for row in rows if not row.get("production_version")]
+    if blank_pv_ids:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM orders WHERE id = ANY(%s) AND COALESCE(production_version, '') <> ''",
+                (blank_pv_ids,),
+            )
+            pv_kept_on_blank = int(cur.fetchone()[0])
+
     # ---------- Build row tuples in _UPSERT_SQL column order ----------
     tuples = []
     for row in rows:
@@ -2852,6 +2867,12 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 """,
                 (batch_id,),
             )
+            if pv_kept_on_blank:
+                warnings.append({
+                    "level": "info", "category": "pv_kept_on_blank", "count": pv_kept_on_blank,
+                    "msg": (f"{pv_kept_on_blank} order(s) arrived without a production version; "
+                            f"kept the version already stored for them."),
+                })
             ambiguous = cur.fetchall()
             if ambiguous:
                 n_amb = sum(int(r[1]) for r in ambiguous)

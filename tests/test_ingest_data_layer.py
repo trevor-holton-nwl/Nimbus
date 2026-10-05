@@ -315,3 +315,24 @@ class TestPurgeOrdersByDateRealDb:
             with db_._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
                 conn.commit()
+
+    def test_blank_production_version_on_reupload_keeps_stored_value(self, pg):
+        """Plan Part 2 #21 (H7, PV half): SAP omitting PRODUCTION_VERSION must
+        not wipe a stored/planner-chosen one; the kept case is counted."""
+        db_ = pg
+        base = {"PRODUCTION_ORDER": self.ORDER, "MATERIAL_NUMBER": self.MATERIAL, "WERKS": self.PLANT,
+                "MACHINE": self.MACHINE, "BASIC_START_DATE": "2026-09-10 08:00"}
+        assert db_.ingest_orders_from_excel(
+            _xlsx([{**base, "PRODUCTION_VERSION": "PV7"}]), "zztest_ingest_pv1.xlsx")["status"] == "ok"
+        result = db_.ingest_orders_from_excel(_xlsx([base]), "zztest_ingest_pv2.xlsx")
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT production_version FROM orders WHERE production_order = %s", (self.ORDER,))
+            assert cur.fetchone()[0] == "PV7"
+        kept = [w for w in result["warnings"] if w.get("category") == "pv_kept_on_blank"]
+        assert kept and kept[0]["count"] == 1
+        # a non-blank incoming value still overwrites
+        db_.ingest_orders_from_excel(
+            _xlsx([{**base, "PRODUCTION_VERSION": "PV8"}]), "zztest_ingest_pv3.xlsx")
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT production_version FROM orders WHERE production_order = %s", (self.ORDER,))
+            assert cur.fetchone()[0] == "PV8"
