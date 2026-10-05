@@ -2353,10 +2353,22 @@ export const AdminCockpit = {
       });
   },
 
-  _clearBackendLog(): void {
-    Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' })
-      .then(() => AdminCockpit._renderBackendLog())
-      .catch(() => {});
+  async _clearBackendLog(): Promise<void> {
+    // The server ring buffer is shared diagnostics evidence and cannot be restored.
+    const ok = await Modal.confirm({
+      title: Util.t('ui.backend_log_clear_confirm'),
+      message: Util.t('ui.backend_log_clear_msg'),
+      confirmLabel: Util.t('btn.backend_log_clear'),
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      AdminCockpit._renderBackendLog();
+    } catch (e) {
+      Toast.show(Util.t('toast.backend_log_clear_failed', { msg: (e as Error).message }), 'error');
+    }
   },
 
   _copyFiltered(): void {

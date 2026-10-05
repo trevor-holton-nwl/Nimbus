@@ -377,3 +377,15 @@ test('buildSaveRequests: a plant-default clear removes that pair from the resent
   assert.equal(upsert[0].rows.length, 0);
   assert.deepEqual(deletes, []); // plant-default clears are folded into the resend, not a separate DELETE call
 });
+
+test('state editor / compatibility mount on the inline state container that actually exists (#47)', () => {
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /\.setup-state \.panel-body/, 'the old Line Status panel no longer exists; selecting it made Update state a no-op');
+  assert.match(source, /querySelector<HTMLElement>\('\[data-setup-state-inline\]'\)/);
+});
+
+test('grid listeners read the current render context, not the first render closure (#47)', () => {
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8');
+  assert.match(source, /_setupGridCtx = \{ snapshot: snapshot0/);
+  assert.match(source, /const \{ snapshot, definition, rows, permissions \} = ctx\(\)/);
+});

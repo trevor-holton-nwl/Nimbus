@@ -656,3 +656,12 @@ test('syncLineSettings posts only the key columns and the changed column, not th
     Toast.show = priorToast;
   }
 });
+
+test('delete-filtered counts on the server and keeps markup out of the confirm message (#47)', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const start = source.indexOf('async function _deleteFiltered');
+  const body = source.slice(start, source.indexOf('// Save', start));
+  assert.match(body, /meta\?\.total/, 'expected_count must come from the server list total');
+  assert.doesNotMatch(body, /state\.rows\.filter/, 'no client-side recount that disagrees with the server predicate');
+  assert.doesNotMatch(body, /message:[^\n]*<strong>/, 'confirm message is plain text; markup belongs in detail');
+});

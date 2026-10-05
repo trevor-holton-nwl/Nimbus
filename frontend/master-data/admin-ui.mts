@@ -3955,23 +3955,37 @@ export const MasterData = (() => {
     const searchInput = document.querySelector('#md-host .md-search') as HTMLInputElement | null;
     const search = (searchInput?.value || '').trim();
 
-    // Mirrors _applyFilter's own client-side predicate (whole-row text
-    // includes the search string) so expected_count matches what the admin
-    // is actually looking at. The server does its own authoritative
-    // recount against the SAME (plant [+ search]) predicate list_rows uses,
-    // and refuses with a 409 if it disagrees — this is a best-effort match,
-    // not the source of truth.
-    const q = search.toLowerCase();
-    const visibleCount = q
-      ? state.rows.filter((r) => Object.values(r).some((v) => String(v ?? '').toLowerCase().includes(q))).length
-      : state.rows.length;
+    // The server is the authority on what "filtered" means: its search predicate covers
+    // only the table's search columns, not every cell the grid text-matches, so a
+    // client-side count disagreed and the guarded delete always answered 409. Ask the
+    // same list endpoint (same plant + search predicate) for meta.total instead.
+    let visibleCount: number;
+    try {
+      const qs = new URLSearchParams({ plant, limit: '1' });
+      if (search) qs.set('search', search);
+      const counted = await Util.fetchTraced(`${API}/master-data/${table}?${qs.toString()}`).then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<{ meta?: { total?: number } }>;
+      });
+      visibleCount = Number(counted.meta?.total);
+      if (!Number.isFinite(visibleCount)) throw new Error('no row count in response');
+    } catch (e) {
+      Toast.show(Util.t('toast.delete_filtered_count_failed', { msg: (e as Error).message }), 'error');
+      return;
+    }
+    if (visibleCount === 0) {
+      Toast.show(Util.t('toast.delete_filtered_done', { count: 0 }), 'info');
+      return;
+    }
 
+    // Modal.confirm sets `message` as plain text (no markup); the one HTML slot is `detail`.
     const ok = await Modal.confirm({
-      title:        `Delete filtered rows from ${TABLE_LABELS[table]}?`,
-      message:      `This will permanently delete <strong>${visibleCount}</strong> row(s) in plant <strong>${Util.escapeHtml(plant)}</strong>`
-                    + (search ? ` matching "${Util.escapeHtml(search)}"` : '') + ` from the database.`,
-      detail:       '<strong>This cannot be undone.</strong>',
-      confirmLabel: 'Yes, delete filtered rows',
+      title:        Util.t('ui.delete_filtered_confirm_title', { table: TABLE_LABELS[table] }),
+      message:      Util.t('ui.delete_filtered_confirm_message', {
+        count: visibleCount, plant, match: search ? Util.t('ui.delete_filtered_matching', { q: search }) : '',
+      }),
+      detail:       Util.t('ui.delete_filtered_confirm_detail'),
+      confirmLabel: Util.t('btn.delete_filtered_confirm'),
       tone:         'danger',
     });
     if (!ok) return;

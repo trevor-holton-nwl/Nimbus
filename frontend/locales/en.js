@@ -2092,4 +2092,17 @@ window.__NIMBUS_LOCALES.en = {
   // aggregate_to_detail.md §4.2) — English-only per this section's own
   // established pattern above.
   'toast.dist_reassign_confirm':        '{{n}} distributions and {{k}} scheduled sub-orders reference {{machine}} under {{wc}}; they will show as *machine left work center* until their shares are adjusted',
+  'ui.delete_filtered_confirm_title': 'Delete filtered rows from {{table}}?',
+  'ui.delete_filtered_confirm_message': 'This will permanently delete {{count}} row(s) in plant {{plant}}{{match}} from the database.',
+  'ui.delete_filtered_matching': ' matching "{{q}}"',
+  'ui.delete_filtered_confirm_detail': '<strong>This cannot be undone.</strong>',
+  'btn.delete_filtered_confirm': 'Yes, delete filtered rows',
+  'toast.delete_filtered_count_failed': 'Could not count the rows to delete: {{msg}}',
+  'ui.backend_log_clear_confirm': 'Clear the backend log?',
+  'ui.backend_log_clear_msg': 'This empties the server\'s in-memory log buffer for everyone. It cannot be restored.',
+  'btn.backend_log_clear': 'Clear log',
+  'toast.backend_log_clear_failed': 'Could not clear the backend log: {{msg}}',
+  'btn.setup_list_prev': 'Previous',
+  'btn.setup_list_next': 'Next',
+  'ui.setup_list_page': '{{from}}-{{to}} of {{total}}',
 };

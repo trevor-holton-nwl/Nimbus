@@ -113,3 +113,22 @@ test('AdminCockpit._renderDistributionWarning\'s review link navigates to the Ga
     }
   });
 });
+
+test('_clearBackendLog confirms first, and reports a non-OK response instead of swallowing it (#47)', async () => {
+  const { Modal, Toast } = await import('../../../frontend/platform/foundation.mjs');
+  const priorFetch = globalThis.fetch, priorConfirm = Modal.confirm, priorToast = Toast.show;
+  const fetched = [], toasts = [];
+  globalThis.fetch = (url, opts) => { fetched.push([String(url), opts?.method]); return Promise.resolve({ ok: false, status: 500, headers: new Map(), json: () => Promise.resolve({}) }); };
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  try {
+    Modal.confirm = () => Promise.resolve(false);
+    await AdminCockpit._clearBackendLog();
+    assert.equal(fetched.length, 0, 'declined confirm must not call the server');
+    Modal.confirm = () => Promise.resolve(true);
+    await AdminCockpit._clearBackendLog();
+    assert.equal(fetched.length, 1);
+    assert.ok(toasts.some(([, type]) => type === 'error'), 'HTTP 500 must surface an error toast');
+  } finally {
+    globalThis.fetch = priorFetch; Modal.confirm = priorConfirm; Toast.show = priorToast;
+  }
+});

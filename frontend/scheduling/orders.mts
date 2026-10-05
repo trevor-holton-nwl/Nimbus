@@ -1621,19 +1621,27 @@ export const Table = {
       }
       rowStrs.push(cells.join('\t'));
     }
-    navigator.clipboard?.writeText(rowStrs.join('\n')).catch(() => {});
-    const gridEl = document.getElementById('ag-grid');
-    if (gridEl) {
-      Table._rangeHighlighted.forEach(key => {
-        const sep  = key.indexOf('|');
-        const cell = gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`);
-        if (cell) { cell.classList.add('ag-cell-copy-flash'); setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380); }
-      });
-    }
     const nRows = maxRow - minRow + 1;
     const nCols = maxCol - minCol + 1;
-    Toast.show(Util.t('toast.copied_range').replace('{r}', String(nRows)).replace('{c}', String(nCols)), 'success');
-    Table._clearRange();
+    // Flash + "Copied" only once the clipboard write actually succeeded; a denied or
+    // missing clipboard reports that instead of claiming the copy happened.
+    const written = navigator.clipboard
+      ? navigator.clipboard.writeText(rowStrs.join('\n'))
+      : Promise.reject(new Error('clipboard unavailable'));
+    written.then(() => {
+      const gridEl = document.getElementById('ag-grid');
+      if (gridEl) {
+        Table._rangeHighlighted.forEach(key => {
+          const sep  = key.indexOf('|');
+          const cell = gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`);
+          if (cell) { cell.classList.add('ag-cell-copy-flash'); setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380); }
+        });
+      }
+      Toast.show(Util.t('toast.copied_range').replace('{r}', String(nRows)).replace('{c}', String(nCols)), 'success');
+      Table._clearRange();
+    }, () => {
+      Toast.show(Util.t('toast.clipboard_denied'), 'error');
+    });
   },
 
   _showAlertPopup(taskId: string): void {

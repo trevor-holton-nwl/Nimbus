@@ -218,6 +218,7 @@ export const SetupAdmin = (() => {
   // every openGridEditor() call so the floating editor's keydown/blur
   // listeners (wired once, globally, in ensureGridEditorEl — never per-render)
   // always act on the latest render instead of a stale closure.
+  type GridWireCtx = { snapshot: SetupSnapshot; definition: SetupDefinition | null; rows: EffectiveSetupRow[]; permissions: SetupPermissions };
   let _gridEditorCtx: { target: HTMLElement; snapshot: SetupSnapshot; definition: SetupDefinition | null; rows: EffectiveSetupRow[]; permissions: SetupPermissions } | null = null;
 
   const keyText = (key: SetupStateKey): string => key.map(part => `${part.fieldKey}=${part.value}`).join(' | ');
@@ -1050,6 +1051,7 @@ export const SetupAdmin = (() => {
       </section>`;
     _mkCombobox(target.querySelector('#setup-line-combobox'), ['', ...lines], { value: _lineScope, placeholder: Util.t('ph.search_lines'), onSelect: value => {
       _lineScope = value;
+      _listMeta = { ..._listMeta, offset: 0 };
       // A stale selection/typed-confirm from the PREVIOUS scope must never
       // carry over — the row keys underneath belong to a different machine.
       _listSelected.clear();
@@ -1191,6 +1193,7 @@ export const SetupAdmin = (() => {
     });
     target.querySelector<HTMLInputElement>('[data-setup-grid-filter-from]')?.addEventListener('input', event => {
       _gridFilterFrom = (event.target as HTMLInputElement).value;
+      _listMeta = { ..._listMeta, offset: 0 };
       if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
       else renderListView(target, snapshot, definition, permissions);
     });
@@ -1347,6 +1350,7 @@ export const SetupAdmin = (() => {
       <div class="setup-list-footer">
         ${permissions.matrixWrite ? `<button type="button" class="btn btn-ghost sm" data-setup-list-add-pair>${Util.escapeHtml(Util.t('ui.setup_list_add_pair'))}</button>` : '<span></span>'}
         <span class="setup-list-count">${Util.escapeHtml(Util.t('ui.setup_list_showing', { shown: rows.length, total: _listMeta.total, from: _gridFilterFrom || Util.t('ui.setup_plant_default') }))}</span>
+        ${_listMeta.total > _listMeta.limit ? `<span class="setup-list-pager"><button type="button" class="btn btn-ghost sm" data-setup-list-page="prev" ${_listMeta.offset <= 0 ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.setup_list_prev'))}</button><span>${Util.escapeHtml(Util.t('ui.setup_list_page', { from: _listMeta.offset + 1, to: Math.min(_listMeta.offset + _listMeta.limit, _listMeta.total), total: _listMeta.total }))}</span><button type="button" class="btn btn-ghost sm" data-setup-list-page="next" ${_listMeta.offset + _listMeta.limit >= _listMeta.total ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.setup_list_next'))}</button></span>` : ''}
       </div>
       ${permissions.matrixWrite ? `
       <div class="setup-list-bulk-actions">
@@ -1377,6 +1381,13 @@ export const SetupAdmin = (() => {
   function wireListView(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition, permissions: SetupPermissions): void {
     const mount = target.querySelector<HTMLElement>('#setup-list-mount');
     if (!mount) return;
+    mount.querySelectorAll<HTMLButtonElement>('[data-setup-list-page]').forEach(button => {
+      button.addEventListener('click', () => {
+        const step = button.dataset.setupListPage === 'next' ? _listMeta.limit : -_listMeta.limit;
+        _listMeta = { ..._listMeta, offset: Math.max(0, _listMeta.offset + step) };
+        renderListView(target, snapshot, definition, permissions);
+      });
+    });
     mount.querySelectorAll<HTMLInputElement>('[data-setup-list-minutes]').forEach(input => {
       input.addEventListener('change', () => {
         const tr = input.closest<HTMLElement>('[data-setup-list-row-from]')!;
@@ -1658,10 +1669,15 @@ export const SetupAdmin = (() => {
    *  innerHTML is replaced), guarded by a dataset flag exactly like
    *  LaborPlanning's `grid._lpDragWired`. Edits are staged into `_gridDirty`,
    *  never written until an explicit Save. */
-  function wireGridInteractions(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
-    const flagged = target as unknown as { _setupGridWired?: boolean };
+  function wireGridInteractions(target: HTMLElement, snapshot0: SetupSnapshot, definition0: SetupDefinition | null, rows0: EffectiveSetupRow[], permissions0: SetupPermissions): void {
+    const flagged = target as unknown as { _setupGridWired?: boolean; _setupGridCtx?: GridWireCtx };
+    // The listeners below are wired once per target but outlive many repaints; they read
+    // the CURRENT render's data through this shared ctx (refreshed on every call), never
+    // the first render's closure (stale rows/permissions after a reload or role change).
+    flagged._setupGridCtx = { snapshot: snapshot0, definition: definition0, rows: rows0, permissions: permissions0 };
     if (flagged._setupGridWired) return;
     flagged._setupGridWired = true;
+    const ctx = (): GridWireCtx => flagged._setupGridCtx!;
 
     const mount = (): HTMLElement | null => target.querySelector<HTMLElement>('#setup-grid-table-mount');
     const axesOf = (): { rowStates: SetupGridState[]; colStates: SetupGridState[] } => {
@@ -1716,6 +1732,7 @@ export const SetupAdmin = (() => {
     document.addEventListener('mouseup', () => { _gridDragging = false; });
 
     target.addEventListener('keydown', event => {
+      const { snapshot, definition, rows, permissions } = ctx();
       const mountEl = mount(); if (!mountEl || !_gridSelRange) return;
       if (!mountEl.contains(document.activeElement) && !mountEl.contains(event.target as Node)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
@@ -1745,6 +1762,7 @@ export const SetupAdmin = (() => {
     });
 
     target.addEventListener('paste', event => {
+      const { snapshot, definition, rows, permissions } = ctx();
       if (!permissions.matrixWrite) return;
       const anchorTd = (document.activeElement as HTMLElement | null)?.closest<HTMLTableCellElement>('td[data-setup-grid-row]');
       if (!anchorTd) return;
@@ -1863,11 +1881,13 @@ export const SetupAdmin = (() => {
   /** Click-to-open wiring for the floating editor — guarded per-`target` like
    *  `wireGridInteractions`, since (unlike the editor element's own listeners
    *  above) this needs the current render's `snapshot`/`rows`/`permissions`. */
-  function wireGridEditor(target: HTMLElement, snapshot: SetupSnapshot, definition: SetupDefinition | null, rows: EffectiveSetupRow[], permissions: SetupPermissions): void {
-    const flagged = target as unknown as { _setupGridEditorWired?: boolean };
+  function wireGridEditor(target: HTMLElement, snapshot0: SetupSnapshot, definition0: SetupDefinition | null, rows0: EffectiveSetupRow[], permissions0: SetupPermissions): void {
+    const flagged = target as unknown as { _setupGridEditorWired?: boolean; _setupGridEditorCtx?: GridWireCtx };
+    flagged._setupGridEditorCtx = { snapshot: snapshot0, definition: definition0, rows: rows0, permissions: permissions0 };
     if (flagged._setupGridEditorWired) return;
     flagged._setupGridEditorWired = true;
     target.addEventListener('click', event => {
+      const { snapshot, definition, rows, permissions } = flagged._setupGridEditorCtx!;
       if (!permissions.matrixWrite || event.ctrlKey || event.metaKey) return; // ctrl/cmd-click is lasso mode
       const mountEl = target.querySelector<HTMLElement>('#setup-grid-table-mount');
       if (!mountEl || !mountEl.contains(event.target as Node)) return;
@@ -1973,7 +1993,7 @@ export const SetupAdmin = (() => {
 
   async function editState(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
     if (!_lineScope) return;
-    const panel = target.querySelector<HTMLElement>('.setup-state .panel-body');
+    const panel = target.querySelector<HTMLElement>('[data-setup-state-inline]');
     if (panel) mountStateEditor(panel, snapshot, _lineScope, () => render(target, snapshot.plant));
   }
 
@@ -1989,7 +2009,7 @@ export const SetupAdmin = (() => {
     const cacheKey = `${snapshot.plant}\u0000${_lineScope}`;
     const saved = _compatibilityByLine[cacheKey];
     const compatible = saved?.setup_compatible !== false;
-    const statePanel = target.querySelector('.setup-state .panel-body');
+    const statePanel = target.querySelector('[data-setup-state-inline]');
     if (!statePanel) return;
     const compat = document.createElement('div'); compat.className = 'setup-compatibility';
     compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${Util.escapeHtml(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${Util.escapeHtml(Util.t('ui.setup_compatibility_reason'))}" value="${Util.escapeHtml(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility ${compatible ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.save'))}</button><p>${Util.escapeHtml(Util.t('ui.setup_not_global_exclusion'))}</p>`;
