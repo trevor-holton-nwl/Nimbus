@@ -66,7 +66,8 @@ def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkey
         def __exit__(self, *args): pass
         def execute(self, sql, params=None): statements.append((sql, params))  # batched UPDATE ... RETURNING (#26) yields (id, xmin) pairs
         def fetchall(self):
-            if statements and statements[-1][0].startswith('UPDATE'): return [('q', 43)]
+            if statements and statements[-1][0].startswith('UPDATE'):
+                return [('q', 43)]
             return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 2, 'p', 'L1', 'scheduled', None, False, None,
                                       None, None, None, None, None)]
         def fetchone(self): return ('q', 43)

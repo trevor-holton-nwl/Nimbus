@@ -301,8 +301,10 @@ def test_upsert_sql_no_longer_blanket_flags_runtime_mismatch():
     _UPSERT_SQL; only a plain carry-forward (COALESCE(...,FALSE)) remains, so
     only the resolver's own write (backend/routing/resolver.py, elsewhere) may
     ever set this flag now."""
-    assert "run_time IS DISTINCT FROM" not in db._UPSERT_SQL
-    assert "scheduled_start IS NOT NULL" not in db._UPSERT_SQL
+    # Review round (H10/D33): the ONLY exception is a scheduled distribution child,
+    # i.e. the flag CASE is gated on a parent link; ordinary orders carry forward.
+    flag = db._UPSERT_SQL.split("runtime_schedule_mismatch = CASE", 1)[1].split("ELSE COALESCE", 1)[0]
+    assert "orders.parent_production_order IS NOT NULL" in flag
     assert "COALESCE(orders.runtime_schedule_mismatch, FALSE)" in db._UPSERT_SQL
 
 
