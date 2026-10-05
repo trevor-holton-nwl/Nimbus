@@ -173,9 +173,9 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     # dropna=False: an order with no machine yet must still be emitted (it was
     # silently dropped before). Such rows get no finish-to-start links below --
     # chaining unrelated unassigned orders would be meaningless.
-    for prod_line, group_raw in df.groupby("MACHINE", dropna=False):
-        if pd.isna(prod_line):
-            prod_line = ""   # TaskRow.MACHINE is a required str; the UI shows '' as 'Unknown'
+    for machine_key, group_raw in df.groupby("MACHINE", dropna=False):
+        # TaskRow.MACHINE is a required str; the UI shows '' as 'Unknown'
+        prod_line = "" if pd.isna(machine_key) else machine_key
         group = group_raw.sort_values("BASIC_START_DATE")
         prev_task_id = None
 
