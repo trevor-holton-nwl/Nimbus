@@ -98,6 +98,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.clear_failed':                'Löschen fehlgeschlagen',
   'toast.diag_bundle_downloaded':      'Diagnosepaket heruntergeladen',
   'toast.undone':                      'Rückgängig: {{label}}',
+  'toast.machine_rejected':           '{{count}} order(s) could not be moved: the machine is not registered for this plant',
   'toast.dark_mode_on':                'Dunkelmodus aktiviert',
   'toast.light_mode_on':               'Hellmodus aktiviert',
   'toast.order_belongs_other_plant':   'Auftrag gehört zu einem anderen Werk — Werk wechseln um zu prüfen.',

@@ -2580,6 +2580,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/logs/csp-report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest Csp Report
+         * @description Tolerant sink for Content-Security-Policy violation reports (the policy
+         *     is report-only, see brain.py). Browsers POST `application/csp-report`
+         *     ({"csp-report": {...}}) or `application/reports+json` ([{type, body}]) --
+         *     neither is `application/json`, so the body is read raw. No auth (browsers
+         *     send none), size-capped, never errors: malformed input is dropped and
+         *     every call answers 204.
+         */
+        post: operations["ingest_csp_report_logs_csp_report_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/logs/frontend": {
         parameters: {
             query?: never;
@@ -7557,7 +7582,9 @@ export interface operations {
     get_diagnostics_deep_diagnostics_deep_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -7570,6 +7597,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -7836,6 +7872,24 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    ingest_csp_report_logs_csp_report_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

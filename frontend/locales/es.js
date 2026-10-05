@@ -98,6 +98,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.clear_failed':                'Error al borrar',
   'toast.diag_bundle_downloaded':      'Paquete de diagnóstico descargado',
   'toast.undone':                      'Deshecho: {{label}}',
+  'toast.machine_rejected':           '{{count}} order(s) could not be moved: the machine is not registered for this plant',
   'toast.dark_mode_on':                'Modo oscuro activado',
   'toast.light_mode_on':               'Modo claro activado',
   'toast.order_belongs_other_plant':   'El pedido pertenece a otra planta — cambie la planta para inspeccionar.',
