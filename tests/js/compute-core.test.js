@@ -615,3 +615,27 @@ test('computeAlerts does not raise pv-lot-size when run_time_basis has no warnin
   });
   assert.equal(res.alerts.filter(a => a.type === 'pv-lot-size').length, 0);
 });
+
+test('computeUtilization steps calendar days across a DST fall-back without double counting (#40)', () => {
+  const prevTz = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    // Skip where the runtime cannot honour a runtime TZ change (Nov 1 2026 must be a 25h day).
+    const probe = new Date(2026, 10, 1);
+    if ((new Date(2026, 10, 2).getTime() - probe.getTime()) !== 25 * 3600 * 1000) return;
+    const t = { id: 'dst', MACHINE: 'L', RUN_TIME: 36,
+      start_date: new Date(2026, 10, 1, 0, 30), end_date: new Date(2026, 10, 2, 12, 30) };
+    const { matrix } = Core.computeUtilization({
+      tasks: [t], lineSettings: { L: { plant: null } },
+      calendars: { L: { workHours: allDays([0, 24]) } }, plants: {},
+      blocks: [], plantBlocks: [], masterData: noPlant,
+      startMs: new Date(2026, 10, 1).getTime(), days: 3,
+    });
+    const d1 = matrix.L[Core.dayKey(new Date(2026, 10, 1))];
+    const d2 = matrix.L[Core.dayKey(new Date(2026, 10, 2))];
+    assert.ok(d2.scheduled > 0, 'the day after the fall-back is visited');
+    assert.ok(Math.abs(d1.scheduled + d2.scheduled - 36) < 1e-6, 'hours are split exactly once across the two days');
+  } finally {
+    if (prevTz === undefined) delete process.env.TZ; else process.env.TZ = prevTz;
+  }
+});
