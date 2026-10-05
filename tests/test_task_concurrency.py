@@ -168,3 +168,92 @@ class TestUpdateTaskDatesBulkXminConflict:
         ], atomic_optimizer=True, strict_conflicts=True)
         assert strict["status"] == "error" and strict["error_code"] == "schedule.conflicts"
         assert db_.get_task_versions([self.oid])[0]["start_date"] == new_start.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# Bundle 0 #2 (Code_Review_Consolidated_10_05.md): cross-seam save contract.
+# The body below is the browser's REAL saveAll() payload, emitted by the JS test
+# in tests/modules/scheduling/persistence.test.mjs into a checked-in fixture
+# (same shared-fixture pattern as routing_cases.json) and POSTed UNMODIFIED
+# through FastAPI to the real route and DB. The only substitution is
+# base_version (the fixture can't know the seeded row's xmin) -- every other
+# byte is what the browser sent. Catches the C1/N09/R3 class: a payload the
+# client legitimately produces being rejected as invalid/stale server-side.
+# ---------------------------------------------------------------------------
+import copy  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_SAVE_FIXTURE = json.loads(
+    (Path(__file__).parent / "modules" / "fixtures" / "save_payload_cases.json").read_text(encoding="utf-8")
+)["cases"]
+_XSEAM_SUBNETWORK = "ZZTEST_XSEAM_SUB"
+
+
+@pytest.mark.pg
+class TestBrowserSavePayloadCrossSeam:
+    @pytest.fixture(autouse=True)
+    def _db(self, pg):
+        self.pg = pg
+        self._cleanup()
+        yield
+        self._cleanup()
+
+    def _cleanup(self):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            for case in _SAVE_FIXTURE.values():
+                cur.execute("DELETE FROM orders WHERE id = %s", (case["request"]["tasks"][0]["id"],))
+                cur.execute("DELETE FROM plants WHERE plant = %s", (case["seed"]["plant"],))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (_XSEAM_SUBNETWORK,))
+            conn.commit()
+
+    def _seed(self, case):
+        seed, oid = case["seed"], case["request"]["tasks"][0]["id"]
+        routing = seed["kind"] == "routing_plant"
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO subnetworks (code,name) VALUES (%s,'xseam') ON CONFLICT DO NOTHING",
+                        (_XSEAM_SUBNETWORK,))
+            cur.execute(
+                "INSERT INTO plants (subnetwork,plant,routing_runtime_enabled,timezone)"
+                " VALUES (%s,%s,%s,'America/New_York')", (_XSEAM_SUBNETWORK, seed["plant"], routing),
+            )
+            cur.execute(
+                "INSERT INTO orders (id,production_order,material_number,plant,machine,production_version,"
+                " order_quantity,basic_start_date,basic_finish_date,scheduled_start,scheduled_end,run_time,"
+                " run_time_source,planning_status,prt_01,parent_production_order,distribution_letter)"
+                " VALUES (%s,%s,'ZZTEST_XSEAM_M',%s,%s,%s,10,%s,%s,%s,%s,%s,%s,'scheduled',%s,%s,%s)",
+                (oid, seed["production_order"], seed["plant"], seed["machine"], seed["production_version"],
+                 seed["start_date"], seed["end_date"], seed["start_date"], seed["end_date"], seed["run_time"],
+                 "routing" if routing else "distributed", case["request"]["tasks"][0]["PRT_01"],
+                 seed["parent_order"], seed["distribution_letter"]),
+            )
+            conn.commit()
+        return oid
+
+    @pytest.mark.parametrize("name", sorted(_SAVE_FIXTURE))
+    def test_browser_payload_is_accepted_and_persisted(self, name, client):
+        import backend.security.auth as auth
+        case = _SAVE_FIXTURE[name]
+        oid = self._seed(case)
+        body = copy.deepcopy(case["request"])
+        body["tasks"][0]["base_version"] = self.pg.get_task_versions([oid])[0]["row_version"]
+        client.app.dependency_overrides[auth.require_authenticated] = lambda: "xseam@example.com"
+        client.app.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+        try:
+            response = client.post("/tasks/update", json=body)
+        finally:
+            client.app.dependency_overrides.clear()
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "ok"
+        assert result["invalid_ids"] == [] and result["stale"] == [] and result["not_found_ids"] == []
+        assert result["rejection_reasons"] == {}
+        assert result["persisted"] == 1 and oid in result["versions"]
+        sent = body["tasks"][0]
+        saved = self.pg.get_task_versions([oid])[0]
+        assert saved["start_date"] == sent["start_date"] and saved["end_date"] == sent["end_date"]
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT machine, production_version, run_time FROM orders WHERE id = %s", (oid,))
+            assert cur.fetchone() == (sent["MACHINE"], sent["PRODUCTION_VERSION"], sent["RUN_TIME"])
+            cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id = %s", (oid,))
+            assert cur.fetchone()[0] == len(sent["schedule_segments"])
