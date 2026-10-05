@@ -42,7 +42,7 @@ def _setup_plant_guard(plant: str, allowed_plants: list[str] | None) -> None:
 
 def _setup_error(exc: ValueError) -> HTTPException:
     """Keep setup signature conflicts distinct from malformed request data."""
-    status = 409 if "signature version is stale" in str(exc).lower() else 400
+    status = 409 if "is stale" in str(exc).lower() else 400
     return HTTPException(status_code=status, detail=str(exc))
 
 
@@ -245,7 +245,8 @@ def import_setup_matrix(plant: str, request: Request, body: dict = Body(default=
         if machine:
             result = setup_data.upsert_machine_matrix_rows(plant, machine, rows, body.get("signature_version"), actor)
         else:
-            result = setup_data.replace_plant_matrix(plant, rows, body.get("signature_version"), actor)
+            result = setup_data.replace_plant_matrix(plant, rows, body.get("signature_version"), actor,
+                                                     body.get("plant_matrix_token"))
     except ValueError as exc:
         raise _setup_error(exc) from exc
     _set_admin_log_details(request, signature_version=result["signature_version"], rows=result.get("rows", 0))

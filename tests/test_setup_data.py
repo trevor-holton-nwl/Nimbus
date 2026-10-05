@@ -643,6 +643,8 @@ class _PairsCursor(_DefinitionCursor):
 
 class _SnapshotCursor(_DefinitionCursor):
     def fetchone(self):
+        if "md5(" in self.executed[-1][0]:
+            return ("tok-snapshot",)
         if "SELECT fields" in self.executed[-1][0]:
             return (["colorWheel"], 4, True, False)
         return None
@@ -770,3 +772,51 @@ class _MatrixRowsCursor(_DefinitionCursor):
             rows = [r for r in rows if r[1] == wanted]
         # Mirror the query's ORDER BY from_key, to_key, machine DESC.
         return sorted(rows, key=lambda r: (json.dumps(r[1]), json.dumps(r[2]), r[0]), reverse=False)
+
+
+class _TokenCursor(_DefinitionCursor):
+    """Definition + a canned plant-matrix content-hash token."""
+    token = "tok-live"
+
+    def fetchone(self):
+        if "md5(" in self.executed[-1][0]:
+            return (self.token,)
+        return super().fetchone()
+
+
+def test_snapshot_returns_the_plant_matrix_token(monkeypatch):
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_SnapshotCursor()))
+    assert setup_data.get_setup_snapshot("5512")["plant_matrix_token"] == "tok-snapshot"
+
+
+def test_replace_plant_matrix_requires_a_token(monkeypatch):
+    """Plan Part 2 #20: no token, no delete-then-insert replace."""
+    cursor = _TokenCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    with pytest.raises(ValueError, match="token is required"):
+        setup_data.replace_plant_matrix("5512", [], 2, "owner@example.com")
+    assert not any("DELETE FROM setup_matrix" in sql for sql, _ in cursor.executed)
+
+
+def test_replace_plant_matrix_rejects_a_stale_token_before_deleting(monkeypatch):
+    cursor = _TokenCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    with pytest.raises(ValueError, match="is stale"):
+        setup_data.replace_plant_matrix("5512", [], 2, "owner@example.com", expected_token="tok-old")
+    assert not any("DELETE FROM setup_matrix" in sql for sql, _ in cursor.executed)
+
+
+def test_replace_plant_matrix_with_the_current_token_replaces_and_returns_a_new_token(monkeypatch):
+    cursor = _TokenCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.replace_plant_matrix("5512", [], 2, "owner@example.com", expected_token="tok-live")
+    assert result["plant_matrix_token"] == "tok-live" and result["rows"] == 0
+    assert any("DELETE FROM setup_matrix" in sql for sql, _ in cursor.executed)
+
+
+@pytest.mark.pg
+def test_plant_matrix_token_sql_runs_and_is_stable_on_a_real_db(pg):
+    import hashlib
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        token = setup_data.plant_matrix_token(cur, "ZZTEST_NO_SUCH_PLANT", 1)
+    assert token == hashlib.md5(b"").hexdigest()

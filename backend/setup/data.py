@@ -317,17 +317,40 @@ def _insert_matrix_rows(cur, plant: str, machine: str, version: int, rows: list[
         )
 
 
-def replace_plant_matrix(plant, rows, signature_version, actor) -> dict:
+def plant_matrix_token(cur, plant: str, signature_version: int) -> str:
+    """Content hash of one plant-default scope's rows (machine = ''), ordered.
+    Returned on read (get_setup_snapshot) and required on replace_plant_matrix,
+    so a delete-then-insert replace built from a stale read is refused instead
+    of silently reverting another admin's edit. No schema change."""
+    cur.execute(
+        """SELECT md5(COALESCE(string_agg(
+                  from_key::text || '|' || to_key::text || '|' || setup_min::text || '|' || source
+                  || '|' || COALESCE(source_reference, ''),
+                  E'
+' ORDER BY from_key::text, to_key::text), ''))
+             FROM setup_matrix WHERE plant = %s AND machine = '' AND signature_version = %s""",
+        (plant, signature_version),
+    )
+    return cur.fetchone()[0]
+
+
+def replace_plant_matrix(plant, rows, signature_version, actor, expected_token=None) -> dict:
     plant = _required_text(plant, "Plant")
     actor = _required_text(actor, "Actor")
+    if not isinstance(expected_token, str) or not expected_token:
+        raise ValueError("A plant matrix token is required; reload the setup page and try again")
     with _pool.connection() as conn, conn.cursor() as cur:
         definition = _require_definition(cur, plant, signature_version, lock=True)
+        if plant_matrix_token(cur, plant, signature_version) != expected_token:
+            raise ValueError("Setup plant-default matrix is stale: another admin changed it; reload and retry")
         normalized = validate_matrix_rows(definition["fields"], rows, strict_blanks=definition["strict_blanks"])
         cur.execute("DELETE FROM setup_matrix WHERE plant = %s AND machine = '' AND signature_version = %s",
                     (plant, signature_version))
         _insert_matrix_rows(cur, plant, "", signature_version, normalized, actor)
+        new_token = plant_matrix_token(cur, plant, signature_version)
         conn.commit()
-    return {"plant": plant, "machine": "", "signature_version": signature_version, "rows": len(normalized)}
+    return {"plant": plant, "machine": "", "signature_version": signature_version, "rows": len(normalized),
+            "plant_matrix_token": new_token}
 
 
 def upsert_machine_matrix_rows(plant, machine, rows, signature_version, actor) -> dict:
@@ -758,8 +781,10 @@ def get_setup_snapshot(plant: str) -> dict:
              "created_at": _iso(r[12]), "updated_by": r[13], "updated_at": _iso(r[14])}
             for r in cur.fetchall()
         ]
+        # Last statement (same REPEATABLE READ snapshot as the rows above).
+        plant_token = plant_matrix_token(cur, plant, version)
     definition = {**definition, "plant": plant}
-    return {"plant": plant, "definition": definition,
+    return {"plant": plant, "definition": definition, "plant_matrix_token": plant_token,
             "plant_rows": [row for row in matrix if row["machine"] == ""],
             "machine_rows": [row for row in matrix if row["machine"] != ""],
             "machine_states": states, "overrides": overrides}

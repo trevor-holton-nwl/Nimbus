@@ -37,7 +37,7 @@ class _SetupService:
         return {"plant": plant, "fields": ["colorWheel"], "strict_blanks": True,
                 "signature_version": self.version, "active": active}
 
-    def replace_plant_matrix(self, plant, rows, signature_version, actor):
+    def replace_plant_matrix(self, plant, rows, signature_version, actor, expected_token=None):
         self._check_rows(rows, signature_version)
         return {"plant": plant, "machine": "", "signature_version": self.version, "rows": len(rows)}
 
@@ -648,3 +648,13 @@ def test_get_setup_matrix_rows_never_loads_a_full_snapshot(monkeypatch):
             client.get("/setup/PLANT-A/matrix-rows")
     finally:
         brain.api.dependency_overrides.clear()
+
+
+def test_stale_plant_matrix_token_maps_to_409(tc, monkeypatch):
+    """Plan Part 2 #20: a stale content-hash token reuses the stale -> 409 mapping."""
+    def _stale(self, plant, rows, signature_version, actor, expected_token=None):
+        raise ValueError("Setup plant-default matrix is stale: another admin changed it; reload and retry")
+    monkeypatch.setattr(brain.setup_data, "replace_plant_matrix", lambda *a, **k: _stale(None, *a, **k))
+    response = tc.post("/setup/5512/matrix/import",
+                       json={"signature_version": 4, "rows": [], "plant_matrix_token": "old"})
+    assert response.status_code == 409

@@ -392,6 +392,9 @@ export interface SetupSnapshot {
   plant: string;
   definition: SetupDefinition | null;
   plant_rows: SetupMatrixRow[];
+  /** Content hash of the plant-default rows; echoed on a plant-default replace
+   *  so the server can refuse a save built from a stale read (409). */
+  plant_matrix_token?: string;
   machine_rows: SetupMatrixRow[];
   machine_states: LineSetupState[];
   overrides: SetupOccurrenceOverride[];

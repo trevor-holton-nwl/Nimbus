@@ -377,3 +377,20 @@ test('buildSaveRequests: a plant-default clear removes that pair from the resent
   assert.equal(upsert[0].rows.length, 0);
   assert.deepEqual(deletes, []); // plant-default clears are folded into the resend, not a separate DELETE call
 });
+
+test('buildSaveRequests: plant-default replace carries stored provenance and the plant matrix token', () => {
+  const red = { key: [{ fieldKey: 'colorWheel', value: 'RED' }], sig: 'colorWheel=RED', parts: ['RED'] };
+  const blue = { key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], sig: 'colorWheel=BLUE', parts: ['BLUE'] };
+  const green = { key: [{ fieldKey: 'colorWheel', value: 'GREEN' }], sig: 'colorWheel=GREEN', parts: ['GREEN'] };
+  const existing = { machine: '', signature_version: 4, from_key: green.key, to_key: blue.key, setup_min: 99,
+    source: 'imported', source_metadata: { file: 'a.csv' }, source_reference: 'ref-1' };
+  const { upsert } = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, machine: '' }], 4, [existing], 'tok-1');
+  assert.equal(upsert[0].plant_matrix_token, 'tok-1');
+  const kept = upsert[0].rows.find(r => r.setup_min === 99);
+  assert.equal(kept.source, 'imported');
+  assert.deepEqual(kept.source_metadata, { file: 'a.csv' });
+  assert.equal(kept.source_reference, 'ref-1');
+  // line-scoped upserts never carry the plant token
+  const line = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, machine: 'L1' }], 4, [], 'tok-1');
+  assert.equal(line.upsert[0].plant_matrix_token, undefined);
+});

@@ -462,13 +462,14 @@ export const SetupAdmin = (() => {
    *  delete-then-insert replace (setup_data.replace_plant_matrix), not an
    *  upsert — sending only the edited cells there would silently wipe every
    *  other plant-default row. See docs/archive/setup_matrix_ui_redesign.md §7. */
-  function buildSaveRequests(edits: ReadonlyArray<SetupGridEdit>, signatureVersion: number, existingPlantRows: ReadonlyArray<SetupMatrixRow>): {
-    upsert: Array<{ machine: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }>;
+  type SetupUpsertRow = { from: SetupStateKey; to: SetupStateKey; setup_min: number; source?: string; source_metadata?: Record<string, unknown>; source_reference?: string | null };
+  function buildSaveRequests(edits: ReadonlyArray<SetupGridEdit>, signatureVersion: number, existingPlantRows: ReadonlyArray<SetupMatrixRow>, plantMatrixToken?: string): {
+    upsert: Array<{ machine: string; signature_version: number; plant_matrix_token?: string; rows: SetupUpsertRow[] }>;
     deletes: Array<{ machine: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }>;
   } {
     const byLine = new Map<string, SetupGridEdit[]>();
     edits.forEach(e => { if (!byLine.has(e.machine)) byLine.set(e.machine, []); byLine.get(e.machine)!.push(e); });
-    const upsert: Array<{ machine: string; signature_version: number; rows: Array<{ from: SetupStateKey; to: SetupStateKey; setup_min: number }> }> = [];
+    const upsert: Array<{ machine: string; signature_version: number; plant_matrix_token?: string; rows: SetupUpsertRow[] }> = [];
     const deletes: Array<{ machine: string; signature_version: number; rows: Array<{ from_key: SetupStateKey; to_key: SetupStateKey }> }> = [];
     byLine.forEach((lineEdits, machine) => {
       const sets = lineEdits.filter((e): e is SetupGridEdit & { setup_min: number } => e.setup_min !== null);
@@ -482,7 +483,10 @@ export const SetupAdmin = (() => {
       existingPlantRows.forEach(row => merged.set(`${stateSig(row.from_key)} ${stateSig(row.to_key)}`, row));
       sets.forEach(e => merged.set(gridEditKey(e.row, e.col), { machine: '', signature_version: signatureVersion, from_key: e.row.key, to_key: e.col.key, setup_min: e.setup_min, source: 'manual' }));
       clears.forEach(e => merged.delete(gridEditKey(e.row, e.col)));
-      if (sets.length || clears.length) upsert.push({ machine: '', signature_version: signatureVersion, rows: [...merged.values()].map(r => ({ from: r.from_key, to: r.to_key, setup_min: r.setup_min })) });
+      // The replace is delete-then-insert, so every resent row must carry its
+      // stored provenance (source/metadata/reference) or it is silently rewritten
+      // as 'manual'; the token lets the server refuse a replace built from a stale read.
+      if (sets.length || clears.length) upsert.push({ machine: '', signature_version: signatureVersion, ...(plantMatrixToken ? { plant_matrix_token: plantMatrixToken } : {}), rows: [...merged.values()].map(r => ({ from: r.from_key, to: r.to_key, setup_min: r.setup_min, ...(r.source ? { source: r.source } : {}), ...(r.source_metadata ? { source_metadata: r.source_metadata } : {}), ...(r.source_reference !== undefined ? { source_reference: r.source_reference } : {}) })) });
     });
     return { upsert, deletes };
   }
@@ -1884,7 +1888,7 @@ export const SetupAdmin = (() => {
     if (!definition || !_gridDirty.size) return;
     const edits = [..._gridDirty.values()];
     const existingPlantRows = snapshot.plant_rows.filter(row => row.signature_version === definition.signature_version);
-    const { upsert, deletes } = buildSaveRequests(edits, definition.signature_version, existingPlantRows);
+    const { upsert, deletes } = buildSaveRequests(edits, definition.signature_version, existingPlantRows, snapshot.plant_matrix_token);
     try {
       for (const body of upsert) {
         const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
@@ -1946,6 +1950,7 @@ export const SetupAdmin = (() => {
       }
       await writeAndRefresh(target, snapshot.plant, `${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, 'POST', {
         machine: parsed.machine, signature_version: parsed.signature_version, rows: parsed.rows,
+        ...(parsed.machine ? {} : { plant_matrix_token: snapshot.plant_matrix_token }),
       });
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
     finally { input.value = ''; }
