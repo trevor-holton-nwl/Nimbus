@@ -2397,7 +2397,25 @@ _UPSERT_SQL = """
         -- carry-forward. Only the resolver (backend/routing/resolver.py) is
         -- allowed to set this flag now, and only when the number it writes
         -- actually differs from what's stored.
-        runtime_schedule_mismatch = COALESCE(orders.runtime_schedule_mismatch, FALSE),
+        runtime_schedule_mismatch = CASE
+            -- Exception (H10/D33): a SCHEDULED distribution child (parent link set)
+            -- whose effective run time actually moves is flagged here, because the
+            -- ingest writes children through THIS statement before distribution's
+            -- own child upsert runs (whose identical CASE would then see no change).
+            WHEN orders.parent_production_order IS NOT NULL
+                 AND (CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1 FROM plants rp
+                             WHERE rp.plant = COALESCE(EXCLUDED.plant, orders.plant)
+                               AND rp.routing_runtime_enabled = TRUE
+                        ) THEN EXCLUDED.run_time
+                        WHEN orders.run_time_source = 'manual' THEN orders.run_time
+                        ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
+                      END) IS DISTINCT FROM orders.run_time
+                 AND (orders.scheduled_start IS NOT NULL
+                      OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
+            THEN TRUE
+            ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
         -- Routing plants: upsert_orders nulls the file's run_time before this
         -- write, so EXCLUDED.run_time is NULL and COALESCE keeps the stored
         -- value; a planner-keyed ('manual') run time is kept unconditionally.
