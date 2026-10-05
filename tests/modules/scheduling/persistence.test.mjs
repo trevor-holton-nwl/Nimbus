@@ -1069,3 +1069,32 @@ test('D25: a late Plant A master-data response after switching to Plant B is dis
   }
 });
 
+
+test('#24 reconnect reloads the plant that was ATTEMPTED, not the null _currentLoadedPlant of a failed boot load', async () => {
+  const origFetch = globalThis.fetch;
+  const priorLoad = Persistence.load;
+  const priorLoaded = Persistence._currentLoadedPlant;
+  const loads = [];
+  try {
+    Persistence._currentLoadedPlant = null;
+    globalThis.fetch = (url) => {
+      const u = String(url);
+      if (u.includes('/tasks')) return Promise.reject(new Error('offline'));
+      if (u.includes('/health')) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      return Promise.reject(new Error('offline'));
+    };
+    await Persistence.load({ plant: 'PLANT-ATTEMPT' }).catch(() => {});
+    assert.equal(Persistence._lastAttemptedPlant, 'PLANT-ATTEMPT');
+    assert.equal(Persistence._currentLoadedPlant, null);
+    Persistence.load = (opts) => { loads.push(opts); return Promise.resolve(); };
+    Persistence._reconnect.start();
+    await new Promise(res => setTimeout(res, 1300));
+    assert.equal(loads.length, 1);
+    assert.equal(loads[0].plant, 'PLANT-ATTEMPT');
+  } finally {
+    Persistence._reconnect.stop();
+    Persistence.load = priorLoad;
+    Persistence._currentLoadedPlant = priorLoaded;
+    globalThis.fetch = origFetch;
+  }
+});

@@ -147,6 +147,9 @@ let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null 
    PERSISTENCE — backend fetch, demo fallback, save + local cache.
    ========================================================================== */
 export const Persistence = {
+  // Plant the most recent load() was ASKED for, set before the fetch so it survives a failed
+  // boot load (where _currentLoadedPlant is still null). _reconnect reloads this plant.
+  _lastAttemptedPlant: null as string | null,
   _currentLoadedPlant: null as string | null,  // plant whose tasks are currently in Store (null = all plants)
   // Stage 3: plant whose priority rank maps Store.priorityRankMaps currently reflects
   // (null = none/unknown). Mirrors _currentLoadedPlant's own role for tasks/calendars —
@@ -284,6 +287,7 @@ export const Persistence = {
     // counter and discards itself if a newer load() has since started. See the
     // _loadRequest field comment above for why this mirrors _setupSnapshotRequest.
     const loadGeneration = ++Persistence._loadRequest;
+    Persistence._lastAttemptedPlant = plant ?? null;
     const stats: LoadStats = Persistence._lastLoad = {
       source: null, ts: new Date().toISOString(), plant: plant ?? null,
       raw_received: 0, backend_meta: null,
@@ -750,7 +754,7 @@ export const Persistence = {
             this.timer = null;
             ErrorLog.info('persistence', 'Backend recovered — reloading');
             Toast.show(Util.t('toast.backend_recovered'), 'success', 3000);
-            try { Persistence.load({ force: true, plant: Persistence._currentLoadedPlant }); } catch (e) {
+            try { Persistence.load({ force: true, plant: Persistence._lastAttemptedPlant ?? Persistence._currentLoadedPlant }); } catch (e) {
               ErrorLog.error('persistence', `Reload after reconnect failed: ${(e as Error).message}`);
             }
           })
@@ -1719,7 +1723,7 @@ export const Persistence = {
   /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
   reload(): Promise<void> {
     ErrorLog.info('persistence', 'Manual reload triggered — discarding local edits after successful hydration');
-    return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant, discardLocalEdits: true });
+    return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant ?? Persistence._lastAttemptedPlant, discardLocalEdits: true });
   },
 
   /** Fetch tasks for a specific plant, replacing whatever is currently in Store.
