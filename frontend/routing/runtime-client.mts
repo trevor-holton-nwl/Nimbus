@@ -67,9 +67,18 @@ const _EMPTY_MAP: RoutingRateMap = { plant: '', generated_at: '', machines: {}, 
  *  (day-level comparison, timezone-naive like the server's `DATE` columns). */
 function _withinValidity(startDate: Date, validFrom: string | null, validTo: string | null): boolean {
   const startDay = _dateOnlyMs(startDate);
-  if (validFrom && startDay < _dateOnlyMs(new Date(validFrom))) return false;
-  if (validTo && startDay > _dateOnlyMs(new Date(validTo))) return false;
+  if (validFrom && startDay < _dateOnlyMs(_parseValidityDate(validFrom))) return false;
+  if (validTo && startDay > _dateOnlyMs(_parseValidityDate(validTo))) return false;
   return true;
+}
+
+/** Date-only validity bounds ('YYYY-MM-DD', the server's DATE columns) are calendar days,
+ *  not instants. `new Date('2026-08-01')` parses as UTC midnight, which in the US is the
+ *  previous LOCAL day (a validity window that starts a day early / ends a day early). Build
+ *  the local date from the parts instead; anything else falls back to the native parser. */
+function _parseValidityDate(s: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:$|T00:00:00(?:\.0+)?Z?$)/.exec(s);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(s);
 }
 
 function _dateOnlyMs(d: Date): number {
@@ -98,6 +107,10 @@ export const Runtime = {
    *  keeps retrying instead of trusting an empty cache as current. */
   _rateMapPlant: null as string | null,
   _rateMap: null as RoutingRateMap | null,
+  /** Monotonic load token. Every load() takes the next value up front and a continuation
+   *  only installs its result while it is still the newest — a plant switch mid-fetch can no
+   *  longer land plant A's rate map (and A's _rateMapPlant) after B's load began. */
+  _loadSeq: 0,
 
   /** Fetches `GET /routing/{plant}/rate-map` and caches it, but only for a
    *  plant whose `routing_runtime_enabled` switch is on (per
@@ -116,6 +129,7 @@ export const Runtime = {
     // assignments below are untouched — see its docstring for why it must
     // stay stale (not nulled) on a network failure/non-ok response.
     Runtime._rateMap = null;
+    const seq = ++Runtime._loadSeq;
 
     if (!plant) {
       Runtime._rateMapPlant = null;
@@ -128,8 +142,11 @@ export const Runtime = {
     }
     try {
       const r = await Util.fetchTraced(`${Config.API_BASE}/routing/${encodeURIComponent(plant)}/rate-map`);
+      if (seq !== Runtime._loadSeq) return;   // superseded by a newer load()
       if (r.ok) {
-        Runtime._rateMap = await r.json() as RoutingRateMap;
+        const map = await r.json() as RoutingRateMap;
+        if (seq !== Runtime._loadSeq) return;
+        Runtime._rateMap = map;
         Runtime._rateMapPlant = plant;
       } else {
         // Non-ok (transient 5xx, corp-proxy pre-roll response) — treated the
@@ -139,6 +156,7 @@ export const Runtime = {
         Runtime._rateMap = null;
       }
     } catch (e) {
+      if (seq !== Runtime._loadSeq) return;
       ErrorLog.warn('routing', `Rate map fetch failed for ${plant}: ${(e as Error).message}`);
       Runtime._rateMap = null;
     }

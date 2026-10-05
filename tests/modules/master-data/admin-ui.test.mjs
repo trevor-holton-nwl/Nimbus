@@ -620,3 +620,10 @@ test('WorkCenters._autosave serializes queued writes for different work centers,
     Store.setSelectedPlant(priorPlant, 'test-restore');
   }
 });
+
+// #36: deleting an exclude/include rule changes a plant's rate map just like editing one,
+// so the refresh set must include plants named in DELETED rows too (not only upserts).
+test('MasterData bulk-save for routing_rules also refreshes Runtime for plants whose rules were deleted', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(source, /\[\.\.\.upserts, \.\.\.deletes\]\.forEach\(\(row\) => \{\s*const plant = row\.plant as string \| undefined;/);
+});

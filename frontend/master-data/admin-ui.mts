@@ -4184,11 +4184,12 @@ export const MasterData = (() => {
           // routing_rules is NOT in SCOPED_TABLES (its grid can show multiple plants'
           // rows simultaneously, per §7.1), so we must refresh Runtime for EVERY distinct
           // plant actually present among the saved rows, not just Store.selectedPlant.
-          // Extract distinct plants from upserts (and ignore deletes since a deleted
-          // routing rule doesn't require a recompute — the operation's fallback behavior
-          // is unaffected). Mirror the pattern from db.py:2734 (resolve_fn loop).
+          // Extract distinct plants from upserts AND deletes: deleting an exclude/include
+          // rule changes which operations count toward run time, so the rate map for that
+          // plant is stale just as it is after an edit (delete rows carry the table's key
+          // columns, which include plant). Mirror the pattern from db.py:2734 (resolve_fn loop).
           const affectedPlants = new Set<string>();
-          upserts.forEach((row) => {
+          [...upserts, ...deletes].forEach((row) => {
             const plant = row.plant as string | undefined;
             if (plant) affectedPlants.add(plant);
           });
