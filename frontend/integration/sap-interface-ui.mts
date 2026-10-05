@@ -708,7 +708,7 @@ export const Interface = (() => {
       });
 
       // Also fetch upload audit for SAP syncs (filename='sap:sap')
-      const auditData: SapUploadAuditResponse = await Util.fetchTraced(`${API}/upload/audit`).then((r) => {
+      const auditData: SapUploadAuditResponse = await Util.fetchTraced(`${API}/upload/audit?source=sap&limit=50`).then((r) => {
         if (!r.ok) return { audit: [] };
         return r.json().catch(() => ({ audit: [] }));
       });
@@ -716,8 +716,8 @@ export const Interface = (() => {
       if (document.getElementById('sap-tabbody') !== body || _tab !== 'history' || _selected !== o.object_key) return;
       const runs = runsData.runs || [];
 
-      // Filter audit items for SAP syncs only
-      const sapAuditItems = (auditData.audit || []).filter(it => it.filename === 'sap:sap');
+      // The server already filtered to SAP syncs (?source=sap) before applying the limit.
+      const sapAuditItems = auditData.audit || [];
 
       if (!runs.length && !sapAuditItems.length) {
         body.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_no_runs'))}</div><div class="sap-empty-d">${Util.escapeHtml(Util.t('ui.sap_no_runs_hint'))}</div><button class="btn btn-sm" data-act-empty="dry">${Util.escapeHtml(Util.t('ui.sap_dry_run'))}</button></div>`;

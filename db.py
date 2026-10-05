@@ -890,12 +890,25 @@ def get_upload_audit_warnings(batch_id: str) -> list[dict] | None:
     return row[0] or []
 
 
-def upload_audit_log(limit: int = 50) -> list[dict]:
-    """Recent uploads, newest first, for the Admin Cockpit history card."""
-    sql = """
+UPLOAD_AUDIT_SOURCES = ("sap", "excel")
+
+
+def upload_audit_log(limit: int = 50, source: str | None = None) -> list[dict]:
+    """Recent uploads, newest first, for the Admin Cockpit history card.
+
+    `source` filters server-side BEFORE the limit: 'sap' = SAP syncs
+    (filename 'sap:sap', see upsert_orders), 'excel' = everything that is not
+    a SAP sync. Without it a SAP history card could only filter the newest
+    `limit` rows client-side and silently lose older SAP entries."""
+    if source is not None and source not in UPLOAD_AUDIT_SOURCES:
+        raise ValueError(f"source must be one of {', '.join(UPLOAD_AUDIT_SOURCES)}")
+    where = {None: "", "sap": "WHERE filename = 'sap:sap'",
+             "excel": "WHERE filename IS DISTINCT FROM 'sap:sap'"}[source]
+    sql = f"""
         SELECT batch_id, filename, row_count,
                inserted_count, updated_count, uploaded_at, warnings
         FROM upload_audit
+        {where}
         ORDER BY uploaded_at DESC
         LIMIT %s
     """
