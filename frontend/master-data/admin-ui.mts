@@ -2583,6 +2583,9 @@ interface MasterDataTableState<T extends MasterDataRow = MasterDataRow> {
   dirty: Map<string, T>;
   deleted: Map<string, MasterDataRow>; // rowKey -> key-column snapshot taken at mark time (survives a search replacing the page)
   added: T[];
+  /** PAGED_TABLES: the search the loaded `rows` page was fetched with. "Load more" is only
+   *  valid for the same search — otherwise it would append another query's rows. */
+  searchKey?: string;
 }
 
 /** `machine` row — the one table `MasterData.syncLineSettings`
@@ -3137,13 +3140,20 @@ export const MasterData = (() => {
       delete _pageState[table];
     }
     const host = document.getElementById('md-host');
-    if (host?.isConnected && AUTO_SCOPE_FROM_SELECTED_PLANT.has(_activeTable)
+    // A grid that kept its scope because it holds unsaved edits must not re-render
+    // (a re-render drops the edits right after the "N unsaved" toast promised to keep them).
+    const activeSt = _cache[_activeTable];
+    const activeDirty = !!(activeSt && (activeSt.dirty.size || activeSt.deleted.size || activeSt.added.length));
+    if (host?.isConnected && AUTO_SCOPE_FROM_SELECTED_PLANT.has(_activeTable) && !activeDirty
         && _scopeFilters[_activeTable]?.plant !== plant) {
+      // The pending debounced search belonged to the previous scope.
+      if (_pageSearchTimer) { clearTimeout(_pageSearchTimer); _pageSearchTimer = null; }
       _renderActiveTable();
     }
   }
 
   function _setTab(table: MasterDataTable): void {
+    if (_pageSearchTimer) { clearTimeout(_pageSearchTimer); _pageSearchTimer = null; }
     delete _pageState[table];
     _activeTable = table;
     _syncTabUI();
@@ -3246,6 +3256,11 @@ export const MasterData = (() => {
     const host = document.getElementById('md-host');
     if (!host) return;
     const prior = _cache[table];
+    // "Load more" belongs to the search its page was fetched with. A search that has since
+    // replaced the query (in flight or applied) makes this stale button a no-op; appending
+    // would mix two queries' rows (and use the wrong offset).
+    if (opts.more && PAGED_TABLES.has(table)
+        && (!prior || (prior.searchKey ?? '') !== (_pageState[table]?.search ?? '').trim())) return;
     if (!opts.more && !opts.keepEdits) {
       host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
     }
@@ -3291,14 +3306,18 @@ export const MasterData = (() => {
         return r.json() as Promise<MasterDataResponse>;
       });
       if (generation !== _loadGeneration) return; // a newer table switch has since started
+      if (_activeTable !== table) return; // tab changed while this was in flight
+      if (opts.more && prior && prior !== _cache[table]) return; // the page being extended was replaced
       if (PAGED_TABLES.has(table)) {
         _pageState[table] = { search: _pageState[table]?.search ?? '', total: Number(data.meta?.total ?? data.rows.length) };
       }
+      const searchKey = PAGED_TABLES.has(table) ? (_pageState[table]?.search ?? '').trim() : undefined;
       if (opts.more && prior) {
         prior.rows = [...prior.rows, ...data.rows];
       } else if (opts.keepEdits && prior) {
         prior.columns = data.columns;
         prior.rows = data.rows;
+        prior.searchKey = searchKey;
       } else {
         _cache[table] = {
           columns: data.columns,
@@ -3306,6 +3325,7 @@ export const MasterData = (() => {
           dirty:   new Map(),
           deleted: new Map(),
           added:   [],
+          searchKey,
         };
       }
       _renderTable(table);
@@ -3316,6 +3336,15 @@ export const MasterData = (() => {
     } catch (e) {
       if (generation !== _loadGeneration) return; // a newer table switch has since started
       const err = e as MasterDataFetchError;
+      if ((opts.more || opts.keepEdits) && _cache[table] && _activeTable === table) {
+        // A failed Load more / search must not blank the grid, toolbar and Save: keep
+        // the cached page (and its pending edits), tell the user, and re-render it.
+        Toast.show(Util.t('toast.admin_tables_rows_failed', { msg: err.message }), 'error');
+        ErrorLog.error('master-data', `Load failed for ${table}: ${err.message}`,
+          { reqId, table, status: err.httpStatus }, { reqId, errorCode: err.errorCode || 'http.network' });
+        _renderTable(table);
+        return;
+      }
       host.innerHTML = `<div class="md-empty">Failed to load ${TABLE_LABELS[table]}: ${Util.escapeHtml(err.message)}</div>`;
       ErrorLog.error('master-data', `Load failed for ${table}: ${err.message}`,
         { reqId, table, status: err.httpStatus }, { reqId, errorCode: err.errorCode || 'http.network' });
@@ -3372,6 +3401,8 @@ export const MasterData = (() => {
       searchInput.oninput = () => {
         if (_pageSearchTimer) clearTimeout(_pageSearchTimer);
         _pageSearchTimer = setTimeout(() => {
+          _pageSearchTimer = null;
+          if (_activeTable !== table) return; // tab/plant switched while the debounce was pending
           _pageState[table] = { search: searchInput.value, total: _pageState[table]?.total ?? 0 };
           void _loadAndRender(table, { keepEdits: true });
         }, 350);
@@ -4330,7 +4361,11 @@ export const MasterData = (() => {
         }
       }
 
-      // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
+      // Refresh master-data in Store so Hierarchy/ProdLines stay in sync. Staleness token:
+      // a plant switch or a newer Persistence load while these fetches are in flight must not
+      // let this response overwrite the (now different) plant's master data.
+      const refreshPlant = Store.selectedPlant;
+      const refreshLoadGen = Persistence._loadRequest;
       Promise.all([
         Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
         // Plant-scoped (#25): never refetch every plant's machines. With no
@@ -4339,6 +4374,7 @@ export const MasterData = (() => {
           ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
           : Promise.resolve(null),
       ]).then(([pData, lData]) => {
+        if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return;
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
           // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -4350,7 +4386,8 @@ export const MasterData = (() => {
           // rows) branch to preserve the original single-emit-per-call shape.
           Store.setMasterData({
             plants: pData?.rows ?? [],
-            lines:  lData?.rows ?? (Store.selectedPlant ? [] : (Store.masterData?.lines ?? [])),
+            // A failed machine fetch keeps the lines already in the Store (never blank them).
+            lines:  lData?.rows ?? (Store.masterData?.lines ?? []),
             // This refresh only re-fetches plants/machine (the two tables the
             // Hierarchy/ProdLines consumers below actually need); it is not
             // work-center-specific and has no sap_workcenter rows in scope
