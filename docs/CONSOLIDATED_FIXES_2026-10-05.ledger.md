@@ -114,3 +114,17 @@ Verification (counts):
 - ruff check .: all checks passed.
 - pytest -q, fresh nimbus_test_int (this worktree's schema.sql applied with ON_ERROR_STOP=1, clean): 948 passed, 1 skipped (pre-existing #203 placeholder), 0 failed.
 - Migrations onto nimbus_test_mig (main's schema.sql): 34 of 36 migrations/*.sql apply in name order and re-apply idempotently (2 passes). 2026-07-03-production-line-optimizer-flags.sql and 2026-08-13-changeover-matrix-stage-0.sql fail on `production_lines` (renamed to machines before main's schema); both files are untouched by either branch and already ledger-applied in prod; pre-existing, not a regression.
+
+## Review fix round (frontend)
+
+| # | Item | Status | Commit | Tests | Note |
+|---|---|---|---|---|---|
+| R1 | Master Data staged deletes lose key cols after paged search | DONE | 298a1c0 | typecheck/build (no unit harness for admin-ui IIFE) | state.deleted is Map rowKey->keyCols snapshot; _save and cascade preview use it |
+| R2 | What-If applied-undo | DONE | d92a2eb | sandbox.test.mjs +1 | task ids on UndoStack.push; Modal.confirm (i18n modal.undo_whatif_calendar_*) if calendar slices changed since apply, cancel aborts (UndoStack.pop now supports async undoFn / false = abort, entry kept); _linePlantSnapshot kept through flushPlant |
+| R3 | calendar-sync pending-delete replay | DONE | 8313a6f | calendar-sync.test.mjs +1 | upserts clear id from pending set (single upserts + flushPlant) |
+| R4 | Modal focus opens flatpickr | DONE | d0e52ea | locale/build only | data-autofocus already supported by Modal; added to print Preview btn, #ovr-line, #plant-blk-reason; focus-restore skips flatpickr inputs. #blk/#lines-blk/edit-calendar already start on a non-date control |
+| R5 | eslint ignore negations | DONE | b09ac65 | lint 0 errors | added app-entry.mjs, _static-delivery-check.mjs; no new errors |
+| R6 | pinnedLines / scoped Master Data tabs | DONE | 016b242 | locale-completeness | pins were already preserved (rendered from pref, not options); no multi-plant machine endpoint, so options stay selected-plant and us.no_lines now says so; machine/material_plants grids re-scope on plant:selected (grids with unsaved edits keep scope + warn). No unit test (admin-ui IIFE) |
+| R7 | save_in_progress toast | DONE | b363048 | persistence.test.mjs +1 | saveAll({silent}); passed by distribution-pane + optimize-ui promote |
+| R8 | nextAvailable overlong warn flood | DONE | ce30499 | calendar-engine.test.mjs +1 | bounded Set per (line,duration) |
+| R9 | stale signature-join comments | DONE | fc06ada | setup-resolution-index.test.mjs 10 pass | test file is LF/-text (NULs): keep LF |
