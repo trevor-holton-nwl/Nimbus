@@ -2820,7 +2820,11 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     if blank_pv_ids:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM orders WHERE id = ANY(%s) AND COALESCE(production_version, '') <> ''",
+                # Distribution children arrive blank on every re-upload (the
+                # aggregate row carries no PV for them), so counting them would
+                # raise this info warning on every unchanged distributed upload.
+                "SELECT COUNT(*) FROM orders WHERE id = ANY(%s) AND parent_production_order IS NULL"
+                " AND COALESCE(production_version, '') <> ''",
                 (blank_pv_ids,),
             )
             pv_kept_on_blank = int(cur.fetchone()[0])

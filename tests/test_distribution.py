@@ -4106,6 +4106,32 @@ class TestUploadMessageCountsPlannedChildren(_ReweightFixtureBase):
                 conn.commit()
 
 
+@pytest.mark.pg
+class TestPvKeptOnBlankIgnoresDistributionChildren(_ReweightFixtureBase):
+    """Senior audit #7: distribution children arrive blank on every re-upload,
+    so `pv_kept_on_blank` fired for each of them."""
+    WC, L1, L2 = "ZZTEST_WC_PVKEEP", "ZZTEST_L1_PVKEEP", "ZZTEST_L2_PVKEEP"
+    ORD, MAT = "ZZTEST_ORD_PVKEEP", "ZZT_MAT_PVKEEP"
+
+    def test_children_not_counted(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        try:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE orders SET production_version = 'PV7' WHERE plant=%s AND parent_production_order=%s",
+                            (self.PLANT, self.ORD))
+                conn.commit()
+            row = {"production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
+                   "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
+                   "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": 100.0, "run_time": 10.0}
+            res = pg.upsert_orders([row], plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+                                   resolve_fn=routing_resolver.resolve_orders)
+            assert not [w for w in res["warnings"] if w.get("category") == "pv_kept_on_blank"], res["warnings"]
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+                conn.commit()
+
+
 def _wait_for_lock_wait(db_, timeout=10.0):
     """Deterministically wait until some backend of this DB is blocked on a
     heavyweight lock (pg_stat_activity), instead of sleeping."""
