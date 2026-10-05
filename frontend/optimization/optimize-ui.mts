@@ -2333,6 +2333,9 @@ export const SandboxAdapter = {
       // the pre-sandbox copies before any persistence work can run. A later
       // undo/revert must not accidentally restore these discarded copies.
       SandboxAdapter._clearSideEffectSnapshot();
+      // Keep the line->plant map: an undo of this applied scenario (_onReverted) needs
+      // it to resolve plants of calendar lines that no longer exist. Cleared there.
+      SandboxAdapter._linePlantSnapshot = capturedLinePlants;
     } else {
       if (SandboxAdapter._sideEffectSnapshotActive) {
         // Sandbox.exit(false) restores schedule state while Sandbox.active is
@@ -2392,7 +2395,7 @@ export const SandboxAdapter = {
     // Without this, "Scenario applied" showed but a reload before a later unrelated
     // save lost the promoted edits (autosave is suppressed during sandbox).
     if (applied) {
-      NIMBUS!.Persistence!.saveAll!();
+      NIMBUS!.Persistence!.saveAll!({ silent: true });
       // Calendar/blackout writes were suppressed during What-If (CalendarSync._post
       // guards on Sandbox.active); push the promoted config now that active=false.
       // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
@@ -2436,7 +2439,10 @@ export const SandboxAdapter = {
     // The promoted scenario intentionally kept its side effects. Revert is a
     // schedule undo event, not a request to restore the pre-sandbox metadata;
     // only clear any stale adapter copies before the normal alert refresh.
+    // (_linePlantSnapshot is kept until after the flush below, which resolves plants through it.)
+    const linePlants = SandboxAdapter._linePlantSnapshot;
     SandboxAdapter._clearSideEffectSnapshot();
+    SandboxAdapter._linePlantSnapshot = linePlants;
     // Undo restored the pre-What-If calendar slices in Store, but Promote had already
     // POSTed the promoted ones. Re-sync every plant whose calendar state differs between
     // the promoted slices (evt.promoted) and the restored Store: flushPlant upserts the
@@ -2452,6 +2458,7 @@ export const SandboxAdapter = {
         });
       }
     }
+    SandboxAdapter._linePlantSnapshot = null;
     (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.scenario_discarded'), 'info');

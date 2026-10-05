@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { Modal } from '../../../frontend/platform/foundation.mjs';
 
 test('Sandbox.enter snapshots current state and flips active/mode', () => {
   Store.setTasks([{ id: 'sb1', RUN_TIME: '1' }], 'unit-test');
@@ -87,4 +88,30 @@ test('Sandbox.exit(true) pushes exactly one UndoStack entry and emits applied:tr
   assert.equal(UndoStack._entries.length, before + 1);
   const exitEvt = events.find(e => e.type === 'sandbox:exited');
   assert.equal(exitEvt.applied, true);
+});
+
+test('applied-scenario undo carries task ids and asks before reverting later calendar edits', async () => {
+  UndoStack._entries.length = 0;
+  Store.setTasks([{ id: 'sb4', RUN_TIME: '1' }], 'unit-test');
+  Sandbox.enter('unit-test');
+  Sandbox.exit(true, 'unit-test');
+  const entry = UndoStack._entries.at(-1);
+  assert.deepEqual(entry.ids, ['sb4']);
+
+  // Calendar edit made after applying -> confirm; cancel aborts and keeps the entry.
+  Store.replacePlants({ ...Store.plants, ZZ: { hours: [6, 18] } }, 'unit-test');
+  const hadWindow = 'window' in globalThis;
+  if (!hadWindow) globalThis.window = {};
+  const origConfirm = Modal.confirm;
+  let asked = 0;
+  Modal.confirm = async () => { asked++; return false; };
+  try {
+    const events = [];
+    const off = Store.subscribe(evt => events.push(evt));
+    assert.equal(await entry.undoFn(), false);
+    off();
+    assert.equal(asked, 1);
+    assert.equal(events.some(e => e.type === 'sandbox:reverted'), false);
+    assert.ok(Store.plants.ZZ);
+  } finally { Modal.confirm = origConfirm; if (!hadWindow) delete globalThis.window; }
 });

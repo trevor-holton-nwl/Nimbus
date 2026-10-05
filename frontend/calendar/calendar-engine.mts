@@ -104,6 +104,9 @@ export function candidateDefaultWorkHours(): WorkHours {
    block-TAB UI (render/openBlockModal/saveBlockFromModal/etc.) stayed behind
    in app.js as `CalendarUI` — see CalendarUI there for the UI half.
    ========================================================================== */
+/** (line|durationMs) pairs already warned about by Calendar.nextAvailable (bounded). */
+const _noWindowWarned = new Set<string>();
+
 export const Calendar = {
   /* ---------- Per-run caches (installed by Engine.runAndApply) ----------- */
   // workWindow memoization, keyed by `${line}|${startOfDayMs}`. Values are
@@ -272,12 +275,18 @@ export const Calendar = {
       if (w) longestWindowMs = Math.max(longestWindowMs, w[1].getTime() - w[0].getTime());
     }
     if (longestWindowMs <= 0 || durationMs > longestWindowMs) {
-      reportSchedulerDiagnostic(
-        'warn',
-        'calendar',
-        'calendar.next-available-no-window',
-        `nextAvailable: no working window on line ${line} can hold ${durationMs}ms (longest nominal window ${longestWindowMs}ms)`,
-      );
+      // The optimizer hot loop re-asks the same (line, duration) thousands of times; warn once.
+      const warnKey = `${line}|${durationMs}`;
+      if (!_noWindowWarned.has(warnKey)) {
+        if (_noWindowWarned.size >= 500) _noWindowWarned.clear();
+        _noWindowWarned.add(warnKey);
+        reportSchedulerDiagnostic(
+          'warn',
+          'calendar',
+          'calendar.next-available-no-window',
+          `nextAvailable: no working window on line ${line} can hold ${durationMs}ms (longest nominal window ${longestWindowMs}ms)`,
+        );
+      }
       return null;
     }
     let iter = 0;

@@ -128,3 +128,17 @@ Verification (counts):
 | 6 status SQL perf | DONE | 9b3027c | TestSqlStatusClassificationParityAndScale (harness FROM shape updated) | 20k headers: summary 1.7-2.0s -> 0.43s; changed list 1.6s -> 0.23s; problems list 1.0 -> 0.47s; needs_review list 0.31 -> 0.45s (trivial `NOT reviewed` predicate, slightly slower) |
 | 7 setup capture scope | SKIPPED | - | - | `capture_setup_states_before_schedule_mutation` has no machine filter and 5 callers would each need the pre-lock affected-machine set; not a one-line scope |
 | 9 migrations | DONE | f140e1c | two-pass apply on DB from main's schema.sql: 0 failures both passes; test_schema_idempotent.py | moved 07-03 and 08-13 to migrations/manual/; 06-30-sap-interface applies fine (production_lines is only a seed string) so left in place |
+
+## Review fix round (frontend)
+
+| # | Item | Status | Commit | Tests | Note |
+|---|---|---|---|---|---|
+| R1 | Master Data staged deletes lose key cols after paged search | DONE | 298a1c0 | typecheck/build (no unit harness for admin-ui IIFE) | state.deleted is Map rowKey->keyCols snapshot; _save and cascade preview use it |
+| R2 | What-If applied-undo | DONE | d92a2eb | sandbox.test.mjs +1 | task ids on UndoStack.push; Modal.confirm (i18n modal.undo_whatif_calendar_*) if calendar slices changed since apply, cancel aborts (UndoStack.pop now supports async undoFn / false = abort, entry kept); _linePlantSnapshot kept through flushPlant |
+| R3 | calendar-sync pending-delete replay | DONE | 8313a6f | calendar-sync.test.mjs +1 | upserts clear id from pending set (single upserts + flushPlant) |
+| R4 | Modal focus opens flatpickr | DONE | d0e52ea | locale/build only | data-autofocus already supported by Modal; added to print Preview btn, #ovr-line, #plant-blk-reason; focus-restore skips flatpickr inputs. #blk/#lines-blk/edit-calendar already start on a non-date control |
+| R5 | eslint ignore negations | DONE | b09ac65 | lint 0 errors | added app-entry.mjs, _static-delivery-check.mjs; no new errors |
+| R6 | pinnedLines / scoped Master Data tabs | DONE | 016b242 | locale-completeness | pins were already preserved (rendered from pref, not options); no multi-plant machine endpoint, so options stay selected-plant and us.no_lines now says so; machine/material_plants grids re-scope on plant:selected (grids with unsaved edits keep scope + warn). No unit test (admin-ui IIFE) |
+| R7 | save_in_progress toast | DONE | b363048 | persistence.test.mjs +1 | saveAll({silent}); passed by distribution-pane + optimize-ui promote |
+| R8 | nextAvailable overlong warn flood | DONE | ce30499 | calendar-engine.test.mjs +1 | bounded Set per (line,duration) |
+| R9 | stale signature-join comments | DONE | fc06ada | setup-resolution-index.test.mjs 10 pass | test file is LF/-text (NULs): keep LF |

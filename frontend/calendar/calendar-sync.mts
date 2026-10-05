@@ -378,6 +378,7 @@ export const CalendarSync = {
 
   saveLineBlackoutUpsert(block: NimbusBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
+    this._trackPendingDeletes(block.plant, 'line', [block.id], false); // a re-created id must not be replayed as a delete
     return this._post('/plant-calendar/line-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, true)] }, 'line-blackout-upsert');
   },
   saveLineBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
@@ -386,6 +387,7 @@ export const CalendarSync = {
   },
   savePlantBlackoutUpsert(block: NimbusPlantBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
+    this._trackPendingDeletes(block.plant, 'plant', [block.id], false);
     return this._post('/plant-calendar/plant-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, false)] }, 'plant-blackout-upsert');
   },
   savePlantBlackoutDelete(plant: string | null, id: string): Promise<CalendarSyncResult> {
@@ -416,12 +418,14 @@ export const CalendarSync = {
     const lineBk = Store.blocks.filter(b => b.plant === plant);
     const lineDeletes = removed.line || [];
     if (lineBk.length || lineDeletes.length) {
+      this._trackPendingDeletes(plant, 'line', lineBk.map(b => b.id), false);
       this._trackedDelete(plant, 'line', lineDeletes, '/plant-calendar/line-blackouts',
         { plant, upserts: lineBk.map(b => this._blockPayload(b, true)), deletes: lineDeletes }, 'promote-line-blackouts');
     }
     const plantBk = Store.plantBlocks.filter(b => b.plant === plant);
     const plantDeletes = removed.plant || [];
     if (plantBk.length || plantDeletes.length) {
+      this._trackPendingDeletes(plant, 'plant', plantBk.map(b => b.id), false);
       this._trackedDelete(plant, 'plant', plantDeletes, '/plant-calendar/plant-blackouts',
         { plant, upserts: plantBk.map(b => this._blockPayload(b, false)), deletes: plantDeletes }, 'promote-plant-blackouts');
     }

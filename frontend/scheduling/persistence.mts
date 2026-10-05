@@ -1424,7 +1424,9 @@ export const Persistence = {
     Toast.show('Conflicting changes remain unsaved. Reload discards these local edits and loads the server schedule.', 'warn', 8000);
   },
 
-  saveAll(): void {
+  /** `opts.silent`: programmatic callers (post-promote persist, banner action) skip the
+   *  user-facing "save in progress" toast; an explicit user save (Ctrl+S) still shows it. */
+  saveAll(opts: { silent?: boolean } = {}): void {
     // In sandbox, promote-then-save runs through Sandbox.exit(true), which itself
     // calls saveAll() after teardown — so return here to avoid a double POST (the
     // re-entrant call below does the single persist).
@@ -1440,7 +1442,7 @@ export const Persistence = {
     // didn't actually send (see the per-id snapshot compare below).
     if (Persistence._saveInFlight) {
       ErrorLog.warn('persistence', 'saveAll() called while a save is already in flight — skipping');
-      Toast.show(Util.t('toast.save_in_progress'), 'warn', 4000);
+      if (!opts.silent) Toast.show(Util.t('toast.save_in_progress'), 'warn', 4000);
       return;
     }
     // Send changed task aggregates (dates, planning state, segments and editable
