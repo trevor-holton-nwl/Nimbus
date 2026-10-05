@@ -957,23 +957,33 @@ def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> lis
 _CONFLICT_LOOKBACK_CAP_HOURS = 30 * 24
 
 
+def _strict_lock_key(plant: str, machine_key: str) -> str:
+    """Advisory-lock text for a (plant, `_machine_match_key`) pair."""
+    return f"{plant}\x1f{machine_key}"
+
+
 def _lock_machines_for_strict_save(cur, items: list[dict], ids: list[str]) -> None:
     """Strict optimizer saves: serialise on every (plant, machine) the batch will
     touch -- the rows' current machines plus any MACHINE edit target -- using
     transaction-scoped advisory locks taken in sorted order, BEFORE the row
     FOR UPDATE locks, so two concurrent strict saves can neither both pass the
-    overlap scan against pre-commit snapshots nor deadlock each other."""
+    overlap scan against pre-commit snapshots nor deadlock each other. The lock
+    key uses the canonical `_machine_match_key` (case/whitespace-insensitive),
+    never the raw spelling, so 'M1' and 'm1' share one lock. Scope: this only
+    serialises strict saves against OTHER strict saves; a non-strict (manual)
+    save takes no advisory lock, so a strict save's overlap scan is not
+    protected from a concurrent manual save of the same machine."""
     cur.execute("SELECT id, plant, machine FROM orders WHERE id = ANY(%s)", (ids,))
     rows = cur.fetchall()
     plant_by_id = {r[0]: r[1] for r in rows}
-    keys = {(r[1], r[2]) for r in rows if r[1] and r[2]}
+    keys = {(r[1], _machine_match_key(r[2])) for r in rows if r[1] and r[2]}
     for it in items:
         target = _canonical_nullable_attribute(it.get("MACHINE")) if "MACHINE" in it else None
         plant = plant_by_id.get(it.get("id"))
         if target and plant:
-            keys.add((plant, target))
-    for plant, machine in sorted(keys):
-        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{plant}{machine}",))
+            keys.add((plant, _machine_match_key(target)))
+    for plant, machine_key in sorted(keys):
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (_strict_lock_key(plant, machine_key),))
 
 
 def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[dict]:

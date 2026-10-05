@@ -272,30 +272,52 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
                 conn.commit()
 
-    def test_strict_save_waits_on_the_machine_advisory_lock(self, pg):
-        """Plan Part 2 #18: strict optimizer saves serialise on (plant, machine)."""
-        import threading
+    @staticmethod
+    def _wait_for_advisory_wait(db_, timeout=10.0):
+        """Poll pg_locks until a backend is blocked on an advisory lock."""
         import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted LIMIT 1")
+                if cur.fetchone():
+                    return True
+            time.sleep(0.02)
+        return False
+
+    @pytest.mark.parametrize("spelling", ["same", "lower"])
+    def test_strict_save_waits_on_the_machine_advisory_lock(self, pg, spelling):
+        """Plan Part 2 #18: strict optimizer saves serialise on (plant, machine),
+        keyed on the canonical match key (so a differently-cased MACHINE edit of
+        the same machine blocks too -- senior audit #5)."""
+        import threading
         db_ = pg
         base = self._current_version(db_)
         done = threading.Event()
+        errors = []
 
         def _save():
-            db_.update_task_dates_bulk(
-                [{"id": self.oid, "start": self.start, "end": self.end, "base_version": base}],
-                atomic_optimizer=True, strict_conflicts=True)
-            done.set()
+            try:
+                item = {"id": self.oid, "start": self.start, "end": self.end, "base_version": base}
+                if spelling == "lower":
+                    item["MACHINE"] = self.MACHINE.lower()
+                db_.update_task_dates_bulk([item], atomic_optimizer=True, strict_conflicts=True)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                done.set()
 
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (f"{self.PLANT}{self.MACHINE}",))
+                        (db_._strict_lock_key(self.PLANT, db_._machine_match_key(self.MACHINE)),))
             t = threading.Thread(target=_save)
             t.start()
-            time.sleep(0.5)
+            assert self._wait_for_advisory_wait(db_), "save never blocked on the advisory lock"
             assert not done.is_set()
             conn.rollback()
         t.join(10)
         assert done.is_set()
+        assert not errors, errors
 
 
 # ---------------------------------------------------------------------------
