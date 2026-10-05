@@ -293,13 +293,37 @@ function setupDefaultWorkHours(): WorkHours {
   return workHours;
 }
 
+/** One line's order intervals, built once per line: starts ascending with a running
+ *  maximum of the interval ends. setupAvailabilityMinutes used to rescan (and re-derive the
+ *  intervals of) every order on the line for each setup bar, O(n^2) per recompute. */
+interface LineIntervalIndex {
+  starts: number[];
+  prefixMaxEnd: number[];
+}
+
+function buildLineIntervalIndex(orders: ReadonlyArray<{ task: NimbusTask }>): LineIntervalIndex {
+  const flat: Array<{ start: number; end: number }> = [];
+  for (const order of orders) {
+    for (const interval of setupOrderIntervals(order.task)) flat.push({ start: interval.start.getTime(), end: interval.end.getTime() });
+  }
+  flat.sort((a, b) => a.start - b.start);
+  const starts: number[] = [];
+  const prefixMaxEnd: number[] = [];
+  let running = -Infinity;
+  for (const interval of flat) {
+    running = Math.max(running, interval.end);
+    starts.push(interval.start);
+    prefixMaxEnd.push(running);
+  }
+  return { starts, prefixMaxEnd };
+}
+
 function setupAvailabilityMinutes(
   context: SetupAvailabilityContext | undefined,
   line: string,
   plant: string,
-  successorOrderId: string,
   end: Date,
-  orders: ReadonlyArray<{ task: NimbusTask; start: Date; end: Date }>,
+  index: LineIntervalIndex,
   fallbackStart: Date | null,
 ): number {
   if (!context) return fallbackStart ? Math.max(0, (end.getTime() - fallbackStart.getTime()) / (60 * 1000)) : 0;
@@ -337,13 +361,20 @@ function setupAvailabilityMinutes(
     if (block.plant && block.plant !== mappedPlant) continue;
     if (applyBlock(block)) return 0;
   }
-  for (const order of orders) {
-    if (String(order.task.id) === successorOrderId) continue;
-    for (const interval of setupOrderIntervals(order.task)) {
-      if (interval.start >= end || interval.end <= new Date(lower)) continue;
-      if (interval.end >= end) return 0;
-      lower = Math.max(lower, interval.end.getTime());
-    }
+  // Intervals starting before `end` are the candidates (the successor's own intervals start at
+  // or after `end`, since the setup bar ends where the successor begins, so they never qualify
+  // and need no explicit exclusion). If any of them reaches `end`, the setup point is covered
+  // by production: 0 available. Otherwise every candidate ends before `end` and the latest of
+  // them (or the window/blackout floor) bounds the free time: the prefix maximum.
+  let lo = 0, hi = index.starts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (index.starts[mid] < end.getTime()) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0) {
+    const latestEnd = index.prefixMaxEnd[lo - 1];
+    if (latestEnd >= end.getTime()) return 0;
+    lower = Math.max(lower, latestEnd);
   }
   return Math.max(0, (end.getTime() - lower) / (60 * 1000));
 }
@@ -407,6 +438,7 @@ export function deriveSetupObservation(
       || String(left.task.id).localeCompare(String(right.task.id))
     ));
     const scope = `${setup.plant}/${line}`;
+    const lineIntervalIndex = availability ? buildLineIntervalIndex(orders) : { starts: [], prefixMaxEnd: [] };
     const resolvedEdges = new Set<string>();
     const assertedState = stateForLine.get(line);
     const observationTime = observedAt(assertedState?.observed_at);
@@ -462,7 +494,7 @@ export function deriveSetupObservation(
           const end = new Date(order.start);
           const start = new Date(end.getTime() - resolved.effectiveMin * 60 * 1000);
           const availableMinutes = setupAvailabilityMinutes(
-            availability, line, setup.plant, String(order.task.id), end, orders, predecessorEnd,
+            availability, line, setup.plant, end, lineIntervalIndex, predecessorEnd,
           );
           observation.intervals.push({
             line, scope, predecessorOrderId, successorOrderId: String(order.task.id), start, end,
