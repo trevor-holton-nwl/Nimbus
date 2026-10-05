@@ -345,6 +345,8 @@ export interface paths {
         /**
          * Get Upload Audit
          * @description Recent uploads, newest first, for the Admin Cockpit history card.
+         *     `?source=sap` (SAP syncs only) / `?source=excel` filter server-side so the
+         *     limit applies to the filtered set.
          */
         get: operations["get_upload_audit_upload_audit_get"];
         put?: never;
@@ -4150,6 +4152,7 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                source?: string | null;
             };
             header?: never;
             path?: never;

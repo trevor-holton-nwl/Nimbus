@@ -820,3 +820,83 @@ def test_plant_matrix_token_sql_runs_and_is_stable_on_a_real_db(pg):
     with pg._pool.connection() as conn, conn.cursor() as cur:
         token = setup_data.plant_matrix_token(cur, "ZZTEST_NO_SUCH_PLANT", 1)
     assert token == hashlib.md5(b"").hexdigest()
+
+
+@pytest.mark.pg
+def test_plant_matrix_token_covers_every_replaced_column_and_distinguishes_null(pg):
+    """Senior audit #6: the token must change when ANY replaced column changes
+    (setup_min, source, source_metadata, source_reference), NULL differs from
+    '', and delimiter-bearing values can't blur adjacent fields."""
+    plant = "ZZTEST_TOKCOLS"
+
+    def token(cur):
+        return setup_data.plant_matrix_token(cur, plant, 1)
+
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute(
+                "INSERT INTO setup_matrix (plant, machine, signature_version, from_key, to_key, setup_min, source,"
+                " source_metadata, source_reference) VALUES (%s, '', 1, '[\"a\"]', '[\"b\"]', 10, 'manual', '{}', NULL),"
+                " (%s, '', 1, '[\"b\"]', '[\"a\"]', 20, 'manual', '{}', NULL)", (plant, plant))
+            base = token(cur)
+            assert base != hashlib_md5_empty()
+            variants = [
+                ("setup_min", "UPDATE setup_matrix SET setup_min = 11 WHERE plant = %s AND from_key = '[\"a\"]'"),
+                ("source", "UPDATE setup_matrix SET source = 'derived' WHERE plant = %s AND from_key = '[\"a\"]'"),
+                ("source_metadata", "UPDATE setup_matrix SET source_metadata = '{\"n\": 1}' WHERE plant = %s AND from_key = '[\"a\"]'"),
+                ("source_reference NULL->''", "UPDATE setup_matrix SET source_reference = '' WHERE plant = %s AND from_key = '[\"a\"]'"),
+            ]
+            seen = {base}
+            for label, sql in variants:
+                cur.execute("SAVEPOINT v")
+                cur.execute(sql, (plant,))
+                t = token(cur)
+                assert t not in seen, f"token blind to {label}"
+                cur.execute("ROLLBACK TO SAVEPOINT v")
+                assert token(cur) == base
+            # delimiter blur: ('x,', 'y') vs ('x', ',y') style shifts across adjacent fields
+            cur.execute("SAVEPOINT v")
+            cur.execute("UPDATE setup_matrix SET source_reference = 'p,q' WHERE plant = %s AND from_key = '[\"a\"]'", (plant,))
+            t1 = token(cur)
+            cur.execute("UPDATE setup_matrix SET source_reference = 'p' WHERE plant = %s AND from_key = '[\"a\"]'", (plant,))
+            cur.execute("UPDATE setup_matrix SET source_reference = 'q,p' WHERE plant = %s AND from_key = '[\"b\"]'", (plant,))
+            assert token(cur) != t1
+            cur.execute("ROLLBACK TO SAVEPOINT v")
+        finally:
+            conn.rollback()
+
+
+def hashlib_md5_empty():
+    import hashlib
+    return hashlib.md5(b"").hexdigest()
+
+
+@pytest.mark.pg
+def test_metadata_only_stale_replace_is_rejected(pg):
+    """Senior audit #6: a replace built from a read that predates a
+    metadata-only edit must be refused."""
+    plant = "1006"
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM setup_matrix WHERE plant = %s", (plant,))
+        cur.execute("DELETE FROM setup_definition WHERE plant = %s", (plant,))
+        conn.commit()
+    try:
+        setup_data.save_definition(plant, ["colorWheel"], True, "t@example.com")
+        version = setup_data.current_signature_version(plant)
+
+        def row(**kw):
+            return {"from": {"colorWheel": "Red"}, "to": {"colorWheel": "Blue"}, "setup_min": 10, **kw}
+
+        t0 = setup_data.get_setup_snapshot(plant)["plant_matrix_token"]
+        setup_data.replace_plant_matrix(plant, [row()], version, "t@example.com", t0)
+        t1 = setup_data.get_setup_snapshot(plant)["plant_matrix_token"]
+        # Admin B edits ONLY source_metadata, using the current token.
+        setup_data.replace_plant_matrix(plant, [row(source_metadata={"note": "B"})], version, "b@example.com", t1)
+        # Admin A, still holding t1, must now be refused.
+        with pytest.raises(ValueError, match="is stale"):
+            setup_data.replace_plant_matrix(plant, [row(setup_min=15)], version, "a@example.com", t1)
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM setup_matrix WHERE plant = %s", (plant,))
+            cur.execute("DELETE FROM setup_definition WHERE plant = %s", (plant,))
+            conn.commit()

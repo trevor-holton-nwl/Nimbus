@@ -218,9 +218,14 @@ def purge_orders(request: Request, body: dict = Body(default={}),
 
 
 @router.get("/upload/audit", dependencies=[Depends(require_admin)])
-def get_upload_audit(limit: int = 50):
-    """Recent uploads, newest first, for the Admin Cockpit history card."""
-    return {"audit": db.upload_audit_log(limit)}
+def get_upload_audit(limit: int = 50, source: str | None = Query(default=None)):
+    """Recent uploads, newest first, for the Admin Cockpit history card.
+    `?source=sap` (SAP syncs only) / `?source=excel` filter server-side so the
+    limit applies to the filtered set."""
+    try:
+        return {"audit": db.upload_audit_log(limit, source)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/upload/{batch_id}/missing-master-data", dependencies=[Depends(require_admin)])

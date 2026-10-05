@@ -50,9 +50,14 @@ def tc():
 
 @pytest.fixture(autouse=True)
 def _clean_ring():
+    import backend.admin_ops.routes as admin_routes
     brain._BACKEND_LOG.clear()
+    admin_routes._CSP_SEEN.clear()
+    admin_routes._CSP_RATE.update(window_start=0.0, admitted=0, dropped=0)
     yield
     brain._BACKEND_LOG.clear()
+    admin_routes._CSP_SEEN.clear()
+    admin_routes._CSP_RATE.update(window_start=0.0, admitted=0, dropped=0)
 
 
 def _seed(entries):
@@ -379,3 +384,135 @@ def test_csp_report_oversize_body_413_and_frontend_cap_is_1mb(tc):
     assert tc.post("/logs/csp-report", content="x" * 50000).status_code == 413
     assert len(brain._BACKEND_LOG) == n
     assert brain._BODY_CAPS[("POST", "/logs/frontend")] == 1024 * 1024
+
+
+def _csp(tc, directive="script-src-attr", blocked="inline", src="http://x/app.js", line=1):
+    body = ('{"csp-report": {"violated-directive": "%s", "blocked-uri": "%s", "source-file": "%s", "line-number": %d}}'
+            % (directive, blocked, src, line))
+    return tc.post("/logs/csp-report", content=body, headers={"content-type": "application/csp-report"})
+
+
+def test_csp_reports_are_deduplicated_with_a_counter(tc):
+    import backend.admin_ops.routes as admin_routes
+    for _ in range(250):
+        assert _csp(tc).status_code == 204
+    csp = [e for e in brain._BACKEND_LOG if e["category"] == "csp"]
+    # first sighting + the 10/100 milestones, never 250 entries
+    assert [e["ctx"].get("occurrences") for e in csp] == [None, 10, 100]
+    assert admin_routes._CSP_SEEN[("script-src-attr", "inline", "http://x/app.js", "1")] == 250
+    # a different line is a different violation
+    _csp(tc, line=2)
+    assert len([e for e in brain._BACKEND_LOG if e["category"] == "csp"]) == 4
+
+
+def test_csp_distinct_flood_is_rate_limited_and_cannot_evict_real_errors(tc, monkeypatch):
+    import backend.admin_ops.routes as admin_routes
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(admin_routes.time, "monotonic", lambda: clock["t"])
+    brain._log_event("error", "scheduling", "real error")
+    for i in range(500):
+        _csp(tc, blocked=f"https://evil{i}.example/x")
+    csp = [e for e in brain._BACKEND_LOG if e["category"] == "csp"]
+    assert len(csp) == admin_routes._CSP_MAX_DISTINCT_PER_MIN
+    assert any(e["msg"] == "real error" for e in brain._BACKEND_LOG)
+    assert admin_routes._CSP_RATE["dropped"] == 480
+    # next minute: the drop count is reported once and admission resumes
+    clock["t"] += 61
+    _csp(tc, blocked="https://another.example/")
+    msgs = [e["msg"] for e in brain._BACKEND_LOG if e["category"] == "csp"]
+    assert any("rate-limited: 480" in m for m in msgs)
+    assert any("another.example" in str(e["ctx"]) for e in brain._BACKEND_LOG if e["category"] == "csp")
+
+
+# --------------------------------------------------------------------------- #
+# Exact-boundary pins for the ctx / audit / body-size caps, the 411 path, and  #
+# /diagnostics/deep's two-guard wiring                                         #
+# --------------------------------------------------------------------------- #
+def test_frontend_sink_ctx_caps_hold_at_the_exact_boundary(tc):
+    from backend.admin_ops import routes as _ao_routes
+    assert (_ao_routes._FE_MAX_CTX_KEYS, _ao_routes._FE_MAX_CTX_KEY, _ao_routes._FE_MAX_CTX_VALUE) == (20, 64, 1024)
+
+    def post(ctx):
+        brain._BACKEND_LOG.clear()
+        assert tc.post("/logs/frontend", json={"entries": [{"msg": "m", "ctx": ctx}]}).status_code == 200
+        return brain._BACKEND_LOG[-1]["ctx"]
+
+    # 20 keys kept whole; the 21st is dropped (first-in-order win).
+    assert len(post({f"k{i:02d}": i for i in range(20)})) == 20
+    got = post({f"k{i:02d}": i for i in range(21)})
+    assert len(got) == 20 and "k20" not in got and "k19" in got
+    # key length: 64 chars intact, 65 cut to 64.
+    got = post({"a" * 64: 1, "b" * 65: 2})
+    assert set(got) == {"a" * 64, "b" * 64}
+    # value length: 1024 chars intact (no marker), 1025 truncated with the marker.
+    got = post({"ok": "v" * 1024, "over": "v" * 1025})
+    assert got["ok"] == "v" * 1024
+    assert got["over"] == "v" * 1024 + "…[truncated]"
+
+
+def test_audit_log_entry_caps_hold_at_the_exact_boundary(tc, monkeypatch):
+    import json as _json
+    import backend.master_data.routes as md_routes
+    written = []
+    monkeypatch.setattr(md_routes, "_cw_append_audit", written.append)
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "u"
+    try:
+        assert (md_routes._AUDIT_MAX_KEYS, md_routes._AUDIT_MAX_BYTES) == (50, 32 * 1024)
+        # 50 keys accepted, 51 rejected by the route (413).
+        assert tc.post("/audit/log", json={f"k{i}": 1 for i in range(50)}).status_code == 200
+        assert tc.post("/audit/log", json={f"k{i}": 1 for i in range(51)}).status_code == 413
+        # Serialized (json.dumps default separators) size: exactly 32768 accepted, 32769 rejected.
+        exact = {"a": "y" * (32 * 1024 - 9)}
+        assert len(_json.dumps(exact, default=str)) == 32 * 1024
+        before = len(written)
+        assert tc.post("/audit/log", json=exact).status_code == 200
+        assert len(written) == before + 1
+        over = {"a": "y" * (32 * 1024 - 8)}
+        assert tc.post("/audit/log", json=over).status_code == 413
+        assert len(written) == before + 1
+    finally:
+        brain.api.dependency_overrides.pop(auth.require_authenticated, None)
+
+
+def test_body_size_cap_middleware_boundary_and_missing_content_length(tc):
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "u"
+    try:
+        hdr = {"content-type": "application/json"}
+        cap = 64 * 1024
+        assert brain._BODY_CAPS[("POST", "/audit/log")] == cap
+        # Exactly at the cap the middleware lets it through (junk JSON then 422s in the app);
+        # one byte over is refused by the middleware itself with an empty 413.
+        at_cap = tc.post("/audit/log", content=b"x" * cap, headers=hdr)
+        assert at_cap.status_code == 422
+        over = tc.post("/audit/log", content=b"x" * (cap + 1), headers=hdr)
+        assert over.status_code == 413 and over.content == b""
+        # No Content-Length (chunked body) on a capped route -> 411 Length Required.
+        chunked = tc.post("/audit/log", content=iter([b'{"a": 1}']), headers=hdr)
+        assert chunked.status_code == 411 and chunked.content == b""
+        assert tc.post("/logs/frontend", content=iter([b'{"entries": []}']), headers=hdr).status_code == 411
+        # An uncapped route is unaffected by the missing header.
+        assert tc.post("/logs/frontend", content=b'{"entries": []}', headers=hdr).status_code == 200
+    finally:
+        brain.api.dependency_overrides.pop(auth.require_authenticated, None)
+
+
+def test_diagnostics_deep_route_requires_api_key_and_admin(monkeypatch):
+    route = next(r for r in iter_route_contexts(brain.api.routes)
+                 if getattr(r, "path", None) == "/diagnostics/deep" and "GET" in r.methods)
+    deps = [d.dependency for d in route.dependencies]
+    assert auth.require_api_key in deps and auth.require_admin in deps
+
+    def must_not_run():
+        raise AssertionError("handler ran without passing both guards")
+
+    monkeypatch.setattr(brain.db, "get_db_deep_stats", must_not_run)
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "k")
+    monkeypatch.setattr(auth, "get_user_role", lambda email: "planner")
+    monkeypatch.setattr(auth, "admin_exists", lambda: True)
+    client = TestClient(brain.api)
+    # Valid key but non-admin actor -> 403 from require_admin (no override in play).
+    r = client.get("/diagnostics/deep", headers={"x-api-key": "k", "x-user-email": "planner@example.com"})
+    assert r.status_code == 403
+    # Admin actor but wrong/missing key -> 401 from require_api_key.
+    monkeypatch.setattr(auth, "get_user_role", lambda email: "admin")
+    assert client.get("/diagnostics/deep", headers={"x-user-email": "a@example.com"}).status_code == 401

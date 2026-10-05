@@ -66,7 +66,7 @@ if (-not $runs -or $bad) { throw "CI is not green for $sha - stop (or use -Overr
 
 ### 2. Build the image (fresh tag) — automatic, no pause
 ```powershell
-az acr build --registry acrnimbusdev --image nimbus:vN .   # N = current + 1
+az acr build --registry acrnimbusdev --image nimbus:vN --build-arg BUILD_ID=$(git rev-parse --short HEAD) .   # N = current + 1; BUILD_ID stamps NIMBUS_BUILD_ID + styles.css?v= from the git SHA
 az acr task list-runs --registry acrnimbusdev --top 1 -o table   # confirm Succeeded (Windows log stream may crash; build still succeeds)
 ```
 Run straight through; don't stop for go-ahead. If the build fails, stop and report — don't retry blindly.

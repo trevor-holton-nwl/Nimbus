@@ -154,3 +154,26 @@ Verification (counts):
 - pytest on fresh nimbus_test_final (this worktree's schema.sql, ON_ERROR_STOP=1): 952 passed, 1 skipped.
 - migrations/*.sql (34 files) onto DB from main's schema.sql, name order: pass 1 0 failures, pass 2 0 failures.
 - generate:api-types: no drift in frontend/types/api-generated.d.mts.
+
+## Senior audit fix round (backend)
+
+| # | Item | Status | Commit | Evidence | Note |
+|---|---|---|---|---|---|
+| 1 | apply() vs /tasks save deadlock | DONE | a2f73fa | TestApplyAndRepairLockOrderNeverDeadlocks: 3 fail before / pass after | _apply_children locks new+previous child ids ORDER BY id FOR UPDATE first |
+| 2 | _resolve_repair deadlock | DONE | a2f73fa | same class (repair vs apply, repair vs save) | one txn per header (commit after each) |
+| 3 | "distributed into 0 sub-order(s)" | DONE | ca919ef,2333d2e | TestUploadMessageCountsPlannedChildren fails before | counters["children_total"]; children_upserted stays written-count |
+| 4 | migrations quarantine | DONE | 8807cea | two-pass apply of 33 top-level files onto DB from main:schema.sql: 0 failures both passes; catalog (cols/idx/constraints/column_metadata) identical to fresh schema.sql; test_schema_idempotent | 2026-08-10 default_workcenter moved to migrations/manual/ (manual now 6 SQL files, was 5); README rewritten per file + pre-2026-08-20 DB guidance; smoke/test sets fixed |
+| 5 | strict advisory lock key | DONE | 3e6ceae | parametrized same/lower spelling, pg_locks polling (no sleep) | key = plant + \x1f + _machine_match_key; docstring: strict-vs-strict only. Before-proof is weak (helper absent pre-fix) |
+| 6 | plant_matrix_token | DONE | 6d8959f | metadata-only stale replace + per-column token tests fail before | source_metadata + length-prefixed, NULL != '' |
+| 7 | pv_kept_on_blank counts children | DONE | 5590d98 | TestPvKeptOnBlankIgnoresDistributionChildren fails before | parent_production_order IS NULL |
+| 8 | stale run_time after failed resolve | DONE | 3565e85 | 2 new tests fail before; mutant (batch clause removed) killed by new sap_order test | recompute route = resolve_orders(full=True); _fallback holds unless manual; fixture legacy cases now held |
+| 9 | CSP flood | DONE | f5c22b6 | dedupe+rate-limit tests | counter, 20 distinct/min, 500-key bound |
+| 10 | _audit_log.json debris | DONE | 62f707c | audit-log md5 unchanged across priority_lists/admin_tables/logs test runs | git rm --cached, .gitignore, conftest sets COLOR_WHEEL_DIR to tmp (writer: test_priority_lists uploads) |
+| 11 | D49 upload audit source filter | DONE | 554fb31,fdef1ed | test_upload_audit_source_filter_applies_before_the_limit fails before | ?source=sap|excel; SAP history uses it; api types regenerated |
+| 12 | mutation holes | DONE | 24237c4 (t12a), 0e482fe/543a327/67414b8 (t12b), merges | each test fails under its mutant | no production bugs found |
+| 13 | randomized status parity | DONE | a20f608 | seeds 11/2026/90210 x260 headers + tie paging, ~5 s; mutant (IS DISTINCT FROM -> <>) fails | no SQL/Python mismatch. Observation: list_headers_for_plant ~0.4 s/call on a few hundred un-ANALYZEd headers |
+| 14 | docs | DONE | 1df7545 | - | six backend CLAUDE.md, MIGRATION CSP/SRI, DEPLOYMENT node 22, promote-azure both copies |
+
+Incident: a `git stash`/`pop` pair in this round raced another worktree's stash on the shared stash stack; my data.py edit leaked into cr1005-audit-fe's working tree (uncommitted, backend/distribution/data.py: children_total change) and a store.mts change leaked into this worktree (uncommitted, left unstaged, never committed here). Needs cleanup by the owner of audit-fe (git checkout backend/distribution/data.py there; it is then superseded by this branch's commit).
+
+Verification: pytest on fresh nimbus_fix_be_final (schema.sql, ON_ERROR_STOP=1): 990 passed, 1 skipped. ruff clean. npm build/typecheck ok, lint 0 errors/31 warnings, sap-interface-ui + runtime-client JS tests pass.

@@ -50,3 +50,11 @@ python -m pytest tests/test_material_plant_attributes.py tests/test_data_integri
 - `docs/SAP_INTEGRATION_ROADMAP.md` describes the intended live-connector future state — don't confuse it with what's actually implemented (the stub skeleton described here).
 
 Optimizer queue state (`orders.planning_status`/`planning_reason`) is planner-owned and excluded from `_UPSERT_SQL` conflict updates, just like scheduled dates. SAP/Excel refresh updates baselines without restoring a queued schedule.
+
+## Upload/ingest contracts added in the 2026-10 review/audit rounds
+
+- **`csv_util` guard on every backend CSV stream.** `backend/csv_util.py` (`csv_cell`/`csv_row`/`CSV_BOM`) prefixes `'` to TEXT cells starting `= + - @ <tab> <CR>` (formula injection); numbers/dates/None pass through. It is applied by the master-data browser export, both missing-master-data CSVs (`GET /upload/{batch_id}/missing-master-data?format=csv` and the per-plant variant), the distribution aggregate CSV and the setup missing-pairs CSV, each with a UTF-8 BOM. A new CSV endpoint must use it. (The frontend/AG Grid exporters are guarded separately.)
+- **`GET /upload/audit` takes `?source=sap|excel`**, filtered in SQL *before* `limit` (`db.upload_audit_log(limit, source)`; `sap` = filename `sap:sap`, `excel` = everything else; anything else is 400). The SAP Interface History tab uses `?source=sap&limit=50` instead of filtering the newest 50 of all uploads client-side.
+- **`pv_kept_on_blank` (info) counts only non-distribution rows** (`parent_production_order IS NULL`): distribution children always arrive without a production version, so counting them warned on every unchanged re-upload.
+- **Distribution summary entry** reports the sub-orders the parents *call for* (`counters["children_total"]`), not the rows written (`children_upserted`, which is 0 for an unchanged re-upload): "N aggregate order(s) distributed into M sub-order(s)".
+- **Re-upload keeps a manual run time on routing plants and re-derives the rest** (see `backend/routing/CLAUDE.md`); a failed post-upload resolve is an `upload_audit` warning, and `POST /routing/{plant}/recompute` repairs it.

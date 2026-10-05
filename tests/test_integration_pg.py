@@ -787,3 +787,41 @@ def test_purge_preview_matches_delete_count(isolated_purge_database):
 
     assert preview["total"] == result["deleted"] == 1
     assert preview["planner_overridden"] == 1  # ZZTEST_PURGE_BASIC_ID has scheduled_start set
+
+
+@pytest.mark.pg
+def test_upload_audit_source_filter_applies_before_the_limit():
+    """Senior audit D49: the SAP history must come from a server-side filter,
+    not the newest N rows of every upload (older SAP entries were lost)."""
+    from backend.integration.routes import get_upload_audit
+    from fastapi import HTTPException
+
+    ids = {"sap": [], "excel": []}
+    base = dt.datetime(2020, 1, 1, 12, 0)
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            for i in range(3):
+                bid = str(uuid.uuid4())
+                ids["sap"].append(bid)
+                cur.execute("INSERT INTO upload_audit (batch_id, filename, row_count, uploaded_at)"
+                            " VALUES (%s, 'sap:sap', 1, %s)", (bid, base + dt.timedelta(minutes=i)))
+            for i in range(60):  # 60 NEWER excel uploads would push every SAP row out of a limit-50 window
+                bid = str(uuid.uuid4())
+                ids["excel"].append(bid)
+                cur.execute("INSERT INTO upload_audit (batch_id, filename, row_count, uploaded_at)"
+                            " VALUES (%s, 'zztest.xlsx', 1, %s)", (bid, base + dt.timedelta(days=1, minutes=i)))
+            conn.commit()
+            unfiltered = {r["batch_id"] for r in db.upload_audit_log(50)}
+            assert not unfiltered & set(ids["sap"])
+            sap = db.upload_audit_log(50, "sap")
+            assert {r["batch_id"] for r in sap} >= set(ids["sap"])
+            assert all(r["filename"] == "sap:sap" for r in sap)
+            excel = db.upload_audit_log(500, "excel")
+            assert not {r["batch_id"] for r in excel} & set(ids["sap"])
+            assert {r["batch_id"] for r in get_upload_audit(50, "sap")["audit"]} >= set(ids["sap"])
+            with pytest.raises(HTTPException) as err:
+                get_upload_audit(50, "bogus")
+            assert err.value.status_code == 400
+        finally:
+            cur.execute("DELETE FROM upload_audit WHERE batch_id = ANY(%s)", (ids["sap"] + ids["excel"],))
+            conn.commit()

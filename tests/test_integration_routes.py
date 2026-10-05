@@ -449,3 +449,39 @@ def test_upload_bom_rejects_oversized_file_with_413(monkeypatch):
         assert "exceeds maximum allowed size" in response.json()["detail"]
     finally:
         brain.api.dependency_overrides.pop(brain.require_admin, None)
+
+
+_FORMULA_EXCEPTIONS = [{"plant": "=PLANT", "material_number": "+MAT", "order_count": 3, "reason": "-no_mp_row"},
+                       {"plant": "@P2", "material_number": "MAT2", "order_count": 1, "reason": "no_mp_row"}]
+
+
+def _assert_formula_guarded_csv(response):
+    import csv
+    import io
+    assert response.status_code == 200
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows[0] == ["plant", "material_number", "order_count", "reason"]
+    assert rows[1] == ["'=PLANT", "'+MAT", "3", "'-no_mp_row"]
+    assert rows[2] == ["'@P2", "MAT2", "1", "no_mp_row"]
+
+
+def test_batch_missing_master_data_csv_is_bom_prefixed_and_formula_guarded(admin_client, monkeypatch):
+    """Exporter wiring (plan Part 1 #8) for GET /upload/{batch}/missing-master-data?format=csv."""
+    monkeypatch.setattr(int_routes.db, "get_upload_audit_warnings", lambda batch_id: [
+        {"category": "missing_master_data", "exceptions": _FORMULA_EXCEPTIONS}])
+    _assert_formula_guarded_csv(admin_client.get("/upload/B1/missing-master-data", params={"format": "csv"}))
+
+
+def test_live_missing_master_data_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
+    """Exporter wiring (plan Part 1 #8) for GET /master-data/{plant}/missing-master-data?format=csv."""
+    monkeypatch.setattr(int_routes.db, "missing_master_data_for_plant",
+                        lambda plant: {"exceptions": _FORMULA_EXCEPTIONS})
+    brain.api.dependency_overrides[int_routes.require_admin] = lambda: "test-admin"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    try:
+        response = TestClient(brain.api).get("/master-data/ZZTEST_PA/missing-master-data", params={"format": "csv"})
+    finally:
+        brain.api.dependency_overrides.pop(int_routes.require_admin, None)
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+    _assert_formula_guarded_csv(response)

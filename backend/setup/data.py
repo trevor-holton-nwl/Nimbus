@@ -317,17 +317,27 @@ def _insert_matrix_rows(cur, plant: str, machine: str, version: int, rows: list[
         )
 
 
+def _token_field(expr: str) -> str:
+    """SQL fragment: one length-prefixed, NULL-distinguishing token field, so
+    adjacent fields can never blur into each other ('a|' + 'b' vs 'a' + '|b')
+    and NULL differs from ''."""
+    return f"(CASE WHEN {expr} IS NULL THEN 'N' ELSE length({expr}) || ':' || {expr} END)"
+
+
+_MATRIX_TOKEN_FIELDS = ("from_key::text", "to_key::text", "setup_min::text", "source",
+                        "source_metadata::text", "source_reference")
+
+
 def plant_matrix_token(cur, plant: str, signature_version: int) -> str:
     """Content hash of one plant-default scope's rows (machine = ''), ordered.
     Returned on read (get_setup_snapshot) and required on replace_plant_matrix,
     so a delete-then-insert replace built from a stale read is refused instead
-    of silently reverting another admin's edit. No schema change."""
+    of silently reverting another admin's edit. Covers EVERY replaced column
+    (keys, setup_min, source, source_metadata, source_reference) as
+    length-prefixed fields with NULL distinct from ''. No schema change."""
+    row_expr = " || ',' || ".join(_token_field(f) for f in _MATRIX_TOKEN_FIELDS)
     cur.execute(
-        """SELECT md5(COALESCE(string_agg(
-                  from_key::text || '|' || to_key::text || '|' || setup_min::text || '|' || source
-                  || '|' || COALESCE(source_reference, ''),
-                  E'
-' ORDER BY from_key::text, to_key::text), ''))
+        f"""SELECT md5(COALESCE(string_agg({row_expr}, ';' ORDER BY from_key::text, to_key::text), ''))
              FROM setup_matrix WHERE plant = %s AND machine = '' AND signature_version = %s""",
         (plant, signature_version),
     )

@@ -6,6 +6,7 @@ NIMBUS_TEST_DB=1; auto-skipped otherwise, see tests/conftest.py).
 """
 
 import json
+import random
 import uuid
 import datetime as dt
 import unittest.mock as mock
@@ -2603,6 +2604,202 @@ class TestSqlStatusClassificationParityAndScale:
 
 
 @pytest.mark.pg
+class TestSqlStatusRandomizedParityAndPagingStability:
+    """Seeded randomized parity between `_STATUS_SQL`/`_STATUS_FROM` and the
+    Python oracle `service.compute_derived_statuses`, plus tie-stable paging.
+    Every fixture row lives in plant 1006 under a ZZTEST_FZ_ prefix and is
+    removed on teardown."""
+    PLANT = "1006"
+    SUB = "WTG"
+    PFX = "ZZTEST_FZ_"
+    WCS = ["ZZTEST_WC_FZ0", "ZZTEST_WC_FZ1", "ZZTEST_WC_FZ2"]
+    MACHS = [f"ZZTEST_FZ_M{i}" for i in range(1, 7)]
+    MATS = ["ZZTEST_FZ_MAT1", "ZZTEST_FZ_MAT2", "ZZTEST_FZ_MAT3"]
+    SEEDS = (11, 2026, 90210)
+    N_PER_SEED = 260
+    FACTS = [None, {}, {"x": 1}, {"previous_workcenter": None}, {"previous_workcenter": ""},
+             {"previous_workcenter": "OLD"}, {"previous_workcenter": 0}, {"previous_workcenter": 0.0},
+             {"previous_workcenter": False}, {"previous_workcenter": []}, {"previous_workcenter": {}},
+             {"previous_workcenter": [0]}, {"previous_workcenter": {"a": 1}},
+             {"previous_workcenter": "0"}, {"previous_workcenter": 1}, {"previous_workcenter": True}]
+    STARTS = [dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 2), None]
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE plant = %s AND (id LIKE %s OR parent_production_order LIKE %s)",
+                    (self.PLANT, self.PFX + "%", self.PFX + "%"))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order LIKE %s",
+                    (self.PLANT, self.PFX + "%"))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine = ANY(%s)", (self.PLANT, self.MACHS))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = ANY(%s)",
+                    (self.PLANT, self.WCS))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = ANY(%s)",
+                    (self.PLANT, self.MATS))
+        cur.execute("DELETE FROM materials WHERE material_id = ANY(%s)", (self.MATS,))
+
+    @pytest.fixture(autouse=True)
+    def _env(self, pg):
+        self.db = pg
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _seed(self, seed, n_headers=None):
+        """Insert one random fixture set in a single transaction (replacing the
+        previous seed's rows); return the number of headers."""
+        rnd = random.Random(seed)
+        n_headers = n_headers or self.N_PER_SEED
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            members = {}
+            cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES "
+                        + ",".join(["(%s,%s,%s)"] * len(self.WCS)),
+                        [x for w in self.WCS for x in (self.PLANT, w, rnd.choice(["single", "distribute"]))])
+            mach_rows = []
+            for m in self.MACHS:
+                wc = rnd.choice(self.WCS + [None])
+                members.setdefault(wc, []).append(m)
+                mach_rows.append((self.SUB, self.PLANT, m, wc))
+            cur.executemany("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                            mach_rows)
+            for mat in self.MATS:
+                _seed_distribution_material(cur, mat, self.PLANT)
+                cur.execute("UPDATE material_plants SET min_lot_size = %s WHERE plant = %s AND material_id = %s",
+                            (rnd.choice([0, 0, 20, 50]), self.PLANT, mat))
+            hdrs, shares, kids = [], [], []
+            n_kid = 0
+            for i in range(n_headers):
+                po =f"{self.PFX}{seed % 1000:03d}_{i:04d}"
+                mat = rnd.choice(self.MATS)
+                wc = rnd.choice(self.WCS)
+                qty = rnd.choice([None, 0, 100, 100, 250])
+                reviewed = rnd.random() < 0.6
+                rq = rnd.choice([None, qty, qty, 77])
+                facts = rnd.choice(self.FACTS)
+                hdrs.append((self.PLANT, po, mat, wc, qty,
+                             rnd.choice(self.STARTS), reviewed, rq,
+                             None if facts is None else json.dumps(facts)))
+                coherent = rnd.random() < 0.6
+                ms = list(members.get(wc, [])) if coherent else rnd.sample(self.MACHS, rnd.randrange(0, 4))
+                fault = rnd.choice(["none", "none", "drop_child", "extra_child", "purge", "zero", "nonmember",
+                                    "dropshare", "qty0", "lot", "mm", "nullm"]) if coherent else None
+                ms_sh = ms[1:] if fault == "dropshare" else list(ms)
+                nm_purge = False
+                if fault == "nonmember":
+                    extra = [m for m in self.MACHS if m not in ms]
+                    if extra:
+                        ms_sh.append(extra[0])
+                        nm_purge = rnd.random() < 0.5
+                for k, m in enumerate(ms_sh):
+                    if coherent:
+                        w = 0 if (fault == "zero" and k == 0) else rnd.choice([1, 2.5])
+                    else:
+                        w = rnd.choice([0, 1, 1, 2.5])
+                    purged = ((not coherent and rnd.random() < 0.2) or (fault == "purge" and k == 0)
+                              or (fault == "nonmember" and nm_purge and k == len(ms_sh) - 1 and m not in ms))
+                    shares.append((self.PLANT, po, mat, m, "ABCDEF"[k], w,
+                                   dt.datetime(2026, 1, 1) if purged else None))
+                if coherent:
+                    km = list(ms_sh)
+                    if fault == "drop_child" and km:
+                        km = km[1:]
+                    if fault == "extra_child":
+                        km.append(rnd.choice(self.MACHS))
+                    if fault == "nullm":
+                        km.append(None)
+                else:
+                    km = [m for m in ms if rnd.random() < 0.7]
+                    if rnd.random() < 0.3:
+                        km.append(rnd.choice(self.MACHS + [None]))
+                for m in km:
+                    n_kid += 1
+                    cid = f"{self.PFX}C{n_kid:06d}"
+                    if coherent:
+                        cq = 0 if fault == "qty0" and rnd.random() < .5 else (1 if fault == "lot" and rnd.random() < .5 else 60)
+                        mm = fault == "mm" and rnd.random() < .5
+                    else:
+                        cq, mm = rnd.choice([None, 0, 5, 10, 60, 100]), rnd.random() < 0.1
+                    kids.append((cid, cid, mat, m, self.PLANT, po, cq, mm,
+                                 dt.datetime(2026, 10, 3) if rnd.random() < 0.4 else None))
+            cur.executemany(
+                "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter,"
+                " order_quantity, run_time, basic_start_date, reviewed, reviewed_quantity, sap_facts)"
+                " VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s,%s::jsonb)", hdrs)
+            cur.executemany(
+                "INSERT INTO order_distribution_share (plant, production_order, material_number, machine,"
+                " letter, weight, purged_at) VALUES (%s,%s,%s,%s,%s,%s,%s)", shares)
+            cur.executemany(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " parent_production_order, order_quantity, runtime_schedule_mismatch, scheduled_start)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", kids)
+            conn.commit()
+        return len(hdrs)
+
+    def test_sql_statuses_equal_python_for_random_fixtures(self):
+        total = 0
+        seen = set()
+        for seed in self.SEEDS:
+            n = self._seed(seed)
+            with self.db._pool.connection() as conn, conn.cursor() as cur:
+                headers = distribution_data._fetch_header_rows(cur, self.PLANT, search=self.PFX)
+                distribution_data._hydrate_headers(cur, self.PLANT, headers)
+                py = {(h["production_order"], h["material_number"]): set(h["statuses"]) for h in headers}
+                assert len(py) == n
+                sql = {k: set() for k in py}
+                for code, expr in distribution_data._STATUS_SQL.items():
+                    cur.execute(
+                        "SELECT order_distribution.production_order, order_distribution.material_number"
+                        f" FROM {distribution_data._STATUS_FROM}"
+                        " WHERE order_distribution.plant = %s AND order_distribution.production_order LIKE %s"
+                        f" AND ({expr})",
+                        (self.PLANT,) * distribution_data._STATUS_FROM_NPLANT + (self.PLANT, self.PFX + "%"),
+                    )
+                    for po, mat in cur.fetchall():
+                        sql[(po, mat)].add(code)
+            bad = {k: (sorted(sql[k]), sorted(py[k])) for k in py if sql[k] != py[k]}
+            assert not bad, f"seed {seed}: SQL != Python for {len(bad)} headers, e.g. {dict(list(bad.items())[:3])}"
+            for st in py.values():
+                seen |= st
+            total += n
+        assert total == len(self.SEEDS) * self.N_PER_SEED
+        assert seen == set(distribution_data._STATUS_SQL), \
+            f"random fixtures must exercise every status; missing {set(distribution_data._STATUS_SQL) - seen}"
+
+    def test_paging_with_ties_is_stable_and_complete(self):
+        self._seed(self.SEEDS[0], n_headers=45)   # small: every page call hydrates + counts
+        for bucket in ("all", "incomplete"):
+            full = distribution_data.list_headers_for_plant(self.PLANT, search=self.PFX, bucket=bucket, limit=0)
+            keys = [(r["header"]["production_order"], r["header"]["material_number"]) for r in full["data"]]
+            assert keys and len(keys) == len(set(keys)) == full["meta"]["total"]
+            # many ties on basic_start_date / reviewed: order key must be non-decreasing
+            def order_key(r):
+                h = r["header"]
+                s = h["basic_start_date"]
+                return (s is None, s or dt.datetime.min, h["reviewed"], h["production_order"], h["material_number"])
+            ok = [order_key(r) for r in full["data"]]
+            assert ok == sorted(ok), bucket
+            if bucket == "all":
+                assert len({k[:3] for k in ok}) < len(ok), "fixture must contain date/reviewed ties"
+            for ps in (4, 7, 20):
+                cat, off = [], 0
+                while True:
+                    page = distribution_data.list_headers_for_plant(
+                        self.PLANT, search=self.PFX, bucket=bucket, limit=ps, offset=off)
+                    pk = [(r["header"]["production_order"], r["header"]["material_number"]) for r in page["data"]]
+                    assert page["meta"]["total"] == len(keys)
+                    if not pk:
+                        break
+                    assert len(pk) <= ps
+                    cat += pk
+                    off += ps
+                assert len(cat) == len(set(cat)), (bucket, ps, "duplicate across pages")
+                assert cat == keys, (bucket, ps)
+
+
+@pytest.mark.pg
 class TestReweightSharesGuards(_ReweightFixtureBase):
     """409 `stale` / 409 `children_scheduled` guards on POST .../shares."""
     WC = "ZZTEST_WC_RWGUARD"
@@ -4078,3 +4275,428 @@ def test_apply_chunk_size_bounds_total_savepoints():
     for n in (2501, 10_000, 100_000):
         assert -(-n // f(n)) <= 50   # <= 50 chunk savepoints per apply()
 
+
+@pytest.mark.pg
+class TestUploadMessageCountsPlannedChildren(_ReweightFixtureBase):
+    """Senior audit #3: an unchanged re-upload writes no child rows, so the
+    summary read 'distributed into 0 sub-order(s)'."""
+    WC, L1, L2 = "ZZTEST_WC_UPMSG", "ZZTEST_L1_UPMSG", "ZZTEST_L2_UPMSG"
+    ORD, MAT = "ZZTEST_ORD_UPMSG", "ZZT_MAT_UPMSG"
+
+    def test_summary_reports_planned_children_even_when_none_written(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        try:
+            row = {"production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
+                   "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
+                   "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": 100.0, "run_time": 10.0}
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+                cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s", (self.PLANT, self.ORD))
+                conn.commit()
+            res = pg.upsert_orders([row], plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+                                   resolve_fn=routing_resolver.resolve_orders)
+            msgs = [w.get("msg", "") for w in res["warnings"] if w.get("category") == "distribution"]
+            assert any("distributed into 2 sub-order(s)" in m for m in msgs), msgs
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+                conn.commit()
+
+
+@pytest.mark.pg
+class TestPvKeptOnBlankIgnoresDistributionChildren(_ReweightFixtureBase):
+    """Senior audit #7: distribution children arrive blank on every re-upload,
+    so `pv_kept_on_blank` fired for each of them."""
+    WC, L1, L2 = "ZZTEST_WC_PVKEEP", "ZZTEST_L1_PVKEEP", "ZZTEST_L2_PVKEEP"
+    ORD, MAT = "ZZTEST_ORD_PVKEEP", "ZZT_MAT_PVKEEP"
+
+    def test_children_not_counted(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        try:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE orders SET production_version = 'PV7' WHERE plant=%s AND parent_production_order=%s",
+                            (self.PLANT, self.ORD))
+                conn.commit()
+            row = {"production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
+                   "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
+                   "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": 100.0, "run_time": 10.0}
+            res = pg.upsert_orders([row], plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+                                   resolve_fn=routing_resolver.resolve_orders)
+            assert not [w for w in res["warnings"] if w.get("category") == "pv_kept_on_blank"], res["warnings"]
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+                conn.commit()
+
+
+def _wait_for_lock_wait(db_, timeout=10.0):
+    """Deterministically wait until some backend of this DB is blocked on a
+    heavyweight lock (pg_stat_activity), instead of sleeping."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_stat_activity WHERE datname = current_database()"
+                        " AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' LIMIT 1")
+            if cur.fetchone():
+                return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.pg
+class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
+    """Senior audit #1/#2: apply() upserted children in letter order while a
+    /tasks save locks in id order (deadlock), and _resolve_repair held every
+    header lock across its loop in basic_start_date order (deadlock vs apply
+    and vs saves)."""
+    MAT = "ZZT_MAT_LOCKORD"
+    WC, L1, L2 = "ZZTEST_WC_LOCKORD", "ZZTEST_L1_LOCKORD", "ZZTEST_L2_LOCKORD"
+
+    def _children(self, pg, order):
+        return _snapshot_children(pg, self.PLANT, order)
+
+    def _row(self, order, qty=100.0):
+        return {"production_order": order, "material_number": self.MAT, "machine": self.WC,
+                "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
+                "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": qty, "run_time": 10.0}
+
+    def test_apply_vs_task_save_has_no_deadlock(self, pg):
+        import threading
+        order = next(o for o in (f"ZZLKA{i}" for i in range(500))
+                     if pg.make_id("A-" + o, self.MAT) > pg.make_id("B-" + o, self.MAT))
+        self._seed_header(pg, self.WC, self.L1, self.L2, order, self.MAT)
+        try:
+            ch = self._children(pg, order)
+            ids = sorted(c["id"] for c in ch)
+            vers = {c["id"]: c["xmin"] for c in ch}
+            bid = str(uuid.uuid4())
+            _, ps, _ = distribution_data.plan([self._row(order, 200.0)], bid)
+            real = distribution_data._apply_children
+            paused, release = threading.Event(), threading.Event()
+
+            def stepped(cur, parent):
+                rows = parent["child_rows"]
+                if len(rows) < 2:
+                    return real(cur, parent)
+                n = real(cur, dict(parent, child_rows=rows[:1]))
+                paused.set()
+                release.wait(30)
+                return n + real(cur, dict(parent, child_rows=rows[1:]))
+
+            res = {}
+
+            def do_apply():
+                try:
+                    with pg._pool.connection() as conn:
+                        res["apply"] = distribution_data.apply(ps, bid, conn)
+                except Exception as exc:  # noqa: BLE001
+                    res["apply"] = exc
+
+            def do_save():
+                t0 = dt.datetime(2026, 10, 2, 8)
+                try:
+                    res["save"] = pg.update_task_dates_bulk(
+                        [{"id": i, "start": t0, "end": t0 + dt.timedelta(hours=3), "base_version": vers[i]}
+                         for i in ids])
+                except Exception as exc:  # noqa: BLE001
+                    res["save"] = exc
+
+            with mock.patch.object(distribution_data, "_apply_children", stepped):
+                ta = threading.Thread(target=do_apply, daemon=True)
+                ta.start()
+                assert paused.wait(20)
+                ts = threading.Thread(target=do_save, daemon=True)
+                ts.start()
+                _wait_for_lock_wait(pg, 3.0)
+                release.set()
+                ta.join(40)
+                ts.join(40)
+            assert not ta.is_alive() and not ts.is_alive()
+            for name in ("apply", "save"):
+                assert not isinstance(res[name], Exception), f"{name} raised {res[name]!r}"
+            assert not res["apply"].get("ingest_warnings", {}).get("failed_parents"), res["apply"]
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur, self.WC, self.L1, self.L2, order, self.MAT)
+                conn.commit()
+
+    @pytest.mark.parametrize("mode", ["apply", "save"])
+    def test_repair_vs_apply_or_save_has_no_deadlock(self, pg, mode):
+        import threading
+        oa, ob = next((f"ZZLKRA{i}", f"ZZLKRB{i}") for i in range(500)
+                      if pg.make_id(f"A-ZZLKRA{i}", self.MAT) < pg.make_id(f"A-ZZLKRB{i}", self.MAT))
+        self._seed_header(pg, self.WC, self.L1, self.L2, oa, self.MAT)
+        batch = str(uuid.uuid4())
+        _, ps2, _ = distribution_data.plan([self._row(ob)], batch)
+        with pg._pool.connection() as conn:
+            distribution_data.apply(ps2, batch, conn)
+        try:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE order_distribution SET basic_start_date = basic_start_date - interval '2 days'"
+                            " WHERE plant=%s AND production_order=%s", (self.PLANT, ob))
+                for o in (oa, ob):
+                    cid = next(c["id"] for c in self._children(pg, o) if c["machine"] == self.L2)
+                    cur.execute("DELETE FROM orders WHERE id=%s", (cid,))
+                conn.commit()
+            real = distribution_data._repair_one_header
+            seen, first_done, release = [], threading.Event(), threading.Event()
+
+            def stepped(cur, plant, order, material, header):
+                r = real(cur, plant, order, material, header)
+                seen.append(order)
+                if len(seen) == 1:
+                    first_done.set()
+                    release.wait(30)
+                return r
+
+            res = {}
+
+            def run(name, fn):
+                try:
+                    res[name] = fn()
+                except Exception as exc:  # noqa: BLE001
+                    res[name] = exc
+
+            with mock.patch.object(distribution_data, "_repair_one_header", stepped):
+                tr = threading.Thread(target=run, daemon=True, args=(
+                    "repair", lambda: distribution_data.resolve(self.PLANT, "repair")))
+                tr.start()
+                assert first_done.wait(30)
+                assert seen[0] == ob, "repair must visit the chronologically-first header first"
+                if mode == "apply":
+                    b2 = str(uuid.uuid4())
+                    _, ps, _ = distribution_data.plan([self._row(oa), self._row(ob)], b2)
+
+                    def other():
+                        with pg._pool.connection() as conn:
+                            return distribution_data.apply(ps, b2, conn)
+                else:
+                    kids = [c for o in (oa, ob) for c in self._children(pg, o)]
+                    t0 = dt.datetime(2026, 10, 2, 8)
+                    items = [{"id": c["id"], "start": t0, "end": t0 + dt.timedelta(hours=3),
+                              "base_version": c["xmin"]} for c in sorted(kids, key=lambda c: c["id"])]
+
+                    def other():
+                        return pg.update_task_dates_bulk(items)
+                to = threading.Thread(target=run, args=("other", other), daemon=True)
+                to.start()
+                _wait_for_lock_wait(pg, 3.0)
+                release.set()
+                tr.join(40)
+                to.join(40)
+            assert not tr.is_alive() and not to.is_alive()
+            for name in ("repair", "other"):
+                assert not isinstance(res[name], Exception), f"{name} raised {res[name]!r}"
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE plant=%s AND (parent_production_order=%s OR production_order=%s)",
+                            (self.PLANT, ob, ob))
+                cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s", (self.PLANT, ob))
+                self._cleanup(cur, self.WC, self.L1, self.L2, oa, self.MAT)
+                conn.commit()
+
+
+
+@pytest.mark.pg
+class TestMutationHolesChildUpsertAndDelete(_ReweightFixtureBase):
+    """Mutation-testing holes: D07 (ordinary upload clears a stale child link AND
+    letter), D17 (superseded-child delete locks rows before touching overrides)
+    and D33 (the IS DISTINCT FROM guard + scheduled-child mismatch flag of
+    `_CHILD_UPSERT_SQL`, each arm exercised with ONLY that field changing)."""
+    WC = "ZZTEST_WC_MUTHOLE"
+    L1, L2 = "ZZTEST_L1_MUTHOLE", "ZZTEST_L2_MUTHOLE"
+    ORD, MAT = "ZZTEST_ORD_MUTHOLE", "ZZTEST_MAT_MUTHOLE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM setup_occurrence_override WHERE plant = %s AND machine IN (%s, %s)",
+                        (self.PLANT, self.L1, self.L2))
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    _PARAM_COLS = (
+        "id", "production_order", "material_number", "material_description", "machine", "plant",
+        "basic_start_date", "basic_finish_date", "run_time", "color", "order_quantity", "form_size",
+        "firming_indicator", "planned_order_initial_quantity", "reduced_quantity", "order_category",
+        "order_type", "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
+        "parent_production_order", "distribution_letter",
+    )
+
+    def _child(self, pg, machine):
+        return next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == machine)
+
+    def _identical_params(self, cur, child_id):
+        cur.execute(f"SELECT {', '.join(self._PARAM_COLS)}, upload_batch_id FROM orders WHERE id = %s",
+                    (child_id,))
+        row = cur.fetchone()
+        params = dict(zip(self._PARAM_COLS, row[:-1], strict=True))
+        params["batch_id"] = row[-1]
+        return params
+
+    # ---- D07 ---------------------------------------------------------------
+    def test_ordinary_upload_clears_stale_parent_link_and_letter(self, pg):
+        child = self._child(pg, self.L1)
+        assert child["parent_production_order"] == self.ORD and child["distribution_letter"]
+        row = {"production_order": child["production_order"], "material_number": self.MAT,
+               "machine": self.L1, "plant": self.PLANT,
+               "basic_start_date": dt.datetime(2026, 10, 1, 8), "basic_finish_date": dt.datetime(2026, 10, 1, 18),
+               "order_quantity": 60.0, "run_time": 6.0}
+        res = pg.upsert_orders([row], batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx")
+        assert res["status"] == "ok"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT parent_production_order, distribution_letter FROM orders WHERE id = %s",
+                        (child["id"],))
+            assert cur.fetchone() == (None, None)
+
+    # ---- D33 ---------------------------------------------------------------
+    def test_child_upsert_identical_params_is_a_noop(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, self._identical_params(cur, child["id"]))
+            assert cur.rowcount == 0
+            conn.rollback()
+
+    @pytest.mark.parametrize("field,new_value", [
+        ("parent_production_order", "ZZTEST_OTHER_PARENT"),
+        ("distribution_letter", "Q"),
+    ])
+    def test_child_upsert_where_fires_on_link_or_letter_change_alone(self, pg, field, new_value):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            params = self._identical_params(cur, child["id"])
+            params[field] = new_value
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute(f"SELECT {field} FROM orders WHERE id = %s", (child["id"],))
+            assert cur.fetchone()[0] == new_value
+            conn.rollback()
+
+    def test_child_upsert_where_fires_on_run_time_change_alone_and_flags_scheduled(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time_source=NULL,"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s",
+                        (dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12), child["id"]))
+            params = self._identical_params(cur, child["id"])
+            params["run_time"] = float(child["run_time"]) + 2.0
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute("SELECT run_time, runtime_schedule_mismatch FROM orders WHERE id=%s", (child["id"],))
+            run_time, flag = cur.fetchone()
+            assert float(run_time) == pytest.approx(float(child["run_time"]) + 2.0)
+            assert flag is True
+            conn.rollback()
+
+    def test_child_upsert_run_time_change_on_unscheduled_child_does_not_flag(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=NULL, scheduled_end=NULL, run_time_source=NULL,"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (child["id"],))
+            params = self._identical_params(cur, child["id"])
+            params["run_time"] = float(child["run_time"]) + 2.0
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute("SELECT runtime_schedule_mismatch FROM orders WHERE id=%s", (child["id"],))
+            assert cur.fetchone()[0] is not True
+            conn.rollback()
+
+    def test_child_upsert_flags_segment_only_scheduled_child_on_run_time_change(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=NULL, scheduled_end=NULL, run_time_source=NULL,"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (child["id"],))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                        " VALUES (%s, 1, %s, %s)",
+                        (child["id"], dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12)))
+            params = self._identical_params(cur, child["id"])
+            params["run_time"] = float(child["run_time"]) + 2.0
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute("SELECT scheduled_start, runtime_schedule_mismatch FROM orders WHERE id=%s",
+                        (child["id"],))
+            start, flag = cur.fetchone()
+            assert start is None and flag is True
+            conn.rollback()
+
+    # ---- D17 ---------------------------------------------------------------
+    def test_delete_superseded_children_locks_rows_before_touching_overrides(self, pg):
+        import threading
+        import psycopg
+        c1, c2 = sorted(c["id"] for c in _snapshot_children(pg, self.PLANT, self.ORD))
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO setup_occurrence_override (plant, machine, signature_version, predecessor_order_id,"
+                " successor_order_id, predecessor_state_key, successor_state_key, standard_min, remaining_min)"
+                " VALUES (%s, %s, 1, %s, %s, '[]'::jsonb, '[]'::jsonb, 0, 0) RETURNING id",
+                (self.PLANT, self.L1, c1, c2))
+            override_id = cur.fetchone()[0]
+            conn.commit()
+        res = {}
+        # Competing transaction: updated (so row-locked) one of the ids, still open.
+        with pg._pool.connection() as holder, holder.cursor() as hcur:
+            hcur.execute("UPDATE orders SET notes = 'held' WHERE id = %s", (c2,))
+
+            def do_delete():
+                try:
+                    with pg._pool.connection() as conn, conn.cursor() as cur:
+                        res["deleted"] = distribution_data._delete_superseded_children(cur, {c1, c2})
+                        conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    res["deleted"] = exc
+
+            t = threading.Thread(target=do_delete, daemon=True)
+            t.start()
+            try:
+                assert _wait_for_lock_wait(pg, 10.0), "delete never blocked on the held row"
+                # Locking happens BEFORE the override move: while the delete is parked on
+                # the row lock, the override row must be untouched (not row-locked).
+                with pg._pool.connection() as probe, probe.cursor() as pcur:
+                    try:
+                        pcur.execute("SELECT id FROM setup_occurrence_override WHERE id = %s FOR UPDATE NOWAIT",
+                                     (override_id,))
+                        assert pcur.fetchone() is not None
+                    except psycopg.errors.LockNotAvailable:
+                        pytest.fail("override was updated before the orders rows were locked")
+                    finally:
+                        probe.rollback()
+            finally:
+                holder.rollback()
+                t.join(30)
+        assert not t.is_alive()
+        assert res["deleted"] == 2
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT status FROM setup_occurrence_override WHERE id = %s", (override_id,))
+            assert cur.fetchone()[0] == "replaced"
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = ANY(%s)", ([c1, c2],))
+            assert cur.fetchone()[0] == 0
+
+def test_aggregate_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
+    """Exporter wiring (plan Part 1 #8): the aggregate CSV applies csv_row to
+    every data row and starts with the UTF-8 BOM. No DB needed -- the roll-up is stubbed."""
+    import csv as _csv
+    import io as _io
+    rows = [{
+        "production_order": "=1+1", "material_number": "+MAT", "machine": "-WC", "quantity": 10,
+        "sum_child_quantity": 10, "start": "2026-10-01T08:00:00", "finish": None, "child_count": 1,
+        "queued_children": 0, "all_scheduled": True, "firming_indicator": "@X", "reviewed": False,
+        "children": [{"production_order": "A-1000", "machine": "L1", "quantity": 10, "start": None, "end": None}],
+    }]
+    monkeypatch.setattr(distribution_data, "get_aggregate", lambda plant, **kw: rows)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+    try:
+        response = TestClient(brain.api).get("/distribution/ZZPLANT/aggregate", params={"format": "csv"})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    parsed = list(_csv.reader(_io.StringIO(response.content.decode("utf-8-sig"))))
+    assert parsed[0][0] == "production_order"
+    data = parsed[1]
+    assert data[:3] == ["'=1+1", "'+MAT", "'-WC"]
+    assert data[10] == "'@X"
+    assert data[3] == "10" and data[7] == "1"

@@ -29,7 +29,7 @@ $env:PYTHONIOENCODING = "utf-8"
 az account show --query "{sub:name,user:user.name}" -o json   # expect Quantum Leap Playground
 az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.template.containers[0].image" -o tsv  # current tag -> next vN, and the ROLLBACK target
 ```
-- **Version stamp:** if frontend (`app.js`/`index.html`/`styles.css`) changed, confirm `APP_VERSION` (app.js) == `NIMBUS_BUILD_ID` (index.html) == `styles.css?v=` and bump all three to a new dated tag. **Do not auto-commit** the bump — surface it; the operator decides when to commit (they may be on a feature branch with unrelated changes).
+- **Version stamp:** if frontend (`frontend/app.js`/`frontend/index.html`/`frontend/styles.css`) changed, the image build stamps `NIMBUS_BUILD_ID` and `styles.css?v=` (both in `frontend/index.html`, consumed by `frontend/app-entry.mjs`'s `runCacheBustGuard`) from the git SHA — pass `--build-arg BUILD_ID=$(git rev-parse --short HEAD)` to `az acr build`; confirm the arg was passed (without it the hand-set stamp in `index.html` ships unchanged, so also check the two values match each other). (The old separate `APP_VERSION` constant in `app.js` was removed — don't look for it.) **Do not auto-commit** the bump — surface it; the operator decides when to commit (they may be on a feature branch with unrelated changes).
 - Decide what changed: code only? deps? schema? (schema → step 1 is required.)
 
 ### 1. DB migration FIRST — only if schema changed (guarded)
@@ -64,7 +64,7 @@ if (-not $runs -or $bad) { throw "CI is not green for $sha - stop (or use -Overr
 
 ### 2. Build the image (fresh tag)
 ```powershell
-az acr build --registry acrnimbusdev --image nimbus:vN .   # N = current + 1
+az acr build --registry acrnimbusdev --image nimbus:vN --build-arg BUILD_ID=$(git rev-parse --short HEAD) .   # N = current + 1; BUILD_ID stamps NIMBUS_BUILD_ID + styles.css?v= from the git SHA
 az acr task list-runs --registry acrnimbusdev --top 1 -o table   # confirm Succeeded (Windows log stream may crash; build still succeeds)
 ```
 

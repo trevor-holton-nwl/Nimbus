@@ -14,6 +14,7 @@ constants are used only within this domain and moved along with their
 callers.
 """
 import json
+import time
 
 import psycopg
 import pandas as pd
@@ -331,6 +332,41 @@ def _truncate(s, cap: int):
 
 
 _CSP_MAX_BODY = 8 * 1024   # 8 KB
+# This sink is unauthenticated and report-only CSP is chatty (~105 inline
+# handlers report on every page view), so reports are de-duplicated by
+# (directive, blocked-uri, source-file, line) with a counter and the number of
+# DISTINCT reports admitted per minute is capped, so a flood can never evict
+# real errors from the 2,000-entry backend log ring.
+_CSP_MAX_DISTINCT_PER_MIN = 20
+_CSP_MAX_TRACKED_KEYS = 500
+_CSP_SEEN: dict[tuple, int] = {}                       # key -> times seen
+_CSP_RATE = {"window_start": 0.0, "admitted": 0, "dropped": 0}
+
+
+def _csp_admit(key: tuple) -> tuple[bool, int]:
+    """(should_log, times_seen). Repeats log only at 10, 100, 1000, ... so the
+    ring still shows that a violation is recurring, once per decade."""
+    seen = _CSP_SEEN.get(key)
+    if seen is not None:
+        seen += 1
+        _CSP_SEEN[key] = seen
+        return (seen in (10, 100, 1000, 10000, 100000), seen)
+    now = time.monotonic()
+    if now - _CSP_RATE["window_start"] >= 60.0:
+        if _CSP_RATE["dropped"]:
+            _log_event("warn", "csp", f"CSP reports rate-limited: {_CSP_RATE['dropped']} distinct report(s) dropped",
+                       event="csp.rate_limited", dropped=_CSP_RATE["dropped"])
+        _CSP_RATE.update(window_start=now, admitted=0, dropped=0)
+    if _CSP_RATE["admitted"] >= _CSP_MAX_DISTINCT_PER_MIN:
+        _CSP_RATE["dropped"] += 1
+        return (False, 0)
+    _CSP_RATE["admitted"] += 1
+    if len(_CSP_SEEN) >= _CSP_MAX_TRACKED_KEYS:
+        _CSP_SEEN.pop(next(iter(_CSP_SEEN)))
+    _CSP_SEEN[key] = 1
+    return (True, 1)
+
+
 _CSP_FIELDS = ("document-uri", "violated-directive", "effective-directive", "blocked-uri",
                "source-file", "line-number", "column-number", "disposition", "original-policy")
 
@@ -358,6 +394,13 @@ async def ingest_csp_report(request: Request):
         fields = {k.replace("-", "_"): _truncate(body.get(k), 512) for k in _CSP_FIELDS if body.get(k) is not None}
         # original-policy repeats the same long string on every report; keep it out of the ring.
         fields.pop("original_policy", None)
+        key = (fields.get("violated_directive") or fields.get("effective_directive"), fields.get("blocked_uri"),
+               fields.get("source_file"), fields.get("line_number"))
+        should_log, seen = _csp_admit(key)
+        if not should_log:
+            continue
+        if seen > 1:
+            fields["occurrences"] = seen
         _log_event("warn", "csp", f"CSP violation: {fields.get('violated_directive') or fields.get('effective_directive') or 'unknown'}",
                    event="csp.report", **fields)
     return Response(status_code=204)

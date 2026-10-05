@@ -147,6 +147,55 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = ANY(%s)", ([oid3, oid4],))
                 conn.commit()
 
+    def test_mixed_batch_leaves_seeded_unset_columns_untouched(self, pg):
+        """P6 (#26) mutation guard: every column is SEEDED non-NULL, then a mixed
+        batch saves a different subset per row. A batched UPDATE that wrote
+        NULL (or a default) for columns absent from a row's payload would wipe
+        the seeded scheduled_end / run_time / prt values -- they must survive."""
+        db_ = pg
+        sched_start = self.start + dt.timedelta(days=5)
+        sched_end = sched_start + dt.timedelta(hours=3)
+        oids = [db_.make_id(self.ORDER + f"_S{i}", self.MATERIAL) for i in range(3)]
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            for i, oid in enumerate(oids):
+                cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+                cur.execute(
+                    "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                    " basic_finish_date, scheduled_start, scheduled_end, run_time, prt_01, prt_02)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,6,'K1','K2')",
+                    (oid, self.ORDER + f"_S{i}", self.MATERIAL, self.MACHINE, self.PLANT,
+                     self.start, self.end, sched_start, sched_end),
+                )
+            conn.commit()
+        try:
+            def snap(oid):
+                with db_._pool.connection() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT scheduled_start, scheduled_end, run_time, prt_01, prt_02"
+                                " FROM orders WHERE id = %s", (oid,))
+                    return cur.fetchone()
+
+            new_start = sched_start + dt.timedelta(days=1)
+            new_end = sched_end + dt.timedelta(days=1)
+            res = db_.update_task_dates_bulk([
+                {"id": oids[0], "start": new_start, "end": new_end},          # dates only
+                {"id": oids[1], "PRT_01": "N1"},                              # attribute only
+                {"id": oids[2], "RUN_TIME": 9},                               # run time only
+            ])
+            assert res["persisted"] == 3 and res["invalid_ids"] == [] and res["stale"] == []
+            assert snap(oids[0]) == (new_start, new_end, 6, "K1", "K2")
+            assert snap(oids[1]) == (sched_start, sched_end, 6, "N1", "K2")
+            assert snap(oids[2]) == (sched_start, sched_end, 9, "K1", "K2")
+            # End-only / start-only edits must not clear the other boundary either.
+            early_start = sched_start - dt.timedelta(hours=1)
+            res = db_.update_task_dates_bulk([{"id": oids[1], "end": new_end}, {"id": oids[2], "start": early_start}])
+            assert res["persisted"] == 2
+            assert snap(oids[1]) == (sched_start, new_end, 6, "N1", "K2")
+            assert snap(oids[2]) == (early_start, sched_end, 9, "K1", "K2")
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (oids,))
+                conn.commit()
+
     def test_machine_edit_to_unknown_machine_is_rejected_with_reason(self, pg):
         """Plan Part 2 #27: a MACHINE the plant neither registers nor already
         holds orders on is rejected per item (200 envelope, rejection reason)."""
@@ -272,30 +321,52 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
                 conn.commit()
 
-    def test_strict_save_waits_on_the_machine_advisory_lock(self, pg):
-        """Plan Part 2 #18: strict optimizer saves serialise on (plant, machine)."""
-        import threading
+    @staticmethod
+    def _wait_for_advisory_wait(db_, timeout=10.0):
+        """Poll pg_locks until a backend is blocked on an advisory lock."""
         import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted LIMIT 1")
+                if cur.fetchone():
+                    return True
+            time.sleep(0.02)
+        return False
+
+    @pytest.mark.parametrize("spelling", ["same", "lower"])
+    def test_strict_save_waits_on_the_machine_advisory_lock(self, pg, spelling):
+        """Plan Part 2 #18: strict optimizer saves serialise on (plant, machine),
+        keyed on the canonical match key (so a differently-cased MACHINE edit of
+        the same machine blocks too -- senior audit #5)."""
+        import threading
         db_ = pg
         base = self._current_version(db_)
         done = threading.Event()
+        errors = []
 
         def _save():
-            db_.update_task_dates_bulk(
-                [{"id": self.oid, "start": self.start, "end": self.end, "base_version": base}],
-                atomic_optimizer=True, strict_conflicts=True)
-            done.set()
+            try:
+                item = {"id": self.oid, "start": self.start, "end": self.end, "base_version": base}
+                if spelling == "lower":
+                    item["MACHINE"] = self.MACHINE.lower()
+                db_.update_task_dates_bulk([item], atomic_optimizer=True, strict_conflicts=True)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                done.set()
 
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (f"{self.PLANT}{self.MACHINE}",))
+                        (db_._strict_lock_key(self.PLANT, db_._machine_match_key(self.MACHINE)),))
             t = threading.Thread(target=_save)
             t.start()
-            time.sleep(0.5)
+            assert self._wait_for_advisory_wait(db_), "save never blocked on the advisory lock"
             assert not done.is_set()
             conn.rollback()
         t.join(10)
         assert done.is_set()
+        assert not errors, errors
 
 
 # ---------------------------------------------------------------------------

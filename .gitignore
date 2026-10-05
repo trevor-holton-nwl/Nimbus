@@ -116,3 +116,6 @@ desktop.ini
 # Superpowers subagent-driven-development — per-plan scratch workspace (ledger,
 # briefs, review packages); the git history is the durable record, not this.
 .superpowers/
+
+# Runtime color-wheel/optimization audit trail (written by the app and by tests)
+data/color_wheels/_audit_log.json

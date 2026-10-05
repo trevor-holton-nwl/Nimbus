@@ -890,12 +890,25 @@ def get_upload_audit_warnings(batch_id: str) -> list[dict] | None:
     return row[0] or []
 
 
-def upload_audit_log(limit: int = 50) -> list[dict]:
-    """Recent uploads, newest first, for the Admin Cockpit history card."""
-    sql = """
+UPLOAD_AUDIT_SOURCES = ("sap", "excel")
+
+
+def upload_audit_log(limit: int = 50, source: str | None = None) -> list[dict]:
+    """Recent uploads, newest first, for the Admin Cockpit history card.
+
+    `source` filters server-side BEFORE the limit: 'sap' = SAP syncs
+    (filename 'sap:sap', see upsert_orders), 'excel' = everything that is not
+    a SAP sync. Without it a SAP history card could only filter the newest
+    `limit` rows client-side and silently lose older SAP entries."""
+    if source is not None and source not in UPLOAD_AUDIT_SOURCES:
+        raise ValueError(f"source must be one of {', '.join(UPLOAD_AUDIT_SOURCES)}")
+    where = {None: "", "sap": "WHERE filename = 'sap:sap'",
+             "excel": "WHERE filename IS DISTINCT FROM 'sap:sap'"}[source]
+    sql = f"""
         SELECT batch_id, filename, row_count,
                inserted_count, updated_count, uploaded_at, warnings
         FROM upload_audit
+        {where}
         ORDER BY uploaded_at DESC
         LIMIT %s
     """
@@ -957,23 +970,33 @@ def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> lis
 _CONFLICT_LOOKBACK_CAP_HOURS = 30 * 24
 
 
+def _strict_lock_key(plant: str, machine_key: str) -> str:
+    """Advisory-lock text for a (plant, `_machine_match_key`) pair."""
+    return f"{plant}\x1f{machine_key}"
+
+
 def _lock_machines_for_strict_save(cur, items: list[dict], ids: list[str]) -> None:
     """Strict optimizer saves: serialise on every (plant, machine) the batch will
     touch -- the rows' current machines plus any MACHINE edit target -- using
     transaction-scoped advisory locks taken in sorted order, BEFORE the row
     FOR UPDATE locks, so two concurrent strict saves can neither both pass the
-    overlap scan against pre-commit snapshots nor deadlock each other."""
+    overlap scan against pre-commit snapshots nor deadlock each other. The lock
+    key uses the canonical `_machine_match_key` (case/whitespace-insensitive),
+    never the raw spelling, so 'M1' and 'm1' share one lock. Scope: this only
+    serialises strict saves against OTHER strict saves; a non-strict (manual)
+    save takes no advisory lock, so a strict save's overlap scan is not
+    protected from a concurrent manual save of the same machine."""
     cur.execute("SELECT id, plant, machine FROM orders WHERE id = ANY(%s)", (ids,))
     rows = cur.fetchall()
     plant_by_id = {r[0]: r[1] for r in rows}
-    keys = {(r[1], r[2]) for r in rows if r[1] and r[2]}
+    keys = {(r[1], _machine_match_key(r[2])) for r in rows if r[1] and r[2]}
     for it in items:
         target = _canonical_nullable_attribute(it.get("MACHINE")) if "MACHINE" in it else None
         plant = plant_by_id.get(it.get("id"))
         if target and plant:
-            keys.add((plant, target))
-    for plant, machine in sorted(keys):
-        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{plant}{machine}",))
+            keys.add((plant, _machine_match_key(target)))
+    for plant, machine_key in sorted(keys):
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (_strict_lock_key(plant, machine_key),))
 
 
 def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[dict]:
@@ -2820,7 +2843,11 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     if blank_pv_ids:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM orders WHERE id = ANY(%s) AND COALESCE(production_version, '') <> ''",
+                # Distribution children arrive blank on every re-upload (the
+                # aggregate row carries no PV for them), so counting them would
+                # raise this info warning on every unchanged distributed upload.
+                "SELECT COUNT(*) FROM orders WHERE id = ANY(%s) AND parent_production_order IS NULL"
+                " AND COALESCE(production_version, '') <> ''",
                 (blank_pv_ids,),
             )
             pv_kept_on_blank = int(cur.fetchone()[0])
