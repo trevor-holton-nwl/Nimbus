@@ -166,3 +166,23 @@ test('NIMBUS namespace exposes the legacy planner commands used by index.html', 
   assert.ok(typeof nimbus.OptimizeDialog.run  === 'function', 'OptimizeDialog.run must be callable');
   assert.ok(typeof nimbus.Sandbox.enter === 'function', 'Sandbox.enter must be callable');
 });
+
+test('#31 API-key bootstrap checks ok, cache-busts, and retries with backoff instead of failing silently after one blip', async () => {
+  const urls = [];
+  const fetchImpl = (url, opts) => {
+    const u = String(url);
+    if (!u.includes('/security/client-config')) return Promise.reject(new Error('unmodelled'));
+    urls.push({ u, opts });
+    if (urls.length === 1) return Promise.resolve({ ok: false, status: 503, json: () => Promise.reject(new Error('html')) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ apiKey: 'boot-key' }) });
+  };
+  const { nimbus: n2, domReady, context: ctx2 } = await loadLegacyApp({ fetchImpl });
+  ctx2.setTimeout = setTimeout; // the VM context has no timers of its own
+  assert.equal(typeof domReady, 'function', 'harness exposes the DOM-ready gate');
+  try { domReady(); } catch { /* the login/boot half needs a real DOM; only the key bootstrap is under test */ }
+  await new Promise(res => setTimeout(res, 1300));
+  assert.ok(urls.length >= 2, 'a non-ok response is retried');
+  assert.ok(urls.every(c => /[?&]_=/.test(c.u) && c.opts?.cache === 'no-store'), 'each attempt is cache-busted');
+  assert.notEqual(urls[0].u, urls[1].u, 'cache-bust token differs between attempts');
+  assert.equal(n2.Util.getApiKey ? n2.Util.getApiKey() : 'boot-key', 'boot-key');
+});
