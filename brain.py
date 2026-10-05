@@ -556,7 +556,10 @@ async def block_markdown_mw(request: Request, call_next):
 # unauthenticated by design). Starlette buffers a whole body before the route
 # runs, so the cap has to be enforced here on Content-Length; a chunked body
 # with no declared length is refused rather than buffered unbounded.
-_BODY_CAPS = {("POST", "/logs/frontend"): 256 * 1024, ("POST", "/audit/log"): 64 * 1024}
+# /logs/frontend: 1 MB (a 50-entry batch with 8 KB stacks legitimately exceeds 256 KB);
+# /logs/csp-report: unauthenticated, so tiny (reports are ~1 KB; the route reads <= 8 KB).
+_BODY_CAPS = {("POST", "/logs/frontend"): 1024 * 1024, ("POST", "/audit/log"): 64 * 1024,
+              ("POST", "/logs/csp-report"): 16 * 1024}
 
 
 @api.middleware("http")
