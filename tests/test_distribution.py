@@ -3634,3 +3634,37 @@ class TestBundle2ParentLinkIntegrity(_ReweightFixtureBase):
         entry = next(w for w in res["warnings"] if w.get("category") == "distribution")
         assert entry["level"] == "warn" and entry["sub_order_id_rows"]
         assert sub["production_order"] in entry["msg"]
+
+    # ---- D07 ----
+    def test_d07_ordinary_upload_overwrites_stale_parent_link_with_null(self, pg):
+        # Header purged/removed: the surviving bare sub-order must stop being machine-locked
+        # once SAP re-sends it as an ordinary order (plain overwrite, not coalesce).
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            conn.commit()
+        bare_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                        " parent_production_order, distribution_letter) VALUES (%s,%s,%s,%s,%s,%s,NULL)"
+                        " ON CONFLICT (id) DO UPDATE SET parent_production_order=EXCLUDED.parent_production_order,"
+                        " distribution_letter=NULL",
+                        (bare_id, self.ORD, self.MAT, self.L1, self.PLANT, self.ORD))
+            conn.commit()
+        self._upload(pg, [self._parent_row(machine=self.L1)])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT parent_production_order, distribution_letter FROM orders WHERE id=%s", (bare_id,))
+            assert cur.fetchone() == (None, None)
+
+    def test_d07_planned_children_carry_link_through_the_generic_upsert(self, pg):
+        # Crash window: children chunks committed, apply() never ran. The children must
+        # still carry their parent link + letter so read paths find them.
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE parent_production_order=%s", (self.ORD,))
+            cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            conn.commit()
+        pg.upsert_orders([self._parent_row()], batch_id=str(uuid.uuid4()), source="excel",
+                         filename="f.xlsx", plan_fn=distribution_data.plan, apply_fn=None)
+        kids = _snapshot_children(pg, self.PLANT, self.ORD)
+        assert len(kids) == 2 and all(k["distribution_letter"] for k in kids)

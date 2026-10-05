@@ -2295,9 +2295,10 @@ _UPSERT_SQL = """
         order_quantity, form_size, firming_indicator,
         planned_order_initial_quantity, reduced_quantity, order_category, order_type,
         bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
+        parent_production_order, distribution_letter,
         upload_batch_id, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
@@ -2370,6 +2371,11 @@ _UPSERT_SQL = """
         labor_hours                     = EXCLUDED.labor_hours,
         machine_hours                   = EXCLUDED.machine_hours,
         no_of_fte                       = EXCLUDED.no_of_fte,
+        -- Parent link + letter: plain overwrite (NOT coalesce). Distribution's
+        -- planned child rows carry them; every ordinary row sends NULL, so an
+        -- order whose header was purged is no longer machine-locked forever.
+        parent_production_order         = EXCLUDED.parent_production_order,
+        distribution_letter             = EXCLUDED.distribution_letter,
         upload_batch_id       = EXCLUDED.upload_batch_id,
         updated_at            = NOW()
     RETURNING id, (xmax = 0) AS inserted
@@ -2384,7 +2390,7 @@ _UPSERT_SQL = """
 # prt_01, prt_02, production_version, order_quantity, form_size, firming_indicator,
 # planned_order_initial_quantity, reduced_quantity, order_category, order_type,
 # bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
-# upload_batch_id.
+# parent_production_order, distribution_letter, upload_batch_id.
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
     "machine", "plant", "basic_start_date", "basic_finish_date",
@@ -2392,6 +2398,7 @@ _UPSERT_ROW_COLS = (
     "order_quantity", "form_size", "firming_indicator",
     "planned_order_initial_quantity", "reduced_quantity", "order_category", "order_type",
     "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
+    "parent_production_order", "distribution_letter",
 )
 
 
