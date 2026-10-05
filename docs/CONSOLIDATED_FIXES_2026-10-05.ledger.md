@@ -193,3 +193,15 @@ Verification: pytest on fresh nimbus_fix_be_final (schema.sql, ON_ERROR_STOP=1):
 | 9 | Mutation holes (nextAvailable bound, palette firm/undo, D28 pagehide, index keys, TM caps, setup-availability differential, _loadSeq, reload fallback, API-key !r.ok, #36 TZ, deterministic timers) | DONE | merged from fix/cr1005-audit-fe-a/-b |
 
 Notes: git stash is shared across worktrees; a stash collision lost one edit (re-applied) and left a stray backend/distribution/data.py hunk (reverted; patch in scratchpad).
+
+## Final verification (post senior audit)
+
+Merged fix/cr1005-audit-be then fix/cr1005-audit-fe (--no-ff). Only conflict: this ledger (kept both "Senior audit fix round" sections). backend/distribution/data.py is identical to the BE branch (no FE children_total hunk); store.mts UndoStack `_busy` present from FE; data/color_wheels/_audit_log.json untracked and gitignored (.gitignore:121).
+
+- npm run build ok; typecheck ok; lint 0 errors / 32 warnings; check:static-assets OK; check:legacy-surface no drift.
+- npm test (TZ unset): legacy 40/40, modules 1035/1035. Same with TZ=America/New_York: 40/40, 1035/1035.
+- ruff check .: all checks passed.
+- pytest on fresh nimbus_final2 (this worktree's schema.sql, ON_ERROR_STOP=1): 990 passed, 1 skipped (pre-existing #203 skip), 0 failed.
+- migrations/*.sql (33 top-level files) onto a DB from main's schema.sql, name order: pass 1 0 failures, pass 2 0 failures.
+- generate:api-types regenerated: no content diff in frontend/types/api-generated.d.mts.
+- Literal NUL scan of 437 tracked files: 0.
