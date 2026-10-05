@@ -134,7 +134,7 @@ interface LoadStats {
 interface CalendarService {
   beginRun(plant: string | null): void;
   endRun(): void;
-  nextAvailable(line: string, from: Date, durationMs: number): Date;
+  nextAvailable(line: string, from: Date, durationMs: number): Date | null;
   workWindow(line: string, date: Date): [Date, Date] | null;
 }
 

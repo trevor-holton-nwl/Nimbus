@@ -421,7 +421,13 @@ export const Alerts = {
       let newStart: Date;
       let changes: Partial<NimbusTask>;
       if (splitPolicy === 'never') {
-        newStart = Calendar.nextAvailable(line, searchFrom, dur);
+        const found = Calendar.nextAvailable(line, searchFrom, dur);
+        if (!found) {
+          // No slot (overlong order / closed line / nothing within 90 days): never move the order.
+          Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          return;
+        }
+        newStart = found;
         const newEnd = new Date(newStart.getTime() + dur);
         changes = { start_date: newStart, end_date: newEnd };
         if (task.scheduleSegments?.length && task.scheduleSegments.length >= 2) changes.scheduleSegments = [];
