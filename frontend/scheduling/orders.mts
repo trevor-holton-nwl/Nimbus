@@ -556,10 +556,14 @@ export const Table = {
             if (!rel.length) return '';
             const err = rel.some(a => a.sev === 'err');
             const color = err ? 'var(--err)' : 'var(--warn)';
-            return `<button onclick="NIMBUS.Table._showAlertPopup('${p.value}')"
-              title="Click to view alerts"
-              style="background:none;border:none;padding:0;cursor:pointer;color:${color};font-weight:600;font-size:inherit;font-family:inherit">
-              ⚐ ${rel.length}</button>`;
+            // DOM node (not an HTML string) so the task id never reaches an inline handler.
+            const taskId = String(p.value);
+            const btn = document.createElement('button');
+            btn.title = 'Click to view alerts';
+            btn.style.cssText = `background:none;border:none;padding:0;cursor:pointer;color:${color};font-weight:600;font-size:inherit;font-family:inherit`;
+            btn.textContent = `⚐ ${rel.length}`;
+            btn.addEventListener('click', () => Table._showAlertPopup(taskId));
+            return btn;
           }
         },
         { headerName: '📝', field: 'notes', width: 180, minWidth: 80,
@@ -1692,7 +1696,7 @@ export const Table = {
         <span id="nb-note-cnt">${cur.length}/500</span>
         <div class="nb-note-pop-btns">
           <button class="nb-note-cancel" onclick="NIMBUS.Table._closeNotePopover()">Cancel</button>
-          <button class="nb-note-save" onclick="NIMBUS.Table._saveNotePopover('${id}')">Save</button>
+          <button class="nb-note-save" data-note-id="${Util.escapeHtml(id)}">Save</button>
         </div>
       </div>`;
     document.body.appendChild(pop);
@@ -1718,6 +1722,9 @@ export const Table = {
     if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
     ta.addEventListener('input', () => {
       cnt.textContent = ta.value.length + '/500';
+    });
+    pop.querySelector<HTMLElement>('.nb-note-save')?.addEventListener('click', (ev) => {
+      Table._saveNotePopover((ev.currentTarget as HTMLElement).dataset.noteId ?? '');
     });
     ta.focus();
     ta.setSelectionRange(ta.value.length, ta.value.length);

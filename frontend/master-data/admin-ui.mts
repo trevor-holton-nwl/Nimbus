@@ -300,9 +300,7 @@ export const Plant = {
       const wh = plant.workHours[d];
       const time = wh ? `${ProdLines._fmtHour(wh[0])}–${ProdLines._fmtHour(wh[1])}` : Util.t('ui.off');
       const hrs = wh ? (() => { const h = wh[1] - wh[0]; return h % 1 === 0 ? `${h}h` : `${h.toFixed(1)}h`; })() : '—';
-      return `<div class="line-hours-pill ${wh ? 'on' : 'off'}" data-day="${d}"
-        onclick="NIMBUS.Plant._pillClick(${d})"
-        oncontextmenu="NIMBUS.Plant._pillRightClick(${d}, event)">
+      return `<div class="line-hours-pill ${wh ? 'on' : 'off'}" data-day="${d}">
         <span class="lhp-day">${dayLabels[d]}</span>
         <span class="lhp-time">${time}</span>
         <span class="lhp-hrs">${hrs}</span>
@@ -312,6 +310,11 @@ export const Plant = {
     }).join('');
 
     body.innerHTML = `<div class="line-hours-pills">${pillsHtml}</div>`;
+    body.querySelectorAll<HTMLElement>('.line-hours-pill').forEach(pill => {
+      const d = Number(pill.dataset.day);
+      pill.addEventListener('click', () => Plant._pillClick(d));
+      pill.addEventListener('contextmenu', (ev) => Plant._pillRightClick(d, ev));
+    });
 
     requestAnimationFrame(() => {
       const p = Store.plants[Store.selectedPlant!];
@@ -564,11 +567,14 @@ export const Plant = {
     list.innerHTML = blocks.map(b => `
       <div class="block-row" style="padding-left:6px;padding-right:6px;">
         <span class="ico">■</span>
-        <span class="reason">${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>
+        <span class="reason">${Util.escapeHtml(b.reason) || Util.t('ui.blackouts_label', {plural: ''})}</span>
         <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
-        <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" onclick="NIMBUS.Plant.removePlantBlock('${b.id}')">×</button>
+        <button class="btn btn-ghost sm plant-blk-remove" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" data-block-id="${Util.escapeHtml(b.id)}">×</button>
       </div>
     `).join('');
+    list.querySelectorAll<HTMLElement>('.plant-blk-remove').forEach(btn => {
+      btn.addEventListener('click', () => Plant.removePlantBlock(btn.dataset.blockId!));
+    });
     list.style.display = Plant._blocksCollapsed ? 'none' : '';
   },
 
@@ -616,19 +622,19 @@ export const Plant = {
               <div style="color:${timeColor};">${timeStr}</div>
             </div>`;
           }).join('');
-          const safeId = line.replace(/'/g, "\\'");
-          const plgVal = (ls.plGroup || '').replace(/"/g, '&quot;');
+          const plgVal = Util.escapeHtml(ls.plGroup || '');
+          const lineEsc = Util.escapeHtml(line);
           return `<tr style="border-bottom:1px solid var(--border,#f1f5f9);">
-            <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${line}</div></td>
+            <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${lineEsc}</div></td>
             <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}</td>
             <td style="padding:8px 12px;">
               <div style="display:flex;gap:6px;align-items:flex-start;">${schedCells}</div>
             </td>
             <td style="padding:8px 12px;">
-              <input type="text" class="input roster-plgroup-input" style="width:120px;font-size:12px;" value="${plgVal}" data-line="${line}" placeholder="—">
+              <input type="text" class="input roster-plgroup-input" style="width:120px;font-size:12px;" value="${plgVal}" data-line="${lineEsc}" placeholder="—">
             </td>
             <td style="padding:8px 12px;text-align:right;">
-              <button class="btn btn-ghost sm" onclick="NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);">Edit →</button>
+              <button class="btn btn-ghost sm roster-edit-line" data-line="${lineEsc}">Edit →</button>
             </td>
           </tr>`;
         }).join('')}
@@ -643,6 +649,18 @@ export const Plant = {
         NIMBUS!.MasterData!.syncLineSettings!(line, { plGroup: val });
         Toast.show(Util.t('toast.line_settings_updated'), 'success');
       };
+    });
+
+    roster.querySelectorAll<HTMLElement>('.roster-edit-line').forEach(editBtn => {
+      editBtn.addEventListener('click', () => {
+        const line = editBtn.dataset.line!;
+        NIMBUS!.App!.goto!('masterdata');
+        NIMBUS!.App!.gotoMasterSub!('lines');
+        setTimeout(() => {
+          const el = document.getElementById(`line-row-${line}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
+      });
     });
 
     const wrap = document.getElementById('plant-roster-wrap');

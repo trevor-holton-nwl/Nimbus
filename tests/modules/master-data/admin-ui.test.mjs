@@ -61,7 +61,7 @@ test('Plant exposes the generalized priority-list optimization API', () => {
 });
 
 test('Plant blackout list renders only blocks for the selected plant', () => {
-  const list = { innerHTML: '', style: {} };
+  const list = { innerHTML: '', style: {}, querySelectorAll: () => [] };
   const stats = { innerHTML: '' };
   const priorWindow = globalThis.window;
   const priorDocument = globalThis.document;
@@ -84,6 +84,17 @@ test('Plant blackout list renders only blocks for the selected plant', () => {
     assert.doesNotMatch(list.innerHTML, /5512-only/);
     assert.match(list.innerHTML, /1006-only/);
     assert.match(stats.innerHTML, /pbs-val">1</);
+
+    // H4 residual: a quote/angle-bracket-bearing reason or id must be escaped and
+    // never reach an inline handler.
+    Store.replacePlantBlocks([
+      { id: `x');alert(1);//"<b>`, plant: '1006', start, end, reason: '<img src=x onerror=alert(1)>' },
+    ], 'test');
+    Plant._renderBlocks();
+    assert.doesNotMatch(list.innerHTML, /<img/);
+    assert.doesNotMatch(list.innerHTML, /onclick=/);
+    assert.match(list.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
+    assert.match(list.innerHTML, /data-block-id="x&#39;\);alert\(1\);\/\/&quot;&lt;b&gt;"/);
   } finally {
     if (priorWindow === undefined) delete globalThis.window;
     else globalThis.window = priorWindow;

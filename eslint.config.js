@@ -68,6 +68,13 @@ module.exports = [
       '**/nimbus-full-audit.js',
       '**/emscripten_fetch_worker.js',
       'eslint.config.js',
+      // Compiled .mts twins are gitignored build output (every warning was counted twice).
+      // Only the hand-written, git-tracked frontend .mjs files are linted; keep this
+      // negation list in sync with `git ls-files "frontend/**/*.mjs"`.
+      'frontend/**/*.mjs',
+      '!frontend/master-data/_static-delivery-check.mjs',
+      '!frontend/scheduling/order-field-catalog.mjs',
+      '!frontend/setup/_static-delivery-check.mjs',
     ],
   },
   {
@@ -184,6 +191,18 @@ module.exports = [
       'no-undef': 'off',
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['warn', { args: 'none', ignoreRestSiblings: true }],
+    },
+  },
+  {
+    // R1: no ${} interpolation inside an inline on*="..." handler attribute (injection
+    // class from the H4 audit). Use data-* attributes + a delegated listener instead.
+    // Must stay `error`: lint:ci runs --quiet and would hide a warning.
+    files: ['frontend/**/*.mts', 'frontend/app.js', 'frontend/nimbus-intelligence.js'],
+    rules: {
+      'no-restricted-syntax': ['error', {
+        selector: 'TemplateElement[value.raw=/\\son[a-z]+="[^"]*$/]',
+        message: 'No ${} inside on*=; use data-* + addEventListener',
+      }],
     },
   },
   {
