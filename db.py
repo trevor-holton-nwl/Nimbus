@@ -1039,6 +1039,100 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     return conflicts
 
 
+_ORDER_ATTR_COLUMNS = {
+    "PRT_01": "prt_01",
+    "PRT_02": "prt_02",
+    "PRODUCTION_VERSION": "production_version",
+    "MACHINE": "machine",
+}
+_ORDER_UPDATE_BATCH = 500   # rows per UPDATE ... FROM (VALUES ...) statement
+
+
+def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
+    """One row's SET list as (literal SET fragments, parameterised columns,
+    parameter values). Rows with the same first two members share one batched
+    statement; a column a row did not set is never in its shape, so it is
+    never touched (and an unedited column never changes)."""
+    lits: list[str] = []
+    pars: list[tuple] = []     # (column, cast, expression over the VALUES column {v})
+    vals: list = []
+    if row["planning_status"] is not None:
+        pars.append(("planning_status", "text", "{v}"))
+        vals.append(row["planning_status"])
+        pars.append(("planning_reason", "jsonb", "{v}"))
+        vals.append(Jsonb(row["planning_reason"]) if row["planning_reason"] else None)
+    if row["queued"]:
+        lits.extend(["scheduled_start = NULL", "scheduled_end = NULL"])
+    if row["start"] is not None and not row["queued"]:
+        pars.append(("scheduled_start", "timestamp", "{v}"))
+        vals.append(row["start"])
+    if row["end"] is not None and not row["queued"]:
+        pars.append(("scheduled_end", "timestamp", "{v}"))
+        vals.append(row["end"])
+    if row["has_runtime"]:
+        pars.append(("run_time", "numeric", "{v}"))
+        vals.append(row["run_time"])
+    if row["manual_runtime_release"]:
+        lits.append("run_time_source = 'manual'")
+    if row["resolved_runtime"] is not None:
+        lits.append("run_time_source = 'routing'")
+        pars.append(("run_time_basis", "jsonb", "{v}"))
+        vals.append(Jsonb(row["resolved_runtime"]["basis"]))
+    if row["clear_runtime_mismatch"]:
+        lits.append("runtime_schedule_mismatch = FALSE")
+    for field, column in _ORDER_ATTR_COLUMNS.items():
+        if field in row["attrs"]:
+            pars.append((column, "text", "NULLIF({v}, '')"))
+            vals.append(row["attrs"][field])
+    # A child replacement still must touch the parent row so xmin remains the
+    # aggregate's one optimistic-lock token.
+    lits.append("updated_at = NOW()")
+    return tuple(lits), tuple(pars), vals
+
+
+def _apply_order_updates_batched(cur, update_rows: list[dict], versions: dict) -> None:
+    """P6: persist `update_rows` (already validated, stale-checked and
+    FOR UPDATE-locked by the caller) with one `UPDATE ... FROM (VALUES ...)`
+    per distinct SET-shape instead of one UPDATE per row. Per-row
+    `RETURNING xmin` goes into `versions`; segment replacement for rows that
+    carry segments is one DELETE + one executemany. Any error propagates (the
+    caller rolls the whole transaction back, exactly as the per-row loop did)."""
+    groups: dict[tuple, list[tuple]] = {}
+    for row in update_rows:
+        lits, pars, vals = _order_update_shape(row)
+        groups.setdefault((lits, pars), []).append((row["id"], vals))
+    for (lits, pars), members in groups.items():
+        for i in range(0, len(members), _ORDER_UPDATE_BATCH):
+            chunk = members[i:i + _ORDER_UPDATE_BATCH]
+            set_sql = ", ".join(
+                list(lits)
+                + [f"{col} = {expr.format(v='v.c' + str(n))}" for n, (col, _cast, expr) in enumerate(pars)]
+            )
+            row_ph = "(" + ", ".join(["%s::text"] + [f"%s::{cast}" for _col, cast, _expr in pars]) + ")"
+            col_names = ", ".join(["id"] + [f"c{n}" for n in range(len(pars))])
+            params: list = []
+            for rid, vals in chunk:
+                params.append(rid)
+                params.extend(vals)
+            cur.execute(
+                f"UPDATE orders o SET {set_sql} FROM (VALUES {', '.join([row_ph] * len(chunk))}) AS v({col_names})"
+                " WHERE o.id = v.id RETURNING o.id, o.xmin::text::bigint AS new_version",
+                params,
+            )
+            for rid, rver in cur.fetchall():
+                versions[rid] = int(rver)
+    seg_rows = [row for row in update_rows if row["segments"] is not None]
+    if seg_rows:
+        cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", ([r["id"] for r in seg_rows],))
+        inserts = [(r["id"], seg["sequence"], seg["start"], seg["end"]) for r in seg_rows for seg in r["segments"]]
+        if inserts:
+            cur.executemany(
+                "INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                " VALUES (%s, %s, %s, %s)",
+                inserts,
+            )
+
+
 def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None,
                            *, atomic_optimizer: bool = False,
                            strict_conflicts: bool = False) -> dict:
@@ -1454,66 +1548,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
 
         if update_rows:
             try:
-                for row in update_rows:
-                    sets: list[str] = []
-                    params: list = []
-                    if row["planning_status"] is not None:
-                        sets.extend(["planning_status = %s", "planning_reason = %s"])
-                        params.extend([row["planning_status"], Jsonb(row["planning_reason"]) if row["planning_reason"] else None])
-                    if row["queued"]:
-                        sets.extend(["scheduled_start = NULL", "scheduled_end = NULL"])
-                    if row["start"] is not None and not row["queued"]:
-                        sets.append("scheduled_start = %s")
-                        params.append(row["start"])
-                    if row["end"] is not None and not row["queued"]:
-                        sets.append("scheduled_end = %s")
-                        params.append(row["end"])
-                    if row["has_runtime"]:
-                        sets.append("run_time = %s")
-                        params.append(row["run_time"])
-                    if row["manual_runtime_release"]:
-                        sets.append("run_time_source = 'manual'")
-                    if row["resolved_runtime"] is not None:
-                        sets.extend(["run_time_source = 'routing'", "run_time_basis = %s"])
-                        params.append(Jsonb(row["resolved_runtime"]["basis"]))
-                    if row["clear_runtime_mismatch"]:
-                        sets.append("runtime_schedule_mismatch = FALSE")
-                    attr_columns = {
-                        "PRT_01": "prt_01",
-                        "PRT_02": "prt_02",
-                        "PRODUCTION_VERSION": "production_version",
-                        "MACHINE": "machine",
-                    }
-                    for field, column in attr_columns.items():
-                        if field in row["attrs"]:
-                            sets.append(f"{column} = NULLIF(%s, '')")
-                            params.append(row["attrs"][field])
-                    # A child replacement still must touch the parent row so
-                    # xmin remains the aggregate's one optimistic-lock token.
-                    sets.append("updated_at = NOW()")
-                    params.append(row["id"])
-                    cur.execute(
-                        f"UPDATE orders SET {', '.join(sets)} WHERE id = %s "
-                        "RETURNING id, xmin::text::bigint AS new_version",
-                        params,
-                    )
-                    rid, rver = cur.fetchone()
-                    versions[rid] = int(rver)
-
-                    if row["segments"] is not None:
-                        cur.execute("DELETE FROM order_schedule_segments WHERE order_id = %s", (row["id"],))
-                        if row["segments"]:
-                            cur.executemany(
-                                """
-                                INSERT INTO order_schedule_segments
-                                    (order_id, segment_no, scheduled_start, scheduled_end)
-                                VALUES (%s, %s, %s, %s)
-                                """,
-                                [
-                                    (row["id"], segment["sequence"], segment["start"], segment["end"])
-                                    for segment in row["segments"]
-                                ],
-                            )
+                _apply_order_updates_batched(cur, update_rows, versions)
                 cur.execute("SAVEPOINT conflict_scan")
                 try:
                     conflicts = _scan_conflicts_for_rows(cur, update_rows, eff)

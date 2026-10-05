@@ -48,10 +48,10 @@ def test_pv_edit_uses_authoritative_runtime_in_same_write(monkeypatch):
     }])
     assert result["invalid_ids"] == []
     assert result["persisted"] == 1
-    writes = [(query, params) for query, params in cursor.executed if query.startswith("UPDATE orders SET")]
+    writes = [(query, params) for query, params in cursor.executed if query.startswith("UPDATE orders o SET")]
     assert len(writes) == 1
     assert "run_time_source = 'routing'" in writes[0][0]
-    assert "run_time_basis = %s" in writes[0][0]
+    assert "run_time_basis = v.c" in writes[0][0]
     assert 9 in writes[0][1]
     assert result["versions"] == {"pv": 999}
 

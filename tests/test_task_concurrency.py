@@ -103,6 +103,50 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert persisted_rows[0]["start_date"] == new_start_1.strftime("%Y-%m-%dT%H:%M:%S")
         assert persisted_rows[0]["end_date"] == new_end_1.strftime("%Y-%m-%dT%H:%M:%S")
 
+    def test_heterogeneous_batch_writes_only_each_rows_own_columns(self, pg):
+        """P6 (#26): rows with different SET shapes are batched per shape; each
+        row still gets its own new xmin back, and neither an unedited row nor
+        a column a row did not set is touched."""
+        db_ = pg
+        oid3 = db_.make_id(self.ORDER + "_C", self.MATERIAL)
+        oid4 = db_.make_id(self.ORDER + "_D", self.MATERIAL)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            for oid, po in ((oid3, self.ORDER + "_C"), (oid4, self.ORDER + "_D")):
+                cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+                cur.execute(
+                    "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                    " basic_finish_date, prt_01) VALUES (%s,%s,%s,%s,%s,%s,%s,'KEEP')",
+                    (oid, po, self.MATERIAL, self.MACHINE, self.PLANT, self.start, self.end),
+                )
+            conn.commit()
+        try:
+            def snap(oid):
+                with db_._pool.connection() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT xmin::text::bigint, scheduled_start, scheduled_end, run_time, prt_01, prt_02"
+                                " FROM orders WHERE id = %s", (oid,))
+                    return cur.fetchone()
+
+            before3 = snap(oid3)
+            s1, e1 = self.start + dt.timedelta(days=2), self.end + dt.timedelta(days=2)
+            res = db_.update_task_dates_bulk([
+                {"id": self.oid, "start": s1, "end": e1, "PRT_01": "P1"},
+                {"id": oid4, "start": s1 + dt.timedelta(days=1), "end": e1 + dt.timedelta(days=1), "PRT_01": "P4"},
+                {"id": self.oid2, "RUN_TIME": 7, "PRT_02": "Q2"},
+            ])
+            assert res["persisted"] == 3 and res["invalid_ids"] == [] and res["stale"] == []
+            for oid in (self.oid, oid4, self.oid2):
+                assert res["versions"][oid] == snap(oid)[0], "versions carry each row's own new xmin"
+            assert snap(oid3) == before3, "an unedited row must not be touched (no xmin bump)"
+            a, b, c = snap(self.oid), snap(oid4), snap(self.oid2)
+            assert (a[1], a[2], a[4]) == (s1, e1, "P1")
+            assert (b[1], b[2], b[4]) == (s1 + dt.timedelta(days=1), e1 + dt.timedelta(days=1), "P4")
+            assert (c[1], c[2], c[3], c[5]) == (None, None, 7, "Q2")   # dates and prt_01 never set for this row
+            assert a[3] is None and a[5] is None   # run_time / prt_02 not set for the date-only shape
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = ANY(%s)", ([oid3, oid4],))
+                conn.commit()
+
     def test_machine_edit_to_unknown_machine_is_rejected_with_reason(self, pg):
         """Plan Part 2 #27: a MACHINE the plant neither registers nor already
         holds orders on is rejected per item (200 envelope, rejection reason)."""

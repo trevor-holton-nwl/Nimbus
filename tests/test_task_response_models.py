@@ -186,7 +186,7 @@ class _FakeSegmentCursor:
     """Minimal stand-in for a psycopg cursor covering exactly the statements
     update_task_dates_bulk issues for a single-item, segments-only batch: the
     `FOR UPDATE OF o` eff-row SELECT, the B3 review-fix plants floor SELECT,
-    and the per-row `UPDATE orders ... RETURNING`. Dispatches on a substring
+    and the batched `UPDATE orders o SET ... FROM (VALUES ...) RETURNING`. Dispatches on a substring
     of the SQL text, mirroring test_master_data_setup_policy.py's fake-cursor
     approach (no live Postgres needed)."""
 
@@ -207,8 +207,12 @@ class _FakeSegmentCursor:
             self._pending = ("all", [(0,)])   # conflict-scan lookback widening
         elif "SELECT machine FROM machine WHERE plant" in sql:
             self._pending = ("all", [("M1",), ("M2",)])   # known machines for the MACHINE-edit check
-        elif sql.strip().startswith("UPDATE orders SET") and "RETURNING" in sql:
-            self._pending = ("one", (params[-1], 999))
+        elif sql.strip().startswith("UPDATE orders o SET") and "RETURNING" in sql:
+            # P6 batched form: one VALUES row per id; each row's params are
+            # [id, <its parameterised columns>], same stride for the whole group.
+            n_rows = sql.count("(%s::text")
+            stride = len(params) // n_rows
+            self._pending = ("all", [(params[i * stride], 999) for i in range(n_rows)])
         else:
             self._pending = ("all", [])
 
