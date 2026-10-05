@@ -368,6 +368,47 @@ class TestRoutingEditTransactions:
         row = self._row(pg)
         assert row["run_time"] == Decimal(6) and row["run_time_source"] == "routing"
 
+    def test_reupload_batch_rederives_sap_order_sourced_row(self, pg):
+        # A 'sap_order' row is neither routing-sourced, held nor NULL, so ONLY the
+        # batch clause in _load_orders can pick it up (a routing row is always
+        # reloaded, which let the test above survive removing that clause).
+        self._set(pg, "UPDATE orders SET run_time_source='sap_order', run_time=3 WHERE id=%s", (self.ids[0],))
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)])
+        row = self._row(pg)
+        assert row["run_time"] == Decimal(6) and row["run_time_source"] == "routing"
+
+    def test_failed_resolve_is_repaired_by_explicit_recompute(self, pg):
+        from types import SimpleNamespace
+        from backend.routing.routes import recompute_plant
+
+        def boom(plant, *, conn, batch_id=None):
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1/0")
+
+        self._set(pg, "UPDATE orders SET run_time_source='sap_order', run_time=3 WHERE id=%s", (self.ids[0],))
+        res = pg.upsert_orders([self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)],
+                               batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx", resolve_fn=boom)
+        assert res["status"] == "ok"
+        assert self._row(pg)["run_time"] == Decimal(3)  # stale: qty doubled, duration not re-derived
+        # A routine (non-batch) resolve does not reload a plain 'sap_order' row ...
+        resolver.resolve_orders(self.PLANT)
+        assert self._row(pg)["run_time"] == Decimal(3)
+        # ... the explicit admin recompute re-derives every non-manual order.
+        recompute_plant(self.PLANT, SimpleNamespace(state=SimpleNamespace()), allowed_plants=[self.PLANT])
+        row = self._row(pg)
+        assert row["run_time"] == Decimal(6) and row["run_time_source"] == "routing"
+
+    def test_unresolvable_non_manual_order_is_held_not_kept_as_legacy(self, pg):
+        # Routing cannot resolve (no production version row for 9999) and there is no
+        # machine_hours: a stored non-manual run time must not survive as 'legacy'.
+        self._set(pg, "UPDATE orders SET run_time_source='sap_order', run_time=3, production_version='9999'"
+                      " WHERE id=%s", (self.ids[0],))
+        resolver.resolve_orders(self.PLANT, full=True)
+        row = self._row(pg)
+        assert row["planning_status"] == "needs_planning"
+        assert row["planning_reason"]["code"] == "runtime_unknown"
+        assert row["run_time_source"] == "sap_order"
+
     def test_reupload_keeps_manual_run_time(self, pg):
         self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
         self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)])

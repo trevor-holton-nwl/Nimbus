@@ -133,7 +133,7 @@
     },
     {
       "name": "deleted_op_filtering_falls_to_legacy_fallback",
-      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 4.25},
+      "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 4.25, "run_time_source": "manual"},
       "production_versions": [
         {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
       ],
@@ -197,7 +197,7 @@
       "expected": {"status": "fallback_sap_order", "run_time": 6.0, "run_time_source": "sap_order", "reason_code": "pv_expired"}
     },
     {
-      "name": "pv_expired_after_valid_to_falls_to_legacy_fallback",
+      "name": "pv_expired_after_valid_to_holds_non_manual_stored_run_time",
       "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": "2027-01-01", "machine_hours": null, "run_time": 5.5},
       "production_versions": [
         {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": "2026-01-01", "valid_to": "2026-12-31", "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
@@ -207,7 +207,7 @@
       ],
       "machine_workcenter": {"M1": "WC1"},
       "rules": {},
-      "expected": {"status": "fallback_legacy", "run_time": 5.5, "run_time_source": "legacy", "reason_code": "pv_expired"}
+      "expected": {"status": "held", "reason_code": "pv_expired"}
     },
     {
       "name": "pv_expired_no_fallback_data_holds",
@@ -280,13 +280,13 @@
       "expected": {"status": "fallback_sap_order", "run_time": 3.3, "run_time_source": "sap_order", "reason_code": "pv_not_found"}
     },
     {
-      "name": "pv_not_found_falls_to_legacy_fallback",
+      "name": "pv_not_found_holds_non_manual_stored_run_time",
       "order": {"plant": "P1", "material_number": "MAT1", "production_version": "9999", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 2.2},
       "production_versions": [],
       "operations": [],
       "machine_workcenter": {"M1": "WC1"},
       "rules": {},
-      "expected": {"status": "fallback_legacy", "run_time": 2.2, "run_time_source": "legacy", "reason_code": "pv_not_found"}
+      "expected": {"status": "held", "reason_code": "pv_not_found"}
     },
     {
       "name": "pv_not_found_no_fallback_data_holds",
@@ -298,7 +298,7 @@
       "expected": {"status": "held", "reason_code": "pv_not_found"}
     },
     {
-      "name": "no_machine_falls_to_legacy_fallback",
+      "name": "no_machine_holds_non_manual_stored_run_time",
       "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": null, "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 1.1},
       "production_versions": [
         {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
@@ -308,7 +308,7 @@
       ],
       "machine_workcenter": {},
       "rules": {},
-      "expected": {"status": "fallback_legacy", "run_time": 1.1, "run_time_source": "legacy", "reason_code": "no_machine"}
+      "expected": {"status": "held", "reason_code": "no_machine"}
     },
     {
       "name": "workcenter_unmapped_falls_to_sap_order_fallback",
@@ -348,7 +348,7 @@
       "expected": {"status": "fallback_sap_order", "run_time": 8.8, "run_time_source": "sap_order", "reason_code": "zero_runtime"}
     },
     {
-      "name": "zero_runtime_falls_to_legacy_fallback",
+      "name": "zero_runtime_holds_non_manual_stored_run_time",
       "order": {"plant": "P1", "material_number": "MAT1", "production_version": "0001", "machine": "M1", "order_quantity": 1000, "basic_start_date": null, "machine_hours": null, "run_time": 9.9},
       "production_versions": [
         {"plant": "P1", "material_id": "MAT1", "production_version": "0001", "valid_from": null, "valid_to": null, "task_list_type": "1", "routing_group": "GRP1", "group_counter": "01", "lot_size_from": null, "lot_size_to": null}
@@ -358,7 +358,7 @@
       ],
       "machine_workcenter": {"M1": "WC1"},
       "rules": {},
-      "expected": {"status": "fallback_legacy", "run_time": 9.9, "run_time_source": "legacy", "reason_code": "zero_runtime"}
+      "expected": {"status": "held", "reason_code": "zero_runtime"}
     },
     {
       "name": "worked_example_two_ops_different_categories_5_4",

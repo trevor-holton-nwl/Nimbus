@@ -208,8 +208,8 @@ def _within_validity(basic_start, valid_from, valid_to) -> bool:
 def _fallback(order: dict, reason_code: str) -> dict:
     """§5.2's fallback order, used whenever steps 2-8 fail: (1) the order
     file's machine-hours value, always read as machine time, source
-    'sap_order'; (2) the order's existing run_time, source 'legacy'; (3)
-    otherwise hold in Needs Planning with the real failing step recorded.
+    'sap_order'; (2) a MANUAL order's existing run_time, retained as 'legacy'
+    (never any other stored value -- it may be stale); (3) otherwise hold in Needs Planning with the real failing step recorded.
     Step 1 (a missing production version) never reaches this function --
     resolve_one returns its own hold directly for that case, per D4."""
     machine_hours = order.get("machine_hours")
@@ -221,7 +221,10 @@ def _fallback(order: dict, reason_code: str) -> dict:
             "reason_code": reason_code,
         }
     existing_run_time = order.get("run_time")
-    if existing_run_time:
+    # Only a planner-entered (manual) run time is retained when routing cannot
+    # resolve. Any other stored value may be stale (quantity or routing moved
+    # on), so it is held (runtime_unknown) instead of silently kept as 'legacy'.
+    if existing_run_time and order.get("run_time_source") == "manual":
         return {
             "status": "fallback_legacy",
             "run_time": existing_run_time,
@@ -520,7 +523,8 @@ def _load_machine_workcenter(cur, plant: str) -> dict:
     return dict(cur.fetchall())
 
 
-def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None) -> list[dict]:
+def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
+                 full: bool = False) -> list[dict]:
     """The set of orders one resolve run considers (§4 item 4's "resolve
     after distribution" ordering is the CALLER's concern, not this query's --
     resolve_orders is called per-plant on demand, over whatever rows exist
@@ -539,7 +543,22 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None)
     routing plant (db._UPSERT_SQL; SAP's value is nulled before the write), so
     an order whose quantity just changed is neither held, routing-sourced nor
     run_time-NULL and would otherwise keep a stale duration.
+
+    `full=True` (the explicit /routing/{plant}/recompute admin action) loads
+    EVERY non-manual order of the plant, so an upload whose post-upload resolve
+    failed (stale kept run_time on a 'sap_order'/'legacy'/NULL-source row) is
+    always repaired by a recompute.
     """
+    if full:
+        cur.execute(
+            "SELECT id, plant, material_number, production_version, machine, order_quantity,"
+            " basic_start_date, run_time, run_time_source, run_time_basis, machine_hours,"
+            " planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+            " FROM orders WHERE plant = %s AND run_time_source IS DISTINCT FROM 'manual'",
+            (plant,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
     cur.execute(
         "SELECT id, plant, material_number, production_version, machine, order_quantity,"
         " basic_start_date, run_time, run_time_source, run_time_basis, machine_hours,"
@@ -735,7 +754,7 @@ def _new_report(is_cutover: bool) -> dict:
     return report
 
 
-def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None) -> dict:
+def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False) -> dict:
     """Does the real work of `resolve_orders` on an already-open connection;
     never commits (that's `resolve_orders`' job -- either its own, for a
     connection it opened itself, or the caller's, for one it was given)."""
@@ -771,7 +790,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None) -> di
 
         report = _new_report(is_cutover)
 
-        orders = _load_orders(cur, plant, is_cutover, batch_id)
+        orders = _load_orders(cur, plant, is_cutover, batch_id, full)
         if not orders:
             return report
 
@@ -829,7 +848,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None) -> di
     return report
 
 
-def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None) -> dict:
+def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False) -> dict:
     """§5's thin DB wrapper -- the shape a later task wires into
     `db.upsert_orders`'s `resolve_fn` seam.
 
@@ -842,11 +861,12 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None) -> dic
 
     `batch_id` (db.upsert_orders' post-upload call) additionally re-derives
     every non-manual order of that upload batch -- see `_load_orders`.
+    `full=True` (explicit recompute) re-derives every non-manual order.
     """
     if conn is not None:
-        return _resolve_orders_on_conn(plant, conn, batch_id)
+        return _resolve_orders_on_conn(plant, conn, batch_id, full)
     with _pool.connection() as new_conn:
-        report = _resolve_orders_on_conn(plant, new_conn, batch_id)
+        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full)
         new_conn.commit()
         return report
 
