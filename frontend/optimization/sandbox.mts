@@ -84,7 +84,14 @@ export const Sandbox = {
           plants:      Util.clone(Store.plants),
           plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
         };
-        Store.setTasks(snap.tasks, 'undo');
+        // Tasks go through the UndoStack.restoreTasks path (updateMany source 'undo', LIVE
+        // row_version): the restored ids become dirty, so the next save pushes the revert
+        // to the server instead of leaving the promoted schedule persisted. A wholesale
+        // setTasks() reset dirty tracking and left the revert local-only. Tasks the
+        // scenario created are dropped locally, as before.
+        const snapIds = new Set(snap.tasks.map((t) => String(t.id)));
+        for (const t of Store.tasksArr) if (!snapIds.has(String(t.id))) Store.removeTask(t.id, 'undo');
+        UndoStack.restoreTasks(snap.tasks.map((t) => Util.clone(t)));
         Store.replaceBlocks(snap.blocks, 'undo');
         Store.replaceCalendars(snap.calendars, 'undo');
         Store.replacePlants(snap.plants, 'undo');
