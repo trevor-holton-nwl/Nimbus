@@ -154,6 +154,8 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-18-sap-workcenter-allow-unconfigured.sql",
         "2026-09-25-routing-production-version-backfill.sql",
         "2026-09-24-routing-production-version-structure.sql",
+        "2026-09-25-orders-run-time-bounds.sql",
+        "2026-09-26-orders-run-time-bounds-validate.sql",
         "2026-10-01-order-distribution-plant-start-index.sql",
     }
     all_names = {

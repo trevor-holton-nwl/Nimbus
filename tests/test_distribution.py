@@ -3319,16 +3319,16 @@ class TestChildUpsertRunTimeSourceGuard(_ReweightFixtureBase):
     @pytest.mark.parametrize("source", ["routing", "manual"])
     def test_guarded_source_keeps_its_existing_run_time(self, pg, source):
         # 20.0h at 60% would otherwise apportion L1 to 12.0h -- a real change
-        # from the 999.0h sentinel, so the WHERE clause fires and the CASE is
+        # from the 99.0h sentinel, so the WHERE clause fires and the CASE is
         # actually exercised, not skipped as a no-op.
-        self._set_run_time_source(pg, self.L1, source, 999.0)
+        self._set_run_time_source(pg, self.L1, source, 99.0)
         self._reingest_run_time(pg, 20.0)
-        assert self._l1_run_time(pg) == pytest.approx(999.0)
+        assert self._l1_run_time(pg) == pytest.approx(99.0)
 
     @pytest.mark.parametrize("source", ["legacy", "distributed", "sap_order", None])
     def test_unguarded_source_gets_refreshed_to_the_new_apportioned_value(self, pg, source):
         if source is not None:
-            self._set_run_time_source(pg, self.L1, source, 999.0)
+            self._set_run_time_source(pg, self.L1, source, 99.0)
         self._reingest_run_time(pg, 20.0)  # 60% of 20.0h = 12.0h
         assert self._l1_run_time(pg) == pytest.approx(12.0)
 

@@ -6,9 +6,10 @@ docs/architecture/domain-refactor-plan.md §4. These carry the `response_model=`
 contracts pinned by FastAPI's own runtime validation — field/type shapes are
 byte-identical to the originals.
 """
+import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # =========================
@@ -252,6 +253,24 @@ class TaskDateUpdate(BaseModel):
     force: bool = False
     planning_status: str | None = None
     planning_reason: dict[str, Any] | None = None
+
+    @field_validator("RUN_TIME")
+    @classmethod
+    def _run_time_must_be_finite_and_bounded(cls, value: float | None) -> float | None:
+        """H8: an unvalidated RUN_TIME (e.g. NaN from a crafted request) reaches
+        SQL interval arithmetic in db.py (`_EFF_END_SQL` et al.) and crashes
+        `GET /tasks`/`/tasks/refresh`/the save-lock query for the whole plant.
+        Bounds mirror the DB-level CHECK constraint added (as NOT VALID, then
+        validated by a later, separate file) in
+        migrations/2026-09-25-orders-run-time-bounds.sql +
+        migrations/2026-09-26-orders-run-time-bounds-validate.sql, which is
+        the backstop for the separate Excel/SAP ingest write path (db.py's
+        bulk upsert) that this pydantic model never sees."""
+        if value is None:
+            return value
+        if not math.isfinite(value) or value < 0 or value >= 168:
+            raise ValueError("RUN_TIME must be a finite number of hours in [0, 168)")
+        return value
 
 
 class TasksUpdatePayload(BaseModel):

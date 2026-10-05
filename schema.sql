@@ -96,6 +96,32 @@ ALTER TABLE orders ADD CONSTRAINT chk_orders_sched_range
     CHECK (scheduled_start IS NULL OR scheduled_end IS NULL OR scheduled_end > scheduled_start)
     NOT VALID;
 
+-- H8 (2026-09-25): bound run_time so a non-finite/out-of-range value (e.g. a
+-- crafted NaN RUN_TIME, or a bad SAP/Excel ingest row — both bypass the API's
+-- pydantic model) can never reach db.py's SQL interval arithmetic and crash a
+-- plant's board. Postgres's float/numeric total ordering (NaN sorts greater
+-- than Infinity) makes this two-sided bound reject NaN and +/-Infinity with
+-- no separate isfinite-style check.
+--
+-- schema.sql is the always-current, fresh-bootstrap end state (an empty
+-- `orders` table on a brand-new database), so this is a single, plain
+-- validating CHECK -- no NOT VALID/VALIDATE CONSTRAINT split needed here;
+-- that two-step lock-avoidance pattern only matters for the live, large,
+-- actively-written `orders` table on Azure, which is why the deploy path
+-- (migrations/2026-09-25-orders-run-time-bounds.sql +
+-- migrations/2026-09-26-orders-run-time-bounds-validate.sql) splits it into
+-- two separate files/transactions instead.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'
+  ) THEN
+    ALTER TABLE orders
+      ADD CONSTRAINT chk_orders_run_time_bounds
+      CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 168));
+  END IF;
+END $$;
+
 -- Productive schedule pieces for a logical order. No segment is individually
 -- addressable by the API: callers replace the complete ordered aggregate while
 -- the parent orders.xmin remains the optimistic-concurrency token.

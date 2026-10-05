@@ -1248,3 +1248,66 @@ field (`1085` is `["colorWheel"]` only) — the capability was safe to use the e
 `POST /master-data/plants/{plant}/constraints` (tracked further up this file), and no plant has actually
 turned on a tooling-based signature or priority-list ranking yet — the data and code both support it,
 turning it on for a real plant is a product decision, not an engineering one.
+
+## `orders.run_time` bound constraint — pre-deploy data check needed (2026-09-25, H8)
+
+`migrations/2026-09-25-orders-run-time-bounds.sql` adds a `NOT VALID` CHECK constraint bounding
+`orders.run_time` to `[0, 168)` hours and rejecting `NaN`/`Infinity`. The constraint exists
+specifically because an unvalidated `RUN_TIME` was reaching SQL interval arithmetic as `NaN`/
+out-of-range and crashing `/tasks` — which means there's a real chance the live Azure `orders` table
+already holds an offending row.
+
+**Two separate files, two separate transactions (Wave-0 final review, Finding 1).** The
+`VALIDATE CONSTRAINT` step lives in its own, later-dated file —
+`migrations/2026-09-26-orders-run-time-bounds-validate.sql` — not in the same file as the
+`ADD CONSTRAINT ... NOT VALID` step. This repo's deploy runner
+(`.claude/skills/promote-azure/scripts/apply-migrations.ps1`, and its `.agents/` mirror) applies each
+migration **file** in its own `--single-transaction` — one transaction per file, not one per logical
+migration. Putting both steps in one file would have meant the `ADD CONSTRAINT NOT VALID` step's heavy
+table lock stayed held through the *entire* `VALIDATE CONSTRAINT` scan too (same transaction),
+defeating the whole point of the two-step pattern, and a `VALIDATE CONSTRAINT` failure would have
+rolled back the `ADD CONSTRAINT` right along with it, leaving no constraint in place at all.
+Splitting them into two files means:
+
+- The `2026-09-25-...-bounds.sql` file's `ACCESS EXCLUSIVE` lock is brief — released the moment
+  *that file's own* transaction commits, not held through the later validation scan.
+- The constraint **does** stay in place blocking new bad writes from the moment
+  `2026-09-25-...-bounds.sql` commits, regardless of whether the later validate file ever succeeds.
+- If `2026-09-26-...-validate.sql` fails (existing data violates the bound), only **that file**
+  needs to be re-run after data cleanup — not the whole pair.
+
+(Naming note: the validate file is intentionally dated `2026-09-26`, not
+`2026-09-25-orders-run-time-bounds-validate.sql` — the runner sorts filenames with plain
+`Sort-Object Name`, and `-` (0x2D) sorts *before* `.` (0x2E) in ASCII, so a same-day `-validate` suffix
+would have sorted *before* the base file it depends on. A later calendar date avoids that trap.)
+
+**Before promoting either migration to Azure**, run this against the live DB to check for existing
+violations:
+
+```sql
+SELECT production_order, run_time
+FROM orders
+WHERE run_time IS NOT NULL
+  AND (run_time < 0 OR run_time >= 168 OR run_time != run_time);
+```
+
+(`run_time != run_time` is the standard SQL idiom for detecting `NaN`, which is otherwise not equal to
+itself.) Clean up any offending rows first, or be prepared for `2026-09-26-orders-run-time-bounds-validate.sql`
+to fail — that failure is non-destructive: the `NOT VALID` constraint from the other file is already in
+place and keeps blocking new bad writes even while validation hasn't completed, so a failed validate
+just means manual data cleanup is needed before re-running that one file, not a rollback of either.
+
+**Also check realistic magnitude, not just violations (Wave-0 final review, Finding 3).** The query
+above only finds rows that already violate the `168`-hour bound. Before promoting, also check the
+*largest* actual `run_time` in a recent real SAP/Excel order file (not synthetic test data) — if
+legitimate production runs are close to or exceed 168 hours, the bound itself needs revisiting before
+this constraint ever reaches production, not just a data cleanup.
+
+**Deferred follow-up (Finding 3, documented not fixed in this pass):** this constraint can fail an
+entire batch, not just one bad row. `upsert_orders`' Excel/SAP ingest path commits in 500-row chunks —
+one row with an out-of-bound `run_time` aborts its whole chunk, leaving a partial upload. The routing
+resolver's `_round_to_minute`/hours-computation path has the same latent exposure for a whole
+`resolve_orders` batch (latent today since no plant has routing switched on). Per-row
+rejection/warning — instead of whole-batch/whole-chunk failure — should eventually be added to both
+paths so one bad row doesn't abort an entire upload or resolve batch. Not implemented here; recorded
+as follow-up work for whoever picks up ingest/resolver hardening next.

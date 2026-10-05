@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import pytest
+from psycopg import errors as pg_errors
 
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
@@ -694,3 +695,111 @@ def test_parent_order_and_distribution_letter_are_read_only():
     assert "DISTRIBUTION_LETTER" not in update_model_fields, (
         "DISTRIBUTION_LETTER must never be in TaskDateUpdate (write model) — it is read-only"
     )
+
+
+# ---------------------------------------------------------------------------
+# H8: RUN_TIME must be finite and bounded, at both the model layer and the
+# database layer (the DB constraint is the backstop for Excel/SAP ingest,
+# which writes run_time through db.py's bulk upsert — a path this pydantic
+# model never sees).
+# ---------------------------------------------------------------------------
+from math import inf, nan  # noqa: E402
+
+from pydantic import ValidationError  # noqa: E402
+
+
+@pytest.mark.parametrize("value", [nan, inf, -inf, -1, 168, 200])
+def test_task_date_update_run_time_rejects_non_finite_or_out_of_range_values(value):
+    """A crafted RUN_TIME of NaN reaches SQL interval arithmetic in db.py and
+    crashes reads/saves for the whole plant (H8). The model-level validator
+    must reject it — and every other non-finite or out-of-bounds value —
+    before it ever reaches a route or the database. Upper bound is exclusive
+    (168 itself is rejected), matching the DB CHECK constraint."""
+    with pytest.raises(ValidationError):
+        brain.TaskDateUpdate(id="abc123", RUN_TIME=value)
+
+
+@pytest.mark.parametrize("value", [0, 0.5, 40.25, 167.99, None])
+def test_task_date_update_run_time_accepts_finite_in_range_values(value):
+    """Sanity check on the other side of the boundary: legitimate values
+    (including the None default meaning "unchanged") must not be rejected."""
+    update = brain.TaskDateUpdate(id="abc123", RUN_TIME=value)
+    assert value == update.RUN_TIME
+
+
+@pytest.mark.pg
+class TestOrdersRunTimeBoundsConstraint:
+    """Proves — against real local Postgres, not a mock — that
+    chk_orders_run_time_bounds (migrations/2026-09-25-orders-run-time-bounds.sql)
+    rejects NaN and +/-Infinity, not just out-of-range finite values. This
+    relies on Postgres's documented float/numeric total ordering (NaN sorts
+    greater than every other value including Infinity, so `NaN >= 0` is true
+    but `NaN < 168` is false) — standard, documented behavior, but never
+    exercised by this codebase's migrations before, so it is proved here
+    rather than assumed."""
+
+    ORD, MAT = "ZZTEST_ORD_H8_RUNTIME", "ZZTEST_MAT_H8_RUNTIME"
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self, pg):
+        db_ = pg
+        oid = db_.make_id(self.ORD, self.MAT)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            conn.commit()
+        yield
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            conn.commit()
+
+    def _insert_run_time(self, pg, run_time_sql: str):
+        """Inserts a fresh test row with run_time set via a raw SQL literal
+        (so we can express 'NaN'::float8 / 'Infinity'::float8, which psycopg
+        cannot bind as ordinary Python float parameters into a NUMERIC
+        column the same way). Returns None on success, or the raised
+        exception on failure (constraint violations roll back the txn)."""
+        db_ = pg
+        oid = db_.make_id(self.ORD, self.MAT)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            conn.commit()
+            try:
+                cur.execute(
+                    f"""
+                    INSERT INTO orders (id, production_order, material_number, run_time)
+                    VALUES (%s, %s, %s, {run_time_sql})
+                    """,
+                    (oid, self.ORD, self.MAT),
+                )
+                conn.commit()
+                return None
+            except Exception as exc:
+                conn.rollback()
+                return exc
+
+    @pytest.mark.parametrize("run_time_sql", [
+        "'NaN'::float8",
+        "'Infinity'::float8",
+        "'-Infinity'::float8",
+    ])
+    def test_constraint_rejects_nan_and_infinite_run_time(self, pg, run_time_sql):
+        exc = self._insert_run_time(pg, run_time_sql)
+        assert exc is not None, (
+            f"INSERT with run_time = {run_time_sql} should have been rejected "
+            "by chk_orders_run_time_bounds but succeeded"
+        )
+        assert isinstance(exc, pg_errors.CheckViolation), (
+            f"expected a CheckViolation (IntegrityError) for {run_time_sql}, got "
+            f"{type(exc).__name__}: {exc}"
+        )
+        assert "chk_orders_run_time_bounds" in str(exc)
+
+    @pytest.mark.parametrize("run_time_sql", ["200", "-1", "168"])
+    def test_constraint_rejects_out_of_range_finite_run_time(self, pg, run_time_sql):
+        exc = self._insert_run_time(pg, run_time_sql)
+        assert exc is not None
+        assert isinstance(exc, pg_errors.CheckViolation)
+
+    def test_constraint_accepts_in_range_run_time(self, pg):
+        exc = self._insert_run_time(pg, "40.5")
+        assert exc is None

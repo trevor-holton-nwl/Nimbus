@@ -10,7 +10,7 @@
 --         ALTER TABLE statements.
 -- Backfill (routing_runtime_legacy_backfill) is a SEPARATE, ledger-guarded
 -- migration file, never mirrored in schema.sql — see
--- migrations/2026-09-24-routing-production-version-backfill.sql and root
+-- migrations/2026-09-25-routing-production-version-backfill.sql and root
 -- CLAUDE.md's rule on data-mutating one-time steps.
 -- ============================================================================
 
