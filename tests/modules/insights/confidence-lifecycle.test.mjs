@@ -235,3 +235,41 @@ test('#25 command-palette Firm/Unfirm/Push/Unschedule push a REAL undo that rest
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+test('#32 Confidence uses the selected plant\'s conf_score_horizon (master data) before the per-user setting', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorMaster = structuredClone(Store.masterData);
+  const priorAvailable = Compute.available;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorConfidence = Confidence.snapshot();
+  globalThis.NIMBUS = nimbus;
+  Compute.available = () => false;
+  const alertIn2Days = [{ id: 'ch-a', type: 'overlap', sev: 'err', line: 'CH-L', taskId: 'ch-1', time: new Date(Date.now() + 2 * 86400000) }];
+  const scoreFor = async (horizonMinutes) => {
+    Store.setMasterData({ plants: [{ plant: 'CH', conf_score_horizon: horizonMinutes }], lines: [] }, 'test');
+    Store.setAlerts(alertIn2Days, 'test');
+    Confidence._lastAlertsSrc = null; Confidence._lastRev = null;
+    await Confidence._recompute();
+    return Confidence.snapshot().score;
+  };
+  try {
+    Confidence._invalidatePending(true);
+    Store.setTasks([{ id: 'ch-1', PLANT: 'CH', MACHINE: 'CH-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('CH', 'test');
+    const shortHorizon = await scoreFor(60);          // the 2-day alert is OUTSIDE the plant's horizon
+    const longHorizon = await scoreFor(20160);        // ...and INSIDE a 14-day one
+    assert.ok(shortHorizon > longHorizon,
+      `a short plant horizon must exclude the alert (short=${shortHorizon}, long=${longHorizon})`);
+  } finally {
+    Confidence._invalidatePending(true);
+    Confidence.restore(priorConfidence);
+    Compute.available = priorAvailable;
+    Store.setMasterData(priorMaster ?? { plants: [], lines: [] }, 'test');
+    Store.setAlerts(priorAlerts, 'test');
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});

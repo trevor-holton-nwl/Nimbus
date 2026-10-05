@@ -31,6 +31,14 @@
 
   const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
 
+  // Confidence horizon: the selected plant's own conf_score_horizon (what the Plant
+  // settings tab edits and shows), then the per-user setting, then 14 days. Reading only
+  // the user setting made the score ignore the plant's configured horizon.
+  function _confHorizonMinutes() {
+    const plant = (Store.masterData?.plants || []).find(r => r.plant === Store.selectedPlant);
+    return plant?.conf_score_horizon ?? Store.userSettings?.confidenceHorizonMinutes ?? 20160;
+  }
+
   // H3f: command-palette actions used to push an empty undo, so Ctrl+Z reverted an
   // UNRELATED earlier edit. Snapshot the affected tasks (and which of them were firmed —
   // firmedIds is a separate set that restoreTasks does not rebuild) before mutating.
@@ -1587,7 +1595,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const tasks  = Store.tasksArr;
       if (!tasks.length) { Confidence._apply(100); return; }
 
-      const hMinutes = (Store.userSettings?.confidenceHorizonMinutes ?? 20160);
+      const hMinutes = _confHorizonMinutes();
       const horizonStart = new Date();
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
@@ -1736,7 +1744,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     async showBreakdown() {
       const alerts = Store.alerts || [];
-      const hMinutes = (Store.userSettings?.confidenceHorizonMinutes ?? 20160);
+      const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
       const horizonStart = new Date();
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
