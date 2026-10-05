@@ -2125,7 +2125,7 @@ export const OptimizerPreview = {
     const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.
     UndoStack.push(`Optimization (${mode})${plant ? ' · ' + plant : ''}`,
-      () => UndoStack.restoreTasks(snap));
+      () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
     Toast.show(Util.t('toast.opt_applied'), 'success');
     // Fire warning toasts — matching the live Engine.runAndApply patterns from schedule-services.mts
     if (OptimizerPreview._explanation) {

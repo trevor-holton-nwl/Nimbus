@@ -437,7 +437,7 @@ export const Alerts = {
       }
       Store.updateTask(task.id, changes, 'alerts');
       try { Engine.autoReflow(task.id); } catch {}
-      UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap));
+      UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap), [task.id]);
       Alerts.dismiss(alertId);
       Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
 
@@ -459,7 +459,7 @@ export const Alerts = {
         (!t.start_date || t.start_date <= dayEnd)
       ).map(t => t.id));
       Engine.runAndApply('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd });
-      UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap));
+      UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
       Alerts.dismiss(alertId);
     }
   },

@@ -197,3 +197,15 @@ test('UndoStack.snapshotTasks/restoreTasks round-trip through Store', () => {
   UndoStack.restoreTasks(snap);
   assert.equal(Store.tasks['u1'].RUN_TIME, '2');
 });
+
+test('UndoStack.invalidate drops entries whose ids intersect, keeps id-less ones (D31)', () => {
+  UndoStack._entries = [];
+  UndoStack.push('a', () => {}, [1, 2]);
+  UndoStack.push('b', () => {}, ['3']);
+  UndoStack.push('c', () => {});
+  UndoStack.invalidate(['2']);
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['b', 'c']);
+  UndoStack.invalidate([]);
+  assert.equal(UndoStack._entries.length, 2);
+  UndoStack._entries = [];
+});

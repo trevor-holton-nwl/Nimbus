@@ -4408,7 +4408,7 @@ export const Interaction = {
         if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
 
         UndoStack.push(`Move ${allIds.length} orders`,
-          () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); });
+          () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
         this._clearGhosts();
         return;
       }
@@ -4438,7 +4438,7 @@ export const Interaction = {
       Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
-                     () => UndoStack.restoreTasks(snap));
+                     () => UndoStack.restoreTasks(snap), [id]);
     }
   },
 
@@ -4657,7 +4657,7 @@ export const Interaction = {
     const patches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
     Store.updateMany(patches, 'interaction');
     UndoStack.push(`Unschedule ${eligibleIds.length} order(s)`,
-                   () => UndoStack.restoreTasks(snap));
+                   () => UndoStack.restoreTasks(snap), eligibleIds);
     Toast.show(
       eligibleIds.length === ids.length
         ? Util.t('toast.unscheduled_orders', { count: eligibleIds.length })

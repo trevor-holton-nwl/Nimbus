@@ -2127,7 +2127,7 @@ export const Engine = {
       if (result.patches.length) {
         const patchIds = new Set(result.patches.map(patch => patch.id));
         const undoTasks = structuredClone(snapshot.tasks.filter(task => patchIds.has(String(task.id))));
-        UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks));
+        UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks), patchIds);
       }
       applySchedulePatches(result.patches);
       Engine.lastSetupAwareResult = result;

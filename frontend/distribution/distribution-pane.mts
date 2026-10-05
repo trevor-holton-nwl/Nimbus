@@ -82,6 +82,12 @@ import type {
   WriteResult, WriteResultChild,
 } from './shares-editor.mjs';
 
+/** D31: drop Ctrl+Z entries that would restore older values of any sub-order a
+ *  distribution write just rewrote server-side. */
+export function invalidateUndoForWrite(ids: Iterable<string | number>): void {
+  UndoStack.invalidate(ids);
+}
+
 /** Decode the authoritative child aggregate through the same segment/date
  *  decoder as /tasks. Nulls replace stale values on kept children too. */
 export function hydrateDistributionChild(child: WriteResultChild, existing?: NimbusTask): NimbusTask {
@@ -1353,6 +1359,9 @@ export const DistributionPane = (() => {
       Persistence._warnUnresolvedConflict();
       return false;
     }
+    // D31: the write rewrote these sub-orders server-side; any Ctrl+Z entry that
+    // would restore their older values must go (it would resurrect pre-write data).
+    invalidateUndoForWrite(ids);
     if (!result.children.length && !result.removed.length) return true;
     for (const child of result.children) _upsertChildTask(child);
     for (const id of result.removed) Store.removeTask(id, 'distribution');
@@ -1419,7 +1428,7 @@ export const DistributionPane = (() => {
       _banner = null;
       _renderDetail();
     };
-    UndoStack.push(Util.t('ui.dist_saved_reconcile', { n: String(resizedIds.length) }), undo);
+    UndoStack.push(Util.t('ui.dist_saved_reconcile', { n: String(resizedIds.length) }), undo, resizedIds);
     _banner = { count: resizedIds.length, firmedIds, undo };
     _renderDetail();
   }

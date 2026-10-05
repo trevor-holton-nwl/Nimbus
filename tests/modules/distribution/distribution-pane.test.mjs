@@ -19,7 +19,9 @@ import {
   formatSubOrders,
   reviewedCheckboxState,
   STATUS_SEVERITY,
+  invalidateUndoForWrite,
 } from '../../../frontend/distribution/distribution-pane.mjs';
+import { UndoStack } from '../../../frontend/platform/store.mjs';
 // P2-16: the shares editor's pure logic module — weight math, dry-run
 // merging, the save-button/undo/removal-confirm state machines. See that
 // module's own header comment for why it's kept separate from
@@ -491,4 +493,14 @@ test('distErrorLocaleKey — builds the err.dist_<code> key, or null for no code
   assert.equal(distErrorLocaleKey('share_purged'), 'err.dist_share_purged');
   assert.equal(distErrorLocaleKey(null), null);
   assert.equal(distErrorLocaleKey(undefined), null);
+});
+
+test('invalidateUndoForWrite - drops only undo entries touching the rewritten sub-orders (D31)', () => {
+  UndoStack._entries = [];
+  UndoStack.push('move A-1', () => {}, ['A-1']);
+  UndoStack.push('move other', () => {}, ['Z-9']);
+  UndoStack.push('no ids (labor etc.)', () => {});
+  invalidateUndoForWrite(['A-1', 'B-2']);
+  assert.deepEqual(UndoStack._entries.map(e => e.label), ['move other', 'no ids (labor etc.)']);
+  UndoStack._entries = [];
 });

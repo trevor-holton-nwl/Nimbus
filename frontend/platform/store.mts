@@ -108,6 +108,8 @@ interface UndoEntry {
   label: string;
   undoFn: () => void;
   at: number;
+  /** Task ids this entry restores (optional; entries without ids are never invalidated). */
+  ids?: string[];
 }
 
 // Two DI seams replace what used to be direct references from Store into modules
@@ -941,10 +943,20 @@ export const UndoStack = {
   MAX: 10,
   _entries: [] as UndoEntry[],
 
-  push(label: string, undoFn: () => void): void {
-    this._entries.push({ label, undoFn, at: Date.now() });
+  push(label: string, undoFn: () => void, ids?: Iterable<string | number>): void {
+    const entry: UndoEntry = { label, undoFn, at: Date.now() };
+    if (ids) entry.ids = [...ids].map(String);
+    this._entries.push(entry);
     if (this._entries.length > this.MAX) this._entries.shift();
     Store.emit({ type: 'undo:pushed', label });
+  },
+  /** Drop every entry whose ids intersect `ids` (D31): after a server-side
+   *  write rewrites those tasks (e.g. a distribution re-weight), restoring an
+   *  older snapshot would resurrect pre-write values. Entries without ids stay. */
+  invalidate(ids: Iterable<string | number>): void {
+    const hit = new Set([...ids].map(String));
+    if (!hit.size) return;
+    this._entries = this._entries.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
   },
   pop(): UndoEntry | null {
     const e = this._entries.pop();
