@@ -1546,7 +1546,10 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
         or counters["children_deleted"] or zero_qty or runtime_defaulted
         or duplicates_dropped or counters["replanned_after_reweight"]
     )
-    n, m, k, p = (counters["parents_distributed"], counters["children_upserted"],
+    # `children_upserted` counts rows actually WRITTEN (an unchanged re-upload
+    # writes none); the summary reports the sub-orders the parents call for.
+    n, m, k, p = (counters["parents_distributed"],
+                 counters.get("children_total", counters["children_upserted"]),
                  counters["children_deleted"], len(conflicting))
     entry["level"] = "warn" if warn_worthy else "info"
     if no_parents:
@@ -1625,6 +1628,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
     counters = {
         "parents_distributed": 0, "children_upserted": 0, "children_deleted": 0,
         "headers_created": 0, "headers_refreshed": 0, "replanned_after_reweight": 0,
+        "children_total": 0,  # sub-orders the distributed parents call for (written or already current)
     }
 
     with conn.cursor() as cur:
@@ -1704,6 +1708,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
                     _write_shares(cur, parent)
 
             local["children_upserted"] += _apply_children(cur, parent)
+            local["children_total"] += len(parent["child_rows"])
             local["parents_distributed"] += 1
 
             intended = set(parent["child_ids"].values())
