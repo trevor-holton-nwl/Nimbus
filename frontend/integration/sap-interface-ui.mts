@@ -515,7 +515,7 @@ export const Interface = (() => {
       const res: SapTestConnectionResult = await Util.fetchTraced(`${API}/sap/interface/test-connection`, {
         method: 'POST', headers: _writeHeaders(),
         body: JSON.stringify({ transport, source_params: params }),
-      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }); return r.json(); });
       _testResult = res.ok
         ? { cls: 'ok', dot: 'ok', msg: `${Util.t('toast.sap_conn_ok')} — ${res.detail || ''}`.trim() }
         : { cls: 'info', dot: '', msg: res.detail || Util.t('toast.sap_conn_fail') };
@@ -530,7 +530,7 @@ export const Interface = (() => {
     try {
       await Util.fetchTraced(`${API}/sap/interface/config/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify(patch),
-      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }); return r.json(); });
       if (_config[object]) _config[object] = { ...(_config[object]), ...patch };
       if (confirmMsg) Toast.show(confirmMsg, 'info');
       await _reload();
@@ -546,7 +546,7 @@ export const Interface = (() => {
     try {
       const res: SapSyncResult = await Util.fetchTraced(`${API}/sap/interface/sync/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ dry_run: !!dryRun }),
-      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json(); });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }); return r.json(); });
       if (res.status === 'ok') {
         Toast.show(`${dryRun ? Util.t('toast.sap_dryrun_done') : Util.t('toast.sap_sync_done')} (read ${res.rows_read ?? 0} · +${res.rows_inserted ?? 0} / ~${res.rows_updated ?? 0})`, 'success');
       } else {
@@ -682,7 +682,7 @@ export const Interface = (() => {
     try {
       await Util.fetchTraced(`${API}/sap/interface/mappings/${encodeURIComponent(object)}`, {
         method: 'POST', headers: _writeHeaders(), body: JSON.stringify({ mappings }),
-      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); }); return r.json() as Promise<SapMappingsSaveResult>; });
+      }).then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }); return r.json() as Promise<SapMappingsSaveResult>; });
       delete _mapState[object];
       Toast.show(Util.t('toast.sap_mappings_saved'), 'success');
       await _reload();

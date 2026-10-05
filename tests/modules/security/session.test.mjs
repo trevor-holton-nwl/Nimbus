@@ -89,3 +89,15 @@ test('Session.updateCachedUser merges a patch into the cached session blob', () 
   const stored = JSON.parse(globalThis.localStorage.getItem('nimbus.session'));
   assert.equal(stored.last_name, 'Holton');
 });
+
+test('#30 Session.signIn keeps the HTTP status and readable text so the login screen can tell throttling/outage from bad credentials', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = () => Promise.resolve({ ok: false, status: 429, json: () => Promise.resolve({ detail: [{ loc: ['body'], msg: 'rate limited' }] }) });
+    await assert.rejects(Session.signIn('trevor', 'pw'), e => e.status === 429 && e.message === 'rate limited');
+    globalThis.fetch = () => Promise.resolve({ ok: false, status: 503, json: () => Promise.reject(new Error('html')) });
+    await assert.rejects(Session.signIn('trevor', 'pw'), e => e.status === 503);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

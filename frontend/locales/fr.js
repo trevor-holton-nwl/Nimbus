@@ -778,6 +778,8 @@ window.__NIMBUS_LOCALES.fr = {
   'sec.session_expired':           'Votre session a expiré. Veuillez vous reconnecter.',
   'sec.login_missing_fields':      'Saisissez votre nom d\'utilisateur et votre mot de passe.',
   'sec.login_unreachable':         'Impossible de joindre le serveur. Vérifiez votre connexion et réessayez.',
+  'sec.login_throttled': 'Trop de tentatives de connexion. Patientez une minute puis réessayez.',
+  'sec.login_unavailable': 'Le serveur est temporairement indisponible. Réessayez dans un instant.',
   'sec.access_revoked':            'Votre accès administrateur n\'est plus valide. Veuillez vous reconnecter.',
   'sec.plant_access_changed':      'Votre accès aux usines a changé. Votre sélection d\'usine a été effacée.',
   'sec.load_users_failed':         'Échec du chargement des utilisateurs : {{msg}}',

@@ -1069,7 +1069,7 @@ export const Plant = {
       // JSON body is {"detail": "..."}, not {"message": "..."} — reading
       // body.message alone showed "upload failed: unknown" for every real
       // failure (bad file format, unknown field key, empty file).
-      const errMsg = body.detail || body.message || 'unknown';
+      const errMsg = Util.errorDetailText(body.detail) || body.message || 'unknown';
       if (status) { status.textContent = Util.t('toast.upload_failed', { msg: errMsg }); status.className = 'admin-status error'; }
       ErrorLog.error('plant', `Priority list upload failed for ${plantName}/${fieldKey}: ${errMsg}`, body);
       return;
@@ -1392,7 +1392,7 @@ export const Plant = {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ upserts: [{ subnetwork: plantRow.subnetwork, plant: plantRow.plant, ...patch }], deletes: [] }),
         });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
         Object.assign(plantRow, patch); // commit to Store only once the write is confirmed
         return true;
       } catch (e) {
@@ -1461,7 +1461,7 @@ export const Plant = {
         );
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
-          throw new Error(body.detail || `HTTP ${response.status}`);
+          throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`);
         }
         plantRow.split_order_policy = next as 'never' | 'overlong_only' | 'partial_allowed';
         Toast.show(Util.t('ui.split_policy_saved'), 'success');
@@ -1492,7 +1492,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, unknown_setup_policy: policy, unknown_setup_default_minutes: minutes }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         const saved = await response.json();
         plantRow.setup_policy_config = { ...(plantRow.setup_policy_config ?? {}), ...saved.setup_policy_config };
         Toast.show(Util.t('ui.unknown_setup_saved'), 'success');
@@ -1523,7 +1523,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_pull_forward_days: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.max_pull_forward_days = next;
         Toast.show(Util.t('ui.max_pull_forward_saved'), 'success');
       } catch (error) {
@@ -1550,7 +1550,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_push_forward_days: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.max_push_forward_days = next;
         Toast.show(Util.t('ui.max_push_forward_saved'), 'success');
       } catch (error) {
@@ -1581,7 +1581,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, min_productive_segment_minutes: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.min_productive_segment_minutes = next;
         Toast.show(Util.t('ui.min_productive_segment_saved'), 'success');
       } catch (error) {
@@ -1612,7 +1612,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, frozen_horizon_days: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.frozen_horizon_days = next;
         Toast.show(Util.t('ui.frozen_horizon_days_saved'), 'success');
       } catch (error) {
@@ -1988,7 +1988,7 @@ export const Plant = {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ subnetwork: plantRow.subnetwork, constraints: payload }),
         });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
         plantRow.constraints = payload;  // commit to Store only once the write is confirmed
         renderEffectiveSequence();       // the persisted tree just changed — re-read it
       } catch (e) {
@@ -4161,7 +4161,7 @@ export const MasterData = (() => {
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts, deletes }),
       }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json() as Promise<MasterDataBulkResult>;
       });
 
@@ -4330,7 +4330,7 @@ export const MasterData = (() => {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ column_name: colName, sql_type: sqlType, length, nullable, default: def, display_label: label }),
         }).then((r) => {
-          if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.col_added', { label }), 'success');
@@ -4358,7 +4358,7 @@ export const MasterData = (() => {
       await Util.fetchTraced(`${API}/master-data/${table}/columns/${col.column_name}`, {
         method:  'DELETE',
       }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json();
       });
       Toast.show(Util.t('toast.column_dropped', { col: col.column_name }), 'success');
@@ -4385,7 +4385,7 @@ export const MasterData = (() => {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ display_label: newLabel }),
         }).then((r) => {
-          if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.column_label_updated', { label: newLabel }), 'success');
@@ -4409,7 +4409,7 @@ export const MasterData = (() => {
     Modal.open('md-schema-export-modal');
     try {
       const data = await Util.fetchTraced(`${API}/master-data/_schema-export`).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json() as Promise<{ sql?: string }>;
       });
       textEl.value = data.sql || '';
@@ -4465,7 +4465,7 @@ export const MasterData = (() => {
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
       }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json();
       });
       if (_activeTable === 'machine') _renderTable('machine');

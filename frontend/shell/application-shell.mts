@@ -882,7 +882,7 @@ const SessionUIAdapter = {
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        throw new Error(e.detail || `HTTP ${r.status}`);
+        throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`);
       }
       const updated = await r.json() as SecurityMeResponse;
       Session.updateCachedUser({ first_name: updated.first_name || null, last_name: updated.last_name || null });
@@ -925,7 +925,7 @@ const SessionUIAdapter = {
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        throw new Error(e.detail || `HTTP ${r.status}`);
+        throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`);
       }
       if (curEl) curEl.value = '';
       if (newEl) newEl.value = '';
@@ -1044,7 +1044,11 @@ function showLoginScreen(opts?: { expired?: boolean }): void {
       // Deliberately generic on bad credentials — never reveal whether the
       // username itself was wrong. A thrown TypeError means fetch() itself
       // failed (offline/unreachable), which is a distinct, honest message.
-      _showError(e instanceof TypeError ? Util.t('sec.login_unreachable') : Util.t('sec.login_invalid'));
+      const status = (e as { status?: number })?.status;
+      _showError(e instanceof TypeError ? Util.t('sec.login_unreachable')
+        : status === 429 ? Util.t('sec.login_throttled')
+        : (status != null && status >= 500) ? Util.t('sec.login_unavailable')
+        : Util.t('sec.login_invalid'));
       _setBusy(false);
     }
   }

@@ -353,3 +353,40 @@ test('Util.csvProcessCell applies the column formatter, then the formula guard',
   assert.equal(Util.csvProcessCell({ value: -5, formatValue: v => v }), -5);
   assert.equal(Util.csvProcessCell({ value: '@x' }), "'@x");
 });
+
+test('#30 Util.errorDetailText flattens FastAPI 422 lists and structured details to readable text (never [object Object])', () => {
+  assert.equal(Util.errorDetailText('plain'), 'plain');
+  assert.equal(Util.errorDetailText(null), null);
+  assert.equal(
+    Util.errorDetailText([{ loc: ['body', 'RUN_TIME'], msg: 'must be positive', type: 'value_error' }, { loc: ['query', 'plant'], msg: 'field required' }]),
+    'RUN_TIME: must be positive; plant: field required');
+  assert.equal(Util.errorDetailText({ message: 'Stale row', code: 'x' }), 'Stale row');
+  assert.ok(!/\[object Object\]/.test(Util.errorDetailText({ a: 1 })));
+});
+
+test('#30 parseBackendError keeps the status and text for 422 list and 409 object details', async () => {
+  const mk = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const p422 = await Util.parseBackendError(mk(422, { detail: [{ loc: ['body', 'qty'], msg: 'bad number' }] }));
+  assert.equal(p422.status, 422);
+  assert.equal(p422.message, 'qty: bad number');
+  const p409 = await Util.parseBackendError(mk(409, { detail: { message: 'Version conflict', error_code: 'x' } }));
+  assert.equal(p409.status, 409);
+  assert.equal(p409.message, 'Version conflict');
+});
+
+test('#30 Toast defaults: errors and warnings stay longer than 1.5 s; explicit durations still win', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  const realSetTimeout = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (fn, ms) => { delays.push(ms); return realSetTimeout(() => {}, 0); };
+  try {
+    Toast.show('e-default', 'error');
+    Toast.show('w-default', 'warn');
+    Toast.show('i-default', 'info');
+    Toast.show('e-explicit', 'error', 20);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  assert.deepEqual(delays.filter(d => d !== Config.ANIM_MS), [6000, 4000, 1500, 20]);
+});

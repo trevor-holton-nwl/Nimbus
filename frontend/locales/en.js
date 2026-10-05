@@ -1101,6 +1101,8 @@ window.__NIMBUS_LOCALES.en = {
   'sec.session_expired':           'Your session expired. Please sign in again.',
   'sec.login_missing_fields':      'Enter your username and password.',
   'sec.login_unreachable':         'Can\'t reach the server. Check your connection and try again.',
+  'sec.login_throttled': 'Too many sign-in attempts. Wait a minute and try again.',
+  'sec.login_unavailable': 'The server is temporarily unavailable. Try again in a moment.',
   'sec.access_revoked':            'Your admin access is no longer valid. Please sign in again.',
   'sec.plant_access_changed':      'Your plant access has changed. Your plant selection has been cleared.',
   'sec.load_users_failed':         'Failed to load users: {{msg}}',

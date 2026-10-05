@@ -551,12 +551,40 @@ export const Util = {
   // Parse a non-ok Response body into a structured {message, errorCode, status}.
   // Best-effort: clones the response (caller keeps the body), reads json() then text().
   // Used by raw-fetch migration sites so each surfaces the parsed backend body.
+  // FastAPI `detail` is a string for HTTPException but a LIST of {loc,msg,type} for 422
+  // validation errors and may be an object ({message,...}) for structured 409s. Flatten any of
+  // them to readable text so a toast never shows "[object Object]".
+  errorDetailText(d: unknown): string | null {
+    if (d == null || d === '') return null;
+    if (typeof d === 'string') return d;
+    if (Array.isArray(d)) {
+      const parts = d.map(item => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') {
+          const o = item as { loc?: unknown; msg?: unknown; message?: unknown };
+          const text = Util.errorDetailText(o.msg ?? o.message);
+          const loc = Array.isArray(o.loc) ? o.loc.filter(p => p !== 'body' && p !== 'query').join('.') : '';
+          return text ? (loc ? `${loc}: ${text}` : text) : null;
+        }
+        return item == null ? null : String(item);
+      }).filter(Boolean);
+      return parts.length ? parts.join('; ') : null;
+    }
+    if (typeof d === 'object') {
+      const o = d as { message?: unknown; msg?: unknown; detail?: unknown };
+      const inner = Util.errorDetailText(o.message ?? o.msg ?? o.detail);
+      if (inner) return inner;
+      try { return JSON.stringify(d).slice(0, 500); } catch { return null; }
+    }
+    return String(d);
+  },
+
   parseBackendError(resp: Response | null | undefined): Promise<{ message: string; errorCode: string; status: number }> {
     const status = resp?.status ?? 0;
     const clone  = (() => { try { return resp?.clone() ?? null; } catch { return null; } })();
     const read   = clone
       ? clone.json().then(
-          j => ({ message: (j && (j.message || j.detail)) || null, errorCode: (j && j.error_code) || null }),
+          j => ({ message: (j && (Util.errorDetailText(j.message) || Util.errorDetailText(j.detail))) || null, errorCode: (j && j.error_code) || null }),
           () => clone.text().then(txt => ({ message: (txt || '').slice(0, 2000) || null, errorCode: null }), () => ({ message: null, errorCode: null }))
         )
       : Promise.resolve({ message: null, errorCode: null });
@@ -1529,9 +1557,11 @@ export const Toast = (function() {
   }
 
   return {
-    show(msg: string, type: string = 'info', ms: number = 1500, action?: ToastAction): void {
+    show(msg: string, type: string = 'info', msArg?: number, action?: ToastAction): void {
       const stack = document.getElementById('toast-stack');
       if (!stack) return;
+      // Per-type default: a 1.5 s error vanishes before it can be read. Explicit durations win.
+      const ms = msArg ?? (type === 'error' ? 6000 : type === 'warn' ? 4000 : 1500);
 
       const dup = _visible.find(e => !e._removing && e.msg === msg && e.type === type);
       if (dup) {

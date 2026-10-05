@@ -178,7 +178,7 @@ export const LaborPlanning = (() => {
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify({ subnetwork, plant, cells }),
       });
-      if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+      if (!r.ok) { const e = await r.json(); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
     } catch (e) {
       Toast.show(`Labor plan save failed: ${(e as Error).message}`, 'error');
       ErrorLog.error('labor', `Save aggregate failed: ${(e as Error).message}`);
@@ -193,7 +193,7 @@ export const LaborPlanning = (() => {
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify({ subnetwork, plant, cells }),
       });
-      if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+      if (!r.ok) { const e = await r.json(); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
     } catch (e) {
       Toast.show(`Line plan save failed: ${(e as Error).message}`, 'error');
       ErrorLog.error('labor', `Save lines failed: ${(e as Error).message}`);

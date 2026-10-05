@@ -778,6 +778,8 @@ window.__NIMBUS_LOCALES.pt = {
   'sec.session_expired':           'Sua sessão expirou. Faça login novamente.',
   'sec.login_missing_fields':      'Informe seu nome de usuário e senha.',
   'sec.login_unreachable':         'Não foi possível contatar o servidor. Verifique sua conexão e tente novamente.',
+  'sec.login_throttled': 'Muitas tentativas de login. Aguarde um minuto e tente novamente.',
+  'sec.login_unavailable': 'O servidor está temporariamente indisponível. Tente novamente em instantes.',
   'sec.access_revoked':            'Seu acesso de administrador não é mais válido. Faça login novamente.',
   'sec.plant_access_changed':      'Seu acesso a plantas foi alterado. Sua seleção de planta foi limpa.',
   'sec.load_users_failed':         'Falha ao carregar os usuários: {{msg}}',

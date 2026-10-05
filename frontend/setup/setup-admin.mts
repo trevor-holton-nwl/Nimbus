@@ -696,7 +696,7 @@ export const SetupAdmin = (() => {
           method: 'DELETE', headers: headers(),
           body: JSON.stringify({ machine, signature_version: definition.signature_version, rows: chunk, scope: auditScope }),
         });
-        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(err.detail) || `HTTP ${response.status}`); }
       }
       Persistence.noteSetupWrite(snapshot.plant, 'matrix');
       _listSelected.clear();
@@ -1888,11 +1888,11 @@ export const SetupAdmin = (() => {
     try {
       for (const body of upsert) {
         const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix/import`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
-        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(err.detail) || `HTTP ${response.status}`); }
       }
       for (const body of deletes) {
         const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/matrix`, { method: 'DELETE', headers: headers(), body: JSON.stringify(body) });
-        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(err.detail) || `HTTP ${response.status}`); }
       }
       Persistence.noteSetupWrite(snapshot.plant, 'matrix');
       discardStagedEdits();
@@ -2019,7 +2019,7 @@ export const SetupAdmin = (() => {
   async function writeAndRefresh(target: HTMLElement, plant: string, url: string, method: string, body: unknown): Promise<boolean> {
     try {
       const response = await Util.fetchTraced(url, { method, headers: headers(), body: JSON.stringify(body) });
-      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${response.status}`); }
+      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(err.detail) || `HTTP ${response.status}`); }
       Persistence.noteSetupWrite(plant, setupWriteKind(url));
       await Persistence.loadSetupSnapshot(plant); render(target, plant); Toast.show(Util.t('toast.setup_saved'), 'success');
       return true;

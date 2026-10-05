@@ -3092,7 +3092,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- Toast container -->
-<div id="toast-stack"></div>
+<div id="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
 
 <!-- Locale bootstrap: load ONLY the active locale (plus 'en', which is the runtime
      fallback dictionary) instead of all five (~350 KB → ~70–140 KB). document.write

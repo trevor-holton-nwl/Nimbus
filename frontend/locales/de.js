@@ -778,6 +778,8 @@ window.__NIMBUS_LOCALES.de = {
   'sec.session_expired':           'Ihre Sitzung ist abgelaufen. Bitte melden Sie sich erneut an.',
   'sec.login_missing_fields':      'Benutzername und Passwort eingeben.',
   'sec.login_unreachable':         'Server nicht erreichbar. Verbindung prüfen und erneut versuchen.',
+  'sec.login_throttled': 'Zu viele Anmeldeversuche. Warten Sie eine Minute und versuchen Sie es erneut.',
+  'sec.login_unavailable': 'Der Server ist vorübergehend nicht verfügbar. Versuchen Sie es gleich erneut.',
   'sec.access_revoked':            'Ihre Administratorberechtigung ist nicht mehr gültig. Bitte melden Sie sich erneut an.',
   'sec.plant_access_changed':      'Ihr Werkzugriff hat sich geändert. Ihre Werksauswahl wurde zurückgesetzt.',
   'sec.load_users_failed':         'Benutzer konnten nicht geladen werden: {{msg}}',
