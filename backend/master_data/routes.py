@@ -101,9 +101,15 @@ def get_audit_log(limit: int = 200):
     return {"entries": list(reversed(log[-limit:]))}
 
 
+_AUDIT_MAX_KEYS = 50
+_AUDIT_MAX_BYTES = 32 * 1024
+
+
 @router.post("/audit/log", response_model=StatusOkResult, dependencies=[Depends(auth.require_authenticated)])
 def append_audit_log(entry: dict, request: Request):
     """Frontend-triggered audit entry (e.g. optimization_run events)."""
+    if len(entry) > _AUDIT_MAX_KEYS or len(json.dumps(entry, default=str)) > _AUDIT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="audit entry too large")
     entry.setdefault("ts", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
     entry.setdefault("user", request.headers.get("X-User", "system"))
     _cw_append_audit(entry)

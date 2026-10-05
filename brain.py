@@ -522,6 +522,25 @@ async def block_markdown_mw(request: Request, call_next):
     return await call_next(request)
 
 
+# Overall request-body cap for the two free-form sinks (/logs/frontend is
+# unauthenticated by design). Starlette buffers a whole body before the route
+# runs, so the cap has to be enforced here on Content-Length; a chunked body
+# with no declared length is refused rather than buffered unbounded.
+_BODY_CAPS = {("POST", "/logs/frontend"): 256 * 1024, ("POST", "/audit/log"): 64 * 1024}
+
+
+@api.middleware("http")
+async def body_size_cap_mw(request: Request, call_next):
+    cap = _BODY_CAPS.get((request.method, request.url.path))
+    if cap is not None:
+        declared = request.headers.get("content-length")
+        if declared is None or not declared.isdigit():
+            return Response(status_code=411)
+        if int(declared) > cap:
+            return Response(status_code=413)
+    return await call_next(request)
+
+
 # Error semantics: surface real HTTP status codes behind ONE consistent JSON
 # envelope — {status:"error", message, detail} — instead of the legacy
 # `200 + {status:"error"}` AND instead of FastAPI's default {"detail": ...}.

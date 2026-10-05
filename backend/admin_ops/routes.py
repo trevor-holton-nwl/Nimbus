@@ -73,7 +73,7 @@ def livez():
     return {"status": "ok"}
 
 
-@router.get("/diagnostics/deep", dependencies=[Depends(require_admin)])
+@router.get("/diagnostics/deep", dependencies=[Depends(require_api_key), Depends(require_admin)])
 def get_diagnostics_deep():
     """Full pipeline breakdown: DB stats + color-wheel analysis + current DIAGNOSTICS."""
     db_deep = db.get_db_deep_stats()
@@ -316,6 +316,9 @@ def clear_backend_logs(request: Request):
 _FE_MAX_ENTRIES = 50
 _FE_MAX_STACK = 8 * 1024   # 8 KB
 _FE_MAX_MSG = 2 * 1024     # 2 KB
+_FE_MAX_CTX_KEYS = 20
+_FE_MAX_CTX_KEY = 64
+_FE_MAX_CTX_VALUE = 1024   # 1 KB per ctx value
 
 
 def _truncate(s, cap: int):
@@ -374,8 +377,12 @@ def ingest_frontend_logs(payload: dict = Body(default={})):
             if raw.get(k) is not None:
                 ctx_src[k] = raw.get(k)
         if ctx_src:
-            entry["ctx"] = {k: (v if isinstance(v, (int, float, bool, type(None))) else str(v))
-                            for k, v in ctx_src.items()}
+            # Cap key count, key length and value length so one caller cannot
+            # park megabytes in the in-memory ring via free-form ctx.
+            entry["ctx"] = {
+                str(k)[:_FE_MAX_CTX_KEY]: (v if isinstance(v, (int, float, bool, type(None)))
+                                           else _truncate(v, _FE_MAX_CTX_VALUE))
+                for k, v in list(ctx_src.items())[:_FE_MAX_CTX_KEYS]}
         _BACKEND_LOG.append(entry)
         accepted += 1
     return {"status": "ok", "accepted": accepted}

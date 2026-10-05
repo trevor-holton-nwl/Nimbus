@@ -302,3 +302,40 @@ def test_frontend_sink_rejects_non_list_entries_with_400(tc):
 def test_frontend_sink_reqId_falls_back_to_rid_key(tc):
     tc.post("/logs/frontend", json={"entries": [{"msg": "x", "rid": "alt-rid"}]})
     assert brain._BACKEND_LOG[-1]["rid"] == "alt-rid"
+
+
+# --------------------------------------------------------------------------- #
+# Plan Part 1 #3 / #4: deep-diagnostics key guard, ctx caps, body-size cap     #
+# --------------------------------------------------------------------------- #
+def test_diagnostics_deep_rejects_missing_api_key(tc, monkeypatch):
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "required-key")
+    assert tc.get("/diagnostics/deep").status_code == 401
+
+
+def test_frontend_sink_caps_ctx_keys_and_values(tc):
+    ctx = {f"k{i}" * 40: "x" * 2000 for i in range(60)}
+    tc.post("/logs/frontend", json={"entries": [{"msg": "m", "ctx": ctx}]})
+    got = brain._BACKEND_LOG[-1]["ctx"]
+    assert len(got) <= brain._FE_MAX_CTX_KEYS
+    assert all(len(k) <= brain._FE_MAX_CTX_KEY for k in got)
+    assert all(len(v) <= brain._FE_MAX_CTX_VALUE + len("…[truncated]") for v in got.values())
+
+
+def test_frontend_sink_rejects_oversize_body_413(tc):
+    big = "x" * (300 * 1024)
+    r = tc.post("/logs/frontend", json={"entries": [{"msg": big}]})
+    assert r.status_code == 413
+    assert not brain._BACKEND_LOG
+
+
+def test_audit_log_post_rejects_oversize_entry(tc):
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "u"
+    try:
+        # 40 KB: under the 64 KB body cap, over the 32 KB entry cap (route-level 413)
+        r = tc.post("/audit/log", json={"action": "x", "details": {"blob": "y" * 40_000}})
+        assert r.status_code == 413
+        # > 64 KB: refused by the body-size middleware before routing
+        r = tc.post("/audit/log", json={"action": "x", "details": {"blob": "y" * 100_000}})
+        assert r.status_code == 413
+    finally:
+        brain.api.dependency_overrides.pop(auth.require_authenticated, None)
