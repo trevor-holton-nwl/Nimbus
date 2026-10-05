@@ -95,3 +95,22 @@ Plan: Code_Review_Consolidated_10_05.md. One row per item.
 | #33 follow-up other line pickers | DONE | bc6e71d | foundation.test.mjs | Orders, Labor, Master Data (Lines nav) and header context pill pass onBatch -> one Store.setSelectedLines. Material grid per-column checklists are not Store.selectedLines pickers and were left alone |
 | #25 P8 scoped master-data loading | DONE | a53ef4a | master-data/admin-ui.test.mjs (source checks), module suite 982 pass | machine + material_plants added to SCOPED_TABLES ('plant', auto-scoped to Store.selectedPlant until the user hits Change); materials + material_plants are server-paged (limit 200, debounced server `search`, offset "Load more", "Showing N of total"; pending edits survive a search reload). material_plants.material_id no longer an FK dropdown (it fetched the whole materials table) - plain text cell. persistence.mts: machine fetched with ?plant= in the two plant paths; no-plant path fetches no machines (lines []). MasterData save-refresh fetches machine for the selected plant only. Backend already had plant/search/limit/offset on GET /master-data/{table}: NO backend change. Lines tab / Work Centers untouched. RISK for reviewer: Store.masterData.lines now holds only the selected plant's machines (was all plants); consumers filter by plant or find by machine name (find-by-name was ambiguous across plants before). New key ui.md_page_status (5 locales) |
 | #28 CSP report-only | DONE | 59c5ee6 | tests/test_logs_endpoints.py (23 pass; master_data+logs 35 pass), ruff clean | brain.py csp_report_only_mw: Content-Security-Policy-Report-Only on text/html only; POST /logs/csp-report (admin_ops, accepts application/csp-report and reports+json, 8 KB cap, always 204, logs category csp via _log_event) because /logs/frontend schema is {entries} only. script-src omits 'unsafe-inline' on purpose so inline on*= and document.write report. Docs: frontend/shell/CLAUDE.md (enforcement checklist) + index.html comment corrected. Not converted: any inline handler |
+
+## Integration (fix/cr1005-integration = backend + frontend)
+
+Merge `--no-ff fix/cr1005-frontend` into `fix/cr1005-backend`. Conflicts: ledger (union, one header), and four test files (distribution-pane, persistence, setup-admin tests, test_logs_endpoints.py) where both sides appended independent tests; both kept. store.mts, persistence.mts, services.mts, nimbus-intelligence.js, locales, CLAUDE.md docs and the legacy-surface contract auto-merged without conflict.
+
+Follow-up fixes after the merge:
+- Command-palette undo (`_pushTaskUndo`) now passes task `ids` so distribution `UndoStack.invalidate` covers it (applyFix already did).
+- `toast.machine_rejected` (backend) was en-only; added to de/es/fr/pt so the locale parity ratchet (231) holds.
+- `machine_unknown` rejections are excluded from `describeRejections` (they have their own toast), so reasons show once; test assertion added.
+- `frontend/types/api-generated.d.mts` regenerated (drifted: backend response-model additions); committed. Transient `.openapi-schema.json` removed (static-assets test flags it).
+- `tests/test_planning_exceptions.py`: mock cursor updated for the batched `UPDATE ... RETURNING` (backend #26 broke this test; no merge involvement).
+- Legacy-surface contract unchanged (no regeneration needed; no growth).
+
+Verification (counts):
+- npm run build: ok. typecheck: ok. lint: 0 errors, 31 warnings. check:static-assets: OK. check:legacy-surface: no drift.
+- npm test: legacy 38/38; modules 986/986 (one run showed a one-off failure in confidence-lifecycle `pruneSnapshots` (#26) under full parallel load; passes alone 3x and on re-run of the full modules suite: flaky timing, not a merge defect).
+- ruff check .: all checks passed.
+- pytest -q, fresh nimbus_test_int (this worktree's schema.sql applied with ON_ERROR_STOP=1, clean): 948 passed, 1 skipped (pre-existing #203 placeholder), 0 failed.
+- Migrations onto nimbus_test_mig (main's schema.sql): 34 of 36 migrations/*.sql apply in name order and re-apply idempotently (2 passes). 2026-07-03-production-line-optimizer-flags.sql and 2026-08-13-changeover-matrix-stage-0.sql fail on `production_lines` (renamed to machines before main's schema); both files are untouched by either branch and already ledger-applied in prod; pre-existing, not a regression.
