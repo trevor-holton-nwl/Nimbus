@@ -1879,6 +1879,15 @@ export function notifyResidualFirming(ids: string[]): void {
 export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
+  // The start-date Flatpickr is built on an <input> that every _render() replaces, so the
+  // previous instance (and its calendar popup appended to <body>) must be destroyed first —
+  // otherwise one picker + one popup DOM tree leaks per render.
+  _fpStart: null as NimbusVendor.FlatpickrInstance | null,
+  _destroyStartPicker(): void {
+    const fp = Inspector._fpStart;
+    Inspector._fpStart = null;
+    try { fp?.destroy(); } catch { /* already torn down with its DOM */ }
+  },
 
   // Admin-configured Orders field visibility (system_settings.orderFields,
   // frontend/order-field-catalog.mjs) for the Inspector surface. No live-refresh
@@ -1932,6 +1941,7 @@ export const Inspector = {
   },
   clear(): void {
     Inspector._currentId = null;
+    Inspector._destroyStartPicker();
     const body = document.getElementById('inspector-body');
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
@@ -2111,6 +2121,7 @@ export const Inspector = {
     const distPct = distTotalQty > 0 ? Math.round(distThisQty / distTotalQty * 100) : 0;
     const distOtherSiblings = distSiblings.filter(s => String(s.id) !== String(task.id));
 
+    Inspector._destroyStartPicker();
     body.innerHTML = `
       ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
@@ -2301,7 +2312,7 @@ export const Inspector = {
     // Upgrade start_date to Flatpickr datetime picker
     const _dtEl = body.querySelector('[data-field="start_date"]') as HTMLInputElement | null;
     if (_dtEl) {
-      Util.fpDatetime(_dtEl, {
+      Inspector._fpStart = Util.fpDatetime(_dtEl, {
         onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
       });
     }

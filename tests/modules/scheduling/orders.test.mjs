@@ -1198,3 +1198,34 @@ test('Printer.exportCsv quotes RFC-4180 fields and formula-guards text cells', a
     Printer._rows = priorRows;
   }
 });
+
+test('#34 Inspector destroys the previous start-date Flatpickr on every re-render and on clear (no leak per render)', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorFp = Util.fpDatetime;
+  const dtInput = { value: '', dataset: { field: 'start_date' } };
+  const body = {
+    innerHTML: '',
+    querySelectorAll() { return []; },
+    querySelector(sel) { return sel === '[data-field="start_date"]' ? dtInput : null; },
+  };
+  const task = {
+    id: 'fp-leak-1', ORDER: '100010', PLANT: 'P-FP', MACHINE: 'L-FP', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00'),
+  };
+  let created = 0, destroyed = 0;
+  Util.fpDatetime = () => { created++; return { destroy() { destroyed++; } }; };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(task);
+    Inspector._render(task);
+    Inspector._render(task);
+    assert.equal(created, 3);
+    assert.equal(destroyed, 2, 'each re-render destroys the instance built for the replaced input');
+    Inspector.clear();
+    assert.equal(destroyed, 3, 'clearing the inspector destroys the last picker too');
+  } finally {
+    Util.fpDatetime = priorFp;
+    globalThis.document.getElementById = priorGetElementById;
+    Inspector._fpStart = null;
+  }
+});
