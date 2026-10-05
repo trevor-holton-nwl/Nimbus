@@ -250,31 +250,6 @@ export const Calendar = {
     return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date));
   },
 
-  /** True if `date` is inside the working window and not inside any blackout. */
-  isAvailable(line: string, date: Date): boolean {
-    const win = Calendar.workWindow(line, date);
-    if (!win) return false;
-    if (date < win[0] || date >= win[1]) return false;
-
-    const plant = Store.getPlantForLine(line);
-    for (const b of Store.blocks) {
-      if (b.plant && b.plant !== plant) continue;
-      if (b.line && b.line !== line) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (date >= s && date < e) return false;
-    }
-
-    for (const b of Store.plantBlocks) {
-      if (b.plant && b.plant !== plant) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (date >= s && date < e) return false;
-    }
-
-    return true;
-  },
-
   /** Advances `from` forward until a contiguous block of `durationMs` is
    *  available on `line`. Returns the starting Date (snapped). */
   nextAvailable(line: string, from: Date, durationMs: number): Date {

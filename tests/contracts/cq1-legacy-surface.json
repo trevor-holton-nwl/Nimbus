@@ -494,27 +494,7 @@
     {
       "file": "master-data/admin-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant._pillClick(${d})"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Plant.removePlantBlock('${b.id}')"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.Plant.toggleBlocksList()"
-    },
-    {
-      "file": "master-data/admin-ui.mjs",
-      "attribute": "oncontextmenu",
-      "expression": "NIMBUS.Plant._pillRightClick(${d}, event)"
     },
     {
       "file": "platform/foundation.mjs",
@@ -570,16 +550,6 @@
       "file": "scheduling/orders.mjs",
       "attribute": "onclick",
       "expression": "NIMBUS.Table._closeNotePopover()"
-    },
-    {
-      "file": "scheduling/orders.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Table._saveNotePopover('${id}')"
-    },
-    {
-      "file": "scheduling/orders.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Table._showAlertPopup('${p.value}')"
     }
   ],
   "htmlCommands": [

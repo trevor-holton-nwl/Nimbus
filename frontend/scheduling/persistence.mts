@@ -1942,23 +1942,6 @@ export const Persistence = {
     };
   },
 
-  /** Restore the persisted plant selection (if any). Called at boot once Store
-   *  is populated enough to know what plants exist. Falls back to null when
-   *  the persisted plant no longer matches a known plant. */
-  restoreSelectedPlant(): void {
-    try {
-      const raw = localStorage.getItem(Config.LS_KEY);
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      const saved = data?.selectedPlant;
-      if (!saved) return;
-      const known = Store.knownPlants();
-      Store.setSelectedPlant(known.includes(saved) ? saved : null, 'restore');
-    } catch {
-      // ignore — selectedPlant restore is best-effort
-    }
-  },
-
   _autosave: Util.debounce(() => {
     if (typeof Sandbox !== 'undefined' && Sandbox.active) return;
     if (Persistence._autosaveDisabled) return;

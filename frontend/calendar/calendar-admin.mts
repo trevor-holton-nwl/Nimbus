@@ -12,7 +12,7 @@ import type { NimbusBlock } from '../platform/types.mjs';
    CALENDAR UI — blackout-block-tab UI remnant.
    CQ-1 Phase 2 Task 1 moved the capacity-math half of the old `Calendar`
    object (workWindow, dailyCapacityHours, effectiveFromCapacity,
-   effectiveCapacityHours, isAvailable, nextAvailable, and the private
+   effectiveCapacityHours, nextAvailable, and the private
    _beginRun/_endRun/_indexBlocks/_dayWindow/_indexCapacityBlocks/
    _overlapsBlock helpers) into schedule-services.mjs, where it is imported
    below as `Calendar` (see the bridge destructure at the top of this IIFE).

@@ -1560,7 +1560,8 @@ export const Toast = (function() {
    MODAL — show/hide helpers for all modals (driven by hidden attribute).
      Modal.open(id)                  — unhide modal with the given element ID
      Modal.close(id)                 — hide modal with the given element ID
-     Modal.confirm(msg, onOk, onCancel?) — two-button confirmation dialog
+     Modal.confirm(opts)             — promise-based two-button confirmation dialog
+                                       (opts: { title, message, detail, confirmLabel, tone }; resolves true/false)
    ========================================================================== */
 // Confirm-dialog serialization: the dialog reuses one fixed set of DOM nodes
 // (#confirm-ok-btn etc.), so a second confirm() fired while one is still
