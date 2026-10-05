@@ -1218,3 +1218,17 @@ test('describeRejections names the rejected orders and their reasons, capped wit
   assert.doesNotMatch(text, /D: /, 'capped at the limit');
   assert.match(text, /reject_more|\+1 more/, 'tail present (locale keys are unresolved under Node)');
 });
+
+test('saveAll while a save is in flight toasts for a user save but stays silent for programmatic callers', () => {
+  const origShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg) => { toasts.push(msg); };
+  const prev = Persistence._saveInFlight;
+  Persistence._saveInFlight = true;
+  try {
+    Persistence.saveAll({ silent: true });
+    assert.equal(toasts.length, 0);
+    Persistence.saveAll();
+    assert.equal(toasts.length, 1);
+  } finally { Persistence._saveInFlight = prev; Toast.show = origShow; }
+});

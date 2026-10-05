@@ -124,7 +124,7 @@ declare global {
           render?(): void;
         };
         Persistence?: {
-          saveAll?(): void;
+          saveAll?(opts?: { silent?: boolean }): void;
         };
         /** Reached by Plant._renderRoster's plant-group-input onchange handler
          *  (plant-and-administration.mts Task 1) to keep MasterData's lines

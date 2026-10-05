@@ -1456,7 +1456,7 @@ export const DistributionPane = (() => {
    *  What-If mode. */
   function _onSaveScheduleClick(): void {
     if (Sandbox.active) return;
-    Persistence.saveAll();
+    Persistence.saveAll({ silent: true });
   }
 
   /* ---------------------------------------------------------------------

@@ -2395,7 +2395,7 @@ export const SandboxAdapter = {
     // Without this, "Scenario applied" showed but a reload before a later unrelated
     // save lost the promoted edits (autosave is suppressed during sandbox).
     if (applied) {
-      NIMBUS!.Persistence!.saveAll!();
+      NIMBUS!.Persistence!.saveAll!({ silent: true });
       // Calendar/blackout writes were suppressed during What-If (CalendarSync._post
       // guards on Sandbox.active); push the promoted config now that active=false.
       // Diff the pre-sandbox snapshot to also propagate blackouts DELETED in-session,
