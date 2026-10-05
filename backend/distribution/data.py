@@ -1240,6 +1240,15 @@ def _replan_from_current_header(cur, parent: dict, current: dict | None) -> dict
     )
 
     new_parent = dict(parent)
+    # D06: the upload's normal chunks already wrote the PLAN-TIME child rows
+    # (and left the plan-time previous set alone). If the header moved since
+    # plan() -- a re-weight/collapse -- ids in either set that the current
+    # shares no longer intend would otherwise never be removed. Stash them
+    # BEFORE child_ids/previous_child_ids are overwritten below; apply()
+    # supersedes (previous ∪ plan-time) - intended.
+    new_parent["plan_time_child_ids"] = (
+        set(parent.get("child_ids", {}).values()) | set(parent.get("previous_child_ids", set()))
+    )
     new_parent["shares"] = live_shares
     new_parent["letters"] = live_letters
     new_parent["child_ids"] = child_ids
@@ -1421,6 +1430,22 @@ def _delete_superseded_children(cur, ids: set[str]) -> int:
     )
     cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (id_list,))
     return cur.rowcount
+
+
+def _unscheduled_ids(cur, ids: set[str]) -> set[str]:
+    """Subset of `ids` that exist and carry no schedule (no scheduled_start
+    and no segments) -- safe to delete without a scheduled-removal confirm."""
+    if not ids:
+        return set()
+    cur.execute(
+        """
+        SELECT o.id FROM orders o
+         WHERE o.id = ANY(%s) AND o.scheduled_start IS NULL
+           AND NOT EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = o.id)
+        """,
+        (sorted(ids),),
+    )
+    return {r[0] for r in cur.fetchall()}
 
 
 def _update_share_child_ids(cur, parent: dict) -> None:
@@ -1642,6 +1667,15 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
             intended = set(parent["child_ids"].values())
             superseded = parent["previous_child_ids"] - intended
             counters["children_deleted"] += _delete_superseded_children(cur, superseded)
+            # D06: plan-time-only ids (replan path). Scheduled-removal safeguard:
+            # these are not on any current share, so they are upload-created
+            # orphans -- delete only the unscheduled ones; a scheduled one is
+            # left in place (visible, carries the parent link) rather than
+            # destroying planner work without confirmation.
+            stale = parent.get("plan_time_child_ids", set()) - parent["previous_child_ids"] - intended
+            if stale:
+                counters["children_deleted"] += _delete_superseded_children(
+                    cur, _unscheduled_ids(cur, stale))
 
             _update_share_child_ids(cur, parent)
 

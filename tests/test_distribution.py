@@ -3668,3 +3668,49 @@ class TestBundle2ParentLinkIntegrity(_ReweightFixtureBase):
                          filename="f.xlsx", plan_fn=distribution_data.plan, apply_fn=None)
         kids = _snapshot_children(pg, self.PLANT, self.ORD)
         assert len(kids) == 2 and all(k["distribution_letter"] for k in kids)
+
+    # ---- D06 ----
+    def test_d06_collapse_during_upload_leaves_no_orphan_sub_orders(self, pg):
+        # Real race: upload plan()s against the 60/40 header, a planner then REALLY
+        # collapses to L1 only (children deleted, bare id created, header xmin bumped),
+        # then the upload's normal chunks re-insert the plan-time A-/B- sub-orders and
+        # apply() runs. Pre-fix those two stayed forever (2,000 pieces for a 1,000 order).
+        rows_out, plan_struct, ingest_w = distribution_data.plan([self._parent_row()], str(uuid.uuid4()))
+        assert len(rows_out) == 2
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}], header["xmin"])
+        assert [c["distribution_letter"] for c in _snapshot_children(pg, self.PLANT, self.ORD)] == [None]
+
+        res = pg.upsert_orders(
+            [self._parent_row()], batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx",
+            plan_fn=lambda rows, b: (rows_out, plan_struct, ingest_w), apply_fn=distribution_data.apply)
+        assert res["status"] == "ok"
+        kids = _snapshot_children(pg, self.PLANT, self.ORD)
+        assert [(k["production_order"], k["distribution_letter"]) for k in kids] == [(self.ORD, None)]
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM orders WHERE material_number=%s AND production_order LIKE %s",
+                        (self.MAT, "%" + self.ORD))
+            assert cur.fetchone()[0] == 1
+
+    def test_d06_scheduled_plan_time_orphan_is_left_in_place(self, pg):
+        # Scheduled-removal safeguard: a plan-time-only order a planner already scheduled
+        # is never silently deleted by the supersede sweep.
+        rows_out, plan_struct, ingest_w = distribution_data.plan([self._parent_row()], str(uuid.uuid4()))
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}], header["xmin"])
+        pg.upsert_orders(
+            [self._parent_row()], batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx",
+            plan_fn=lambda rows, b: (rows_out, plan_struct, ingest_w), apply_fn=None)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s WHERE material_number=%s"
+                        " AND production_order = %s", (dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12),
+                                                       self.MAT, "A-" + self.ORD))
+            conn.commit()
+        with pg._pool.connection() as conn:
+            distribution_data.apply(plan_struct, str(uuid.uuid4()), conn)
+        left = sorted(k["production_order"] for k in _snapshot_children(pg, self.PLANT, self.ORD))
+        assert left == ["A-" + self.ORD, self.ORD]
