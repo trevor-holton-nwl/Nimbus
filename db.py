@@ -1005,9 +1005,13 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     # A long order can start well before `lo` and still run into the window, so
     # widen the start-indexed lookback by the touched machines' longest run time
     # (capped) and keep the true-overlap test on the effective END.
+    # Bounded by the same indexable eff-start range (idx_orders_machine_eff_start):
+    # nothing starting more than the lookback cap before `lo` can matter, so never
+    # scan the machine's whole history just to size the lookback.
     cur.execute(
-        "SELECT COALESCE(MAX(run_time), 0) FROM orders WHERE machine = ANY(%s) AND plant = ANY(%s)",
-        (machines, plants),
+        "SELECT COALESCE(MAX(run_time), 0) FROM orders WHERE machine = ANY(%s) AND plant = ANY(%s)"
+        " AND COALESCE(scheduled_start, basic_start_date) BETWEEN %s AND %s",
+        (machines, plants, lo - timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS), hi),
     )
     lookback_hours = min(float(cur.fetchone()[0] or 0), _CONFLICT_LOOKBACK_CAP_HOURS)
     wide_lo = lo - timedelta(hours=lookback_hours)
