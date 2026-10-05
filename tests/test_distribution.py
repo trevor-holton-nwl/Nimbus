@@ -3714,3 +3714,19 @@ class TestBundle2ParentLinkIntegrity(_ReweightFixtureBase):
             distribution_data.apply(plan_struct, str(uuid.uuid4()), conn)
         left = sorted(k["production_order"] for k in _snapshot_children(pg, self.PLANT, self.ORD))
         assert left == ["A-" + self.ORD, self.ORD]
+
+    # ---- D43 ----
+    def test_d43_hours_sum_ignores_orphans_carrying_the_parent_link(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET labor_hours = 50 WHERE parent_production_order=%s", (self.ORD,))
+            # Orphan: carries the parent link but no share points at it.
+            cur.execute("INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                        " parent_production_order, distribution_letter, labor_hours, machine_hours)"
+                        " VALUES (%s,%s,%s,%s,%s,%s,'Z',50,10)",
+                        (pg.make_id("Z-" + self.ORD, self.MAT), "Z-" + self.ORD, self.MAT, self.L1,
+                         self.PLANT, self.ORD))
+            conn.commit()
+            header = distribution_data._lock_one_header(cur, self.PLANT, self.ORD, self.MAT, for_update=False)
+            facts = distribution_data._parent_facts_from_header(cur, self.PLANT, self.ORD, self.MAT, header)
+        assert facts["labor_hours"] == Decimal(100)          # 2 real children x 50; orphan's 50 excluded
+        assert facts["machine_hours"] in (None, Decimal(0))  # orphan's 10 excluded

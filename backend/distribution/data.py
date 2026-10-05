@@ -2380,9 +2380,14 @@ def _parent_facts_from_header(cur, plant: str, order: str, material: str, header
     silently losing it -- see backend/distribution/CLAUDE.md."""
     sap_facts = header.get("sap_facts") or {}
     facts = {k: sap_facts.get(k) for k in _SAP_FACTS_COPIED_KEYS}
+    # D43: sum only the sub-orders a share actually points at -- never every
+    # order carrying the parent link (orphans from a failed/raced upload would
+    # inflate the total that then gets re-split).
     cur.execute(
-        "SELECT SUM(labor_hours), SUM(machine_hours) FROM orders"
-        " WHERE plant = %s AND parent_production_order = %s AND material_number = %s",
+        "SELECT SUM(o.labor_hours), SUM(o.machine_hours) FROM orders o"
+        " WHERE o.id IN (SELECT s.child_id FROM order_distribution_share s"
+        "                 WHERE s.plant = %s AND s.production_order = %s AND s.material_number = %s"
+        "                   AND s.child_id IS NOT NULL)",
         (plant, order, material),
     )
     row = cur.fetchone()
