@@ -42,7 +42,7 @@ def _setup_schema_texts() -> list[tuple[str, str]]:
     rewritten retroactively — schema.sql now uses `machine` naming, so the two
     would permanently disagree on those tokens. The live Azure DB is reconciled
     to the new naming by a separate, one-time hand-applied cutover migration
-    (migrations/2026-08-20-line-to-machine.sql), not by keeping this dated file
+    (migrations/manual/2026-08-20-line-to-machine.sql), not by keeping this dated file
     in lockstep with schema.sql. Only SCHEMA_PATH is checked here now; the
     constant is kept (unused below) so this rationale stays attached to it."""
     return [(SCHEMA_PATH, _schema_text())]
@@ -120,9 +120,6 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-08-10-material-plant-default-workcenter.sql",
         "2026-08-11-priority-lists.sql",
         "2026-08-13-changeover-matrix-stage-0.sql",
-        "2026-08-17-line-key-columns.sql",
-        "2026-08-20-line-to-machine.sql",
-        "2026-08-20-setup-value-case-fold-backfill.sql",
     }
 
     expected_replayable = {

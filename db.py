@@ -567,18 +567,6 @@ _ORDERS_SELECT = f"""
 """
 
 
-def load_orders_df() -> pd.DataFrame:
-    """
-    Return ALL orders as a DataFrame. Used by diagnostics/admin paths only —
-    the hot /tasks read path uses query_orders() with server-side scoping.
-    """
-    with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(_ORDERS_SELECT)
-        cols = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=cols)
-
-
 def query_orders(plant: str | None = None, line: str | None = None,
                  limit: int | None = None, offset: int | None = None,
                  allowed_plants: list[str] | None = None) -> tuple[pd.DataFrame, datetime | None, datetime | None]:
@@ -903,31 +891,6 @@ def upload_audit_log(limit: int = 50) -> list[dict]:
 # =========================
 # QUERIES — write
 # =========================
-def update_task_dates(task_id: str, start_date=None, end_date=None) -> dict:
-    """
-    Persist a manual drag/drop or override edit by writing to
-    scheduled_start / scheduled_end.  Never touches the SAP-source columns
-    so the next upload doesn't have to think about user edits.
-    """
-    if start_date is None and end_date is None:
-        return {"status": "ok", "updated": 0}
-    sets, params = [], []
-    if start_date is not None:
-        sets.append("scheduled_start = %s")
-        params.append(start_date)
-    if end_date is not None:
-        sets.append("scheduled_end = %s")
-        params.append(end_date)
-    sets.extend(["planning_status = 'scheduled'", "planning_reason = NULL", "updated_at = NOW()"])
-    params.append(task_id)
-    sql = f"UPDATE orders SET {', '.join(sets)} WHERE id = %s"
-    with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, params)
-        updated = cur.rowcount
-        conn.commit()
-    return {"status": "ok", "updated": updated}
-
-
 def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> list[dict]:
     """Pairwise strict overlaps (`start < other_end`, never `<=`) between orders on
     the same machine. `intervals` are (machine, order_id, start, end); an order with
@@ -2269,7 +2232,7 @@ def run_vacuum_analyze(table: str | None = None) -> dict:
     results = {}
     with psycopg.connect(CONN_STR, autocommit=True) as conn:
         for t in targets:
-            conn.execute(f"VACUUM ANALYZE {t}")
+            conn.execute(sql.SQL("VACUUM ANALYZE {}").format(sql.Identifier(t)))
             results[t] = "ok"
     return {"results": results}
 
@@ -2280,7 +2243,7 @@ def run_analyze(table: str) -> dict:
     if table not in allowed:
         raise ValueError(f"Unknown table: {table}")
     with psycopg.connect(CONN_STR, autocommit=True) as conn:
-        conn.execute(f"ANALYZE {table}")
+        conn.execute(sql.SQL("ANALYZE {}").format(sql.Identifier(table)))
     return {"table": table, "status": "ok"}
 
 

@@ -69,7 +69,7 @@ one's inline comment for the reasoning):
      business material code under two different column names (historical),
      confirmed against schema.sql/migrations, not merely assumed.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from psycopg.types.json import Jsonb
@@ -924,7 +924,7 @@ def _build_rate_map_on_conn(plant: str, conn) -> dict:
 
     return {
         "plant": plant,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         # §8.1: "machines" -- every machine in this plant with a non-null
         # sap_workcenter, {machine: sap_workcenter}.
         "machines": {m: wc for m, wc in machine_workcenter.items() if wc},

@@ -19,7 +19,7 @@ master_data.py (deferred split, see docs/MIGRATION.md).
 """
 import json
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -104,7 +104,7 @@ def get_audit_log(limit: int = 200):
 @router.post("/audit/log", response_model=StatusOkResult, dependencies=[Depends(auth.require_authenticated)])
 def append_audit_log(entry: dict, request: Request):
     """Frontend-triggered audit entry (e.g. optimization_run events)."""
-    entry.setdefault("ts", datetime.utcnow().isoformat() + "Z")
+    entry.setdefault("ts", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
     entry.setdefault("user", request.headers.get("X-User", "system"))
     _cw_append_audit(entry)
     return {"status": "ok"}

@@ -210,10 +210,6 @@ SKIPPED_POST_SCHEMA_MIGRATIONS = {
     "2026-08-10-material-plant-default-workcenter.sql": "pre-cutover default_workcenter column",
     "2026-08-11-priority-lists.sql": "pre-cutover priority_list.line column",
     "2026-08-13-changeover-matrix-stage-0.sql": "pre-cutover production_lines/setup line columns",
-    "2026-08-17-line-key-columns.sql": "pre-cutover production_lines/line_key columns",
-    # Hand-applied operational cutovers are not repeatable post-current-schema.
-    "2026-08-20-line-to-machine.sql": "hand-applied line-to-machine cutover",
-    "2026-08-20-setup-value-case-fold-backfill.sql": "hand-applied setup value backfill",
 }
 
 

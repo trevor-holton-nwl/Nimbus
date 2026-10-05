@@ -34,9 +34,8 @@ uses for spotting the "ON CONFLICT" upsert vs. the plain audit insert), not by
 executing real SQL. Two consequences of that:
 
   * Coverage for item 2 (the COALESCE fix) can only pin the SQL text of the
-    fix plus a pure-Python mirror of COALESCE/NULLIF's well-defined semantics
-    (`_coalesce_nullif_semantics` below) — it cannot execute Postgres's actual
-    COALESCE evaluator. `tests/test_routing_resolver.py`
+    fix — it cannot execute Postgres's actual COALESCE evaluator.
+    `tests/test_routing_resolver.py`
     (ROUTING_RUNTIME_DESIGN.md §10) is where any resolver-side behavior gets a
     genuine live-value check once a DB is reachable.
   * Coverage for item 4's plant-scoping (`AND plant = ANY(%s)`) pins the two
@@ -47,7 +46,6 @@ executing real SQL. Two consequences of that:
 """
 from contextlib import contextmanager
 
-import pytest
 
 import db
 
@@ -211,29 +209,6 @@ def test_stamp_order_attributes_pins_the_coalesce_nullif_fix_plant_scoped():
     update_stmt, params = cursor.executed[0]
     assert "COALESCE(NULLIF(o.production_version, ''), mp.default_production_version)" in update_stmt
     assert params == ("5501",)
-
-
-def _coalesce_nullif_semantics(order_value, mp_default):
-    """Pure-Python mirror of Postgres's COALESCE(NULLIF(o.production_version,
-    ''), mp.default_production_version) — NULLIF(x, '') is NULL whenever x is
-    NULL or '', otherwise x; COALESCE then picks the first non-NULL. Standard,
-    well-defined SQL semantics — used here only to double-check the *intent*
-    behind the SQL text pinned above (missing/blank falls back; a non-blank
-    value, from the file or a planner's own edit, always wins), not to
-    substitute for running real Postgres."""
-    if order_value not in (None, ""):
-        return order_value
-    return mp_default
-
-
-@pytest.mark.parametrize("order_value,mp_default,expected", [
-    (None, "0002", "0002"),   # missing production_version -> Material Plant default
-    ("", "0002", "0002"),     # blank string (cleared/blank upload cell) -> falls back
-    ("0007", "0002", "0007"), # explicit file value wins, default never applied
-    ("0007", None, "0007"),   # explicit value survives even with no MP default at all
-])
-def test_production_version_coalesce_semantics(order_value, mp_default, expected):
-    assert _coalesce_nullif_semantics(order_value, mp_default) == expected
 
 
 # ---------------------------------------------------------------------------

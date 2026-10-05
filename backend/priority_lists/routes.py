@@ -15,7 +15,7 @@ docs/architecture/domain-refactor-plan.md §2 row 7 and MIGRATION.md).
 """
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -208,7 +208,7 @@ def _persist_priority_list(plant: str, field_key: str, spec: dict, entries: dict
     else:
         action = "priority_list_replace" if is_replace else "priority_list_upload"
     _cw_append_audit({
-        "ts": datetime.utcnow().isoformat() + "Z", "user": user, "action": action, "plant": plant,
+        "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z", "user": user, "action": action, "plant": plant,
         "details": {"field_key": field_key, "machine": machine, "filename": filename,
                     "row_count": stored_count, "file_row_count": file_row_count,
                     "replaced": is_replace},
@@ -414,7 +414,7 @@ def delete_priority_list_generic(
     res = db.delete_priority_list(plant, field_key, line=machine)
     if res is None:
         return {"status": "not_found"}
-    ts = datetime.utcnow().isoformat() + "Z"
+    ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     user = request.headers.get("X-User", "system")
     _cw_append_audit({
         "ts": ts, "user": user, "action": "priority_list_delete", "plant": plant,
@@ -551,7 +551,7 @@ def delete_color_wheel(plant: str, request: Request,
     res = db.delete_priority_list(plant, "colorWheel", line="")
     if res is None:
         return {"status": "not_found"}
-    ts = datetime.utcnow().isoformat() + "Z"
+    ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     user = request.headers.get("X-User", "system")
     _cw_append_audit({
         "ts": ts, "user": user, "action": "color_wheel_delete", "plant": plant,
