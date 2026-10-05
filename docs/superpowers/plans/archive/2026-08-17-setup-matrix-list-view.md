@@ -127,7 +127,7 @@ def page_matrix_rows(plant: str, line: str, signature_version: int, *, from_key:
     plant_by_key: dict[str, dict] = {}
     line_by_key: dict[str, dict] = {}
     for r in raw:
-        key = f"{json.dumps(r[1], sort_keys=True)} {json.dumps(r[2], sort_keys=True)}"
+        key = f"{json.dumps(r[1], sort_keys=True)}\x00{json.dumps(r[2], sort_keys=True)}"
         entry = {"from_key": r[1], "to_key": r[2], "setup_min": int(r[3]), "source": r[4]}
         if r[0] == "":
             plant_by_key[key] = entry

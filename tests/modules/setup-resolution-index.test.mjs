@@ -444,7 +444,7 @@ test('a plant-row index never admits a row whose from/to pair would collide unde
   const definition = { plant: '5512', fields: ['prt01', 'colorWheel'], signature_version: 1, strict_blanks: true, active: true };
 
   // Row: from = [prt01="1", colorWheel="A"], to = [prt01="X", colorWheel="Y"].
-  // stateSignature (values joined with NUL) = "1 A" for from, "X Y" for to.
+  // stateSignature (values joined with NUL) = "1\u0000A" for from, "X\u0000Y" for to.
   // A naive empty-joined signature would be "1A" / "XY" (space-joined key "1A XY").
   const row = {
     machine: '',
@@ -454,7 +454,7 @@ test('a plant-row index never admits a row whose from/to pair would collide unde
     setup_min: 7,
   };
   // Query: from = [prt01="1A", colorWheel=""], to = [prt01="X", colorWheel="Y"].
-  // stateSignature = "1A " for from — distinct from the row's "1 A" now that
+  // stateSignature = "1A\u0000" for from — distinct from the row's "1\u0000A" now that
   // the join is NUL; under a naive '' join both would be "1A" while the value
   // arrays still differ, which is the collision this test guards.
   const query = {
