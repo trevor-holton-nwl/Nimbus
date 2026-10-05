@@ -6229,7 +6229,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const protectedTask = taskIsEvaluationProtected(snapshot, bounds, task);
       const successor = definition ? stateForOrder(task, definition) : null;
       const resolution = chargeable && state && successor
-        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides })
+        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
         : null;
       if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
       const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
