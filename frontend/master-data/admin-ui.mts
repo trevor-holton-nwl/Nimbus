@@ -2972,7 +2972,10 @@ export const MasterData = (() => {
   const FK_SOURCE: Partial<Record<MasterDataTable, Record<string, MasterDataTable>>> = {
     plants:           { subnetwork: 'subnetworks' },
     machine: { subnetwork: 'subnetworks', plant: 'plants' },
-    material_plants:  { material_id: 'materials' },
+    // material_plants.material_id is deliberately NOT registered here either
+    // (#25): the generic _fkSelect would fetch the whole `materials` table
+    // (unbounded) to fill its <select>. It is a plain text cell; the backend
+    // rejects an unknown material.
     // bom_items.component_id is deliberately NOT registered here: it needs a
     // plant-scoped option list (material_plants filtered to the row's plant),
     // which the generic _fkSelect (whole-source-table, single-key convention)
@@ -3031,7 +3034,24 @@ export const MasterData = (() => {
     bom_items:          'plant+material',
     production_version: 'plant',
     routing_operation:  'plant',
+    // P8 (#25): machine and material_plants are per-plant and at 50+ plants /
+    // 3,500+ machines must never load whole into the (non-virtualised) DOM table.
+    machine:            'plant',
+    material_plants:    'plant',
   };
+
+  // Scoped tables whose gate is skipped when the app-wide plant is already
+  // selected (the common case) — the grid opens straight on that plant.
+  const AUTO_SCOPE_FROM_SELECTED_PLANT: ReadonlySet<MasterDataTable> = new Set(['machine', 'material_plants']);
+
+  // Tables that load a server-side page (search + limit/offset + "Load more")
+  // instead of the whole (scoped) table: `materials` is not per-plant, so it
+  // is paged unscoped; `material_plants` is paged within its plant.
+  const PAGED_TABLES: ReadonlySet<MasterDataTable> = new Set(['materials', 'material_plants']);
+  const PAGE_SIZE = 200;
+  interface PageState { search: string; total: number }
+  const _pageState: Partial<Record<MasterDataTable, PageState>> = {};
+  let _pageSearchTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Per-table scope filter for SCOPED_TABLES (was a single bom_items-only
   // `_bomFilter`; generalized to a map so production_version/routing_operation
@@ -3095,6 +3115,7 @@ export const MasterData = (() => {
   }
 
   function _setTab(table: MasterDataTable): void {
+    delete _pageState[table];
     _activeTable = table;
     _syncTabUI();
     _renderActiveTable();
@@ -3111,6 +3132,12 @@ export const MasterData = (() => {
   // immediately.
   function _renderActiveTable(): void {
     const mode = SCOPED_TABLES[_activeTable];
+    // Only before the user has ever touched this tab's scope: "Change" leaves a
+    // defined (empty) filter behind so the gate shows instead of re-auto-scoping.
+    if (mode && !_scopeFilters[_activeTable]
+        && AUTO_SCOPE_FROM_SELECTED_PLANT.has(_activeTable) && Store.selectedPlant) {
+      _scopeFilters[_activeTable] = { plant: Store.selectedPlant, material_id: null };
+    }
     if (mode && !_scopeReady(_activeTable, mode)) {
       _renderScopeGate(_activeTable, mode);
     } else {
@@ -3183,10 +3210,16 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Data loading
   // -----------------------------------------------------------------------
-  async function _loadAndRender(table: MasterDataTable): Promise<void> {
+  // opts.more: PAGED_TABLES "Load more" — fetch the next page and append.
+  // opts.keepEdits: PAGED_TABLES server-side search — swap the baseline rows
+  // but keep pending edits, and don't blank the grid (the search box keeps focus).
+  async function _loadAndRender(table: MasterDataTable, opts: { more?: boolean; keepEdits?: boolean } = {}): Promise<void> {
     const host = document.getElementById('md-host');
     if (!host) return;
-    host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
+    const prior = _cache[table];
+    if (!opts.more && !opts.keepEdits) {
+      host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
+    }
     // Stale-response guard: capture the generation before the async fetch,
     // and only let this call mutate `_cache`/render if it's still current
     // once the fetch resolves. Without this, quickly switching Manage Data
@@ -3203,11 +3236,20 @@ export const MasterData = (() => {
     // _loadAndRender for a scoped table.
     const _scopeMode = SCOPED_TABLES[table];
     const _scope = _scopeMode ? _scopeFilter(table) : null;
-    const qs = _scopeMode === 'plant+material'
-      ? `?${new URLSearchParams({ plant: _scope!.plant!, material_id: _scope!.material_id! }).toString()}`
-      : _scopeMode === 'plant'
-      ? `?${new URLSearchParams({ plant: _scope!.plant! }).toString()}`
-      : '';
+    const params = new URLSearchParams();
+    if (_scopeMode === 'plant+material') {
+      params.set('plant', _scope!.plant!);
+      params.set('material_id', _scope!.material_id!);
+    } else if (_scopeMode === 'plant') {
+      params.set('plant', _scope!.plant!);
+    }
+    if (PAGED_TABLES.has(table)) {
+      const search = (_pageState[table]?.search ?? '').trim();
+      if (search) params.set('search', search);
+      params.set('limit', String(PAGE_SIZE));
+      if (opts.more && prior) params.set('offset', String(prior.rows.length));
+    }
+    const qs = params.toString() ? `?${params.toString()}` : '';
     try {
       const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async (r) => {
         if (!r.ok) {
@@ -3220,14 +3262,28 @@ export const MasterData = (() => {
         return r.json() as Promise<MasterDataResponse>;
       });
       if (generation !== _loadGeneration) return; // a newer table switch has since started
-      _cache[table] = {
-        columns: data.columns,
-        rows:    data.rows,
-        dirty:   new Map(),
-        deleted: new Set(),
-        added:   [],
-      };
+      if (PAGED_TABLES.has(table)) {
+        _pageState[table] = { search: _pageState[table]?.search ?? '', total: Number(data.meta?.total ?? data.rows.length) };
+      }
+      if (opts.more && prior) {
+        prior.rows = [...prior.rows, ...data.rows];
+      } else if (opts.keepEdits && prior) {
+        prior.columns = data.columns;
+        prior.rows = data.rows;
+      } else {
+        _cache[table] = {
+          columns: data.columns,
+          rows:    data.rows,
+          dirty:   new Map(),
+          deleted: new Set(),
+          added:   [],
+        };
+      }
       _renderTable(table);
+      if (opts.keepEdits) {
+        const box = document.querySelector<HTMLInputElement>('#md-host .md-search');
+        if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+      }
     } catch (e) {
       if (generation !== _loadGeneration) return; // a newer table switch has since started
       const err = e as MasterDataFetchError;
@@ -3266,6 +3322,7 @@ export const MasterData = (() => {
       changeBtn.onclick = () => {
         _scopeFilters[table] = { plant: null, material_id: null };
         delete _cache[table];
+        delete _pageState[table];
         _renderActiveTable();
       };
       scopeBar.appendChild(changeBtn);
@@ -3280,7 +3337,19 @@ export const MasterData = (() => {
     searchInput.type = 'search';
     searchInput.className = 'input md-search';
     searchInput.placeholder = Util.t('ph.search_table', { table: TABLE_LABELS[table] });
-    searchInput.oninput = () => _applyFilter(table, searchInput.value.toLowerCase());
+    if (PAGED_TABLES.has(table)) {
+      // Server-side search (debounced) — the grid only ever holds one page.
+      searchInput.value = _pageState[table]?.search ?? '';
+      searchInput.oninput = () => {
+        if (_pageSearchTimer) clearTimeout(_pageSearchTimer);
+        _pageSearchTimer = setTimeout(() => {
+          _pageState[table] = { search: searchInput.value, total: _pageState[table]?.total ?? 0 };
+          void _loadAndRender(table, { keepEdits: true });
+        }, 350);
+      };
+    } else {
+      searchInput.oninput = () => _applyFilter(table, searchInput.value.toLowerCase());
+    }
     toolbar.appendChild(searchInput);
 
     const spacer = document.createElement('span');
@@ -3412,6 +3481,23 @@ export const MasterData = (() => {
     tbl.appendChild(tbody);
     wrap.appendChild(tbl);
     host.appendChild(wrap);
+
+    if (PAGED_TABLES.has(table)) {
+      const total = _pageState[table]?.total ?? rows.length;
+      const pager = document.createElement('div');
+      pager.className = 'md-toolbar md-pager';
+      const status = document.createElement('span');
+      status.textContent = Util.t('ui.md_page_status', { shown: rows.length, total });
+      pager.appendChild(status);
+      if (rows.length < total) {
+        const moreBtn = document.createElement('button');
+        moreBtn.className = 'btn btn-ghost sm';
+        moreBtn.textContent = Util.t('btn.load_more');
+        moreBtn.onclick = () => { moreBtn.disabled = true; void _loadAndRender(table, { more: true }); };
+        pager.appendChild(moreBtn);
+      }
+      host.appendChild(pager);
+    }
   }
 
   function _appendRow(tbody: HTMLTableSectionElement, table: MasterDataTable, columns: MasterDataColumn[], row: MasterDataRow): void {
@@ -4221,7 +4307,11 @@ export const MasterData = (() => {
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
         Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
-        Util.fetchTraced(`${API}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
+        // Plant-scoped (#25): never refetch every plant's machines. With no
+        // selected plant, keep whatever lines are already in the Store.
+        Store.selectedPlant
+          ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
+          : Promise.resolve(null),
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
@@ -4234,7 +4324,7 @@ export const MasterData = (() => {
           // rows) branch to preserve the original single-emit-per-call shape.
           Store.setMasterData({
             plants: pData?.rows ?? [],
-            lines:  lData?.rows ?? [],
+            lines:  lData?.rows ?? (Store.selectedPlant ? [] : (Store.masterData?.lines ?? [])),
             // This refresh only re-fetches plants/machine (the two tables the
             // Hierarchy/ProdLines consumers below actually need); it is not
             // work-center-specific and has no sap_workcenter rows in scope

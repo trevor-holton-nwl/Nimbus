@@ -1032,6 +1032,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.orders_in_range':                '{{count}} Auftrag{{plural}} im Bereich',
   'ui.listening':                      '🎤 Hört zu…',
   'ui.unsaved_badge':                  '{{count}} nicht gespeichert',
+  'ui.md_page_status':                 '{{shown}} von {{total}} angezeigt',
   'ui.no_matches_table':               'Keine Übereinstimmungen',
 
   /* ── Column / master data validation ────────────────────────────────────── */

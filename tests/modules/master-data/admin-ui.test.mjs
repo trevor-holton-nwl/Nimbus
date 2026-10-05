@@ -687,3 +687,22 @@ test('WorkCenters._flushOnPageHide sends queued edits with keepalive so they sur
     globalThis.fetch = priorFetch;
   }
 });
+
+test('machine / material_plants load plant-scoped and materials/material_plants are server-paged (#25)', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(source, /machine:\s+'plant',\s*\n\s*material_plants:\s+'plant',/, 'machine + material_plants are SCOPED_TABLES');
+  assert.match(source, /PAGED_TABLES[^\n]*new Set\(\['materials', 'material_plants'\]\)/);
+  const load = source.slice(source.indexOf('async function _loadAndRender'), source.indexOf('function _renderTable'));
+  assert.match(load, /params\.set\('limit'/, 'paged tables send a limit');
+  assert.match(load, /params\.set\('search'/, 'paged tables search server-side');
+  assert.match(load, /params\.set\('offset'/, 'Load more sends an offset');
+  const fk = source.slice(source.indexOf('const FK_SOURCE'), source.indexOf('const FIXED_OPTIONS'));
+  assert.doesNotMatch(fk, /material_id:\s*'materials'/, 'no whole-materials FK dropdown');
+  assert.doesNotMatch(source, /master-data\/machine`/, 'no unscoped /master-data/machine fetch left');
+});
+
+test('persistence fetches /master-data/machine only with the plant (#25)', () => {
+  const source = readFileSync(new URL('../../../frontend/scheduling/persistence.mts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /master-data\/machine`/, 'no unscoped machine fetch');
+  assert.equal((source.match(/master-data\/machine\?plant=\$\{encodeURIComponent\(plant\)\}/g) || []).length, 2);
+});

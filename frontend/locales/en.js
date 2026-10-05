@@ -600,6 +600,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.orders_in_range':                '{{count}} order{{plural}} in range',
   'ui.listening':                      '🎤 Listening…',
   'ui.unsaved_badge':                  '{{count}} unsaved',
+  'ui.md_page_status':                 'Showing {{shown}} of {{total}}',
   'ui.no_matches_table':               'No matches',
   'ui.column_id_required':             'Column ID is required.',
   'ui.column_id_format':               'Column ID must start with a lowercase letter and contain only lowercase letters, digits, underscores.',

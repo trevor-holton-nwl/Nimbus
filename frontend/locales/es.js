@@ -1036,6 +1036,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.orders_in_range':                '{{count}} pedido{{plural}} en el rango',
   'ui.listening':                      '🎤 Escuchando…',
   'ui.unsaved_badge':                  '{{count}} sin guardar',
+  'ui.md_page_status':                 'Mostrando {{shown}} de {{total}}',
   'ui.no_matches_table':               'Sin coincidencias',
 
   /* ── Column / master data validation ────────────────────────────────────── */

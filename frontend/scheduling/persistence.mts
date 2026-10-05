@@ -364,7 +364,9 @@ export const Persistence = {
       // fetch to; skip it entirely rather than fetch every plant's rows.
       return Promise.all([
         Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-        Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+        // No plant selected: no machines to show (plant-scoped, #25) — never
+        // fetch every plant's machine list just to populate the plant picker.
+        Promise.resolve(null as MasterDataRowsResponse<MasterLineRow> | null),
       ]).then(([pData, lData]) => {
         // A newer load() may have started (and even resolved) while this was in
         // flight — discard rather than let a stale response overwrite it.
@@ -448,7 +450,7 @@ export const Persistence = {
           // THEN hydrate calendars/blackouts from the backend (authoritative).
           Promise.all([
             Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-            Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+            Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
           ]).then(([pData, lData, wcData]) => {
             // A newer load() (e.g. the user switched plants again) may have
@@ -598,7 +600,7 @@ export const Persistence = {
         // master_data.get_system_settings()/GET /system-settings in brain.py.
         Promise.all([
           Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-          Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+          Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
         ]).then(([pData, lData, ssData, wcData]) => {
