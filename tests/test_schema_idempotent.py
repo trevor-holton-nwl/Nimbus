@@ -116,10 +116,8 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     skipped_names = {name for name, _reason in skipped}
     expected_skipped = {
         "2026-06-30-sap-interface.sql",
-        "2026-07-03-production-line-optimizer-flags.sql",
         "2026-08-10-material-plant-default-workcenter.sql",
         "2026-08-11-priority-lists.sql",
-        "2026-08-13-changeover-matrix-stage-0.sql",
     }
 
     expected_replayable = {
