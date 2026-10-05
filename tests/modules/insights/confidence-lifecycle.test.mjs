@@ -275,6 +275,9 @@ test('#32 Confidence uses the selected plant\'s conf_score_horizon (master data)
 });
 
 // ---- #26 Time Machine: put resolves with the key, in-memory cap, key-cursor prune -----------
+// Deterministic: the fake IndexedDB completes its callbacks on the microtask queue (no wall-clock
+// timers), and settle() drains that queue by yielding one macrotask turn.
+const settle = () => new Promise(resolve => setImmediate(resolve));
 function fakeIntelDb() {
   const rows = [];
   let nextId = 1;
@@ -285,10 +288,10 @@ function fakeIntelDb() {
         const req = { result: undefined };
         const id = v.id ?? nextId++;
         req.result = id; rows.push({ ...v, id });
-        setTimeout(() => t.oncomplete && t.oncomplete({}), 0);
+        queueMicrotask(() => t.oncomplete && t.oncomplete({}));
         return req;
       },
-      count() { const req = { result: rows.length }; setTimeout(() => req.onsuccess && req.onsuccess({}), 0); return req; },
+      count() { const req = { result: rows.length }; queueMicrotask(() => req.onsuccess && req.onsuccess({})); return req; },
       delete(key) { const i = rows.findIndex(r => r.id === key); if (i >= 0) rows.splice(i, 1); },
       index() {
         return {
@@ -296,9 +299,9 @@ function fakeIntelDb() {
             const sorted = [...rows].sort((a, b) => a.ts - b.ts);
             let i = 0;
             const req = {};
-            const emit = () => setTimeout(() => req.onsuccess && req.onsuccess({
+            const emit = () => queueMicrotask(() => req.onsuccess && req.onsuccess({
               target: { result: i < sorted.length ? { primaryKey: sorted[i].id, continue() { i += 1; emit(); } } : null },
-            }), 0);
+            }));
             emit();
             return req;
           },
@@ -332,7 +335,7 @@ test('pruneSnapshots deletes only the oldest rows by key cursor, leaving keepN (
   context.window.requestIdleCallback = fn => fn();
   try {
     db.pruneSnapshots(5);
-    await wait(50);
+    await settle();
     assert.deepEqual(fake.rows.map(r => r.id).sort((a, b) => a - b), [4, 5, 6, 7, 8], 'the 3 oldest are gone');
   } finally { db._db = prior; context.window.requestIdleCallback = priorRic; }
 });
@@ -346,7 +349,7 @@ test('TimeMachine keeps at most 200 snapshots in memory (#26)', async () => {
   tm._snapshots = Array.from({ length: 200 }, (_, i) => ({ id: i + 1, ts: i, plant: null }));
   try {
     tm.snapshot('overflow');
-    await wait(20);
+    await settle();
     assert.equal(tm._snapshots.length, 200);
     assert.equal(tm._snapshots.at(-1).label, 'overflow');
     assert.equal(tm._snapshots[0].id, 2, 'the oldest entry was trimmed');

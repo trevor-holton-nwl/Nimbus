@@ -214,7 +214,8 @@ test('Timeline.scrollToLine navigates by negative offset and sets _vScrollTop', 
   }
 });
 
-test('Timeline loading mask: show sets hidden=false and clears is-hiding; hide adds is-hiding, then after 180ms sets hidden=true and removes is-hiding', async () => {
+test('Timeline loading mask: show sets hidden=false and clears is-hiding; hide adds is-hiding, then after 180ms sets hidden=true and removes is-hiding', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock: no wall-clock sleeps
   const priorLoadingMaskTimer = Timeline._loadingMaskTimer;
   const priorLoadingMaskHideTimer = Timeline._loadingMaskHideTimer;
   _loadingOverlay.hidden = true;
@@ -231,7 +232,7 @@ test('Timeline loading mask: show sets hidden=false and clears is-hiding; hide a
     assert.equal(_loadingOverlay._classes.has('is-hiding'), true, 'hideLoadingMask must add is-hiding immediately');
 
     // Wait for the 180ms timer
-    await new Promise(r => setTimeout(r, 220));
+    t.mock.timers.tick(220);
     assert.equal(_loadingOverlay.hidden, true, 'after 180ms, hideLoadingMask must set hidden=true');
     assert.equal(_loadingOverlay._classes.has('is-hiding'), false, 'after 180ms, hideLoadingMask must remove is-hiding');
 
@@ -239,12 +240,12 @@ test('Timeline loading mask: show sets hidden=false and clears is-hiding; hide a
     Timeline.showLoadingMask();
     Timeline.hideLoadingMask();
     Timeline.showLoadingMask();
-    await new Promise(r => setTimeout(r, 220));
+    t.mock.timers.tick(220);
     assert.equal(_loadingOverlay.hidden, false, 'a re-show before hide completes must cancel the hide and keep overlay visible');
 
     // Final hide and wait to ensure no timer leak
     Timeline.hideLoadingMask();
-    await new Promise(r => setTimeout(r, 220));
+    t.mock.timers.tick(220);
     if (Timeline._loadingMaskTimer !== null) clearTimeout(Timeline._loadingMaskTimer);
     if (Timeline._loadingMaskHideTimer !== null) clearTimeout(Timeline._loadingMaskHideTimer);
   } finally {

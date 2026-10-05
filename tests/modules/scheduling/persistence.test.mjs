@@ -1144,7 +1144,8 @@ test('cross-seam: saveAll payloads for a sub-order and a routing-plant order mat
     'saveAll payload drifted from tests/modules/fixtures/save_payload_cases.json; if intentional, regenerate with NIMBUS_UPDATE_FIXTURES=1 and re-run tests/test_task_concurrency.py');
 });
 
-test('#24 reconnect reloads the plant that was ATTEMPTED, not the null _currentLoadedPlant of a failed boot load', async () => {
+test('#24 reconnect reloads the plant that was ATTEMPTED, not the null _currentLoadedPlant of a failed boot load', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock: the 1s backoff is ticked, not slept
   const origFetch = globalThis.fetch;
   const priorLoad = Persistence.load;
   const priorLoaded = Persistence._currentLoadedPlant;
@@ -1162,7 +1163,8 @@ test('#24 reconnect reloads the plant that was ATTEMPTED, not the null _currentL
     assert.equal(Persistence._currentLoadedPlant, null);
     Persistence.load = (opts) => { loads.push(opts); return Promise.resolve(); };
     Persistence._reconnect.start();
-    await new Promise(res => setTimeout(res, 1300));
+    t.mock.timers.tick(1000); // first backoff delay
+    for (let i = 0; i < 5; i++) await new Promise(res => setImmediate(res)); // let the /health promise chain settle
     assert.equal(loads.length, 1);
     assert.equal(loads[0].plant, 'PLANT-ATTEMPT');
   } finally {
@@ -1192,7 +1194,7 @@ test('#29 save POST carries a timeout signal, a timeout toasts an error (no blin
     Persistence.saveAll();
     Persistence.saveAll(); // second Save while the first is still in flight
     assert.ok(toasts.some(([m, t]) => m === 'toast.save_in_progress' && t === 'warn'), 'second save is reported, not just logged');
-    await new Promise(res => setTimeout(res, 20));
+    await new Promise(res => setImmediate(res));
     const saves = calls.filter(c => c.url.includes('/tasks/update'));
     assert.equal(saves.length, 1, 'a timeout is not retried blind');
     assert.ok(saves[0].opts.signal instanceof AbortSignal, 'save POST must carry an AbortSignal timeout');
@@ -1231,4 +1233,82 @@ test('saveAll while a save is in flight toasts for a user save but stays silent 
     Persistence.saveAll();
     assert.equal(toasts.length, 1);
   } finally { Persistence._saveInFlight = prev; Toast.show = origShow; }
+});
+
+// -- reload() failure path ---------------------------------------------------
+// reload() is the "discard my edits and refetch" action. When the server load
+// fails it must NOT fall back to cache/demo (that would silently replace the
+// user's still-unsaved board with an older snapshot) and must not start the
+// reconnect watcher; it just tells the user and leaves local edits intact.
+async function withFailingTasksFetch(run) {
+  const origFetch = globalThis.fetch;
+  const origToast = Toast.show;
+  const origLoadCache = Persistence._loadCache;
+  const origLoadDemo = Persistence._loadDemo;
+  const origReconnectStart = Persistence._reconnect.start;
+  const priorLoaded = Persistence._currentLoadedPlant;
+  const priorAttempted = Persistence._lastAttemptedPlant;
+  const calls = { urls: [], toasts: [], loadCache: 0, loadDemo: 0, reconnect: 0 };
+  globalThis.fetch = (url) => { calls.urls.push(String(url)); return Promise.resolve({ ok: false, status: 500, clone() { return this; }, json: () => Promise.resolve({}), text: () => Promise.resolve('') }); };
+  Toast.show = (msg, type) => { calls.toasts.push({ msg, type }); };
+  Persistence._loadCache = () => { calls.loadCache++; return origLoadCache.call(Persistence); };
+  Persistence._loadDemo = () => { calls.loadDemo++; };
+  Persistence._reconnect.start = () => { calls.reconnect++; };
+  try { await run(calls); } finally {
+    globalThis.fetch = origFetch; Toast.show = origToast;
+    Persistence._loadCache = origLoadCache; Persistence._loadDemo = origLoadDemo;
+    Persistence._reconnect.start = origReconnectStart;
+    Persistence._currentLoadedPlant = priorLoaded; Persistence._lastAttemptedPlant = priorAttempted;
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  }
+}
+
+test('Persistence.reload: a failed server load keeps local edits, toasts the error, and never falls back to cache/demo or starts the reconnect watcher', async () => {
+  await withFailingTasksFetch(async (calls) => {
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    Store.setTasks([{ id: 'reload-edit', PLANT: 'RL', MACHINE: 'L1', RUN_TIME: 1, row_version: 4,
+      start_date: new Date('2026-09-10T08:00:00'), end_date: new Date('2026-09-10T09:00:00') }], 'unit-test');
+    Persistence._dirtyIds.add('reload-edit');
+    Persistence._currentLoadedPlant = 'RL';
+    const before = Store.tasks['reload-edit'];
+
+    await Persistence.reload();
+
+    assert.ok(calls.urls.some(u => u.includes('/tasks?plant=RL')), `reload must refetch the loaded plant, saw ${calls.urls}`);
+    assert.ok(calls.toasts.some(t => t.type === 'error' && /Reload failed/.test(t.msg)), 'user is told the reload failed');
+    assert.equal(calls.loadCache, 0, 'a discard-reload must not substitute the offline cache');
+    assert.equal(calls.loadDemo, 0, 'a discard-reload must not substitute demo data');
+    assert.equal(calls.reconnect, 0, 'no reconnect watcher for a manual reload');
+    assert.equal(Store.tasks['reload-edit'], before, 'the local board is untouched');
+    assert.ok(Persistence._dirtyIds.has('reload-edit'), 'unsaved edits remain unsaved');
+  });
+});
+
+test('Persistence.reload: targets the last ATTEMPTED plant when no plant has loaded yet', async () => {
+  await withFailingTasksFetch(async (calls) => {
+    Persistence._currentLoadedPlant = null;
+    Persistence._lastAttemptedPlant = 'ATTEMPTED-RL';
+    await Persistence.reload();
+    assert.ok(calls.urls.some(u => u.includes('/tasks?plant=ATTEMPTED-RL')), `saw ${calls.urls}`);
+  });
+});
+
+test('Persistence.load (non-reload) with a failed server load falls back to the cache, toasts, and starts the reconnect watcher', async () => {
+  await withFailingTasksFetch(async (calls) => {
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    Store.setTasks([{ id: 'cached-fallback', PLANT: 'RL', MACHINE: 'L1', RUN_TIME: 1, row_version: 2,
+      start_date: new Date('2026-09-10T08:00:00'), end_date: new Date('2026-09-10T09:00:00') }], 'unit-test');
+    Persistence._saveCache();
+    Store.setTasks([], 'unit-test');
+    Persistence._currentLoadedPlant = null;
+
+    await Persistence.load({ force: true, plant: 'RL' });
+
+    assert.equal(calls.loadCache, 1, 'cache restore attempted');
+    assert.ok(Store.tasks['cached-fallback'], 'cached board is shown');
+    assert.equal(calls.loadDemo, 0, 'demo is only the last resort when no cache exists');
+    assert.equal(calls.reconnect, 1, 'reconnect watcher started');
+    assert.ok(calls.toasts.some(t => t.type === 'warn'), 'user is warned the backend is unreachable');
+    globalThis.localStorage.removeItem(Config.LS_KEY);
+  });
 });
