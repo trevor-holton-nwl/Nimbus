@@ -4499,3 +4499,180 @@ class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
                 self._cleanup(cur, self.WC, self.L1, self.L2, oa, self.MAT)
                 conn.commit()
 
+
+
+@pytest.mark.pg
+class TestMutationHolesChildUpsertAndDelete(_ReweightFixtureBase):
+    """Mutation-testing holes: D07 (ordinary upload clears a stale child link AND
+    letter), D17 (superseded-child delete locks rows before touching overrides)
+    and D33 (the IS DISTINCT FROM guard + scheduled-child mismatch flag of
+    `_CHILD_UPSERT_SQL`, each arm exercised with ONLY that field changing)."""
+    WC = "ZZTEST_WC_MUTHOLE"
+    L1, L2 = "ZZTEST_L1_MUTHOLE", "ZZTEST_L2_MUTHOLE"
+    ORD, MAT = "ZZTEST_ORD_MUTHOLE", "ZZTEST_MAT_MUTHOLE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM setup_occurrence_override WHERE plant = %s AND machine IN (%s, %s)",
+                        (self.PLANT, self.L1, self.L2))
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    _PARAM_COLS = (
+        "id", "production_order", "material_number", "material_description", "machine", "plant",
+        "basic_start_date", "basic_finish_date", "run_time", "color", "order_quantity", "form_size",
+        "firming_indicator", "planned_order_initial_quantity", "reduced_quantity", "order_category",
+        "order_type", "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
+        "parent_production_order", "distribution_letter",
+    )
+
+    def _child(self, pg, machine):
+        return next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == machine)
+
+    def _identical_params(self, cur, child_id):
+        cur.execute(f"SELECT {', '.join(self._PARAM_COLS)}, upload_batch_id FROM orders WHERE id = %s",
+                    (child_id,))
+        row = cur.fetchone()
+        params = dict(zip(self._PARAM_COLS, row[:-1], strict=True))
+        params["batch_id"] = row[-1]
+        return params
+
+    # ---- D07 ---------------------------------------------------------------
+    def test_ordinary_upload_clears_stale_parent_link_and_letter(self, pg):
+        child = self._child(pg, self.L1)
+        assert child["parent_production_order"] == self.ORD and child["distribution_letter"]
+        row = {"production_order": child["production_order"], "material_number": self.MAT,
+               "machine": self.L1, "plant": self.PLANT,
+               "basic_start_date": dt.datetime(2026, 10, 1, 8), "basic_finish_date": dt.datetime(2026, 10, 1, 18),
+               "order_quantity": 60.0, "run_time": 6.0}
+        res = pg.upsert_orders([row], batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx")
+        assert res["status"] == "ok"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT parent_production_order, distribution_letter FROM orders WHERE id = %s",
+                        (child["id"],))
+            assert cur.fetchone() == (None, None)
+
+    # ---- D33 ---------------------------------------------------------------
+    def test_child_upsert_identical_params_is_a_noop(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, self._identical_params(cur, child["id"]))
+            assert cur.rowcount == 0
+            conn.rollback()
+
+    @pytest.mark.parametrize("field,new_value", [
+        ("parent_production_order", "ZZTEST_OTHER_PARENT"),
+        ("distribution_letter", "Q"),
+    ])
+    def test_child_upsert_where_fires_on_link_or_letter_change_alone(self, pg, field, new_value):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            params = self._identical_params(cur, child["id"])
+            params[field] = new_value
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute(f"SELECT {field} FROM orders WHERE id = %s", (child["id"],))
+            assert cur.fetchone()[0] == new_value
+            conn.rollback()
+
+    def test_child_upsert_where_fires_on_run_time_change_alone_and_flags_scheduled(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time_source=NULL,"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s",
+                        (dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12), child["id"]))
+            params = self._identical_params(cur, child["id"])
+            params["run_time"] = float(child["run_time"]) + 2.0
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute("SELECT run_time, runtime_schedule_mismatch FROM orders WHERE id=%s", (child["id"],))
+            run_time, flag = cur.fetchone()
+            assert float(run_time) == pytest.approx(float(child["run_time"]) + 2.0)
+            assert flag is True
+            conn.rollback()
+
+    def test_child_upsert_run_time_change_on_unscheduled_child_does_not_flag(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=NULL, scheduled_end=NULL, run_time_source=NULL,"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (child["id"],))
+            params = self._identical_params(cur, child["id"])
+            params["run_time"] = float(child["run_time"]) + 2.0
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute("SELECT runtime_schedule_mismatch FROM orders WHERE id=%s", (child["id"],))
+            assert cur.fetchone()[0] is not True
+            conn.rollback()
+
+    def test_child_upsert_flags_segment_only_scheduled_child_on_run_time_change(self, pg):
+        child = self._child(pg, self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=NULL, scheduled_end=NULL, run_time_source=NULL,"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (child["id"],))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                        " VALUES (%s, 1, %s, %s)",
+                        (child["id"], dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12)))
+            params = self._identical_params(cur, child["id"])
+            params["run_time"] = float(child["run_time"]) + 2.0
+            cur.execute(distribution_data._CHILD_UPSERT_SQL, params)
+            assert cur.rowcount == 1
+            cur.execute("SELECT scheduled_start, runtime_schedule_mismatch FROM orders WHERE id=%s",
+                        (child["id"],))
+            start, flag = cur.fetchone()
+            assert start is None and flag is True
+            conn.rollback()
+
+    # ---- D17 ---------------------------------------------------------------
+    def test_delete_superseded_children_locks_rows_before_touching_overrides(self, pg):
+        import threading
+        import psycopg
+        c1, c2 = sorted(c["id"] for c in _snapshot_children(pg, self.PLANT, self.ORD))
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO setup_occurrence_override (plant, machine, signature_version, predecessor_order_id,"
+                " successor_order_id, predecessor_state_key, successor_state_key, standard_min, remaining_min)"
+                " VALUES (%s, %s, 1, %s, %s, '[]'::jsonb, '[]'::jsonb, 0, 0) RETURNING id",
+                (self.PLANT, self.L1, c1, c2))
+            override_id = cur.fetchone()[0]
+            conn.commit()
+        res = {}
+        # Competing transaction: updated (so row-locked) one of the ids, still open.
+        with pg._pool.connection() as holder, holder.cursor() as hcur:
+            hcur.execute("UPDATE orders SET notes = 'held' WHERE id = %s", (c2,))
+
+            def do_delete():
+                try:
+                    with pg._pool.connection() as conn, conn.cursor() as cur:
+                        res["deleted"] = distribution_data._delete_superseded_children(cur, {c1, c2})
+                        conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    res["deleted"] = exc
+
+            t = threading.Thread(target=do_delete, daemon=True)
+            t.start()
+            try:
+                assert _wait_for_lock_wait(pg, 10.0), "delete never blocked on the held row"
+                # Locking happens BEFORE the override move: while the delete is parked on
+                # the row lock, the override row must be untouched (not row-locked).
+                with pg._pool.connection() as probe, probe.cursor() as pcur:
+                    try:
+                        pcur.execute("SELECT id FROM setup_occurrence_override WHERE id = %s FOR UPDATE NOWAIT",
+                                     (override_id,))
+                        assert pcur.fetchone() is not None
+                    except psycopg.errors.LockNotAvailable:
+                        pytest.fail("override was updated before the orders rows were locked")
+                    finally:
+                        probe.rollback()
+            finally:
+                holder.rollback()
+                t.join(30)
+        assert not t.is_alive()
+        assert res["deleted"] == 2
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT status FROM setup_occurrence_override WHERE id = %s", (override_id,))
+            assert cur.fetchone()[0] == "replaced"
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = ANY(%s)", ([c1, c2],))
+            assert cur.fetchone()[0] == 0
