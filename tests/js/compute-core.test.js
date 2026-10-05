@@ -639,3 +639,31 @@ test('computeUtilization steps calendar days across a DST fall-back without doub
     if (prevTz === undefined) delete process.env.TZ; else process.env.TZ = prevTz;
   }
 });
+
+test('computeUtilization resolves a line missing from master data via its tasks\' PLANT (worker/sync parity with Store.getPlantForLine)', () => {
+  const start = new Date(2026, 6, 7);
+  const t = { id: 'x', MACHINE: 'LB', PLANT: 'B', RUN_TIME: 4,
+    start_date: new Date(2026, 6, 7, 9), end_date: new Date(2026, 6, 7, 13) };
+  const { matrix } = Core.computeUtilization({
+    tasks: [t], lineSettings: {},
+    calendars: { LB: { workHours: allDays([0, 24]) } },
+    plants: { B: { workHours: allDays(null) } }, // plant B is closed every day
+    blocks: [], plantBlocks: [], masterData: noPlant,
+    startMs: start.getTime(), days: 1,
+  });
+  assert.equal(matrix.LB[Core.dayKey(start)].capacity, 0, 'closed plant B must zero the line even though master data lacks LB');
+  assert.equal(Core.getPlantForLine('LB', {}, noPlant), null, 'the fallback is scoped to a compute call, never leaks');
+});
+
+test('nextCalendarDay always returns a later day, in zones where local midnight does not exist', () => {
+  const { execFileSync } = require('node:child_process');
+  const code = `
+    const Core = require(${JSON.stringify(require.resolve('../../frontend/nimbus-compute-core.js'))});
+    // Sao Paulo 2018-11-04: DST began at 00:00 -> 01:00, so local midnight does not exist.
+    const out = [];
+    let d = new Date(2018, 10, 3, 12);
+    for (let i = 0; i < 4; i++) { const n = Core._nextCalendarDay(d); out.push([n.getDate(), n.getHours()]); d = n; }
+    console.log(JSON.stringify(out));`;
+  const out = execFileSync(process.execPath, ['-e', code], { env: { ...process.env, TZ: 'America/Sao_Paulo' } }).toString().trim();
+  assert.deepEqual(JSON.parse(out), [[4, 1], [5, 0], [6, 0], [7, 0]], 'one calendar day per call, landing on midnight (01:00 only on the day midnight is skipped)');
+});

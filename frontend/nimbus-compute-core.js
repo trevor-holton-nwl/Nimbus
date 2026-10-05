@@ -72,10 +72,9 @@
   // Next local calendar midnight via setDate, never `+ MS_DAY`: across a DST change a
   // local day is 23 or 25 hours, so +24h lands on the same date twice (fall back).
   function nextCalendarDay(d) {
-    const x = new Date(d.getTime());
-    x.setHours(0, 0, 0, 0);
-    x.setDate(x.getDate() + 1);
-    return x;
+    // Constructed from local Y/M/D (not setHours(0)): zones whose DST jump skips local
+    // midnight have no 00:00 on that date, and the constructor resolves it forward safely.
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
   }
 
   // Buckets a date into a separation-window key at the given granularity
@@ -200,6 +199,17 @@
   // getPlantForLine stays O(1) on the hot (line×day) capacity/matrix loops instead of a
   // linear masterData.lines scan per cell. Set/cleared by computeAlerts/computeUtilization.
   let _plantMemo = null;
+  // line → the PLANT carried by the line's tasks (first explicit owner, same rule as
+  // Store.getPlantForLine's last-resort fallback) so the worker path resolves a line the
+  // same way the sync path does when master data / lineSettings lack it. Set per top-level call.
+  let _taskPlantFallback = null;
+  function _buildTaskPlantFallback(tasks) {
+    const m = new Map();
+    for (const t of tasks || []) {
+      if (t && t.MACHINE && t.PLANT && !m.has(t.MACHINE)) m.set(t.MACHINE, t.PLANT);
+    }
+    return m;
+  }
 
   function getPlantForLine(line, lineSettings, masterData) {
     if (_plantMemo && _plantMemo.has(line)) return _plantMemo.get(line);
@@ -211,7 +221,7 @@
       result = fromSettings;
     } else {
       const mdLine = (masterData?.lines ?? []).find(r => r.machine === line);
-      result = mdLine?.plant ?? null;
+      result = mdLine?.plant ?? _taskPlantFallback?.get(line) ?? null;
     }
     if (_plantMemo) _plantMemo.set(line, result);
     return result;
@@ -390,6 +400,7 @@
 
     _wwCache = new Map();
     _plantMemo = new Map();
+    _taskPlantFallback = _buildTaskPlantFallback(tasks);
     const plantOf = line => getPlantForLine(line, lineSettings, masterData);
     const setupActiveForLine = line => masterData?.plants?.find(p => p.plant === plantOf(line))?.setup_active !== false;
 
@@ -900,6 +911,7 @@
 
     _wwCache = null;
     _plantMemo = null;
+    _taskPlantFallback = null;
 
     const dismissedSet = new Set(dismissed || []);
     const kept = alerts.filter(a => !dismissedSet.has(a.id));
@@ -915,6 +927,7 @@
     const start = startOfDay(new Date(startMs));
     _wwCache = new Map();
     _plantMemo = new Map();
+    _taskPlantFallback = _buildTaskPlantFallback(tasks);
 
     let lines;
     if (Array.isArray(explicitLines)) {
@@ -1054,6 +1067,7 @@
 
     _wwCache = null;
     _plantMemo = null;
+    _taskPlantFallback = null;
     return { matrix };
   }
 
@@ -1063,7 +1077,7 @@
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
-    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, workWindow,
+    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, workWindow,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization,
