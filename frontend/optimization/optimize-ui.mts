@@ -2251,6 +2251,12 @@ export const SandboxAdapter = {
   _lastOptimizeSnapshot: null as Date | null,
   _dismissedSnapshot: null as Set<string> | null,
   _linePlantSnapshot: null as Map<string, string | null> | null,
+  // H3c: the unsaved-edit sets as they stood at entry. Discard's wholesale setTasks emits
+  // 'tasks:bulk', which App._trackDirty answers by CLEARING both sets — wiping the planner's
+  // pre-What-If unsaved edits (and the force flags that opt optimizer/undo rows into atomic
+  // save). Restored in _onExited(discard) after that clear has run.
+  _dirtySnapshot: null as Set<string> | null,
+  _forceSnapshot: null as Set<string> | null,
   _sideEffectSnapshotActive: false,
 
   init() {
@@ -2270,7 +2276,7 @@ export const SandboxAdapter = {
     Store.subscribe(evt => {
       if (evt.type === 'sandbox:entered') SandboxAdapter._onEntered();
       else if (evt.type === 'sandbox:exited') SandboxAdapter._onExited(evt);
-      else if (evt.type === 'sandbox:reverted') SandboxAdapter._onReverted();
+      else if (evt.type === 'sandbox:reverted') SandboxAdapter._onReverted(evt);
     }, 'SandboxAdapter');
   },
 
@@ -2297,6 +2303,8 @@ export const SandboxAdapter = {
     SandboxAdapter._linePlantSnapshot = new Map(
       Object.keys(Store.calendars).map((line) => [line, Store.getPlantForLine(line)]),
     );
+    SandboxAdapter._dirtySnapshot = new Set(Persistence._dirtyIds);
+    SandboxAdapter._forceSnapshot = new Set(Persistence._forceIds);
     SandboxAdapter._sideEffectSnapshotActive = true;
 
     document.body.classList.add('sandbox-mode');
@@ -2343,6 +2351,15 @@ export const SandboxAdapter = {
         if (NIMBUS!.Confidence && SandboxAdapter._confSnapshot) {
           NIMBUS!.Confidence!.restore!(Util.clone(SandboxAdapter._confSnapshot));
         }
+      }
+      // Put back the pre-What-If unsaved-edit sets (the discard's tasks:bulk cleared them,
+      // and any dirty ids the trial added belong to state that no longer exists).
+      if (SandboxAdapter._dirtySnapshot && SandboxAdapter._forceSnapshot) {
+        Persistence._dirtyIds.clear();
+        for (const id of SandboxAdapter._dirtySnapshot) Persistence._dirtyIds.add(id);
+        Persistence._forceIds.clear();
+        for (const id of SandboxAdapter._forceSnapshot) Persistence._forceIds.add(id);
+        Persistence._syncUnsaved();
       }
       // RestoreDismissed intentionally has no scheduling behavior of its own:
       // this is the one existing post-discard recompute, and it must see the
@@ -2415,11 +2432,26 @@ export const SandboxAdapter = {
   // Sandbox.exit()'s undo closure (in schedule-state.mjs) restores tasks/firmedIds
   // then emits this instead of calling Alerts/Toast directly (those are cross-module
   // concerns the state module doesn't own). Matches the pre-refactor inline behavior.
-  _onReverted() {
+  _onReverted(evt?: StoreEvent) {
     // The promoted scenario intentionally kept its side effects. Revert is a
     // schedule undo event, not a request to restore the pre-sandbox metadata;
     // only clear any stale adapter copies before the normal alert refresh.
     SandboxAdapter._clearSideEffectSnapshot();
+    // Undo restored the pre-What-If calendar slices in Store, but Promote had already
+    // POSTed the promoted ones. Re-sync every plant whose calendar state differs between
+    // the promoted slices (evt.promoted) and the restored Store: flushPlant upserts the
+    // restored hours/blackouts and deletes blackouts that exist only in the promoted state.
+    const promoted = evt?.promoted as SandboxExitSnapshot | undefined;
+    if (promoted) {
+      for (const plant of SandboxAdapter._collectAffectedPlants(promoted)) {
+        const curLine  = new Set(Store.blocks.filter((b) => b.plant === plant).map((b) => b.id));
+        const curPlant = new Set(Store.plantBlocks.filter((b) => b.plant === plant).map((b) => b.id));
+        CalendarSync.flushPlant(plant, {
+          line:  promoted.blocks.filter((b) => b.plant === plant && !curLine.has(b.id)).map((b) => b.id),
+          plant: promoted.plantBlocks.filter((b) => b.plant === plant && !curPlant.has(b.id)).map((b) => b.id),
+        });
+      }
+    }
     (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.scenario_discarded'), 'info');
@@ -2430,6 +2462,8 @@ export const SandboxAdapter = {
     SandboxAdapter._lastOptimizeSnapshot = null;
     SandboxAdapter._dismissedSnapshot = null;
     SandboxAdapter._linePlantSnapshot = null;
+    SandboxAdapter._dirtySnapshot = null;
+    SandboxAdapter._forceSnapshot = null;
     SandboxAdapter._sideEffectSnapshotActive = false;
   },
 

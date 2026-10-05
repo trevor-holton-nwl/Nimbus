@@ -1361,3 +1361,110 @@ test('SandboxAdapter promotes changed line hours after the only task owner disap
 test('SandboxAdapter exposes the documented public API', () => {
   assert.equal(typeof SandboxAdapter.init, 'function');
 });
+
+test('#26 What-If discard restores the dirty/force sets captured at entry (App._trackDirty clears them on tasks:bulk)', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorDoc = globalThis.document;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorToast = Toast.show;
+  const priorDirty = new Set(Persistence._dirtyIds);
+  const priorForce = new Set(Persistence._forceIds);
+  const fixture = makeSandboxDocument();
+  globalThis.document = fixture.document;
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  Toast.show = () => {};
+  // Mirrors App._trackDirty's `tasks:bulk` branch (the real subscriber lives in application-shell).
+  const offTrack = Store.subscribe(evt => {
+    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+  }, 'unit-test-track-dirty');
+  const offAdapter = subscribeSandboxAdapter();
+  try {
+    Store.setTasks([{ id: 'wd-1', PLANT: 'WD', MACHINE: 'WD-L', RUN_TIME: 1 }], 'unit-test');
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    Persistence._dirtyIds.add('pre-dirty');
+    Persistence._forceIds.add('pre-force');
+    Sandbox.enter('unit-test');
+    Persistence._dirtyIds.add('trial-dirty');
+    Sandbox.exit(false, 'unit-test');
+    assert.deepEqual([...Persistence._dirtyIds], ['pre-dirty'], 'pre-What-If unsaved edits survive discard; trial ids do not');
+    assert.deepEqual([...Persistence._forceIds], ['pre-force']);
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    offAdapter(); offTrack();
+    SandboxAdapter._clearSideEffectSnapshot();
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    for (const id of priorDirty) Persistence._dirtyIds.add(id);
+    for (const id of priorForce) Persistence._forceIds.add(id);
+    Alerts.scheduleRecompute = priorSchedule;
+    Toast.show = priorToast;
+    Store.setTasks(priorTasks, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+    globalThis.document = priorDoc;
+  }
+});
+
+test('#27 undo of an APPLIED What-If restores calendar slices and re-syncs the backend for the touched plant', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorDoc = globalThis.document;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorBlocks = structuredClone(Store.blocks);
+  const priorPlantBlocks = structuredClone(Store.plantBlocks);
+  const priorCalendars = structuredClone(Store.calendars);
+  const priorPlants = structuredClone(Store.plants);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorFlush = CalendarSync.flushPlant;
+  const priorToast = Toast.show;
+  const priorEntries = UndoStack._entries.slice();
+  const fixture = makeSandboxDocument();
+  const flushCalls = [];
+  globalThis.document = fixture.document;
+  globalThis.NIMBUS = { Persistence: { saveAll() {} } };
+  Alerts.scheduleRecompute = () => {};
+  Toast.show = () => {};
+  CalendarSync.flushPlant = (plant, removed) => flushCalls.push({ plant, removed });
+  const offAdapter = subscribeSandboxAdapter();
+  try {
+    Store.setMasterData({ plants: [{ plant: 'UP' }], lines: [{ machine: 'UL', plant: 'UP' }] }, 'unit-test');
+    Store.setTasks([{ id: 'ua-1', PLANT: 'UP', MACHINE: 'UL', RUN_TIME: 1 }], 'unit-test');
+    Store.replaceCalendars({ UL: { workHours: { 0: [8, 16] } } }, 'unit-test');
+    Store.replacePlants({ UP: { workHours: { 0: [8, 16] } } }, 'unit-test');
+    Store.replaceBlocks([{ id: 'ub-old', plant: 'UP', line: 'UL', start: '2026-08-01T00:00:00Z', end: '2026-08-01T01:00:00Z' }], 'unit-test');
+    Store.replacePlantBlocks([], 'unit-test');
+    UndoStack._entries.length = 0;
+
+    Sandbox.enter('unit-test');
+    Store.removeBlock('ub-old', 'unit-test');
+    Store.addBlock({ id: 'ub-new', plant: 'UP', line: 'UL', start: '2026-08-03T00:00:00Z', end: '2026-08-03T01:00:00Z' }, 'unit-test');
+    Store.setCalendar('UL', { 0: [9, 17] }, 'unit-test');
+    Sandbox.exit(true, 'unit-test');
+    flushCalls.length = 0; // the promote flush is not under test
+
+    UndoStack.pop();
+    assert.deepEqual(Store.blocks.map(b => b.id), ['ub-old'], 'undo restores the pre-What-If blackouts');
+    assert.deepEqual(Store.calendars.UL.workHours[0], [8, 16], 'undo restores the pre-What-If line hours');
+    assert.equal(flushCalls.length, 1, 'the promoted calendar state had been POSTed, so undo re-syncs the plant');
+    assert.equal(flushCalls[0].plant, 'UP');
+    assert.deepEqual(flushCalls[0].removed, { line: ['ub-new'], plant: [] },
+      'blackouts that exist only in the promoted state are explicitly deleted server-side');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    offAdapter();
+    SandboxAdapter._clearSideEffectSnapshot();
+    CalendarSync.flushPlant = priorFlush;
+    Alerts.scheduleRecompute = priorSchedule;
+    Toast.show = priorToast;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceBlocks(priorBlocks, 'unit-test');
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.replacePlants(priorPlants, 'unit-test');
+    Store.replacePlantBlocks(priorPlantBlocks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    globalThis.NIMBUS = priorNimbus;
+    globalThis.document = priorDoc;
+  }
+});
