@@ -2550,10 +2550,11 @@ class TestSqlStatusClassificationParityAndScale:
         with self.db._pool.connection() as conn, conn.cursor() as cur:
             for code in distribution_data._STATUS_SQL:
                 cur.execute(
-                    "SELECT production_order FROM order_distribution WHERE plant = %s"
-                    f" AND production_order LIKE %s AND (SELECT {distribution_data._STATUS_SQL[code]}"
-                    f" FROM {distribution_data._STATUS_FROM})",
-                    (self.PLANT, self.PFX + "%"),
+                    "SELECT order_distribution.production_order"
+                    f" FROM {distribution_data._STATUS_FROM}"
+                    " WHERE order_distribution.plant = %s AND order_distribution.production_order LIKE %s"
+                    f" AND ({distribution_data._STATUS_SQL[code]})",
+                    (self.PLANT,) * distribution_data._STATUS_FROM_NPLANT + (self.PLANT, self.PFX + "%"),
                 )
                 sql_set = {r[0] for r in cur.fetchall()}
                 py_set = {po for po, st in py.items() if code in st}
