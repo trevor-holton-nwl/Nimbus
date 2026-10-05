@@ -3110,8 +3110,37 @@ export const MasterData = (() => {
     });
     const exportBtn = document.getElementById('md-export-schema-btn');
     if (exportBtn) exportBtn.onclick = _exportSchema;
+    if (!_plantSubWired) {
+      _plantSubWired = true;
+      Store.subscribe((evt) => { if (evt.type === 'plant:selected') _onPlantSelected(); }, 'MasterDataGridScope');
+    }
     _syncTabUI();
     _renderActiveTable();
+  }
+
+  // The machine / material_plants grids auto-scope to the app-wide plant on first open.
+  // When the global plant later changes, re-scope them too (otherwise the tab keeps
+  // showing — and editing — the previous plant's rows). Grids holding unsaved edits keep
+  // their scope (re-scoping would drop the edits) and warn instead.
+  let _plantSubWired = false;
+  function _onPlantSelected(): void {
+    const plant = Store.selectedPlant;
+    for (const table of AUTO_SCOPE_FROM_SELECTED_PLANT) {
+      const st = _cache[table];
+      if (_scopeFilters[table]?.plant === plant) continue;
+      if (st && (st.dirty.size || st.deleted.size || st.added.length)) {
+        Toast.show(Util.t('ui.n_unsaved', { count: st.dirty.size + st.deleted.size + st.added.length }), 'warn');
+        continue;
+      }
+      delete _scopeFilters[table];
+      delete _cache[table];
+      delete _pageState[table];
+    }
+    const host = document.getElementById('md-host');
+    if (host?.isConnected && AUTO_SCOPE_FROM_SELECTED_PLANT.has(_activeTable)
+        && _scopeFilters[_activeTable]?.plant !== plant) {
+      _renderActiveTable();
+    }
   }
 
   function _setTab(table: MasterDataTable): void {

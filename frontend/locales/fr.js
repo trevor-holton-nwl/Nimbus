@@ -764,7 +764,7 @@ window.__NIMBUS_LOCALES.fr = {
   'us.pin_remove':                 'Désépingler',
   'us.pinned_section':             'Épinglées',
   'us.all_plants_section':         'Toutes les usines',
-  'us.no_lines':                   'Aucune machine chargée',
+  'us.no_lines':                   'Aucune machine chargée pour l’usine sélectionnée',
   'us.first_day':                  'Premier jour de la semaine',
   'us.first_day_sun':              'Dimanche',
   'us.first_day_mon':              'Lundi',

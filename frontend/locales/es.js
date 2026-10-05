@@ -715,7 +715,7 @@ window.__NIMBUS_LOCALES.es = {
   'us.pin_remove':                 'Desfijar',
   'us.pinned_section':             'Fijadas',
   'us.all_plants_section':         'Todas las plantas',
-  'us.no_lines':                   'No hay máquinas cargadas',
+  'us.no_lines':                   'No hay máquinas cargadas para la planta seleccionada',
   'us.first_day':                  'Primer día de la semana',
   'us.first_day_sun':              'Domingo',
   'us.first_day_mon':              'Lunes',

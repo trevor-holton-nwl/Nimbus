@@ -764,7 +764,7 @@ window.__NIMBUS_LOCALES.de = {
   'us.pin_remove':                 'Lösen',
   'us.pinned_section':             'Angeheftet',
   'us.all_plants_section':         'Alle Werke',
-  'us.no_lines':                   'Keine Maschinen geladen',
+  'us.no_lines':                   'Keine Maschinen für das gewählte Werk geladen',
   'us.first_day':                  'Erster Wochentag',
   'us.first_day_sun':              'Sonntag',
   'us.first_day_mon':              'Montag',

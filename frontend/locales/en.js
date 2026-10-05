@@ -1086,7 +1086,7 @@ window.__NIMBUS_LOCALES.en = {
   'us.pin_remove':                 'Unpin',
   'us.pinned_section':             'Pinned',
   'us.all_plants_section':         'All plants',
-  'us.no_lines':                   'No machines loaded',
+  'us.no_lines':                   'No machines loaded for the selected plant',
   'us.first_day':                  'First day of week',
   'us.first_day_sun':              'Sunday',
   'us.first_day_mon':              'Monday',
