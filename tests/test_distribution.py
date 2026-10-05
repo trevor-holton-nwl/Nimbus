@@ -3580,3 +3580,57 @@ class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
                 assert child["run_time_basis"] == {}
                 assert child["prt_01"] == 'CURRENT-TOOL'
                 assert child["production_version"] == '0002'
+
+
+# =====================================================================
+# Consolidated fixes 2026-10-05, Bundle 2: parent-link integrity (D30/D07/D06/D43)
+# =====================================================================
+
+@pytest.mark.pg
+class TestBundle2ParentLinkIntegrity(_ReweightFixtureBase):
+    WC = "ZZTEST_WC_B2"
+    L1, L2 = "ZZTEST_L1_B2", "ZZTEST_L2_B2"
+    ORD, MAT = "ZZTEST_ORD_B2", "ZZTEST_MAT_B2"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _parent_row(self, **kw):
+        row = {
+            "production_order": self.ORD, "material_number": self.MAT,
+            "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+        row.update(kw)
+        return row
+
+    def _upload(self, pg, rows):
+        return pg.upsert_orders(
+            rows, batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx",
+            plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+        )
+
+    # ---- D30 ----
+    def test_d30_sub_order_id_row_is_skipped_with_warning(self, pg):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        sub = next(c for c in children if c["distribution_letter"])
+        stray = self._parent_row(production_order=sub["production_order"], machine="ZZTEST_OTHER_M",
+                                 order_quantity=7777.0)
+        rows_out, _plan, warnings = distribution_data.plan([stray], str(uuid.uuid4()))
+        assert rows_out == []
+        assert [w["production_order"] for w in warnings["sub_order_id_rows"]] == [sub["production_order"]]
+
+        # End to end through the generic upsert: untouched machine/quantity, warning surfaced.
+        res = self._upload(pg, [stray, self._parent_row()])
+        after = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["id"] == sub["id"])
+        assert after["machine"] == sub["machine"] and after["order_quantity"] == sub["order_quantity"]
+        entry = next(w for w in res["warnings"] if w.get("category") == "distribution")
+        assert entry["level"] == "warn" and entry["sub_order_id_rows"]
+        assert sub["production_order"] in entry["msg"]

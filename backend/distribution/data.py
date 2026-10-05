@@ -324,6 +324,7 @@ def _empty_ingest_warnings() -> dict:
         "ambiguous_workcenter_plant": [],
         "default_machine_invalid": [],
         "workcenter_without_members": [],
+        "sub_order_id_rows": [],
         "zero_quantity_children": 0,
         "parent_runtime_defaulted": 0,
         "single_rewrites": 0,
@@ -904,6 +905,30 @@ def _plan_core(cur, rows: list[dict], batch_id: str, warnings: dict) -> tuple[li
     # docstring). Excluded indices are skipped below without emitting a row.
     excluded = _dedupe_and_filter_conflicts(items, existing_headers, warnings)
 
+    # D30: an uploaded row whose computed order id is an existing sub-order
+    # (distribution_letter IS NOT NULL -- e.g. a grid export re-imported) would
+    # pass through as an ordinary order and overwrite the sub-order's machine
+    # and quantity, bypassing its machine lock. Warn and skip THAT row only
+    # (never refuse the upload); skipped rows never reach rows_out, so the
+    # generic upsert never writes them.
+    row_ids = {idx: db.make_id(it["row"].get("production_order"), it["row"].get("material_number"))
+               for idx, it in enumerate(items) if idx not in excluded}
+    if row_ids:
+        cur.execute(
+            "SELECT id FROM orders WHERE id = ANY(%s) AND distribution_letter IS NOT NULL",
+            (sorted(set(row_ids.values())),),
+        )
+        sub_ids = {r[0] for r in cur.fetchall()}
+        if sub_ids:
+            for idx, oid in sorted(row_ids.items()):
+                if oid in sub_ids:
+                    r = items[idx]["row"]
+                    warnings["sub_order_id_rows"].append({
+                        "production_order": db._str_id(r.get("production_order")),
+                        "material_number": db._str_id(r.get("material_number")),
+                    })
+                    excluded.add(idx)
+
     rows_out: list[dict] = []
     parents_plan: dict[tuple[str, str, str], dict] = {}
 
@@ -1442,6 +1467,7 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
     ambiguous = ingest_warnings.get("ambiguous_workcenter_plant", [])
     wc_no_members = ingest_warnings.get("workcenter_without_members", [])
     default_invalid = ingest_warnings.get("default_machine_invalid", [])
+    sub_order_rows = ingest_warnings.get("sub_order_id_rows", [])
     zero_qty = int(ingest_warnings.get("zero_quantity_children", 0))
     runtime_defaulted = int(ingest_warnings.get("parent_runtime_defaulted", 0))
     single_rewrites = int(ingest_warnings.get("single_rewrites", 0))
@@ -1462,9 +1488,10 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
         "ambiguous_plant": ambiguous,
         "workcenter_without_members": wc_no_members,
         "default_machine_invalid": default_invalid,
+        "sub_order_id_rows": sub_order_rows,
     }
     warn_worthy = bool(
-        conflicting or ambiguous or wc_no_members or default_invalid
+        sub_order_rows or conflicting or ambiguous or wc_no_members or default_invalid
         or counters["children_deleted"] or zero_qty or runtime_defaulted
         or duplicates_dropped or counters["replanned_after_reweight"]
     )
@@ -1479,6 +1506,11 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
     else:
         entry["msg"] = (f"{n} aggregate order(s) distributed into {m} sub-order(s) "
                         f"({k} deleted, {p} parent(s) ambiguous)")
+    if sub_order_rows:
+        sample = ", ".join(r["production_order"] for r in sub_order_rows[:5])
+        more = f" (+{len(sub_order_rows) - 5} more)" if len(sub_order_rows) > 5 else ""
+        entry["msg"] += (f"; {len(sub_order_rows)} row(s) skipped because their order number is an "
+                         f"existing distributed sub-order: {sample}{more}")
     return entry
 
 
