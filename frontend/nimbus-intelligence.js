@@ -403,13 +403,32 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
     },
 
+    // Resolves with the stored record's KEY (the autoIncrement id for snapshots). It used to
+    // resolve with the transaction's complete event, so `snap.id = id` stored an Event.
     put(store, value) {
       if (!IntelDB._db) return Promise.resolve();
       return new Promise((res, rej) => {
         const tx = IntelDB._db.transaction(store, 'readwrite');
-        tx.objectStore(store).put(value);
-        tx.oncomplete = res;
+        const req = tx.objectStore(store).put(value);
+        tx.oncomplete = () => res(req.result);
         tx.onerror    = e => rej(e.target.error);
+      });
+    },
+
+    // Newest `n` records of a store via a reverse cursor on an index (no getAll of the whole
+    // store), returned oldest-first.
+    getNewest(store, indexName, n) {
+      if (!IntelDB._db) return Promise.resolve([]);
+      return new Promise((res, rej) => {
+        const out = [];
+        const tx  = IntelDB._db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).index(indexName).openCursor(null, 'prev');
+        req.onsuccess = e => {
+          const cursor = e.target.result;
+          if (cursor && out.length < n) { out.push(cursor.value); cursor.continue(); }
+          else res(out.reverse());
+        };
+        req.onerror = e => rej(e.target.error);
       });
     },
 
@@ -445,16 +464,24 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     pruneSnapshots(keepN = 200) {
       if (!IntelDB._db) return;
+      // Count, then walk the ts index with a KEY cursor (keys only: no snapshot payloads are
+      // loaded) deleting the oldest by primary key until keepN remain.
       const fn = () => {
-        IntelDB.getAll('snapshots').then(all => {
-          if (!all || all.length <= keepN) return;
-          const toDelete = all
-            .sort((a, b) => a.ts - b.ts)
-            .slice(0, all.length - keepN);
-          const tx = IntelDB._db.transaction('snapshots', 'readwrite');
-          const os = tx.objectStore('snapshots');
-          toDelete.forEach(s => os.delete(s.id));
-        });
+        const tx = IntelDB._db.transaction('snapshots', 'readwrite');
+        const os = tx.objectStore('snapshots');
+        const countReq = os.count();
+        countReq.onsuccess = () => {
+          let excess = countReq.result - keepN;
+          if (excess <= 0) return;
+          const curReq = os.index('ts').openKeyCursor();
+          curReq.onsuccess = e => {
+            const cursor = e.target.result;
+            if (!cursor || excess <= 0) return;
+            os.delete(cursor.primaryKey);
+            excess -= 1;
+            cursor.continue();
+          };
+        };
       };
       if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 });
       else setTimeout(fn, 2000);
@@ -1307,9 +1334,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      TIME MACHINE — durable IndexedDB snapshot history
      ========================================================================== */
+  // In-memory history cap; matches the IndexedDB prune (IntelDB.pruneSnapshots(200)).
+  const TM_MAX_SNAPSHOTS = 200;
   const TimeMachine = {
     _snapshots: [],
     _panel:     null,
+    _IntelDB:   IntelDB, // test hook
 
     init() {
       // Auto-snapshots are debounced (R20): a burst of undoable actions (drag-storm,
@@ -1329,7 +1359,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           TimeMachine._snapshotAuto(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update');
         }
       });
-      IntelDB.getAll('snapshots').then(rows => {
+      IntelDB.getNewest('snapshots', 'ts', TM_MAX_SNAPSHOTS).then(rows => {
         TimeMachine._snapshots = (rows || []).sort((a, b) => a.ts - b.ts);
       });
     },
@@ -1356,7 +1386,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       IntelDB.put('snapshots', snap).then(id => {
         snap.id = id || snap.id;
         TimeMachine._snapshots.push(snap);
-        IntelDB.pruneSnapshots(200);
+        if (TimeMachine._snapshots.length > TM_MAX_SNAPSHOTS) {
+          TimeMachine._snapshots.splice(0, TimeMachine._snapshots.length - TM_MAX_SNAPSHOTS);
+        }
+        IntelDB.pruneSnapshots(TM_MAX_SNAPSHOTS);
       }).catch(e => {
         (window.NIMBUS && window.NIMBUS.ErrorLog
           ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine snapshot persist failed', { err: String(e), errorCode: 'internal' })
