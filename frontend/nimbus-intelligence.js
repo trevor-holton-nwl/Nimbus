@@ -52,7 +52,7 @@
       if (on.length)  Store.setFirmed(on, true, 'undo');
       if (off.length) Store.setFirmed(off, false, 'undo');
       Alerts.scheduleRecompute();
-    });
+    }, ids);   // ids let distribution writes drop stale undo entries
   }
 
   /* --- CSS injection ------------------------------------------------------- */
