@@ -72,6 +72,8 @@ module.exports = [
       // Only the hand-written, git-tracked frontend .mjs files are linted; keep this
       // negation list in sync with `git ls-files "frontend/**/*.mjs"`.
       'frontend/**/*.mjs',
+      '!frontend/app-entry.mjs',
+      '!frontend/_static-delivery-check.mjs',
       '!frontend/master-data/_static-delivery-check.mjs',
       '!frontend/scheduling/order-field-catalog.mjs',
       '!frontend/setup/_static-delivery-check.mjs',
