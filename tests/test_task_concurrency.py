@@ -170,6 +170,10 @@ class TestUpdateTaskDatesBulkXminConflict:
              "base_version": db_.get_task_versions([self.oid2])[0]["row_version"]},
         ])
         assert result["invalid_ids"] == [] and result["persisted"] == 1
+        # Review round: the CANONICAL spelling is stored, never the typed variant.
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT machine FROM orders WHERE id = %s", (self.oid2,))
+            assert cur.fetchone()[0] == self.MACHINE
 
     def test_force_true_bypasses_the_stale_check_and_persists_anyway(self, pg):
         """A `force: True` edit must succeed even against a stale base_version
