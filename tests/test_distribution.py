@@ -4079,6 +4079,33 @@ def test_apply_chunk_size_bounds_total_savepoints():
         assert -(-n // f(n)) <= 50   # <= 50 chunk savepoints per apply()
 
 
+@pytest.mark.pg
+class TestUploadMessageCountsPlannedChildren(_ReweightFixtureBase):
+    """Senior audit #3: an unchanged re-upload writes no child rows, so the
+    summary read 'distributed into 0 sub-order(s)'."""
+    WC, L1, L2 = "ZZTEST_WC_UPMSG", "ZZTEST_L1_UPMSG", "ZZTEST_L2_UPMSG"
+    ORD, MAT = "ZZTEST_ORD_UPMSG", "ZZT_MAT_UPMSG"
+
+    def test_summary_reports_planned_children_even_when_none_written(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        try:
+            row = {"production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
+                   "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
+                   "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": 100.0, "run_time": 10.0}
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+                cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s", (self.PLANT, self.ORD))
+                conn.commit()
+            res = pg.upsert_orders([row], plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+                                   resolve_fn=routing_resolver.resolve_orders)
+            msgs = [w.get("msg", "") for w in res["warnings"] if w.get("category") == "distribution"]
+            assert any("distributed into 2 sub-order(s)" in m for m in msgs), msgs
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+                conn.commit()
+
+
 def _wait_for_lock_wait(db_, timeout=10.0):
     """Deterministically wait until some backend of this DB is blocked on a
     heavyweight lock (pg_stat_activity), instead of sleeping."""
