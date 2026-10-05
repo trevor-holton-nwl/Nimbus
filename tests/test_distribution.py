@@ -2550,10 +2550,11 @@ class TestSqlStatusClassificationParityAndScale:
         with self.db._pool.connection() as conn, conn.cursor() as cur:
             for code in distribution_data._STATUS_SQL:
                 cur.execute(
-                    "SELECT production_order FROM order_distribution WHERE plant = %s"
-                    f" AND production_order LIKE %s AND (SELECT {distribution_data._STATUS_SQL[code]}"
-                    f" FROM {distribution_data._STATUS_FROM})",
-                    (self.PLANT, self.PFX + "%"),
+                    "SELECT order_distribution.production_order"
+                    f" FROM {distribution_data._STATUS_FROM}"
+                    " WHERE order_distribution.plant = %s AND order_distribution.production_order LIKE %s"
+                    f" AND ({distribution_data._STATUS_SQL[code]})",
+                    (self.PLANT,) * distribution_data._STATUS_FROM_NPLANT + (self.PLANT, self.PFX + "%"),
                 )
                 sql_set = {r[0] for r in cur.fetchall()}
                 py_set = {po for po, st in py.items() if code in st}
@@ -4031,3 +4032,49 @@ def test_letter_sort_key_orders_aa_after_z():
     letters = [_index_to_letter(i) for i in (27, 0, 26, 1, 25)]   # AB, A, AA, B, Z
     assert sorted(letters, key=letter_sort_key) == ["A", "B", "Z", "AA", "AB"]
     assert sorted(letters)[:3] == ["A", "AA", "AB"]               # the old, wrong order
+
+
+@pytest.mark.pg
+class TestIngestFlagsScheduledChildRuntimeChange(_ReweightFixtureBase):
+    """H10/D33 (review round): the mismatch flag must fire on a REAL ingest, where
+    db._UPSERT_SQL writes the child rows before distribution's own child upsert."""
+    WC = "ZZTEST_WC_H10"
+    L1, L2 = "ZZTEST_L1_H10", "ZZTEST_L2_H10"
+    ORD, MAT = "ZZTEST_ORD_H10", "ZZTEST_MAT_H10"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def test_scheduled_child_flagged_unscheduled_child_not(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, runtime_schedule_mismatch=FALSE"
+                        " WHERE plant=%s AND parent_production_order=%s",
+                        (dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12), self.PLANT, self.ORD))
+            cur.execute("UPDATE orders SET scheduled_start=NULL, scheduled_end=NULL"
+                        " WHERE plant=%s AND parent_production_order=%s AND machine=%s",
+                        (self.PLANT, self.ORD, self.L2))
+            conn.commit()
+        row = {"production_order": self.ORD, "material_number": self.MAT, "machine": self.WC, "plant": self.PLANT,
+               "basic_start_date": dt.datetime(2026, 10, 1, 8), "basic_finish_date": dt.datetime(2026, 10, 1, 18),
+               "order_quantity": 100.0, "run_time": 30.0}
+        pg.upsert_orders([row], plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
+                         resolve_fn=routing_resolver.resolve_orders)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT machine, runtime_schedule_mismatch FROM orders"
+                        " WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+            flags = dict(cur.fetchall())
+        assert flags[self.L1] is True
+        assert flags[self.L2] is False
+
+
+def test_apply_chunk_size_bounds_total_savepoints():
+    f = distribution_data._apply_chunk_size
+    assert f(0) == 50 and f(10) == 50 and f(2500) == 50
+    for n in (2501, 10_000, 100_000):
+        assert -(-n // f(n)) <= 50   # <= 50 chunk savepoints per apply()
+

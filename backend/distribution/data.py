@@ -1570,7 +1570,15 @@ def _empty_apply_result() -> dict:
     return {**counters, "warnings_entry": _build_warnings_entry({}, counters), "ingest_warnings": {}}
 
 
-_APPLY_CHUNK_PARENTS = 50  # D01: parents per SAVEPOINT in apply()
+_APPLY_CHUNK_PARENTS = 50  # D01: MINIMUM parents per SAVEPOINT in apply()
+_APPLY_MAX_CHUNKS = 50     # keeps total savepoints under Postgres' 64-subxact cache (overflow degrades every session)
+
+
+def _apply_chunk_size(n_parents: int) -> int:
+    """Size-adaptive chunk: >= 50 parents, grown so one apply() opens at most
+    ~50 chunk savepoints however large the upload (a failed chunk still retries
+    per parent, which only costs extra savepoints on the failure path)."""
+    return max(_APPLY_CHUNK_PARENTS, -(-n_parents // _APPLY_MAX_CHUNKS))
 
 
 def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
@@ -1724,8 +1732,9 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
             cur.execute(f"RELEASE SAVEPOINT {sp}")
             return True
 
-        for ci in range(0, len(keys), _APPLY_CHUNK_PARENTS):
-            chunk = keys[ci:ci + _APPLY_CHUNK_PARENTS]
+        chunk_size = _apply_chunk_size(len(keys))
+        for ci in range(0, len(keys), chunk_size):
+            chunk = keys[ci:ci + chunk_size]
             local = {name: 0 for name in counters}
             if _run_savepointed(f"dist_chunk_{ci}", chunk, local):
                 for name, n_ in local.items():
@@ -1823,29 +1832,55 @@ _OD_SHARE_KEY = ("s.plant = order_distribution.plant"
 _OD_CHILD_KEY = ("c.plant = order_distribution.plant"
                  " AND c.parent_production_order = order_distribution.production_order"
                  " AND c.material_number = order_distribution.material_number")
+# Review round (perf): the per-header LATERALs this replaced probed shares /
+# children / members once PER HEADER (index-nested-loop x 20k headers). The
+# facts are now grouped ONCE for the plant and hash-joined; each LATERAL-less
+# `LEFT JOIN LATERAL (SELECT COALESCE(g.x, default) ...)` below only restores
+# the old "no rows -> empty array / FALSE" defaults, so every `_STATUS_SQL`
+# expression is unchanged. The FROM carries 3 plant placeholders (shares,
+# children, members), see `_STATUS_FROM_PARAMS`.
 _STATUS_FROM = (
-    "(SELECT 1) _b"
+    "order_distribution"
+    " LEFT JOIN (SELECT s.plant, s.production_order, s.material_number,"
+    " array_agg(s.machine) FILTER (WHERE s.weight > 0 AND s.purged_at IS NULL) AS sh_live,"
+    " array_agg(s.machine) FILTER (WHERE s.weight > 0) AS sh_pos,"
+    " array_agg(s.machine) AS sh_all,"
+    " bool_or(s.purged_at IS NOT NULL) AS sh_purged"
+    " FROM order_distribution_share s WHERE s.plant = %s GROUP BY 1, 2, 3) g_sh"
+    " ON g_sh.plant = order_distribution.plant"
+    " AND g_sh.production_order = order_distribution.production_order"
+    " AND g_sh.material_number = order_distribution.material_number"
     " LEFT JOIN LATERAL (SELECT"
-    " COALESCE(array_agg(s.machine) FILTER (WHERE s.weight > 0 AND s.purged_at IS NULL), '{}'::text[]) AS sh_live,"
-    " COALESCE(array_agg(s.machine) FILTER (WHERE s.weight > 0), '{}'::text[]) AS sh_pos,"
-    " COALESCE(array_agg(s.machine), '{}'::text[]) AS sh_all,"
-    " COALESCE(bool_or(s.purged_at IS NOT NULL), FALSE) AS sh_purged"
-    f" FROM order_distribution_share s WHERE {_OD_SHARE_KEY}) sh ON TRUE"
-    " LEFT JOIN LATERAL (SELECT"
-    " COALESCE(array_agg(c.machine) FILTER (WHERE c.machine IS NOT NULL), '{}'::text[]) AS ch_m,"
-    " COALESCE(bool_or(c.machine IS NULL), FALSE) AS ch_null,"
-    " COALESCE(bool_or(c.order_quantity = 0), FALSE) AS ch_zero,"
-    " COALESCE(bool_or(c.runtime_schedule_mismatch), FALSE) AS ch_mm,"
-    " COALESCE(bool_or(mp.min_lot_size > 0 AND c.order_quantity IS NOT NULL"
-    "                  AND c.order_quantity < mp.min_lot_size), FALSE) AS ch_lot"
+    " COALESCE(g_sh.sh_live, '{}'::text[]) AS sh_live,"
+    " COALESCE(g_sh.sh_pos, '{}'::text[]) AS sh_pos,"
+    " COALESCE(g_sh.sh_all, '{}'::text[]) AS sh_all,"
+    " COALESCE(g_sh.sh_purged, FALSE) AS sh_purged) sh ON TRUE"
+    " LEFT JOIN (SELECT c.plant, c.parent_production_order, c.material_number,"
+    " array_agg(c.machine) FILTER (WHERE c.machine IS NOT NULL) AS ch_m,"
+    " bool_or(c.machine IS NULL) AS ch_null,"
+    " bool_or(c.order_quantity = 0) AS ch_zero,"
+    " bool_or(c.runtime_schedule_mismatch) AS ch_mm,"
+    " bool_or(mp.min_lot_size > 0 AND c.order_quantity IS NOT NULL"
+    "         AND c.order_quantity < mp.min_lot_size) AS ch_lot"
     " FROM orders c LEFT JOIN material_plants mp ON mp.plant = c.plant AND mp.material_id = c.material_number"
-    f" WHERE {_OD_CHILD_KEY}) ch ON TRUE"
+    " WHERE c.plant = %s AND c.parent_production_order IS NOT NULL GROUP BY 1, 2, 3) g_ch"
+    " ON g_ch.plant = order_distribution.plant"
+    " AND g_ch.parent_production_order = order_distribution.production_order"
+    " AND g_ch.material_number = order_distribution.material_number"
+    " LEFT JOIN LATERAL (SELECT"
+    " COALESCE(g_ch.ch_m, '{}'::text[]) AS ch_m,"
+    " COALESCE(g_ch.ch_null, FALSE) AS ch_null,"
+    " COALESCE(g_ch.ch_zero, FALSE) AS ch_zero,"
+    " COALESCE(g_ch.ch_mm, FALSE) AS ch_mm,"
+    " COALESCE(g_ch.ch_lot, FALSE) AS ch_lot) ch ON TRUE"
     " LEFT JOIN sap_workcenter w ON w.plant = order_distribution.plant"
     " AND w.sap_workcenter = order_distribution.sap_workcenter"
-    " LEFT JOIN LATERAL (SELECT COALESCE(array_agg(m.machine), '{}'::text[]) AS mem_m"
-    " FROM machine m WHERE m.plant = order_distribution.plant"
-    " AND m.sap_workcenter = order_distribution.sap_workcenter) mem ON TRUE"
+    " LEFT JOIN (SELECT m.plant, m.sap_workcenter, array_agg(m.machine) AS mem_m"
+    " FROM machine m WHERE m.plant = %s GROUP BY 1, 2) g_mem"
+    " ON g_mem.plant = order_distribution.plant AND g_mem.sap_workcenter = order_distribution.sap_workcenter"
+    " LEFT JOIN LATERAL (SELECT COALESCE(g_mem.mem_m, '{}'::text[]) AS mem_m) mem ON TRUE"
 )
+_STATUS_FROM_NPLANT = 3   # %s placeholders in _STATUS_FROM, all the plant
 
 _STATUS_SQL: dict[str, str] = {
     "needs_review": "NOT order_distribution.reviewed",
@@ -1882,9 +1917,17 @@ def _status_expr(status_or_bucket: str | None) -> str | None:
 
 
 def _status_filter_sql(status_or_bucket: str | None) -> str | None:
-    """WHERE-clause predicate for a query whose FROM is `order_distribution`."""
+    """WHERE-clause predicate for a query whose FROM is `order_distribution`
+    and whose params already end with this predicate's `_STATUS_FROM_NPLANT +
+    1` plant values (see `_header_where_sql(status_plant=...)`). The inner
+    `order_distribution` shadows the outer one; the grouped facts are computed
+    once for the plant and semi-joined, not probed per header."""
     expr = _status_expr(status_or_bucket)
-    return None if expr is None else f"(SELECT {expr} FROM {_STATUS_FROM})"
+    if expr is None:
+        return None
+    return ("(order_distribution.production_order, order_distribution.material_number) IN"
+            " (SELECT order_distribution.production_order, order_distribution.material_number"
+            f" FROM {_STATUS_FROM} WHERE order_distribution.plant = %s AND {expr})")
 
 
 _HEADER_COLUMNS_SQL = """
@@ -1946,6 +1989,7 @@ def _header_where_sql(plant: str, *, search=None, workcenter=None, reviewed=None
         params.append(list(machines))
     if status_sql:
         where.append(status_sql)
+        params.extend([plant] * (_STATUS_FROM_NPLANT + 1))
     return " AND ".join(where), params
 
 
@@ -2257,9 +2301,9 @@ def get_summary(plant: str) -> dict:
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FILTER (WHERE f.nr), count(*) FILTER (WHERE f.ch), count(*) FILTER (WHERE f.pr)"
-            " FROM order_distribution LEFT JOIN LATERAL"
-            f" (SELECT {nr} AS nr, {ch} AS ch, {pr} AS pr FROM {_STATUS_FROM}) f ON TRUE"
-            " WHERE order_distribution.plant = %s", (plant,),
+            f" FROM (SELECT {nr} AS nr, {ch} AS ch, {pr} AS pr FROM {_STATUS_FROM}"
+            " WHERE order_distribution.plant = %s) f",
+            (plant,) * (_STATUS_FROM_NPLANT + 1),
         )
         needs_review, changed, problems = cur.fetchone()
     return {"needs_review": int(needs_review), "changed": int(changed), "problems": int(problems),

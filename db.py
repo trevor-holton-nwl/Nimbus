@@ -292,16 +292,27 @@ def _machine_match_key(machine) -> str:
     return "".join(str(machine).split()).casefold()
 
 
-def _known_machine_keys(cur, plant: str) -> set[str]:
+def _known_machine_keys(cur, plant: str) -> dict[str, str]:
     """Machines a MACHINE edit may target on `plant`: the plant's registered
     machines plus any machine already holding orders there (legacy/unregistered
-    lines are legitimate move targets), as `_machine_match_key` values."""
+    lines are legitimate move targets), as {`_machine_match_key`: canonical
+    spelling}. The canonical spelling is the machine table's when registered,
+    else the most common spelling among the plant's orders, so a match on a
+    differently-cased/spaced edit stores the real code, never the typo."""
+    cur.execute("SELECT machine FROM machine WHERE plant = %s", (plant,))
+    out: dict[str, str] = {}
+    for (m,) in cur.fetchall():
+        if m:
+            out.setdefault(_machine_match_key(m), m)
     cur.execute(
-        "SELECT machine FROM machine WHERE plant = %s"
-        " UNION SELECT machine FROM orders WHERE plant = %s AND machine IS NOT NULL",
-        (plant, plant),
+        "SELECT machine, COUNT(*) AS n FROM orders WHERE plant = %s AND machine IS NOT NULL"
+        " GROUP BY machine ORDER BY n DESC, machine",
+        (plant,),
     )
-    return {_machine_match_key(r[0]) for r in cur.fetchall() if r[0]}
+    for m, _n in cur.fetchall():
+        if m:
+            out.setdefault(_machine_match_key(m), m)
+    return out
 
 
 def _canonical_runtime_minutes(value) -> int | None:
@@ -994,9 +1005,13 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     # A long order can start well before `lo` and still run into the window, so
     # widen the start-indexed lookback by the touched machines' longest run time
     # (capped) and keep the true-overlap test on the effective END.
+    # Bounded by the same indexable eff-start range (idx_orders_machine_eff_start):
+    # nothing starting more than the lookback cap before `lo` can matter, so never
+    # scan the machine's whole history just to size the lookback.
     cur.execute(
-        "SELECT COALESCE(MAX(run_time), 0) FROM orders WHERE machine = ANY(%s) AND plant = ANY(%s)",
-        (machines, plants),
+        "SELECT COALESCE(MAX(run_time), 0) FROM orders WHERE machine = ANY(%s) AND plant = ANY(%s)"
+        " AND COALESCE(scheduled_start, basic_start_date) BETWEEN %s AND %s",
+        (machines, plants, lo - timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS), hi),
     )
     lookback_hours = min(float(cur.fetchone()[0] or 0), _CONFLICT_LOOKBACK_CAP_HOURS)
     wide_lo = lo - timedelta(hours=lookback_hours)
@@ -1287,7 +1302,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
 
         update_rows: list[dict] = []
         seen_ids: set[str] = set()
-        known_machines_by_plant: dict[str, set[str]] = {}
+        known_machines_by_plant: dict[str, dict[str, str]] = {}
         eligibility_cache: dict = {}   # per-call plant lookups for check_eligibility (P7)
         for it in items:
             tid = it.get("id")
@@ -1354,10 +1369,13 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if attrs.get("MACHINE") and current["plant"]:
                 if current["plant"] not in known_machines_by_plant:
                     known_machines_by_plant[current["plant"]] = _known_machine_keys(cur, current["plant"])
-                if _machine_match_key(attrs["MACHINE"]) not in known_machines_by_plant[current["plant"]]:
+                canonical_machine = known_machines_by_plant[current["plant"]].get(_machine_match_key(attrs["MACHINE"]))
+                if canonical_machine is None:
                     rejection_reasons[tid] = "machine_unknown"
                     invalid_ids.append(tid)
                     continue
+                # Store the canonical spelling (also feeds the eligibility check below).
+                attrs["MACHINE"] = canonical_machine
             # Routing runtime (ROUTING_RUNTIME_DESIGN.md §5.5/§8.2/§8.5): a client
             # RUN_TIME is only honored on a disabled plant (today's unconditional
             # behavior, preserved exactly) or to release an order currently held
@@ -2397,7 +2415,25 @@ _UPSERT_SQL = """
         -- carry-forward. Only the resolver (backend/routing/resolver.py) is
         -- allowed to set this flag now, and only when the number it writes
         -- actually differs from what's stored.
-        runtime_schedule_mismatch = COALESCE(orders.runtime_schedule_mismatch, FALSE),
+        runtime_schedule_mismatch = CASE
+            -- Exception (H10/D33): a SCHEDULED distribution child (parent link set)
+            -- whose effective run time actually moves is flagged here, because the
+            -- ingest writes children through THIS statement before distribution's
+            -- own child upsert runs (whose identical CASE would then see no change).
+            WHEN orders.parent_production_order IS NOT NULL
+                 AND (CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1 FROM plants rp
+                             WHERE rp.plant = COALESCE(EXCLUDED.plant, orders.plant)
+                               AND rp.routing_runtime_enabled = TRUE
+                        ) THEN EXCLUDED.run_time
+                        WHEN orders.run_time_source = 'manual' THEN orders.run_time
+                        ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
+                      END) IS DISTINCT FROM orders.run_time
+                 AND (orders.scheduled_start IS NOT NULL
+                      OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
+            THEN TRUE
+            ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
         -- Routing plants: upsert_orders nulls the file's run_time before this
         -- write, so EXCLUDED.run_time is NULL and COALESCE keeps the stored
         -- value; a planner-keyed ('manual') run time is kept unconditionally.

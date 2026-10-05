@@ -114,3 +114,17 @@ Verification (counts):
 - ruff check .: all checks passed.
 - pytest -q, fresh nimbus_test_int (this worktree's schema.sql applied with ON_ERROR_STOP=1, clean): 948 passed, 1 skipped (pre-existing #203 placeholder), 0 failed.
 - Migrations onto nimbus_test_mig (main's schema.sql): 34 of 36 migrations/*.sql apply in name order and re-apply idempotently (2 passes). 2026-07-03-production-line-optimizer-flags.sql and 2026-08-13-changeover-matrix-stage-0.sql fail on `production_lines` (renamed to machines before main's schema); both files are untouched by either branch and already ledger-applied in prod; pre-existing, not a regression.
+
+## Review fix round (backend, branch fix/cr1005-review-be)
+
+| # | status | commit | tests | note |
+|---|---|---|---|---|
+| 1 H10/D33 | DONE | 8c44dd4 | test_distribution.py::TestIngestFlagsScheduledChildRuntimeChange (fails before) | CASE added to `_UPSERT_SQL`, only for rows with a parent link + schedule + changed effective run_time |
+| 2 MACHINE canonical | DONE | bbb4876 | test_task_concurrency.py case/space variant now asserts stored spelling (fails before) | `_known_machine_keys` returns {key: canonical}; machine table spelling wins, else most common order spelling |
+| 3 csp-report cap | DONE | 0fa3fcf | test_logs_endpoints.py (413) | 16 KB cap; ring-write coalescing skipped (route already limits to 10 reports/call) |
+| 8 /logs/frontend cap | DONE | 0fa3fcf | test_logs_endpoints.py | 1 MB |
+| 4 apply() savepoints | DONE | eedbb00 | test_apply_chunk_size_bounds_total_savepoints | chunk = max(50, ceil(n/50)) |
+| 5 conflict-scan lookback | DONE | 4409735 | test_conflict_scan_lookback_query_is_bounded_by_eff_start_range | bound = lo - 30d (the existing cap) .. hi; semantics unchanged |
+| 6 status SQL perf | DONE | 9b3027c | TestSqlStatusClassificationParityAndScale (harness FROM shape updated) | 20k headers: summary 1.7-2.0s -> 0.43s; changed list 1.6s -> 0.23s; problems list 1.0 -> 0.47s; needs_review list 0.31 -> 0.45s (trivial `NOT reviewed` predicate, slightly slower) |
+| 7 setup capture scope | SKIPPED | - | - | `capture_setup_states_before_schedule_mutation` has no machine filter and 5 callers would each need the pre-lock affected-machine set; not a one-line scope |
+| 9 migrations | DONE | f140e1c | two-pass apply on DB from main's schema.sql: 0 failures both passes; test_schema_idempotent.py | moved 07-03 and 08-13 to migrations/manual/; 06-30-sap-interface applies fine (production_lines is only a seed string) so left in place |

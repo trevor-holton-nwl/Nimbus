@@ -170,6 +170,10 @@ class TestUpdateTaskDatesBulkXminConflict:
              "base_version": db_.get_task_versions([self.oid2])[0]["row_version"]},
         ])
         assert result["invalid_ids"] == [] and result["persisted"] == 1
+        # Review round: the CANONICAL spelling is stored, never the typed variant.
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT machine FROM orders WHERE id = %s", (self.oid2,))
+            assert cur.fetchone()[0] == self.MACHINE
 
     def test_force_true_bypasses_the_stale_check_and_persists_anyway(self, pg):
         """A `force: True` edit must succeed even against a stale base_version
@@ -381,3 +385,24 @@ class TestBrowserSavePayloadCrossSeam:
             assert cur.fetchone() == (sent["MACHINE"], sent["PRODUCTION_VERSION"], sent["RUN_TIME"])
             cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id = %s", (oid,))
             assert cur.fetchone()[0] == len(sent["schedule_segments"])
+
+
+def test_conflict_scan_lookback_query_is_bounded_by_eff_start_range():
+    """Review round: the MAX(run_time) lookback must not scan a machine's whole history."""
+    import datetime as _dt
+    import db as db_
+
+    class Cur:
+        def __init__(self): self.q = []
+        def execute(self, sql, params=None): self.q.append((sql, params))
+        def fetchone(self): return (0,)
+        def fetchall(self): return []
+
+    cur = Cur()
+    t0 = _dt.datetime(2026, 10, 1, 8)
+    rows = [{"id": "A", "moved": True, "queued": False, "machine": "M1", "start": t0, "end": t0 + _dt.timedelta(hours=2)}]
+    db_._scan_conflicts_for_rows(cur, rows, {"A": {"plant": "1006", "start": t0, "end": t0}})
+    sql, params = cur.q[0]
+    assert "MAX(run_time)" in sql and "BETWEEN" in sql and "COALESCE(scheduled_start, basic_start_date)" in sql
+    lo, hi = params[2], params[3]
+    assert lo == t0 - _dt.timedelta(days=1) - _dt.timedelta(days=30) and hi == t0 + _dt.timedelta(hours=2) + _dt.timedelta(days=1)

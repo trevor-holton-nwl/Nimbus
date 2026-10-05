@@ -323,7 +323,7 @@ def test_frontend_sink_caps_ctx_keys_and_values(tc):
 
 
 def test_frontend_sink_rejects_oversize_body_413(tc):
-    big = "x" * (300 * 1024)
+    big = "x" * (1100 * 1024)
     r = tc.post("/logs/frontend", json={"entries": [{"msg": big}]})
     assert r.status_code == 413
     assert not brain._BACKEND_LOG
@@ -370,5 +370,12 @@ def test_csp_report_endpoint_logs_legacy_and_reports_api_bodies_and_tolerates_ju
 
     n = len(brain._BACKEND_LOG)
     assert tc.post("/logs/csp-report", content="not json {{", headers={"content-type": "application/csp-report"}).status_code == 204
-    assert tc.post("/logs/csp-report", content="x" * 50000).status_code == 204
+    assert tc.post("/logs/csp-report", content="x" * 12000).status_code == 204   # under the 16 KB cap, junk -> dropped
     assert len(brain._BACKEND_LOG) == n
+
+
+def test_csp_report_oversize_body_413_and_frontend_cap_is_1mb(tc):
+    n = len(brain._BACKEND_LOG)
+    assert tc.post("/logs/csp-report", content="x" * 50000).status_code == 413
+    assert len(brain._BACKEND_LOG) == n
+    assert brain._BODY_CAPS[("POST", "/logs/frontend")] == 1024 * 1024

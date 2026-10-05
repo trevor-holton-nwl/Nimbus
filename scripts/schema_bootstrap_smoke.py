@@ -206,10 +206,9 @@ SKIPPED_POST_SCHEMA_MIGRATIONS = {
     # Pre machine-rename SAP seed uses the legacy production_lines object key.
     "2026-06-30-sap-interface.sql": "pre-cutover production_lines SAP object key",
     # These frozen files target tables/columns renamed by the 2026-08-20 cutover.
-    "2026-07-03-production-line-optimizer-flags.sql": "pre-cutover production_lines table",
+    # (production-line-optimizer-flags / changeover-matrix-stage-0 now live in migrations/manual/.)
     "2026-08-10-material-plant-default-workcenter.sql": "pre-cutover default_workcenter column",
     "2026-08-11-priority-lists.sql": "pre-cutover priority_list.line column",
-    "2026-08-13-changeover-matrix-stage-0.sql": "pre-cutover production_lines/setup line columns",
 }
 
 
