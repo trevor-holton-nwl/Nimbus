@@ -110,3 +110,23 @@ test('a failed hours/upsert save toasts honestly with a Retry action instead of 
     globalThis.fetch = priorFetch; Toast.show = priorToast;
   }
 });
+
+test('re-upserting a blackout id clears it from the pending-delete set (no stale replayed delete)', async () => {
+  const { Toast } = await import('../../../frontend/platform/foundation.mjs');
+  globalThis.window = globalThis.window || {};
+  const priorToast = Toast.show; Toast.show = () => {};
+  const priorFetch = globalThis.fetch, priorLs = globalThis.localStorage;
+  const store = new Map();
+  globalThis.localStorage = { getItem: k => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 503 });
+  try {
+    CalendarSync._trackPendingDeletes('P1', 'line', ['blk-1'], true);
+    CalendarSync._trackPendingDeletes('P1', 'plant', ['pb-1'], true);
+    await CalendarSync.saveLineBlackoutUpsert({ id: 'blk-1', plant: 'P1', line: 'L1', start: '2026-01-01T00:00:00Z', end: '2026-01-02T00:00:00Z' });
+    await CalendarSync.savePlantBlackoutUpsert({ id: 'pb-1', plant: 'P1', start: '2026-01-01T00:00:00Z', end: '2026-01-02T00:00:00Z' });
+    assert.equal(store.has('nimbus.calendar.pendingDeletes'), false);
+  } finally {
+    globalThis.fetch = priorFetch; Toast.show = priorToast;
+    if (priorLs === undefined) delete globalThis.localStorage; else globalThis.localStorage = priorLs;
+  }
+});
