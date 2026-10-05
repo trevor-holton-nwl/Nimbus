@@ -2581,7 +2581,7 @@ interface MasterDataTableState<T extends MasterDataRow = MasterDataRow> {
   rows: T[];
   /** rowKey -> patch (a shallow-copied-and-mutated row carrying only the edited baseline + changed fields). */
   dirty: Map<string, T>;
-  deleted: Set<string>;
+  deleted: Map<string, MasterDataRow>; // rowKey -> key-column snapshot taken at mark time (survives a search replacing the page)
   added: T[];
 }
 
@@ -3275,7 +3275,7 @@ export const MasterData = (() => {
           columns: data.columns,
           rows:    data.rows,
           dirty:   new Map(),
-          deleted: new Set(),
+          deleted: new Map(),
           added:   [],
         };
       }
@@ -3668,7 +3668,7 @@ export const MasterData = (() => {
         return r.json() as Promise<MasterDataResponse>;
       }).then((data) => {
         _fkLoadWarnings.delete(sourceTable);
-        _cache[sourceTable] = { columns: data.columns, rows: data.rows, dirty: new Map(), deleted: new Set(), added: [] };
+        _cache[sourceTable] = { columns: data.columns, rows: data.rows, dirty: new Map(), deleted: new Map(), added: [] };
         // Rebuild select options.
         while (sel.options.length > 1) sel.remove(1);
         data.rows.forEach((r) => {
@@ -4011,7 +4011,7 @@ export const MasterData = (() => {
       if (idx >= 0) state.added.splice(idx, 1);
       _renderTable(table);
     } else {
-      state.deleted.add(rowKey);
+      state.deleted.set(rowKey, deletePayload);
       tr.className = 'md-row-deleted';
       _updateSaveBtn(table);
       _renderTable(table);
@@ -4186,12 +4186,9 @@ export const MasterData = (() => {
 
     // Build deletes.
     const deletes: MasterDataRow[] = [];
-    state.deleted.forEach((rowKey) => {
-      const row = _getRowByKey(table, rowKey);
-      const d: MasterDataRow = {};
-      keys.forEach((k) => { d[k] = row[k]; });
-      deletes.push(d);
-    });
+    // Key columns come from the snapshot taken at mark-for-delete time: a server-side
+    // search may have replaced state.rows since, so a live row lookup would find {}.
+    state.deleted.forEach((snap) => { deletes.push({ ...snap }); });
 
     if (!upserts.length && !deletes.length) return;
 
@@ -4542,7 +4539,7 @@ export const MasterData = (() => {
         });
         _lineSyncMachineCache[plant] = {
           columns: data.columns, rows: data.rows,
-          dirty: new Map(), deleted: new Set(), added: [],
+          dirty: new Map(), deleted: new Map(), added: [],
         };
       } catch { return; }
     }
