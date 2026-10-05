@@ -706,3 +706,68 @@ test('persistence fetches /master-data/machine only with the plant (#25)', () =>
   assert.doesNotMatch(source, /master-data\/machine`/, 'no unscoped machine fetch');
   assert.equal((source.match(/master-data\/machine\?plant=\$\{encodeURIComponent\(plant\)\}/g) || []).length, 2);
 });
+
+test('WorkCenters.render installs the pagehide listener once, and firing it flushes the CURRENT unsaved edit plus queued ones (D28)', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorIsAdmin = Session.isAdmin;
+  const priorWindow = globalThis.window;
+  const priorDocument = globalThis.document;
+  const priorPlant = Store.selectedPlant;
+  const priorWired = WorkCenters._pageHideWired;
+  const priorState = {
+    loadedPlant: WorkCenters._loadedPlant, selected: WorkCenters._selected, staged: WorkCenters._staged,
+    machines: WorkCenters._machines, dirty: WorkCenters._dirty,
+  };
+  const listeners = [];
+  const calls = [];
+  Session.isAdmin = () => true;
+  globalThis.window = { addEventListener: (type, fn) => listeners.push({ type, fn }) };
+  globalThis.document = { getElementById: () => ({ innerHTML: '' }), querySelector: () => null };
+  globalThis.fetch = (url, opts) => { calls.push({ url: String(url), opts }); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); };
+  try {
+    // 1. render() wires the listener (no plant selected -> returns right after wiring).
+    Store.setSelectedPlant(null, "test");
+    WorkCenters._pageHideWired = false;
+    await WorkCenters.render();
+    const pagehide = listeners.filter(l => l.type === 'pagehide');
+    assert.equal(pagehide.length, 1, 'a pagehide listener is installed');
+    await WorkCenters.render();
+    assert.equal(listeners.filter(l => l.type === 'pagehide').length, 1, 'second render does not stack another listener');
+
+    // 2. Invoking the captured listener flushes a queued edit AND the current unsaved (dirty) edit.
+    const payload = { description: 'q', distribution_mode: 'single', default_machine: 'M1', max_separation: 'none', review_required: false, distribute_tooled: false, weights: {} };
+    WorkCenters._queued.set('P\u0000OLD', { plant: 'P', code: 'OLD', payload, members: ['M1'] });
+    WorkCenters._loadedPlant = 'P';
+    WorkCenters._selected = 'CUR';
+    WorkCenters._machines = [{ machine: 'M1', sap_workcenter: 'CUR' }, { machine: 'M2', sap_workcenter: 'CUR' }];
+    WorkCenters._staged = { description: 'typed just now', distribution_mode: 'distribute', default_machine: '', max_separation: 'none', review_required: false, distribute_tooled: false, weights: { M1: 3, M2: null } };
+    WorkCenters._dirty = true;
+    pagehide[0].fn();
+    assert.equal(calls.length, 2, 'queued write + current unsaved write');
+    const urls = calls.map(c => c.url);
+    assert.ok(urls.some(u => /\/distribution\/P\/workcenters\/OLD$/.test(u)), 'queued edit flushed');
+    const cur = calls.find(c => /\/workcenters\/CUR$/.test(c.url));
+    assert.ok(cur, 'the in-progress (not yet queued) edit is flushed too');
+    assert.equal(cur.opts.keepalive, true);
+    const body = JSON.parse(cur.opts.body);
+    assert.equal(body.description, 'typed just now');
+    assert.deepEqual(body.weights, { M1: 3, M2: null });
+    assert.equal(WorkCenters._dirty, false, 'dirty cleared so autosave does not resend');
+    assert.equal(WorkCenters._queued.size, 0);
+
+    // 3. Nothing dirty and nothing queued -> nothing sent.
+    calls.length = 0;
+    pagehide[0].fn();
+    assert.equal(calls.length, 0);
+  } finally {
+    Session.isAdmin = priorIsAdmin;
+    globalThis.fetch = priorFetch;
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, "test");
+    WorkCenters._pageHideWired = priorWired;
+    WorkCenters._loadedPlant = priorState.loadedPlant; WorkCenters._selected = priorState.selected;
+    WorkCenters._staged = priorState.staged; WorkCenters._machines = priorState.machines; WorkCenters._dirty = priorState.dirty;
+    WorkCenters._queued.clear();
+  }
+});
