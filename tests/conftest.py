@@ -32,6 +32,19 @@ from tests.support.db_safety import (  # noqa: E402
 
 load_dotenv(os.path.join(ROOT, ".env"))
 
+# The color-wheel/optimization audit trail is an on-disk file under
+# COLOR_WHEEL_DIR (read once when backend.priority_lists.audit_log is imported).
+# Point it at a throwaway directory so tests never write into the repo's
+# data/color_wheels/ (which previously leaked _audit_log.json into commits).
+if not os.environ.get("COLOR_WHEEL_DIR"):
+    import atexit
+    import shutil
+    import tempfile
+
+    _TEST_COLOR_WHEEL_DIR = tempfile.mkdtemp(prefix="nimbus_test_color_wheels_")
+    os.environ["COLOR_WHEEL_DIR"] = _TEST_COLOR_WHEEL_DIR
+    atexit.register(shutil.rmtree, _TEST_COLOR_WHEEL_DIR, ignore_errors=True)
+
 PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_DB = os.getenv("PG_DB", "nimbus")
 TEST_DB_OPTED_IN = is_test_database_opted_in(os.getenv("NIMBUS_TEST_DB"))
