@@ -522,3 +522,32 @@ class TestResolveOrdersRoutingRuntimeGate:
         assert "EXISTS" in cursor.executed[1][0]
         assert "FROM orders" in cursor.executed[2][0]
         assert report == _new_report(is_cutover=True)
+
+
+class TestWriteChunkingAndPendingHold:
+    def test_outcome_and_hold_writes_chunk_at_5000_rows_per_statement(self):
+        from backend.routing import resolver as r
+
+        class Cur:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, query, params):
+                self.calls.append((query, params))
+
+        cur = Cur()
+        r._write_outcomes(cur, [(f"o{i}", 1, "routing", "{}", False, False) for i in range(12001)])
+        assert [len(p) // 6 for _, p in cur.calls] == [5000, 5000, 2001]
+        cur = Cur()
+        r._write_holds(cur, [(f"o{i}", "{}") for i in range(10001)])
+        assert [len(p) // 2 for _, p in cur.calls] == [5000, 5000, 1]
+        cur = Cur()
+        r._write_outcomes(cur, [])
+        r._write_holds(cur, [])
+        assert cur.calls == []
+
+    def test_runtime_pending_counts_as_a_routing_hold(self):
+        from backend.routing.resolver import _is_routing_hold
+
+        assert _is_routing_hold({"code": "runtime_pending", "message": "x"})
+        assert not _is_routing_hold({"code": "something_else"})

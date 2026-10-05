@@ -1051,13 +1051,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     `backend.routing.resolver.check_eligibility` for the candidate combination
     before being accepted — an ineligible candidate is rejected the same way
     as any other single-aspect edit conflict in this function (folded into
-    `invalid_ids`, no separate reason field). After a batch with at least one
-    accepted MACHINE/PRODUCTION_VERSION edit on such a plant commits,
-    `backend.routing.resolver.resolve_orders(plant)` is called for each
-    affected plant (its own separate, self-committing connection, never this
-    function's own transaction) so the order's run_time reflects the new
-    combination immediately rather than waiting for the next plant-wide
-    recompute.
+    `invalid_ids`, no separate reason field). An accepted candidate's run_time
+    and basis are resolved and written inside this same transaction (no
+    post-commit plant-wide resolve).
 
     `allowed_plants` (None for an unrestricted/admin caller) scopes writes to
     the caller's assigned plants: a row whose plant falls outside the set is
@@ -1308,8 +1304,11 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 has_runtime = True
 
             if has_runtime and current["routing_runtime_enabled"] and resolved_runtime is None:
+                # runtime_pending: an upload's placeholder hold that a failed
+                # post-upload resolve can leave behind; keying a run time
+                # releases it exactly like a resolver-set runtime_unknown.
                 if not (current["planning_status"] == "needs_planning"
-                        and current["reason_code"] == "runtime_unknown"):
+                        and current["reason_code"] in ("runtime_unknown", "runtime_pending")):
                     invalid_ids.append(tid)
                     continue
                 manual_runtime_release = True
@@ -2331,7 +2330,17 @@ _UPSERT_SQL = """
         -- allowed to set this flag now, and only when the number it writes
         -- actually differs from what's stored.
         runtime_schedule_mismatch = COALESCE(orders.runtime_schedule_mismatch, FALSE),
-        run_time              = EXCLUDED.run_time,
+        -- Routing plants: upsert_orders nulls the file's run_time before this
+        -- write, so EXCLUDED.run_time is NULL and COALESCE keeps the stored
+        -- value; a planner-keyed ('manual') run time is kept unconditionally.
+        -- The post-upload resolve (batch_id) re-derives every non-manual row
+        -- of the batch, so a kept value can't go stale when quantity changes.
+        -- run_time_source/run_time_basis are never in this SET, so they carry
+        -- forward untouched. A disabled plant sends a real value: SAP wins.
+        run_time              = CASE
+            WHEN orders.run_time_source = 'manual' THEN orders.run_time
+            ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
+        END,
         color                 = EXCLUDED.color,
         -- prt_01/prt_02/production_version: written from the uploaded row like color
         -- (NULL today — no upload source carries them yet), then overwritten for
@@ -2815,6 +2824,25 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # touches a pre-existing order that was merely updated. Runs after
             # `plant` is fully resolved (backfills above) so the plant filter
             # is accurate.
+            # Plants backfilled from the machine just above (an upload with no
+            # PLANT column carried none when routing_enabled_plants was
+            # computed at the top): join them in so their new orders are held
+            # and their batch is resolved. Their file run_time was already
+            # written, which is fine -- the batch resolve below re-derives
+            # every non-manual row of the batch.
+            resolve_plants = {r["plant"] for r in rows if r.get("plant")}
+            if any(not r.get("plant") for r in rows):
+                cur.execute(
+                    """
+                    SELECT DISTINCT o.plant FROM orders o
+                      JOIN plants p ON p.plant = o.plant
+                     WHERE o.upload_batch_id = %s AND p.routing_runtime_enabled = TRUE
+                    """,
+                    (batch_id,),
+                )
+                backfilled_enabled = {r[0] for r in cur.fetchall()}
+                routing_enabled_plants |= backfilled_enabled
+                resolve_plants |= backfilled_enabled
             if inserted_ids and routing_enabled_plants:
                 cur.execute(
                     """
@@ -2862,8 +2890,29 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # matches `resolve_orders`'s conn-reuse contract). A no-op for any
             # plant resolve_fn/the caller never wires in.
             if resolve_fn is not None:
-                for resolve_plant in sorted({r.get("plant") for r in rows if r.get("plant")}):
-                    resolve_result = resolve_fn(resolve_plant, conn=conn)
+                # A resolver failure must not fail the upload: the rows are
+                # already committed (never fold ingest into one transaction --
+                # Code_Review_09_25 §10). Contain it in a savepoint, report a
+                # warning, and leave the plant for a /recompute.
+                for resolve_plant in sorted(resolve_plants):
+                    cur.execute("SAVEPOINT routing_resolve")
+                    try:
+                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id)
+                        cur.execute("RELEASE SAVEPOINT routing_resolve")
+                    except Exception as exc:
+                        cur.execute("ROLLBACK TO SAVEPOINT routing_resolve")
+                        log.warning("Post-upload routing resolve failed for plant %s: %s",
+                                    resolve_plant, exc, extra={"category": "upload"})
+                        warnings.append({
+                            "level": "warn",
+                            "category": "routing_resolve",
+                            "status": "failed",
+                            "plant": resolve_plant,
+                            "msg": (f"Routing run times could not be calculated for plant "
+                                    f"{resolve_plant} ({exc}). The orders were saved; run "
+                                    f"Recompute for this plant to retry."),
+                        })
+                        continue
                     warnings.append({
                         "level": "info",
                         "category": "routing_resolve",

@@ -4,6 +4,7 @@ All rows belong to an isolated ZZTEST_AR plant. Both eligibility calculation
 and order writes use production code; no resolver or SQL mocks are installed.
 """
 import datetime as dt
+import uuid
 from decimal import Decimal
 
 import pytest
@@ -342,3 +343,95 @@ class TestRoutingEditTransactions:
         assert result["invalid_ids"] == [self.ids[1]]
         assert result["rejection_reasons"] == {self.ids[1]: "pv_not_found"}
         assert [self._row(pg, oid) for oid in self.ids] == before
+
+    # ---- Bundle 1 (routing switch-on gate): re-upload / hold / resolve contracts ----
+    def _upload_row(self, oid, *, quantity, plant=None, run_time=99.0, machine=None):
+        return {
+            "id": oid, "production_order": oid.split("|")[0], "material_number": self.MATERIAL,
+            "machine": machine or self.M1, "plant": plant, "basic_start_date": self.START,
+            "basic_finish_date": self.START + dt.timedelta(days=2), "run_time": run_time,
+            "order_quantity": quantity, "production_version": "0001",
+        }
+
+    def _upload(self, pg, rows, **kw):
+        return pg.upsert_orders(rows, batch_id=kw.pop("batch_id", str(uuid.uuid4())), source="excel",
+                                filename="f.xlsx", resolve_fn=resolver.resolve_orders, **kw)
+
+    def _set(self, pg, sql, params):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            conn.commit()
+
+    def test_reupload_rederives_non_manual_run_time_when_quantity_changes(self, pg):
+        # Stale-duration regression: qty 10 -> 20 must re-derive 3h -> 6h, not keep 3h or take SAP's 99.
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)])
+        row = self._row(pg)
+        assert row["run_time"] == Decimal(6) and row["run_time_source"] == "routing"
+
+    def test_reupload_keeps_manual_run_time(self, pg):
+        self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)])
+        row = self._row(pg)
+        assert row["run_time"] == Decimal(7) and row["run_time_source"] == "manual"
+
+    def test_reupload_without_plant_column_still_holds_resolves_and_keeps_manual(self, pg):
+        # No PLANT column: plant is only known after the machine backfill.
+        self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[1],))
+        new_id = pg.make_id("ZZTEST_AR_O3", self.MATERIAL)
+        res = self._upload(pg, [
+            self._upload_row(self.ids[0], quantity=20),
+            self._upload_row(self.ids[1], quantity=20),
+            self._upload_row(new_id, quantity=30),
+        ])
+        assert res["status"] == "ok"
+        assert self._row(pg, self.ids[0])["run_time"] == Decimal(6)
+        assert self._row(pg, self.ids[1])["run_time"] == Decimal(7)
+        fresh = self._row(pg, new_id)
+        # held as runtime_pending, then released by the resolve (pending code recognised)
+        assert fresh["run_time"] == Decimal(9) and fresh["run_time_source"] == "routing"
+        assert fresh["planning_status"] == "scheduled" and fresh["planning_reason"] is None
+        assert any(w.get("category") == "routing_resolve" and w.get("plant") == self.PLANT
+                   for w in res["warnings"])
+
+    def test_runtime_pending_hold_is_released_by_resolve(self, pg):
+        self._set(pg, "UPDATE orders SET planning_status='needs_planning', scheduled_start=NULL,"
+                      " scheduled_end=NULL, run_time_source=NULL, run_time=NULL,"
+                      " planning_reason='{\"code\":\"runtime_pending\",\"message\":\"x\"}'::jsonb"
+                      " WHERE id=%s", (self.ids[0],))
+        resolver.resolve_orders(self.PLANT)
+        row = self._row(pg)
+        assert row["planning_status"] == "scheduled" and row["planning_reason"] is None
+        assert row["run_time"] == Decimal(3)
+
+    def test_planner_run_time_releases_runtime_pending_hold(self, pg):
+        self._set(pg, "UPDATE orders SET planning_status='needs_planning', scheduled_start=NULL,"
+                      " scheduled_end=NULL, run_time_source=NULL, run_time=NULL,"
+                      " planning_reason='{\"code\":\"runtime_pending\",\"message\":\"x\"}'::jsonb"
+                      " WHERE id=%s", (self.ids[0],))
+        result = self._save(pg, {"RUN_TIME": 5})
+        assert result["persisted"] == 1
+        row = self._row(pg)
+        assert row["run_time_source"] == "manual" and row["planning_status"] == "scheduled"
+
+    def test_resolver_failure_becomes_upload_warning_not_failed_upload(self, pg):
+        def boom(plant, *, conn, batch_id=None):
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1/0")
+
+        boom_batch = str(uuid.uuid4())
+        res = pg.upsert_orders([self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)],
+                               batch_id=boom_batch, source="excel", filename="f.xlsx",
+                               resolve_fn=boom)
+        assert res["status"] == "ok" and res["updated"] == 1
+        failed = [w for w in res["warnings"] if w.get("category") == "routing_resolve"]
+        assert failed and failed[0]["status"] == "failed" and failed[0]["level"] == "warn"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT warnings FROM upload_audit WHERE batch_id=%s", (boom_batch,))
+            assert cur.fetchone() is not None
+            cur.execute("DELETE FROM upload_audit WHERE batch_id=%s", (boom_batch,))
+            conn.commit()
+
+    def test_disabled_plant_reupload_unchanged_sap_run_time_wins(self, pg):
+        self._set(pg, "UPDATE plants SET routing_runtime_enabled=FALSE WHERE plant=%s", (self.PLANT,))
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT, run_time=99.0)])
+        assert self._row(pg)["run_time"] == Decimal(99)
