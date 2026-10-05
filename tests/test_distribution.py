@@ -2683,10 +2683,7 @@ class TestSqlStatusRandomizedParityAndPagingStability:
                              rnd.choice(self.STARTS), reviewed, rq,
                              None if facts is None else json.dumps(facts)))
                 coherent = rnd.random() < 0.6
-                if coherent:
-                    ms = list(members.get(wc, []))
-                else:
-                    ms = rnd.sample(self.MACHS, rnd.randrange(0, 4))
+                ms = list(members.get(wc, [])) if coherent else rnd.sample(self.MACHS, rnd.randrange(0, 4))
                 fault = rnd.choice(["none", "none", "drop_child", "extra_child", "purge", "zero", "nonmember",
                                     "dropshare", "qty0", "lot", "mm", "nullm"]) if coherent else None
                 ms_sh = ms[1:] if fault == "dropshare" else list(ms)
