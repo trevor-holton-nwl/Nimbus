@@ -942,6 +942,29 @@ def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> lis
             for (m, a, b), v in sorted(totals.items())]
 
 
+# Longest run time (hours) the conflict scan's start-indexed lookback will widen by.
+_CONFLICT_LOOKBACK_CAP_HOURS = 30 * 24
+
+
+def _lock_machines_for_strict_save(cur, items: list[dict], ids: list[str]) -> None:
+    """Strict optimizer saves: serialise on every (plant, machine) the batch will
+    touch -- the rows' current machines plus any MACHINE edit target -- using
+    transaction-scoped advisory locks taken in sorted order, BEFORE the row
+    FOR UPDATE locks, so two concurrent strict saves can neither both pass the
+    overlap scan against pre-commit snapshots nor deadlock each other."""
+    cur.execute("SELECT id, plant, machine FROM orders WHERE id = ANY(%s)", (ids,))
+    rows = cur.fetchall()
+    plant_by_id = {r[0]: r[1] for r in rows}
+    keys = {(r[1], r[2]) for r in rows if r[1] and r[2]}
+    for it in items:
+        target = _canonical_nullable_attribute(it.get("MACHINE")) if "MACHINE" in it else None
+        plant = plant_by_id.get(it.get("id"))
+        if target and plant:
+            keys.add((plant, target))
+    for plant, machine in sorted(keys):
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{plant}{machine}",))
+
+
 def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[dict]:
     """Runs inside the still-open save transaction so the scan sees this batch's
     own UPDATEs. Window bounds come from the rows that actually moved.
@@ -968,6 +991,15 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
         return []
     lo = min(starts) - timedelta(days=1)
     hi = max(ends) + timedelta(days=1)
+    # A long order can start well before `lo` and still run into the window, so
+    # widen the start-indexed lookback by the touched machines' longest run time
+    # (capped) and keep the true-overlap test on the effective END.
+    cur.execute(
+        "SELECT COALESCE(MAX(run_time), 0) FROM orders WHERE machine = ANY(%s) AND plant = ANY(%s)",
+        (machines, plants),
+    )
+    lookback_hours = min(float(cur.fetchone()[0] or 0), _CONFLICT_LOOKBACK_CAP_HOURS)
+    wide_lo = lo - timedelta(hours=lookback_hours)
     cur.execute(
         f"""
         SELECT o.machine, o.plant, o.id,
@@ -980,8 +1012,9 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
           AND o.plant = ANY(%s)
           AND o.planning_status <> 'needs_planning'
           AND COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
+          AND {_EFF_END_SQL} > %s
         """,
-        (machines, plants, lo, hi),
+        (machines, plants, wide_lo, hi, lo),
     )
     # Plant-qualified key so _detect_interval_conflicts (grouped by its
     # `machine` field only) never pools two different plants' same-named
@@ -1061,9 +1094,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     `atomic_optimizer`: a non-empty scan rolls the whole batch back and returns
     status 'error' / error_code 'schedule.conflicts'; a scan failure under strict
     mode propagates instead of being swallowed. The window is bounded on the
-    neighbour's effective START (index-servable), so an order that began more
-    than a day before the window and runs into it is not scanned;
-    `conflicts == []` is not proof of no overlap.
+    neighbour's effective START (index-servable) widened by the touched
+    machines' longest run time (capped at 30 days) and filtered on effective
+    END, so a long order that began before the window and runs into it is
+    found; an order longer than the cap can still be missed, so
+    `conflicts == []` is not absolute proof of no overlap. In strict mode the
+    save first takes per-(plant, machine) advisory locks in sorted order.
 
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
     not_found_ids, stale, versions, rejection_reasons}. invalid_ids / not_found_ids
@@ -1096,6 +1132,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
 
     ids = [it["id"] for it in items if it.get("id")]
     with _pool.connection() as conn, conn.cursor() as cur:
+        if strict_conflicts and atomic_optimizer:
+            _lock_machines_for_strict_save(cur, items, ids)
         cur.execute(
             f"""
             SELECT o.id,

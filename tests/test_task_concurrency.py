@@ -193,6 +193,62 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert strict["status"] == "error" and strict["error_code"] == "schedule.conflicts"
         assert db_.get_task_versions([self.oid])[0]["start_date"] == new_start.strftime("%Y-%m-%dT%H:%M:%S")
 
+    def test_conflict_scan_sees_a_long_order_that_started_before_the_window(self, pg):
+        """Plan Part 2 #18: a 130 h order starting 5 days earlier used to fall
+        outside the fixed 1-day start lookback and its overlap went unreported."""
+        db_ = pg
+        long_id = db_.make_id(self.ORDER + "_LONG", self.MATERIAL)
+        long_start = self.start - dt.timedelta(days=5)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " basic_start_date, basic_finish_date, scheduled_start, scheduled_end, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,130)",
+                (long_id, self.ORDER + "_LONG", self.MATERIAL, self.MACHINE, self.PLANT,
+                 long_start, long_start + dt.timedelta(hours=130),
+                 long_start, long_start + dt.timedelta(hours=130)),
+            )
+            conn.commit()
+        try:
+            base = self._current_version(db_)
+            new_start = self.start + dt.timedelta(hours=7)
+            result = db_.update_task_dates_bulk([
+                {"id": self.oid, "start": new_start, "end": new_start + dt.timedelta(hours=2),
+                 "base_version": base},
+            ])
+            pairs = {frozenset((c["order_a"], c["order_b"])) for c in result["conflicts"]}
+            assert frozenset((self.oid, long_id)) in pairs
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
+                conn.commit()
+
+    def test_strict_save_waits_on_the_machine_advisory_lock(self, pg):
+        """Plan Part 2 #18: strict optimizer saves serialise on (plant, machine)."""
+        import threading
+        import time
+        db_ = pg
+        base = self._current_version(db_)
+        done = threading.Event()
+
+        def _save():
+            db_.update_task_dates_bulk(
+                [{"id": self.oid, "start": self.start, "end": self.end, "base_version": base}],
+                atomic_optimizer=True, strict_conflicts=True)
+            done.set()
+
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"{self.PLANT}{self.MACHINE}",))
+            t = threading.Thread(target=_save)
+            t.start()
+            time.sleep(0.5)
+            assert not done.is_set()
+            conn.rollback()
+        t.join(10)
+        assert done.is_set()
+
 
 # ---------------------------------------------------------------------------
 # Bundle 0 #2 (Code_Review_Consolidated_10_05.md): cross-seam save contract.

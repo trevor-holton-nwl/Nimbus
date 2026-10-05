@@ -203,6 +203,8 @@ class _FakeSegmentCursor:
             self._pending = ("all", list(self.eff_rows))
         elif "FROM plants WHERE plant = ANY" in sql:
             self._pending = ("all", list(self.plant_rows))
+        elif "MAX(run_time)" in sql:
+            self._pending = ("all", [(0,)])   # conflict-scan lookback widening
         elif "SELECT machine FROM machine WHERE plant" in sql:
             self._pending = ("all", [("M1",), ("M2",)])   # known machines for the MACHINE-edit check
         elif sql.strip().startswith("UPDATE orders SET") and "RETURNING" in sql:
