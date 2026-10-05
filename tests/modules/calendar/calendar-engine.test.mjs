@@ -75,3 +75,43 @@ test('nextAvailable warns once per (line, duration) for an overlong order, not o
     assert.equal(warns, 2, 'a different duration still warns');
   } finally { ErrorLog.warn = origWarn; }
 });
+
+test('nextAvailable honours its 90-day bound: a slot just inside is found, one beyond returns null', () => {
+  const all = (w) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  const prior = Store.blocks.slice();
+  const from = new Date('2031-01-06T00:00:00');
+  const hour = 3600 * 1000;
+  try {
+    Store.setCalendar('NA-90A', all([0, 24]), 'unit-test');
+    // Blackout ends ~86 days out -> first free slot is inside the 90-day bound.
+    const insideEnd = new Date('2031-04-02T00:00:00');
+    Store.replaceBlocks([{ id: 'na90-in', line: 'NA-90A', start: from, end: insideEnd }], 'unit-test');
+    const found = Calendar.nextAvailable('NA-90A', from, hour);
+    assert.ok(found instanceof Date, 'slot inside 90 days is found');
+    assert.ok(found.getTime() >= insideEnd.getTime(), 'slot starts after the blackout');
+    assert.ok(found.getTime() - from.getTime() <= 90 * 24 * hour, 'and within the 90-day horizon');
+
+    // Blackout runs ~104 days out -> every candidate start is beyond 90 days.
+    Store.replaceBlocks([{ id: 'na90-out', line: 'NA-90A', start: from, end: new Date('2031-04-20T00:00:00') }], 'unit-test');
+    assert.equal(Calendar.nextAvailable('NA-90A', from, hour), null, 'nothing within 90 days -> null, not a start past the bound');
+  } finally {
+    Store.replaceBlocks(prior, 'unit-test');
+  }
+});
+
+test('nextAvailable returns null when a day-long blackout leaves no window long enough anywhere in 90 days', () => {
+  const all = (w) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  const prior = Store.blocks.slice();
+  const from = new Date('2031-01-06T00:00:00');
+  try {
+    Store.setCalendar('NA-90B', all([8, 16]), 'unit-test');
+    // Blackout covers every working window for 100 days.
+    Store.replaceBlocks([{ id: 'na90b', line: 'NA-90B', start: from, end: new Date('2031-04-17T00:00:00') }], 'unit-test');
+    assert.equal(Calendar.nextAvailable('NA-90B', from, 4 * 3600 * 1000), null);
+    // Without the blackout the same request succeeds (proves null came from exhaustion).
+    Store.replaceBlocks([], 'unit-test');
+    assert.ok(Calendar.nextAvailable('NA-90B', from, 4 * 3600 * 1000) instanceof Date);
+  } finally {
+    Store.replaceBlocks(prior, 'unit-test');
+  }
+});

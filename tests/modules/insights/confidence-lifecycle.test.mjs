@@ -352,3 +352,193 @@ test('TimeMachine keeps at most 200 snapshots in memory (#26)', async () => {
     assert.equal(tm._snapshots[0].id, 2, 'the oldest entry was trimmed');
   } finally { db._db = prior; tm._snapshots = priorSnaps; context.window.requestIdleCallback = priorRic; }
 });
+
+// ---------------------------------------------------------------------------
+// Command palette firm / un-firm actions and their undo (H3f). The production
+// nimbus-intelligence.js is already loaded above; these drive the real palette
+// commands against the real Store/UndoStack and observe the ids and sources.
+// ---------------------------------------------------------------------------
+async function withPaletteHarness(body) {
+  const { CommandPalette, TimeMachine, UndoStack, Toast } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorFirmed = new Set(Store.firmedIds);
+  const priorEntries = UndoStack._entries.slice();
+  const priorSelection = nimbus.Selection;
+  const priorToast = Toast.show;
+  const priorSnapshot = TimeMachine.snapshot;
+  const priorClose = CommandPalette.close;
+  const priorSetFirmed = Store.setFirmed;
+  const priorPush = UndoStack.push;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const setFirmedCalls = [];
+  const pushCalls = [];
+  Toast.show = () => {};
+  CommandPalette.close = () => {};
+  TimeMachine.snapshot = () => ({});
+  Alerts.scheduleRecompute = () => {};
+  Store.setFirmed = function (ids, firmed, source) {
+    setFirmedCalls.push({ ids: [].concat(ids).map(String), firmed, source });
+    return priorSetFirmed.call(this, ids, firmed, source);
+  };
+  UndoStack.push = function (label, fn, ids) {
+    pushCalls.push({ label, ids: ids ? [...ids].map(String) : undefined });
+    return priorPush.call(this, label, fn, ids);
+  };
+  UndoStack._entries = [];
+  try {
+    await body({ CommandPalette, UndoStack, setFirmedCalls, pushCalls });
+  } finally {
+    Store.setFirmed = priorSetFirmed;
+    UndoStack.push = priorPush;
+    UndoStack._entries = priorEntries;
+    Toast.show = priorToast;
+    CommandPalette.close = priorClose;
+    TimeMachine.snapshot = priorSnapshot;
+    Alerts.scheduleRecompute = priorSchedule;
+    nimbus.Selection = priorSelection;
+    Store.setTasks(priorTasks, 'test');
+    Store.firmedIds.clear();
+    for (const id of priorFirmed) Store.firmedIds.add(id);
+  }
+}
+
+const mkTask = id => ({ id, PLANT: 'CMD-P', MACHINE: 'CMD-L', RUN_TIME: 1, start_date: new Date('2031-03-03T08:00:00'), end_date: new Date('2031-03-03T09:00:00') });
+const brief = calls => calls.map(c => ({ ids: c.ids, firmed: c.firmed, source: c.source }));
+
+test('palette Firm N orders firms exactly the valid selected ids with cmd-palette source, and undo restores each previous firmed state', async () => {
+  await withPaletteHarness(({ CommandPalette, UndoStack, setFirmedCalls, pushCalls }) => {
+    Store.setTasks([mkTask('c1'), mkTask('c2'), mkTask('c3'), mkTask('c4')], 'test');
+    Store.setFirmed(['c1'], true, 'test');             // c1 already firmed before the action
+    setFirmedCalls.length = 0;
+    nimbus.Selection = { ids: () => ['c1', 'c2', 'c3', 'ghost'], stats: () => ({ firmedCount: 1 }) };
+
+    const cmd = CommandPalette._buildSelectionCommands().find(c => c.type === 'selection');
+    assert.ok(cmd, 'a firm command is offered when not every selected order is firmed');
+    cmd.run();
+
+    // Unknown ids (a stale selection) are filtered out before firming and snapshotting.
+    assert.deepEqual(brief(setFirmedCalls), [{ ids: ['c1', 'c2', 'c3'], firmed: true, source: 'cmd-palette' }]);
+    assert.equal(pushCalls.length, 1);
+    assert.equal(pushCalls[0].label, 'Firm 4 orders', 'label carries the SELECTION count');
+    assert.deepEqual(pushCalls[0].ids, ['c1', 'c2', 'c3']);
+    assert.ok(['c1', 'c2', 'c3'].every(id => Store.isFirmed(id)));
+    assert.equal(Store.isFirmed('c4'), false, 'unselected order untouched');
+
+    setFirmedCalls.length = 0;
+    UndoStack.pop();
+    assert.equal(Store.isFirmed('c1'), true, 'c1 was firmed before, so it stays firmed after undo');
+    assert.equal(Store.isFirmed('c2'), false, 'c2 returns to unfirmed');
+    assert.equal(Store.isFirmed('c3'), false, 'c3 returns to unfirmed');
+    assert.deepEqual(brief(setFirmedCalls), [
+      { ids: ['c1'], firmed: true, source: 'undo' },
+      { ids: ['c2', 'c3'], firmed: false, source: 'undo' },
+    ]);
+  });
+});
+
+test('palette Unfirm N orders (all selected firmed) unfirms them and undo re-firms them', async () => {
+  await withPaletteHarness(({ CommandPalette, UndoStack, setFirmedCalls, pushCalls }) => {
+    Store.setTasks([mkTask('u1'), mkTask('u2')], 'test');
+    Store.setFirmed(['u1', 'u2'], true, 'test');
+    setFirmedCalls.length = 0;
+    nimbus.Selection = { ids: () => ['u1', 'u2'], stats: () => ({ firmedCount: 2 }) };
+
+    CommandPalette._buildSelectionCommands().find(c => c.type === 'selection').run();
+    assert.deepEqual(brief(setFirmedCalls), [{ ids: ['u1', 'u2'], firmed: false, source: 'cmd-palette' }]);
+    assert.equal(pushCalls[0].label, 'Unfirm 2 orders');
+    assert.deepEqual(pushCalls[0].ids, ['u1', 'u2']);
+    assert.ok(!Store.isFirmed('u1') && !Store.isFirmed('u2'));
+
+    UndoStack.pop();
+    assert.ok(Store.isFirmed('u1') && Store.isFirmed('u2'), 'undo restores the firmed state');
+  });
+});
+
+test('palette freeze intent firms only the not-yet-firmed orders, and one undo restores the prior firmed set', async () => {
+  await withPaletteHarness(({ UndoStack, setFirmedCalls, pushCalls }) => {
+    Store.setTasks([mkTask('f1'), mkTask('f2'), mkTask('f3')], 'test');
+    Store.setFirmed(['f2'], true, 'test');
+    setFirmedCalls.length = 0;
+
+    const freeze = nimbus.NeedsEngine.resolveIntent('freeze everything').find(r => r.type === 'intent');
+    assert.ok(freeze, 'freeze intent resolves');
+    freeze.run();
+    assert.deepEqual(brief(setFirmedCalls), [{ ids: ['f1', 'f3'], firmed: true, source: 'cmd-palette' }]);
+    assert.equal(pushCalls[0].label, 'Firm All (freeze)');
+    assert.deepEqual(pushCalls[0].ids, ['f1', 'f3'], 'already-firmed f2 is not part of the undo scope');
+    assert.ok(['f1', 'f2', 'f3'].every(id => Store.isFirmed(id)));
+
+    UndoStack.pop();
+    assert.equal(Store.isFirmed('f1'), false);
+    assert.equal(Store.isFirmed('f3'), false);
+    assert.equal(Store.isFirmed('f2'), true, 'f2 was firmed before and is not touched by undo');
+  });
+});
+
+test('palette freeze with nothing left to firm pushes no undo entry and does not call setFirmed', async () => {
+  await withPaletteHarness(({ UndoStack, setFirmedCalls, pushCalls }) => {
+    Store.setTasks([mkTask('n1')], 'test');
+    Store.setFirmed(['n1'], true, 'test');
+    setFirmedCalls.length = 0;
+    nimbus.NeedsEngine.resolveIntent('freeze').find(r => r.type === 'intent').run();
+    assert.equal(setFirmedCalls.length, 0);
+    assert.equal(pushCalls.length, 0);
+    assert.equal(UndoStack._entries.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Time Machine history cap (TM_MAX_SNAPSHOTS = 200) at each of its three call
+// sites: the init() load limit, the in-memory trim, and the IndexedDB prune.
+// IntelDB is reachable via the TimeMachine._IntelDB test hook; stubbing its
+// methods lets us observe the cap each call site actually passes.
+// ---------------------------------------------------------------------------
+async function withTimeMachineHarness(body) {
+  const { TimeMachine } = nimbus;
+  const db = TimeMachine._IntelDB;
+  const prior = { put: db.put, getNewest: db.getNewest, pruneSnapshots: db.pruneSnapshots, snaps: TimeMachine._snapshots, subscribe: Store.subscribe };
+  const log = { getNewest: [], prune: [], put: [] };
+  db.put = snap => { log.put.push(snap); return Promise.resolve(log.put.length); };
+  db.pruneSnapshots = (...args) => { log.prune.push(args); };
+  Store.subscribe = () => () => {};   // init() must not leave live auto-snapshot subscriptions behind
+  try {
+    await body({ TimeMachine, db, log });
+  } finally {
+    Object.assign(db, { put: prior.put, getNewest: prior.getNewest, pruneSnapshots: prior.pruneSnapshots });
+    Store.subscribe = prior.subscribe;
+    TimeMachine._snapshots = prior.snaps;
+  }
+}
+
+test('TimeMachine.init loads at most 200 newest snapshots, oldest-first', async () => {
+  await withTimeMachineHarness(async ({ TimeMachine, db, log }) => {
+    db.getNewest = (store, index, n) => {
+      log.getNewest.push([store, index, n]);
+      return Promise.resolve([{ ts: 30 }, { ts: 10 }, { ts: 20 }]);
+    };
+    TimeMachine.init();
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(log.getNewest, [['snapshots', 'ts', 200]], 'loads from the snapshots store by ts with a 200 cap');
+    assert.deepEqual(TimeMachine._snapshots.map(s => s.ts), [10, 20, 30], 'sorted oldest-first');
+  });
+});
+
+test('TimeMachine.snapshot prunes IndexedDB to 200 and trims the in-memory history to the 200 newest', async () => {
+  await withTimeMachineHarness(async ({ TimeMachine, log }) => {
+    TimeMachine._snapshots = Array.from({ length: 200 }, (_, i) => ({ ts: i, label: `old${i}` }));
+    const snap = TimeMachine.snapshot('newest');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(log.put.length, 1);
+    assert.deepEqual(log.prune, [[200]], 'IntelDB.pruneSnapshots is called with the 200 cap');
+    assert.equal(TimeMachine._snapshots.length, 200, 'history stays capped at 200');
+    assert.equal(TimeMachine._snapshots[199], snap, 'newest is kept');
+    assert.equal(TimeMachine._snapshots[0].label, 'old1', 'the single oldest entry is the one dropped');
+
+    // Below the cap nothing is dropped.
+    TimeMachine._snapshots = Array.from({ length: 199 }, (_, i) => ({ ts: i, label: `old${i}` }));
+    TimeMachine.snapshot('another');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(TimeMachine._snapshots.length, 200);
+    assert.equal(TimeMachine._snapshots[0].label, 'old0');
+  });
+});
