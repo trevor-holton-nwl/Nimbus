@@ -4447,14 +4447,22 @@ export const MasterData = (() => {
     if (rowIdx < 0) return;
 
     const updatedRow = { ...state.rows[rowIdx] };
-    if ('excludeFromOpt' in patch) updatedRow.excl_optimizer  = patch.excludeFromOpt ? 'X' : null;
-    if ('bottleneck'     in patch) updatedRow.bottleneck      = patch.bottleneck     ? 'X' : null;
-    if ('bufferUnit'     in patch) updatedRow.buffer_type     = patch.bufferUnit === 'pct' ? '%' : 'hrs';
-    if ('bufferPct'      in patch) updatedRow.buffer_percent  = patch.bufferPct;
-    if ('bufferHours'    in patch) updatedRow.buffer_hours    = patch.bufferHours;
-    if ('plGroup'        in patch) updatedRow.wc_group        = patch.plGroup || null;
-    if ('sapWorkcenter'  in patch) updatedRow.sap_workcenter  = patch.sapWorkcenter || null;
-    if ('distributionWeight' in patch) updatedRow.distribution_weight = patch.distributionWeight ?? null;
+    // Only the columns this call changes (plus the key) go to the server: re-posting the
+    // whole cached row would silently revert any column a colleague edited since the
+    // cache was filled. bulk_apply updates only the keys it receives.
+    const changed: Record<string, unknown> = {};
+    const setCol = (col: string, value: unknown): void => { (updatedRow as Record<string, unknown>)[col] = value; changed[col] = value; };
+    if ('excludeFromOpt' in patch) setCol('excl_optimizer', patch.excludeFromOpt ? 'X' : null);
+    if ('bottleneck'     in patch) setCol('bottleneck', patch.bottleneck     ? 'X' : null);
+    if ('bufferUnit'     in patch) setCol('buffer_type', patch.bufferUnit === 'pct' ? '%' : 'hrs');
+    if ('bufferPct'      in patch) setCol('buffer_percent', patch.bufferPct);
+    if ('bufferHours'    in patch) setCol('buffer_hours', patch.bufferHours);
+    if ('plGroup'        in patch) setCol('wc_group', patch.plGroup || null);
+    if ('sapWorkcenter'  in patch) setCol('sap_workcenter', patch.sapWorkcenter || null);
+    if ('distributionWeight' in patch) setCol('distribution_weight', patch.distributionWeight ?? null);
+    const upsertRow: MasterDataRow = {};
+    for (const k of KEY_COLS.machine) upsertRow[k] = (updatedRow as MasterDataRow)[k];
+    Object.assign(upsertRow, changed);
 
     // Update cache row and clear any stale dirty flag so MasterData table stays consistent.
     state.rows[rowIdx] = updatedRow;
@@ -4464,7 +4472,7 @@ export const MasterData = (() => {
       await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
-        body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
+        body:    JSON.stringify({ upserts: [upsertRow], deletes: [] }),
       }).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json();

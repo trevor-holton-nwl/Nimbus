@@ -627,3 +627,32 @@ test('MasterData bulk-save for routing_rules also refreshes Runtime for plants w
   const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   assert.match(source, /\[\.\.\.upserts, \.\.\.deletes\]\.forEach\(\(row\) => \{\s*const plant = row\.plant as string \| undefined;/);
 });
+
+test('syncLineSettings posts only the key columns and the changed column, not the whole cached row (#46)', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorToast = Toast.show;
+  const posts = [];
+  Toast.show = () => {};
+  Store.setLineSetting('LINE-46', { plant: 'P46' }, 'test');
+  const priorGetPlant = Store.getPlantForLine;
+  Store.getPlantForLine = (line) => (line === 'LINE-46' ? 'P46' : priorGetPlant.call(Store, line));
+  globalThis.fetch = (url, opts) => {
+    if (opts && opts.method === 'POST') {
+      posts.push(JSON.parse(opts.body));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      columns: [], rows: [{ subnetwork: 'S1', plant: 'P46', machine: 'LINE-46', bottleneck: null, buffer_hours: 3, wc_group: 'G-old' }],
+    }) });
+  };
+  try {
+    await MasterData.syncLineSettings('LINE-46', { bottleneck: true });
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].upserts, [{ subnetwork: 'S1', plant: 'P46', machine: 'LINE-46', bottleneck: 'X' }],
+      'untouched columns (buffer_hours, wc_group) must not be re-posted from the stale cache');
+  } finally {
+    Store.getPlantForLine = priorGetPlant;
+    globalThis.fetch = priorFetch;
+    Toast.show = priorToast;
+  }
+});
