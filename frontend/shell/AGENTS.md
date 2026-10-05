@@ -14,8 +14,8 @@
 **Also the custodian of the root-pinned classic scripts that never moved into any domain folder:**
 - `frontend/app.js` (762 lines) — boot orchestration, DI-seam wiring, the CQ-1 bridge destructure, and a compatibility `return {...}` namespace. Holds no module bodies.
 - `frontend/app-entry.mjs` — the real module loader (see Integration points below for its current import list).
-- `frontend/nimbus-intelligence.js` (2410 lines) — the intelligence layer, loaded after `app.js`: `CommandPalette` (Cmd+K), `NeedsEngine`, `TimeMachine`, `Confidence`, `RipplePreview`, `Diff`, `Patterns`, `DarkMode`, `LangSwitcher`, `IntelDB`. Deliberately stays a classic (non-module) script — it needs `NIMBUS` as a bare identifier via shared lexical scope, and now uses `Store` event subscriptions rather than runtime monkey-patches (except the one documented `Alerts.recompute` exception — see `frontend/insights/CLAUDE.md`).
-- `frontend/index.html` (3094 lines) — script/style load order, `NIMBUS_BUILD_ID`, the CSP meta tag.
+- `frontend/nimbus-intelligence.js` (2410 lines) — the intelligence layer, loaded after `app.js`: `CommandPalette` (Cmd+K), `NeedsEngine`, `TimeMachine`, `Confidence`, `RipplePreview`, `Diff`, `Patterns`, `DarkMode`, `LangSwitcher`, `IntelDB`. Deliberately stays a classic (non-module) script — it needs `NIMBUS` as a bare identifier via shared lexical scope, and now uses `Store` event subscriptions rather than runtime monkey-patches (none remain).
+- `frontend/index.html` (3094 lines) — script/style load order, `NIMBUS_BUILD_ID`, the CDN SRI hashes (there is no CSP tag).
 - `frontend/styles.css`, `frontend/locales/` — design tokens and i18n string maps.
 
 ## Counterpart
@@ -24,7 +24,7 @@ None — this is a frontend-only shell/boot domain.
 
 ## Key invariants & hazards
 
-- **`NIMBUS_BUILD_ID` is the single cache-bust source.** Set at `index.html:55` (`window.NIMBUS_BUILD_ID = '2026-08-25-a'`) and read again at `index.html:3072`. It drives every `?v=` query param, `Config.BUILD_ID` (in `platform/foundation.mts`), and `app-entry.mjs`'s `runCacheBustGuard()`. There is no separate `APP_VERSION` constant — bump this on every deploy.
+- **`NIMBUS_BUILD_ID` is the single cache-bust source.** Set at `index.html:55` (`window.NIMBUS_BUILD_ID = '2026-08-25-a'`) and read again at `index.html:3072`. It drives every `?v=` query param, `Config.BUILD_ID` (in `platform/foundation.mts`), and `app-entry.mjs`'s `runCacheBustGuard()`. There is no separate `APP_VERSION` constant. The hand-set value in `index.html` (plus `styles.css?v=`) is the local-dev fallback; the Dockerfile's `frontendbuild` stage overwrites both with the git SHA when built with `--build-arg BUILD_ID=$(git rev-parse --short HEAD)`, so deploys no longer need a manual bump.
 - **`runCacheBustGuard(win)`** (`app-entry.mjs`, lines ~132-145): compares `sessionStorage['nimbus.app.ver']` to `window.NIMBUS_BUILD_ID`; on mismatch, stores the new version and `location.replace(...)`s with a refreshed `_v=` param (stripping any prior one). Wrapped in try/catch so storage/location failures never block boot. It was deliberately moved to the top of `app-entry.mjs` (rather than the top of `app.js`, where it lived pre-refactor) so it fires before the deferred-module load even starts, recovering most of the redirect-timing gap the new load order introduced.
 - **Script/module load order matters.** `app-entry.mjs` (a `<script type="module">`) imports the real ES modules, bridges their exports onto `window.__NIMBUS_*` globals, then injects `app.js` and `nimbus-intelligence.js` as classic scripts in that order, then deletes all the bridge globals (`app-entry.mjs` lines ~99-106) since `app.js` only reads them synchronously at its own IIFE top and `nimbus-intelligence.js` never reads them at all. Locale files load before all of this (first in the script chain) because `app.js` reads them when defining `window.t`.
 - **Classic-script constraints.** `nimbus-intelligence.js` must stay non-module for the bare-`NIMBUS`-identifier reason above — don't convert it to an ES module without re-solving that coupling.
@@ -39,7 +39,7 @@ None — this is a frontend-only shell/boot domain.
   | Time-only (hours table) | `true` | `true` | `"H:i"` | — | — |
 
   Modal pickers are **module-level, lazily initialized, and conventionally named `_fp*`** — built once behind an `if (!Module._fpX)` guard, then `Module._fpX.setDate(d, false)` (`false` suppresses `onChange`); table time inputs are built inline per row. `grep -n "flatpickr(" frontend/*.mjs` finds every instance. With `altInput: true`, existing `.value` reads keep working: the hidden original input holds the `dateFormat` value, the visible alt input shows `altFormat`.
-- **CSP is Report-Only, not yet enforced.** `index.html:17` carries a `Content-Security-Policy-Report-Only` meta tag pending removal of the remaining static inline `onclick=`/`onchange=` handlers — don't assume CSP is actually blocking anything yet.
+- **There is no CSP at all.** `index.html` carries no CSP `<meta>` tag and `brain.py` sends no CSP header (an earlier version of this doc and of the `index.html` header comment claimed a Report-Only one; it was never shipped) — nothing is reported or blocked. Enabling one is blocked on the remaining static inline `onclick=`/`onchange=` handlers. CDN assets are covered by Subresource Integrity (`integrity=` + `crossorigin="anonymous"`) instead, except the Google Fonts stylesheet (content varies by user agent, so it cannot take SRI). When bumping a CDN version, recompute the sha384 hash of the exact URL.
 
 ## Integration points
 

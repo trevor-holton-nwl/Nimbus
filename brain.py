@@ -509,6 +509,36 @@ async def static_mjs_no_cache_mw(request: Request, call_next):
     return response
 
 
+# Content-Security-Policy, REPORT-ONLY (#28): nothing is blocked; violations are
+# POSTed to /logs/csp-report and land in the backend log ring. The static inline
+# on*= handlers (~105) and the document.write bootstrap in index.html WILL report
+# (script-src deliberately omits 'unsafe-inline') -- that report stream is the
+# work list for eventually enforcing. Origins are the exact CDNs index.html pins
+# (unpkg: vis-timeline, jsdelivr: ag-grid + flatpickr, Google Fonts CSS/fonts).
+# HTML responses only; JSON/static assets get no header. See frontend/shell/CLAUDE.md.
+_CSP_REPORT_ONLY = "; ".join((
+    "default-src 'self'",
+    "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com https://cdn.jsdelivr.net",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "report-uri /logs/csp-report",
+))
+
+
+@api.middleware("http")
+async def csp_report_only_mw(request: Request, call_next):
+    response = await call_next(request)
+    if response.headers.get("content-type", "").lower().startswith("text/html"):
+        response.headers["Content-Security-Policy-Report-Only"] = _CSP_REPORT_ONLY
+    return response
+
+
 # Future domain phases (P6) place a CLAUDE.md inside each frontend/<domain>/ folder
 # so Claude Code's ancestor-directory doc auto-load picks it up while editing
 # that domain's source. Those files must never be reachable through the public

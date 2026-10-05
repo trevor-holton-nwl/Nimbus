@@ -61,9 +61,24 @@ export const Sandbox = {
     if (apply) {
       // Promote sandbox state to real state with a single undoable entry.
       UndoStack.push('Discard What-If scenario', () => {
+        // The promoted calendar/blackout edits live in these slices, so reverting only
+        // tasks + firms (the old behavior) left them applied and already POSTed. Capture
+        // the promoted slices first so SandboxAdapter can re-sync the backend to the
+        // restored state (CalendarSync.flushPlant, with the promoted-only blackouts as
+        // explicit deletes), then restore every slice the discard path restores.
+        const promoted = {
+          blocks:      Store.blocks.map(b => Util.clone(b)),
+          calendars:   Util.clone(Store.calendars),
+          plants:      Util.clone(Store.plants),
+          plantBlocks: Store.plantBlocks.map(b => Util.clone(b)),
+        };
         Store.setTasks(snap.tasks, 'undo');
+        Store.replaceBlocks(snap.blocks, 'undo');
+        Store.replaceCalendars(snap.calendars, 'undo');
+        Store.replacePlants(snap.plants, 'undo');
+        Store.replacePlantBlocks(snap.plantBlocks, 'undo');
         Store.replaceFirmedIds(snap.firmedIds, 'undo');
-        Store.emit({ type: 'sandbox:reverted', source: 'undo' });
+        Store.emit({ type: 'sandbox:reverted', source: 'undo', promoted });
       });
     } else {
       // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below

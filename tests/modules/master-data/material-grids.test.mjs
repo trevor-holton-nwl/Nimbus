@@ -227,3 +227,10 @@ test('a failed old-generation A write releases A for retry without clearing newe
   assert.deepEqual(JSON.parse(f.requests.at(-1).opts.body).updates, [{ material_id: 'MAT', color: 'blue' }]);
   f.respond(f.requests.at(-1), { updated: 1 }); await settle();
 });
+
+test('default_machine editor is the searchable combobox editor, not a plain select (D61)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../../frontend/master-data/material-grids.mts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /cellEditor:\s*'agSelectCellEditor'/);
+  assert.match(source, /cellEditor:\s*_mkMachineComboEditor\(\)/);
+});

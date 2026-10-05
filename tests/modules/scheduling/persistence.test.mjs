@@ -1143,3 +1143,77 @@ test('cross-seam: saveAll payloads for a sub-order and a routing-plant order mat
   assert.deepEqual(generated, checkedIn,
     'saveAll payload drifted from tests/modules/fixtures/save_payload_cases.json; if intentional, regenerate with NIMBUS_UPDATE_FIXTURES=1 and re-run tests/test_task_concurrency.py');
 });
+
+test('#24 reconnect reloads the plant that was ATTEMPTED, not the null _currentLoadedPlant of a failed boot load', async () => {
+  const origFetch = globalThis.fetch;
+  const priorLoad = Persistence.load;
+  const priorLoaded = Persistence._currentLoadedPlant;
+  const loads = [];
+  try {
+    Persistence._currentLoadedPlant = null;
+    globalThis.fetch = (url) => {
+      const u = String(url);
+      if (u.includes('/tasks')) return Promise.reject(new Error('offline'));
+      if (u.includes('/health')) return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      return Promise.reject(new Error('offline'));
+    };
+    await Persistence.load({ plant: 'PLANT-ATTEMPT' }).catch(() => {});
+    assert.equal(Persistence._lastAttemptedPlant, 'PLANT-ATTEMPT');
+    assert.equal(Persistence._currentLoadedPlant, null);
+    Persistence.load = (opts) => { loads.push(opts); return Promise.resolve(); };
+    Persistence._reconnect.start();
+    await new Promise(res => setTimeout(res, 1300));
+    assert.equal(loads.length, 1);
+    assert.equal(loads[0].plant, 'PLANT-ATTEMPT');
+  } finally {
+    Persistence._reconnect.stop();
+    Persistence.load = priorLoad;
+    Persistence._currentLoadedPlant = priorLoaded;
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('#29 save POST carries a timeout signal, a timeout toasts an error (no blind retry), and a second Save while in flight toasts', async () => {
+  Store.setTasks([{
+    id: 'to1', MACHINE: 'L1', RUN_TIME: '1',
+    start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '5',
+  }], 'unit-test');
+  const calls = [];
+  const toasts = [];
+  const origFetch = globalThis.fetch;
+  const origToast = Toast.show;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  globalThis.fetch = (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
+  };
+  try {
+    Persistence._dirtyIds.add('to1');
+    Persistence.saveAll();
+    Persistence.saveAll(); // second Save while the first is still in flight
+    assert.ok(toasts.some(([m, t]) => m === 'toast.save_in_progress' && t === 'warn'), 'second save is reported, not just logged');
+    await new Promise(res => setTimeout(res, 20));
+    const saves = calls.filter(c => c.url.includes('/tasks/update'));
+    assert.equal(saves.length, 1, 'a timeout is not retried blind');
+    assert.ok(saves[0].opts.signal instanceof AbortSignal, 'save POST must carry an AbortSignal timeout');
+    assert.ok(toasts.some(([m, t]) => m === 'toast.save_timeout' && t === 'error'), 'timeout shows an error toast');
+    assert.equal(Persistence._saveInFlight, false, 'lock released after a timeout');
+    assert.ok(Persistence._dirtyIds.has('to1'), 'edit stays dirty after a timeout');
+  } finally {
+    globalThis.fetch = origFetch;
+    Toast.show = origToast;
+    Persistence._dirtyIds.delete('to1');
+  }
+});
+
+test('describeRejections names the rejected orders and their reasons, capped with a +N more tail (D29)', async () => {
+  const { describeRejections } = await import('../../../frontend/scheduling/persistence.mjs');
+  assert.equal(describeRejections({}), '');
+  assert.equal(describeRejections(undefined), '');
+  assert.equal(describeRejections({ A: 'runtime_preview_changed' }), '', 'preview changes have their own toast');
+  const text = describeRejections({ A: 'pv_expired', B: 'something_new', C: 'no_routing', D: 'zero_runtime' }, 3);
+  assert.match(text, /^A: /);
+  assert.match(text, /B: something_new/, 'unknown codes fall back to the raw code');
+  assert.doesNotMatch(text, /D: /, 'capped at the limit');
+  assert.match(text, /reject_more|\+1 more/, 'tail present (locale keys are unresolved under Node)');
+});

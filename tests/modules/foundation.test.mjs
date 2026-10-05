@@ -322,3 +322,135 @@ test('Util.taskMatchesPasteSet also matches a task\'s PARENT_ORDER, so pasting t
   assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: '1000' }, idSet), true);
   assert.equal(Util.taskMatchesPasteSet({ PRODUCTION_ORDER: '3000' }, idSet), false);
 });
+
+test('Util.csvGuardText prefixes only text cells that start with = + - @ (never numbers)', () => {
+  assert.equal(Util.csvGuardText('=SUM(A1)'), "'=SUM(A1)");
+  assert.equal(Util.csvGuardText('+cmd|x'), "'+cmd|x");
+  assert.equal(Util.csvGuardText('-1+1'), "'-1+1");
+  assert.equal(Util.csvGuardText('@A1'), "'@A1");
+  assert.equal(Util.csvGuardText('\tx'), "'\tx");
+  assert.equal(Util.csvGuardText('plain'), 'plain');
+  // real numbers and numeric-looking strings stay numbers
+  assert.equal(Util.csvGuardText(-5), -5);
+  assert.equal(Util.csvGuardText('-5'), '-5');
+  assert.equal(Util.csvGuardText('+3.25'), '+3.25');
+  assert.equal(Util.csvGuardText('-1,234.5'), '-1,234.5');
+  assert.equal(Util.csvGuardText(null), null);
+});
+
+test('Util.csvCell is RFC-4180 quoted and formula-guarded', () => {
+  assert.equal(Util.csvCell('a,b'), '"a,b"');
+  assert.equal(Util.csvCell('say "hi"'), '"say ""hi"""');
+  assert.equal(Util.csvCell('l1\nl2'), '"l1\nl2"');
+  assert.equal(Util.csvCell('=HYPERLINK("x")'), `"'=HYPERLINK(""x"")"`);
+  assert.equal(Util.csvCell(-5), '-5');
+  assert.equal(Util.csvCell(null), '');
+});
+
+test('Util.csvProcessCell applies the column formatter, then the formula guard', () => {
+  const fmt = v => (v === 7 ? '=7' : v);
+  assert.equal(Util.csvProcessCell({ value: 7, formatValue: fmt }), "'=7");
+  assert.equal(Util.csvProcessCell({ value: -5, formatValue: v => v }), -5);
+  assert.equal(Util.csvProcessCell({ value: '@x' }), "'@x");
+});
+
+test('#30 Util.errorDetailText flattens FastAPI 422 lists and structured details to readable text (never [object Object])', () => {
+  assert.equal(Util.errorDetailText('plain'), 'plain');
+  assert.equal(Util.errorDetailText(null), null);
+  assert.equal(
+    Util.errorDetailText([{ loc: ['body', 'RUN_TIME'], msg: 'must be positive', type: 'value_error' }, { loc: ['query', 'plant'], msg: 'field required' }]),
+    'RUN_TIME: must be positive; plant: field required');
+  assert.equal(Util.errorDetailText({ message: 'Stale row', code: 'x' }), 'Stale row');
+  assert.ok(!/\[object Object\]/.test(Util.errorDetailText({ a: 1 })));
+});
+
+test('#30 parseBackendError keeps the status and text for 422 list and 409 object details', async () => {
+  const mk = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const p422 = await Util.parseBackendError(mk(422, { detail: [{ loc: ['body', 'qty'], msg: 'bad number' }] }));
+  assert.equal(p422.status, 422);
+  assert.equal(p422.message, 'qty: bad number');
+  const p409 = await Util.parseBackendError(mk(409, { detail: { message: 'Version conflict', error_code: 'x' } }));
+  assert.equal(p409.status, 409);
+  assert.equal(p409.message, 'Version conflict');
+});
+
+test('#30 Toast defaults: errors and warnings stay longer than 1.5 s; explicit durations still win', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  const realSetTimeout = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (fn, ms) => { delays.push(ms); return realSetTimeout(() => {}, 0); };
+  try {
+    Toast.show('e-default', 'error');
+    Toast.show('w-default', 'warn');
+    Toast.show('i-default', 'info');
+    Toast.show('e-explicit', 'error', 20);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  assert.deepEqual(delays.filter(d => d !== Config.ANIM_MS), [6000, 4000, 1500, 20]);
+});
+
+test('#33 matchPasteToCheckboxes with onBatch hands every newly matched box over once and fires no per-box events', () => {
+  const mk = value => ({ value, checked: false, events: 0, dispatchEvent() { this.events++; } });
+  const boxes = ['L1', 'L2', 'L3', 'L4'].map(mk);
+  boxes[1].checked = true; // already selected
+  const batches = [];
+  const res = Util.matchPasteToCheckboxes('l1\nL2\nL3\nNOPE', boxes, b => batches.push(b.map(x => x.value)));
+  assert.deepEqual(batches, [['L1', 'L3']], 'one callback carrying all N newly matched boxes');
+  assert.deepEqual(res, { matched: 3, total: 4 });
+  assert.ok(boxes.every(b => b.events === 0), 'no per-box change events (each would rebuild the checklist and detach the rest)');
+});
+
+test('Modal.open applies dialog semantics, moves focus in, and Modal.close restores the opener (#49)', async () => {
+  const previousDocument = globalThis.document;
+  const attrs = {};
+  const opener = { focus() { opener.focused = true; }, isConnected: true };
+  const cancel = { focus() { cancel.focused = true; } };
+  const heading = { id: '' };
+  const dlg = {
+    getAttribute: k => attrs[k] ?? null, setAttribute: (k, v) => { attrs[k] = v; },
+    querySelector: sel => (sel.includes('.modal-head') ? heading : null),
+    querySelectorAll: () => [], contains: () => false,
+  };
+  const backdrop = {
+    hidden: true,
+    querySelector: sel => (sel === '.modal' ? dlg : null),
+    contains: () => false, addEventListener() {},
+  };
+  globalThis.document = {
+    activeElement: opener, body: {},
+    getElementById: id => (id === 'confirm-modal' ? backdrop : id === 'confirm-cancel-btn' ? cancel : null),
+    addEventListener() {},
+  };
+  try {
+    Modal.open('confirm-modal');
+    assert.equal(backdrop.hidden, false);
+    assert.equal(attrs.role, 'dialog');
+    assert.equal(attrs['aria-modal'], 'true');
+    assert.equal(attrs['aria-labelledby'], 'confirm-modal-title');
+    await new Promise(r => setTimeout(r, 5));
+    assert.equal(cancel.focused, true, 'a confirm focuses Cancel, never the destructive action');
+    Modal.close('confirm-modal');
+    assert.equal(backdrop.hidden, true);
+    assert.equal(opener.focused, true, 'focus returns to the element that opened the dialog');
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('every Store.selectedLines picker applies a multi-line paste in one setSelectedLines call (#33 follow-up)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const picks = [
+    ['scheduling/orders.mts', 'tbl-flt-line-checklist'],
+    ['labor/labor-planning.mts', 'lp-line-checklist'],
+    ['master-data/admin-ui.mts', 'lines-nav-checklist'],
+    ['shell/application-shell.mts', 'context-lines-checklist'],
+  ];
+  for (const [file, id] of picks) {
+    const source = readFileSync(new URL(`../../frontend/${file}`, import.meta.url), 'utf8');
+    const at = source.indexOf(`getElementById('${id}')?.querySelectorAll`);
+    assert.ok(at > 0, `${file}: ${id} paste wiring found`);
+    assert.match(source.slice(at, at + 400), /boxes => Store\.setSelectedLines\(new Set\(\[\.\.\.Store\.selectedLines/, `${file} passes an onBatch`);
+  }
+});

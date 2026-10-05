@@ -805,6 +805,25 @@ test('snapshotSchedule scopes a reused line calendar by the task-resolved plant'
   }
 });
 
+test('snapshotSchedule(plant) clones only that plant\'s (and un-stamped) blackout blocks (#39)', () => {
+  const priorBlocks = structuredClone(Store.blocks);
+  const priorPlantBlocks = structuredClone(Store.plantBlocks);
+  try {
+    const mk = (id, plant) => ({ id, plant, line: null, start: '2030-01-01T00:00:00', end: '2030-01-01T01:00:00' });
+    Store.replaceBlocks([mk('b-a', 'P-A'), mk('b-b', 'P-B'), mk('b-g', undefined)], 'unit-test');
+    Store.replacePlantBlocks([mk('pb-a', 'P-A'), mk('pb-b', 'P-B')], 'unit-test');
+    const scoped = snapshotSchedule('P-A');
+    assert.deepEqual(scoped.blocks.map(b => b.id), ['b-a', 'b-g']);
+    assert.deepEqual(scoped.plantBlocks.map(b => b.id), ['pb-a']);
+    const whole = snapshotSchedule();
+    assert.equal(whole.blocks.length, 3);
+    assert.equal(whole.plantBlocks.length, 2);
+  } finally {
+    Store.replaceBlocks(priorBlocks, 'unit-test');
+    Store.replacePlantBlocks(priorPlantBlocks, 'unit-test');
+  }
+});
+
 test('Engine.evaluateSchedule uses setup truth captured in the detached snapshot', () => {
   const plant = 'DETACHED-SETUP-TRUTH';
   const line = 'DETACHED-SETUP-LINE';
@@ -3508,3 +3527,37 @@ test("Engine.evaluateSchedule('spt') setup-aware path preserves the near-cap SPT
     'the 5h order, savable but at risk of missing its cap if the 2h order ran next, is pulled ahead of the 2h order');
 });
 
+
+test('deriveSetupObservation availability matches the legacy per-order scan with many orders on a line (#22)', () => {
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const lineHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const colors = ['RED', 'BLUE'];
+  const tasks = [];
+  // 60 back-to-back one-hour orders alternating colour (every boundary is a 20-minute setup),
+  // each with a 15-minute idle gap before it, so the free time before each setup is 15 minutes.
+  const base = new Date('2030-03-04T00:00:00').getTime();
+  for (let i = 0; i < 60; i += 1) {
+    const start = base + i * 75 * 60 * 1000 + 15 * 60 * 1000;
+    tasks.push({ id: `bulk-${i}`, PLANT: 'P-IDX', MACHINE: 'IDX-LINE', COLOR: colors[i % 2], RUN_TIME: 1,
+      start_date: new Date(start), end_date: new Date(start + 60 * 60 * 1000) });
+  }
+  const observation = deriveSetupObservation({
+    plant: 'P-IDX',
+    definition: { plant: 'P-IDX', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [
+      { machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 20 },
+      { machine: '', signature_version: 1, from_key: state('BLUE'), to_key: state('RED'), setup_min: 20 },
+    ],
+    machine_rows: [], machine_states: [], overrides: [],
+  }, tasks, undefined, {
+    calendars: { 'IDX-LINE': { workHours: lineHours } },
+    plants: { 'P-IDX': { workHours: lineHours } },
+    lineSettings: { 'IDX-LINE': { plant: 'P-IDX' } },
+    masterData: { lines: [{ machine: 'IDX-LINE', plant: 'P-IDX' }] },
+    blocks: [], plantBlocks: [],
+  });
+  assert.equal(observation.intervals.length, 59);
+  for (const interval of observation.intervals) {
+    assert.equal(interval.availableMinutes, 15, 'free time is bounded by the previous order end, not the window start');
+  }
+});

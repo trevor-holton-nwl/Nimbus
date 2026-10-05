@@ -426,6 +426,33 @@ export const Util = {
     } as Record<string, string>)[c]));
   },
 
+  // Spreadsheet-formula guard for CSV exports. A TEXT value whose first character is
+  // = + - @ (or a tab/CR that Excel strips before re-reading the leading character) would
+  // be evaluated as a formula when the file is opened, so it is prefixed with a single
+  // quote. Non-strings (real numbers, dates, null) and numeric-looking strings such as
+  // "-5" or "+3.2" pass through untouched so exported numbers stay numbers.
+  csvGuardText<T>(value: T): T | string {
+    if (typeof value !== 'string') return value;
+    if (!/^[=+\-@\t\r]/.test(value)) return value;
+    if (/^[+-]?\d[\d,]*(\.\d+)?(e[+-]?\d+)?%?$/i.test(value)) return value;
+    return `'${value}`;
+  },
+
+  // AG Grid `processCellCallback` for exportDataAsCsv. Supplying any callback makes the grid
+  // skip its own valueFormatter step, so apply the column's formatter here first (keeps the
+  // export identical to the default), then formula-guard text. AG Grid does the quoting.
+  csvProcessCell(p: { value: unknown; formatValue?: (v: unknown) => unknown }): unknown {
+    return Util.csvGuardText(p.formatValue ? p.formatValue(p.value) : p.value);
+  },
+
+  // One RFC-4180 CSV field: formula-guarded, and quoted (inner quotes doubled) only when it
+  // contains a comma, quote, CR or LF.
+  csvCell(value: unknown): string {
+    if (value == null) return '';
+    const s = String(Util.csvGuardText(typeof value === 'number' ? value : String(value)));
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  },
+
   // User-facing order identifier. Backend task payloads expose the business
   // order number as ORDER; PRODUCTION_ORDER remains a legacy compatibility
   // field. Never fall back to the internal task ID in visible copy.
@@ -524,12 +551,40 @@ export const Util = {
   // Parse a non-ok Response body into a structured {message, errorCode, status}.
   // Best-effort: clones the response (caller keeps the body), reads json() then text().
   // Used by raw-fetch migration sites so each surfaces the parsed backend body.
+  // FastAPI `detail` is a string for HTTPException but a LIST of {loc,msg,type} for 422
+  // validation errors and may be an object ({message,...}) for structured 409s. Flatten any of
+  // them to readable text so a toast never shows "[object Object]".
+  errorDetailText(d: unknown): string | null {
+    if (d == null || d === '') return null;
+    if (typeof d === 'string') return d;
+    if (Array.isArray(d)) {
+      const parts = d.map(item => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') {
+          const o = item as { loc?: unknown; msg?: unknown; message?: unknown };
+          const text = Util.errorDetailText(o.msg ?? o.message);
+          const loc = Array.isArray(o.loc) ? o.loc.filter(p => p !== 'body' && p !== 'query').join('.') : '';
+          return text ? (loc ? `${loc}: ${text}` : text) : null;
+        }
+        return item == null ? null : String(item);
+      }).filter(Boolean);
+      return parts.length ? parts.join('; ') : null;
+    }
+    if (typeof d === 'object') {
+      const o = d as { message?: unknown; msg?: unknown; detail?: unknown };
+      const inner = Util.errorDetailText(o.message ?? o.msg ?? o.detail);
+      if (inner) return inner;
+      try { return JSON.stringify(d).slice(0, 500); } catch { return null; }
+    }
+    return String(d);
+  },
+
   parseBackendError(resp: Response | null | undefined): Promise<{ message: string; errorCode: string; status: number }> {
     const status = resp?.status ?? 0;
     const clone  = (() => { try { return resp?.clone() ?? null; } catch { return null; } })();
     const read   = clone
       ? clone.json().then(
-          j => ({ message: (j && (j.message || j.detail)) || null, errorCode: (j && j.error_code) || null }),
+          j => ({ message: (j && (Util.errorDetailText(j.message) || Util.errorDetailText(j.detail))) || null, errorCode: (j && j.error_code) || null }),
           () => clone.text().then(txt => ({ message: (txt || '').slice(0, 2000) || null, errorCode: null }), () => ({ message: null, errorCode: null }))
         )
       : Promise.resolve({ message: null, errorCode: null });
@@ -730,24 +785,36 @@ export const Util = {
   // bubbling 'change' on each newly-checked box so the panel's own
   // onchange="..." handler does the Set-update + apply work — no separate
   // "select" logic to keep in sync.
-  matchPasteToCheckboxes(text: string, checkboxEls: HTMLInputElement[]): { matched: number; total: number } {
+  //
+  // Optional `onBatch`: when the panel's change handler REBUILDS the checklist (the
+  // shared Store.selectedLines pickers do), every box captured above is detached after the
+  // first change event and later values were silently lost — pasting N lines selected 1.
+  // With onBatch, no per-box event fires: the newly-matched boxes are handed over once so
+  // the caller can apply them in a single update.
+  matchPasteToCheckboxes(text: string, checkboxEls: HTMLInputElement[],
+                         onBatch?: (newlyMatched: HTMLInputElement[]) => void): { matched: number; total: number } {
     const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
     const byValue = new Map();
     checkboxEls.forEach(cb => byValue.set(Util.norm(cb.value), cb));
     let matched = 0;
+    const fresh: HTMLInputElement[] = [];
     distinct.forEach(v => {
       const cb = byValue.get(v);
       if (!cb) return;
       matched++;
-      if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+      if (cb.checked) return;
+      if (onBatch) { fresh.push(cb); return; }
+      cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    if (onBatch && fresh.length) onBatch(fresh);
     return { matched, total: distinct.length };
   },
 
   // One-time wiring for a small paste-capture <input> sitting atop a
   // checkbox panel. getCheckboxEls is called lazily at paste-time so it
   // always sees the panel's current (rebuilt) checkbox list.
-  wirePasteToCheckboxes(inputEl: PasteWiredInput, getCheckboxEls: () => HTMLInputElement[]): void {
+  wirePasteToCheckboxes(inputEl: PasteWiredInput, getCheckboxEls: () => HTMLInputElement[],
+                        onBatch?: (newlyMatched: HTMLInputElement[]) => void): void {
     if (!inputEl || inputEl._pasteWired) return;
     inputEl._pasteWired = true;
     inputEl.addEventListener('paste', e => {
@@ -755,7 +822,7 @@ export const Util = {
       const text = (e.clipboardData || (window as unknown as { clipboardData?: DataTransfer }).clipboardData)!.getData('text/plain');
       inputEl.value = '';
       if (!text || !text.trim()) return;
-      const { matched, total } = Util.matchPasteToCheckboxes(text, getCheckboxEls());
+      const { matched, total } = Util.matchPasteToCheckboxes(text, getCheckboxEls(), onBatch);
       if (!total) return;
       Toast.show(Util.t('toast.paste_checkbox_match', { matched, total }), matched > 0 ? 'success' : 'warn');
     });
@@ -1502,9 +1569,11 @@ export const Toast = (function() {
   }
 
   return {
-    show(msg: string, type: string = 'info', ms: number = 1500, action?: ToastAction): void {
+    show(msg: string, type: string = 'info', msArg?: number, action?: ToastAction): void {
       const stack = document.getElementById('toast-stack');
       if (!stack) return;
+      // Per-type default: a 1.5 s error vanishes before it can be read. Explicit durations win.
+      const ms = msArg ?? (type === 'error' ? 6000 : type === 'warn' ? 4000 : 1500);
 
       const dup = _visible.find(e => !e._removing && e.msg === msg && e.type === type);
       if (dup) {
@@ -1533,7 +1602,8 @@ export const Toast = (function() {
    MODAL — show/hide helpers for all modals (driven by hidden attribute).
      Modal.open(id)                  — unhide modal with the given element ID
      Modal.close(id)                 — hide modal with the given element ID
-     Modal.confirm(msg, onOk, onCancel?) — two-button confirmation dialog
+     Modal.confirm(opts)             — promise-based two-button confirmation dialog
+                                       (opts: { title, message, detail, confirmLabel, tone }; resolves true/false)
    ========================================================================== */
 // Confirm-dialog serialization: the dialog reuses one fixed set of DOM nodes
 // (#confirm-ok-btn etc.), so a second confirm() fired while one is still
@@ -1574,9 +1644,97 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
   Modal.open('confirm-modal');
 }
 
+/* ── Modal accessibility (#49) ────────────────────────────────────────────────
+   Every dialog is a `.modal-backdrop` > `.modal`. Modal.open/close apply the dialog
+   semantics centrally so the ~40 call sites and the static index.html markup need no
+   per-modal wiring: role="dialog" + aria-modal + aria-labelledby (from the header
+   heading), focus moves into the dialog on open and returns to the opener on close,
+   Tab stays inside, and Escape cancels the confirm dialog. All DOM access is guarded:
+   Node tests drive Modal with minimal fakes that have no querySelector/setAttribute. */
+const _MODAL_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const _modalOpener = new Map<string, HTMLElement>();
+let _modalEscapeWired = false;
+
+function _modalFocusables(dlg: HTMLElement): HTMLElement[] {
+  return Array.from(dlg.querySelectorAll<HTMLElement>(_MODAL_FOCUSABLE)).filter(el => !el.hidden && !el.closest('[hidden]'));
+}
+
+function _modalOpened(el: HTMLElement, id: string): void {
+  try {
+    if (typeof el.querySelector !== 'function') return;
+    const dlg = el.querySelector<HTMLElement>('.modal') ?? el;
+    if (typeof dlg.setAttribute !== 'function') return;
+    if (!dlg.getAttribute('role')) dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-modal', 'true');
+    if (!dlg.getAttribute('aria-label') && !dlg.getAttribute('aria-labelledby')) {
+      const heading = dlg.querySelector<HTMLElement>('.modal-head h1, .modal-head h2, .modal-head h3, .modal-head h4');
+      if (heading) {
+        if (!heading.id) heading.id = `${id}-title`;
+        dlg.setAttribute('aria-labelledby', heading.id);
+      }
+    }
+    const active = typeof document !== 'undefined' ? document.activeElement as HTMLElement | null : null;
+    if (active && active !== document.body && !el.contains(active)) _modalOpener.set(id, active);
+    if (!(el as HTMLElement & { _modalKeysWired?: boolean })._modalKeysWired) {
+      (el as HTMLElement & { _modalKeysWired?: boolean })._modalKeysWired = true;
+      el.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key !== 'Tab') return;
+        const items = _modalFocusables(dlg);
+        if (!items.length) return;
+        const first = items[0], last = items[items.length - 1];
+        if (e.shiftKey && (document.activeElement === first || !dlg.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && (document.activeElement === last || !dlg.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+      });
+    }
+    // Deferred so a caller's own focus() right after open() (a search box, say) wins.
+    setTimeout(() => {
+      if (el.hidden || dlg.contains(document.activeElement)) return;
+      const explicit = dlg.querySelector<HTMLElement>('[data-autofocus], [autofocus]');
+      // A confirm defaults to Cancel: a stray Enter must never trigger the destructive action.
+      const target = explicit
+        ?? (id === 'confirm-modal' ? document.getElementById('confirm-cancel-btn') : null)
+        ?? dlg.querySelector<HTMLElement>('.modal-body input:not([disabled]):not([type="hidden"]), .modal-body select:not([disabled]), .modal-body textarea:not([disabled])')
+        ?? _modalFocusables(dlg)[0];
+      target?.focus();
+    }, 0);
+    if (!_modalEscapeWired && typeof document !== 'undefined' && document.addEventListener) {
+      _modalEscapeWired = true;
+      // Capture phase so an open confirm wins over the drawer's own Escape handler.
+      document.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key !== 'Escape') return;
+        const confirmEl = document.getElementById('confirm-modal');
+        if (confirmEl && !confirmEl.hidden) {
+          e.preventDefault(); e.stopPropagation();
+          document.getElementById('confirm-cancel-btn')?.click();
+        }
+      }, true);
+    }
+  } catch { /* a11y enhancement only - never break opening a dialog */ }
+}
+
+function _modalClosed(id: string): void {
+  const opener = _modalOpener.get(id);
+  _modalOpener.delete(id);
+  try {
+    if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+  } catch { /* ignore */ }
+}
+
 export const Modal = {
-  open(id: string): void  { const el = document.getElementById(id); if (el) el.hidden = false; },
-  close(id: string): void { const el = document.getElementById(id); if (el) el.hidden = true;  },
+  open(id: string): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wasHidden = el.hidden;
+    el.hidden = false;
+    if (wasHidden) _modalOpened(el, id);
+  },
+  close(id: string): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wasOpen = !el.hidden;
+    el.hidden = true;
+    if (wasOpen) _modalClosed(id);
+  },
 
   // Promise-based confirmation dialog.
   // opts: { title, message, detail (HTML string), confirmLabel, tone: 'danger'|'warn' }

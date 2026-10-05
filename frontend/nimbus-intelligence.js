@@ -1,8 +1,12 @@
 /* =============================================================================
    N.I.M.B.U.S. Intelligence Layer  (nimbus-intelligence.js)
-   Loaded after app.js — extends window.NIMBUS with 14 intelligence modules.
+   Loaded after app.js — extends window.NIMBUS with 10 intelligence modules.
 
    Modules:
+     IntelDB         — IndexedDB store backing history/patterns
+     NeedsEngine     — "needs attention" suggestions
+     DarkMode        — theme toggle
+     LangSwitcher    — language selector
      CommandPalette  — Cmd+K fuzzy search overlay
      TimeMachine     — IndexedDB-backed history scrubber
      Confidence      — live 0-100 schedule health score + sparkline
@@ -26,6 +30,30 @@
   }
 
   const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
+
+  // Confidence horizon: the selected plant's own conf_score_horizon (what the Plant
+  // settings tab edits and shows), then the per-user setting, then 14 days. Reading only
+  // the user setting made the score ignore the plant's configured horizon.
+  function _confHorizonMinutes() {
+    return Store.masterPlant(Store.selectedPlant)?.conf_score_horizon ?? Store.userSettings?.confidenceHorizonMinutes ?? 20160;
+  }
+
+  // H3f: command-palette actions used to push an empty undo, so Ctrl+Z reverted an
+  // UNRELATED earlier edit. Snapshot the affected tasks (and which of them were firmed —
+  // firmedIds is a separate set that restoreTasks does not rebuild) before mutating.
+  function _pushTaskUndo(label, ids) {
+    const snap = UndoStack.snapshotTasks(ids);
+    const wasFirmed = new Set(ids.filter(id => Store.isFirmed(id)).map(String));
+    UndoStack.push(label, () => {
+      UndoStack.restoreTasks(snap);
+      const live = ids.filter(id => Store.tasks[id]);
+      const on  = live.filter(id => wasFirmed.has(String(id)));
+      const off = live.filter(id => !wasFirmed.has(String(id)));
+      if (on.length)  Store.setFirmed(on, true, 'undo');
+      if (off.length) Store.setFirmed(off, false, 'undo');
+      Alerts.scheduleRecompute();
+    });
+  }
 
   /* --- CSS injection ------------------------------------------------------- */
   (function _injectStyles() {
@@ -375,13 +403,32 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
     },
 
+    // Resolves with the stored record's KEY (the autoIncrement id for snapshots). It used to
+    // resolve with the transaction's complete event, so `snap.id = id` stored an Event.
     put(store, value) {
       if (!IntelDB._db) return Promise.resolve();
       return new Promise((res, rej) => {
         const tx = IntelDB._db.transaction(store, 'readwrite');
-        tx.objectStore(store).put(value);
-        tx.oncomplete = res;
+        const req = tx.objectStore(store).put(value);
+        tx.oncomplete = () => res(req.result);
         tx.onerror    = e => rej(e.target.error);
+      });
+    },
+
+    // Newest `n` records of a store via a reverse cursor on an index (no getAll of the whole
+    // store), returned oldest-first.
+    getNewest(store, indexName, n) {
+      if (!IntelDB._db) return Promise.resolve([]);
+      return new Promise((res, rej) => {
+        const out = [];
+        const tx  = IntelDB._db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).index(indexName).openCursor(null, 'prev');
+        req.onsuccess = e => {
+          const cursor = e.target.result;
+          if (cursor && out.length < n) { out.push(cursor.value); cursor.continue(); }
+          else res(out.reverse());
+        };
+        req.onerror = e => rej(e.target.error);
       });
     },
 
@@ -417,16 +464,24 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     pruneSnapshots(keepN = 200) {
       if (!IntelDB._db) return;
+      // Count, then walk the ts index with a KEY cursor (keys only: no snapshot payloads are
+      // loaded) deleting the oldest by primary key until keepN remain.
       const fn = () => {
-        IntelDB.getAll('snapshots').then(all => {
-          if (!all || all.length <= keepN) return;
-          const toDelete = all
-            .sort((a, b) => a.ts - b.ts)
-            .slice(0, all.length - keepN);
-          const tx = IntelDB._db.transaction('snapshots', 'readwrite');
-          const os = tx.objectStore('snapshots');
-          toDelete.forEach(s => os.delete(s.id));
-        });
+        const tx = IntelDB._db.transaction('snapshots', 'readwrite');
+        const os = tx.objectStore('snapshots');
+        const countReq = os.count();
+        countReq.onsuccess = () => {
+          let excess = countReq.result - keepN;
+          if (excess <= 0) return;
+          const curReq = os.index('ts').openKeyCursor();
+          curReq.onsuccess = e => {
+            const cursor = e.target.result;
+            if (!cursor || excess <= 0) return;
+            os.delete(cursor.primaryKey);
+            excess -= 1;
+            cursor.continue();
+          };
+        };
       };
       if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 });
       else setTimeout(fn, 2000);
@@ -694,9 +749,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '🔒',
           run() {
             CommandPalette.close();
-            NIMBUS.UndoStack?.push?.('Firm All (freeze)', () => {});
             const unfirmedIds = Store.tasksArr.filter(t => !Store.isFirmed(t.id)).map(t => t.id);
-            if (unfirmedIds.length) Store.setFirmed(unfirmedIds, true, 'cmd-palette');
+            if (unfirmedIds.length) {
+              _pushTaskUndo('Firm All (freeze)', unfirmedIds);
+              Store.setFirmed(unfirmedIds, true, 'cmd-palette');
+            }
             Alerts.scheduleRecompute();
             const label = `Frozen · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
             TimeMachine.snapshot(label);
@@ -1148,9 +1205,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         run() {
           CommandPalette.close();
           const newFirmed = !allFirmed;
-          NIMBUS.UndoStack?.push?.(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, () => {});
           const validIds = ids.filter(id => Store.tasks[id]);
-          if (validIds.length) Store.setFirmed(validIds, newFirmed, 'cmd-palette');
+          if (validIds.length) {
+            _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, validIds);
+            Store.setFirmed(validIds, newFirmed, 'cmd-palette');
+          }
           Alerts.scheduleRecompute();
           Toast.show(newFirmed ? t('toast.firmed_orders', { count: n }) : t('toast.unfirmed_orders', { count: n }), 'success', 1400);
         }
@@ -1164,7 +1223,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_shift_orders_1h'),
         run() {
           CommandPalette.close();
-          NIMBUS.UndoStack?.push?.(`Push ${n} orders +1h`, () => {});
           const patches = ids
             .filter(id => Store.tasks[id]?.start_date && Store.tasks[id]?.end_date)
             .map(id => {
@@ -1187,6 +1245,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             })
             .filter(Boolean);
           if (patches.length) {
+            _pushTaskUndo(`Push ${n} orders +1h`, patches.map(p => p.id));
             Store.updateMany(patches, 'cmd-palette');
           }
           Alerts.scheduleRecompute();
@@ -1209,9 +1268,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           // behind. Full unscheduling is a separate persistence behavior, so
           // leave split parents untouched rather than creating a partial edit.
           const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
-          NIMBUS.UndoStack?.push?.(`Unschedule ${eligibleIds.length} orders`, () => {});
           const unschPatches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
-          if (unschPatches.length) Store.updateMany(unschPatches, 'cmd-palette');
+          if (unschPatches.length) {
+            _pushTaskUndo(`Unschedule ${eligibleIds.length} orders`, eligibleIds);
+            Store.updateMany(unschPatches, 'cmd-palette');
+          }
           Alerts.scheduleRecompute();
           Toast.show(
             eligibleIds.length ? t('toast.unscheduled_bulk', { count: eligibleIds.length }) :
@@ -1273,9 +1334,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      TIME MACHINE — durable IndexedDB snapshot history
      ========================================================================== */
+  // In-memory history cap; matches the IndexedDB prune (IntelDB.pruneSnapshots(200)).
+  const TM_MAX_SNAPSHOTS = 200;
   const TimeMachine = {
     _snapshots: [],
     _panel:     null,
+    _IntelDB:   IntelDB, // test hook
 
     init() {
       // Auto-snapshots are debounced (R20): a burst of undoable actions (drag-storm,
@@ -1295,7 +1359,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           TimeMachine._snapshotAuto(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update');
         }
       });
-      IntelDB.getAll('snapshots').then(rows => {
+      IntelDB.getNewest('snapshots', 'ts', TM_MAX_SNAPSHOTS).then(rows => {
         TimeMachine._snapshots = (rows || []).sort((a, b) => a.ts - b.ts);
       });
     },
@@ -1322,7 +1386,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       IntelDB.put('snapshots', snap).then(id => {
         snap.id = id || snap.id;
         TimeMachine._snapshots.push(snap);
-        IntelDB.pruneSnapshots(200);
+        if (TimeMachine._snapshots.length > TM_MAX_SNAPSHOTS) {
+          TimeMachine._snapshots.splice(0, TimeMachine._snapshots.length - TM_MAX_SNAPSHOTS);
+        }
+        IntelDB.pruneSnapshots(TM_MAX_SNAPSHOTS);
       }).catch(e => {
         (window.NIMBUS && window.NIMBUS.ErrorLog
           ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine snapshot persist failed', { err: String(e), errorCode: 'internal' })
@@ -1560,7 +1627,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const tasks  = Store.tasksArr;
       if (!tasks.length) { Confidence._apply(100); return; }
 
-      const hMinutes = (Store.userSettings?.confidenceHorizonMinutes ?? 20160);
+      const hMinutes = _confHorizonMinutes();
       const horizonStart = new Date();
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
@@ -1709,7 +1776,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     async showBreakdown() {
       const alerts = Store.alerts || [];
-      const hMinutes = (Store.userSettings?.confidenceHorizonMinutes ?? 20160);
+      const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
       const horizonStart = new Date();
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);

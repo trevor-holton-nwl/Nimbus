@@ -250,39 +250,39 @@ export const Calendar = {
     return Calendar.effectiveFromCapacity(line, Calendar.dailyCapacityHours(line, date));
   },
 
-  /** True if `date` is inside the working window and not inside any blackout. */
-  isAvailable(line: string, date: Date): boolean {
-    const win = Calendar.workWindow(line, date);
-    if (!win) return false;
-    if (date < win[0] || date >= win[1]) return false;
-
-    const plant = Store.getPlantForLine(line);
-    for (const b of Store.blocks) {
-      if (b.plant && b.plant !== plant) continue;
-      if (b.line && b.line !== line) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (date >= s && date < e) return false;
-    }
-
-    for (const b of Store.plantBlocks) {
-      if (b.plant && b.plant !== plant) continue;
-      const s = Util.parseDate(b.start), e = Util.parseDate(b.end);
-      if (!s || !e) continue;
-      if (date >= s && date < e) return false;
-    }
-
-    return true;
-  },
-
   /** Advances `from` forward until a contiguous block of `durationMs` is
-   *  available on `line`. Returns the starting Date (snapped). */
-  nextAvailable(line: string, from: Date, durationMs: number): Date {
+   *  available on `line`. Returns the starting Date (snapped), or `null` when no
+   *  slot exists: the line has no working window at all, the order is longer than
+   *  the longest single working window (this helper never splits), or nothing fits
+   *  within 90 days. Callers must handle null (it is never a "valid" start). */
+  nextAvailable(line: string, from: Date, durationMs: number): Date | null {
+    const step = Config.STEP_MS;
+    const snapUp = (d: Date): Date => new Date(Math.ceil(d.getTime() / step) * step);
     let cur = Util.snap(new Date(from));
-    const MAX_ITERS = 90 * 24;  // 90-day explicit bound: max day-jumps
+    const MAX_DAYS = 90;                   // explicit time bound from `from`
+    const MAX_ITERS = MAX_DAYS * 24;       // and a hard cap on loop trips
+    const limitMs = cur.getTime() + MAX_DAYS * Config.MS_DAY;
+    // Nominal-window short-circuit: working windows repeat weekly, so probing seven
+    // consecutive days gives the longest window this line can ever offer. No window,
+    // or an order longer than every window, can never fit.
+    let longestWindowMs = 0;
+    for (let i = 0; i < 7; i++) {
+      const probe = new Date(cur); probe.setDate(probe.getDate() + i);
+      const w = Calendar.workWindow(line, probe);
+      if (w) longestWindowMs = Math.max(longestWindowMs, w[1].getTime() - w[0].getTime());
+    }
+    if (longestWindowMs <= 0 || durationMs > longestWindowMs) {
+      reportSchedulerDiagnostic(
+        'warn',
+        'calendar',
+        'calendar.next-available-no-window',
+        `nextAvailable: no working window on line ${line} can hold ${durationMs}ms (longest nominal window ${longestWindowMs}ms)`,
+      );
+      return null;
+    }
     let iter = 0;
 
-    while (iter++ < MAX_ITERS) {
+    while (iter++ < MAX_ITERS && cur.getTime() <= limitMs) {
       const win = Calendar.workWindow(line, cur);
       if (!win) {
         // jump to start of next day
@@ -305,7 +305,9 @@ export const Calendar = {
       }
       const conflict = Calendar._overlapsBlock(line, cur, candidateEnd);
       if (conflict) {
-        cur = Util.snap(new Date(conflict.end));
+        // Round the blackout END UP to the grid: a nearest-snap of 10:05 lands on 10:00,
+        // back inside the blackout, and the loop would never advance.
+        cur = snapUp(new Date(conflict.end));
         continue;
       }
       return cur;
@@ -316,10 +318,9 @@ export const Calendar = {
       'error',
       'calendar',
       'calendar.next-available-exhausted',
-      `nextAvailable exhausted iteration limit (${MAX_ITERS}) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`,
+      `nextAvailable exhausted ${MAX_DAYS}-day bound (${MAX_ITERS} iterations) for line ${line} (plant ${plant}) seeking ${durationMs}ms slot from ${Util.fmtDTReadable(from)}`,
     );
-    // fallback: return the original from; caller must handle
-    return Util.snap(new Date(from));
+    return null;
   },
 
   /** True when a proposed range is entirely inside one effective operating

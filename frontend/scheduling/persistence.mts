@@ -92,10 +92,14 @@ interface HealthResponse {
   color_wheel?: unknown;
 }
 
+/** Per-attempt ceiling for the bulk save POST (loads use 5-8 s; a real bulk save is slower). */
+const SAVE_TIMEOUT_MS = 60_000;
+
 /** Lazily-added fields `saveAll`'s `_post` retry closure stamps onto a plain
  *  `Error` so both the retry-vs-terminal check and the rejection log can read
  *  them back — mirrors nimbus-worker.ts's `err as Error` idiom (Phase 0). */
 interface SaveError extends Error {
+  timedOut?: boolean;
   httpStatus?: number;
   errorCode?: string;
   reqId?: string;
@@ -130,7 +134,7 @@ interface LoadStats {
 interface CalendarService {
   beginRun(plant: string | null): void;
   endRun(): void;
-  nextAvailable(line: string, from: Date, durationMs: number): Date;
+  nextAvailable(line: string, from: Date, durationMs: number): Date | null;
   workWindow(line: string, date: Date): [Date, Date] | null;
 }
 
@@ -146,7 +150,27 @@ let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null 
 /* =============================================================================
    PERSISTENCE — backend fetch, demo fallback, save + local cache.
    ========================================================================== */
+/** D29 - one short, translated line naming WHICH orders the server rejected and why
+ *  (the save response's sparse `rejection_reasons` {id: step} map), instead of a bare
+ *  "N/M persisted". Shows the first `limit` and a "+N more" tail; unknown codes fall
+ *  back to the raw code. `runtime_preview_changed` is excluded: it has its own toast. */
+export function describeRejections(reasons: Record<string, string> | undefined | null, limit = 3): string {
+  const entries = Object.entries(reasons || {}).filter(([, code]) => code !== 'runtime_preview_changed');
+  if (!entries.length) return '';
+  const label = (code: string): string => {
+    const key = `ui.reject_${code}`;
+    const text = Util.t(key);
+    return text === key ? code : text;
+  };
+  const shown = entries.slice(0, limit).map(([id, code]) => `${id}: ${label(code)}`);
+  const more = entries.length - shown.length;
+  return shown.join('; ') + (more > 0 ? Util.t('ui.reject_more', { count: more }) : '');
+}
+
 export const Persistence = {
+  // Plant the most recent load() was ASKED for, set before the fetch so it survives a failed
+  // boot load (where _currentLoadedPlant is still null). _reconnect reloads this plant.
+  _lastAttemptedPlant: null as string | null,
   _currentLoadedPlant: null as string | null,  // plant whose tasks are currently in Store (null = all plants)
   // Stage 3: plant whose priority rank maps Store.priorityRankMaps currently reflects
   // (null = none/unknown). Mirrors _currentLoadedPlant's own role for tasks/calendars —
@@ -284,6 +308,7 @@ export const Persistence = {
     // counter and discards itself if a newer load() has since started. See the
     // _loadRequest field comment above for why this mirrors _setupSnapshotRequest.
     const loadGeneration = ++Persistence._loadRequest;
+    Persistence._lastAttemptedPlant = plant ?? null;
     const stats: LoadStats = Persistence._lastLoad = {
       source: null, ts: new Date().toISOString(), plant: plant ?? null,
       raw_received: 0, backend_meta: null,
@@ -339,7 +364,9 @@ export const Persistence = {
       // fetch to; skip it entirely rather than fetch every plant's rows.
       return Promise.all([
         Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-        Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+        // No plant selected: no machines to show (plant-scoped, #25) — never
+        // fetch every plant's machine list just to populate the plant picker.
+        Promise.resolve(null as MasterDataRowsResponse<MasterLineRow> | null),
       ]).then(([pData, lData]) => {
         // A newer load() may have started (and even resolved) while this was in
         // flight — discard rather than let a stale response overwrite it.
@@ -423,7 +450,7 @@ export const Persistence = {
           // THEN hydrate calendars/blackouts from the backend (authoritative).
           Promise.all([
             Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-            Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+            Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
           ]).then(([pData, lData, wcData]) => {
             // A newer load() (e.g. the user switched plants again) may have
@@ -573,7 +600,7 @@ export const Persistence = {
         // master_data.get_system_settings()/GET /system-settings in brain.py.
         Promise.all([
           Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
-          Util.fetchTraced(`${Config.API_BASE}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
+          Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
         ]).then(([pData, lData, ssData, wcData]) => {
@@ -750,7 +777,7 @@ export const Persistence = {
             this.timer = null;
             ErrorLog.info('persistence', 'Backend recovered — reloading');
             Toast.show(Util.t('toast.backend_recovered'), 'success', 3000);
-            try { Persistence.load({ force: true, plant: Persistence._currentLoadedPlant }); } catch (e) {
+            try { Persistence.load({ force: true, plant: Persistence._lastAttemptedPlant ?? Persistence._currentLoadedPlant }); } catch (e) {
               ErrorLog.error('persistence', `Reload after reconnect failed: ${(e as Error).message}`);
             }
           })
@@ -1413,6 +1440,7 @@ export const Persistence = {
     // didn't actually send (see the per-id snapshot compare below).
     if (Persistence._saveInFlight) {
       ErrorLog.warn('persistence', 'saveAll() called while a save is already in flight — skipping');
+      Toast.show(Util.t('toast.save_in_progress'), 'warn', 4000);
       return;
     }
     // Send changed task aggregates (dates, planning state, segments and editable
@@ -1466,6 +1494,9 @@ export const Persistence = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
       body,
+      // A hung request would hold _saveInFlight forever (every later Save is skipped).
+      // Generous because a real bulk save is slow, but bounded.
+      signal: AbortSignal.timeout(SAVE_TIMEOUT_MS),
     }).then(async r => {
       if (!r.ok) {
         const parsed = await Util.parseBackendError(r);
@@ -1475,6 +1506,9 @@ export const Persistence = {
       }
       return r.json() as Promise<BulkUpdateResult>;
     }).catch(e => {
+      // A timed-out POST may still be applied server-side; retrying it blind could double-send.
+      // Surface it and let the planner re-save (version tokens reconcile any partial apply).
+      if ((e as Error)?.name === 'TimeoutError') { (e as SaveError).timedOut = true; throw e; }
       if (e.httpStatus || attempt >= 3) throw e;
       return new Promise(res => setTimeout(res, 2000)).then(() => _post(attempt + 1));
     });
@@ -1582,7 +1616,10 @@ export const Persistence = {
           // Conflicts already surfaced their own toast; don't also claim a partial-save error.
         } else if (persisted < total) {
           ErrorLog.warn('persistence', `Partial DB save: ${persisted}/${total} persisted`, result);
-          Toast.show(Util.t('toast.partial_db_save', { persisted, total }), 'warn', 6000);
+          const rejected = describeRejections(result.rejection_reasons);
+          Toast.show(rejected
+            ? Util.t('toast.partial_db_save_reasons', { persisted, total, details: rejected })
+            : Util.t('toast.partial_db_save', { persisted, total }), 'warn', rejected ? 9000 : 6000);
         } else {
           ErrorLog.info('persistence', `Saved to backend (${persisted} tasks)`);
           Toast.show(Util.t('toast.saved_to_backend'), 'success');
@@ -1594,6 +1631,10 @@ export const Persistence = {
             { status: e.httpStatus, reqId: e.reqId },
             { reqId: e.reqId, errorCode: e.errorCode || 'http.status' });
           Toast.show(Util.t('toast.save_rejected', { msg: e.message }), 'error', 6000);
+        } else if (e.timedOut) {
+          ErrorLog.error('persistence', `Backend save timed out after ${SAVE_TIMEOUT_MS} ms`,
+            { reqId }, { reqId, errorCode: 'http.timeout' });
+          Toast.show(Util.t('toast.save_timeout'), 'error', 8000);
         } else {
           ErrorLog.warn('persistence', `Backend save failed: ${e.message}`,
             { reqId }, { reqId, errorCode: 'http.network' });
@@ -1723,7 +1764,7 @@ export const Persistence = {
   /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
   reload(): Promise<void> {
     ErrorLog.info('persistence', 'Manual reload triggered — discarding local edits after successful hydration');
-    return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant, discardLocalEdits: true });
+    return Persistence.load({ force: true, plant: Persistence._currentLoadedPlant ?? Persistence._lastAttemptedPlant, discardLocalEdits: true });
   },
 
   /** Fetch tasks for a specific plant, replacing whatever is currently in Store.
@@ -1944,23 +1985,6 @@ export const Persistence = {
       lastSavedAt:      Persistence._lastCacheAt || 0,
       autosaveDisabled: !!Persistence._autosaveDisabled,
     };
-  },
-
-  /** Restore the persisted plant selection (if any). Called at boot once Store
-   *  is populated enough to know what plants exist. Falls back to null when
-   *  the persisted plant no longer matches a known plant. */
-  restoreSelectedPlant(): void {
-    try {
-      const raw = localStorage.getItem(Config.LS_KEY);
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      const saved = data?.selectedPlant;
-      if (!saved) return;
-      const known = Store.knownPlants();
-      Store.setSelectedPlant(known.includes(saved) ? saved : null, 'restore');
-    } catch {
-      // ignore — selectedPlant restore is best-effort
-    }
   },
 
   _autosave: Util.debounce(() => {

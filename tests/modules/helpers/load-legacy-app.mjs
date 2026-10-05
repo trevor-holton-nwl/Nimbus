@@ -119,8 +119,19 @@ export async function loadLegacyApp({ fetchImpl, workerFactory, storageSeed = {}
   const fetchCalls     = [];
   const workerMessages = [];
 
+  // Explicit allowlist for the default stub: an unlisted URL throws so a test
+  // can never pass through an un-modelled backend call. Add a legitimate URL
+  // here (or pass a custom fetchImpl) rather than loosening the throw.
+  const ALLOWED_FETCH_PATHS = [
+    /\/tasks\/update(?:[?#]|$)/,
+    /\/distribution\/[^/]+\/summary(?:[?#]|$)/,
+  ];
   const defaultFetch = (url, opts) => {
-    fetchCalls.push({ url: String(url), opts });
+    const u = String(url);
+    if (!ALLOWED_FETCH_PATHS.some(re => re.test(u))) {
+      throw new Error(`load-legacy-app: unexpected fetch to ${u} - add it to ALLOWED_FETCH_PATHS or pass fetchImpl`);
+    }
+    fetchCalls.push({ url: u, opts });
     return Promise.resolve({
       ok: true, status: 200,
       json: () => Promise.resolve({ tasks: [], versions: {}, stale: [] }),

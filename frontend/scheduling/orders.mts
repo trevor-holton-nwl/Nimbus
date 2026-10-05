@@ -556,10 +556,14 @@ export const Table = {
             if (!rel.length) return '';
             const err = rel.some(a => a.sev === 'err');
             const color = err ? 'var(--err)' : 'var(--warn)';
-            return `<button onclick="NIMBUS.Table._showAlertPopup('${p.value}')"
-              title="Click to view alerts"
-              style="background:none;border:none;padding:0;cursor:pointer;color:${color};font-weight:600;font-size:inherit;font-family:inherit">
-              ⚐ ${rel.length}</button>`;
+            // DOM node (not an HTML string) so the task id never reaches an inline handler.
+            const taskId = String(p.value);
+            const btn = document.createElement('button');
+            btn.title = 'Click to view alerts';
+            btn.style.cssText = `background:none;border:none;padding:0;cursor:pointer;color:${color};font-weight:600;font-size:inherit;font-family:inherit`;
+            btn.textContent = `⚐ ${rel.length}`;
+            btn.addEventListener('click', () => Table._showAlertPopup(taskId));
+            return btn;
           }
         },
         { headerName: '📝', field: 'notes', width: 180, minWidth: 80,
@@ -691,7 +695,10 @@ export const Table = {
     const colorIn = document.getElementById('tbl-flt-color-paste-input') as HTMLInputElement | null;
     if (lineIn) {
       Util.wirePasteToCheckboxes(lineIn,
-        () => Array.from(document.getElementById('tbl-flt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('tbl-flt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        // One Store update for the whole paste: per-box change events rebuild the checklist
+        // and detach the later boxes (pasting N lines selected 1).
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'table'));
     }
     if (colorIn) {
       Util.wirePasteToCheckboxes(colorIn,
@@ -1520,7 +1527,7 @@ export const Table = {
 
   exportCsv(): void {
     if (!Table._api) return;
-    Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv' });
+    Table._api.exportDataAsCsv({ fileName: 'nimbus-orders.csv', processCellCallback: Util.csvProcessCell });
   },
 
   _toggleRangeMode(): void {
@@ -1617,19 +1624,27 @@ export const Table = {
       }
       rowStrs.push(cells.join('\t'));
     }
-    navigator.clipboard?.writeText(rowStrs.join('\n')).catch(() => {});
-    const gridEl = document.getElementById('ag-grid');
-    if (gridEl) {
-      Table._rangeHighlighted.forEach(key => {
-        const sep  = key.indexOf('|');
-        const cell = gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`);
-        if (cell) { cell.classList.add('ag-cell-copy-flash'); setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380); }
-      });
-    }
     const nRows = maxRow - minRow + 1;
     const nCols = maxCol - minCol + 1;
-    Toast.show(Util.t('toast.copied_range').replace('{r}', String(nRows)).replace('{c}', String(nCols)), 'success');
-    Table._clearRange();
+    // Flash + "Copied" only once the clipboard write actually succeeded; a denied or
+    // missing clipboard reports that instead of claiming the copy happened.
+    const written = navigator.clipboard
+      ? navigator.clipboard.writeText(rowStrs.join('\n'))
+      : Promise.reject(new Error('clipboard unavailable'));
+    written.then(() => {
+      const gridEl = document.getElementById('ag-grid');
+      if (gridEl) {
+        Table._rangeHighlighted.forEach(key => {
+          const sep  = key.indexOf('|');
+          const cell = gridEl.querySelector(`.ag-row[row-index="${key.slice(0, sep)}"] .ag-cell[col-id="${key.slice(sep + 1)}"]`);
+          if (cell) { cell.classList.add('ag-cell-copy-flash'); setTimeout(() => cell.classList.remove('ag-cell-copy-flash'), 380); }
+        });
+      }
+      Toast.show(Util.t('toast.copied_range').replace('{r}', String(nRows)).replace('{c}', String(nCols)), 'success');
+      Table._clearRange();
+    }, () => {
+      Toast.show(Util.t('toast.clipboard_denied'), 'error');
+    });
   },
 
   _showAlertPopup(taskId: string): void {
@@ -1692,7 +1707,7 @@ export const Table = {
         <span id="nb-note-cnt">${cur.length}/500</span>
         <div class="nb-note-pop-btns">
           <button class="nb-note-cancel" onclick="NIMBUS.Table._closeNotePopover()">Cancel</button>
-          <button class="nb-note-save" onclick="NIMBUS.Table._saveNotePopover('${id}')">Save</button>
+          <button class="nb-note-save" data-note-id="${Util.escapeHtml(id)}">Save</button>
         </div>
       </div>`;
     document.body.appendChild(pop);
@@ -1718,6 +1733,9 @@ export const Table = {
     if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
     ta.addEventListener('input', () => {
       cnt.textContent = ta.value.length + '/500';
+    });
+    pop.querySelector<HTMLElement>('.nb-note-save')?.addEventListener('click', (ev) => {
+      Table._saveNotePopover((ev.currentTarget as HTMLElement).dataset.noteId ?? '');
     });
     ta.focus();
     ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -1872,6 +1890,15 @@ export function notifyResidualFirming(ids: string[]): void {
 export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
+  // The start-date Flatpickr is built on an <input> that every _render() replaces, so the
+  // previous instance (and its calendar popup appended to <body>) must be destroyed first —
+  // otherwise one picker + one popup DOM tree leaks per render.
+  _fpStart: null as NimbusVendor.FlatpickrInstance | null,
+  _destroyStartPicker(): void {
+    const fp = Inspector._fpStart;
+    Inspector._fpStart = null;
+    try { fp?.destroy(); } catch { /* already torn down with its DOM */ }
+  },
 
   // Admin-configured Orders field visibility (system_settings.orderFields,
   // frontend/order-field-catalog.mjs) for the Inspector surface. No live-refresh
@@ -1925,6 +1952,7 @@ export const Inspector = {
   },
   clear(): void {
     Inspector._currentId = null;
+    Inspector._destroyStartPicker();
     const body = document.getElementById('inspector-body');
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
@@ -2104,6 +2132,7 @@ export const Inspector = {
     const distPct = distTotalQty > 0 ? Math.round(distThisQty / distTotalQty * 100) : 0;
     const distOtherSiblings = distSiblings.filter(s => String(s.id) !== String(task.id));
 
+    Inspector._destroyStartPicker();
     body.innerHTML = `
       ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
@@ -2294,7 +2323,7 @@ export const Inspector = {
     // Upgrade start_date to Flatpickr datetime picker
     const _dtEl = body.querySelector('[data-field="start_date"]') as HTMLInputElement | null;
     if (_dtEl) {
-      Util.fpDatetime(_dtEl, {
+      Inspector._fpStart = Util.fpDatetime(_dtEl, {
         onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
       });
     }
@@ -2692,21 +2721,25 @@ export const Printer = {
 
   exportCsv() {
     if (!Printer._rows.length) { Toast.show(Util.t('toast.nothing_to_export'), 'warn'); return; }
-    const fmtDt = (d: Date | null) => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
+    // Plant-local wall clock (same as every on-screen time) — toISOString() exported UTC,
+    // shifting each time by the viewer's UTC offset.
+    const fmtDt = (d: Date | null) => d ? Util.fmtDT(d) : '';
     const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
+    // RFC-4180 quoting + formula guard on every text field (Util.csvCell); BOM so Excel
+    // reads the file as UTF-8.
     const lines = [
-      headers.join(','),
+      headers.map(Util.csvCell).join(','),
       ...Printer._rows.map(t => [
         t.MACHINE || '',
         t.ORDER || t.PRODUCTION_ORDER || '',
         t.MATERIAL_NUMBER  || '',
-        (t.MATERIAL_DESCRIPTION || t.text || '').replace(/,/g, ';'),
+        t.MATERIAL_DESCRIPTION || t.text || '',
         fmtDt(t.start_date),
         fmtDt(t.end_date),
         Util.runHours(t).toFixed(1)
-      ].join(','))
+      ].map(Util.csvCell).join(','))
     ];
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.download = `nimbus-orders-${Util.dayKey(new Date())}.csv`;
     a.href = URL.createObjectURL(blob);

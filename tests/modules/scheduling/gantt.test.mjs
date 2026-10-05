@@ -1828,3 +1828,20 @@ test('D51: Timeline._itemPatchFor restores .dist-sibling for an id the highlight
     Store.setSelectedPlant(priorPlant, 'test');
   }
 });
+
+test('#33 Timeline._itemForTask re-applies the active Gantt filter dimming so a rebuild cannot silently un-dim bars', () => {
+  const start = new Date('2026-07-01T08:00:00');
+  const end   = new Date('2026-07-01T12:00:00');
+  Store.setTasks([
+    { id: 'dim-red',  PRODUCTION_ORDER: 'D1', MATERIAL_NUMBER: 'M1', MACHINE: 'L1', plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED',  FORM_SIZE: 'S' },
+    { id: 'dim-blue', PRODUCTION_ORDER: 'D2', MATERIAL_NUMBER: 'M2', MACHINE: 'L1', plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'BLUE', FORM_SIZE: 'S' },
+  ], 'test');
+  try {
+    assert.doesNotMatch(Timeline._itemForTask(Store.tasks['dim-blue']).className, /\bdimmed\b/, 'no filter active: nothing dimmed');
+    GanttFilter._selectedColors.add('RED');
+    assert.doesNotMatch(Timeline._itemForTask(Store.tasks['dim-red']).className, /\bdimmed\b/, 'matching task stays undimmed');
+    assert.match(Timeline._itemForTask(Store.tasks['dim-blue']).className, /\bdimmed\b/, 'non-matching task is dimmed by the builder itself');
+  } finally {
+    GanttFilter._selectedColors.clear();
+  }
+});

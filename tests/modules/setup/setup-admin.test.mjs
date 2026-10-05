@@ -394,3 +394,15 @@ test('buildSaveRequests: plant-default replace carries stored provenance and the
   const line = SetupAdmin.buildSaveRequests([{ row: red, col: blue, setup_min: 20, machine: 'L1' }], 4, [], 'tok-1');
   assert.equal(line.upsert[0].plant_matrix_token, undefined);
 });
+
+test('state editor / compatibility mount on the inline state container that actually exists (#47)', () => {
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /\.setup-state \.panel-body/, 'the old Line Status panel no longer exists; selecting it made Update state a no-op');
+  assert.match(source, /querySelector<HTMLElement>\('\[data-setup-state-inline\]'\)/);
+});
+
+test('grid listeners read the current render context, not the first render closure (#47)', () => {
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8');
+  assert.match(source, /_setupGridCtx = \{ snapshot: snapshot0/);
+  assert.match(source, /const \{ snapshot, definition, rows, permissions \} = ctx\(\)/);
+});

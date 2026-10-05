@@ -300,9 +300,7 @@ export const Plant = {
       const wh = plant.workHours[d];
       const time = wh ? `${ProdLines._fmtHour(wh[0])}–${ProdLines._fmtHour(wh[1])}` : Util.t('ui.off');
       const hrs = wh ? (() => { const h = wh[1] - wh[0]; return h % 1 === 0 ? `${h}h` : `${h.toFixed(1)}h`; })() : '—';
-      return `<div class="line-hours-pill ${wh ? 'on' : 'off'}" data-day="${d}"
-        onclick="NIMBUS.Plant._pillClick(${d})"
-        oncontextmenu="NIMBUS.Plant._pillRightClick(${d}, event)">
+      return `<div class="line-hours-pill ${wh ? 'on' : 'off'}" data-day="${d}">
         <span class="lhp-day">${dayLabels[d]}</span>
         <span class="lhp-time">${time}</span>
         <span class="lhp-hrs">${hrs}</span>
@@ -312,6 +310,11 @@ export const Plant = {
     }).join('');
 
     body.innerHTML = `<div class="line-hours-pills">${pillsHtml}</div>`;
+    body.querySelectorAll<HTMLElement>('.line-hours-pill').forEach(pill => {
+      const d = Number(pill.dataset.day);
+      pill.addEventListener('click', () => Plant._pillClick(d));
+      pill.addEventListener('contextmenu', (ev) => Plant._pillRightClick(d, ev));
+    });
 
     requestAnimationFrame(() => {
       const p = Store.plants[Store.selectedPlant!];
@@ -564,11 +567,14 @@ export const Plant = {
     list.innerHTML = blocks.map(b => `
       <div class="block-row" style="padding-left:6px;padding-right:6px;">
         <span class="ico">■</span>
-        <span class="reason">${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>
+        <span class="reason">${Util.escapeHtml(b.reason) || Util.t('ui.blackouts_label', {plural: ''})}</span>
         <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
-        <button class="btn btn-ghost sm" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" onclick="NIMBUS.Plant.removePlantBlock('${b.id}')">×</button>
+        <button class="btn btn-ghost sm plant-blk-remove" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" data-block-id="${Util.escapeHtml(b.id)}">×</button>
       </div>
     `).join('');
+    list.querySelectorAll<HTMLElement>('.plant-blk-remove').forEach(btn => {
+      btn.addEventListener('click', () => Plant.removePlantBlock(btn.dataset.blockId!));
+    });
     list.style.display = Plant._blocksCollapsed ? 'none' : '';
   },
 
@@ -616,19 +622,19 @@ export const Plant = {
               <div style="color:${timeColor};">${timeStr}</div>
             </div>`;
           }).join('');
-          const safeId = line.replace(/'/g, "\\'");
-          const plgVal = (ls.plGroup || '').replace(/"/g, '&quot;');
+          const plgVal = Util.escapeHtml(ls.plGroup || '');
+          const lineEsc = Util.escapeHtml(line);
           return `<tr style="border-bottom:1px solid var(--border,#f1f5f9);">
-            <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${line}</div></td>
+            <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${lineEsc}</div></td>
             <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}</td>
             <td style="padding:8px 12px;">
               <div style="display:flex;gap:6px;align-items:flex-start;">${schedCells}</div>
             </td>
             <td style="padding:8px 12px;">
-              <input type="text" class="input roster-plgroup-input" style="width:120px;font-size:12px;" value="${plgVal}" data-line="${line}" placeholder="—">
+              <input type="text" class="input roster-plgroup-input" style="width:120px;font-size:12px;" value="${plgVal}" data-line="${lineEsc}" placeholder="—">
             </td>
             <td style="padding:8px 12px;text-align:right;">
-              <button class="btn btn-ghost sm" onclick="NIMBUS.App.goto('masterdata'); NIMBUS.App.gotoMasterSub('lines'); setTimeout(()=>{const el=document.getElementById('line-row-${safeId}');if(el)el.scrollIntoView({behavior:'smooth',block:'center'});},80);">Edit →</button>
+              <button class="btn btn-ghost sm roster-edit-line" data-line="${lineEsc}">Edit →</button>
             </td>
           </tr>`;
         }).join('')}
@@ -643,6 +649,18 @@ export const Plant = {
         NIMBUS!.MasterData!.syncLineSettings!(line, { plGroup: val });
         Toast.show(Util.t('toast.line_settings_updated'), 'success');
       };
+    });
+
+    roster.querySelectorAll<HTMLElement>('.roster-edit-line').forEach(editBtn => {
+      editBtn.addEventListener('click', () => {
+        const line = editBtn.dataset.line!;
+        NIMBUS!.App!.goto!('masterdata');
+        NIMBUS!.App!.gotoMasterSub!('lines');
+        setTimeout(() => {
+          const el = document.getElementById(`line-row-${line}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
+      });
     });
 
     const wrap = document.getElementById('plant-roster-wrap');
@@ -1051,7 +1069,7 @@ export const Plant = {
       // JSON body is {"detail": "..."}, not {"message": "..."} — reading
       // body.message alone showed "upload failed: unknown" for every real
       // failure (bad file format, unknown field key, empty file).
-      const errMsg = body.detail || body.message || 'unknown';
+      const errMsg = Util.errorDetailText(body.detail) || body.message || 'unknown';
       if (status) { status.textContent = Util.t('toast.upload_failed', { msg: errMsg }); status.className = 'admin-status error'; }
       ErrorLog.error('plant', `Priority list upload failed for ${plantName}/${fieldKey}: ${errMsg}`, body);
       return;
@@ -1374,7 +1392,7 @@ export const Plant = {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ upserts: [{ subnetwork: plantRow.subnetwork, plant: plantRow.plant, ...patch }], deletes: [] }),
         });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
         Object.assign(plantRow, patch); // commit to Store only once the write is confirmed
         return true;
       } catch (e) {
@@ -1443,7 +1461,7 @@ export const Plant = {
         );
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
-          throw new Error(body.detail || `HTTP ${response.status}`);
+          throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`);
         }
         plantRow.split_order_policy = next as 'never' | 'overlong_only' | 'partial_allowed';
         Toast.show(Util.t('ui.split_policy_saved'), 'success');
@@ -1474,7 +1492,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, unknown_setup_policy: policy, unknown_setup_default_minutes: minutes }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         const saved = await response.json();
         plantRow.setup_policy_config = { ...(plantRow.setup_policy_config ?? {}), ...saved.setup_policy_config };
         Toast.show(Util.t('ui.unknown_setup_saved'), 'success');
@@ -1505,7 +1523,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_pull_forward_days: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.max_pull_forward_days = next;
         Toast.show(Util.t('ui.max_pull_forward_saved'), 'success');
       } catch (error) {
@@ -1532,7 +1550,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_push_forward_days: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.max_push_forward_days = next;
         Toast.show(Util.t('ui.max_push_forward_saved'), 'success');
       } catch (error) {
@@ -1563,7 +1581,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, min_productive_segment_minutes: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.min_productive_segment_minutes = next;
         Toast.show(Util.t('ui.min_productive_segment_saved'), 'success');
       } catch (error) {
@@ -1594,7 +1612,7 @@ export const Plant = {
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
             body: JSON.stringify({ subnetwork: plantRow.subnetwork, frozen_horizon_days: next }) },
         );
-        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         plantRow.frozen_horizon_days = next;
         Toast.show(Util.t('ui.frozen_horizon_days_saved'), 'success');
       } catch (error) {
@@ -1970,7 +1988,7 @@ export const Plant = {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ subnetwork: plantRow.subnetwork, constraints: payload }),
         });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
         plantRow.constraints = payload;  // commit to Store only once the write is confirmed
         renderEffectiveSequence();       // the persisted tree just changed — re-read it
       } catch (e) {
@@ -2325,7 +2343,8 @@ export const ProdLines = {
         ProdLines._rebuildLineFilterChecklist(allLines);
       };
       Util.wirePasteToCheckboxes(search,
-        () => Array.from(document.getElementById('lines-nav-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('lines-nav-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'masterdata'));
     }
     const list = document.getElementById('lines-nav-list');
     if (list) {
@@ -2953,7 +2972,10 @@ export const MasterData = (() => {
   const FK_SOURCE: Partial<Record<MasterDataTable, Record<string, MasterDataTable>>> = {
     plants:           { subnetwork: 'subnetworks' },
     machine: { subnetwork: 'subnetworks', plant: 'plants' },
-    material_plants:  { material_id: 'materials' },
+    // material_plants.material_id is deliberately NOT registered here either
+    // (#25): the generic _fkSelect would fetch the whole `materials` table
+    // (unbounded) to fill its <select>. It is a plain text cell; the backend
+    // rejects an unknown material.
     // bom_items.component_id is deliberately NOT registered here: it needs a
     // plant-scoped option list (material_plants filtered to the row's plant),
     // which the generic _fkSelect (whole-source-table, single-key convention)
@@ -3012,7 +3034,24 @@ export const MasterData = (() => {
     bom_items:          'plant+material',
     production_version: 'plant',
     routing_operation:  'plant',
+    // P8 (#25): machine and material_plants are per-plant and at 50+ plants /
+    // 3,500+ machines must never load whole into the (non-virtualised) DOM table.
+    machine:            'plant',
+    material_plants:    'plant',
   };
+
+  // Scoped tables whose gate is skipped when the app-wide plant is already
+  // selected (the common case) — the grid opens straight on that plant.
+  const AUTO_SCOPE_FROM_SELECTED_PLANT: ReadonlySet<MasterDataTable> = new Set(['machine', 'material_plants']);
+
+  // Tables that load a server-side page (search + limit/offset + "Load more")
+  // instead of the whole (scoped) table: `materials` is not per-plant, so it
+  // is paged unscoped; `material_plants` is paged within its plant.
+  const PAGED_TABLES: ReadonlySet<MasterDataTable> = new Set(['materials', 'material_plants']);
+  const PAGE_SIZE = 200;
+  interface PageState { search: string; total: number }
+  const _pageState: Partial<Record<MasterDataTable, PageState>> = {};
+  let _pageSearchTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Per-table scope filter for SCOPED_TABLES (was a single bom_items-only
   // `_bomFilter`; generalized to a map so production_version/routing_operation
@@ -3076,6 +3115,7 @@ export const MasterData = (() => {
   }
 
   function _setTab(table: MasterDataTable): void {
+    delete _pageState[table];
     _activeTable = table;
     _syncTabUI();
     _renderActiveTable();
@@ -3092,6 +3132,12 @@ export const MasterData = (() => {
   // immediately.
   function _renderActiveTable(): void {
     const mode = SCOPED_TABLES[_activeTable];
+    // Only before the user has ever touched this tab's scope: "Change" leaves a
+    // defined (empty) filter behind so the gate shows instead of re-auto-scoping.
+    if (mode && !_scopeFilters[_activeTable]
+        && AUTO_SCOPE_FROM_SELECTED_PLANT.has(_activeTable) && Store.selectedPlant) {
+      _scopeFilters[_activeTable] = { plant: Store.selectedPlant, material_id: null };
+    }
     if (mode && !_scopeReady(_activeTable, mode)) {
       _renderScopeGate(_activeTable, mode);
     } else {
@@ -3164,10 +3210,16 @@ export const MasterData = (() => {
   // -----------------------------------------------------------------------
   // Data loading
   // -----------------------------------------------------------------------
-  async function _loadAndRender(table: MasterDataTable): Promise<void> {
+  // opts.more: PAGED_TABLES "Load more" — fetch the next page and append.
+  // opts.keepEdits: PAGED_TABLES server-side search — swap the baseline rows
+  // but keep pending edits, and don't blank the grid (the search box keeps focus).
+  async function _loadAndRender(table: MasterDataTable, opts: { more?: boolean; keepEdits?: boolean } = {}): Promise<void> {
     const host = document.getElementById('md-host');
     if (!host) return;
-    host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
+    const prior = _cache[table];
+    if (!opts.more && !opts.keepEdits) {
+      host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
+    }
     // Stale-response guard: capture the generation before the async fetch,
     // and only let this call mutate `_cache`/render if it's still current
     // once the fetch resolves. Without this, quickly switching Manage Data
@@ -3184,11 +3236,20 @@ export const MasterData = (() => {
     // _loadAndRender for a scoped table.
     const _scopeMode = SCOPED_TABLES[table];
     const _scope = _scopeMode ? _scopeFilter(table) : null;
-    const qs = _scopeMode === 'plant+material'
-      ? `?${new URLSearchParams({ plant: _scope!.plant!, material_id: _scope!.material_id! }).toString()}`
-      : _scopeMode === 'plant'
-      ? `?${new URLSearchParams({ plant: _scope!.plant! }).toString()}`
-      : '';
+    const params = new URLSearchParams();
+    if (_scopeMode === 'plant+material') {
+      params.set('plant', _scope!.plant!);
+      params.set('material_id', _scope!.material_id!);
+    } else if (_scopeMode === 'plant') {
+      params.set('plant', _scope!.plant!);
+    }
+    if (PAGED_TABLES.has(table)) {
+      const search = (_pageState[table]?.search ?? '').trim();
+      if (search) params.set('search', search);
+      params.set('limit', String(PAGE_SIZE));
+      if (opts.more && prior) params.set('offset', String(prior.rows.length));
+    }
+    const qs = params.toString() ? `?${params.toString()}` : '';
     try {
       const data = await Util.fetchTraced(`${API}/master-data/${table}${qs}`, { headers: { 'x-request-id': reqId } }).then(async (r) => {
         if (!r.ok) {
@@ -3201,14 +3262,28 @@ export const MasterData = (() => {
         return r.json() as Promise<MasterDataResponse>;
       });
       if (generation !== _loadGeneration) return; // a newer table switch has since started
-      _cache[table] = {
-        columns: data.columns,
-        rows:    data.rows,
-        dirty:   new Map(),
-        deleted: new Set(),
-        added:   [],
-      };
+      if (PAGED_TABLES.has(table)) {
+        _pageState[table] = { search: _pageState[table]?.search ?? '', total: Number(data.meta?.total ?? data.rows.length) };
+      }
+      if (opts.more && prior) {
+        prior.rows = [...prior.rows, ...data.rows];
+      } else if (opts.keepEdits && prior) {
+        prior.columns = data.columns;
+        prior.rows = data.rows;
+      } else {
+        _cache[table] = {
+          columns: data.columns,
+          rows:    data.rows,
+          dirty:   new Map(),
+          deleted: new Set(),
+          added:   [],
+        };
+      }
       _renderTable(table);
+      if (opts.keepEdits) {
+        const box = document.querySelector<HTMLInputElement>('#md-host .md-search');
+        if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+      }
     } catch (e) {
       if (generation !== _loadGeneration) return; // a newer table switch has since started
       const err = e as MasterDataFetchError;
@@ -3247,6 +3322,7 @@ export const MasterData = (() => {
       changeBtn.onclick = () => {
         _scopeFilters[table] = { plant: null, material_id: null };
         delete _cache[table];
+        delete _pageState[table];
         _renderActiveTable();
       };
       scopeBar.appendChild(changeBtn);
@@ -3261,7 +3337,19 @@ export const MasterData = (() => {
     searchInput.type = 'search';
     searchInput.className = 'input md-search';
     searchInput.placeholder = Util.t('ph.search_table', { table: TABLE_LABELS[table] });
-    searchInput.oninput = () => _applyFilter(table, searchInput.value.toLowerCase());
+    if (PAGED_TABLES.has(table)) {
+      // Server-side search (debounced) — the grid only ever holds one page.
+      searchInput.value = _pageState[table]?.search ?? '';
+      searchInput.oninput = () => {
+        if (_pageSearchTimer) clearTimeout(_pageSearchTimer);
+        _pageSearchTimer = setTimeout(() => {
+          _pageState[table] = { search: searchInput.value, total: _pageState[table]?.total ?? 0 };
+          void _loadAndRender(table, { keepEdits: true });
+        }, 350);
+      };
+    } else {
+      searchInput.oninput = () => _applyFilter(table, searchInput.value.toLowerCase());
+    }
     toolbar.appendChild(searchInput);
 
     const spacer = document.createElement('span');
@@ -3393,6 +3481,23 @@ export const MasterData = (() => {
     tbl.appendChild(tbody);
     wrap.appendChild(tbl);
     host.appendChild(wrap);
+
+    if (PAGED_TABLES.has(table)) {
+      const total = _pageState[table]?.total ?? rows.length;
+      const pager = document.createElement('div');
+      pager.className = 'md-toolbar md-pager';
+      const status = document.createElement('span');
+      status.textContent = Util.t('ui.md_page_status', { shown: rows.length, total });
+      pager.appendChild(status);
+      if (rows.length < total) {
+        const moreBtn = document.createElement('button');
+        moreBtn.className = 'btn btn-ghost sm';
+        moreBtn.textContent = Util.t('btn.load_more');
+        moreBtn.onclick = () => { moreBtn.disabled = true; void _loadAndRender(table, { more: true }); };
+        pager.appendChild(moreBtn);
+      }
+      host.appendChild(pager);
+    }
   }
 
   function _appendRow(tbody: HTMLTableSectionElement, table: MasterDataTable, columns: MasterDataColumn[], row: MasterDataRow): void {
@@ -3937,23 +4042,37 @@ export const MasterData = (() => {
     const searchInput = document.querySelector('#md-host .md-search') as HTMLInputElement | null;
     const search = (searchInput?.value || '').trim();
 
-    // Mirrors _applyFilter's own client-side predicate (whole-row text
-    // includes the search string) so expected_count matches what the admin
-    // is actually looking at. The server does its own authoritative
-    // recount against the SAME (plant [+ search]) predicate list_rows uses,
-    // and refuses with a 409 if it disagrees — this is a best-effort match,
-    // not the source of truth.
-    const q = search.toLowerCase();
-    const visibleCount = q
-      ? state.rows.filter((r) => Object.values(r).some((v) => String(v ?? '').toLowerCase().includes(q))).length
-      : state.rows.length;
+    // The server is the authority on what "filtered" means: its search predicate covers
+    // only the table's search columns, not every cell the grid text-matches, so a
+    // client-side count disagreed and the guarded delete always answered 409. Ask the
+    // same list endpoint (same plant + search predicate) for meta.total instead.
+    let visibleCount: number;
+    try {
+      const qs = new URLSearchParams({ plant, limit: '1' });
+      if (search) qs.set('search', search);
+      const counted = await Util.fetchTraced(`${API}/master-data/${table}?${qs.toString()}`).then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<{ meta?: { total?: number } }>;
+      });
+      visibleCount = Number(counted.meta?.total);
+      if (!Number.isFinite(visibleCount)) throw new Error('no row count in response');
+    } catch (e) {
+      Toast.show(Util.t('toast.delete_filtered_count_failed', { msg: (e as Error).message }), 'error');
+      return;
+    }
+    if (visibleCount === 0) {
+      Toast.show(Util.t('toast.delete_filtered_done', { count: 0 }), 'info');
+      return;
+    }
 
+    // Modal.confirm sets `message` as plain text (no markup); the one HTML slot is `detail`.
     const ok = await Modal.confirm({
-      title:        `Delete filtered rows from ${TABLE_LABELS[table]}?`,
-      message:      `This will permanently delete <strong>${visibleCount}</strong> row(s) in plant <strong>${Util.escapeHtml(plant)}</strong>`
-                    + (search ? ` matching "${Util.escapeHtml(search)}"` : '') + ` from the database.`,
-      detail:       '<strong>This cannot be undone.</strong>',
-      confirmLabel: 'Yes, delete filtered rows',
+      title:        Util.t('ui.delete_filtered_confirm_title', { table: TABLE_LABELS[table] }),
+      message:      Util.t('ui.delete_filtered_confirm_message', {
+        count: visibleCount, plant, match: search ? Util.t('ui.delete_filtered_matching', { q: search }) : '',
+      }),
+      detail:       Util.t('ui.delete_filtered_confirm_detail'),
+      confirmLabel: Util.t('btn.delete_filtered_confirm'),
       tone:         'danger',
     });
     if (!ok) return;
@@ -4143,7 +4262,7 @@ export const MasterData = (() => {
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts, deletes }),
       }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json() as Promise<MasterDataBulkResult>;
       });
 
@@ -4166,11 +4285,12 @@ export const MasterData = (() => {
           // routing_rules is NOT in SCOPED_TABLES (its grid can show multiple plants'
           // rows simultaneously, per §7.1), so we must refresh Runtime for EVERY distinct
           // plant actually present among the saved rows, not just Store.selectedPlant.
-          // Extract distinct plants from upserts (and ignore deletes since a deleted
-          // routing rule doesn't require a recompute — the operation's fallback behavior
-          // is unaffected). Mirror the pattern from db.py:2734 (resolve_fn loop).
+          // Extract distinct plants from upserts AND deletes: deleting an exclude/include
+          // rule changes which operations count toward run time, so the rate map for that
+          // plant is stale just as it is after an edit (delete rows carry the table's key
+          // columns, which include plant). Mirror the pattern from db.py:2734 (resolve_fn loop).
           const affectedPlants = new Set<string>();
-          upserts.forEach((row) => {
+          [...upserts, ...deletes].forEach((row) => {
             const plant = row.plant as string | undefined;
             if (plant) affectedPlants.add(plant);
           });
@@ -4187,7 +4307,11 @@ export const MasterData = (() => {
       // Refresh master-data in Store so Hierarchy/ProdLines stay in sync.
       Promise.all([
         Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
-        Util.fetchTraced(`${API}/master-data/machine`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>,
+        // Plant-scoped (#25): never refetch every plant's machines. With no
+        // selected plant, keep whatever lines are already in the Store.
+        Store.selectedPlant
+          ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
+          : Promise.resolve(null),
       ]).then(([pData, lData]) => {
         if (pData || lData) {
           // Public Store.setMasterData(...) equivalent of the former direct
@@ -4200,7 +4324,7 @@ export const MasterData = (() => {
           // rows) branch to preserve the original single-emit-per-call shape.
           Store.setMasterData({
             plants: pData?.rows ?? [],
-            lines:  lData?.rows ?? [],
+            lines:  lData?.rows ?? (Store.selectedPlant ? [] : (Store.masterData?.lines ?? [])),
             // This refresh only re-fetches plants/machine (the two tables the
             // Hierarchy/ProdLines consumers below actually need); it is not
             // work-center-specific and has no sap_workcenter rows in scope
@@ -4312,7 +4436,7 @@ export const MasterData = (() => {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ column_name: colName, sql_type: sqlType, length, nullable, default: def, display_label: label }),
         }).then((r) => {
-          if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.col_added', { label }), 'success');
@@ -4340,7 +4464,7 @@ export const MasterData = (() => {
       await Util.fetchTraced(`${API}/master-data/${table}/columns/${col.column_name}`, {
         method:  'DELETE',
       }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json();
       });
       Toast.show(Util.t('toast.column_dropped', { col: col.column_name }), 'success');
@@ -4367,7 +4491,7 @@ export const MasterData = (() => {
           headers: { 'content-type': 'application/json' },
           body:    JSON.stringify({ display_label: newLabel }),
         }).then((r) => {
-          if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+          if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
           return r.json();
         });
         Toast.show(Util.t('toast.column_label_updated', { label: newLabel }), 'success');
@@ -4391,7 +4515,7 @@ export const MasterData = (() => {
     Modal.open('md-schema-export-modal');
     try {
       const data = await Util.fetchTraced(`${API}/master-data/_schema-export`).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json() as Promise<{ sql?: string }>;
       });
       textEl.value = data.sql || '';
@@ -4428,14 +4552,22 @@ export const MasterData = (() => {
     if (rowIdx < 0) return;
 
     const updatedRow = { ...state.rows[rowIdx] };
-    if ('excludeFromOpt' in patch) updatedRow.excl_optimizer  = patch.excludeFromOpt ? 'X' : null;
-    if ('bottleneck'     in patch) updatedRow.bottleneck      = patch.bottleneck     ? 'X' : null;
-    if ('bufferUnit'     in patch) updatedRow.buffer_type     = patch.bufferUnit === 'pct' ? '%' : 'hrs';
-    if ('bufferPct'      in patch) updatedRow.buffer_percent  = patch.bufferPct;
-    if ('bufferHours'    in patch) updatedRow.buffer_hours    = patch.bufferHours;
-    if ('plGroup'        in patch) updatedRow.wc_group        = patch.plGroup || null;
-    if ('sapWorkcenter'  in patch) updatedRow.sap_workcenter  = patch.sapWorkcenter || null;
-    if ('distributionWeight' in patch) updatedRow.distribution_weight = patch.distributionWeight ?? null;
+    // Only the columns this call changes (plus the key) go to the server: re-posting the
+    // whole cached row would silently revert any column a colleague edited since the
+    // cache was filled. bulk_apply updates only the keys it receives.
+    const changed: Record<string, unknown> = {};
+    const setCol = (col: string, value: unknown): void => { (updatedRow as Record<string, unknown>)[col] = value; changed[col] = value; };
+    if ('excludeFromOpt' in patch) setCol('excl_optimizer', patch.excludeFromOpt ? 'X' : null);
+    if ('bottleneck'     in patch) setCol('bottleneck', patch.bottleneck     ? 'X' : null);
+    if ('bufferUnit'     in patch) setCol('buffer_type', patch.bufferUnit === 'pct' ? '%' : 'hrs');
+    if ('bufferPct'      in patch) setCol('buffer_percent', patch.bufferPct);
+    if ('bufferHours'    in patch) setCol('buffer_hours', patch.bufferHours);
+    if ('plGroup'        in patch) setCol('wc_group', patch.plGroup || null);
+    if ('sapWorkcenter'  in patch) setCol('sap_workcenter', patch.sapWorkcenter || null);
+    if ('distributionWeight' in patch) setCol('distribution_weight', patch.distributionWeight ?? null);
+    const upsertRow: MasterDataRow = {};
+    for (const k of KEY_COLS.machine) upsertRow[k] = (updatedRow as MasterDataRow)[k];
+    Object.assign(upsertRow, changed);
 
     // Update cache row and clear any stale dirty flag so MasterData table stays consistent.
     state.rows[rowIdx] = updatedRow;
@@ -4445,9 +4577,9 @@ export const MasterData = (() => {
       await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
-        body:    JSON.stringify({ upserts: [updatedRow], deletes: [] }),
+        body:    JSON.stringify({ upserts: [upsertRow], deletes: [] }),
       }).then((r) => {
-        if (!r.ok) return r.json().then((e) => { throw new Error(e.detail || `HTTP ${r.status}`); });
+        if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
         return r.json();
       });
       if (_activeTable === 'machine') _renderTable('machine');
@@ -4572,6 +4704,30 @@ export const WorkCenters = {
   // drains, serialized, still inside the write that preceded it).
   _queued: new Map<string, WorkCenterWriteRequest>(),
 
+  // D28 - set once the pagehide listener below is installed (first render()).
+  _pageHideWired: false,
+
+  /** Tab close / reload / navigation: the 500 ms debounce (and an in-flight write's queued
+   *  follow-ups) would otherwise die with the page, silently losing the last Work Center
+   *  edit. Send every captured-but-unsent write now with `keepalive: true`, which the
+   *  browser lets outlive the page. Best effort: no response handling is possible here. */
+  _flushOnPageHide(): void {
+    if (!Session.isAdmin()) return;
+    const requests = [...WorkCenters._queued.values()];
+    if (WorkCenters._dirty) {
+      const current = WorkCenters._buildWrite();
+      if (current) requests.push(current);
+    }
+    WorkCenters._queued.clear();
+    WorkCenters._dirty = false;
+    for (const q of requests) {
+      void Util.fetchTraced(
+        `${Config.API_BASE}/distribution/${encodeURIComponent(q.plant)}/workcenters/${encodeURIComponent(q.code)}`,
+        { method: 'PUT', keepalive: true, headers: { 'content-type': 'application/json' }, body: JSON.stringify(q.payload) },
+      ).catch(() => { /* page is going away */ });
+    }
+  },
+
   // Fires _autosave() ~500ms after the last Description/weight keystroke.
   // Util.debounce (foundation.mts) has no cancel/flush handle, so
   // _flushPending() below can't cancel this timer — it just wins the race by
@@ -4592,6 +4748,10 @@ export const WorkCenters = {
   async render(): Promise<void> {
     const pane = document.getElementById('md-master-work-centers-pane');
     if (!pane) return;
+    if (!WorkCenters._pageHideWired && typeof window !== 'undefined' && window.addEventListener) {
+      WorkCenters._pageHideWired = true;
+      window.addEventListener('pagehide', () => WorkCenters._flushOnPageHide());
+    }
     const plant = Store.selectedPlant;
     if (!plant) {
       pane.innerHTML = `<div class="md-empty">${Util.t('empty.wc_select_plant')}</div>`;

@@ -7,14 +7,26 @@
 # output. COPY frontend ./frontend happens right before RUN npm run build so Docker's layer
 # cache invalidates correctly whenever any file under frontend/ changes — no risk of a
 # stale compiled-output layer surviving a source edit.
-FROM node:20-slim AS frontendbuild
+FROM node:22.23.3-slim AS frontendbuild
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsconfig.worker.json ./
 RUN npm ci
 COPY frontend ./frontend
 RUN npm run build
 
-FROM python:3.12-slim
+# Cache-bust stamp: pass the git SHA at build time, e.g.
+#   az acr build -r <ACR> -t nimbus:vN --build-arg BUILD_ID=$(git rev-parse --short HEAD) .
+# It overwrites the hand-set NIMBUS_BUILD_ID / styles.css?v= in index.html. Without the arg
+# (local dev, plain docker build) the hand stamp already in index.html is kept as-is.
+ARG BUILD_ID=
+RUN if [ -n "$BUILD_ID" ]; then \
+      case "$BUILD_ID" in *[!A-Za-z0-9._-]*) echo "invalid BUILD_ID" >&2; exit 1;; esac; \
+      sed -i -E -e "s/(NIMBUS_BUILD_ID = ')[^']*(')/\1${BUILD_ID}\2/" -e 's/(styles\.css\?v=)[^"]*/\1'"${BUILD_ID}"'/' frontend/index.html; \
+      grep -q "NIMBUS_BUILD_ID = '${BUILD_ID}'" frontend/index.html; \
+      grep -q "styles.css?v=${BUILD_ID}\"" frontend/index.html; \
+    fi
+
+FROM python:3.12.15-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

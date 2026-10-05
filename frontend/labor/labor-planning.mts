@@ -178,7 +178,7 @@ export const LaborPlanning = (() => {
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify({ subnetwork, plant, cells }),
       });
-      if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+      if (!r.ok) { const e = await r.json(); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
     } catch (e) {
       Toast.show(`Labor plan save failed: ${(e as Error).message}`, 'error');
       ErrorLog.error('labor', `Save aggregate failed: ${(e as Error).message}`);
@@ -193,7 +193,7 @@ export const LaborPlanning = (() => {
         headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
         body: JSON.stringify({ subnetwork, plant, cells }),
       });
-      if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+      if (!r.ok) { const e = await r.json(); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
     } catch (e) {
       Toast.show(`Line plan save failed: ${(e as Error).message}`, 'error');
       ErrorLog.error('labor', `Save lines failed: ${(e as Error).message}`);
@@ -374,7 +374,7 @@ export const LaborPlanning = (() => {
       if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
       delete _aggrData[plant][grp][period];
       cleared.push({ wc_group: grp, period, avail_hours: null });
-      const inp = g?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
+      const inp = g?.querySelector(`.lp-cell[data-group="${_cssEsc(grp)}"][data-period="${_cssEsc(period)}"]`) as HTMLInputElement | null;
       if (inp) inp.value = '';
     }
     if (!cleared.length) return;
@@ -390,7 +390,7 @@ export const LaborPlanning = (() => {
       const g2 = document.getElementById('labor-grid');
       if (g2) {
         prev.forEach(({ wc_group: grp, period, avail_hours: old }) => {
-          const el = g2.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
+          const el = g2.querySelector(`.lp-cell[data-group="${_cssEsc(grp)}"][data-period="${_cssEsc(period)}"]`) as HTMLInputElement | null;
           if (el) el.value = old != null ? String(old) : '';
         });
         _updateAggrTotals(g2);
@@ -398,6 +398,14 @@ export const LaborPlanning = (() => {
       _saveAggregate(sn, plant, prev);
     });
     _saveAggregate(sn, plant, cleared);
+  }
+
+  /** Escapes a value for use inside a quoted CSS attribute selector. A bare `"` or `\`
+   *  in a group/line name used to produce a selector that matched nothing (or threw). */
+  function _cssEsc(value: string): string {
+    const css = (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS;
+    if (css?.escape) return css.escape(String(value));
+    return String(value).split('\\').join('\\\\').split('"').join('\\"');
   }
 
   function _copySelected(): void {
@@ -432,7 +440,7 @@ export const LaborPlanning = (() => {
       const cells = _weeks.map((w) => {
         const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
         return `<td>
-          <input type="number" class="lp-cell" data-group="${Util.escapeHtml(grp)}" data-period="${w.key}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
+          <input type="number" class="lp-cell" data-group="${Util.escapeHtml(grp)}" data-period="${_cssEsc(w.key)}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
         </td>`;
       }).join('');
       return `<tr><td>${Util.escapeHtml(grp)}</td>${cells}</tr>`;
@@ -460,7 +468,7 @@ export const LaborPlanning = (() => {
 
     // Build [row][col] -> <td> cache so the lasso paint never queries the DOM.
     _cellGrid = _displayGroups.map((grp) =>
-      _weeks.map((w) => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`)?.closest<HTMLTableCellElement>('td') || null));
+      _weeks.map((w) => grid.querySelector(`.lp-cell[data-group="${_cssEsc(grp)}"][data-period="${_cssEsc(w.key)}"]`)?.closest<HTMLTableCellElement>('td') || null));
     _selTds = new Set();
 
     const sn = _subnetwork(plant);
@@ -518,7 +526,7 @@ export const LaborPlanning = (() => {
         UndoStack.push(`Labor: ${grp} / ${period}`, () => {
           if (!_aggrData[plant][grp]) _aggrData[plant][grp] = {};
           if (oldAh == null) delete _aggrData[plant][grp][period]; else _aggrData[plant][grp][period] = oldAh;
-          const el = document.getElementById('labor-grid')?.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
+          const el = document.getElementById('labor-grid')?.querySelector(`.lp-cell[data-group="${_cssEsc(grp)}"][data-period="${_cssEsc(period)}"]`) as HTMLInputElement | null;
           if (el) el.value = oldAh != null ? String(oldAh) : '';
           const gridEl = document.getElementById('labor-grid');
           if (gridEl) _updateAggrTotals(gridEl);
@@ -535,7 +543,7 @@ export const LaborPlanning = (() => {
       e.preventDefault();
       const text = e.clipboardData?.getData('text/plain'); if (!text) return;
       const clipRows = text.replace(/\r/g, '').split('\n').filter((r) => r !== '').map((r) => r.split('\t'));
-      const cellMatrix = _displayGroups.map((grp) => _weeks.map((w) => grid.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${w.key}"]`) as HTMLInputElement | null));
+      const cellMatrix = _displayGroups.map((grp) => _weeks.map((w) => grid.querySelector(`.lp-cell[data-group="${_cssEsc(grp)}"][data-period="${_cssEsc(w.key)}"]`) as HTMLInputElement | null));
       let anchorRow = 0, anchorCol = 0;
       if (anchor) {
         anchorRow = Math.max(0, _displayGroups.indexOf(anchor.dataset.group || ''));
@@ -579,7 +587,7 @@ export const LaborPlanning = (() => {
         const g = document.getElementById('labor-grid');
         if (g) {
           prev.forEach(({ wc_group: grp, period, avail_hours: old }) => {
-            const el = g.querySelector(`.lp-cell[data-group="${grp.replace(/"/g,'&quot;')}"][data-period="${period}"]`) as HTMLInputElement | null;
+            const el = g.querySelector(`.lp-cell[data-group="${_cssEsc(grp)}"][data-period="${_cssEsc(period)}"]`) as HTMLInputElement | null;
             if (el) el.value = old != null ? String(old) : '';
           });
           _updateAggrTotals(g);
@@ -718,7 +726,7 @@ export const LaborPlanning = (() => {
       UndoStack.push(`Line plan: ${line} / ${day}`, () => {
         if (!_lineData[plant][line]) _lineData[plant][line] = {};
         if (oldAh == null) delete _lineData[plant][line][day]; else _lineData[plant][line][day] = { avail_hours: oldAh, source: oldSrc };
-        const el = grid.querySelector(`.lp-line-cell[data-line="${line.replace(/"/g,'&quot;')}"][data-day="${day}"]`) as HTMLInputElement | null;
+        const el = grid.querySelector(`.lp-line-cell[data-line="${_cssEsc(line)}"][data-day="${_cssEsc(day)}"]`) as HTMLInputElement | null;
         if (el) el.value = oldAh != null ? String(oldAh) : '';
         _saveLines(sn, plant, [{ machine: line, day, avail_hours: oldAh, source: oldSrc }]);
       });
@@ -1055,7 +1063,8 @@ export const LaborPlanning = (() => {
           });
       };
       Util.wirePasteToCheckboxes(lineSearchIn,
-        () => Array.from(document.getElementById('lp-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('lp-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'labor'));
     }
   }
 

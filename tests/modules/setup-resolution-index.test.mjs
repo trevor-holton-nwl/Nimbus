@@ -500,3 +500,23 @@ test('space-containing machine codes never cross-match between distinct lines in
   assert.equal(unindexed.effectiveMin, 9);
   assert.deepEqual(indexed, unindexed);
 });
+
+test('two states whose values concatenate identically keep distinct index rows (#45)', () => {
+  const definition = { plant: '5512', fields: ['prt01', 'colorWheel'], signature_version: 1, strict_blanks: true, active: true };
+  const st = (a, b) => [{ fieldKey: 'prt01', value: a }, { fieldKey: 'colorWheel', value: b }];
+  const to = st('Z', 'Z');
+  const plantRows = [
+    { machine: '', signature_version: 1, from_key: st('10', '220'), to_key: to, setup_min: 40 },
+    { machine: '', signature_version: 1, from_key: st('102', '20'), to_key: to, setup_min: 15 },
+  ];
+  const index = buildSetupResolutionIndex({ definition, machineRows: [], plantRows, overrides: [] });
+  const q = (from) => ({ definition, machine: '', predecessorState: from, successorState: to,
+    predecessorOrderId: 'P', successorOrderId: 'S', machineRows: [], plantRows, overrides: [] });
+  for (const from of [st('10', '220'), st('102', '20')]) {
+    const unindexed = resolveSetup(q(from));
+    const indexed = resolveSetup({ ...q(from), index });
+    assert.deepEqual(indexed, unindexed);
+  }
+  assert.equal(resolveSetup({ ...q(st('10', '220')), index }).effectiveMin, 40);
+  assert.equal(resolveSetup({ ...q(st('102', '20')), index }).effectiveMin, 15);
+});

@@ -721,6 +721,16 @@ const NIMBUS = (function () {
   }
   App._bootMain = _bootMain;
 
+  function _loadApiKey(attempt) {
+    const bust = `_=${Date.now()}${Math.random().toString(16).slice(2, 8)}`;
+    fetch(`${Config.API_BASE}/security/client-config?${bust}`, { cache: 'no-store' })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => Util.setApiKey(d.apiKey))
+      .catch(() => {
+        if (attempt < 3) setTimeout(() => _loadApiKey(attempt + 1), 1000 * 2 ** (attempt - 1));
+      });
+  }
+
   function _domReadyGate() {
     // Learn the NIMBUS_API_KEY deployment-config stopgap (see backend/security/
     // CLAUDE.md) as early as possible, in parallel with everything below — the
@@ -729,10 +739,10 @@ const NIMBUS = (function () {
     // forget, same pattern as ErrorLog._shipNow's own infra calls; a failure
     // here just leaves Util's api-key empty, matching the pre-existing no-op
     // behavior when NIMBUS_API_KEY is unset on the backend.
-    fetch(`${Config.API_BASE}/security/client-config`)
-      .then(r => r.json())
-      .then(d => Util.setApiKey(d.apiKey))
-      .catch(() => {});
+    // One blip at page load used to leave admin calls 401-ing until a manual refresh, so:
+    // check r.ok (a 5xx HTML body is not config), bypass the corporate proxy's URL-keyed
+    // cache, and retry 3x with backoff (1s, 2s, 4s). Still fire-and-forget.
+    _loadApiKey(1);
 
     // Mandatory login gate — blocks the whole app until authenticated against
     // user_security. A cached session (page reload while signed in) skips

@@ -504,3 +504,11 @@ test('invalidateUndoForWrite - drops only undo entries touching the rewritten su
   assert.deepEqual(UndoStack._entries.map(e => e.label), ['move other', 'no ids (labor etc.)']);
   UndoStack._entries = [];
 });
+
+test('effectiveDateWindow — needs_review with no explicit dates is unwindowed so the list matches the badge (D37)', async () => {
+  const { effectiveDateWindow } = await import('../../../frontend/distribution/distribution-pane.mjs');
+  const base = { ...DEFAULT_DISTRIBUTION_FILTERS };
+  assert.deepEqual(effectiveDateWindow(base, '2026-10-05', '2026-12-31'), { from: '', to: '' });
+  assert.deepEqual(effectiveDateWindow({ ...base, from: '2026-09-01' }, '2026-10-05', '2026-12-31'), { from: '2026-09-01', to: '' });
+  assert.deepEqual(effectiveDateWindow({ ...base, bucket: 'changed' }, '2026-10-05', '2026-12-31'), { from: '2026-10-05', to: '2026-12-31' });
+});

@@ -69,6 +69,15 @@
     return x;
   }
 
+  // Next local calendar midnight via setDate, never `+ MS_DAY`: across a DST change a
+  // local day is 23 or 25 hours, so +24h lands on the same date twice (fall back).
+  function nextCalendarDay(d) {
+    const x = new Date(d.getTime());
+    x.setHours(0, 0, 0, 0);
+    x.setDate(x.getDate() + 1);
+    return x;
+  }
+
   // Buckets a date into a separation-window key at the given granularity
   // ('hour' | 'day' | 'week'); 'none' (or anything unrecognized) returns null,
   // meaning no bucket constraint applies. Local wall-clock components throughout —
@@ -486,7 +495,12 @@
       }
     }
 
-    /* 1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
+    /* D50 severity note: this ALERT is sev 'err' (it is a red, planner-must-fix item).
+       The optimizer's matching `distribution_separation` validation finding
+       (setup-scheduler.mts checkDistributionSeparation) is deliberately 'warning': a
+       validation 'error' blocks Apply, and the optimizer cannot always repair a
+       separation it did not create. Same condition, two severity scales - keep both.
+    1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
        PARENT_ORDER; a per-work-center policy (max_separation: 'hour'|'day'|'week')
        caps how far apart their scheduled starts may drift. Grouped by
        (plant, PARENT_ORDER, MATERIAL_NUMBER) so an unlikely parent-order-number
@@ -948,14 +962,14 @@
             const row = lineRows[key];
             if (row) {
               const dayStartMs = row.date.getTime();
-              const dayEndMs = dayStartMs + MS_DAY;
+              const dayEndMs = nextCalendarDay(row.date).getTime();
               const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
               if (contribution > 0) {
                 row.scheduled += contribution;
                 if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
               }
             }
-            currentDay = new Date(currentDay.getTime() + MS_DAY);
+            currentDay = nextCalendarDay(currentDay);
           }
         }
         continue;
@@ -987,11 +1001,11 @@
         const row = lineRows[key];
         if (row) {
           if (!workWindow(line, row.date, calendars, plants, lineSettings, masterData)) {
-            currentDay = new Date(currentDay.getTime() + MS_DAY);
+            currentDay = nextCalendarDay(currentDay);
             continue;
           }
           const dayStartMs = row.date.getTime();
-          const dayEndMs   = dayStartMs + MS_DAY;
+          const dayEndMs   = nextCalendarDay(row.date).getTime();
           const overlapMs    = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
           const contribution = taskRunHrs * (overlapMs / totalTaskMs);
           if (contribution > 0) {
@@ -999,7 +1013,7 @@
             row.tasks.push(t.id);
           }
         }
-        currentDay = new Date(currentDay.getTime() + MS_DAY);
+        currentDay = nextCalendarDay(currentDay);
       }
     }
 
@@ -1020,14 +1034,14 @@
         const row = lineRows[key];
         if (row) {
           const dayStartMs = row.date.getTime();
-          const dayEndMs = dayStartMs + MS_DAY;
+          const dayEndMs = nextCalendarDay(row.date).getTime();
           const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
           if (contribution > 0) {
             row.scheduled += contribution;
             if (interval.successorOrderId && !row.tasks.includes(interval.successorOrderId)) row.tasks.push(interval.successorOrderId);
           }
         }
-        currentDay = new Date(currentDay.getTime() + MS_DAY);
+        currentDay = nextCalendarDay(currentDay);
       }
     }
 

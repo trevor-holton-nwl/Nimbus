@@ -13,9 +13,11 @@ byte-identical to before. `_diag_snapshot`, `_truncate`, and the `_FE_MAX_*`
 constants are used only within this domain and moved along with their
 callers.
 """
+import json
+
 import psycopg
 import pandas as pd
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 import db
 import master_data as md
@@ -326,6 +328,39 @@ def _truncate(s, cap: int):
         return None
     s = str(s)
     return s if len(s) <= cap else s[:cap] + "…[truncated]"
+
+
+_CSP_MAX_BODY = 8 * 1024   # 8 KB
+_CSP_FIELDS = ("document-uri", "violated-directive", "effective-directive", "blocked-uri",
+               "source-file", "line-number", "column-number", "disposition", "original-policy")
+
+
+@router.post("/logs/csp-report", status_code=204)
+async def ingest_csp_report(request: Request):
+    """Tolerant sink for Content-Security-Policy violation reports (the policy
+    is report-only, see brain.py). Browsers POST `application/csp-report`
+    ({"csp-report": {...}}) or `application/reports+json` ([{type, body}]) --
+    neither is `application/json`, so the body is read raw. No auth (browsers
+    send none), size-capped, never errors: malformed input is dropped and
+    every call answers 204."""
+    try:
+        raw = (await request.body())[:_CSP_MAX_BODY]
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        return Response(status_code=204)
+    reports = data if isinstance(data, list) else [data]
+    for item in reports[:10]:
+        if not isinstance(item, dict):
+            continue
+        body = item.get("csp-report") or item.get("body") or item
+        if not isinstance(body, dict):
+            continue
+        fields = {k.replace("-", "_"): _truncate(body.get(k), 512) for k in _CSP_FIELDS if body.get(k) is not None}
+        # original-policy repeats the same long string on every report; keep it out of the ring.
+        fields.pop("original_policy", None)
+        _log_event("warn", "csp", f"CSP violation: {fields.get('violated_directive') or fields.get('effective_directive') or 'unknown'}",
+                   event="csp.report", **fields)
+    return Response(status_code=204)
 
 
 @router.post("/logs/frontend")

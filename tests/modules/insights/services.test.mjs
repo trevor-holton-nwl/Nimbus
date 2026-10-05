@@ -505,3 +505,33 @@ test('fix round 1 — a stale in-flight request must not overwrite the null a la
   }
 });
 
+
+test('#28 Alerts.applyFix refuses SAP-firmed and manually-firmed orders (effective firmed set) and leaves them unmoved', () => {
+  const plant = '5512';
+  const line = 'FIRMFIX-LINE';
+  const start = new Date('2026-08-25T08:00:00');
+  const end = new Date('2026-08-25T10:00:00');
+  const priorPlant = Store.selectedPlant;
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorFirmed = new Set(Store.firmedIds);
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setTasks([
+      { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, ecc_firmed: true },
+      { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
+    ], 'unit-test');
+    Store.setFirmed(['ff-man'], true, 'unit-test');
+    for (const id of ['ff-ecc', 'ff-man']) {
+      const alert = { id: `ff-alert-${id}`, type: 'blackout', taskId: id };
+      Store.setAlerts([alert], 'unit-test');
+      Alerts.applyFix(alert.id);
+      assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), `${id} must not be moved by a one-click fix`);
+      assert.equal(Store.alerts.length, 1, `${id}: the alert is not dismissed when the fix is refused`);
+    }
+  } finally {
+    Store.setFirmed(['ff-man'], false, 'unit-test');
+    for (const id of priorFirmed) Store.setFirmed([id], true, 'unit-test');
+    Store.setAlerts(priorAlerts, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});

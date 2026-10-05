@@ -156,7 +156,11 @@ export const Session = (() => {
     });
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
-      throw new Error(e.detail || 'Invalid username or password');
+      // Keep the HTTP status: the login screen maps 429/5xx to throttled/unavailable
+      // messages instead of calling every failure "invalid password".
+      const err = new Error(Util.errorDetailText(e.detail) || 'Invalid username or password') as Error & { status?: number };
+      err.status = res.status;
+      throw err;
     }
     const data = await res.json() as SessionUserBlob;
     // Per-user settings + role defaults are the authoritative DB blobs; the
@@ -290,7 +294,7 @@ export const Session = (() => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ settings: patch }),
       });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
       const updated = await r.json() as { settings?: Record<string, unknown> };
       // Server returns the full merged blob — adopt it as truth + mirror to cache.
       const settings = updated.settings || {};

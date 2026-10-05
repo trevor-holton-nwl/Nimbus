@@ -400,6 +400,10 @@ export const Alerts = {
     if (a.type === 'overlap' || a.type === 'blackout' || a.type === 'tool-conflict') {
       const task = Store.tasks[a.taskId!];
       if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
+      // Firmed orders are immovable. firmingStatus is the EFFECTIVE set — SAP ecc_firmed,
+      // frozen horizon and the manual flag (all on this parent-level task) — not just
+      // Store.isFirmed. Optimizer runs and autoReflow already honor the same union.
+      if (Engine.firmingStatus(task).firmed) { Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
       const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
@@ -417,7 +421,13 @@ export const Alerts = {
       let newStart: Date;
       let changes: Partial<NimbusTask>;
       if (splitPolicy === 'never') {
-        newStart = Calendar.nextAvailable(line, searchFrom, dur);
+        const found = Calendar.nextAvailable(line, searchFrom, dur);
+        if (!found) {
+          // No slot (overlong order / closed line / nothing within 90 days): never move the order.
+          Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          return;
+        }
+        newStart = found;
         const newEnd = new Date(newStart.getTime() + dur);
         changes = { start_date: newStart, end_date: newEnd };
         if (task.scheduleSegments?.length && task.scheduleSegments.length >= 2) changes.scheduleSegments = [];

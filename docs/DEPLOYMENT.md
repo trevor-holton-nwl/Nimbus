@@ -28,7 +28,7 @@ the URL can use it).
 
 ## Optimizer planning exceptions release
 
-Apply `migrations/2026-09-09_optimizer_planning_exceptions.sql` through the migration ledger before releasing the dependent application. The application now reads `planning_status` and `planning_reason` on every task query. Queued orders preserve SAP baselines but have no committed dates or segments. Older application versions do not understand this state and can reconstruct dates from SAP baselines, so a rollback after orders enter Needs Planning must retain queue-aware application code. Build the frontend and bump `NIMBUS_BUILD_ID` as part of the application release. Verify a queued order and a scheduled peer together through Save/reload, and verify that a stale optimizer save persists neither row.
+Apply `migrations/2026-09-09_optimizer_planning_exceptions.sql` through the migration ledger before releasing the dependent application. The application now reads `planning_status` and `planning_reason` on every task query. Queued orders preserve SAP baselines but have no committed dates or segments. Older application versions do not understand this state and can reconstruct dates from SAP baselines, so a rollback after orders enter Needs Planning must retain queue-aware application code. Build the frontend as part of the application release (pass `--build-arg BUILD_ID=<git short sha>` to `az acr build` so the cache-bust id is stamped automatically). Verify a queued order and a scheduled peer together through Save/reload, and verify that a stale optimizer save persists neither row.
 
 ## Prerequisites
 
@@ -41,10 +41,10 @@ Apply `migrations/2026-09-09_optimizer_planning_exceptions.sql` through the migr
 ## Redeploy after a code change (the common case)
 From the repo root, bumping the image tag each time:
 ```powershell
-az acr build --registry acrnimbusdev --image nimbus:v2 .
+az acr build --registry acrnimbusdev --image nimbus:v2 --build-arg BUILD_ID=$(git rev-parse --short HEAD) .
 az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:v2
 ```
-- Changed frontend JS/CSS? Bump `NIMBUS_BUILD_ID` in `index.html` — it single-source-drives the `?v=` on every asset URL and the `app-entry.mjs` cache-bust guard, so browsers don't serve stale assets. (There is **no** separate `APP_VERSION` in `app.js` anymore — that constant moved into `app-entry.mjs`'s `runCacheBustGuard()`, which reads `NIMBUS_BUILD_ID` directly.)
+- Changed frontend JS/CSS? Pass `--build-arg BUILD_ID=$(git rev-parse --short HEAD)` to `az acr build` (as above). The Dockerfile stamps it into `NIMBUS_BUILD_ID` and `styles.css?v=` in `index.html` at image build time (letters, digits, `.`, `_`, `-` only; the build fails on anything else). `NIMBUS_BUILD_ID` single-source-drives the `?v=` on every asset URL and the `app-entry.mjs` cache-bust guard, so browsers don't serve stale assets - there is no need to hand-edit it in `index.html`. Without the build arg the committed value ships unchanged, so browsers may serve stale assets. (There is **no** separate `APP_VERSION` in `app.js`; that constant lives in `app-entry.mjs`'s `runCacheBustGuard()`.)
 - Edited a `.ts`/`.mts` file? `az acr build` compiles it automatically in the cloud (the multi-stage `Dockerfile`'s `node:20-slim` builder runs `npm run build`), so a redeploy needs nothing extra. For **local** dev only, run `npm run build` before `uvicorn brain:api` serves the fresh output — see `docs/archive/typescript_migration.md`.
 - Do **not** re-run `schema.sql` on a normal redeploy — it's idempotent and ledger-guarded now (safe if you do), but a redeploy never needs it since the schema already exists.
 

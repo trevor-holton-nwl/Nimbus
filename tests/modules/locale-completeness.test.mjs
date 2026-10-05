@@ -435,3 +435,21 @@ test('en.js is the superset — no locale has a key en.js lacks', () => {
     assert.deepEqual(extra, [], `${locale}.js has keys not present in en.js: ${extra.join(', ')}`);
   }
 });
+
+// Ratchet (CR 09-25 #23): non-English locales may lag en.js, but the number of
+// missing keys per locale must never grow. When you ADD keys to en.js, add the
+// same keys to every locale (English value is fine) rather than raising these
+// numbers; when you translate and the count drops, LOWER the number here.
+const MISSING_KEY_BASELINE = { de: 231, es: 231, fr: 231, pt: 231 };
+
+test('locale parity ratchet - missing-key count per locale never grows vs en.js', () => {
+  const en = keysOf('en');
+  for (const [locale, baseline] of Object.entries(MISSING_KEY_BASELINE)) {
+    const have = keysOf(locale);
+    const missing = [...en].filter(k => !have.has(k));
+    assert.ok(
+      missing.length <= baseline,
+      `${locale}.js is missing ${missing.length} en.js keys (baseline ${baseline}); add the new keys (English value is fine). Last missing: ${missing.slice(-5).join(', ')}`,
+    );
+  }
+});

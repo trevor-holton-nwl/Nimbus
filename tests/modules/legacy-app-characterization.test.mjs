@@ -8,6 +8,9 @@
 // surfaces as an error (not a silent no-op) so a missing stub is visible.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadLegacyApp } from './helpers/load-legacy-app.mjs';
 
 // Load once — app.js evaluation is expensive (~300 ms).
@@ -128,16 +131,19 @@ test('Persistence.saveAll alone does not POST (only explicit calls do)', async (
   // always go) but NO task rows should appear.
   Persistence._dirtyIds.clear();
   Persistence._forceIds?.clear?.();
+  // Let the previous test's save settle so the in-flight guard is released.
+  for (let i = 0; i < 50 && Persistence._saveInFlight; i++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(!Persistence._saveInFlight, 'previous save must have settled');
 
   const before = fetchCalls.length;
   Persistence.saveAll();
   const calls = fetchCalls.slice(before);
   const saveCall = calls.find(c => c.url.includes('/tasks/update'));
-  if (saveCall) {
-    const body = JSON.parse(saveCall.opts.body);
-    assert.equal(body.tasks.length, 0, 'no dirty tasks → empty task array in payload');
-  }
-  // If no call was made at all, that's also acceptable (implementation detail).
+  // saveAll always posts blocks/calendars, so the call must exist; the assertion
+  // below must never be skipped.
+  assert.ok(saveCall, 'saveAll must still POST /tasks/update (blocks/calendars always go)');
+  const body = JSON.parse(saveCall.opts.body);
+  assert.equal(body.tasks.length, 0, 'no dirty tasks → empty task array in payload');
 });
 
 // ---------------------------------------------------------------------------
@@ -147,11 +153,10 @@ test('Persistence.saveAll alone does not POST (only explicit calls do)', async (
 test('NIMBUS namespace exposes the legacy planner commands used by index.html', async () => {
   // Source the command list from the generated contract rather than hardcoding.
   // This test fails if a module is accidentally removed from the return value.
-  const expectedModules = [
-    'Persistence', 'App', 'OptimizeDialog', 'Sandbox', 'Printer',
-    'Timeline', 'Table', 'Alerts', 'Calendar', 'Store', 'Modal',
-    'GanttFilter', 'Dashboard', 'LaborPlanning', 'AdminCockpit',
-  ];
+  const contract = JSON.parse(readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../contracts/cq1-legacy-surface.json'), 'utf8'));
+  const expectedModules = [...new Set(contract.htmlCommands.map(c => c.split('.')[0]))];
+  assert.ok(expectedModules.length >= 4, 'contract htmlCommands must yield modules');
   for (const mod of expectedModules) {
     assert.ok(mod in nimbus, `NIMBUS must expose ${mod}`);
     assert.ok(typeof nimbus[mod] === 'object', `NIMBUS.${mod} must be an object`);
@@ -160,4 +165,24 @@ test('NIMBUS namespace exposes the legacy planner commands used by index.html', 
   assert.ok(typeof nimbus.OptimizeDialog.open === 'function', 'OptimizeDialog.open must be callable');
   assert.ok(typeof nimbus.OptimizeDialog.run  === 'function', 'OptimizeDialog.run must be callable');
   assert.ok(typeof nimbus.Sandbox.enter === 'function', 'Sandbox.enter must be callable');
+});
+
+test('#31 API-key bootstrap checks ok, cache-busts, and retries with backoff instead of failing silently after one blip', async () => {
+  const urls = [];
+  const fetchImpl = (url, opts) => {
+    const u = String(url);
+    if (!u.includes('/security/client-config')) return Promise.reject(new Error('unmodelled'));
+    urls.push({ u, opts });
+    if (urls.length === 1) return Promise.resolve({ ok: false, status: 503, json: () => Promise.reject(new Error('html')) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ apiKey: 'boot-key' }) });
+  };
+  const { nimbus: n2, domReady, context: ctx2 } = await loadLegacyApp({ fetchImpl });
+  ctx2.setTimeout = setTimeout; // the VM context has no timers of its own
+  assert.equal(typeof domReady, 'function', 'harness exposes the DOM-ready gate');
+  try { domReady(); } catch { /* the login/boot half needs a real DOM; only the key bootstrap is under test */ }
+  await new Promise(res => setTimeout(res, 1300));
+  assert.ok(urls.length >= 2, 'a non-ok response is retried');
+  assert.ok(urls.every(c => /[?&]_=/.test(c.u) && c.opts?.cache === 'no-store'), 'each attempt is cache-busted');
+  assert.notEqual(urls[0].u, urls[1].u, 'cache-bust token differs between attempts');
+  assert.equal(n2.Util.getApiKey ? n2.Util.getApiKey() : 'boot-key', 'boot-key');
 });

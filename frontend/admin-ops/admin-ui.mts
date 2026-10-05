@@ -1307,7 +1307,7 @@ export const AdminCockpit = {
       const body = await r.json().catch(() => ({})) as AdminPurgePreview;
       if (seq !== AdminCockpit._purgePreviewSeq) return; // superseded by a newer request
       if (!r.ok || body.status !== 'ok') {
-        el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.escapeHtml(Util.t('toast.purge_preview_failed', { msg: body.detail || body.message || 'unknown' }))}</span>`;
+        el.innerHTML = `<span style="color:var(--err,#c0392b)">${Util.escapeHtml(Util.t('toast.purge_preview_failed', { msg: Util.errorDetailText(body.detail) || body.message || 'unknown' }))}</span>`;
         return;
       }
       AdminCockpit._purgePreview = body;
@@ -1421,7 +1421,7 @@ export const AdminCockpit = {
         if (zone) zone.classList.remove('uploading');
         if (btn)  btn.disabled = false;
         if (!ok || body.status !== 'ok') {
-          const msg = body?.message || body?.detail || 'HTTP error';
+          const msg = body?.message || Util.errorDetailText(body?.detail) || 'HTTP error';
           AdminCockpit._setStatus(status, Util.t('toast.upload_failed', { msg }), 'error');
           ErrorLog.error('admin', `Upload failed: ${msg}`, body,
             { reqId, errorCode: body?.error_code || 'http.status' });
@@ -1525,8 +1525,8 @@ export const AdminCockpit = {
       .then((r) => r.json().catch(() => ({})) as Promise<AdminPurgeResult>)
       .then((body) => {
         if (body.status !== 'ok') {
-          AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: body.message || body.detail || 'unknown' }), 'error');
-          ErrorLog.error('admin', `Purge failed: ${body.message || body.detail || 'unknown'}`, body,
+          AdminCockpit._setStatus(status, Util.t('toast.purge_failed', { msg: body.message || Util.errorDetailText(body.detail) || 'unknown' }), 'error');
+          ErrorLog.error('admin', `Purge failed: ${body.message || Util.errorDetailText(body.detail) || 'unknown'}`, body,
             { reqId, errorCode: body?.error_code || 'http.status' });
           return;
         }
@@ -2353,10 +2353,22 @@ export const AdminCockpit = {
       });
   },
 
-  _clearBackendLog(): void {
-    Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' })
-      .then(() => AdminCockpit._renderBackendLog())
-      .catch(() => {});
+  async _clearBackendLog(): Promise<void> {
+    // The server ring buffer is shared diagnostics evidence and cannot be restored.
+    const ok = await Modal.confirm({
+      title: Util.t('ui.backend_log_clear_confirm'),
+      message: Util.t('ui.backend_log_clear_msg'),
+      confirmLabel: Util.t('btn.backend_log_clear'),
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      const r = await Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      AdminCockpit._renderBackendLog();
+    } catch (e) {
+      Toast.show(Util.t('toast.backend_log_clear_failed', { msg: (e as Error).message }), 'error');
+    }
   },
 
   _copyFiltered(): void {

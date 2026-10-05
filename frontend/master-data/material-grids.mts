@@ -65,6 +65,7 @@ interface ColSpec {
   numeric?: boolean;
   editable?: boolean;
   cellEditor?: unknown;
+  cellEditorPopup?: boolean;
   cellEditorParams?: () => Record<string, unknown>;
   headerTooltip?: string;
   cellRenderer?: unknown;
@@ -122,7 +123,57 @@ interface GridState {
   generation: number;
 }
 
-// -- Cell renderers ---------------------------------------------------------
+// -- Cell editors / renderers -------------------------------------------------
+
+// Searchable default-machine editor (D61): same type-to-filter / arrow-key / Enter
+// interaction and hps-* markup as admin-ui's _mkCombobox, as an AG Grid popup editor,
+// replacing agSelectCellEditor, which is an unsearchable <select> over 70+ machines.
+// Free text is never committed: only an option (or the cleared '') becomes the value.
+function _mkMachineComboEditor() {
+  return class {
+    _eGui!: HTMLDivElement;
+    _input!: HTMLInputElement;
+    _value = '';
+    _options: string[] = [];
+    _filtered: string[] = [];
+    _active = 0;
+    _params!: { value: unknown; values?: string[]; stopEditing: (cancel?: boolean) => void };
+    init(params: { value: unknown; values?: string[]; stopEditing: (cancel?: boolean) => void }): void {
+      this._params = params;
+      this._value = params.value == null ? '' : String(params.value);
+      this._options = (params.values || []).filter(Boolean);
+      this._eGui = document.createElement('div');
+      this._eGui.className = 'hps-combobox md-bom-combobox has-value';
+      this._eGui.innerHTML = `<input type="text" class="hps-input" autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="true" placeholder="${Util.escapeHtml(Util.t('ph.default_machine_search'))}"><div class="hps-dropdown" role="listbox"></div>`;
+      this._input = this._eGui.querySelector('.hps-input') as HTMLInputElement;
+      this._input.value = this._value;
+      const dropdown = this._eGui.querySelector('.hps-dropdown') as HTMLElement;
+      const render = (query: string): void => {
+        const q = query.trim().toLowerCase();
+        const unchanged = q === this._value.toLowerCase();
+        this._filtered = q && !unchanged ? this._options.filter(o => o.toLowerCase().includes(q)) : this._options.slice();
+        if (!this._filtered.length) { dropdown.innerHTML = `<div class="hps-empty">${Util.escapeHtml(Util.t('ui.no_matches'))}</div>`; this._active = -1; return; }
+        dropdown.innerHTML = this._filtered.map((o, i) => `<div class="hps-option${o === this._value ? ' selected' : ''}${i === this._active ? ' active' : ''}" role="option" data-idx="${i}">${Util.escapeHtml(o)}</div>`).join('');
+        dropdown.querySelectorAll('.hps-option').forEach((el, i) => el.addEventListener('mousedown', e => { e.preventDefault(); this._pick(this._filtered[i]); }));
+      };
+      render(this._value);
+      this._active = Math.max(0, this._filtered.indexOf(this._value));
+      render(this._value);
+      this._input.addEventListener('input', () => { this._active = 0; render(this._input.value); });
+      this._input.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') { e.preventDefault(); this._active = Math.min(this._active + 1, this._filtered.length - 1); render(this._input.value); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); this._active = Math.max(this._active - 1, 0); render(this._input.value); }
+        else if (e.key === 'Enter') { e.preventDefault(); if (this._filtered[this._active]) this._pick(this._filtered[this._active]); else if (!this._input.value.trim()) this._pick(''); }
+        else if (e.key === 'Escape') { e.preventDefault(); this._params.stopEditing(true); }
+      });
+    }
+    _pick(value: string): void { this._value = value; this._params.stopEditing(); }
+    getGui(): HTMLDivElement { return this._eGui; }
+    afterGuiAttached(): void { this._input.focus(); this._input.select(); }
+    getValue(): string { return this._value; }
+    isPopup(): boolean { return true; }
+  };
+}
 
 // Renderer for default_machine column that adds a tooltip for unknown machines.
 function _mkDefaultMachineRenderer() {
@@ -211,7 +262,8 @@ const SPECS: Record<GridId, GridSpec> = {
       { field: 'prt_02',                      i18n: 'col.prt_02', width: 170, editable: true },
       { field: 'color',                       i18n: 'col.color',  width: 130, editable: true },
       { field: 'default_machine',          i18n: 'col.default_machine', width: 170, editable: true,
-        cellEditor: 'agSelectCellEditor',
+        cellEditor: _mkMachineComboEditor(),
+        cellEditorPopup: true,
         cellEditorParams: () => ({
           values: ['', ...Store.linesForSelectedPlant()],
         }),
@@ -611,6 +663,7 @@ function _buildColumnDefs(spec: GridSpec): unknown[] {
     // Add cell editor if specified
     if (c.cellEditor) {
       colDef.cellEditor = c.cellEditor;
+      if (c.cellEditorPopup) colDef.cellEditorPopup = true;
     }
 
     // Add cell editor params if specified
@@ -718,7 +771,7 @@ function _createGrid(spec: GridSpec): void {
   agGrid.createGrid(el, gridOptions as unknown as NimbusVendor.AgGridOptions);
 
   document.getElementById(`md-${GRID_ABBR[spec.id]}-export`)?.addEventListener('click', () => {
-    try { st.api?.exportDataAsCsv({ fileName: `nimbus-${spec.id}.csv` }); } catch {}
+    try { st.api?.exportDataAsCsv({ fileName: `nimbus-${spec.id}.csv`, processCellCallback: Util.csvProcessCell }); } catch {}
   });
 
   if (spec.saveUrl) {

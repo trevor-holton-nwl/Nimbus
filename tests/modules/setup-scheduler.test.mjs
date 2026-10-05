@@ -5189,3 +5189,18 @@ test('fillPlanningGaps recomputes distribution_separation against its own final 
   assert.deepEqual(findings[0].parents.slice().sort(), ['dist-a', 'dist-b', 'dist-c']);
   assert.equal(findings[0].severity, 'warning');
 });
+
+test('#37 gap fill keeps the setup_transition_unrecorded reason instead of overwriting it with "No slot found"', () => {
+  const red = scheduledTask('n8-red', 1, 'RED', '2026-08-03T12:00');
+  const blue = scheduledTask('n8-zblue', 1, 'BLUE', '2026-08-03T12:00');
+  const snapshot = policySnapshot([red, blue], { unknownSetupPolicy: 'excludeFromSearch', version: 2 });
+  const bounds = dueDateBounds(UNCOVERED());
+  const primary = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  assert.equal(primary.dispositions.find(d => d.id === 'n8-red').reason.code, 'setup_transition_unrecorded');
+  const filled = SetupScheduler.fillPlanningGaps(snapshot, bounds, primary);
+  const queued = filled.dispositions.find(d => d.id === 'n8-red');
+  assert.equal(queued.status, 'needs_planning');
+  assert.equal(queued.reason.code, 'setup_transition_unrecorded', 'the actionable reason survives the capacity check');
+  assert.equal(filled.patches.find(p => p.id === 'n8-red').changes.planning_reason.code, 'setup_transition_unrecorded',
+    'and so does the persisted planning_reason patch');
+});

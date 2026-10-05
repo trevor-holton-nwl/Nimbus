@@ -143,7 +143,9 @@ function joinIndexKey(...parts: ReadonlyArray<string>): string {
 const ABSENT_KEY_COMPONENT = '__ABSENT_ORDER_ID__';
 
 /**
- * Canonical string for a state's ordered VALUES, joined with `''`. Valid only
+ * Canonical string for a state's ordered VALUES, joined with a NUL escape
+ * sequence (never a literal NUL byte; an empty join let ("10","220") and
+ * ("102","20") share one key). In-memory key only, never persisted. Valid only
  * for states that have already passed `hasCanonicalShape` against the SAME
  * definition: shape validation already guarantees each state's fieldKeys equal
  * `definition.fields` in order, so `statesEqual` on two shape-valid states
@@ -151,7 +153,7 @@ const ABSENT_KEY_COMPONENT = '__ABSENT_ORDER_ID__';
  * `stateSignature` strings tests. Do not key an unvalidated state this way.
  */
 export function stateSignature(state: SetupStateKey): string {
-  return state.map(entry => entry.value).join('');
+  return state.map(entry => entry.value).join('\u0000');
 }
 
 /** Caller-owned prebuilt lookup index for `resolveSetup`. Built once per plant

@@ -163,7 +163,7 @@ export const Security = (() => {
           // re-auth instead of only bubbling a raw error to the caller.
           if (r.status === 403) { try { Session.onAuthDenied(); } catch {} }
           return r.json().catch(() => ({})).then((e) => {
-            const err: Error & { status?: number } = new Error(e.detail || `HTTP ${r.status}`);
+            const err: Error & { status?: number } = new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`);
             err.status = r.status;
             throw err;
           });
@@ -776,7 +776,7 @@ export const Security = (() => {
           headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
           body:    JSON.stringify({ pages }),
         });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); }
         const result: { pages?: Partial<Record<TopLevelTab, boolean>> } = await r.json();
         const roleRow = _roles.find(candidate => candidate.role === role);
         if (roleRow) roleRow.pages = result.pages ?? { ...roleRow.pages, ...pages };

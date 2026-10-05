@@ -340,3 +340,35 @@ def test_audit_log_post_rejects_oversize_entry(tc):
         assert r.status_code == 413
     finally:
         brain.api.dependency_overrides.pop(auth.require_authenticated, None)
+
+
+# --------------------------------------------------------------------------- #
+# CSP report-only header + POST /logs/csp-report (#28)                         #
+# --------------------------------------------------------------------------- #
+def test_csp_report_only_header_on_html_not_on_json(tc):
+    html = tc.get("/")
+    assert html.status_code == 200
+    policy = html.headers.get("content-security-policy-report-only", "")
+    assert "default-src 'self'" in policy and "report-uri /logs/csp-report" in policy
+    assert "https://unpkg.com" in policy and "https://cdn.jsdelivr.net" in policy
+    assert "content-security-policy" not in html.headers      # report-only: never enforcing
+    api = tc.get("/logs/backend")
+    assert "content-security-policy-report-only" not in api.headers
+
+
+def test_csp_report_endpoint_logs_legacy_and_reports_api_bodies_and_tolerates_junk(tc):
+    legacy = '{"csp-report": {"document-uri": "http://x/", "violated-directive": "script-src-attr", "blocked-uri": "inline"}}'
+    r = tc.post("/logs/csp-report", content=legacy, headers={"content-type": "application/csp-report"})
+    assert r.status_code == 204
+    e = brain._BACKEND_LOG[-1]
+    assert e["category"] == "csp" and e["event"] == "csp.report"
+    assert "script-src-attr" in e["msg"] and e["ctx"]["blocked_uri"] == "inline"
+
+    modern = '[{"type": "csp-violation", "body": {"effectiveDirective": "x", "violated-directive": "img-src"}}]'
+    assert tc.post("/logs/csp-report", content=modern, headers={"content-type": "application/reports+json"}).status_code == 204
+    assert "img-src" in brain._BACKEND_LOG[-1]["msg"]
+
+    n = len(brain._BACKEND_LOG)
+    assert tc.post("/logs/csp-report", content="not json {{", headers={"content-type": "application/csp-report"}).status_code == 204
+    assert tc.post("/logs/csp-report", content="x" * 50000).status_code == 204
+    assert len(brain._BACKEND_LOG) == n

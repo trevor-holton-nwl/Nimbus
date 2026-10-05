@@ -7,7 +7,12 @@
 // Usage:
 //   import { scanLegacySurface } from './scripts/legacy-surface.mjs';
 //   node scripts/legacy-surface.mjs          # diff vs contract; exit 1 on drift
-//   node scripts/legacy-surface.mjs --write  # write / overwrite contract
+//   node scripts/legacy-surface.mjs --write  # regenerate contract (shrinkage only)
+//   node scripts/legacy-surface.mjs --write --allow-growth  # also accept NEW consumers
+//
+// Ratchet: the surface may only shrink. Any ADDED handler/command/consumer
+// fails the check, and --write refuses to record growth, unless --allow-growth
+// is passed explicitly (a deliberate, reviewable act - never use it in CI).
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
@@ -146,6 +151,23 @@ function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+const SURFACE_LISTS = ['inlineHandlers', 'htmlCommands', 'intelligenceCommands', 'privateConsumers'];
+
+function listKeys(name, surface) {
+  const list = surface[name] || [];
+  return name === 'inlineHandlers' ? list.map(h => `${h.file}|${h.attribute}|${h.expression}`) : list;
+}
+
+/** Entries present in `current` but absent from `saved`, across every list. */
+export function surfaceAdditions(current, saved) {
+  const out = [];
+  for (const name of SURFACE_LISTS) {
+    const have = new Set(listKeys(name, saved));
+    for (const k of listKeys(name, current)) if (!have.has(k)) out.push(`${name}: ${k}`);
+  }
+  return out;
+}
+
 function diff(label, current, saved) {
   const added = current.filter(x => !saved.includes(x));
   const removed = saved.filter(x => !current.includes(x));
@@ -164,7 +186,17 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
 
   const surface = scanLegacySurface({ htmlSource, intelligenceSource, appSource, moduleSources });
 
+  const allowGrowth = process.argv.includes('--allow-growth');
+
   if (process.argv.includes('--write')) {
+    const prior = readContract();
+    const added = prior ? surfaceAdditions(surface, prior) : [];
+    if (added.length && !allowGrowth) {
+      console.error('Refusing to write: the legacy surface GREW (ratchet). New consumers:');
+      added.forEach(x => console.error(`    + ${x}`));
+      console.error('\nMigrate them off the legacy surface, or pass --allow-growth to accept deliberately.');
+      process.exit(1);
+    }
     writeFileSync(CONTRACT_PATH, JSON.stringify(surface, null, 2) + '\n', 'utf8');
     console.log(`Contract written to ${CONTRACT_PATH}`);
     console.log(`  ${surface.inlineHandlers.length} inline handlers`);
@@ -190,6 +222,11 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   diff('htmlCommands', surface.htmlCommands, saved.htmlCommands);
   diff('intelligenceCommands', surface.intelligenceCommands, saved.intelligenceCommands);
   diff('privateConsumers', surface.privateConsumers, saved.privateConsumers);
-  console.error('\nUpdate with: node scripts/legacy-surface.mjs --write');
+  const grew = surfaceAdditions(surface, saved);
+  if (grew.length) {
+    console.error(`\nRatchet violation: ${grew.length} new consumer(s) added. Remove them; the surface may only shrink.`);
+  } else {
+    console.error('\nSurface only shrank - record it with: node scripts/legacy-surface.mjs --write');
+  }
   process.exit(1);
 }

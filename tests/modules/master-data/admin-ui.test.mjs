@@ -61,7 +61,7 @@ test('Plant exposes the generalized priority-list optimization API', () => {
 });
 
 test('Plant blackout list renders only blocks for the selected plant', () => {
-  const list = { innerHTML: '', style: {} };
+  const list = { innerHTML: '', style: {}, querySelectorAll: () => [] };
   const stats = { innerHTML: '' };
   const priorWindow = globalThis.window;
   const priorDocument = globalThis.document;
@@ -84,6 +84,17 @@ test('Plant blackout list renders only blocks for the selected plant', () => {
     assert.doesNotMatch(list.innerHTML, /5512-only/);
     assert.match(list.innerHTML, /1006-only/);
     assert.match(stats.innerHTML, /pbs-val">1</);
+
+    // H4 residual: a quote/angle-bracket-bearing reason or id must be escaped and
+    // never reach an inline handler.
+    Store.replacePlantBlocks([
+      { id: `x');alert(1);//"<b>`, plant: '1006', start, end, reason: '<img src=x onerror=alert(1)>' },
+    ], 'test');
+    Plant._renderBlocks();
+    assert.doesNotMatch(list.innerHTML, /<img/);
+    assert.doesNotMatch(list.innerHTML, /onclick=/);
+    assert.match(list.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
+    assert.match(list.innerHTML, /data-block-id="x&#39;\);alert\(1\);\/\/&quot;&lt;b&gt;"/);
   } finally {
     if (priorWindow === undefined) delete globalThis.window;
     else globalThis.window = priorWindow;
@@ -608,4 +619,90 @@ test('WorkCenters._autosave serializes queued writes for different work centers,
     WorkCenters._dirty = priorDirty;
     Store.setSelectedPlant(priorPlant, 'test-restore');
   }
+});
+
+// #36: deleting an exclude/include rule changes a plant's rate map just like editing one,
+// so the refresh set must include plants named in DELETED rows too (not only upserts).
+test('MasterData bulk-save for routing_rules also refreshes Runtime for plants whose rules were deleted', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(source, /\[\.\.\.upserts, \.\.\.deletes\]\.forEach\(\(row\) => \{\s*const plant = row\.plant as string \| undefined;/);
+});
+
+test('syncLineSettings posts only the key columns and the changed column, not the whole cached row (#46)', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorToast = Toast.show;
+  const posts = [];
+  Toast.show = () => {};
+  Store.setLineSetting('LINE-46', { plant: 'P46' }, 'test');
+  const priorGetPlant = Store.getPlantForLine;
+  Store.getPlantForLine = (line) => (line === 'LINE-46' ? 'P46' : priorGetPlant.call(Store, line));
+  globalThis.fetch = (url, opts) => {
+    if (opts && opts.method === 'POST') {
+      posts.push(JSON.parse(opts.body));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      columns: [], rows: [{ subnetwork: 'S1', plant: 'P46', machine: 'LINE-46', bottleneck: null, buffer_hours: 3, wc_group: 'G-old' }],
+    }) });
+  };
+  try {
+    await MasterData.syncLineSettings('LINE-46', { bottleneck: true });
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].upserts, [{ subnetwork: 'S1', plant: 'P46', machine: 'LINE-46', bottleneck: 'X' }],
+      'untouched columns (buffer_hours, wc_group) must not be re-posted from the stale cache');
+  } finally {
+    Store.getPlantForLine = priorGetPlant;
+    globalThis.fetch = priorFetch;
+    Toast.show = priorToast;
+  }
+});
+
+test('delete-filtered counts on the server and keeps markup out of the confirm message (#47)', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const start = source.indexOf('async function _deleteFiltered');
+  const body = source.slice(start, source.indexOf('// Save', start));
+  assert.match(body, /meta\?\.total/, 'expected_count must come from the server list total');
+  assert.doesNotMatch(body, /state\.rows\.filter/, 'no client-side recount that disagrees with the server predicate');
+  assert.doesNotMatch(body, /message:[^\n]*<strong>/, 'confirm message is plain text; markup belongs in detail');
+});
+
+test('WorkCenters._flushOnPageHide sends queued edits with keepalive so they survive tab close (D28)', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorIsAdmin = Session.isAdmin;
+  const calls = [];
+  Session.isAdmin = () => true;
+  globalThis.fetch = (url, opts) => { calls.push({ url: String(url), opts }); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); };
+  const payload = { description: 'x', distribution_mode: 'single', default_machine: 'M1', max_separation: 'none', review_required: false, distribute_tooled: false, weights: {} };
+  try {
+    WorkCenters._queued.set('P\u0000WC1', { plant: 'P', code: 'WC1', payload, members: ['M1'] });
+    WorkCenters._dirty = false;
+    WorkCenters._flushOnPageHide();
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/distribution\/P\/workcenters\/WC1$/);
+    assert.equal(calls[0].opts.method, 'PUT');
+    assert.equal(calls[0].opts.keepalive, true);
+    assert.equal(WorkCenters._queued.size, 0, 'queue is drained so nothing is sent twice');
+  } finally {
+    Session.isAdmin = priorIsAdmin;
+    globalThis.fetch = priorFetch;
+  }
+});
+
+test('machine / material_plants load plant-scoped and materials/material_plants are server-paged (#25)', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(source, /machine:\s+'plant',\s*\n\s*material_plants:\s+'plant',/, 'machine + material_plants are SCOPED_TABLES');
+  assert.match(source, /PAGED_TABLES[^\n]*new Set\(\['materials', 'material_plants'\]\)/);
+  const load = source.slice(source.indexOf('async function _loadAndRender'), source.indexOf('function _renderTable'));
+  assert.match(load, /params\.set\('limit'/, 'paged tables send a limit');
+  assert.match(load, /params\.set\('search'/, 'paged tables search server-side');
+  assert.match(load, /params\.set\('offset'/, 'Load more sends an offset');
+  const fk = source.slice(source.indexOf('const FK_SOURCE'), source.indexOf('const FIXED_OPTIONS'));
+  assert.doesNotMatch(fk, /material_id:\s*'materials'/, 'no whole-materials FK dropdown');
+  assert.doesNotMatch(source, /master-data\/machine`/, 'no unscoped /master-data/machine fetch left');
+});
+
+test('persistence fetches /master-data/machine only with the plant (#25)', () => {
+  const source = readFileSync(new URL('../../../frontend/scheduling/persistence.mts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /master-data\/machine`/, 'no unscoped machine fetch');
+  assert.equal((source.match(/master-data\/machine\?plant=\$\{encodeURIComponent\(plant\)\}/g) || []).length, 2);
 });

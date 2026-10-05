@@ -6229,7 +6229,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const protectedTask = taskIsEvaluationProtected(snapshot, bounds, task);
       const successor = definition ? stateForOrder(task, definition) : null;
       const resolution = chargeable && state && successor
-        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides })
+        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
         : null;
       if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
       const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
@@ -6328,6 +6328,9 @@ function retainCompatiblePlacements(
 
 /**
  * P3a — detection only. Warns (never blocks, never affects the score vector)
+ * Severity (D50): this finding stays 'warning' while the compute-core ALERT for the same
+ * condition is sev 'err' - a validation 'error' would block Apply on a condition the
+ * optimizer cannot always repair, whereas the alert is the planner-facing red flag.
  * when a SAP aggregate order's distributed sub-orders (siblings sharing
  * `PARENT_ORDER`) start further apart than their work center's configured
  * `max_separation` policy allows. A future alignment pass may actually fix
@@ -6708,7 +6711,13 @@ export function fillPlanningGaps(
     if (dispositions.get(id)?.status !== 'needs_planning') continue;
     const complete = checked.get(id) === (revision.get(line) ?? 0);
     if (!complete) unchecked++;
-    const reason = complete
+    // A completed capacity check that still finds nothing is NOT the real story for an order
+    // the primary search refused because its setup transition is unrecorded (N8
+    // excludeFromSearch) — keep that actionable reason instead of the generic "No slot found".
+    const prior = dispositions.get(id)?.reason;
+    const reason = complete && prior?.code === 'setup_transition_unrecorded'
+      ? prior
+      : complete
       ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
       : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' };
     patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });

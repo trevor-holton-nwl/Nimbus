@@ -1,6 +1,6 @@
 {
   // Config for real browser ESM modules (docs/archive/typescript_migration.md Phase 1+ —
-  // frontend/*.mts). No real .mts files exist yet as of Phase 0; nimbus-worker.ts (a
+  // frontend/**/*.mts), compiled in place to .mjs twins (gitignored). nimbus-worker.ts (a
   // classic, non-module worker script) deliberately uses the separate
   // tsconfig.worker.json instead — see that file's header comment for why a single
   // shared config can't cleanly serve both execution contexts under "nodenext".
