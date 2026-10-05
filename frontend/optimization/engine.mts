@@ -169,8 +169,11 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
       tasks,
       firmedIds: Array.from(Store.firmedIds), // manual firms only — ECC/frozen derivation joins at the setup-aware fold; do not union here.
       selectedPlant: Store.selectedPlant,
-      blocks: structuredClone(Store.blocks),
-      plantBlocks: structuredClone(Store.plantBlocks),
+      // Every consumer (setup-scheduler lineBlocksFor/overlapBlocks, Calendar._indexBlocks,
+      // nextAvailable) skips blocks of another plant, so a plant-scoped snapshot clones
+      // only that plant's (and un-stamped) blocks.
+      blocks: structuredClone(plant ? Store.blocks.filter(block => !block.plant || block.plant === plant) : Store.blocks),
+      plantBlocks: structuredClone(plant ? Store.plantBlocks.filter(block => !block.plant || block.plant === plant) : Store.plantBlocks),
       calendars: structuredClone(sourceCalendars),
       plants: structuredClone(Store.plants),
       lineSettings,
@@ -1097,6 +1100,7 @@ export const Engine = {
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
     if (policy === 'never') {
       const start = Calendar.nextAvailable(line, requestedStart, runtimeMinutes * Config.MS_MIN);
+      if (!start) return null;
       return { start_date: start, end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN), scheduleSegments: [] };
     }
     const allocation = Calendar.allocateRuntime(line, requestedStart, runtimeMinutes, policy);
@@ -2427,7 +2431,8 @@ export const Engine = {
           // Step 2: advance past any closed/blackout region.
           if (respectCalendar) {
             const _calT0 = performance.now();
-            cursor = Calendar.nextAvailable(line, cursor, durMs);
+            // null = no slot exists; keep the cursor (the former "return from" fallback).
+            cursor = Calendar.nextAvailable(line, cursor, durMs) ?? cursor;
             _pmCalMs += performance.now() - _calT0;
           }
 

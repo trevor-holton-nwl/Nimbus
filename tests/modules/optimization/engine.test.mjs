@@ -805,6 +805,25 @@ test('snapshotSchedule scopes a reused line calendar by the task-resolved plant'
   }
 });
 
+test('snapshotSchedule(plant) clones only that plant\'s (and un-stamped) blackout blocks (#39)', () => {
+  const priorBlocks = structuredClone(Store.blocks);
+  const priorPlantBlocks = structuredClone(Store.plantBlocks);
+  try {
+    const mk = (id, plant) => ({ id, plant, line: null, start: '2030-01-01T00:00:00', end: '2030-01-01T01:00:00' });
+    Store.replaceBlocks([mk('b-a', 'P-A'), mk('b-b', 'P-B'), mk('b-g', undefined)], 'unit-test');
+    Store.replacePlantBlocks([mk('pb-a', 'P-A'), mk('pb-b', 'P-B')], 'unit-test');
+    const scoped = snapshotSchedule('P-A');
+    assert.deepEqual(scoped.blocks.map(b => b.id), ['b-a', 'b-g']);
+    assert.deepEqual(scoped.plantBlocks.map(b => b.id), ['pb-a']);
+    const whole = snapshotSchedule();
+    assert.equal(whole.blocks.length, 3);
+    assert.equal(whole.plantBlocks.length, 2);
+  } finally {
+    Store.replaceBlocks(priorBlocks, 'unit-test');
+    Store.replacePlantBlocks(priorPlantBlocks, 'unit-test');
+  }
+});
+
 test('Engine.evaluateSchedule uses setup truth captured in the detached snapshot', () => {
   const plant = 'DETACHED-SETUP-TRUTH';
   const line = 'DETACHED-SETUP-LINE';
