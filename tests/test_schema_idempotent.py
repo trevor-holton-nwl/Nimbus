@@ -105,6 +105,25 @@ def test_order_distribution_plant_start_index_in_schema_and_migration():
     assert index_stmt in migration_text
 
 
+def test_manual_migrations_folder_is_pinned_and_retired_column_stays_out_of_top_level():
+    """Senior audit #4: 2026-08-10 re-created the retired default_workcenter
+    column on current-schema databases; it now lives in migrations/manual/."""
+    mig = os.path.join(ROOT, "migrations")
+    manual = {n for n in os.listdir(os.path.join(mig, "manual")) if n.endswith(".sql")}
+    assert manual == {
+        "2026-07-03-production-line-optimizer-flags.sql",
+        "2026-08-10-material-plant-default-workcenter.sql",
+        "2026-08-13-changeover-matrix-stage-0.sql",
+        "2026-08-17-line-key-columns.sql",
+        "2026-08-20-line-to-machine.sql",
+        "2026-08-20-setup-value-case-fold-backfill.sql",
+    }
+    for name in os.listdir(mig):
+        if name.endswith(".sql"):
+            with open(os.path.join(mig, name), encoding="utf-8") as f:
+                assert "ADD COLUMN IF NOT EXISTS default_workcenter" not in f.read(), name
+
+
 def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     """The smoke script replays only migrations safe after current schema.sql.
 
@@ -116,7 +135,6 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     skipped_names = {name for name, _reason in skipped}
     expected_skipped = {
         "2026-06-30-sap-interface.sql",
-        "2026-08-10-material-plant-default-workcenter.sql",
         "2026-08-11-priority-lists.sql",
     }
 
