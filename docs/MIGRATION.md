@@ -752,11 +752,22 @@ Implications for a hosted plant pilot:
 - End users' **browsers** need outbound internet to those CDNs (the container does not). On a
   locked-down corporate/plant network that blocks public CDNs, the UI breaks — unstyled page, no
   Gantt timeline, no orders grid.
-- No Content-Security-Policy is set and there is **no Subresource-Integrity** pinning on the CDN
-  `<script>`/`<link>` tags.
-- **Fix (deferred):** vendor these libraries into the repo and serve them from the same container
-  (they would be covered by the existing `StaticFiles` mount), or front them with an approved
-  internal mirror; add SRI hashes + a CSP. **Decide before any network-restricted plant rollout.**
+- **Status (updated 2026-10-05):** the CDN `<script>`/`<link>` tags in `frontend/index.html` now carry
+  Subresource-Integrity hashes (`integrity=` + `crossorigin="anonymous"`); the Google Fonts stylesheet
+  cannot take SRI (Google varies it per user agent). A **report-only** Content-Security-Policy
+  (`Content-Security-Policy-Report-Only`, set by `brain.py`'s `csp_report_only_mw` on HTML responses
+  only) is live and nothing is blocked: the ~100 static inline `on*=` handlers still violate
+  `script-src` (deliberately no `'unsafe-inline'`), and that report stream is the work list for
+  enforcing. Browsers POST violations to the unauthenticated `POST /logs/csp-report`
+  (`backend/admin_ops/routes.py`): body capped at 16 KB by the body-cap middleware (413; 411 without a
+  Content-Length), at most 10 reports per request, **de-duplicated** by (directive, blocked-uri,
+  source-file, line) with a counter (a repeat is logged only at its 10th/100th/1000th... occurrence,
+  with `occurrences`) and **rate-limited** to 20 distinct reports/minute per process (drops are
+  summarised in one `csp.rate_limited` entry), so a report flood cannot evict real errors from the
+  2,000-entry `_BACKEND_LOG` ring. Both the dedupe table and the rate window are per-process state.
+- **Still deferred:** vendoring the libraries into the repo (served by the existing `StaticFiles`
+  mount) or fronting them with an approved internal mirror, and moving the policy from report-only to
+  enforcing once the inline handlers are gone. **Decide before any network-restricted plant rollout.**
 
 ---
 

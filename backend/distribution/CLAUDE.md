@@ -56,3 +56,10 @@ Run: `python -m pytest tests/test_distribution.py tests/test_rbac_plant_scoping.
 ## Counterpart
 
 Frontend half: `frontend/distribution/CLAUDE.md`. The Work Centers master-data sub-tab (§4.3) shipped inside `frontend/master-data/admin-ui.mts` (`WorkCenters`) as edit-only — creation removed, autosave adopted. The Scheduling Board Distribution tab (§6) shipped in full with `frontend/distribution/distribution-pane.mts` (P2-15 pane shell/list/filters/detail-header + P2-16 shares editor, dry-run preview, Save/Reset/Undo, reconcile banner, and What-If guard). §10's aggregate roll-up/CSV export (`GET /distribution/{plant}/aggregate`) has no frontend consumer yet.
+
+## Lock-order and summary contracts added in the 2026-10 audit round
+
+- **Child rows are locked in id order before they are written.** `/tasks` saves lock `orders` rows in id order but `_apply_children` upserts in letter order, which could deadlock a concurrent save. `_apply_children` now first runs `SELECT id FROM orders WHERE id = ANY(new + previous ids) ORDER BY id FOR UPDATE`; `_delete_superseded_children` and `_fetch_children_by_machine(lock=True)` already lock in id order. Any new multi-row writer of `orders` must do the same.
+- **`resolve` scope `repair` runs one transaction per header** (`conn.commit()` after each `_repair_one_header`), instead of holding every header lock across the loop in `basic_start_date` order -- that order could invert against `apply()`'s key-ordered header locks (`plant, production_order, material_number`) and against saves' id-ordered child locks. Repair is idempotent, so a partial run is safe.
+- **Upload summary counts planned sub-orders** (`counters["children_total"]`), not rows written; `children_upserted` stays the written-row count.
+- **Regression tests:** `tests/test_distribution.py::TestApplyAndRepairLockOrderNeverDeadlocks` (apply vs save, repair vs apply/save, with stepped hooks and `pg_stat_activity` lock-wait polling, no sleeps), `TestUploadMessageCountsPlannedChildren`, `TestPvKeptOnBlankIgnoresDistributionChildren`.
