@@ -495,7 +495,12 @@
       }
     }
 
-    /* 1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
+    /* D50 severity note: this ALERT is sev 'err' (it is a red, planner-must-fix item).
+       The optimizer's matching `distribution_separation` validation finding
+       (setup-scheduler.mts checkDistributionSeparation) is deliberately 'warning': a
+       validation 'error' blocks Apply, and the optimizer cannot always repair a
+       separation it did not create. Same condition, two severity scales - keep both.
+    1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
        PARENT_ORDER; a per-work-center policy (max_separation: 'hour'|'day'|'week')
        caps how far apart their scheduled starts may drift. Grouped by
        (plant, PARENT_ORDER, MATERIAL_NUMBER) so an unlikely parent-order-number

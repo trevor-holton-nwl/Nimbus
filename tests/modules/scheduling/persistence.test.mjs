@@ -1131,3 +1131,15 @@ test('#29 save POST carries a timeout signal, a timeout toasts an error (no blin
     Persistence._dirtyIds.delete('to1');
   }
 });
+
+test('describeRejections names the rejected orders and their reasons, capped with a +N more tail (D29)', async () => {
+  const { describeRejections } = await import('../../../frontend/scheduling/persistence.mjs');
+  assert.equal(describeRejections({}), '');
+  assert.equal(describeRejections(undefined), '');
+  assert.equal(describeRejections({ A: 'runtime_preview_changed' }), '', 'preview changes have their own toast');
+  const text = describeRejections({ A: 'pv_expired', B: 'something_new', C: 'no_routing', D: 'zero_runtime' }, 3);
+  assert.match(text, /^A: /);
+  assert.match(text, /B: something_new/, 'unknown codes fall back to the raw code');
+  assert.doesNotMatch(text, /D: /, 'capped at the limit');
+  assert.match(text, /reject_more|\+1 more/, 'tail present (locale keys are unresolved under Node)');
+});

@@ -665,3 +665,25 @@ test('delete-filtered counts on the server and keeps markup out of the confirm m
   assert.doesNotMatch(body, /state\.rows\.filter/, 'no client-side recount that disagrees with the server predicate');
   assert.doesNotMatch(body, /message:[^\n]*<strong>/, 'confirm message is plain text; markup belongs in detail');
 });
+
+test('WorkCenters._flushOnPageHide sends queued edits with keepalive so they survive tab close (D28)', async () => {
+  const priorFetch = globalThis.fetch;
+  const priorIsAdmin = Session.isAdmin;
+  const calls = [];
+  Session.isAdmin = () => true;
+  globalThis.fetch = (url, opts) => { calls.push({ url: String(url), opts }); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); };
+  const payload = { description: 'x', distribution_mode: 'single', default_machine: 'M1', max_separation: 'none', review_required: false, distribute_tooled: false, weights: {} };
+  try {
+    WorkCenters._queued.set('P\u0000WC1', { plant: 'P', code: 'WC1', payload, members: ['M1'] });
+    WorkCenters._dirty = false;
+    WorkCenters._flushOnPageHide();
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/distribution\/P\/workcenters\/WC1$/);
+    assert.equal(calls[0].opts.method, 'PUT');
+    assert.equal(calls[0].opts.keepalive, true);
+    assert.equal(WorkCenters._queued.size, 0, 'queue is drained so nothing is sent twice');
+  } finally {
+    Session.isAdmin = priorIsAdmin;
+    globalThis.fetch = priorFetch;
+  }
+});

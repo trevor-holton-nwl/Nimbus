@@ -150,6 +150,23 @@ let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null 
 /* =============================================================================
    PERSISTENCE — backend fetch, demo fallback, save + local cache.
    ========================================================================== */
+/** D29 - one short, translated line naming WHICH orders the server rejected and why
+ *  (the save response's sparse `rejection_reasons` {id: step} map), instead of a bare
+ *  "N/M persisted". Shows the first `limit` and a "+N more" tail; unknown codes fall
+ *  back to the raw code. `runtime_preview_changed` is excluded: it has its own toast. */
+export function describeRejections(reasons: Record<string, string> | undefined | null, limit = 3): string {
+  const entries = Object.entries(reasons || {}).filter(([, code]) => code !== 'runtime_preview_changed');
+  if (!entries.length) return '';
+  const label = (code: string): string => {
+    const key = `ui.reject_${code}`;
+    const text = Util.t(key);
+    return text === key ? code : text;
+  };
+  const shown = entries.slice(0, limit).map(([id, code]) => `${id}: ${label(code)}`);
+  const more = entries.length - shown.length;
+  return shown.join('; ') + (more > 0 ? Util.t('ui.reject_more', { count: more }) : '');
+}
+
 export const Persistence = {
   // Plant the most recent load() was ASKED for, set before the fetch so it survives a failed
   // boot load (where _currentLoadedPlant is still null). _reconnect reloads this plant.
@@ -1593,7 +1610,10 @@ export const Persistence = {
           // Conflicts already surfaced their own toast; don't also claim a partial-save error.
         } else if (persisted < total) {
           ErrorLog.warn('persistence', `Partial DB save: ${persisted}/${total} persisted`, result);
-          Toast.show(Util.t('toast.partial_db_save', { persisted, total }), 'warn', 6000);
+          const rejected = describeRejections(result.rejection_reasons);
+          Toast.show(rejected
+            ? Util.t('toast.partial_db_save_reasons', { persisted, total, details: rejected })
+            : Util.t('toast.partial_db_save', { persisted, total }), 'warn', rejected ? 9000 : 6000);
         } else {
           ErrorLog.info('persistence', `Saved to backend (${persisted} tasks)`);
           Toast.show(Util.t('toast.saved_to_backend'), 'success');

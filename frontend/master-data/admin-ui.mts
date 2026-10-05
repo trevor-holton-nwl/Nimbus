@@ -4613,6 +4613,30 @@ export const WorkCenters = {
   // drains, serialized, still inside the write that preceded it).
   _queued: new Map<string, WorkCenterWriteRequest>(),
 
+  // D28 - set once the pagehide listener below is installed (first render()).
+  _pageHideWired: false,
+
+  /** Tab close / reload / navigation: the 500 ms debounce (and an in-flight write's queued
+   *  follow-ups) would otherwise die with the page, silently losing the last Work Center
+   *  edit. Send every captured-but-unsent write now with `keepalive: true`, which the
+   *  browser lets outlive the page. Best effort: no response handling is possible here. */
+  _flushOnPageHide(): void {
+    if (!Session.isAdmin()) return;
+    const requests = [...WorkCenters._queued.values()];
+    if (WorkCenters._dirty) {
+      const current = WorkCenters._buildWrite();
+      if (current) requests.push(current);
+    }
+    WorkCenters._queued.clear();
+    WorkCenters._dirty = false;
+    for (const q of requests) {
+      void Util.fetchTraced(
+        `${Config.API_BASE}/distribution/${encodeURIComponent(q.plant)}/workcenters/${encodeURIComponent(q.code)}`,
+        { method: 'PUT', keepalive: true, headers: { 'content-type': 'application/json' }, body: JSON.stringify(q.payload) },
+      ).catch(() => { /* page is going away */ });
+    }
+  },
+
   // Fires _autosave() ~500ms after the last Description/weight keystroke.
   // Util.debounce (foundation.mts) has no cancel/flush handle, so
   // _flushPending() below can't cancel this timer — it just wins the race by
@@ -4633,6 +4657,10 @@ export const WorkCenters = {
   async render(): Promise<void> {
     const pane = document.getElementById('md-master-work-centers-pane');
     if (!pane) return;
+    if (!WorkCenters._pageHideWired && typeof window !== 'undefined' && window.addEventListener) {
+      WorkCenters._pageHideWired = true;
+      window.addEventListener('pagehide', () => WorkCenters._flushOnPageHide());
+    }
     const plant = Store.selectedPlant;
     if (!plant) {
       pane.innerHTML = `<div class="md-empty">${Util.t('empty.wc_select_plant')}</div>`;

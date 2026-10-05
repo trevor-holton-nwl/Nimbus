@@ -6328,6 +6328,9 @@ function retainCompatiblePlacements(
 
 /**
  * P3a — detection only. Warns (never blocks, never affects the score vector)
+ * Severity (D50): this finding stays 'warning' while the compute-core ALERT for the same
+ * condition is sev 'err' - a validation 'error' would block Apply on a condition the
+ * optimizer cannot always repair, whereas the alert is the planner-facing red flag.
  * when a SAP aggregate order's distributed sub-orders (siblings sharing
  * `PARENT_ORDER`) start further apart than their work center's configured
  * `max_separation` policy allows. A future alignment pass may actually fix

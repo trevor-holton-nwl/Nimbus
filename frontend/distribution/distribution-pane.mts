@@ -326,6 +326,19 @@ export function fromPersistedFilters(saved: unknown): DistributionFilters {
   return base;
 }
 
+/** D37 - the date window the list fetch uses. The nav badge counts the plant's whole
+ *  "needs review" backlog (the summary endpoint has no window), so with no explicit
+ *  dates that bucket must not be windowed either, or the badge says 37 and the list
+ *  shows 12. Other buckets keep the default window (today .. visibility horizon end).
+ *  Explicit From/To always win. Empty string = no bound. */
+export function effectiveDateWindow(filters: DistributionFilters, todayIso: string, horizonEndIso: string): { from: string; to: string } {
+  const unwindowed = filters.bucket === 'needs_review';
+  return {
+    from: filters.from || (unwindowed ? '' : todayIso),
+    to: filters.to || (unwindowed ? '' : horizonEndIso),
+  };
+}
+
 export type DistEmptyState = 'no_workcenters' | 'no_orders' | 'no_match' | null;
 
 export interface EmptyStateContext {
@@ -534,8 +547,8 @@ export const DistributionPane = (() => {
 
   function _todayIso(): string { return Util.dayKey(new Date()); }
   function _horizonEndIso(): string { return Store.visibilityHorizonEnd ? Util.dayKey(Store.visibilityHorizonEnd) : ''; }
-  function _effectiveFrom(): string { return _filters.from || _todayIso(); }
-  function _effectiveTo(): string { return _filters.to || _horizonEndIso(); }
+  function _effectiveFrom(): string { return effectiveDateWindow(_filters, _todayIso(), _horizonEndIso()).from; }
+  function _effectiveTo(): string { return effectiveDateWindow(_filters, _todayIso(), _horizonEndIso()).to; }
 
   /* ---------------------------------------------------------------------
      Boot — wire the static shell + Store subscriptions exactly once.
