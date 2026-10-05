@@ -2227,11 +2227,35 @@ def load_labor_plan(plant: str) -> dict:
     return {"rows": rows}
 
 
+_LABOR_PERIOD_RE = re.compile(r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$")
+_LABOR_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_labor_cells(cells: list, field: str) -> None:
+    """Reject a malformed `period` (ISO week, YYYY-Www) or `day` (ISO date,
+    YYYY-MM-DD) before it reaches a TEXT primary-key column."""
+    for c in cells:
+        val = c.get(field)
+        if not val:
+            continue
+        ok = isinstance(val, str) and (
+            _LABOR_PERIOD_RE.match(val) if field == "period" else _LABOR_DAY_RE.match(val))
+        if ok and field == "day":
+            try:
+                datetime.strptime(val, "%Y-%m-%d")
+            except ValueError:
+                ok = False
+        if not ok:
+            kind = "ISO week (YYYY-Www)" if field == "period" else "ISO date (YYYY-MM-DD)"
+            raise ValueError(f"Invalid {field} {val!r}: expected {kind}")
+
+
 def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
     """Upsert or delete aggregate labor-plan cells. A null/empty avail_hours deletes the cell."""
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
     valid = [c for c in cells if c.get("wc_group") and c.get("period")]
+    _validate_labor_cells(valid, "period")
     to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
     to_upsert = [c for c in valid if c not in to_delete]
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -2305,6 +2329,7 @@ def upsert_labor_plan_machine(subnetwork: str, plant: str, cells: list, user_ema
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
     valid = [c for c in cells if c.get("machine") and c.get("day")]
+    _validate_labor_cells(valid, "day")
     to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
     to_upsert = [c for c in valid if c not in to_delete]
     with _pool.connection() as conn, conn.cursor() as cur:

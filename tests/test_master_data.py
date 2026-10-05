@@ -438,3 +438,15 @@ def test_every_multi_key_table_has_an_explicit_search_columns_entry():
     multi_key_tables = {table for table, keys in md._KEY_COLUMNS.items() if len(keys) > 1}
     missing = multi_key_tables - md._SEARCH_COLUMNS.keys()
     assert not missing, f"multi-key tables missing a _SEARCH_COLUMNS override: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("bad", ["2026-W00", "2026-W54", "2026W05", "tomorrow", "<b>x</b>", "2026-05-01"])
+def test_labor_plan_rejects_malformed_period(bad):
+    with pytest.raises(ValueError, match="Invalid period"):
+        md.upsert_labor_plan("WTG", "P1", [{"wc_group": "G", "period": bad, "avail_hours": 8}])
+
+
+@pytest.mark.parametrize("bad", ["2026-13-01", "2026-02-30", "05/01/2026", "2026-5-1", "x"])
+def test_labor_plan_line_rejects_malformed_day(bad):
+    with pytest.raises(ValueError, match="Invalid day"):
+        md.upsert_labor_plan_machine("WTG", "P1", [{"machine": "M1", "day": bad, "avail_hours": 8}])
