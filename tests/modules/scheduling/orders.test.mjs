@@ -1229,3 +1229,29 @@ test('#34 Inspector destroys the previous start-date Flatpickr on every re-rende
     Inspector._fpStart = null;
   }
 });
+
+test('#35 Printer.exportCsv writes plant-local wall-clock times, not UTC', async () => {
+  const priorDoc = globalThis.document;
+  const priorURL = globalThis.URL.createObjectURL;
+  const priorRevoke = globalThis.URL.revokeObjectURL;
+  const priorRows = Printer._rows;
+  let blob = null;
+  globalThis.document = { createElement: () => ({ click() {} }) };
+  globalThis.URL.createObjectURL = b => { blob = b; return 'blob:x'; };
+  globalThis.URL.revokeObjectURL = () => {};
+  try {
+    // Late-evening local time: its UTC rendering is a different calendar day/hour in any non-UTC zone.
+    const start = new Date(2026, 7, 14, 23, 30);
+    const end = new Date(2026, 7, 15, 1, 45);
+    Printer._rows = [{ MACHINE: 'L1', ORDER: '1', MATERIAL_NUMBER: 'M', MATERIAL_DESCRIPTION: 'd', start_date: start, end_date: end }];
+    Printer.exportCsv();
+    const row = (await blob.text()).split('\r\n')[1];
+    assert.ok(row.includes('2026-08-14 23:30'), `start must be local wall clock: ${row}`);
+    assert.ok(row.includes('2026-08-15 01:45'), `end must be local wall clock: ${row}`);
+  } finally {
+    globalThis.document = priorDoc;
+    globalThis.URL.createObjectURL = priorURL;
+    globalThis.URL.revokeObjectURL = priorRevoke;
+    Printer._rows = priorRows;
+  }
+});

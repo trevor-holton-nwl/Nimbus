@@ -2710,7 +2710,9 @@ export const Printer = {
 
   exportCsv() {
     if (!Printer._rows.length) { Toast.show(Util.t('toast.nothing_to_export'), 'warn'); return; }
-    const fmtDt = (d: Date | null) => d ? d.toISOString().slice(0, 16).replace('T', ' ') : '';
+    // Plant-local wall clock (same as every on-screen time) — toISOString() exported UTC,
+    // shifting each time by the viewer's UTC offset.
+    const fmtDt = (d: Date | null) => d ? Util.fmtDT(d) : '';
     const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
     // RFC-4180 quoting + formula guard on every text field (Util.csvCell); BOM so Excel
     // reads the file as UTF-8.
