@@ -390,3 +390,14 @@ test('#30 Toast defaults: errors and warnings stay longer than 1.5 s; explicit d
   }
   assert.deepEqual(delays.filter(d => d !== Config.ANIM_MS), [6000, 4000, 1500, 20]);
 });
+
+test('#33 matchPasteToCheckboxes with onBatch hands every newly matched box over once and fires no per-box events', () => {
+  const mk = value => ({ value, checked: false, events: 0, dispatchEvent() { this.events++; } });
+  const boxes = ['L1', 'L2', 'L3', 'L4'].map(mk);
+  boxes[1].checked = true; // already selected
+  const batches = [];
+  const res = Util.matchPasteToCheckboxes('l1\nL2\nL3\nNOPE', boxes, b => batches.push(b.map(x => x.value)));
+  assert.deepEqual(batches, [['L1', 'L3']], 'one callback carrying all N newly matched boxes');
+  assert.deepEqual(res, { matched: 3, total: 4 });
+  assert.ok(boxes.every(b => b.events === 0), 'no per-box change events (each would rebuild the checklist and detach the rest)');
+});

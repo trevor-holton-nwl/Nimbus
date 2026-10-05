@@ -708,6 +708,10 @@ export const Timeline = {
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
     if (conflict) cls.push('conflict-order');
+    // Filter dimming lives in className, which this builder recomputes on every rebuild —
+    // without re-applying it here a rebuild (plant/line change, bulk edit) silently un-dimmed
+    // every bar until the next filter tweak.
+    if (GanttFilter.isActive() && !GanttFilter.matches(t)) cls.push('dimmed');
     // Distribution marker (decision M, aggregate_to_detail.md §8): every child
     // of a distributed SAP order (bare 100% child included) gets the inset
     // keyline via dist-child; a lettered child additionally gets the
@@ -2849,8 +2853,11 @@ export const GanttFilter = {
     const colorIn = document.getElementById('gantt-color-paste-input') as HTMLInputElement | null;
     const formIn  = document.getElementById('gantt-form-paste-input') as HTMLInputElement | null;
     if (lineIn) {
+      // One Store update for the whole paste: each per-box change event rebuilds the
+      // checklist (via 'lines:selected'), detaching every later matched box.
       Util.wirePasteToCheckboxes(lineIn,
-        () => Array.from(document.getElementById('gantt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('gantt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        boxes => Store.setSelectedLines(new Set([...GanttFilter._selectedLines, ...boxes.map(cb => cb.value)]), 'gantt'));
     }
     if (colorIn) {
       Util.wirePasteToCheckboxes(colorIn,

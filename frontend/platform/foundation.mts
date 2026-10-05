@@ -785,24 +785,36 @@ export const Util = {
   // bubbling 'change' on each newly-checked box so the panel's own
   // onchange="..." handler does the Set-update + apply work — no separate
   // "select" logic to keep in sync.
-  matchPasteToCheckboxes(text: string, checkboxEls: HTMLInputElement[]): { matched: number; total: number } {
+  //
+  // Optional `onBatch`: when the panel's change handler REBUILDS the checklist (the
+  // shared Store.selectedLines pickers do), every box captured above is detached after the
+  // first change event and later values were silently lost — pasting N lines selected 1.
+  // With onBatch, no per-box event fires: the newly-matched boxes are handed over once so
+  // the caller can apply them in a single update.
+  matchPasteToCheckboxes(text: string, checkboxEls: HTMLInputElement[],
+                         onBatch?: (newlyMatched: HTMLInputElement[]) => void): { matched: number; total: number } {
     const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
     const byValue = new Map();
     checkboxEls.forEach(cb => byValue.set(Util.norm(cb.value), cb));
     let matched = 0;
+    const fresh: HTMLInputElement[] = [];
     distinct.forEach(v => {
       const cb = byValue.get(v);
       if (!cb) return;
       matched++;
-      if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+      if (cb.checked) return;
+      if (onBatch) { fresh.push(cb); return; }
+      cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    if (onBatch && fresh.length) onBatch(fresh);
     return { matched, total: distinct.length };
   },
 
   // One-time wiring for a small paste-capture <input> sitting atop a
   // checkbox panel. getCheckboxEls is called lazily at paste-time so it
   // always sees the panel's current (rebuilt) checkbox list.
-  wirePasteToCheckboxes(inputEl: PasteWiredInput, getCheckboxEls: () => HTMLInputElement[]): void {
+  wirePasteToCheckboxes(inputEl: PasteWiredInput, getCheckboxEls: () => HTMLInputElement[],
+                        onBatch?: (newlyMatched: HTMLInputElement[]) => void): void {
     if (!inputEl || inputEl._pasteWired) return;
     inputEl._pasteWired = true;
     inputEl.addEventListener('paste', e => {
@@ -810,7 +822,7 @@ export const Util = {
       const text = (e.clipboardData || (window as unknown as { clipboardData?: DataTransfer }).clipboardData)!.getData('text/plain');
       inputEl.value = '';
       if (!text || !text.trim()) return;
-      const { matched, total } = Util.matchPasteToCheckboxes(text, getCheckboxEls());
+      const { matched, total } = Util.matchPasteToCheckboxes(text, getCheckboxEls(), onBatch);
       if (!total) return;
       Toast.show(Util.t('toast.paste_checkbox_match', { matched, total }), matched > 0 ? 'success' : 'warn');
     });
