@@ -1808,16 +1808,84 @@ def status_matches_filter(statuses: set, status_or_bucket: str | None) -> bool:
     return status_or_bucket in statuses
 
 
-# Safety cap on the candidate header set list_headers_for_plant()/get_summary()
-# load before computing derived statuses in Python. A plant's order_distribution
-# header count is bounded by its count of currently-tracked aggregate SAP
-# orders (not the O(states^2) setup-matrix hazard the scale roadmap actually
-# warns against, root CLAUDE.md), but bucket/status filtering is inherently a
-# read-time Python computation (derived statuses are never stored, §5.7) that
-# can't be pushed into the SQL LIMIT/OFFSET -- this bounds the SQL-filterable
-# candidate set before that computation runs, rather than fetching every
-# header a plant has ever had.
-_LIST_CANDIDATE_CAP = 5000
+# #24 (D13/D14): the derived-status flags are ALSO expressible in SQL, so the
+# list filter/count/page and the summary run in the database with no candidate
+# cap. `service.compute_derived_statuses` stays the oracle (the page's wire
+# `statuses` still come from it, and a real-DB parity test asserts the SQL
+# flags below equal it for every status). Every expression is written against
+# the unaliased `order_distribution` table, so it can be dropped into any query
+# whose FROM is that table. One header's facts are gathered ONCE (one probe of
+# its shares, one of its children, its work center row and member machines)
+# by `_STATUS_FROM`, then every flag is a cheap array/boolean test on them.
+_OD_SHARE_KEY = ("s.plant = order_distribution.plant"
+                 " AND s.production_order = order_distribution.production_order"
+                 " AND s.material_number = order_distribution.material_number")
+_OD_CHILD_KEY = ("c.plant = order_distribution.plant"
+                 " AND c.parent_production_order = order_distribution.production_order"
+                 " AND c.material_number = order_distribution.material_number")
+_STATUS_FROM = (
+    "(SELECT 1) _b"
+    " LEFT JOIN LATERAL (SELECT"
+    " COALESCE(array_agg(s.machine) FILTER (WHERE s.weight > 0 AND s.purged_at IS NULL), '{}'::text[]) AS sh_live,"
+    " COALESCE(array_agg(s.machine) FILTER (WHERE s.weight > 0), '{}'::text[]) AS sh_pos,"
+    " COALESCE(array_agg(s.machine), '{}'::text[]) AS sh_all,"
+    " COALESCE(bool_or(s.purged_at IS NOT NULL), FALSE) AS sh_purged"
+    f" FROM order_distribution_share s WHERE {_OD_SHARE_KEY}) sh ON TRUE"
+    " LEFT JOIN LATERAL (SELECT"
+    " COALESCE(array_agg(c.machine) FILTER (WHERE c.machine IS NOT NULL), '{}'::text[]) AS ch_m,"
+    " COALESCE(bool_or(c.machine IS NULL), FALSE) AS ch_null,"
+    " COALESCE(bool_or(c.order_quantity = 0), FALSE) AS ch_zero,"
+    " COALESCE(bool_or(c.runtime_schedule_mismatch), FALSE) AS ch_mm,"
+    " COALESCE(bool_or(mp.min_lot_size > 0 AND c.order_quantity IS NOT NULL"
+    "                  AND c.order_quantity < mp.min_lot_size), FALSE) AS ch_lot"
+    " FROM orders c LEFT JOIN material_plants mp ON mp.plant = c.plant AND mp.material_id = c.material_number"
+    f" WHERE {_OD_CHILD_KEY}) ch ON TRUE"
+    " LEFT JOIN sap_workcenter w ON w.plant = order_distribution.plant"
+    " AND w.sap_workcenter = order_distribution.sap_workcenter"
+    " LEFT JOIN LATERAL (SELECT COALESCE(array_agg(m.machine), '{}'::text[]) AS mem_m"
+    " FROM machine m WHERE m.plant = order_distribution.plant"
+    " AND m.sap_workcenter = order_distribution.sap_workcenter) mem ON TRUE"
+)
+
+_STATUS_SQL: dict[str, str] = {
+    "needs_review": "NOT order_distribution.reviewed",
+    # D16: NULL reviewed_quantity never fires; order_quantity NULL vs a stamped
+    # quantity compares unequal (Python `None != x`), hence IS DISTINCT FROM.
+    "qty_changed": ("(order_distribution.reviewed AND order_distribution.reviewed_quantity IS NOT NULL"
+                    " AND order_distribution.order_quantity IS DISTINCT FROM order_distribution.reviewed_quantity)"),
+    # live share with no child, or a child (incl. NULL machine) with no live share
+    "incomplete": "(NOT (sh.sh_live <@ ch.ch_m) OR ch.ch_null OR NOT (ch.ch_m <@ sh.sh_live))",
+    "mode_mismatch": "COALESCE(w.distribution_mode = 'single', FALSE)",
+    # Python truthiness of sap_facts.previous_workcenter.
+    "wc_changed": ("(COALESCE(order_distribution.sap_facts -> 'previous_workcenter', 'null'::jsonb)"
+                   " NOT IN ('null'::jsonb, 'false'::jsonb, '\"\"'::jsonb, '0'::jsonb, '[]'::jsonb, '{}'::jsonb))"),
+    # only when the work center row exists: positive share on a non-member, or a member with no share
+    "membership_changed": "(w.sap_workcenter IS NOT NULL AND (NOT (sh.sh_pos <@ mem.mem_m) OR NOT (mem.mem_m <@ sh.sh_all)))",
+    "below_min_lot": "ch.ch_lot",
+    "zero_quantity_children": "ch.ch_zero",
+    "purged": "sh.sh_purged",
+    "runtime_mismatch": "ch.ch_mm",
+}
+
+
+def _status_expr(status_or_bucket: str | None) -> str | None:
+    """Boolean SQL expression (over `_STATUS_FROM`'s columns) equivalent of
+    `status_matches_filter` (None = no filter). A code the server never derives
+    (e.g. the client-side `separation_violated`, or garbage) matches nothing,
+    as in Python."""
+    if not status_or_bucket or status_or_bucket == "all":
+        return None
+    if status_or_bucket in _STATUS_BUCKETS:
+        codes = sorted(c for c in _STATUS_BUCKETS[status_or_bucket] if c in _STATUS_SQL)
+        return "(" + " OR ".join(_STATUS_SQL[c] for c in codes) + ")" if codes else "FALSE"
+    return _STATUS_SQL.get(status_or_bucket, "FALSE")
+
+
+def _status_filter_sql(status_or_bucket: str | None) -> str | None:
+    """WHERE-clause predicate for a query whose FROM is `order_distribution`."""
+    expr = _status_expr(status_or_bucket)
+    return None if expr is None else f"(SELECT {expr} FROM {_STATUS_FROM})"
+
 
 _HEADER_COLUMNS_SQL = """
     plant, production_order, material_number, sap_workcenter, order_quantity,
@@ -1844,16 +1912,8 @@ def _row_to_header(r) -> dict:
 _INTERNAL_HEADER_KEYS = frozenset({"shares", "children", "workcenter", "machines", "statuses"})
 
 
-def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter: str | None = None,
-                       reviewed: bool | None = None, batch: str | None = None,
-                       date_from=None, date_to=None, machines: list | None = None,
-                       limit_cap: int | None = _LIST_CANDIDATE_CAP) -> list[dict]:
-    """Every header matching the SQL-expressible filters (§6 "Data"), ordered
-    `basic_start_date ASC, reviewed ASC` (§6's stated default sort), with
-    `production_order ASC, material_number ASC` appended as a stable
-    tiebreaker (D42) so paging never reorders same-start-date rows between
-    pages. Bucket/status filtering happens afterward in Python (see module
-    note above)."""
+def _header_where_sql(plant: str, *, search=None, workcenter=None, reviewed=None, batch=None,
+                      date_from=None, date_to=None, machines=None, status_sql=None) -> tuple[str, list]:
     where = ["plant = %s"]
     params: list = [plant]
     if search:
@@ -1884,11 +1944,35 @@ def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter
             " AND s.machine = ANY(%s))"
         )
         params.append(list(machines))
-    where_sql = " AND ".join(where)
+    if status_sql:
+        where.append(status_sql)
+    return " AND ".join(where), params
+
+
+def _fetch_header_rows(cur, plant: str, *, search: str | None = None, workcenter: str | None = None,
+                       reviewed: bool | None = None, batch: str | None = None,
+                       date_from=None, date_to=None, machines: list | None = None,
+                       status: str | None = None, limit: int | None = None, offset: int = 0,
+                       limit_cap: int | None = None) -> list[dict]:
+    """Every header matching the SQL-expressible filters (§6 "Data") -- since
+    #24 including the derived-status/bucket filter (`status`) -- ordered
+    `basic_start_date ASC, reviewed ASC` (§6's stated default sort), with
+    `production_order ASC, material_number ASC` appended as a stable
+    tiebreaker (D42) so paging never reorders same-start-date rows between
+    pages. `limit`/`offset` page in SQL; `limit_cap` is a plain row cap."""
+    where_sql, params = _header_where_sql(
+        plant, search=search, workcenter=workcenter, reviewed=reviewed, batch=batch,
+        date_from=date_from, date_to=date_to, machines=machines, status_sql=_status_filter_sql(status),
+    )
     limit_sql = ""
-    if limit_cap is not None:
+    if limit is None:
+        limit = limit_cap
+    if limit is not None:
         limit_sql = " LIMIT %s"
-        params.append(limit_cap)
+        params.append(limit)
+        if offset:
+            limit_sql += " OFFSET %s"
+            params.append(offset)
     cur.execute(
         f"""
         SELECT {_HEADER_COLUMNS_SQL}
@@ -2083,29 +2167,31 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
     `changed`, `problems`), or an individual status code directly (deep
     links); `None`/`''`/`'all'` means unfiltered.
 
-    `meta.truncated` (D13) is True when the plant's SQL-filterable candidate
-    header set exceeds `_LIST_CANDIDATE_CAP` -- `total`/bucket counts then
-    reflect only the capped candidate set, not the plant's true header count.
+    #24: the bucket/status filter, `total`, `scheduled_children` and the page
+    are all computed in SQL over EVERY matching header (no candidate cap); only
+    the visible page is hydrated and run through the Python classifier for its
+    wire `statuses`. `meta.truncated` is kept for wire compatibility and is
+    always False now.
     """
+    status_sql = _status_filter_sql(bucket)
     with _pool.connection() as conn, conn.cursor() as cur:
-        headers = _fetch_header_rows(
+        where, params = _header_where_sql(
+            plant, search=search, workcenter=workcenter, reviewed=reviewed, batch=batch,
+            date_from=date_from, date_to=date_to, machines=machines, status_sql=status_sql,
+        )
+        cur.execute(
+            "SELECT count(*), COALESCE(SUM((SELECT count(*) FROM orders c"
+            f" WHERE {_OD_CHILD_KEY} AND c.scheduled_start IS NOT NULL)), 0)"
+            f" FROM order_distribution WHERE {where}", params,
+        )
+        total, scheduled_children = cur.fetchone()
+        page = _fetch_header_rows(
             cur, plant, search=search, workcenter=workcenter, reviewed=reviewed,
             batch=batch, date_from=date_from, date_to=date_to, machines=machines,
-            limit_cap=_LIST_CANDIDATE_CAP + 1,
-        )
-        truncated = len(headers) > _LIST_CANDIDATE_CAP
-        headers = headers[:_LIST_CANDIDATE_CAP]
-        _hydrate_headers(cur, plant, headers)
+            status=bucket, limit=limit or None, offset=offset,
+        ) if total else []
+        _hydrate_headers(cur, plant, page)
 
-    if bucket and bucket != "all":
-        headers = [h for h in headers if status_matches_filter(h["statuses"], bucket)]
-
-    total = len(headers)
-    scheduled_children = sum(
-        1 for h in headers for c in h.get("children", []) if c.get("scheduled_start") is not None
-    )
-
-    page = headers[offset:offset + limit] if limit else headers[offset:]
     data = [
         {
             "header": _header_wire_shape(h),
@@ -2117,7 +2203,7 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
     ]
     return {
         "data": data,
-        "meta": {"total": total, "scheduled_children": scheduled_children, "truncated": truncated},
+        "meta": {"total": int(total), "scheduled_children": int(scheduled_children), "truncated": False},
     }
 
 
@@ -2165,21 +2251,19 @@ def get_summary(plant: str) -> dict:
     problems}` counts over the plant's headers, classified by the SAME
     `classify_bucket_membership` this module's `list_headers_for_plant`
     `bucket` filter uses -- the two can't drift apart because they share
-    this one function. `truncated` (D13) mirrors the list route's
-    `meta.truncated`: True when the plant's candidate header set exceeds
-    `_LIST_CANDIDATE_CAP`, so the counts above are then a lower bound."""
+    this one function. #24: one `count(*) FILTER` per bucket over EVERY header
+    (no cap); `truncated` is kept for wire compatibility and is always False."""
+    nr, ch, pr = (_status_expr(b) for b in ("needs_review", "changed", "problems"))
     with _pool.connection() as conn, conn.cursor() as cur:
-        headers = _fetch_header_rows(cur, plant, limit_cap=_LIST_CANDIDATE_CAP + 1)
-        truncated = len(headers) > _LIST_CANDIDATE_CAP
-        headers = headers[:_LIST_CANDIDATE_CAP]
-        _hydrate_headers(cur, plant, headers)
-
-    counts = {"needs_review": 0, "changed": 0, "problems": 0}
-    for h in headers:
-        for bucket_name in classify_bucket_membership(h["statuses"]):
-            counts[bucket_name] += 1
-    counts["truncated"] = truncated
-    return counts
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE f.nr), count(*) FILTER (WHERE f.ch), count(*) FILTER (WHERE f.pr)"
+            " FROM order_distribution LEFT JOIN LATERAL"
+            f" (SELECT {nr} AS nr, {ch} AS ch, {pr} AS pr FROM {_STATUS_FROM}) f ON TRUE"
+            " WHERE order_distribution.plant = %s", (plant,),
+        )
+        needs_review, changed, problems = cur.fetchone()
+    return {"needs_review": int(needs_review), "changed": int(changed), "problems": int(problems),
+            "truncated": False}
 
 
 def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, date_to=None) -> list[dict]:
@@ -3582,7 +3666,9 @@ def _resolve_repair(plant: str, dry_run: bool) -> dict:
     """`resolve` scope `repair`: every header currently classified
     `incomplete` (SS5.7) gets re-materialized via `_repair_one_header`."""
     with _pool.connection() as conn, conn.cursor() as cur:
-        headers = _fetch_header_rows(cur, plant)
+        # #24: the SQL `incomplete` flag selects the candidates (no cap); the
+        # Python classifier remains the final word on each hydrated header.
+        headers = _fetch_header_rows(cur, plant, status="incomplete")
         _hydrate_headers(cur, plant, headers)
         incomplete = [h for h in headers if "incomplete" in h.get("statuses", set())]
 

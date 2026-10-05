@@ -5,6 +5,7 @@ transaction seam (@pytest.mark.pg -- requires a local/CI Postgres with
 NIMBUS_TEST_DB=1; auto-skipped otherwise, see tests/conftest.py).
 """
 
+import json
 import uuid
 import datetime as dt
 import unittest.mock as mock
@@ -2371,9 +2372,8 @@ class TestLockOneHeaderForUpdateFlag:
 class TestFetchHeaderRowsOrderByAndSearch:
     """D42 + D59 unit tests (no DB): `_fetch_header_rows` must append a
     stable `production_order ASC, material_number ASC` tiebreaker after its
-    stated default sort (paging happens in Python afterward -- see the
-    module note above `_LIST_CANDIDATE_CAP` -- so a stable ORDER BY is all
-    that's required, no keyset pagination), and its `search` predicate must
+    stated default sort (paging is OFFSET/LIMIT in SQL since #24, so a stable
+    ORDER BY is all that's required), and its `search` predicate must
     escape the user's own ILIKE wildcard characters via `db._like_contains`
     + `ESCAPE '\\'` (D59) rather than embedding the raw term."""
 
@@ -2404,69 +2404,201 @@ class TestFetchHeaderRowsOrderByAndSearch:
 
 
 @pytest.mark.pg
-class TestListAndSummaryReportCandidateSetTruncation:
-    """D13: when a plant's SQL-filterable candidate header set exceeds
-    `_LIST_CANDIDATE_CAP`, both the list route's `meta.truncated` and the
-    summary route's top-level `truncated` must say so, rather than silently
-    reporting counts/filters over only the first `_LIST_CANDIDATE_CAP` rows
-    with no signal that more exist. Monkeypatches the cap down to 2 and
-    seeds 3 bare headers (no shares/children needed -- only the candidate
-    count matters here) so the fetch-time `+1` cap probe actually trips."""
+class TestSqlStatusClassificationParityAndScale:
+    """#24 (D13/D14): the review queue classifies in SQL with no candidate cap.
+    `service.compute_derived_statuses` stays the oracle: for a fixture covering
+    every derived status, each SQL flag must equal the Python result for every
+    header; and >5,000 headers must all be counted by the summary."""
     PLANT = "1006"
-    WC = "ZZTEST_WC_TRUNC"
-    MAT = "ZZTEST_MAT_TRUNC"
-    ORDS = ["ZZTEST_ORD_TRUNC_1", "ZZTEST_ORD_TRUNC_2", "ZZTEST_ORD_TRUNC_3"]
+    SUB = "WTG"
+    WC_D, WC_S = "ZZTEST_WC_PAR_D", "ZZTEST_WC_PAR_S"
+    M1, M2, MX = "ZZTEST_PAR_M1", "ZZTEST_PAR_M2", "ZZTEST_PAR_MX"
+    MAT, MAT_LOT = "ZZTEST_PAR_MAT", "ZZTEST_PAR_MLOT"
+    PFX = "ZZTEST_PAR_"
+    BULK = "ZZTEST_BULK_"
 
     def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE plant = %s AND (production_order LIKE %s OR parent_production_order LIKE %s)",
+                    (self.PLANT, "ZZTEST_PAR_%", "ZZTEST_PAR_%"))
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s AND (production_order LIKE %s OR production_order LIKE %s)",
+                    (self.PLANT, "ZZTEST_PAR_%", "ZZTEST_BULK_%"))
+        cur.execute("DELETE FROM machine WHERE plant = %s AND machine = ANY(%s)", (self.PLANT, [self.M1, self.M2, self.MX]))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = ANY(%s)",
+                    (self.PLANT, [self.WC_D, self.WC_S]))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = ANY(%s)",
+                    (self.PLANT, [self.MAT, self.MAT_LOT]))
+        cur.execute("DELETE FROM materials WHERE material_id = ANY(%s)", ([self.MAT, self.MAT_LOT],))
+
+    def _header(self, cur, name, wc=None, *, reviewed=False, qty=100, rq=None, facts=None, mat=None):
         cur.execute(
-            "DELETE FROM order_distribution WHERE plant = %s AND production_order = ANY(%s)",
-            (self.PLANT, self.ORDS),
+            "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter, order_quantity,"
+            " run_time, basic_start_date, reviewed, reviewed_quantity, sap_facts)"
+            " VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s,%s::jsonb)",
+            (self.PLANT, self.PFX + name, mat or self.MAT, wc or self.WC_D, qty,
+             dt.datetime(2026, 10, 1, 8, 0), reviewed, rq, None if facts is None else json.dumps(facts)),
         )
-        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
-                    (self.PLANT, self.WC))
+
+    def _share(self, cur, name, machine, letter, weight=1, purged=False, mat=None):
+        cur.execute(
+            "INSERT INTO order_distribution_share (plant, production_order, material_number, machine, letter, weight, purged_at)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (self.PLANT, self.PFX + name, mat or self.MAT, machine, letter, weight,
+             dt.datetime(2026, 10, 2) if purged else None),
+        )
+
+    def _child(self, cur, name, machine, qty=10, mismatch=False, mat=None, scheduled=False):
+        cid = self.PFX + name + "-C" + str(machine)
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, machine, plant, parent_production_order,"
+            " order_quantity, runtime_schedule_mismatch, scheduled_start) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (cid, cid, mat or self.MAT, machine, self.PLANT, self.PFX + name, qty, mismatch,
+             dt.datetime(2026, 10, 3) if scheduled else None),
+        )
 
     @pytest.fixture(autouse=True)
-    def _seed(self, pg, monkeypatch):
+    def _seed(self, pg):
         db_ = pg
+        self.db = db_
         with db_._pool.connection() as conn, conn.cursor() as cur:
             self._cleanup(cur)
-            cur.execute(
-                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
-                "VALUES (%s, %s, 'single')", (self.PLANT, self.WC),
-            )
-            for ord_ in self.ORDS:
-                cur.execute(
-                    "INSERT INTO order_distribution (plant, production_order, material_number,"
-                    " sap_workcenter, order_quantity, run_time, basic_start_date, basic_finish_date)"
-                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (self.PLANT, ord_, self.MAT, self.WC, 10.0, 1.0,
-                     dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 9, 0)),
-                )
+            cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode)"
+                        " VALUES (%s,%s,'distribute'),(%s,%s,'single')",
+                        (self.PLANT, self.WC_D, self.PLANT, self.WC_S))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
+                        (self.SUB, self.PLANT, self.M1, self.WC_D, self.SUB, self.PLANT, self.M2, self.WC_D))
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            _seed_distribution_material(cur, self.MAT_LOT, self.PLANT)
+            cur.execute("UPDATE material_plants SET min_lot_size = 50 WHERE plant = %s AND material_id = %s",
+                        (self.PLANT, self.MAT_LOT))
+
+            self._header(cur, "plain_reviewed", reviewed=True, rq=100)
+            self._header(cur, "needs_review")
+            self._header(cur, "qty_changed", reviewed=True, rq=80)
+            self._header(cur, "qty_null_order", reviewed=True, qty=None, rq=5)
+            self._header(cur, "qty_null_rq", reviewed=True, rq=None)
+            # incomplete: live share, no child
+            self._header(cur, "inc_no_child", reviewed=True, rq=100)
+            self._share(cur, "inc_no_child", self.M1, "A")
+            # incomplete: child, no share
+            self._header(cur, "inc_orphan_child", reviewed=True, rq=100)
+            self._child(cur, "inc_orphan_child", self.M1)
+            # complete pair on both members
+            self._header(cur, "complete", reviewed=True, rq=100)
+            for m, letter in ((self.M1, "A"), (self.M2, "B")):
+                self._share(cur, "complete", m, letter)
+                self._child(cur, "complete", m, scheduled=True)
+            # zero-weight and purged shares without a child are NOT incomplete
+            self._header(cur, "zero_purged_nochild", reviewed=True, rq=100)
+            self._share(cur, "zero_purged_nochild", self.M1, "A", weight=0)
+            self._share(cur, "zero_purged_nochild", self.M2, "B", weight=1, purged=True)
+            # child with a NULL machine
+            self._header(cur, "null_machine_child", reviewed=True, rq=100)
+            self._child(cur, "null_machine_child", None)
+            # mode mismatch (work center now single)
+            self._header(cur, "mode", wc=self.WC_S, reviewed=True, rq=100)
+            # wc_changed truthy / falsey
+            self._header(cur, "wc_prev", reviewed=True, rq=100, facts={"previous_workcenter": "OLD"})
+            self._header(cur, "wc_prev_empty", reviewed=True, rq=100, facts={"previous_workcenter": ""})
+            self._header(cur, "wc_prev_null", reviewed=True, rq=100, facts={"previous_workcenter": None})
+            # membership: member M2 has no share; positive share on a non-member
+            self._header(cur, "member_missing_share", reviewed=True, rq=100)
+            self._share(cur, "member_missing_share", self.M1, "A")
+            self._child(cur, "member_missing_share", self.M1)
+            self._header(cur, "share_not_member", reviewed=True, rq=100)
+            self._share(cur, "share_not_member", self.MX, "A")
+            self._share(cur, "share_not_member", self.M1, "B", weight=0)
+            self._share(cur, "share_not_member", self.M2, "C", weight=0)
+            self._child(cur, "share_not_member", self.MX)
+            # below min lot / zero qty / runtime mismatch / purged
+            self._header(cur, "lot", reviewed=True, rq=100, mat=self.MAT_LOT)
+            self._share(cur, "lot", self.M1, "A", mat=self.MAT_LOT)
+            self._share(cur, "lot", self.M2, "B", mat=self.MAT_LOT)
+            self._child(cur, "lot", self.M1, qty=10, mat=self.MAT_LOT)
+            self._child(cur, "lot", self.M2, qty=60, mat=self.MAT_LOT)
+            self._header(cur, "zero_qty", reviewed=True, rq=100)
+            self._share(cur, "zero_qty", self.M1, "A")
+            self._share(cur, "zero_qty", self.M2, "B")
+            self._child(cur, "zero_qty", self.M1, qty=0)
+            self._child(cur, "zero_qty", self.M2, qty=5)
+            self._header(cur, "mismatch", reviewed=True, rq=100)
+            self._share(cur, "mismatch", self.M1, "A")
+            self._share(cur, "mismatch", self.M2, "B")
+            self._child(cur, "mismatch", self.M1, mismatch=True)
+            self._child(cur, "mismatch", self.M2)
+            self._header(cur, "purged", reviewed=True, rq=100)
+            self._share(cur, "purged", self.M1, "A")
+            self._share(cur, "purged", self.M2, "B", purged=True)
+            self._child(cur, "purged", self.M1)
             conn.commit()
-        monkeypatch.setattr(distribution_data, "_LIST_CANDIDATE_CAP", 2)
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
             self._cleanup(cur)
             conn.commit()
 
-    @pytest.fixture
-    def client(self):
-        brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [self.PLANT]
-        brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
-        try:
-            yield TestClient(brain.api)
-        finally:
-            brain.api.dependency_overrides.clear()
+    def _python_statuses(self):
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            headers = distribution_data._fetch_header_rows(cur, self.PLANT, search=self.PFX)
+            distribution_data._hydrate_headers(cur, self.PLANT, headers)
+            return {h["production_order"]: set(h["statuses"]) for h in headers}
 
-    def test_list_reports_truncated(self, client):
-        response = client.get(f"/distribution/{self.PLANT}", params={"search": "ZZTEST_ORD_TRUNC"})
-        assert response.status_code == 200
-        assert response.json()["meta"]["truncated"] is True
+    def test_sql_flags_equal_python_classifier_for_every_status(self):
+        py = self._python_statuses()
+        assert len(py) >= 20
+        covered = set().union(*py.values())
+        every = set(distribution_data._STATUS_SQL)
+        assert covered == every, f"fixture must exercise every status; missing {every - covered}"
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            for code in distribution_data._STATUS_SQL:
+                cur.execute(
+                    "SELECT production_order FROM order_distribution WHERE plant = %s"
+                    f" AND production_order LIKE %s AND (SELECT {distribution_data._STATUS_SQL[code]}"
+                    f" FROM {distribution_data._STATUS_FROM})",
+                    (self.PLANT, self.PFX + "%"),
+                )
+                sql_set = {r[0] for r in cur.fetchall()}
+                py_set = {po for po, st in py.items() if code in st}
+                assert sql_set == py_set, (code, sql_set ^ py_set)
 
-    def test_summary_reports_truncated(self, client):
-        response = client.get(f"/distribution/{self.PLANT}/summary")
-        assert response.status_code == 200
-        assert response.json()["truncated"] is True
+    def test_list_and_summary_match_python_buckets(self):
+        py = self._python_statuses()
+        for bucket in ("needs_review", "changed", "problems", "purged", "incomplete",
+                       "separation_violated", "bogus", "all"):
+            out = distribution_data.list_headers_for_plant(self.PLANT, search=self.PFX, bucket=bucket, limit=1000)
+            want = {po for po, st in py.items() if status_matches_filter(st, bucket)}
+            got = {r["header"]["production_order"] for r in out["data"]}
+            assert got == want, bucket
+            assert out["meta"]["total"] == len(want) and out["meta"]["truncated"] is False
+            for r in out["data"]:  # wire statuses still come from the Python oracle
+                assert set(r["statuses"]) == py[r["header"]["production_order"]]
+        summ = distribution_data.get_summary(self.PLANT)
+        for name in ("needs_review", "changed", "problems"):
+            assert summ[name] >= sum(1 for st in py.values() if name in classify_bucket_membership(st))
+        assert summ["truncated"] is False
+
+    def test_scheduled_children_and_paging(self):
+        out = distribution_data.list_headers_for_plant(self.PLANT, search=self.PFX, limit=3, offset=2)
+        assert len(out["data"]) == 3
+        assert out["meta"]["scheduled_children"] == 2
+        full = distribution_data.list_headers_for_plant(self.PLANT, search=self.PFX, limit=1000)
+        assert ([r["header"]["production_order"] for r in full["data"]][2:5]
+                == [r["header"]["production_order"] for r in out["data"]])
+
+    def test_summary_counts_past_5000_headers(self):
+        before = distribution_data.get_summary(self.PLANT)
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter,"
+                " order_quantity, run_time, basic_start_date)"
+                " SELECT %s, %s || g, %s, %s, 10, 1, now() FROM generate_series(1, 5100) g",
+                (self.PLANT, self.BULK, self.MAT, self.WC_D),
+            )
+            conn.commit()
+        after = distribution_data.get_summary(self.PLANT)
+        assert after["needs_review"] - before["needs_review"] == 5100
+        assert after["truncated"] is False
+        out = distribution_data.list_headers_for_plant(self.PLANT, bucket="needs_review", limit=50, offset=5000)
+        assert out["meta"]["total"] >= 5100 and len(out["data"]) == 50
+        assert out["meta"]["truncated"] is False
 
 
 @pytest.mark.pg
