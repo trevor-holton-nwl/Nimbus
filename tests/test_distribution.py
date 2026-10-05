@@ -3389,11 +3389,45 @@ class TestChildUpsertNeverAutoFlagsRuntimeMismatch(_ReweightFixtureBase):
 
         assert self._mismatch_flag(pg, self.L1) is True
 
-    def test_flag_is_never_auto_set_true_by_a_write_that_did_not_set_it(self, pg):
-        # Both children start FALSE/NULL (fresh insert never sets the column).
+    def test_flag_is_never_auto_set_true_for_an_unscheduled_child(self, pg):
+        # Both children start FALSE/NULL and unscheduled: a run-time change has no bar to re-fit.
         self._reingest_run_time(pg, 45.0)
         assert self._mismatch_flag(pg, self.L1) is not True
         assert self._mismatch_flag(pg, self.L2) is not True
+
+    def _schedule(self, pg, machine, source=None):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time_source=%s"
+                " WHERE plant=%s AND parent_production_order=%s AND machine=%s",
+                (dt.datetime(2026, 10, 2, 8), dt.datetime(2026, 10, 2, 12), source,
+                 self.PLANT, self.ORD, machine))
+            conn.commit()
+
+    def test_h10_scheduled_child_with_changed_run_time_is_flagged(self, pg):
+        self._schedule(pg, self.L1)
+        self._reingest_run_time(pg, 30.0)
+        assert self._mismatch_flag(pg, self.L1) is True
+        assert self._mismatch_flag(pg, self.L2) is not True  # unscheduled sibling untouched
+
+    def test_h10_scheduled_child_with_same_run_time_is_not_flagged(self, pg):
+        self._schedule(pg, self.L1)
+        self._reingest_run_time(pg, 10.0, qty=150.0)  # quantity changes, run time per share does not
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time FROM orders WHERE plant=%s AND parent_production_order=%s AND machine=%s",
+                        (self.PLANT, self.ORD, self.L1))
+            before = cur.fetchone()[0]
+        self._reingest_run_time(pg, 10.0, qty=150.0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time FROM orders WHERE plant=%s AND parent_production_order=%s AND machine=%s",
+                        (self.PLANT, self.ORD, self.L1))
+            assert cur.fetchone()[0] == before
+        assert self._mismatch_flag(pg, self.L1) is not True
+
+    def test_h10_manual_run_time_kept_is_not_flagged(self, pg):
+        self._schedule(pg, self.L1, source="manual")
+        self._reingest_run_time(pg, 30.0)
+        assert self._mismatch_flag(pg, self.L1) is not True
 
 
 @pytest.mark.pg

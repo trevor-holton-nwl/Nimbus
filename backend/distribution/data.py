@@ -1309,7 +1309,16 @@ _CHILD_UPSERT_SQL = """
         parent_production_order = EXCLUDED.parent_production_order,
         distribution_letter     = EXCLUDED.distribution_letter,
         upload_batch_id         = EXCLUDED.upload_batch_id,
-        runtime_schedule_mismatch = COALESCE(orders.runtime_schedule_mismatch, FALSE),
+        -- H10/D33: a SCHEDULED child whose effective run time actually changed needs
+        -- its bar re-fitted (the client reconcile reads this flag); anything else
+        -- keeps the existing flag untouched. Effective = the run_time CASE above.
+        runtime_schedule_mismatch = CASE
+            WHEN (CASE WHEN orders.run_time_source IN ('routing', 'manual') THEN orders.run_time
+                       ELSE EXCLUDED.run_time END) IS DISTINCT FROM orders.run_time
+                 AND (orders.scheduled_start IS NOT NULL
+                      OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
+            THEN TRUE
+            ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
         updated_at              = NOW()
     WHERE orders.order_quantity IS DISTINCT FROM EXCLUDED.order_quantity
        OR orders.run_time IS DISTINCT FROM EXCLUDED.run_time
