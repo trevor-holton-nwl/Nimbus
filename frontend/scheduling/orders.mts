@@ -695,7 +695,10 @@ export const Table = {
     const colorIn = document.getElementById('tbl-flt-color-paste-input') as HTMLInputElement | null;
     if (lineIn) {
       Util.wirePasteToCheckboxes(lineIn,
-        () => Array.from(document.getElementById('tbl-flt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('tbl-flt-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        // One Store update for the whole paste: per-box change events rebuild the checklist
+        // and detach the later boxes (pasting N lines selected 1).
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'table'));
     }
     if (colorIn) {
       Util.wirePasteToCheckboxes(colorIn,

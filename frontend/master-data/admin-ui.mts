@@ -2343,7 +2343,8 @@ export const ProdLines = {
         ProdLines._rebuildLineFilterChecklist(allLines);
       };
       Util.wirePasteToCheckboxes(search,
-        () => Array.from(document.getElementById('lines-nav-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('lines-nav-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'masterdata'));
     }
     const list = document.getElementById('lines-nav-list');
     if (list) {

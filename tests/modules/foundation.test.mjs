@@ -438,3 +438,19 @@ test('Modal.open applies dialog semantics, moves focus in, and Modal.close resto
     globalThis.document = previousDocument;
   }
 });
+
+test('every Store.selectedLines picker applies a multi-line paste in one setSelectedLines call (#33 follow-up)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const picks = [
+    ['scheduling/orders.mts', 'tbl-flt-line-checklist'],
+    ['labor/labor-planning.mts', 'lp-line-checklist'],
+    ['master-data/admin-ui.mts', 'lines-nav-checklist'],
+    ['shell/application-shell.mts', 'context-lines-checklist'],
+  ];
+  for (const [file, id] of picks) {
+    const source = readFileSync(new URL(`../../frontend/${file}`, import.meta.url), 'utf8');
+    const at = source.indexOf(`getElementById('${id}')?.querySelectorAll`);
+    assert.ok(at > 0, `${file}: ${id} paste wiring found`);
+    assert.match(source.slice(at, at + 400), /boxes => Store\.setSelectedLines\(new Set\(\[\.\.\.Store\.selectedLines/, `${file} passes an onBatch`);
+  }
+});

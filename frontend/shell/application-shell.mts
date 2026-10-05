@@ -2048,7 +2048,8 @@ const App = {
         App._renderLinesPillChecklist();
       };
       Util.wirePasteToCheckboxes(linesPillSearch,
-        () => Array.from(document.getElementById('context-lines-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('context-lines-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'header'));
     }
     App._refreshLinesPillLabel();
     Store.subscribe(evt => {

@@ -1063,7 +1063,8 @@ export const LaborPlanning = (() => {
           });
       };
       Util.wirePasteToCheckboxes(lineSearchIn,
-        () => Array.from(document.getElementById('lp-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []));
+        () => Array.from(document.getElementById('lp-line-checklist')?.querySelectorAll<HTMLInputElement>('input[type=checkbox]') ?? []),
+        boxes => Store.setSelectedLines(new Set([...Store.selectedLines, ...boxes.map(cb => cb.value)]), 'labor'));
     }
   }
 
