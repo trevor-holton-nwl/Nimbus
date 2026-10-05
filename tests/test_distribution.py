@@ -3730,3 +3730,132 @@ class TestBundle2ParentLinkIntegrity(_ReweightFixtureBase):
             facts = distribution_data._parent_facts_from_header(cur, self.PLANT, self.ORD, self.MAT, header)
         assert facts["labor_hours"] == Decimal(100)          # 2 real children x 50; orphan's 50 excluded
         assert facts["machine_hours"] in (None, Decimal(0))  # orphan's 10 excluded
+
+
+class TestBundle3FetchChildrenLock:
+    """D17 (no DB): the real-write child read takes `FOR UPDATE OF o` in id
+    order; the dry-run preview read stays lock-free (D56)."""
+
+    class _Cur:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, sql, params=None):
+            self.queries.append(sql)
+
+        def fetchall(self):
+            return []
+
+    def test_lock_true_orders_by_id_and_locks_orders_rows(self):
+        cur = self._Cur()
+        distribution_data._fetch_children_by_machine(cur, "1006", "ORD", "MAT", lock=True)
+        assert "ORDER BY o.id" in cur.queries[0]
+        assert "FOR UPDATE OF o" in cur.queries[0]
+
+    def test_default_is_lock_free(self):
+        cur = self._Cur()
+        distribution_data._fetch_children_by_machine(cur, "1006", "ORD", "MAT")
+        assert "FOR UPDATE" not in cur.queries[0]
+
+
+@pytest.mark.pg
+class TestBundle3RewriteSafety(_ReweightFixtureBase):
+    WC = "ZZTEST_WC_B3"
+    L1, L2 = "ZZTEST_L1_B3", "ZZTEST_L2_B3"
+    ORD, MAT = "ZZTEST_ORD_B3", "ZZTEST_MAT_B3"
+    ORD2 = "ZZTEST_ORD_B3X"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            cur.execute("DELETE FROM orders WHERE plant=%s AND (parent_production_order=%s OR production_order=%s)",
+                        (self.PLANT, self.ORD2, self.ORD2))
+            cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD2))
+            conn.commit()
+
+    def _row(self, order, qty=100.0):
+        return {
+            "production_order": order, "material_number": self.MAT, "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0),
+            "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": qty, "run_time": 10.0,
+        }
+
+    # ---- D17 ----
+    def test_d17_real_reweight_captures_setup_states_dry_run_does_not(self, pg):
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        shares = [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}]
+        with mock.patch.object(distribution_data.setup_data,
+                               "capture_setup_states_before_schedule_mutation") as cap:
+            distribution_data.reweight_shares(self.PLANT, self.ORD, self.MAT, shares, header["xmin"],
+                                              dry_run=True)
+            assert cap.call_count == 0
+            distribution_data.reweight_shares(self.PLANT, self.ORD, self.MAT, shares, header["xmin"])
+            assert cap.call_count == 1 and cap.call_args.kwargs["plants"] == [self.PLANT]
+
+    # ---- D01 ----
+    def test_d01_one_failing_parent_does_not_fail_the_rest(self, pg):
+        batch_id = str(uuid.uuid4())
+        _, plan_struct, _ = distribution_data.plan(
+            [self._row(self.ORD, 200.0), self._row(self.ORD2)], batch_id)
+        real = distribution_data._apply_children
+
+        def flaky(cur, parent):
+            if parent["production_order"] == self.ORD2:
+                raise RuntimeError("boom")
+            return real(cur, parent)
+
+        with mock.patch.object(distribution_data, "_apply_children", side_effect=flaky):
+            with pg._pool.connection() as conn:
+                res = distribution_data.apply(plan_struct, batch_id, conn)
+        assert res["parents_distributed"] == 1
+        entry = res["warnings_entry"]
+        assert entry["level"] == "warn"
+        assert [f["production_order"] for f in entry["failed_parents"]] == [self.ORD2]
+        assert self.ORD2 in entry["msg"]
+        assert sum(c["order_quantity"] for c in _snapshot_children(pg, self.PLANT, self.ORD)) == Decimal(200)
+        assert _snapshot_header(pg, self.PLANT, self.ORD2, self.MAT) is None  # rolled back, not half-written
+
+    # ---- D11 ----
+    def test_d11_reweight_stamps_tooling_and_production_version(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE material_plants SET prt_01='T1', prt_02='T2', default_production_version='PV9'"
+                        " WHERE plant=%s AND material_id=%s", (self.PLANT, self.MAT))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 50}, {"machine": self.L2, "weight": 50}], header["xmin"])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT prt_01, prt_02, production_version FROM orders WHERE plant=%s"
+                        " AND parent_production_order=%s", (self.PLANT, self.ORD))
+            rows = cur.fetchall()
+        assert rows and all(r == ("T1", "T2", "PV9") for r in rows)
+
+    @pytest.mark.parametrize("source,expect_runtime", [("manual", 77), (None, 10)])
+    def test_d11_collapse_copies_tooling_and_only_manual_run_time(self, pg, source, expect_runtime):
+        children = _snapshot_children(pg, self.PLANT, self.ORD)
+        old = next(c for c in children if c["machine"] == self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET prt_01='OLD1', prt_02='OLD2', production_version='OLDPV',"
+                        " run_time=77, run_time_source=%s, run_time_basis=%s::jsonb WHERE id=%s",
+                        (source, '{"k": 1}' if source else None, old["id"]))
+            # No material_plants row: isolates the collapse copy from the batch stamp (which wins when a row exists).
+            cur.execute("DELETE FROM material_plants WHERE plant=%s AND material_id=%s", (self.PLANT, self.MAT))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}], header["xmin"],
+            confirm_remove_scheduled=True)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT prt_01, prt_02, production_version, run_time, run_time_source FROM orders WHERE id=%s",
+                        (pg.make_id(self.ORD, self.MAT),))
+            prt1, prt2, pv, rt, rts = cur.fetchone()
+        assert (prt1, prt2, pv) == ("OLD1", "OLD2", "OLDPV")
+        assert float(rt) == expect_runtime
+        assert rts == source

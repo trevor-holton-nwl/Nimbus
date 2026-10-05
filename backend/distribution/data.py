@@ -39,6 +39,7 @@ the `order_distribution` HEADER table (this file's `plan`/`apply`), not to the
 only). `save_workcenter` stays a plain last-write-wins transaction, the same
 shape as master_data.py's other narrow single-purpose admin writers.
 """
+import logging
 import math
 import re
 import uuid
@@ -51,6 +52,8 @@ import db
 import backend.distribution.service as service
 import backend.setup.data as setup_data
 from db import _pool
+
+log = logging.getLogger(__name__)
 
 VALID_DISTRIBUTION_MODES = frozenset({"single", "distribute"})
 VALID_MAX_SEPARATIONS = frozenset({"none", "hour", "day", "week"})
@@ -1419,6 +1422,10 @@ def _delete_superseded_children(cur, ids: set[str]) -> int:
     if not ids:
         return 0
     id_list = sorted(ids)
+    # D17: lock the rows in id order before moving overrides / deleting, so a
+    # concurrent /tasks save of one of them waits (and then conflicts) instead
+    # of racing the delete.
+    cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (id_list,))
     cur.execute(
         """
         UPDATE setup_occurrence_override
@@ -1493,6 +1500,7 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
     wc_no_members = ingest_warnings.get("workcenter_without_members", [])
     default_invalid = ingest_warnings.get("default_machine_invalid", [])
     sub_order_rows = ingest_warnings.get("sub_order_id_rows", [])
+    failed_parents = ingest_warnings.get("failed_parents", [])
     zero_qty = int(ingest_warnings.get("zero_quantity_children", 0))
     runtime_defaulted = int(ingest_warnings.get("parent_runtime_defaulted", 0))
     single_rewrites = int(ingest_warnings.get("single_rewrites", 0))
@@ -1514,9 +1522,10 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
         "workcenter_without_members": wc_no_members,
         "default_machine_invalid": default_invalid,
         "sub_order_id_rows": sub_order_rows,
+        "failed_parents": failed_parents,
     }
     warn_worthy = bool(
-        sub_order_rows or conflicting or ambiguous or wc_no_members or default_invalid
+        failed_parents or sub_order_rows or conflicting or ambiguous or wc_no_members or default_invalid
         or counters["children_deleted"] or zero_qty or runtime_defaulted
         or duplicates_dropped or counters["replanned_after_reweight"]
     )
@@ -1536,6 +1545,11 @@ def _build_warnings_entry(ingest_warnings: dict, counters: dict, *, no_parents: 
         more = f" (+{len(sub_order_rows) - 5} more)" if len(sub_order_rows) > 5 else ""
         entry["msg"] += (f"; {len(sub_order_rows)} row(s) skipped because their order number is an "
                          f"existing distributed sub-order: {sample}{more}")
+    if failed_parents:
+        sample = ", ".join(f"{r['production_order']}/{r['material_number']}" for r in failed_parents[:5])
+        more = f" (+{len(failed_parents) - 5} more)" if len(failed_parents) > 5 else ""
+        entry["msg"] += (f"; {len(failed_parents)} aggregate order(s) could not be distributed and "
+                         f"were skipped: {sample}{more}")
     return entry
 
 
@@ -1545,6 +1559,9 @@ def _empty_apply_result() -> dict:
         "headers_created": 0, "headers_refreshed": 0, "replanned_after_reweight": 0,
     }
     return {**counters, "warnings_entry": _build_warnings_entry({}, counters), "ingest_warnings": {}}
+
+
+_APPLY_CHUNK_PARENTS = 50  # D01: parents per SAVEPOINT in apply()
 
 
 def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
@@ -1624,14 +1641,14 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
                     "xmin": r[18],
                 }
 
-        for key in keys:
+        def _apply_one_parent(key: tuple[str, str, str], local: dict) -> None:
             parent = parents[key]
             plant, production_order, material_number = key
 
             if parent["is_new_header"]:
                 inserted = _insert_new_header(cur, parent, batch_id)
                 if inserted:
-                    counters["headers_created"] += 1
+                    local["headers_created"] += 1
                     _write_shares(cur, parent)
                 else:
                     # Race: another writer created this header between our
@@ -1639,9 +1656,9 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
                     # Re-fetch+lock it and re-plan from what's there NOW.
                     current = _lock_one_header(cur, plant, production_order, material_number)
                     parent = _replan_from_current_header(cur, parent, current)
-                    counters["replanned_after_reweight"] += 1
+                    local["replanned_after_reweight"] += 1
                     _write_header_facts(cur, parent, batch_id)
-                    counters["headers_refreshed"] += 1
+                    local["headers_refreshed"] += 1
                     _write_shares(cur, parent)
             else:
                 current = locked.get(key) or _lock_one_header(cur, plant, production_order, material_number)
@@ -1649,24 +1666,24 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
                     # Header vanished entirely between plan() and apply()
                     # (e.g. fully purged) -- fall back to creating it fresh.
                     _insert_new_header(cur, parent, batch_id)
-                    counters["headers_created"] += 1
+                    local["headers_created"] += 1
                     _write_shares(cur, parent)
                 else:
                     if current["xmin"] != parent["header_xmin"]:
                         # Step 3: re-check. A planner re-weighted between
                         # plan() and apply() -- the re-weight WINS.
                         parent = _replan_from_current_header(cur, parent, current)
-                        counters["replanned_after_reweight"] += 1
+                        local["replanned_after_reweight"] += 1
                     _write_header_facts(cur, parent, batch_id)
-                    counters["headers_refreshed"] += 1
+                    local["headers_refreshed"] += 1
                     _write_shares(cur, parent)
 
-            counters["children_upserted"] += _apply_children(cur, parent)
-            counters["parents_distributed"] += 1
+            local["children_upserted"] += _apply_children(cur, parent)
+            local["parents_distributed"] += 1
 
             intended = set(parent["child_ids"].values())
             superseded = parent["previous_child_ids"] - intended
-            counters["children_deleted"] += _delete_superseded_children(cur, superseded)
+            local["children_deleted"] += _delete_superseded_children(cur, superseded)
             # D06: plan-time-only ids (replan path). Scheduled-removal safeguard:
             # these are not on any current share, so they are upload-created
             # orphans -- delete only the unscheduled ones; a scheduled one is
@@ -1674,14 +1691,51 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
             # destroying planner work without confirmation.
             stale = parent.get("plan_time_child_ids", set()) - parent["previous_child_ids"] - intended
             if stale:
-                counters["children_deleted"] += _delete_superseded_children(
+                local["children_deleted"] += _delete_superseded_children(
                     cur, _unscheduled_ids(cur, stale))
 
             _update_share_child_ids(cur, parent)
 
+        # D01: one bad parent must not fail the whole upload. A SAVEPOINT per
+        # chunk of parents (not per parent: thousands of subtransactions in one
+        # SAP sync degrade every other session). On a chunk failure, roll back
+        # to it and retry that chunk's parents one by one under their own
+        # savepoints; only the parents that still fail are skipped and reported.
+        failed_parents: list[dict] = []
+
+        def _run_savepointed(sp: str, chunk_keys: list, local: dict) -> bool:
+            cur.execute(f"SAVEPOINT {sp}")
+            try:
+                for k in chunk_keys:
+                    _apply_one_parent(k, local)
+            except Exception:
+                cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                cur.execute(f"RELEASE SAVEPOINT {sp}")
+                return False
+            cur.execute(f"RELEASE SAVEPOINT {sp}")
+            return True
+
+        for ci in range(0, len(keys), _APPLY_CHUNK_PARENTS):
+            chunk = keys[ci:ci + _APPLY_CHUNK_PARENTS]
+            local = {name: 0 for name in counters}
+            if _run_savepointed(f"dist_chunk_{ci}", chunk, local):
+                for name, n_ in local.items():
+                    counters[name] += n_
+                continue
+            for k in chunk:
+                local = {name: 0 for name in counters}
+                if _run_savepointed(f"dist_parent_{ci}", [k], local):
+                    for name, n_ in local.items():
+                        counters[name] += n_
+                else:
+                    log.exception("distribution apply: parent %s failed; skipped", k)
+                    failed_parents.append({"plant": k[0], "production_order": k[1], "material_number": k[2]})
+
     conn.commit()
 
-    ingest_warnings = plan.get("ingest_warnings", {})
+    ingest_warnings = {**plan.get("ingest_warnings", {})}
+    if failed_parents:
+        ingest_warnings["failed_parents"] = failed_parents
     warnings_entry = _build_warnings_entry(ingest_warnings, counters)
     return {**counters, "warnings_entry": warnings_entry, "ingest_warnings": ingest_warnings}
 
@@ -2542,6 +2596,17 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
                notes           = old_o.notes,
                planning_status = old_o.planning_status,
                planning_reason = old_o.planning_reason,
+               production_version = old_o.production_version,
+               prt_01          = old_o.prt_01,
+               prt_02          = old_o.prt_02,
+               -- D11: a partial share's hours must not land on the now-whole order,
+               -- so run time travels only when a planner typed it.
+               run_time        = CASE WHEN old_o.run_time_source = 'manual'
+                                      THEN old_o.run_time ELSE new_o.run_time END,
+               run_time_source = CASE WHEN old_o.run_time_source = 'manual'
+                                      THEN old_o.run_time_source ELSE new_o.run_time_source END,
+               run_time_basis  = CASE WHEN old_o.run_time_source = 'manual'
+                                      THEN old_o.run_time_basis ELSE new_o.run_time_basis END,
                updated_at      = NOW()
           FROM orders AS old_o
          WHERE new_o.id = %s AND old_o.id = %s
@@ -2552,6 +2617,32 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
         "UPDATE order_schedule_segments SET order_id = %s WHERE order_id = %s",
         (new_child_id, old_child_id),
     )
+
+
+def _stamp_batch_children(conn, batch_id: str) -> None:
+    """D11: give children written under `batch_id` the same machine_key and
+    material_plants attributes (prt_01/prt_02/production_version/color) an
+    ordinary upload stamps, so re-weight/reset/repair/resolve-created
+    sub-orders are not unknown-setup (optimizer) or held (routing plants).
+    Scoped to this batch's rows only; same transaction, no commit. Mirrors
+    db.upsert_orders' machine_key backfill + `_stamp_order_attributes`."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE orders o
+               SET machine_key = (
+                   SELECT m.machine_key FROM machine m
+                    WHERE m.plant = o.plant AND m.machine = o.machine
+               )
+             WHERE o.upload_batch_id = %s AND o.machine_key IS NULL AND o.plant IS NOT NULL
+               AND (
+                   SELECT COUNT(*) FROM machine m
+                    WHERE m.plant = o.plant AND m.machine = o.machine
+               ) = 1
+            """,
+            (batch_id,),
+        )
+    db._stamp_order_attributes(conn, batch_id=batch_id)
 
 
 def _write_reweight_shares(cur, plant: str, order: str, material: str,
@@ -2624,17 +2715,25 @@ def _resolve_review_stamp(header: dict, requested_reviewed, actor: str):
     return (reviewed, reviewed_by, reviewed_at, reviewed_quantity)
 
 
-def _fetch_children_by_machine(cur, plant: str, order: str, material: str) -> dict[str, dict]:
+def _fetch_children_by_machine(cur, plant: str, order: str, material: str, *,
+                               lock: bool = False) -> dict[str, dict]:
     """Every LIVE child currently materialized for one header, keyed by
     machine -- the "before" snapshot the dry-run preview and the
-    scheduled-removal check both need."""
+    scheduled-removal check both need.
+
+    `lock=True` (D17, real writes only) takes `FOR UPDATE OF o` in id order, the
+    same order a normal /tasks save locks in, so a re-weight cannot overwrite or
+    delete a sub-order a planner is saving, and the two cannot deadlock. The
+    dry-run preview stays lock-free (D56)."""
     cur.execute(
-        """
+        f"""
         SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
                o.scheduled_start, o.scheduled_end, o.notes, o.planning_status, o.planning_reason,
                EXISTS(SELECT 1 FROM order_schedule_segments s WHERE s.order_id = o.id) AS has_segments
           FROM orders o
          WHERE o.plant = %s AND o.parent_production_order = %s AND o.material_number = %s
+         ORDER BY o.id
+        {"FOR UPDATE OF o" if lock else ""}
         """,
         (plant, order, material),
     )
@@ -2740,7 +2839,7 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
                 and prev.get("weight") is not None and _dec(prev["weight"]) > 0):
             collapse = {"machine": surv_machine, "old_child_id": prev["child_id"], "new_child_id": new_bare_id}
 
-    children_before = _fetch_children_by_machine(cur, plant, order, material)
+    children_before = _fetch_children_by_machine(cur, plant, order, material, lock=not dry_run)
     _visibility_end, frozen_end = db._horizon_bounds_for_plant(cur, plant)
 
     removed_details = []
@@ -2836,6 +2935,7 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     deleted = _delete_superseded_children(cur, superseded)
     _write_reweight_shares(cur, plant, order, material, letters, desired_weights)
     _update_share_child_ids(cur, parent_stub)
+    _stamp_batch_children(cur.connection, upload_batch_id)
 
     reviewed_val, reviewed_by, reviewed_at, reviewed_quantity = _resolve_review_stamp(header, reviewed, actor)
     _write_reweight_header(
@@ -2877,6 +2977,14 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     }
 
 
+def _capture_setup_states_for_reweight(plant: str, actor: str, reason: str) -> None:
+    """Snapshot machine setup states before a re-weight moves/deletes schedules
+    (D17). Uses its own connection, so call it BEFORE taking any row lock,
+    exactly as `apply()` does."""
+    setup_data.capture_setup_states_before_schedule_mutation(
+        actor=actor, reason=reason, plants=[plant])
+
+
 def reweight_shares(plant: str, order: str, material: str, shares_input, base_version, *,
                     reviewed=None, allow_stale: bool = False, confirm_remove_scheduled: bool = False,
                     dry_run: bool = False, actor: str = "system") -> dict:
@@ -2899,6 +3007,8 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
     the connection's full lifetime, same as a real write. Skipping the lock
     read entirely is what keeps a dry run from blocking a concurrent writer.
     """
+    if not dry_run:
+        _capture_setup_states_for_reweight(plant, actor, f"Distribution re-weight {order}/{material}")
     with _pool.connection() as conn, conn.cursor() as cur:
         header = _lock_one_header(cur, plant, order, material, for_update=not dry_run)
         if header is None:
@@ -2937,7 +3047,8 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
 
 def reset_one_header(plant: str, order: str, material: str, base_version, *,
                      confirm_remove_scheduled: bool = False, dry_run: bool = False,
-                     require_unreviewed: bool = False, actor: str = "system") -> dict:
+                     require_unreviewed: bool = False, actor: str = "system",
+                     capture_states: bool = True) -> dict:
     """`POST /distribution/{plant}/reset`'s per-parent core (SS5.2's default
     precedence, `source = 'default'`) -- shares the SAME
     `_materialize_reweight` engine `reweight_shares` uses, just with the
@@ -2966,7 +3077,12 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
     moment that positive weight lands. Admin reapply-defaults shares this
     same core, so it revives purged shares identically. Repair
     (`_repair_one_header`) and a planner re-weight (`reweight_shares`) both
-    deliberately leave a purged share purged."""
+    deliberately leave a purged share purged.
+
+    `capture_states=False` is for bulk callers that already captured setup
+    states once for the whole sweep (D17)."""
+    if not dry_run and capture_states:
+        _capture_setup_states_for_reweight(plant, actor, f"Distribution reset {order}/{material}")
     with _pool.connection() as conn, conn.cursor() as cur:
         header = _lock_one_header(cur, plant, order, material, for_update=not dry_run)
         if header is None:
@@ -3132,6 +3248,8 @@ def reset_orders(plant: str, items: list[dict], *, confirm_remove_scheduled: boo
     `children_scheduled` guard on one parent never blocks the others in the
     same request)."""
     results = []
+    if not dry_run:
+        _capture_setup_states_for_reweight(plant, actor, "Distribution bulk reset")
     for item in items:
         order = item.get("production_order")
         material = item.get("material_number")
@@ -3140,6 +3258,7 @@ def reset_orders(plant: str, items: list[dict], *, confirm_remove_scheduled: boo
             result = reset_one_header(
                 plant, order, material, base_version,
                 confirm_remove_scheduled=confirm_remove_scheduled, dry_run=dry_run, actor=actor,
+                capture_states=False,
             )
         except DistributionHeaderNotFound:
             results.append({"production_order": order, "material_number": material, "status": "not_found"})
@@ -3191,6 +3310,7 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
     `ValueError("already_reviewed: ...")` is caught by the generic
     `except ValueError` below, same as any other skip) instead of silently
     re-defaulted."""
+    _capture_setup_states_for_reweight(plant, actor, "Distribution reapply defaults")
     with _pool.connection() as conn, conn.cursor() as cur:
         if orders:
             keys = [(o.get("production_order"), o.get("material_number")) for o in orders]
@@ -3215,7 +3335,7 @@ def reapply_defaults(plant: str, *, workcenter: str | None = None, orders: list[
             result = reset_one_header(
                 plant, order, material, base_version=None,
                 confirm_remove_scheduled=confirm_remove_scheduled, dry_run=False,
-                require_unreviewed=bool(only_unreviewed), actor=actor,
+                require_unreviewed=bool(only_unreviewed), actor=actor, capture_states=False,
             )
         except DistributionHeaderNotFound:
             counters["skipped"] += 1
@@ -3327,6 +3447,8 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
         apply_result = {"headers_created": 0, "children_upserted": 0}
         if plan_structure.get("parents"):
             apply_result = apply(plan_structure, batch_id, conn, actor=actor)
+            _stamp_batch_children(conn, batch_id)
+            conn.commit()
         else:
             conn.commit()
 
@@ -3461,6 +3583,10 @@ def _resolve_repair(plant: str, dry_run: bool) -> dict:
 
         repaired = 0
         children_upserted = 0
+        if incomplete:
+            # Own connection: must run before this loop takes its row locks,
+            # but the header lock below is per-iteration so capture first.
+            _capture_setup_states_for_reweight(plant, "system", "Distribution resolve repair")
         for h in incomplete:
             po, mat = h["production_order"], h["material_number"]
             current = _lock_one_header(cur, plant, po, mat)
