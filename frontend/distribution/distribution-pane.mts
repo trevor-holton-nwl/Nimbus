@@ -2423,7 +2423,7 @@ export const DistributionPane = (() => {
     const h = _detail.header;
     const rows = _editorRows();
     const view = mergeRowsWithDryRun(rows, _dryRun);
-    const totals = computeTotals(view);
+    const totals = computeTotals(view, h.order_quantity);
     const whatIf = Sandbox.active;
     const sig = dryRunSignature(h, rows);
     const saveState = computeSaveButtonState({
@@ -2433,6 +2433,13 @@ export const DistributionPane = (() => {
     const undoDisabled = whatIf || isUndoDisabled(_lastWrite?.baseVersionAfterWrite ?? null, h.base_version);
     const revState = reviewedCheckboxState(h, _detail.statuses);
     const saveLabel = Util.t(saveState.labelKey, { n: String(saveState.removedCount) });
+    // Decision H: quantity shares round UP, so the settled total can run over
+    // SAP's order_quantity by under one piece per extra sub-order. Flag it
+    // next to the TOTAL qty cell; it never blocks Save.
+    const qtyDelta = totals.qtyDeltaVsSap;
+    const qtyDeltaHtml = (qtyDelta != null && qtyDelta !== 0)
+      ? ` <span class="dist-editor-total-qty-delta" title="${Util.escapeHtml(Util.t('ui.dist_editor_total_qty_vs_sap', { delta: (qtyDelta > 0 ? '+' : '') + String(qtyDelta), sap: String(h.order_quantity ?? '') }))}">(${qtyDelta > 0 ? '+' : ''}${qtyDelta})</span>`
+      : '';
 
     return `
       <div class="dist-editor" id="dist-editor">
@@ -2456,7 +2463,7 @@ export const DistributionPane = (() => {
               <td colspan="2">${Util.escapeHtml(Util.t('ui.dist_editor_total'))}</td>
               <td>${new Intl.NumberFormat(Util.locale(), { maximumFractionDigits: 3 }).format(totals.weight)}</td>
               <td>${totals.effectivePct.toFixed(1)}%</td>
-              <td>${totals.qtyAfter}</td>
+              <td>${totals.qtyAfter}${qtyDeltaHtml}</td>
               <td>${totals.hoursAfter.toFixed(2)}</td>
               <td colspan="3"></td>
             </tr>

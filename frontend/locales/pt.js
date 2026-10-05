@@ -1731,6 +1731,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.dist_editor_col_start':          'Início atual',
   'ui.dist_editor_col_outcome':        'Resultado',
   'ui.dist_editor_total':              'TOTAL',
+  'ui.dist_editor_total_qty_vs_sap':              'vs. quantidade SAP {{sap}}: {{delta}}',
   'ui.dist_no_suborder':               '(sem sub-pedido)',
   'ui.dist_outcome_unchanged':         'Inalterado',
   'ui.dist_outcome_resized':           'Redimensionado',

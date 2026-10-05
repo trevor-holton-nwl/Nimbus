@@ -378,6 +378,17 @@ test('computeTotals — sums every numeric column across the current row view', 
   assert.equal(totals.hoursAfter, 10);
 });
 
+test('computeTotals — qtyDeltaVsSap reports the round-up overshoot vs SAP quantity (null before a dry run)', () => {
+  const rows = [
+    { machine: 'M1', letter: 'A', weight: 1, purged: false, stale: false, currentStart: null },
+    { machine: 'M3', letter: 'C', weight: 1, purged: false, stale: false, currentStart: null },
+  ];
+  assert.equal(computeTotals(mergeRowsWithDryRun(rows, null), 98).qtyDeltaVsSap, null);
+  const view = mergeRowsWithDryRun(rows, DRY_RUN_FIXTURE);
+  assert.equal(computeTotals(view, 98).qtyDeltaVsSap, computeTotals(view).qtyAfter - 98);
+  assert.equal(computeTotals(view).qtyDeltaVsSap, null);
+});
+
 /* --- Save-button disabled-until-dry-run-settles state machine ----------- */
 
 test('computeSaveButtonState — disabled while the dry run is pending/idle/error', () => {

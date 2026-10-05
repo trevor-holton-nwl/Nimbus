@@ -425,6 +425,131 @@ class TestApportion:
         assert sum(result.values()) == Decimal(110)
 
 
+class TestApportionRoundUpRemainder:
+    """H6 / owner rule (2026-09-25 rev. 4): with round_up_remainder=True, no
+    lot-size rounding and every non-zero fractional share rounds UP to a
+    whole unit -- independently per machine, not a single unit of remainder
+    handed to the largest fractional share."""
+
+    def test_evenly_divisible_ignores_lot_size_515_515(self):
+        """1,030 split evenly across 2 machines with an incremental lot size
+        of 50 must still yield 515 + 515 -- the lot size is completely
+        ignored for quantity apportionment now (unit is forced to 1 by the
+        caller in data.py, not by apportion() itself, so this test passes
+        unit=1 directly to pin apportion()'s own contract)."""
+        total = Decimal(1030)
+        weights = {"M1": Decimal(1), "M2": Decimal(1)}
+        unit = Decimal(1)  # data.py forces this regardless of incremental_lot_size=50
+        result = apportion(total, weights, unit, round_up_remainder=True)
+        assert result == {"M1": Decimal(515), "M2": Decimal(515)}
+        assert sum(result.values()) == total
+
+    def test_fractional_split_rounds_every_share_up_516_516(self):
+        """1,031 split evenly across 2 machines: ideal shares are 515.5 each
+        -- BOTH must round up to 516 (not one machine getting the extra unit
+        via largest-remainder, which would produce 516 + 515). The total
+        (1,032) legitimately exceeds the SAP order quantity (1,031) by one
+        piece, which the owner's rule explicitly allows."""
+        total = Decimal(1031)
+        weights = {"M1": Decimal(1), "M2": Decimal(1)}
+        unit = Decimal(1)
+        result = apportion(total, weights, unit, round_up_remainder=True)
+        assert result == {"M1": Decimal(516), "M2": Decimal(516)}
+        assert sum(result.values()) == Decimal(1032)  # over by 1, not exact
+
+    def test_unequal_weights_round_up_independently(self):
+        """A three-way uneven split where every share is fractional: each
+        machine's own share rounds up independently, not just one recipient
+        of a pooled remainder."""
+        total = Decimal(100)
+        weights = {"M1": Decimal(1), "M2": Decimal(1), "M3": Decimal(1)}
+        unit = Decimal(1)
+        # Ideal shares: 33.333... each -> every one rounds up to 34.
+        result = apportion(total, weights, unit, round_up_remainder=True)
+        assert result == {"M1": Decimal(34), "M2": Decimal(34), "M3": Decimal(34)}
+        assert sum(result.values()) == Decimal(102)  # over by 2 (one per fractional share)
+
+    def test_zero_weight_machine_gets_zero(self):
+        """A machine with 0 weight still gets 0 under round_up_remainder,
+        same as the default mode."""
+        total = Decimal(100)
+        weights = {"M1": Decimal(1), "M2": Decimal(0)}
+        unit = Decimal(1)
+        result = apportion(total, weights, unit, round_up_remainder=True)
+        assert result["M2"] == Decimal(0)
+        assert result["M1"] == Decimal(100)
+
+
+class TestApportionOtherSplitsUnaffectedByRoundUpRemainder:
+    """Regression: run-time, labor-hours, and machine-hours apportionment
+    call apportion() WITHOUT round_up_remainder (its default is False), so
+    they must keep their exact existing largest-remainder behavior,
+    byte-for-byte, unaffected by the new parameter's existence."""
+
+    def test_default_call_signature_unchanged(self):
+        """Calling apportion() with the pre-existing 4 positional/keyword
+        args (no round_up_remainder) reproduces the exact same
+        largest-remainder result as before this change -- this is the
+        run-time/labor-hours/machine-hours call shape in data.py."""
+        total = Decimal(1031)
+        weights = {"M1": Decimal(1), "M2": Decimal(1)}
+        unit = Decimal(1)
+        result = apportion(total, weights, unit)
+        # Largest-remainder: floor(515.5)=515 each, then 1 unit of remainder
+        # goes to whichever machine wins the tie (alphabetical: M1).
+        assert sum(result.values()) == total
+        assert result["M1"] == Decimal(516)
+        assert result["M2"] == Decimal(515)
+
+    def test_run_time_style_minutes_apportionment_exact_sum(self):
+        """Run-time minutes apportionment (data.py's unit=Decimal(1) call,
+        no round_up_remainder) must still sum EXACTLY to the total -- never
+        over, unlike the quantity mode."""
+        total_minutes = Decimal(931)  # e.g. 15.516... hours * 60, rounded
+        weights = {"M1": Decimal(2), "M2": Decimal(1), "M3": Decimal(1)}
+        unit = Decimal(1)
+        result = apportion(total_minutes, weights, unit)
+        assert sum(result.values()) == total_minutes
+
+    def test_hours_style_apportionment_exact_sum(self):
+        """Labor-hours / machine-hours apportionment (data.py's
+        _HOURS_APPORTION_UNIT = Decimal('0.01'), no round_up_remainder) must
+        still sum EXACTLY to the total."""
+        total_hours = Decimal("10.03")
+        weights = {"M1": Decimal(1), "M2": Decimal(1), "M3": Decimal(1)}
+        unit = Decimal("0.01")
+        result = apportion(total_hours, weights, unit)
+        assert sum(result.values()) == total_hours
+
+    def test_explicit_round_up_remainder_false_matches_default(self):
+        """Passing round_up_remainder=False explicitly must be identical to
+        omitting it -- guards against the default value itself having been
+        changed by accident."""
+        total = Decimal(1031)
+        weights = {"M1": Decimal(1), "M2": Decimal(1)}
+        unit = Decimal(1)
+        tie_order = ["M1", "M2"]
+        result_omitted = apportion(total, weights, unit, tie_order)
+        result_explicit = apportion(total, weights, unit, tie_order, round_up_remainder=False)
+        assert result_omitted == result_explicit
+
+
+
+class TestBuildChildRowsQuantityRoundsUp:
+    """H6 call site: _build_child_rows (shared by save and the dry-run preview)
+    must ignore incremental_lot_size and round each quantity share up, while
+    hours/minutes keep their exact-sum split."""
+
+    def test_lot_size_ignored_and_shares_round_up(self):
+        import backend.distribution.data as dist_data
+        rows, _ids, _z = dist_data._build_child_rows(
+            "P1", "1000", "MAT", {"order_quantity": 1031, "run_time": None},
+            {"M1": 1, "M2": 1}, {"M1": "A", "M2": "B"}, {"incremental_lot_size": 50},
+        )
+        qtys = sorted(float(r["order_quantity"]) for r in rows)
+        assert qtys == [516.0, 516.0]
+
+
 class TestCleanWeights:
     """D21: `_clean_weights` rejects non-finite/over-ceiling weights before
     the existing `< 0` check (save_workcenter's {machine: weight} map)."""

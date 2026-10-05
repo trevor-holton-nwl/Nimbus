@@ -236,6 +236,7 @@ def apportion(
     tie_order: Optional[list[str]] = None,
     *,
     round_total: bool = False,
+    round_up_remainder: bool = False,
 ) -> dict[str, Decimal]:
     """
     Hamilton / largest-remainder apportionment (§5.3 bullet "Quantity apportionment").
@@ -258,9 +259,9 @@ def apportion(
     False) rounds `total` to the nearest whole multiple of `unit`
     (ROUND_HALF_UP) FIRST to fix that -- gated behind a flag because the
     QUANTITY path calls this same function with `unit = incremental_lot_size`
-    (a real, meaningful lot-size split, H6, deliberately out of scope here),
-    and unconditionally rounding there would silently change lot-size split
-    results. Only the labor_hours/machine_hours callers
+    (historically a lot-size split; since superseded by `round_up_remainder`,
+    H6), and unconditionally rounding there would silently change quantity
+    split results. Only the labor_hours/machine_hours callers
     (`data.py::_build_child_rows`) pass `round_total=True`; the quantity and
     run-time-minutes callers are byte-for-byte unchanged from base
     behavior. A negative total is handled symmetrically regardless of
@@ -268,11 +269,21 @@ def apportion(
     result) rather than raising -- this function must never raise, since
     `plan_fn` runs outside `upsert_orders`' `try`.
 
+    H6 / owner rule (aggregate_to_detail.md decision H, 2026-09-25 rev. 4):
+    `round_up_remainder=True` (QUANTITY apportionment only) skips the
+    largest-remainder step -- every machine's ideal share rounds UP,
+    independently, to the next whole multiple of `unit` when it is not
+    already one. The shares can therefore sum to MORE than `total` (by less
+    than one `unit` per fractional share: 1,031 split evenly = 516 + 516 =
+    1,032). That is intended, not a bug. The run-time/labor/machine-hours
+    callers never pass it and keep their exact-sum behavior.
+
     Returns:
       {machine: quantity_in_units}
     """
     if total < 0:
-        negated = apportion(-total, weights, unit, tie_order, round_total=round_total)
+        negated = apportion(-total, weights, unit, tie_order, round_total=round_total,
+                            round_up_remainder=round_up_remainder)
         return {m: -v for m, v in negated.items()}
 
     if not weights or all(w == 0 for w in weights.values()):
@@ -293,6 +304,20 @@ def apportion(
             ideal_shares[machine] = (total * weight) / total_weight
         else:
             ideal_shares[machine] = Decimal(0)
+
+    if round_up_remainder:
+        # Each fractional share rounds up independently; an exact multiple of
+        # `unit` is left as-is; a zero-weight machine stays 0.
+        allocations = {}
+        for machine, share in ideal_shares.items():
+            if share <= 0:
+                allocations[machine] = Decimal(0)
+                continue
+            allocation = (share // unit) * unit
+            if share - allocation > 0:
+                allocation += unit
+            allocations[machine] = allocation
+        return allocations
 
     # Round down to whole multiples of unit
     allocations = {}

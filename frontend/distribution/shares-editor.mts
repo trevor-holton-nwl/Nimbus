@@ -271,17 +271,29 @@ export interface TotalsRow {
   effectivePct: number;
   qtyAfter: number;
   hoursAfter: number;
+  /** `qtyAfter` minus the header's `order_quantity` -- null until a dry run
+   *  has settled (every row's `qtyAfter` is still null before then) or when
+   *  no `order_quantity` was supplied. Positive means the split's summed
+   *  quantity exceeds SAP's order quantity, which the owner's round-up-only
+   *  quantity rule (decision H) explicitly allows. Display only, never a
+   *  save-blocking error. */
+  qtyDeltaVsSap: number | null;
 }
 
 /** The editor's TOTAL row — sums every numeric column across the CURRENT row
  *  view set (labor-planning.mts's `lp-total-row` shape, per §6). */
-export function computeTotals(rows: readonly EditorRowView[]): TotalsRow {
-  const totals: TotalsRow = { weight: 0, effectivePct: 0, qtyAfter: 0, hoursAfter: 0 };
+export function computeTotals(rows: readonly EditorRowView[], orderQuantity?: number | null): TotalsRow {
+  const totals: TotalsRow = { weight: 0, effectivePct: 0, qtyAfter: 0, hoursAfter: 0, qtyDeltaVsSap: null };
+  let dryRunSettled = false;
   for (const r of rows) {
     totals.weight += r.weight == null ? 0 : r.weight;
     totals.effectivePct += r.effectivePct || 0;
     totals.qtyAfter += r.qtyAfter || 0;
     totals.hoursAfter += r.hoursAfter || 0;
+    if (r.qtyAfter != null) dryRunSettled = true;
+  }
+  if (dryRunSettled && typeof orderQuantity === 'number' && Number.isFinite(orderQuantity)) {
+    totals.qtyDeltaVsSap = Math.round((totals.qtyAfter - orderQuantity) * 1000) / 1000;
   }
   return totals;
 }

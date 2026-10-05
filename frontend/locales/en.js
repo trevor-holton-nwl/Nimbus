@@ -2021,6 +2021,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.dist_editor_col_start':           'Current start',
   'ui.dist_editor_col_outcome':         'Outcome',
   'ui.dist_editor_total':               'TOTAL',
+  'ui.dist_editor_total_qty_vs_sap':               'vs SAP qty {{sap}}: {{delta}}',
   'ui.dist_no_suborder':                '(no sub-order)',
   'ui.dist_outcome_unchanged':          'Unchanged',
   'ui.dist_outcome_resized':            'Resized',

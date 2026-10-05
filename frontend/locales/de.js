@@ -1755,6 +1755,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.dist_editor_col_start':           'Aktueller Start',
   'ui.dist_editor_col_outcome':         'Ergebnis',
   'ui.dist_editor_total':               'GESAMT',
+  'ui.dist_editor_total_qty_vs_sap':               'vs. SAP-Menge {{sap}}: {{delta}}',
 
   // Distribution outcomes and markers
   'ui.dist_no_suborder':                '(kein Unterauftrag)',

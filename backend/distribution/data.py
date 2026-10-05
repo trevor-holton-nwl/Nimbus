@@ -684,8 +684,17 @@ def _build_child_rows(plant: str, production_order: str, material_number: str,
     order_quantity = parent_facts.get("order_quantity")
     qty_alloc: dict[str, Decimal] = {}
     if order_quantity is not None:
-        unit = _quantity_unit(order_quantity, mat_attrs.get("incremental_lot_size"))
-        qty_alloc = service.apportion(_dec(order_quantity), positive, unit, tie_order)
+        # H6 / owner rule (aggregate_to_detail.md decision H, 2026-09-25): no
+        # lot-size rounding for quantity -- unit is a whole piece (bypassing
+        # _quantity_unit's incremental_lot_size lookup) and every fractional
+        # share rounds UP independently, so the children may sum to slightly
+        # more than the SAP parent quantity. This is the ONE apportion() call
+        # both the saved materialization and the shares-editor dry-run
+        # preview go through (_build_child_rows), so they always agree.
+        qty_alloc = service.apportion(
+            _dec(order_quantity), positive, Decimal(1), tie_order,
+            round_up_remainder=True,
+        )
 
     run_time = parent_facts.get("run_time")
     minutes_alloc: dict[str, Decimal] = {}
