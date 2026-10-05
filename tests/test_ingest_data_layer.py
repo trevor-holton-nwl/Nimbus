@@ -316,6 +316,35 @@ class TestPurgeOrdersByDateRealDb:
                 cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
                 conn.commit()
 
+    def test_float_machine_cells_stored_as_clean_text(self, pg):
+        """A MACHINE column holding the float 101.0 (alongside 101.5, which
+        forces pandas to read the whole column as float64) must store '101'
+        for the whole-number cell (Excel float suffix stripped by _str_id) and
+        keep '101.5' verbatim -- never '101.0'."""
+        db_ = pg
+        order_b = self.ORDER + "_F"
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
+            conn.commit()
+        try:
+            workbook = _xlsx([
+                {"PRODUCTION_ORDER": self.ORDER, "MATERIAL_NUMBER": self.MATERIAL,
+                 "WERKS": self.PLANT, "MACHINE": 101.0, "BASIC_START_DATE": "2026-09-10 08:00"},
+                {"PRODUCTION_ORDER": order_b, "MATERIAL_NUMBER": self.MATERIAL,
+                 "WERKS": self.PLANT, "MACHINE": 101.5, "BASIC_START_DATE": "2026-09-10 08:00"},
+            ])
+            assert pd.read_excel(io.BytesIO(workbook))["MACHINE"].dtype.kind == "f"
+            assert db_.ingest_orders_from_excel(workbook, "zztest_ingest_floatmach.xlsx")["status"] == "ok"
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT production_order, machine FROM orders WHERE production_order IN (%s, %s)",
+                            (self.ORDER, order_b))
+                got = dict(cur.fetchall())
+            assert got == {self.ORDER: "101", order_b: "101.5"}
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
+                conn.commit()
+
     def test_blank_production_version_on_reupload_keeps_stored_value(self, pg):
         """Plan Part 2 #21 (H7, PV half): SAP omitting PRODUCTION_VERSION must
         not wipe a stored/planner-chosen one; the kept case is counted."""

@@ -557,6 +557,50 @@ def test_update_task_dates_bulk_accepts_an_eligible_machine_change_in_one_transa
     assert pool.last_connection.committed is True
 
 
+def test_update_task_dates_bulk_shares_one_eligibility_cache_per_call(monkeypatch):
+    """P7 call-site wiring: ONE caller-owned cache is created per
+    update_task_dates_bulk call and handed to every eligibility check, so two
+    edits on one plant load the four reference lookups once (not per row), and a
+    second call starts with a fresh cache (no cross-call staleness)."""
+    loads = {"pv": 0, "op": 0, "mw": 0, "rules": 0}
+
+    def counted(key, value):
+        def loader(cur, plant):
+            loads[key] += 1
+            return value
+        return loader
+
+    monkeypatch.setattr(routing_resolver, "_load_pv_lookup", counted("pv", {}))
+    monkeypatch.setattr(routing_resolver, "_load_op_lookup", counted("op", {}))
+    monkeypatch.setattr(routing_resolver, "_load_machine_workcenter", counted("mw", {}))
+    monkeypatch.setattr(routing_resolver, "_load_rules", counted(
+        "rules", {"control_key_exclude": frozenset(), "header_status_include": frozenset()}))
+    caches = []
+    real_check = routing_resolver.check_eligibility
+
+    def spy(*args, **kwargs):
+        caches.append(kwargs.get("cache"))
+        return real_check(*args, **kwargs)
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility", spy)
+
+    def run():
+        cursor = _FakeSegmentCursor([_routing_eff_row("r-a"), _routing_eff_row("r-b")], plant_rows=[])
+        monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+        return brain.db.update_task_dates_bulk([
+            {"id": "r-a", "MACHINE": "M2", "base_version": 100},
+            {"id": "r-b", "MACHINE": "M2", "base_version": 100},
+        ])
+
+    run()
+    assert len(caches) == 2 and caches[0] is not None
+    assert caches[0] is caches[1], "both rows of one call must share the same cache object"
+    assert loads == {"pv": 1, "op": 1, "mw": 1, "rules": 1}
+    run()
+    assert caches[2] is not caches[0], "a new call must not reuse the previous call's cache"
+    assert loads == {"pv": 2, "op": 2, "mw": 2, "rules": 2}
+
+
 def test_update_task_dates_bulk_never_gates_a_disabled_plant(monkeypatch):
     eff_rows = [_routing_eff_row("r-disabled", routing_runtime_enabled=False)]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
