@@ -29,6 +29,7 @@ from collections.abc import Iterator
 
 from psycopg import sql
 
+from backend.csv_util import CSV_BOM, csv_row
 from db import _pool
 
 log = logging.getLogger("nimbus.admin_tables")
@@ -371,7 +372,8 @@ def stream_csv_rows(table: str, *, filters: dict[str, list[str]] | None = None,
             buf.truncate(0)
             return value
 
-        writer.writerow(col_names)
+        buf.write(CSV_BOM)
+        writer.writerow(csv_row(col_names))
         yield _flush()
 
         written = 0
@@ -380,7 +382,7 @@ def stream_csv_rows(table: str, *, filters: dict[str, list[str]] | None = None,
             if written >= row_cap:
                 truncated = True
                 break
-            writer.writerow(row)
+            writer.writerow(csv_row(row))
             yield _flush()
             written += 1
 

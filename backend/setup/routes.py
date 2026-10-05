@@ -21,6 +21,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 import master_data as md
 import backend.setup.data as setup_data
 from backend.admin_ops.logbuffer import _current_rid, _set_admin_log_details
+from backend.csv_util import CSV_BOM, csv_row
 from backend.security import auth
 from backend.security.auth import require_api_key
 from backend.setup.models import PlantSetupActiveResult, SetupEnvelope, SetupLineCompatibilityResult
@@ -195,13 +196,14 @@ def export_setup_missing_pairs(plant: str, kind: str = Query(default="observed")
         raise _setup_error(exc) from exc
     output = io.StringIO()
     writer = csv.writer(output)
+    output.write(CSV_BOM)
     writer.writerow(["Plant", "Machine", "Scope", "Signature version", "From setup state", "To setup state"])
     definition = result.get("definition")
     version = definition.get("signature_version") if definition else ""
     for row in page["rows"]:
-        writer.writerow([plant, row["machine"], row["scope"], version,
-                         json.dumps(row["from_key"], separators=(",", ":")),
-                         json.dumps(row["to_key"], separators=(",", ":"))])
+        writer.writerow(csv_row([plant, row["machine"], row["scope"], version,
+                                 json.dumps(row["from_key"], separators=(",", ":")),
+                                 json.dumps(row["to_key"], separators=(",", ":"))]))
     headers = {"Content-Disposition": f'attachment; filename="setup-missing-{kind}-{plant}.csv"',
                "X-Total-Count": str(page["meta"]["total"])}
     return Response(content=output.getvalue(), media_type="text/csv", headers=headers)

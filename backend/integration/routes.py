@@ -31,6 +31,7 @@ import master_data as md
 import backend.integration.sap_sync as sap_sync
 import backend.setup.data as setup_data
 from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
+from backend.csv_util import CSV_BOM, csv_cell
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
 
@@ -250,10 +251,11 @@ def get_missing_master_data(batch_id: str, format: str | None = Query(default=No
 
     if format == "csv":
         buf = io.StringIO()
+        buf.write(CSV_BOM)
         writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "order_count", "reason"])
         writer.writeheader()
         for e in exceptions:
-            writer.writerow({k: e.get(k) for k in ["plant", "material_number", "order_count", "reason"]})
+            writer.writerow({k: csv_cell(e.get(k)) for k in ["plant", "material_number", "order_count", "reason"]})
         return Response(
             content=buf.getvalue(), media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="missing-master-data-{batch_id}.csv"'},
@@ -282,10 +284,11 @@ def get_live_missing_master_data(
     result = db.missing_master_data_for_plant(plant)
     if format == "csv":
         buf = io.StringIO()
+        buf.write(CSV_BOM)
         writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "order_count", "reason"])
         writer.writeheader()
         for e in result["exceptions"]:
-            writer.writerow({k: e.get(k) for k in ["plant", "material_number", "order_count", "reason"]})
+            writer.writerow({k: csv_cell(e.get(k)) for k in ["plant", "material_number", "order_count", "reason"]})
         return Response(
             content=buf.getvalue(), media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="missing-master-data-{plant}.csv"'},

@@ -353,8 +353,10 @@ def test_export_csv_produces_parseable_csv_matching_filtered_rows(zz_plants):
     chunks = list(at.stream_csv_rows("plants", filters={"subnetwork": [sub]}))
     text = "".join(chunks)
     assert at.TRUNCATION_MARKER_PREFIX not in text  # under the cap -> no marker at all
+    assert text.startswith("﻿")  # UTF-8 BOM for Excel (plan Part 1 #8)
     reader = csv.reader(io.StringIO(text))
     header = next(reader)
+    header[0] = header[0].lstrip("﻿")
     assert "plant" in header
     plant_idx = header.index("plant")
     rows = list(reader)
@@ -485,3 +487,16 @@ def test_route_export_csv_unknown_table_is_404_not_a_csv_body(admin_client):
     response = admin_client.get("/admin/tables/not_a_real_table/export.csv")
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
+
+
+def test_csv_cell_guards_text_formula_leads_only():
+    from backend.csv_util import csv_cell, csv_row
+    assert csv_cell("=1+1") == "'=1+1"
+    assert csv_cell("+SUM(A1)") == "'+SUM(A1)"
+    assert csv_cell("-2+3") == "'-2+3"
+    assert csv_cell("@x") == "'@x"
+    assert csv_cell("	cmd") == "'	cmd"
+    assert csv_cell("plain") == "plain"
+    assert csv_cell("") == ""
+    # numbers (including negatives), None and bools are never touched
+    assert csv_row([-5, 3.5, None, True, "ok"]) == [-5, 3.5, None, True, "ok"]

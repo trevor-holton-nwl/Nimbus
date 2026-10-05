@@ -40,6 +40,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 import master_data as md
 import backend.distribution.data as distribution_data
 from backend.admin_ops.logbuffer import _set_admin_log_details
+from backend.csv_util import CSV_BOM, csv_row
 from backend.distribution.models import WorkCenterSaveResult
 from backend.security import auth
 from backend.security.auth import require_api_key
@@ -212,6 +213,7 @@ def get_distribution_aggregate(
     if format == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf)
+        buf.write(CSV_BOM)
         writer.writerow(["production_order", "material_number", "machine", "quantity",
                          "sum_child_quantity", "start", "finish", "child_count",
                          "queued_children", "all_scheduled", "firming_indicator", "reviewed", "children"])
@@ -220,10 +222,10 @@ def get_distribution_aggregate(
                 f"{c['production_order']}|{c['machine']}|{c['quantity']}|{c['start'] or ''}|{c['end'] or ''}"
                 for c in r["children"]
             )
-            writer.writerow([r["production_order"], r["material_number"], r["machine"], r["quantity"],
-                             r["sum_child_quantity"], r["start"] or "", r["finish"] or "", r["child_count"],
-                             r["queued_children"], r["all_scheduled"], r["firming_indicator"], r["reviewed"],
-                             children_summary])
+            writer.writerow(csv_row([r["production_order"], r["material_number"], r["machine"], r["quantity"],
+                                     r["sum_child_quantity"], r["start"] or "", r["finish"] or "", r["child_count"],
+                                     r["queued_children"], r["all_scheduled"], r["firming_indicator"], r["reviewed"],
+                                     children_summary]))
         headers = {"Content-Disposition": f'attachment; filename="distribution-aggregate-{plant}.csv"',
                   "Cache-Control": "no-store"}
         return Response(content=buf.getvalue(), media_type="text/csv", headers=headers)
