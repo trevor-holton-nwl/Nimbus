@@ -3809,9 +3809,8 @@ class TestBundle3RewriteSafety(_ReweightFixtureBase):
                 raise RuntimeError("boom")
             return real(cur, parent)
 
-        with mock.patch.object(distribution_data, "_apply_children", side_effect=flaky):
-            with pg._pool.connection() as conn:
-                res = distribution_data.apply(plan_struct, batch_id, conn)
+        with mock.patch.object(distribution_data, "_apply_children", side_effect=flaky),                 pg._pool.connection() as conn:
+            res = distribution_data.apply(plan_struct, batch_id, conn)
         assert res["parents_distributed"] == 1
         entry = res["warnings_entry"]
         assert entry["level"] == "warn"
