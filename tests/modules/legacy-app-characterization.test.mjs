@@ -8,6 +8,9 @@
 // surfaces as an error (not a silent no-op) so a missing stub is visible.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadLegacyApp } from './helpers/load-legacy-app.mjs';
 
 // Load once — app.js evaluation is expensive (~300 ms).
@@ -128,16 +131,19 @@ test('Persistence.saveAll alone does not POST (only explicit calls do)', async (
   // always go) but NO task rows should appear.
   Persistence._dirtyIds.clear();
   Persistence._forceIds?.clear?.();
+  // Let the previous test's save settle so the in-flight guard is released.
+  for (let i = 0; i < 50 && Persistence._saveInFlight; i++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(!Persistence._saveInFlight, 'previous save must have settled');
 
   const before = fetchCalls.length;
   Persistence.saveAll();
   const calls = fetchCalls.slice(before);
   const saveCall = calls.find(c => c.url.includes('/tasks/update'));
-  if (saveCall) {
-    const body = JSON.parse(saveCall.opts.body);
-    assert.equal(body.tasks.length, 0, 'no dirty tasks → empty task array in payload');
-  }
-  // If no call was made at all, that's also acceptable (implementation detail).
+  // saveAll always posts blocks/calendars, so the call must exist; the assertion
+  // below must never be skipped.
+  assert.ok(saveCall, 'saveAll must still POST /tasks/update (blocks/calendars always go)');
+  const body = JSON.parse(saveCall.opts.body);
+  assert.equal(body.tasks.length, 0, 'no dirty tasks → empty task array in payload');
 });
 
 // ---------------------------------------------------------------------------
@@ -147,11 +153,10 @@ test('Persistence.saveAll alone does not POST (only explicit calls do)', async (
 test('NIMBUS namespace exposes the legacy planner commands used by index.html', async () => {
   // Source the command list from the generated contract rather than hardcoding.
   // This test fails if a module is accidentally removed from the return value.
-  const expectedModules = [
-    'Persistence', 'App', 'OptimizeDialog', 'Sandbox', 'Printer',
-    'Timeline', 'Table', 'Alerts', 'Calendar', 'Store', 'Modal',
-    'GanttFilter', 'Dashboard', 'LaborPlanning', 'AdminCockpit',
-  ];
+  const contract = JSON.parse(readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../contracts/cq1-legacy-surface.json'), 'utf8'));
+  const expectedModules = [...new Set(contract.htmlCommands.map(c => c.split('.')[0]))];
+  assert.ok(expectedModules.length >= 4, 'contract htmlCommands must yield modules');
   for (const mod of expectedModules) {
     assert.ok(mod in nimbus, `NIMBUS must expose ${mod}`);
     assert.ok(typeof nimbus[mod] === 'object', `NIMBUS.${mod} must be an object`);

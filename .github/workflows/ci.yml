@@ -42,6 +42,38 @@ jobs:
       - name: Static asset boundary
         run: npm run check:static-assets
 
+  api-types-in-sync:
+    name: Generated API types in sync
+    # Re-dumps the FastAPI OpenAPI schema and fails if the committed
+    # frontend/types/api-generated.d.mts differs. No database needed:
+    # scripts/dump_openapi.py sets NIMBUS_PG_POOL_MIN=0 before importing brain.
+    runs-on: ubuntu-latest
+    env:
+      PG_HOST: localhost
+      PG_PORT: '5432'
+      PG_DB: nimbus
+      PG_USER: postgres
+      PG_PASS: postgres
+      NIMBUS_PG_POOL_MIN: '0'
+      COLOR_FILE: /tmp/color_wheel.xlsx
+      COLOR_WHEEL_DIR: /tmp/color_wheels
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: npm ci
+      - run: python -m pip install -r requirements.txt
+      - name: Regenerate API types
+        run: npm run generate:api-types
+      - name: Fail if api-generated.d.mts is stale
+        run: git diff --exit-code frontend/types/api-generated.d.mts
+
   lint-python:
     name: Ruff
     runs-on: ubuntu-latest
