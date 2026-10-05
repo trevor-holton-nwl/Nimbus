@@ -487,7 +487,8 @@ test('Toast action is one-shot (double-click) and a throwing action still dismis
   assert.equal(el2.classList.contains('leaving'), true, 'finally dismisses even when run() throws');
 });
 
-test('Modal: Tab stays trapped (including focus on <body> and dialogs with no focusables) and Escape cancels a confirm', async () => {
+test('Modal: Tab stays trapped (including focus on <body> and dialogs with no focusables) and Escape cancels a confirm', async (tctx) => {
+  tctx.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock for Modal.open's deferred focus
   const prevDoc = globalThis.document;
   const byId = {};
   let root;
@@ -538,7 +539,7 @@ test('Modal: Tab stays trapped (including focus on <body> and dialogs with no fo
     const btns = Array.from({ length: nButtons }, (_, i) => m.add(new El('button', { id: `${id}-b${i}` })));
     return { bd, m, btns };
   };
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const sleep = async ms => { tctx.mock.timers.tick(ms); }; // deferred-focus timer fires on the virtual clock
   try {
     const A = mk('tabA', 2);
     Modal.open('tabA'); await sleep(5);

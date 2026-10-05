@@ -167,7 +167,8 @@ test('NIMBUS namespace exposes the legacy planner commands used by index.html', 
   assert.ok(typeof nimbus.Sandbox.enter === 'function', 'Sandbox.enter must be callable');
 });
 
-test('#31 API-key bootstrap checks ok, cache-busts, and retries with backoff instead of failing silently after one blip', async () => {
+test('#31 API-key bootstrap checks ok, cache-busts, and retries with backoff instead of failing silently after one blip', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock: the 1s backoff is ticked, not slept
   const urls = [];
   const fetchImpl = (url, opts) => {
     const u = String(url);
@@ -180,9 +181,68 @@ test('#31 API-key bootstrap checks ok, cache-busts, and retries with backoff ins
   ctx2.setTimeout = setTimeout; // the VM context has no timers of its own
   assert.equal(typeof domReady, 'function', 'harness exposes the DOM-ready gate');
   try { domReady(); } catch { /* the login/boot half needs a real DOM; only the key bootstrap is under test */ }
-  await new Promise(res => setTimeout(res, 1300));
+  for (let i = 0; i < 5; i++) await new Promise(res => setImmediate(res)); // first attempt settles, arming the 1s backoff
+  t.mock.timers.tick(1000);
+  for (let i = 0; i < 5; i++) await new Promise(res => setImmediate(res)); // retry settles
   assert.ok(urls.length >= 2, 'a non-ok response is retried');
   assert.ok(urls.every(c => /[?&]_=/.test(c.u) && c.opts?.cache === 'no-store'), 'each attempt is cache-busted');
   assert.notEqual(urls[0].u, urls[1].u, 'cache-bust token differs between attempts');
   assert.equal(n2.Util.getApiKey ? n2.Util.getApiKey() : 'boot-key', 'boot-key');
+});
+
+// ---------------------------------------------------------------------------
+// API-key bootstrap (_loadApiKey in app.js's _domReadyGate): a non-ok
+// /security/client-config response must not be treated as config.
+// ---------------------------------------------------------------------------
+async function bootApiKey(configResponse) {
+  const { Util } = await import('../../frontend/platform/foundation.mjs');
+  const seen = [];
+  const { domReady } = await loadLegacyApp({
+    fetchImpl: (url, opts) => {
+      seen.push({ url: String(url), opts });
+      if (String(url).includes('/security/client-config')) return Promise.resolve(configResponse());
+      return Promise.reject(new Error('offline'));
+    },
+  });
+  Util.setApiKey('');
+  let bootError = null;
+  try { domReady(); } catch (e) { bootError = e; } // the login gate after _loadApiKey may touch stubbed DOM; irrelevant here
+  for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+  const origFetch = globalThis.fetch;
+  let headers;
+  globalThis.fetch = (url, opts) => { headers = opts.headers; return Promise.resolve({ ok: true, status: 200, clone: () => ({}) }); };
+  try { await Util.fetchTraced('/probe'); } finally { globalThis.fetch = origFetch; }
+  return { seen, headers, bootError, reset: () => Util.setApiKey('') };
+}
+
+test('API-key bootstrap: a non-ok /security/client-config (5xx) leaves the key unset and does not reject/throw', async () => {
+  const unhandled = [];
+  const onUnhandled = e => unhandled.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  const r = await bootApiKey(() => ({
+    ok: false, status: 503,
+    // A proxy error page is not JSON: if the !r.ok guard were missing, this would be parsed as config.
+    json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    text: () => Promise.resolve('<html>bad gateway</html>'),
+  }));
+  try {
+    const cfg = r.seen.find(s => s.url.includes('/security/client-config'));
+    assert.ok(cfg, 'boot requested the client config');
+    assert.equal(cfg.opts.cache, 'no-store', 'bypasses the corporate proxy cache');
+    assert.match(cfg.url, /[?&]_=/, 'cache-busting query param');
+    assert.equal(r.headers.has('x-api-key'), false, 'no key learned from a failed response');
+    assert.deepEqual(unhandled, [], 'failure is swallowed, never an unhandled rejection');
+  } finally { process.off('unhandledRejection', onUnhandled); r.reset(); }
+});
+
+test('API-key bootstrap: a non-ok response whose body happens to parse as {apiKey} is still ignored', async () => {
+  const r = await bootApiKey(() => ({
+    ok: false, status: 500, json: () => Promise.resolve({ apiKey: 'must-not-be-used' }), text: () => Promise.resolve(''),
+  }));
+  try { assert.equal(r.headers.has('x-api-key'), false); } finally { r.reset(); }
+});
+
+test('API-key bootstrap: an ok response sets the key that fetchTraced then sends as X-API-Key', async () => {
+  const r = await bootApiKey(() => ({ ok: true, status: 200, json: () => Promise.resolve({ apiKey: 'boot-key' }) }));
+  try { assert.equal(r.headers.get('x-api-key'), 'boot-key'); } finally { r.reset(); }
 });

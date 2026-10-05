@@ -227,3 +227,145 @@ test('runtime-client.load: clears the cached map SYNCHRONOUSLY, before its own f
     Store.setMasterData(priorMasterData, 'test');
   }
 });
+
+// -- _loadSeq stale-response guard -------------------------------------------
+// An older, slower load() must never overwrite the cache after a newer load()
+// has begun, whether the older response lands before or after the newer one,
+// and whether it stalls at the fetch or at the body parse.
+function deferredFetch() {
+  const pending = [];
+  const fetchStub = (url) => new Promise(resolve => pending.push({ url: String(url), resolve }));
+  return { pending, fetchStub };
+}
+
+const okResponse = (map) => ({ ok: true, status: 200, json: () => Promise.resolve(map), clone() { return this; } });
+
+test('runtime-client.load: a slow older load for plant A that resolves AFTER a newer load for plant B is discarded', async () => {
+  const priorMasterData = Store.masterData;
+  const priorFetch = globalThis.fetch;
+  const mapA = buildRateMapForCase(resolvedCases[0]);
+  const mapB = { ...buildRateMapForCase(resolvedCases[0]), machines: { MARK_B: 'B' } };
+  try {
+    Store.setMasterData({ plants: [
+      { plant: 'PLANT-A', routing_runtime_enabled: true }, { plant: 'PLANT-B', routing_runtime_enabled: true },
+    ] }, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+    const { pending, fetchStub } = deferredFetch();
+    globalThis.fetch = fetchStub;
+
+    const loadA = Runtime.load('PLANT-A');
+    const loadB = Runtime.load('PLANT-B');
+    assert.equal(pending.length, 2);
+    const reqA = pending.find(p => p.url.includes('PLANT-A'));
+    const reqB = pending.find(p => p.url.includes('PLANT-B'));
+
+    reqB.resolve(okResponse(mapB));
+    await loadB;
+    assert.equal(Runtime._rateMapPlant, 'PLANT-B');
+    assert.equal(Runtime._rateMap, mapB);
+
+    reqA.resolve(okResponse(mapA)); // the stale response lands last
+    await loadA;
+    assert.equal(Runtime._rateMapPlant, 'PLANT-B', 'stale plant-A response must not overwrite plant-B plant tag');
+    assert.equal(Runtime._rateMap, mapB, 'stale plant-A response must not overwrite the plant-B map');
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setMasterData(priorMasterData, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+  }
+});
+
+test('runtime-client.load: an older load for the SAME plant that resolves after a newer one does not replace the newer map', async () => {
+  const priorMasterData = Store.masterData;
+  const priorFetch = globalThis.fetch;
+  const oldMap = { ...buildRateMapForCase(resolvedCases[0]), machines: { OLD: 'x' } };
+  const newMap = { ...buildRateMapForCase(resolvedCases[0]), machines: { NEW: 'x' } };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'PLANT-A', routing_runtime_enabled: true }] }, 'test');
+    const { pending, fetchStub } = deferredFetch();
+    globalThis.fetch = fetchStub;
+    const first = Runtime.load('PLANT-A');
+    const second = Runtime.load('PLANT-A');
+    pending[1].resolve(okResponse(newMap));
+    await second;
+    pending[0].resolve(okResponse(oldMap));
+    await first;
+    assert.equal(Runtime._rateMap, newMap);
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setMasterData(priorMasterData, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+  }
+});
+
+test('runtime-client.load: an older load whose body parse finishes after a newer load began is discarded (second guard after r.json())', async () => {
+  const priorMasterData = Store.masterData;
+  const priorFetch = globalThis.fetch;
+  const staleMap = { ...buildRateMapForCase(resolvedCases[0]), machines: { STALE: 'x' } };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'PLANT-A', routing_runtime_enabled: true }, { plant: 'PLANT-B', routing_runtime_enabled: false }] }, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+    let releaseJson;
+    globalThis.fetch = () => Promise.resolve({
+      ok: true, status: 200, clone() { return this; },
+      json: () => new Promise(resolve => { releaseJson = () => resolve(staleMap); }),
+    });
+    const loadA = Runtime.load('PLANT-A');
+    while (!releaseJson) await new Promise(resolve => setImmediate(resolve)); // fetch resolved, body still pending
+    await Runtime.load('PLANT-B'); // newer load (plant disabled: clears, no fetch)
+    releaseJson();
+    await loadA;
+    assert.equal(Runtime._rateMap, null, 'a stale body must not repopulate the cache');
+    assert.equal(Runtime._rateMapPlant, null, 'a stale body must not re-tag the cache with plant A');
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setMasterData(priorMasterData, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+  }
+});
+
+test('runtime-client.load: an older load that FAILS after a newer load began does not clobber the newer map', async () => {
+  const priorMasterData = Store.masterData;
+  const priorFetch = globalThis.fetch;
+  const mapB = { ...buildRateMapForCase(resolvedCases[0]), machines: { B: 'b' } };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'PLANT-A', routing_runtime_enabled: true }, { plant: 'PLANT-B', routing_runtime_enabled: true }] }, 'test');
+    const calls = [];
+    globalThis.fetch = (url) => new Promise((resolve, reject) => calls.push({ url: String(url), resolve, reject }));
+    const loadA = Runtime.load('PLANT-A');
+    const loadB = Runtime.load('PLANT-B');
+    calls[1].resolve(okResponse(mapB));
+    await loadB;
+    calls[0].reject(new Error('network down'));
+    await loadA;
+    assert.equal(Runtime._rateMap, mapB);
+    assert.equal(Runtime._rateMapPlant, 'PLANT-B');
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setMasterData(priorMasterData, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+  }
+});
+
+test('runtime-client.load: an older load that returns a non-ok response after a newer load landed does not null the newer map', async () => {
+  const priorMasterData = Store.masterData;
+  const priorFetch = globalThis.fetch;
+  const mapB = { ...buildRateMapForCase(resolvedCases[0]), machines: { B: 'b' } };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'PLANT-A', routing_runtime_enabled: true }, { plant: 'PLANT-B', routing_runtime_enabled: true }] }, 'test');
+    const calls = [];
+    globalThis.fetch = (url) => new Promise(resolve => calls.push({ url: String(url), resolve }));
+    const loadA = Runtime.load('PLANT-A');
+    const loadB = Runtime.load('PLANT-B');
+    calls[1].resolve(okResponse(mapB));
+    await loadB;
+    calls[0].resolve({ ok: false, status: 503, clone() { return this; }, json: () => Promise.resolve({}), text: () => Promise.resolve('') });
+    await loadA;
+    assert.equal(Runtime._rateMap, mapB, 'stale non-ok must not drop the newer cache');
+    assert.equal(Runtime._rateMapPlant, 'PLANT-B');
+  } finally {
+    globalThis.fetch = priorFetch;
+    Store.setMasterData(priorMasterData, 'test');
+    Runtime._rateMap = null; Runtime._rateMapPlant = null;
+  }
+});

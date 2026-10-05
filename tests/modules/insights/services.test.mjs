@@ -125,12 +125,13 @@ test('Alerts.recompute schedules a fresh pass when the worker result is stale', 
 });
 
 
-test('Alerts.scheduleRecompute/{,Lines} debounce and eventually call recompute (adaptive delay)', async () => {
+test('Alerts.scheduleRecompute/{,Lines} debounce and eventually call recompute (adaptive delay)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock: the debounce is ticked, not slept
   let recomputeCalls = 0;
   const orig = Alerts.recompute;
   Alerts.recompute = (...args) => { recomputeCalls++; return orig.apply(Alerts, args); };
   Alerts.scheduleRecompute();
-  await new Promise(r => setTimeout(r, 600)); // > _ALERTS_MAX_DEBOUNCE_MS
+  t.mock.timers.tick(600); // > _ALERTS_MAX_DEBOUNCE_MS
   assert.ok(recomputeCalls >= 1);
   Alerts.recompute = orig;
 });
