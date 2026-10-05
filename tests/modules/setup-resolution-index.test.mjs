@@ -521,3 +521,37 @@ test('two states whose values concatenate identically keep distinct index rows (
   assert.equal(resolveSetup({ ...q(st('10', '220')), index }).effectiveMin, 40);
   assert.equal(resolveSetup({ ...q(st('102', '20')), index }).effectiveMin, 15);
 });
+
+// joinIndexKey is module-private; its separator semantics are observable through the
+// keys buildSetupResolutionIndex stores (one Map entry per distinct joined key).
+test('index keys: (a, "b c") vs ("a b", c) do not collide, empty segments stay distinct, and segment order matters', () => {
+  const definition = { plant: '5512', fields: ['prt01'], signature_version: 1, strict_blanks: false, active: true };
+  const st = (value) => [{ fieldKey: 'prt01', value }];
+  const row = (machine, from, to, min) => ({ machine, signature_version: 1, from_key: st(from), to_key: st(to), setup_min: min });
+  const idx = (machineRows, plantRows = []) => buildSetupResolutionIndex({ definition, machineRows, plantRows, overrides: [] });
+
+  // Same concatenation, different split points -> two entries, not one first-row-wins entry.
+  assert.equal(idx([row('A', 'B C', 'X', 1), row('A B', 'C', 'X', 2)]).machineRows.size, 2);
+  assert.equal(idx([row('A', 'BC', 'X', 1), row('AB', 'C', 'X', 2)]).machineRows.size, 2);
+  // Empty segments: ("", "A") and ("A", "") must differ from each other and from ("A","A")-free joins.
+  assert.equal(idx([row('', 'A', 'A', 1), row('A', '', 'A', 2), row('A', 'A', '', 3)]).machineRows.size, 3);
+  // Plant rows (machine ''): from/to order matters and ("A","") != ("","A").
+  const plant = idx([], [row('', 'A', 'B', 1), row('', 'B', 'A', 2), row('', 'A', '', 3), row('', '', 'A', 4)]);
+  assert.equal(plant.plantRows.size, 4);
+  // Identical tuples still dedupe (first-row-wins), proving size counts keys rather than rows.
+  const dupe = idx([row('A', 'B', 'X', 1), row('A', 'B', 'X', 9)]);
+  assert.equal(dupe.machineRows.size, 1);
+  assert.equal([...dupe.machineRows.values()][0].setup_min, 1);
+
+  // Override keys: null predecessor vs real predecessor, and order of predecessor/successor ids.
+  const ov = (pred, succ) => ({
+    machine: 'M', status: 'active', signature_version: 1, standard_min: 1, remaining_min: 1,
+    predecessor_order_id: pred, successor_order_id: succ,
+    predecessor_state_key: st('A'), successor_state_key: st('B'),
+  });
+  const ovIdx = buildSetupResolutionIndex({
+    definition, machineRows: [], plantRows: [],
+    overrides: [ov('P', 'S'), ov('S', 'P'), ov(null, 'S'), ov('P S', ''), ov('P', ' S')],
+  });
+  assert.equal(ovIdx.overrides.size, 5);
+});

@@ -209,3 +209,27 @@ test('UndoStack.invalidate drops entries whose ids intersect, keeps id-less ones
   assert.equal(UndoStack._entries.length, 2);
   UndoStack._entries = [];
 });
+
+test('UndoStack.pop ignores re-entrant pops while an async undo is pending (senior audit #4)', async () => {
+  UndoStack._entries = [];
+  const hadWin = 'window' in globalThis, hadDoc = 'document' in globalThis;
+  if (!hadWin) globalThis.window = {};
+  if (!hadDoc) globalThis.document = { getElementById: () => null };
+  const log = [];
+  let release;
+  UndoStack.push('A older', () => { log.push('A'); });
+  UndoStack.push('B async', () => new Promise((r) => { release = r; }).then((ok) => { if (!ok) return false; log.push('B'); }));
+  assert.equal(UndoStack.pop()?.label, 'B async');
+  assert.equal(UndoStack.pop(), null, 'second Ctrl+Z while the confirm is open is ignored');
+  release(false);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(log, []);
+  assert.deepEqual(UndoStack._entries.map((e) => e.label), ['A older', 'B async'], 'cancelled entry restored in order');
+  assert.equal(UndoStack.pop()?.label, 'B async', 'pops work again once settled');
+  release(true);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(log, ['B']);
+  UndoStack._entries = [];
+  if (!hadWin) delete globalThis.window;
+  if (!hadDoc) delete globalThis.document;
+});

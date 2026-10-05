@@ -959,18 +959,25 @@ export const UndoStack = {
     if (!hit.size) return;
     this._entries = this._entries.filter(e => !e.ids || !e.ids.some(id => hit.has(id)));
   },
+  /** True while an async undo (e.g. the What-If confirm) is still pending: a second
+   *  Ctrl+Z must not pop an OLDER entry and undo out of order. */
+  _busy: false,
   pop(): UndoEntry | null {
+    if (this._busy) return null;
     const e = this._entries.pop();
     if (!e) return null;
     const done = (r: void | boolean): void => {
+      this._busy = false;
       if (r === false) { this._entries.push(e); return; } // aborted: keep the entry, no toast
       Toast.show(Util.t('toast.undone', { label: e.label }), 'success');
     };
-    const fail = (err: unknown): void => { ErrorLog.error('undo', `${e.label}: ${(err as Error).message}`); };
+    const fail = (err: unknown): void => { this._busy = false; ErrorLog.error('undo', `${e.label}: ${(err as Error).message}`); };
     try {
       const r = e.undoFn();
-      if (r && typeof (r as Promise<void | boolean>).then === 'function') (r as Promise<void | boolean>).then(done, fail);
-      else done(r as void | boolean);
+      if (r && typeof (r as Promise<void | boolean>).then === 'function') {
+        this._busy = true;
+        (r as Promise<void | boolean>).then(done, fail);
+      } else done(r as void | boolean);
     } catch (err) { fail(err); }
     return e;
   },

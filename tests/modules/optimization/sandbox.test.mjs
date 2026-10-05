@@ -115,3 +115,32 @@ test('applied-scenario undo carries task ids and asks before reverting later cal
     assert.ok(Store.plants.ZZ);
   } finally { Modal.confirm = origConfirm; if (!hadWindow) delete globalThis.window; }
 });
+
+test('applied-scenario undo restores tasks through the dirty path with the live row_version (senior audit #2)', async () => {
+  UndoStack._entries.length = 0;
+  const dirty = new Set();
+  // mirror of App._trackDirty
+  const off = Store.subscribe((evt) => {
+    if (['refresh', 'note', 'distribution'].includes(evt.source)) return;
+    if (evt.type === 'task:update') dirty.add(String(evt.id));
+    if (evt.type === 'tasks:bulkUpdate') evt.ids.forEach((i) => dirty.add(String(i)));
+    if (evt.type === 'tasks:bulk') dirty.clear();
+  });
+  try {
+    const d0 = new Date('2026-10-06T08:00:00'), d1 = new Date('2026-10-06T10:00:00'), d2 = new Date('2026-10-07T08:00:00');
+    Store.setTasks([{ id: 'wu1', MACHINE: 'L1', PLANT: 'P', start_date: d0, end_date: d1, RUN_TIME: '2', row_version: 5 }], 't');
+    Sandbox.enter('t');
+    Store.updateTask('wu1', { start_date: d2, end_date: new Date(d2.getTime() + 7200e3) }, 'sandbox-edit');
+    Sandbox.exit(true, 't');
+    // server accepted the promoted save -> new version, clean
+    dirty.clear();
+    Store.updateTask('wu1', { row_version: 6 }, 'refresh');
+    dirty.clear();
+    const entry = UndoStack._entries.at(-1);
+    assert.notEqual(await entry.undoFn(), false);
+    const t = Store.tasks.wu1;
+    assert.equal(t.start_date.toISOString(), d0.toISOString(), 'schedule reverted locally');
+    assert.equal(t.row_version, 6, 'live row_version kept so the revert save is not a conflict');
+    assert.ok(dirty.has('wu1'), 'reverted task must be dirty so the next save pushes the revert');
+  } finally { off(); }
+});

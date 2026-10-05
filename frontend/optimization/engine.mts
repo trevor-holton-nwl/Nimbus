@@ -731,11 +731,24 @@ function sourceMasterData(): NimbusMasterData | null { return _candidateSnapshot
 function sourcePriorityRankMaps() { return _candidateSnapshot?.priorityRankMaps ?? Store.priorityRankMaps; }
 function sourceSelectedPlant(): string | null { return _candidateSnapshot?.selectedPlant ?? Store.selectedPlant; }
 
+// Last-resort ownership from the snapshot's own tasks (mirrors Store.getPlantForLine's final
+// fallback, and compute-core's), memoized per snapshot so the hot path stays O(1).
+const _snapshotTaskPlants = new WeakMap<object, Map<string, string>>();
+function snapshotTaskPlant(snapshot: Readonly<ScheduleSnapshot>, line: string): string | null {
+  let m = _snapshotTaskPlants.get(snapshot);
+  if (!m) {
+    m = new Map();
+    for (const t of snapshot.tasks) if (t.MACHINE && t.PLANT && !m.has(t.MACHINE)) m.set(t.MACHINE, t.PLANT);
+    _snapshotTaskPlants.set(snapshot, m);
+  }
+  return m.get(line) ?? null;
+}
+
 export function sourceGetPlantForLine(line: string): string | null {
   if (!_candidateSnapshot) return Store.getPlantForLine(line);
   return _candidateSnapshot.lineSettings[line]?.plant
     ?? _candidateSnapshot.masterData?.lines.find(row => row.machine === line)?.plant
-    ?? null;
+    ?? snapshotTaskPlant(_candidateSnapshot, line);
 }
 
 function sourceTasksByPlant(plant: string | null): NimbusTask[] {
@@ -2463,8 +2476,11 @@ export const Engine = {
           // Step 2: advance past any closed/blackout region.
           if (respectCalendar) {
             const _calT0 = performance.now();
-            // null = no slot exists; keep the cursor (the former "return from" fallback).
-            cursor = Calendar.nextAvailable(line, cursor, durMs) ?? cursor;
+            // null = no single window holds the order (inherently overlong, or none within 90
+            // days). Never keep a cursor that may sit inside a blackout: use the documented
+            // continuous-bar exception's first operating instant, else the snapped cursor.
+            cursor = Calendar.nextAvailable(line, cursor, durMs)
+              ?? Calendar.nextOperatingInstant(line, cursor) ?? Util.snap(cursor);
             _pmCalMs += performance.now() - _calT0;
           }
 

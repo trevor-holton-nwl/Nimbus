@@ -1456,7 +1456,9 @@ export const DistributionPane = (() => {
    *  What-If mode. */
   function _onSaveScheduleClick(): void {
     if (Sandbox.active) return;
-    Persistence.saveAll({ silent: true });
+    // A user click: never silent (an in-flight save must still say so). `silent` stays
+    // reserved for programmatic promote paths.
+    Persistence.saveAll();
   }
 
   /* ---------------------------------------------------------------------

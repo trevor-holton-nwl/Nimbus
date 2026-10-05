@@ -454,3 +454,129 @@ test('every Store.selectedLines picker applies a multi-line paste in one setSele
     assert.match(source.slice(at, at + 400), /boxes => Store\.setSelectedLines\(new Set\(\[\.\.\.Store\.selectedLines/, `${file} passes an onBatch`);
   }
 });
+
+test('errorDetailText: empty scalars/objects fall back, {code} and {error:{message}} are readable, long 422 lists are truncated (senior audit)', () => {
+  for (const empty of [undefined, null, '', 0, false, {}, []]) assert.equal(Util.errorDetailText(empty), null, JSON.stringify(empty));
+  assert.equal(Util.errorDetailText({ code: 'E_LOCKED' }), 'E_LOCKED');
+  assert.equal(Util.errorDetailText({ error_code: 'LOCKED', status: 'x' }), 'LOCKED');
+  assert.equal(Util.errorDetailText({ error: { message: 'deep' } }), 'deep');
+  const many = Array.from({ length: 150 }, (_, i) => ({ loc: ['body', `f${i}`], msg: `bad ${i}` }));
+  const text = Util.errorDetailText(many);
+  assert.ok(text.length < 200, `truncated, got ${text.length} chars`);
+  assert.match(text, /f0: bad 0/);
+  assert.match(text, /\(\+145\)/);
+  const loop = {}; loop.message = loop;
+  assert.equal(Util.errorDetailText(loop), null, 'self-referential payload cannot overflow the stack');
+  // callers do: errorDetailText(x) || 'HTTP ' + status
+  assert.equal(Util.errorDetailText({}) || 'HTTP 500', 'HTTP 500');
+  assert.equal(Util.errorDetailText(0) || 'HTTP 500', 'HTTP 500');
+});
+
+test('Toast action is one-shot (double-click) and a throwing action still dismisses the toast', () => {
+  const doc = _fakeDocument();
+  globalThis.document = doc;
+  let runs = 0;
+  Toast.show('one shot', 'warn', 20, { label: 'Go', run: () => { runs++; } });
+  const el = doc._stack.children[0];
+  el.children[0].click(); el.children[0].click();
+  assert.equal(runs, 1, 'a second click must not re-run the action');
+
+  Toast.show('throws', 'warn', 20, { label: 'Boom', run: () => { throw new Error('x'); } });
+  const el2 = doc._stack.children.find(c => c.textContent === 'throws');
+  assert.throws(() => el2.children[0].click(), /x/);
+  assert.equal(el2.classList.contains('leaving'), true, 'finally dismisses even when run() throws');
+});
+
+test('Modal: Tab stays trapped (including focus on <body> and dialogs with no focusables) and Escape cancels a confirm', async (tctx) => {
+  tctx.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock for Modal.open's deferred focus
+  const prevDoc = globalThis.document;
+  const byId = {};
+  let root;
+  class El {
+    constructor(tag, o = {}) {
+      this.tag = tag; this.id = o.id || ''; this.cls = new Set((o.cls || '').split(' ').filter(Boolean)); this.children = []; this.parent = null;
+      this.hidden = !!o.hidden; this.disabled = false; this.attrs = {}; this.L = {}; this.textContent = ''; this.type = ''; this.style = {};
+      if (this.id) byId[this.id] = this;
+    }
+    get isConnected() { let e = this; while (e) { if (e === root) return true; e = e.parent; } return false; }
+    add(c) { c.parent = this; this.children.push(c); return c; }
+    appendChild(c) { return this.add(c); }
+    get classList() { const s = this; return { add: c => s.cls.add(c), remove: c => s.cls.delete(c), contains: c => s.cls.has(c) }; }
+    desc() { return this.children.flatMap(c => [c, ...c.desc()]); }
+    contains(n) { return n === this || this.desc().includes(n); }
+    closest(sel) { let e = this; while (e) { if (sel === '[hidden]' && e.hidden) return e; e = e.parent; } return null; }
+    getAttribute(k) { return this.attrs[k] ?? null; }
+    setAttribute(k, v) { this.attrs[k] = String(v); }
+    matches(sel) {
+      const f = ['a', 'button', 'input', 'select', 'textarea'].includes(this.tag) && !this.disabled && this.attrs.tabindex !== '-1';
+      if (sel.startsWith('a[href]')) return f;
+      if (sel === '.modal') return this.cls.has('modal');
+      return false;
+    }
+    querySelector(s) { return this.desc().find(e => e.matches(s)) || null; }
+    querySelectorAll(s) { return this.desc().filter(e => e.matches(s)); }
+    addEventListener(t, f) { (this.L[t] ||= []).push(f); }
+    removeEventListener(t, f) { this.L[t] = (this.L[t] || []).filter(x => x !== f); }
+    focus() { if (!this.isConnected || this.hidden || this.closest('[hidden]')) return; globalThis.document.activeElement = this; }
+    click() { for (const f of [...(this.L.click || [])]) f({ target: this }); }
+  }
+  root = new El('body');
+  const docL = {};
+  globalThis.document = {
+    activeElement: root, body: root, getElementById: id => byId[id] || null, createElement: t => new El(t),
+    addEventListener(t, f) { (docL[t] ||= []).push(f); },
+  };
+  const key = (target, k, shiftKey = false) => {
+    const e = { key: k, shiftKey, prevented: false, stopped: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } };
+    for (const f of docL.keydown || []) f(e);
+    if (e.stopped) return e;
+    for (let n = target; n; n = n.parent) for (const f of n.L.keydown || []) f(e);
+    return e;
+  };
+  const mk = (id, nButtons) => {
+    const bd = root.add(new El('div', { id, cls: 'modal-backdrop', hidden: true }));
+    const m = bd.add(new El('div', { cls: 'modal' }));
+    const btns = Array.from({ length: nButtons }, (_, i) => m.add(new El('button', { id: `${id}-b${i}` })));
+    return { bd, m, btns };
+  };
+  const sleep = async ms => { tctx.mock.timers.tick(ms); }; // deferred-focus timer fires on the virtual clock
+  try {
+    const A = mk('tabA', 2);
+    Modal.open('tabA'); await sleep(5);
+    assert.equal(globalThis.document.activeElement, A.btns[0], 'focus moves into the dialog');
+    A.btns[1].focus();
+    assert.equal(key(A.btns[1], 'Tab').prevented, true, 'Tab on the last control wraps');
+    assert.equal(globalThis.document.activeElement, A.btns[0]);
+    assert.equal(key(A.btns[0], 'Tab', true).prevented, true, 'Shift+Tab on the first control wraps');
+    assert.equal(globalThis.document.activeElement, A.btns[1]);
+
+    globalThis.document.activeElement = root; // a click on the backdrop left focus on <body>
+    assert.equal(key(root, 'Tab').prevented, true, 'Tab from <body> is pulled back into the open dialog');
+    assert.ok(A.m.contains(globalThis.document.activeElement));
+    Modal.close('tabA');
+    globalThis.document.activeElement = root;
+    assert.equal(key(root, 'Tab').prevented, false, 'no trap once the dialog is closed');
+
+    const E = mk('tabEmpty', 0); // nothing focusable inside
+    Modal.open('tabEmpty'); await sleep(5);
+    globalThis.document.activeElement = root;
+    assert.equal(key(root, 'Tab').prevented, true);
+    assert.equal(globalThis.document.activeElement, E.m, 'the dialog container itself takes focus');
+    assert.equal(E.m.attrs.tabindex, '-1');
+    Modal.close('tabEmpty');
+
+    // Escape cancels an open confirm dialog.
+    const C = mk('confirm-modal', 0);
+    const cancel = C.m.add(new El('button', { id: 'confirm-cancel-btn' }));
+    let cancelled = 0;
+    cancel.addEventListener('click', () => { cancelled++; });
+    Modal.open('confirm-modal'); await sleep(5);
+    const esc = key(cancel, 'Escape');
+    assert.equal(esc.prevented, true);
+    assert.equal(cancelled, 1, 'Escape clicks Cancel');
+    Modal.close('confirm-modal');
+    assert.equal(key(root, 'Escape').prevented, false, 'Escape is ignored when no confirm is open');
+  } finally {
+    globalThis.document = prevDoc;
+  }
+});

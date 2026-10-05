@@ -128,7 +128,16 @@ export const CalendarSync = {
       jobs.push(Util.fetchTraced(`${Config.API_BASE}${path}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plant, deletes: ids }), signal: AbortSignal.timeout(8000),
-      }).then(r => { if (r.ok) CalendarSync._trackPendingDeletes(plant, kind, ids, false); })
+      }).then(r => {
+        // 404 = already gone (the delete is idempotent). A permanent 4xx (403/409) will never
+        // succeed on replay: drop the ids with a one-time warning rather than hiding the
+        // blackout locally forever. Transient failures (5xx/network) stay pending.
+        if (r.ok || r.status === 404) { CalendarSync._trackPendingDeletes(plant, kind, ids, false); return; }
+        if (r.status === 403 || r.status === 409) {
+          CalendarSync._trackPendingDeletes(plant, kind, ids, false);
+          Toast.show(Util.t('toast.calendar_delete_dropped'), 'warn', 10000);
+        }
+      })
         .catch(e => ErrorLog.warn('calendar-sync', `Replay of pending ${kind} blackout deletes failed: ${(e as Error).message}`)));
     }
     return Promise.all(jobs).then(() => undefined);
@@ -488,7 +497,40 @@ export const CalendarSync = {
     const deletesOnly = Array.isArray(body.deletes) && body.deletes.length > 0 && !body.upserts;
     if (deletesOnly) { Toast.show(Util.t('toast.calendar_delete_pending'), 'warn', 8000); return; }
     Toast.show(Util.t('toast.calendar_save_failed'), 'warn', 10000,
-      { label: Util.t('btn.retry'), run: () => { void this._post(path, body, label); } });
+      // Rebuild from CURRENT state at click time: the captured body may be stale by then and a
+      // blind re-send could overwrite a newer edit (or resurrect a block deleted since).
+      { label: Util.t('btn.retry'), run: () => {
+        const fresh = this._freshBody(path, body);
+        if (fresh) void this._post(path, fresh, label);
+      } });
+  },
+
+  /** Re-derive a failed write's body from the live Store; null when nothing is left to send. */
+  _freshBody(path: string, body: Record<string, unknown>): Record<string, unknown> | null {
+    const plant = String(body.plant ?? '');
+    if (path === '/plant-calendar/plant-hours') {
+      return { plant, work_hours: Store.plants[plant]?.workHours };
+    }
+    if (path === '/plant-calendar/line-hours') {
+      const names = ((body.lines as Array<{ machine: string }> | undefined) || []).map(l => l.machine);
+      const lines = names.filter(m => Store.calendars[m]).map(m => ({ machine: m, work_hours: Store.calendars[m].workHours }));
+      return lines.length ? { plant, lines } : null;
+    }
+    const isLine = path === '/plant-calendar/line-blackouts';
+    if (isLine || path === '/plant-calendar/plant-blackouts') {
+      const pool: Array<NimbusBlock | NimbusPlantBlock> = isLine ? Store.blocks : Store.plantBlocks;
+      const byId = new Map(pool.map(b => [b.id, b] as const));
+      const sentUpserts = ((body.upserts as Array<{ id: string }> | undefined) || []).map(u => u.id);
+      const sentDeletes = ((body.deletes as string[] | undefined) || []);
+      const upserts = sentUpserts.filter(id => byId.has(id)).map(id => this._blockPayload(byId.get(id)!, isLine));
+      const deletes = [...new Set([...sentDeletes, ...sentUpserts.filter(id => !byId.has(id))])].filter(id => !byId.has(id));
+      if (!upserts.length && !deletes.length) return null;
+      const fresh: Record<string, unknown> = { plant };
+      if (upserts.length) fresh.upserts = upserts;
+      if (deletes.length) fresh.deletes = deletes;
+      return fresh;
+    }
+    return body;
   },
 };
 

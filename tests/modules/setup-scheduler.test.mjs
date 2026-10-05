@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { evaluateSchedule } from '../../frontend/optimization/engine.mjs';
+import { evaluateSchedule, deriveSetupObservation } from '../../frontend/optimization/engine.mjs';
 import * as SetupScheduler from '../../frontend/optimization/setup-scheduler.mjs';
 import { ErrorLog } from '../../frontend/platform/foundation.mjs';
 import { Store } from '../../frontend/platform/store.mjs';
@@ -5203,4 +5203,135 @@ test('#37 gap fill keeps the setup_transition_unrecorded reason instead of overw
   assert.equal(queued.reason.code, 'setup_transition_unrecorded', 'the actionable reason survives the capacity check');
   assert.equal(filled.patches.find(p => p.id === 'n8-red').changes.planning_reason.code, 'setup_transition_unrecorded',
     'and so does the persisted planning_reason patch');
+});
+
+// ---------------------------------------------------------------------------
+// Setup availability: the production prefix-max index (binary search over
+// interval starts + running max of ends) must agree with a plain O(n^2)
+// "scan every other order's intervals" reference, for every setup bar.
+// ---------------------------------------------------------------------------
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function referenceAvailability(core, ctx, line, plant, successorId, end, orders) {
+  const defaultHours = {};
+  for (let d = 0; d < 7; d++) defaultHours[d] = core.WEEKEND_OFF && (d === 0 || d === 6) ? null : [...core.DEFAULT_SHIFT];
+  const probe = new Date(end.getTime() - 1);
+  const lineWin = core._dayWindow(ctx.calendars[line]?.workHours ?? defaultHours, probe);
+  if (!lineWin) return 0;
+  const plantWin = core._dayWindow(ctx.plants[plant]?.workHours ?? defaultHours, probe);
+  if (!plantWin) return 0;
+  const win = [Math.max(+lineWin[0], +plantWin[0]), Math.min(+lineWin[1], +plantWin[1])];
+  if (win[0] >= win[1] || +end > win[1] || +end <= win[0]) return 0;
+  let lower = win[0];
+  const blocked = (b) => {
+    const s = core.parseDate(b.start), e = core.parseDate(b.end);
+    if (!s || !e || +s >= +end || +e <= lower) return false;
+    if (+e >= +end) return true;
+    lower = Math.max(lower, +e);
+    return false;
+  };
+  for (const b of ctx.blocks) {
+    if (b.plant && b.plant !== plant) continue;
+    if (b.line && b.line !== line) continue;
+    if (blocked(b)) return 0;
+  }
+  for (const b of ctx.plantBlocks) {
+    if (b.plant && b.plant !== plant) continue;
+    if (blocked(b)) return 0;
+  }
+  for (const o of orders) {
+    if (String(o.id) === successorId) continue;
+    for (const iv of core.scheduleIntervals(o)) {
+      if (+iv.start >= +end || +iv.end <= lower) continue;
+      if (+iv.end >= +end) return 0;
+      lower = Math.max(lower, +iv.end);
+    }
+  }
+  return Math.max(0, (+end - lower) / 60000);
+}
+
+test('setup availability prefix-max index matches an O(n^2) reference on seeded random lines', () => {
+  const core = globalThis.NimbusComputeCore;
+  const MIN = 60000;
+  const base = new Date(2026, 5, 10, 0, 0, 0).getTime();
+  const colors = ['RED', 'BLUE', 'GREEN', 'BLACK'];
+  const state = v => [{ fieldKey: 'colorWheel', value: v }];
+  const plantRows = [];
+  for (const a of colors) for (const b of colors) if (a !== b) plantRows.push({ machine: '', signature_version: 1, from_key: state(a), to_key: state(b), setup_min: 10 });
+  const setup = {
+    plant: 'P', definition: { plant: 'P', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_active: true, plant_rows: plantRows, machine_rows: [], machine_states: [], overrides: [],
+  };
+  const wh = open => Object.fromEntries(Array.from({ length: 7 }, (_, i) => [i, open]));
+  let compared = 0, nonzero = 0, zero = 0;
+  for (const seed of [1, 7, 12345, 99991]) {
+    const R = mulberry32(seed);
+    const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+    for (let c = 0; c < 300; c++) {
+      const grid = R() < 0.4 ? 60 : (R() < 0.5 ? 1 : 15);
+      const tasks = [];
+      for (let i = 0; i < ri(2, 8); i++) {
+        const st = base + ri(0, (24 * 60) / grid) * grid * MIN;
+        const t = { id: 'T' + i, PLANT: 'P', MACHINE: 'L', COLOR: colors[ri(0, 3)], RUN_TIME: 1 };
+        if (R() < 0.35) {
+          const segs = ri(2, 3);
+          let cur = st; t.scheduleSegments = [];
+          for (let s = 0; s < segs; s++) {
+            const len = ri(1, 300) * MIN;
+            t.scheduleSegments.push({ sequence: s + 1, startDate: new Date(cur), endDate: new Date(cur + len) });
+            cur += len + ri(-100, 300) * MIN;
+          }
+          if (R() < 0.3) t.scheduleSegments.reverse();
+          t.start_date = new Date(st); t.end_date = new Date(cur);
+        } else {
+          t.start_date = new Date(st); t.end_date = new Date(st + ri(1, 600) * MIN);
+        }
+        tasks.push(t);
+      }
+      const blocks = [], plantBlocks = [];
+      for (let i = 0; i < ri(0, 3); i++) {
+        const s = base + ri(0, 1400) * MIN;
+        const b = {
+          start: new Date(s).toISOString(), end: new Date(s + ri(1, 300) * MIN + (R() < 0.3 ? 30000 : 0)).toISOString(),
+          plant: R() < 0.7 ? 'P' : 'Q', line: R() < 0.5 ? 'L' : (R() < 0.5 ? 'M' : undefined),
+        };
+        (R() < 0.5 ? blocks : plantBlocks).push(b);
+      }
+      const ctx = {
+        calendars: { L: { workHours: wh(R() < 0.8 ? [0, 24] : [ri(0, 8), ri(14, 24)]) } },
+        plants: { P: { workHours: wh(R() < 0.8 ? [0, 24] : [ri(0, 8), ri(14, 24)]) } },
+        lineSettings: {}, masterData: null, blocks, plantBlocks,
+      };
+      const obs = deriveSetupObservation(setup, tasks, new Set(['L']), ctx);
+      for (const iv of obs.intervals) {
+        const expected = referenceAvailability(core, ctx, 'L', 'P', iv.successorOrderId, iv.end, tasks);
+        assert.equal(iv.availableMinutes, expected, `seed ${seed} case ${c} successor ${iv.successorOrderId}`);
+        compared++; if (expected > 0) nonzero++; else zero++;
+      }
+    }
+  }
+  // Guard against a vacuous comparison: both covered and uncovered outcomes must be exercised.
+  assert.ok(compared > 500, `compared ${compared}`);
+  assert.ok(nonzero > 50 && zero > 50, `nonzero ${nonzero}, zero ${zero}`);
+});
+
+test('setup availability without a calendar context falls back to the gap since the predecessor ended', () => {
+  const state = v => [{ fieldKey: 'colorWheel', value: v }];
+  const setup = {
+    plant: 'P', definition: { plant: 'P', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+    plant_active: true, plant_rows: [{ machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 10 }],
+    machine_rows: [], machine_states: [], overrides: [],
+  };
+  const t = (id, color, s, e) => ({ id, PLANT: 'P', MACHINE: 'L', COLOR: color, RUN_TIME: 1, start_date: new Date(s), end_date: new Date(e) });
+  const obs = deriveSetupObservation(setup, [t('a', 'RED', '2026-08-03T08:00:00', '2026-08-03T09:00:00'), t('b', 'BLUE', '2026-08-03T09:45:00', '2026-08-03T10:45:00')], new Set(['L']));
+  assert.equal(obs.intervals.length, 1);
+  assert.equal(obs.intervals[0].availableMinutes, 45);
 });

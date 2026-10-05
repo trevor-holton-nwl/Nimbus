@@ -921,6 +921,43 @@ test('Engine.evaluateSchedule keeps planningStart separate from runNow and place
   }
 });
 
+test('legacy optimizer never lands an inherently overlong order inside a blackout (nextAvailable null fallback)', () => {
+  const plant = 'LEGACY-OVERLONG';
+  const line = 'LEGACY-OVERLONG-L1';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const priorBlocks = structuredClone(Store.blocks);
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setCalendar(line, { 1: [8, 18] }, 'unit-test'); // 10h window; the 12h order can never fit one window
+    Store.addBlock({ id: 'legacy-overlong-blackout', plant, line, start: new Date('2035-08-06T08:00:00'), end: new Date('2035-08-06T10:00:00') }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    Store.setTasks([{ id: 'legacy-overlong-order', PLANT: plant, MACHINE: line, RUN_TIME: 12, start_date: null, end_date: null }], 'unit-test');
+    // Only a non-public mode string with no active setup snapshot reaches the compatibility walk.
+    const result = Engine.evaluateSchedule('legacy-compat', {
+      plant, respectFirmed: true, respectCalendar: true,
+      planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'),
+      endDate: new Date('2035-08-08T00:00:00'),
+    });
+    const patch = result.patches.find(item => item.id === 'legacy-overlong-order');
+    assert.ok(patch?.changes.start_date, 'the overlong order is placed (continuous-bar exception)');
+    assert.ok(patch.changes.start_date.getTime() >= new Date('2035-08-06T10:00:00').getTime(),
+      'it must start at the first operating instant after the blackout, never inside it');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.replaceBlocks(priorBlocks, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
 test('Engine setup-aware routing carries respectCalendar into bounds and placement', () => {
   const plant = 'ENGINE-CALENDAR-CONTRACT';
   const line = 'ENGINE-CALENDAR-L1';

@@ -218,6 +218,7 @@ declare global {
     ensureCalendar(line: string, calendars: Record<string, NimbusCalendarEntry>): void;
     ensurePlant(name: string | null, plants: Record<string, NimbusCalendarEntry>): void;
     _dayWindow(workHours: NimbusWorkHours, date: unknown): [Date, Date] | null;
+    _nextCalendarDay(d: Date): Date;
     workWindow(
       line: string, date: unknown,
       calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusCalendarEntry>,

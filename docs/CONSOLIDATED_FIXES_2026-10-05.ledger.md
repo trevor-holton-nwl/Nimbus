@@ -177,3 +177,19 @@ Verification (counts):
 Incident: a `git stash`/`pop` pair in this round raced another worktree's stash on the shared stash stack; my data.py edit leaked into cr1005-audit-fe's working tree (uncommitted, backend/distribution/data.py: children_total change) and a store.mts change leaked into this worktree (uncommitted, left unstaged, never committed here). Needs cleanup by the owner of audit-fe (git checkout backend/distribution/data.py there; it is then superseded by this branch's commit).
 
 Verification: pytest on fresh nimbus_fix_be_final (schema.sql, ON_ERROR_STOP=1): 990 passed, 1 skipped. ruff clean. npm build/typecheck ok, lint 0 errors/31 warnings, sap-interface-ui + runtime-client JS tests pass.
+
+## Senior audit fix round (frontend)
+
+| # | Item | Status | Tests (before-fail / after-pass) |
+|---|---|---|---|
+| 1 | Labor data-period raw key (CSS.escape stub) | DONE | labor-planning.test.mjs |
+| 2 | What-If applied undo via restoreTasks (dirty, live row_version) | DONE | sandbox.test.mjs |
+| 3 | Master Data dirty grid kept on plant switch | DONE | admin-ui-grid.test.mjs S4 (new behavioural harness from md_probe) |
+| 4 | UndoStack.pop busy flag | DONE | store.test.mjs |
+| 5 | MD paging: stale Load more, failed load keeps grid, timer cleared, post-save refresh token + keeps lines | DONE | admin-ui-grid.test.mjs S2/S5/S6 + 2 refresh tests |
+| 6 | Legacy walk nextAvailable null fallback | DONE | engine.test.mjs (reachable only via non-public mode string) |
+| 7 | Distribution Save schedule not silent | DONE | distribution-pane.test.mjs (source-level; pane has no DOM harness) |
+| 8 | Lows: calendar-sync Retry/replay, nextCalendarDay, Toast one-shot, Modal Tab trap, errorDetailText, static-assets gitignore, missingPairsCsv csvCell, AGENTS.md CSP, compute-core/engine plant fallback | DONE | calendar-sync, compute-core (TZ child), foundation, static-assets, optimize-ui tests |
+| 9 | Mutation holes (nextAvailable bound, palette firm/undo, D28 pagehide, index keys, TM caps, setup-availability differential, _loadSeq, reload fallback, API-key !r.ok, #36 TZ, deterministic timers) | DONE | merged from fix/cr1005-audit-fe-a/-b |
+
+Notes: git stash is shared across worktrees; a stash collision lost one edit (re-applied) and left a stray backend/distribution/data.py hunk (reverted; patch in scratchpad).

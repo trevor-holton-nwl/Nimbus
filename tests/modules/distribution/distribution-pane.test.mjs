@@ -512,3 +512,11 @@ test('effectiveDateWindow — needs_review with no explicit dates is unwindowed 
   assert.deepEqual(effectiveDateWindow({ ...base, from: '2026-09-01' }, '2026-10-05', '2026-12-31'), { from: '2026-09-01', to: '' });
   assert.deepEqual(effectiveDateWindow({ ...base, bucket: 'changed' }, '2026-10-05', '2026-12-31'), { from: '2026-10-05', to: '2026-12-31' });
 });
+
+test('banner Save schedule (a user click) calls Persistence.saveAll without silent (senior audit #7)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../../frontend/distribution/distribution-pane.mts', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('function _onSaveScheduleClick'), src.indexOf('P2-16 — Show on Gantt'));
+  assert.match(body, /Persistence\.saveAll\(\)/);
+  assert.doesNotMatch(body, /saveAll\(\{[^)]*silent/, 'silent is reserved for programmatic callers');
+});

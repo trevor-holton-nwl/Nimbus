@@ -342,8 +342,11 @@ test('OptimizerPreview derives and exports real setup states for bounded missing
     const csv = OptimizerPreview.missingPairsCsv(pairs.pairs);
     assert.match(csv, /From setup state,To setup state/);
     assert.match(csv, /Reason,Remedy/);
-    assert.match(csv, /"RED"/);
-    assert.match(csv, /"BLUE"/);
+    assert.match(csv, /,RED,BLUE,/);
+    // Formula-guarded and RFC-4180 quoted (senior audit): a '=' state must not execute in Excel.
+    const hostile = OptimizerPreview.missingPairsCsv([{ ...pairs.pairs[0], fromState: '=HYPERLINK(1)', remedy: 'a, "b"' }]);
+    assert.ok(hostile.includes(",'=HYPERLINK(1),"), 'formula prefix is neutralised');
+    assert.ok(hostile.endsWith('"a, ""b"""'), 'embedded comma/quote are RFC-4180 quoted');
   } finally {
     globalThis.window.__NIMBUS_LOCALES = originalLocales;
   }

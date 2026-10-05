@@ -440,7 +440,7 @@ export const LaborPlanning = (() => {
       const cells = _weeks.map((w) => {
         const ah = planMap[grp]?.[w.key]; if (ah != null) totals[w.key] += ah;
         return `<td>
-          <input type="number" class="lp-cell" data-group="${Util.escapeHtml(grp)}" data-period="${_cssEsc(w.key)}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
+          <input type="number" class="lp-cell" data-group="${Util.escapeHtml(grp)}" data-period="${Util.escapeHtml(w.key)}" min="0" step="0.5" value="${ah != null ? ah : ''}" placeholder="—">
         </td>`;
       }).join('');
       return `<tr><td>${Util.escapeHtml(grp)}</td>${cells}</tr>`;

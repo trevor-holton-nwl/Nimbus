@@ -11,7 +11,8 @@
 //   node scripts/check-static-assets.mjs   # CLI: checks the real frontend/ tree, exit 1 on any violation
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { resolve, dirname, extname, relative, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { resolve, dirname, extname, relative, sep, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -101,17 +102,38 @@ const ALLOWED_EXTENSIONS = new Set([
   '.woff', '.woff2', '.ttf',
 ]);
 
+/** Subset of `paths` that git ignores. Locally generated scratch output (e.g. the
+ *  gitignored OpenAPI dump `npm run generate:api-types` leaves under frontend/types/) is
+ *  never committed, so it must not turn the suite red. No git (the Docker build, a tarball)
+ *  or any git error => nothing is treated as ignored, i.e. the strict check still runs. */
+function gitIgnoredSubset(paths) {
+  if (!paths.length) return new Set();
+  try {
+    const r = spawnSync('git', ['check-ignore', '--stdin', '-z'], { cwd: ROOT, input: paths.join('\u0000'), encoding: 'utf8' });
+    if (r.error || (r.status !== 0 && r.status !== 1)) return new Set();
+    return new Set((r.stdout || '').split('\u0000').filter(Boolean).map(p => resolve(ROOT, p)));
+  } catch { return new Set(); }
+}
+
 /**
  * Recursively find any file under `dir` that is either an exact-match backend
- * filename or has an extension outside the frontend allowlist.
+ * filename or has an extension outside the frontend allowlist. A disallowed extension is
+ * forgiven when git ignores the file; an exact backend basename never is.
  */
 export function findForbiddenFiles(dir) {
+  const hits = findForbiddenFilesRaw(dir);
+  const extOnly = hits.filter(f => !FORBIDDEN_BASENAMES.has(basename(f)));
+  const ignored = gitIgnoredSubset(extOnly);
+  return hits.filter(f => !ignored.has(f));
+}
+
+function findForbiddenFilesRaw(dir) {
   const found = [];
   if (!existsSync(dir)) return found;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = resolve(dir, entry.name);
     if (entry.isDirectory()) {
-      found.push(...findForbiddenFiles(full));
+      found.push(...findForbiddenFilesRaw(full));
       continue;
     }
     const ext = extname(entry.name).toLowerCase();

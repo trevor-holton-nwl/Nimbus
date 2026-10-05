@@ -1210,7 +1210,9 @@ export const OptimizerPreview = {
   },
 
   missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
-    const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    // Util.csvCell: RFC-4180 quoting AND the spreadsheet formula guard (a state/order value
+    // starting with = + - @ must not execute when the planner opens the export in Excel).
+    const quote = (value: unknown) => Util.csvCell(value);
     return ['Line,Predecessor order,Successor order,From setup state,To setup state,Reason,Remedy', ...pairs.map(pair =>
       [pair.line, pair.predecessorOrderId, pair.successorOrderId, pair.fromState, pair.toState, pair.reason, pair.remedy].map(quote).join(','))].join('\n');
   },

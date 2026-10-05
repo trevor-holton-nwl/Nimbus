@@ -56,3 +56,20 @@ test('collectStaticImportClosure throws when an import target does not exist', (
     /does not resolve/,
   );
 });
+
+test('findForbiddenFiles forgives gitignored scratch output but still flags stray files and backend basenames (generate:api-types must not turn the suite red)', async () => {
+  const { writeFileSync, rmSync, mkdtempSync, existsSync: exists } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dump = resolve(WEB_DIR, 'types', '.openapi-schema.json');
+  const created = !exists(dump);
+  if (created) writeFileSync(dump, '{}');
+  try {
+    assert.deepEqual(findForbiddenFiles(WEB_DIR), [], 'the gitignored OpenAPI dump is not a violation');
+  } finally { if (created) rmSync(dump, { force: true }); }
+  const tmp = mkdtempSync(resolve(tmpdir(), 'static-'));
+  try {
+    writeFileSync(resolve(tmp, 'notes.txt'), 'x');
+    writeFileSync(resolve(tmp, 'db.py'), 'x');
+    assert.deepEqual(findForbiddenFiles(tmp).map(f => f.split(/[\\/]/).pop()).sort(), ['db.py', 'notes.txt']);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

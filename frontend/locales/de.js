@@ -1913,5 +1913,6 @@ window.__NIMBUS_LOCALES.de = {
   'ui.reject_zero_runtime': 'calculated run time is zero',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
+  'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
   'btn.retry': 'Retry',
 };

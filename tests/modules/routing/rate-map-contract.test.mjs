@@ -16,7 +16,21 @@ test('actual rate-map producer contract keeps shared routing groups material-spe
   }
 });
 
-test('#36 date-only validity bounds are LOCAL calendar days (valid_to is inclusive, valid_from is not a day early)', () => {
+// The bug this pins (date-only 'YYYY-MM-DD' bounds parsed as UTC midnight) is invisible when the
+// process runs in UTC, so each case sets TZ itself to a zone behind UTC and proves it took effect.
+function withTimeZone(zone, fn) {
+  const prior = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    // Guard against a vacuous run: the zone must really be active (August => EDT/PDT, never 0).
+    assert.notEqual(new Date(2026, 7, 20, 12, 0).getTimezoneOffset(), 0, `TZ=${zone} did not take effect`);
+    fn();
+  } finally {
+    if (prior === undefined) delete process.env.TZ; else process.env.TZ = prior;
+  }
+}
+
+for (const zone of ['America/New_York', 'America/Los_Angeles']) test(`#36 date-only validity bounds are LOCAL calendar days in ${zone} (valid_to is inclusive, valid_from is not a day early)`, () => withTimeZone(zone, () => {
   const map = {
     plant: 'P', generated_at: '', machines: { M: 'WC' },
     pv: { 'MAT|0001': { valid_from: '2026-08-10', valid_to: '2026-08-20', lot_from: null, lot_to: null, key: 'K' } },
@@ -34,7 +48,7 @@ test('#36 date-only validity bounds are LOCAL calendar days (valid_to is inclusi
   } finally {
     Runtime._rateMap = priorMap; Runtime._rateMapPlant = priorPlant;
   }
-});
+}));
 
 test('#36 a slow plant-A rate-map response cannot overwrite plant B after the user switched', async () => {
   const { Store } = await import('../../../frontend/platform/store.mjs');
