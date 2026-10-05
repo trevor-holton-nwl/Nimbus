@@ -106,7 +106,8 @@ interface StoreState {
 
 interface UndoEntry {
   label: string;
-  undoFn: () => void;
+  /** May be async; resolving/returning `false` means the user aborted (entry is kept, no toast). */
+  undoFn: () => void | boolean | Promise<void | boolean>;
   at: number;
   /** Task ids this entry restores (optional; entries without ids are never invalidated). */
   ids?: string[];
@@ -943,7 +944,7 @@ export const UndoStack = {
   MAX: 10,
   _entries: [] as UndoEntry[],
 
-  push(label: string, undoFn: () => void, ids?: Iterable<string | number>): void {
+  push(label: string, undoFn: UndoEntry['undoFn'], ids?: Iterable<string | number>): void {
     const entry: UndoEntry = { label, undoFn, at: Date.now() };
     if (ids) entry.ids = [...ids].map(String);
     this._entries.push(entry);
@@ -961,8 +962,16 @@ export const UndoStack = {
   pop(): UndoEntry | null {
     const e = this._entries.pop();
     if (!e) return null;
-    try { e.undoFn(); Toast.show(Util.t('toast.undone', { label: e.label }), 'success'); }
-    catch (err) { ErrorLog.error('undo', `${e.label}: ${(err as Error).message}`); }
+    const done = (r: void | boolean): void => {
+      if (r === false) { this._entries.push(e); return; } // aborted: keep the entry, no toast
+      Toast.show(Util.t('toast.undone', { label: e.label }), 'success');
+    };
+    const fail = (err: unknown): void => { ErrorLog.error('undo', `${e.label}: ${(err as Error).message}`); };
+    try {
+      const r = e.undoFn();
+      if (r && typeof (r as Promise<void | boolean>).then === 'function') (r as Promise<void | boolean>).then(done, fail);
+      else done(r as void | boolean);
+    } catch (err) { fail(err); }
     return e;
   },
   /** Take a snapshot of the given task ids so they can be restored. */

@@ -15,7 +15,7 @@
 // after both modules finish loading, never at top-level evaluation.
 import { Store, UndoStack } from '../platform/store.mjs';
 import type { CalendarEntry } from '../platform/store.mjs';
-import { Util } from '../platform/foundation.mjs';
+import { Util, Modal } from '../platform/foundation.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock } from '../platform/types.mjs';
 
 interface SandboxSnapshot {
@@ -60,7 +60,19 @@ export const Sandbox = {
 
     if (apply) {
       // Promote sandbox state to real state with a single undoable entry.
-      UndoStack.push('Discard What-If scenario', () => {
+      // Calendar state as promoted (sandbox state at apply). Compared at undo time to
+      // detect calendar edits made since applying, which the undo would silently revert.
+      const promotedAtApply = JSON.stringify([Store.blocks, Store.plantBlocks, Store.calendars, Store.plants]);
+      UndoStack.push('Discard What-If scenario', async () => {
+        if (JSON.stringify([Store.blocks, Store.plantBlocks, Store.calendars, Store.plants]) !== promotedAtApply) {
+          const ok = await Modal.confirm({
+            title:        Util.t('modal.undo_whatif_calendar_title'),
+            message:      Util.t('modal.undo_whatif_calendar_msg'),
+            confirmLabel: Util.t('modal.undo_whatif_calendar_confirm'),
+            tone:         'warn',
+          });
+          if (!ok) return false; // abort the whole undo
+        }
         // The promoted calendar/blackout edits live in these slices, so reverting only
         // tasks + firms (the old behavior) left them applied and already POSTed. Capture
         // the promoted slices first so SandboxAdapter can re-sync the backend to the
@@ -79,7 +91,8 @@ export const Sandbox = {
         Store.replacePlantBlocks(snap.plantBlocks, 'undo');
         Store.replaceFirmedIds(snap.firmedIds, 'undo');
         Store.emit({ type: 'sandbox:reverted', source: 'undo', promoted });
-      });
+        return true;
+      }, snap.tasks.map((t) => t.id));
     } else {
       // Discard: restore the pre-enter snapshot wholesale. Each replaceX() below
       // fires its own '<field>:replace' event (distinct from that field's normal
