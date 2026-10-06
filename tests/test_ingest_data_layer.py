@@ -440,6 +440,11 @@ class TestSapTruthReupload:
                         " scheduled_end) VALUES (%s, 1, %s, %s)", (oid, start, end))
             conn.commit()
 
+    def _planning_reason(self, oid=None):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT planning_reason FROM orders WHERE id=%s", (oid or self._oid(),))
+            return cur.fetchone()[0]
+
     def _segments(self, oid=None):
         with self.pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id=%s", (oid or self._oid(),))
@@ -485,12 +490,18 @@ class TestSapTruthReupload:
     def test_sap_date_change_resets_slot_and_unfirms(self):
         self._up()
         self._schedule(self.base + dt.timedelta(days=3))
-        self._sql("UPDATE orders SET planning_status='scheduled' WHERE id=%s", (self._oid(),))
+        # Planner un-scheduled it (Needs Planning); SAP changing the order puts it back.
+        self._sql("DELETE FROM order_schedule_segments WHERE order_id=%s", (self._oid(),))
+        self._sql("UPDATE orders SET scheduled_start=NULL, scheduled_end=NULL, planning_status='needs_planning',"
+                  " planning_reason=%s::jsonb WHERE id=%s",
+                  ('{"code":"planner_unscheduled","message":"Unscheduled by planner"}', self._oid()))
+        assert self._row()["planning_status"] == "needs_planning"
         res = self._up([self._line(BASIC_START_DATE=self.base + dt.timedelta(days=1),
                                    BASIC_FINISH_DATE=self.base + dt.timedelta(days=2))], "zztest_st_2.xlsx")
         row = self._row()
         assert row["scheduled_start"] is None and row["scheduled_end"] is None
         assert row["manual_firmed"] is False and row["planning_status"] == "scheduled"
+        assert self._planning_reason() is None
         assert self._segments() == 0
         assert row["sap_basic_start_date"] == self.base + dt.timedelta(days=1)
         cats = {w["category"]: w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")}
@@ -509,6 +520,15 @@ class TestSapTruthReupload:
         warn = next(w for w in res["warnings"] if w.get("category") == "sap_changed_running")
         assert warn["count"] == 1 and self._oid() in warn["order_ids"]
         assert not [w for w in res["warnings"] if w.get("category") == "sap_changed"]
+
+    def test_sap_change_on_never_scheduled_running_window_is_not_a_kept_slot(self):
+        # Nothing was scheduled, so there is no slot or firm that "was kept".
+        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        start, finish = now - dt.timedelta(hours=2), now + dt.timedelta(hours=6)
+        self._up([self._line(BASIC_START_DATE=start, BASIC_FINISH_DATE=finish)])
+        res = self._up([self._line(BASIC_START_DATE=start + dt.timedelta(days=1),
+                                   BASIC_FINISH_DATE=finish + dt.timedelta(days=1))], "zztest_st_2.xlsx")
+        assert not [w for w in res["warnings"] if w.get("category") == "sap_changed_running"]
 
     def test_sap_change_on_frozen_order_resets(self):
         self._up()
@@ -663,3 +683,158 @@ class TestSapTruthReupload:
         res = self.pg.upsert_orders([dict(row)], source="excel", filename="zztest_st_2.xlsx")
         assert res["updated"] == 0 and res["unchanged"] == 1
         assert self._row() == before
+
+    # ---- audit fix round: derived finish is never an SAP date change (F3) ----
+    def _date_only_line(self, **kw):
+        d0 = self.base.replace(hour=0)
+        return self._line(BASIC_START_DATE=d0, BASIC_FINISH_DATE=d0 + dt.timedelta(days=1), **kw)
+
+    def _no_sap_reset(self, res):
+        assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
+
+    def test_run_time_change_alone_is_not_a_sap_date_change(self):
+        self._up([self._date_only_line(RUN_TIME=4)])
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        res = self._up([self._date_only_line(RUN_TIME=6)], "zztest_st_2.xlsx")
+        row = self._row()
+        self._no_sap_reset(res)
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+
+    def test_run_time_column_dropped_is_not_a_sap_date_change(self):
+        self._up([self._date_only_line(RUN_TIME=4)])
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        line = self._date_only_line()
+        del line["RUN_TIME"]
+        res = self._up([line], "zztest_st_2.xlsx")
+        self._no_sap_reset(res)
+        assert self._row()["scheduled_start"] == slot and self._row()["manual_firmed"] is True
+
+    def test_finish_column_absent_run_time_change_is_not_a_date_change(self):
+        line4, line6 = self._line(RUN_TIME=4), self._line(RUN_TIME=6)
+        del line4["BASIC_FINISH_DATE"], line6["BASIC_FINISH_DATE"]
+        self._up([line4])
+        assert self._row()["sap_basic_finish_date"] is None, "SAP sent no finish: nothing to baseline"
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        res = self._up([line6], "zztest_st_2.xlsx")
+        self._no_sap_reset(res)
+        assert self._row()["scheduled_start"] == slot
+
+    def test_run_time_change_on_routing_plant_is_not_a_sap_date_change(self):
+        self._sql("UPDATE plants SET routing_runtime_enabled = TRUE WHERE plant=%s", (self.PLANT,))
+        self._up([self._date_only_line(RUN_TIME=4)])
+        res = self._up([self._date_only_line(RUN_TIME=6)], "zztest_st_2.xlsx")
+        self._no_sap_reset(res)
+        assert res["updated"] == 0 and res["unchanged"] == 1
+
+    def test_real_sap_finish_date_change_resets(self):
+        self._up()
+        self._schedule(self.base + dt.timedelta(days=3))
+        res = self._up([self._line(BASIC_FINISH_DATE=self.base + dt.timedelta(days=2))], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] is None and row["manual_firmed"] is False
+        assert [w for w in res["warnings"] if w.get("category") == "sap_changed"]
+        assert row["sap_basic_finish_date"] == self.base + dt.timedelta(days=2)
+
+    # ---- audit fix round: machine follows SAP only when SAP's field changed (F6) ----
+    def test_name_feed_benign_change_keeps_planner_machine(self):
+        # SAP sends machine NAMES; a description-only change must not revert the planner's machine.
+        self._up([self._line(MACHINE=self.M1)])
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot, machine=self.M2)
+        res = self._up([self._line(MACHINE=self.M1, MATERIAL_DESCRIPTION="renamed")], "zztest_st_2.xlsx")
+        row = self._row()
+        assert res["updated"] == 1
+        assert row["machine"] == self.M2, "planner machine must survive a benign SAP write"
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+
+    def test_name_feed_machine_change_by_sap_still_wins(self):
+        self._up([self._line(MACHINE=self.M1)])
+        self._schedule(self.base + dt.timedelta(days=3), machine=self.M2)
+        self._up([self._line(MACHINE=self.M3)], "zztest_st_2.xlsx")
+        assert self._row()["machine"] == self.M3
+
+    def test_machine_name_echo_is_not_a_workcenter_change(self):
+        self._up([self._line(MACHINE=self.M1)])
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot, machine=self.M2)
+        res = self._up([self._line(MACHINE=self.M2)], "zztest_st_2.xlsx")
+        row = self._row()
+        self._no_sap_reset(res)
+        assert row["machine"] == self.M2 and row["scheduled_start"] == slot and row["manual_firmed"] is True
+
+    # ---- audit fix round: unchanged re-upload fills NULL master-data attributes (F8) ----
+    def test_unchanged_reupload_fills_null_master_data_attributes(self):
+        line = self._line(MATERIAL_NUMBER=self.MATERIAL2)
+        self._sql("INSERT INTO materials (material_id) VALUES (%s) ON CONFLICT DO NOTHING", (self.MATERIAL2,))
+        self._up([line])
+        oid = self.pg.make_id(self.ORDER, self.MATERIAL2)
+        assert self._row(oid)["production_version"] is None
+        self._sql("INSERT INTO material_plants (material_id, plant, default_production_version, color, prt_01)"
+                  " VALUES (%s, %s, 'NPV1', 'RED', 'T1')", (self.MATERIAL2, self.PLANT))
+        res = self._up([line], "zztest_st_2.xlsx")
+        assert res["unchanged"] == 1
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT production_version, color, prt_01 FROM orders WHERE id=%s", (oid,))
+            assert cur.fetchone() == ("NPV1", "RED", "T1")
+
+    def test_unchanged_reupload_with_nothing_to_fill_keeps_xmin(self):
+        self._up()
+        before = self._row()
+        res = self._up(name="zztest_st_2.xlsx")
+        assert res["unchanged"] == 1 and self._row() == before
+
+    # ---- audit fix round: SAP-sync path passes ISO strings (F9) ----
+    def test_iso_string_dates_description_change_is_not_a_reset(self):
+        def row_in(**kw):
+            r = {"production_order": self.ORDER, "material_number": self.MATERIAL, "machine": self.M1,
+                 "plant": self.PLANT, "basic_start_date": self.base.isoformat(),
+                 "basic_finish_date": (self.base + dt.timedelta(days=1)).isoformat(),
+                 "order_quantity": 100, "run_time": 4.0}
+            r.update(kw)
+            return r
+        self.pg.upsert_orders([row_in()], source="sap")
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        res = self.pg.upsert_orders([row_in(material_description="renamed")], source="sap")
+        self._no_sap_reset(res)
+        assert self._row()["scheduled_start"] == slot and self._row()["manual_firmed"] is True
+
+    # ---- fix round 1 ----
+    def test_machine_deleted_then_benign_write_takes_sap_default(self):
+        self._up()
+        self._sql("UPDATE orders SET machine=%s WHERE id=%s", (self.M2, self._oid()))
+        self._sql("UPDATE orders SET machine=%s WHERE id=%s", ("ZZTEST_ST_GONE", self._oid()))
+        self._up([self._line(MATERIAL_DESCRIPTION="renamed")], "zztest_st_2.xlsx")
+        assert self._row()["machine"] == self.M1, "a machine that no longer exists self-heals to SAP's default"
+
+    def test_plant_change_with_same_workcenter_takes_machine_of_new_plant(self):
+        plant2 = self.PLANT + "B"
+        self._sql("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')", (self.SUB, plant2))
+        self._sql("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode, default_machine)"
+                  " VALUES (%s, %s, 'single', %s)", (plant2, self.WC, "ZZTEST_ST_B1"))
+        self._sql("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                  (self.SUB, plant2, "ZZTEST_ST_B1", self.WC))
+        try:
+            self._up()
+            self._up([self._line(WERKS=plant2, MATERIAL_DESCRIPTION="moved")], "zztest_st_2.xlsx")
+            row = self._row()
+            assert row["plant"] == plant2 and row["machine"] == "ZZTEST_ST_B1"
+        finally:
+            self._sql("DELETE FROM orders WHERE plant = %s", (plant2,))
+            self._sql("DELETE FROM machine WHERE plant = %s", (plant2,))
+            self._sql("DELETE FROM sap_workcenter WHERE plant = %s", (plant2,))
+            self._sql("DELETE FROM plants WHERE plant = %s", (plant2,))
+
+    def test_unparseable_incoming_date_is_counted_in_a_warning(self):
+        def row_in(finish):
+            return {"production_order": self.ORDER, "material_number": self.MATERIAL, "machine": self.M1,
+                    "plant": self.PLANT, "basic_start_date": self.base, "basic_finish_date": finish,
+                    "order_quantity": 100, "run_time": 4.0}
+        res = self.pg.upsert_orders([row_in("not-a-date")], source="sap")
+        warn = next(w for w in res["warnings"] if w.get("category") == "unparseable_dates")
+        assert warn["count"] == 1
+        res = self.pg.upsert_orders([row_in(None)], source="sap")
+        assert not [w for w in res["warnings"] if w.get("category") == "unparseable_dates"]

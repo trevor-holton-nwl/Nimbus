@@ -2420,6 +2420,28 @@ def _norm_pv_sql(expr: str) -> str:
             f"ELSE lpad(upper(btrim({expr})), 4, '0') END)")
 
 
+def _naive_dt(value):
+    """Normalise an incoming date to a naive datetime (the shape the DB returns and
+    change detection compares against): ISO strings (the SAP-sync path), pandas
+    Timestamps and tz-aware values all collapse to a naive wall-clock datetime.
+    None and anything unparseable stay None / unchanged respectively."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
 def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None) -> set[str]:
     """Which SAP-owned fields did this upload change vs SAP's previous upload?
 
@@ -2451,7 +2473,8 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
 
     base_wc = before.get("sap_workcenter")
     in_wc = incoming.get("sap_workcenter")
-    if base_wc is not None and in_wc is not None and in_wc != base_wc and in_wc != current_machine_wc:
+    if (base_wc is not None and in_wc is not None and in_wc != base_wc
+            and in_wc != current_machine_wc and in_wc != before.get("machine")):
         changed.add("workcenter")
 
     def _q(v):
@@ -2481,12 +2504,24 @@ _ROUTING_PLANT_SQL = """EXISTS (
                AND rp.routing_runtime_enabled = TRUE)"""
 
 # H7 (SAP wins on the WORK CENTER, not the exact machine): an ordinary order
-# keeps the planner's machine whenever that machine belongs to the work center
-# SAP just sent; otherwise (new work center, or SAP sent a machine name) the
-# incoming machine wins. Children (parent link set) always take the incoming
-# machine. The plant / machine_key CASEs below compare against this SAME
-# resolved expression, never against the raw EXCLUDED.machine.
+# keeps the planner's machine (1) whenever what SAP sent in the work center /
+# machine field is the same as SAP sent last time (the machine follows SAP only
+# when that field CHANGED -- a benign write such as a description change must
+# not revert a planner's move, name feeds included), or (2) whenever that
+# machine belongs to the work center SAP just sent; otherwise (new work center,
+# or SAP sent a different machine name) the incoming machine wins. Children
+# (parent link set) always take the incoming machine. The plant / machine_key
+# CASEs below compare against this SAME resolved expression, never against the
+# raw EXCLUDED.machine.
 _RESOLVED_MACHINE_SQL = """CASE
+            WHEN EXCLUDED.parent_production_order IS NULL
+             AND orders.machine IS NOT NULL
+             AND orders.sap_workcenter IS NOT NULL
+             AND orders.sap_workcenter IS NOT DISTINCT FROM EXCLUDED.sap_workcenter
+             AND EXISTS (SELECT 1 FROM machine km
+                          WHERE km.plant = COALESCE(EXCLUDED.plant, orders.plant)
+                            AND km.machine = orders.machine)
+            THEN orders.machine
             WHEN EXCLUDED.parent_production_order IS NULL
              AND EXISTS (SELECT 1 FROM machine m
                           WHERE m.plant = COALESCE(EXCLUDED.plant, orders.plant)
@@ -2898,14 +2933,14 @@ _UPSERT_CHUNK = 500
 # ordering identical to /tasks saves and distribution (id order, all before any
 # write), so the three can never hold a pair of rows in opposite order.
 _CHUNK_READ_COLS = (
-    "id", "plant", "parent_production_order", "material_number", "manual_firmed",
+    "id", "plant", "parent_production_order", "material_number", "manual_firmed", "machine",
     "sap_basic_start_date", "sap_basic_finish_date", "sap_workcenter", "order_quantity",
     "sap_production_version", "production_version", "scheduled_start", "scheduled_end",
     "basic_start_date", "basic_finish_date", "run_time", "planning_status",
     "machine_wc", "first_start", "last_end", "tz",
 )
 _CHUNK_READ_SQL = f"""
-    SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed,
+    SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
            o.sap_basic_start_date, o.sap_basic_finish_date, o.sap_workcenter, o.order_quantity,
            o.sap_production_version, o.production_version, o.scheduled_start, o.scheduled_end,
            o.basic_start_date, o.basic_finish_date, o.run_time, o.planning_status,
@@ -2915,9 +2950,16 @@ _CHUNK_READ_SQL = f"""
            (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz
       FROM orders o
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
-     WHERE o.id = ANY(%(ids)s)
-        OR (o.plant, o.parent_production_order, o.material_number) IN (
-             SELECT x.plant, x.parent_production_order, x.material_number FROM orders x
+     WHERE o.id IN (
+             -- the chunk's own rows (primary-key lookup) ...
+             SELECT i.id FROM orders i WHERE i.id = ANY(%(ids)s)
+             UNION
+             -- ... plus every sibling of a distribution child among them, found through
+             -- the (plant, parent, material) index instead of walking the whole table
+             SELECT s.id FROM orders x
+               JOIN orders s ON s.plant = x.plant
+                            AND s.parent_production_order = x.parent_production_order
+                            AND s.material_number = x.material_number
               WHERE x.id = ANY(%(ids)s) AND x.parent_production_order IS NOT NULL)
      ORDER BY o.id
        FOR UPDATE OF o
@@ -2955,6 +2997,19 @@ def _order_is_running(b: dict, now: datetime) -> bool:
     return end is not None and start <= now < end
 
 
+# A stored attribute is NULL (or blank, for the production version) while its
+# material_plants master value is not -- the "unchanged re-upload still fills it" test.
+_MASTER_FILL_PREDICATE_SQL = """
+       (o.color IS NULL AND mp.color IS NOT NULL)
+    OR (o.prt_01 IS NULL AND mp.prt_01 IS NOT NULL)
+    OR (o.prt_02 IS NULL AND mp.prt_02 IS NOT NULL)
+    OR (COALESCE(o.production_version, '') = '' AND COALESCE(mp.default_production_version, '') <> '')"""
+_MASTER_FILL_CANDIDATES_SQL = """
+    SELECT o.id FROM orders o
+      JOIN material_plants mp ON mp.plant = o.plant AND mp.material_id = o.material_number
+     WHERE o.id = ANY(%s) AND (""" + _MASTER_FILL_PREDICATE_SQL + """)"""
+
+
 def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | None = None,
                         heal_ids: list[str] | None = None) -> dict:
     """Post-upsert steps scoped to `ids` (the orders an upload actually wrote):
@@ -2967,7 +3022,15 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
     backfill can actually fill them -- the result's `healed_ids` lists those.
     Shares the caller's transaction and commits it at the end."""
     ids = sorted(set(ids))
-    scope = sorted(set(ids) | set(heal_ids or []))
+    # Rows among the incoming ids that SAP sent nothing new for (skipped as unchanged)
+    # but whose color / PRT / production version is still NULL while master data now
+    # has a value: filled below. Found by an unlocked read BEFORE the lock so every
+    # row this function writes is locked by the one id-ordered statement.
+    fill_ids: list[str] = []
+    if report_ids:
+        cur.execute(_MASTER_FILL_CANDIDATES_SQL, (sorted(set(report_ids)),))
+        fill_ids = [r[0] for r in cur.fetchall()]
+    scope = sorted(set(ids) | set(heal_ids or []) | set(fill_ids))
     healed: set[str] = set()
     if scope:
         # Lock first (id order) so these multi-row UPDATEs can never deadlock a
@@ -3013,6 +3076,10 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
             (scope,),
         )
         healed.update(r[0] for r in cur.fetchall())
+        # The filled rows join the healed set: the Seam 2 stamp below then writes
+        # exactly those rows (the candidate query already proved each has something
+        # to fill), so truly unchanged rows keep their xmin.
+        healed.update(fill_ids)
     healed -= set(ids)
     # Seam 2 -- strictly downstream of the plant backfill above (it reads o.plant).
     # The upload ALWAYS succeeds regardless of how much is unmatched (N5/N6/N7).
@@ -3066,7 +3133,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         never silently dropped.
       - `resolve_fn` is the optional routing-runtime ingest seam
         (ROUTING_RUNTIME_DESIGN.md §4/§5) — also defaults to None. When given,
-        it is called as `resolve_fn(plant, conn=conn, batch_id=..., ids=...)` —
+        it is called as `resolve_fn(plant, conn=conn, batch_id=..., ids=...,
+        protect_ids=...)` (`protect_ids` = SAP-changed orders kept in place because
+        they are running; the resolver never holds them) —
         matching `backend.routing.resolver.resolve_orders`'s signature, reusing
         the connection already open at that point (`ids` = every order this
         upload wrote, since unchanged rows are skipped and keep their old batch
@@ -3126,6 +3195,16 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # children, single-mode work-center codes rewritten to a real machine) so
     # everything below — id/dedup, chunked upsert, backfills — runs unchanged
     # over the resolved rows. `plan_structure` is held onto for `apply_fn` below.
+    # Dates arrive as naive datetimes from Excel but as ISO strings from the SAP-sync
+    # path; normalise first so change detection never compares str with datetime.
+    unparseable_dates = 0
+    for row in rows:
+        for date_col in ("basic_start_date", "basic_finish_date", "sap_basic_finish_date"):
+            if date_col in row:
+                original = row[date_col]
+                row[date_col] = _naive_dt(original)
+                if row[date_col] is None and original is not None and str(original).strip() not in ("", "NaT"):
+                    unparseable_dates += 1     # treated as "not sent" for change detection
     distribution_plan: dict = {}
     if plan_fn is not None:
         rows, distribution_plan, distribution_ingest_warnings = plan_fn(rows, batch_id)
@@ -3213,9 +3292,12 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 sap_pv = _zero_pad(sap_pv.upper(), 4)
         row["sap_production_version"] = sap_pv
         # SAP's own dates, written to the baseline columns by the upsert only
-        # (never by baseline-correct or a drag).
+        # (never by baseline-correct or a drag). A caller that knows the finish SAP
+        # actually sent (the Excel ingest: None = not sent) passes it as
+        # `sap_basic_finish_date`; otherwise the row's finish is SAP's.
         row["sap_basic_start_date"] = row.get("basic_start_date")
-        row["sap_basic_finish_date"] = row.get("basic_finish_date")
+        if "sap_basic_finish_date" not in row:
+            row["sap_basic_finish_date"] = row.get("basic_finish_date")
 
     # ---------- Build row tuples in _UPSERT_SQL column order ----------
     tuples = []
@@ -3243,6 +3325,19 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # run_time_source-'routing' resolve is still pending.
     inserted_ids: list[str] = []
     touched: set[str] = set()      # ids this upload actually wrote (upsert or reset)
+    # A distribution child's own quantity is its SHARE of the parent, which a planner's
+    # re-weight changes (and a stale plan can put back): it is never SAP changing the
+    # order. Children are judged on the PARENT's quantity instead -- SAP's new parent
+    # quantity vs the one the distribution header stored at SAP's previous upload.
+    parent_quantity_changed: set[tuple] = set()
+    parent_quantity_judged: set[tuple] = set()   # headers with both quantities known
+    for pkey, pplan in (distribution_plan.get("parents") or {}).items():
+        old_q = ((pplan.get("existing_header") or {}).get("order_quantity"))
+        new_q = (pplan.get("parent_facts") or {}).get("order_quantity")
+        if old_q is not None and new_q is not None:
+            parent_quantity_judged.add(tuple(pkey))
+            if Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001")):
+                parent_quantity_changed.add(tuple(pkey))
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
@@ -3278,13 +3373,23 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         continue
                     incoming = {
                         "basic_start_date": r.get("basic_start_date"),
-                        "basic_finish_date": r.get("basic_finish_date"),
+                        # the finish SAP sent, never NIMBUS's start+RUN_TIME derivation
+                        "basic_finish_date": r.get("sap_basic_finish_date"),
                         "sap_workcenter": r.get("sap_workcenter"),
                         "order_quantity": r.get("order_quantity"),
                         "sap_production_version": r.get("sap_production_version"),
                         "parent_production_order": r.get("parent_production_order"),
                     }
-                    if sap_changed_fields(b, incoming, b["machine_wc"]):
+                    pkey = (b["plant"], b["parent_production_order"], b["material_number"])
+                    # Judged on the parent's quantity when the header knows it; a child with no
+                    # usable header quantity falls back to its own quantity comparison.
+                    is_child = bool(b["parent_production_order"]) and pkey in parent_quantity_judged
+                    if is_child:
+                        incoming["order_quantity"] = None
+                    fields = sap_changed_fields(b, incoming, b["machine_wc"])
+                    if is_child and pkey in parent_quantity_changed:
+                        fields.add("quantity")
+                    if fields:
                         changed.add(rid)
                 if changed:
                     # (d) a changed distribution child takes every sibling (same plant,
@@ -3300,7 +3405,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                     reset_ids: list[str] = []
                     for rid in sorted(candidates):
                         if _order_is_running(before[rid], _plant_local_now(before[rid]["tz"])):
-                            running_changed_ids.append(rid)
+                            # Only a really scheduled order has a slot/firm that was "kept"; a
+                            # never-scheduled order whose SAP window covers now has nothing to protect.
+                            if before[rid]["scheduled_start"] is not None or before[rid]["first_start"] is not None:
+                                running_changed_ids.append(rid)
                         else:
                             reset_ids.append(rid)
                     # (f) slot + firm back to SAP's dates
@@ -3460,7 +3568,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 for resolve_plant in sorted(resolve_plants):
                     cur.execute("SAVEPOINT routing_resolve")
                     try:
-                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id, ids=touched_ids)
+                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id, ids=touched_ids,
+                                                    protect_ids=running_changed_ids)
                         cur.execute("RELEASE SAVEPOINT routing_resolve")
                     except Exception as exc:
                         cur.execute("ROLLBACK TO SAVEPOINT routing_resolve")
@@ -3482,6 +3591,20 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "plant": resolve_plant,
                         **resolve_result,
                     })
+                    if resolve_result.get("running_kept"):
+                        warnings.append({
+                            "level": "warn", "category": "routing_running_kept", "plant": resolve_plant,
+                            "count": resolve_result["running_kept"],
+                            "msg": (f"{resolve_result['running_kept']} order(s) in plant {resolve_plant} are "
+                                    f"running right now: their run time could not be recalculated from "
+                                    f"routing while running, so their run time, slot and firm were kept."),
+                        })
+            if unparseable_dates:
+                warnings.append({
+                    "level": "warn", "category": "unparseable_dates", "count": unparseable_dates,
+                    "msg": (f"{unparseable_dates} date value(s) could not be read and were treated as "
+                            f"not sent (they cannot count as an SAP date change)."),
+                })
             unchanged = len(tuples) - inserted - updated
             warnings.append({
                 "level": "info", "category": "upload_counts",
@@ -3643,6 +3766,11 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     if "BASIC_FINISH_DATE" not in df.columns:
         df["BASIC_FINISH_DATE"] = pd.NaT
     df["BASIC_FINISH_DATE"] = pd.to_datetime(df["BASIC_FINISH_DATE"], errors="coerce")
+    # The finish date SAP actually SENT (NaT = column absent / blank / unparseable), kept
+    # before any NIMBUS derivation below: it is what the SAP baseline and the
+    # SAP-change detection compare, so a RUN_TIME change can never look like SAP
+    # moving the dates.
+    df["_SAP_FINISH_DATE"] = df["BASIC_FINISH_DATE"]
     df["BASIC_FINISH_DATE"] = df["BASIC_FINISH_DATE"].fillna(df["BASIC_START_DATE"])
 
     # RUN_TIME must be parsed BEFORE the "bad" (missing/corrupt finish) branch
@@ -3744,6 +3872,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
             "plant": _str_id(_v(r, "PLANT")) or None,
             "basic_start_date": _ts(r["BASIC_START_DATE"]),
             "basic_finish_date": _ts(r["BASIC_FINISH_DATE"]),
+            "sap_basic_finish_date": _ts(r["_SAP_FINISH_DATE"]),
             "run_time": float(r["RUN_TIME"]) if pd.notna(r["RUN_TIME"]) else None,
             "_run_time_was_defaulted": bool(r["_RUN_TIME_DEFAULTED"]),
             "color": _v(r, "COLOR"),

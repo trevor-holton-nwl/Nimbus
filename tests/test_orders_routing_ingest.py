@@ -329,7 +329,7 @@ def test_resolve_fn_called_once_per_plant_after_apply_before_audit(monkeypatch):
 
     resolve_calls = []
 
-    def fake_resolve(plant, *, conn, batch_id=None, ids=None):
+    def fake_resolve(plant, *, conn, batch_id=None, ids=None, protect_ids=None):
         calls.append(f"resolve:{plant}")
         resolve_calls.append(plant)
         assert "apply" in calls, "resolve_fn must run after apply_fn"
