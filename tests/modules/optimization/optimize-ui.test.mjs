@@ -1471,3 +1471,34 @@ test('#27 undo of an APPLIED What-If restores calendar slices and re-syncs the b
     globalThis.document = priorDoc;
   }
 });
+
+test('G4: What-If discard snapshots and restores Persistence._firmDirtyIds (trial firm marks vanish, pre-enter marks stay)', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorFirmDirty = new Set(Persistence._firmDirtyIds);
+  const priorSchedule = Alerts.scheduleRecompute;
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+  try {
+    Store.setTasks([{ id: 'fd-kept', PLANT: 'FD', MACHINE: 'FD-L', RUN_TIME: 1 }, { id: 'fd-trial', PLANT: 'FD', MACHINE: 'FD-L', RUN_TIME: 1 }], 'unit-test');
+    Persistence._firmDirtyIds.clear();
+    Persistence._firmDirtyIds.add('fd-kept');
+    Sandbox.enter('unit-test');
+    Persistence._firmDirtyIds.add('fd-trial');          // a firm mark made inside the trial
+    Persistence._firmDirtyIds.delete('fd-kept');
+    Sandbox.exit(false, 'unit-test');
+    assert.deepEqual([...Persistence._firmDirtyIds], ['fd-kept'], 'discard restores the pre-enter firm-dirty set exactly');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Persistence._firmDirtyIds.clear();
+    for (const id of priorFirmDirty) Persistence._firmDirtyIds.add(id);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});

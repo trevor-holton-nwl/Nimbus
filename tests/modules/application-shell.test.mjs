@@ -216,6 +216,7 @@ test('a firm toggle dirties just that task and saveAll sends FIRMED without goin
   Store.setTasks([firmTask('fm-a'), firmTask('fm-b')], 'unit-test');
   Store.setFirmed(['fm-a'], true, 'table');
   assert.deepEqual([...Persistence._dirtyIds], ['fm-a']);
+  assert.deepEqual([...Persistence._firmDirtyIds], ['fm-a'], 'G4: the firm toggle marks the firm-dirty set');
   assert.equal(Persistence._forceIds.size, 0, 'a firm-only row is never an optimizer (atomic) row');
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -233,6 +234,7 @@ test('a firm toggle dirties just that task and saveAll sends FIRMED without goin
     assert.equal(calls[0].tasks[0].FIRMED, true);
     assert.equal(calls[0].tasks[0].force, !Config.CONCURRENCY_CHECK);
     assert.equal(Persistence._dirtyIds.size, 0, 'a persisted firm clears its dirty flag');
+    assert.equal(Persistence._firmDirtyIds.size, 0, 'G4: a successful save clears the firm-dirty marker too');
   } finally { globalThis.fetch = originalFetch; }
 }));
 
