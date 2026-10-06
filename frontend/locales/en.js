@@ -40,6 +40,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.select_plant_before_opt':     'Select a plant in the top bar before optimizing.',
   'toast.select_plant_to_opt':         'Select a plant to optimize',
   'toast.select_lines_to_opt':         'Select at least one machine to optimize, or switch to Whole plant.',
+  'toast.opt_apply_running_skipped':  '{{count}} order(s) started running while the preview was open and were left as they are.',
   'toast.opt_applied':                 'Optimization applied — Ctrl+Z to undo',
   'toast.opt_discarded':               'Optimization discarded — schedule restored',
   'toast.optimize_missing_setup_summary': 'Optimized. {{orders}} order(s) on {{lines}} machine(s) were scheduled without setup data (no changeover bar) — see Alerts.',

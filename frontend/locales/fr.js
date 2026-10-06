@@ -40,6 +40,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.select_plant_before_opt':     'Sélectionnez une usine dans la barre supérieure avant d\'optimiser.',
   'toast.select_plant_to_opt':         'Sélectionnez une usine à optimiser',
   'toast.select_lines_to_opt':         'Sélectionnez au moins une machine à optimiser, ou passez à Usine entière.',
+  'toast.opt_apply_running_skipped':  '{{count}} ordre(s) ont démarré pendant que l’aperçu était ouvert et ont été laissés tels quels.',
   'toast.opt_applied':                 'Optimisation appliquée — Ctrl+Z pour annuler',
   'toast.opt_discarded':               'Optimisation annulée — programme restauré',
   'toast.optimize_missing_setup_summary': 'Optimisé. {{orders}} ordre(s) sur {{lines}} machine(s) ont été planifiés sans données de réglage (aucune barre de changement) — voir Alertes.',

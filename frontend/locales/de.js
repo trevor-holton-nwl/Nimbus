@@ -40,6 +40,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.select_plant_before_opt':     'Bitte vor der Optimierung ein Werk in der Leiste oben auswählen.',
   'toast.select_plant_to_opt':         'Bitte ein Werk zum Optimieren auswählen',
   'toast.select_lines_to_opt':         'Bitte mindestens eine Maschine auswählen oder auf Gesamtwerk wechseln.',
+  'toast.opt_apply_running_skipped':  '{{count}} Auftrag/Aufträge wurden gestartet, während die Vorschau geöffnet war, und blieben unverändert.',
   'toast.opt_applied':                 'Optimierung angewendet — Strg+Z zum Rückgängigmachen',
   'toast.opt_discarded':               'Optimierung verworfen — Plan wiederhergestellt',
   'toast.optimize_missing_setup_summary': 'Optimiert. {{orders}} Auftrag/Aufträge auf {{lines}} Maschine(n) wurden ohne Rüstdaten eingeplant (kein Rüstbalken) — siehe Warnungen.',
