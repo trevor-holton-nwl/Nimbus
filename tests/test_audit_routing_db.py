@@ -628,3 +628,26 @@ class TestRoutingEditTransactions:
         assert (status, sched_start, firmed, segments) == ("scheduled", None, False, 0)
         task = pg.get_task_versions([self.ids[0]])[0]
         assert not task["schedule_segments"]
+
+    def test_running_kept_is_reported_in_plain_words(self, pg):
+        start, end = self._make_running(pg)
+
+        def line(**kw):
+            return dict(self._upload_row(self.ids[0], quantity=10, plant=self.PLANT),
+                        basic_start_date=start, basic_finish_date=end, **kw)
+
+        self._upload(pg, [line()])
+        res = self._upload(pg, [line(production_version="9999")])
+        warn = next(w for w in res["warnings"] if w.get("category") == "routing_running_kept")
+        assert warn["count"] == 1 and "running" in warn["msg"] and "run time" in warn["msg"]
+
+    def test_repeat_resolve_of_an_already_held_order_does_not_touch_it(self, pg):
+        self._set(pg, "UPDATE orders SET production_version='9999' WHERE id=%s", (self.ids[0],))
+        resolver.resolve_orders(self.PLANT, full=True)
+        before = self._row(pg)
+        # a segment added after the hold must survive a repeat resolve that changes nothing
+        self._set(pg, "INSERT INTO order_schedule_segments(order_id, segment_no, scheduled_start, scheduled_end)"
+                      " VALUES (%s,1,%s,%s)", (self.ids[0], self.START, self.START + dt.timedelta(hours=1)))
+        resolver.resolve_orders(self.PLANT, full=True)
+        assert self._row(pg)["version"] == before["version"]
+        assert self._state(pg)[3] == 1, "an already-held row is not a transition: no segment delete"

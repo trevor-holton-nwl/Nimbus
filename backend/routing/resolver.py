@@ -742,13 +742,26 @@ def _write_holds(cur, rows: list[tuple]) -> None:
 def _write_holds_chunk(cur, rows: list[tuple]) -> None:
     placeholders = ", ".join(["(%s::text, %s::jsonb)"] * len(rows))
     params = [v for row in rows for v in row]
-    held_ids = [row[0] for row in rows]
-    # Lock the rows first, in id order (the order every other multi-row `orders`
-    # writer uses), BEFORE touching their segment rows: a /tasks save locks the
-    # order row and then writes its segments, so the opposite order could deadlock.
-    cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (held_ids,))
+    # Only rows that actually transition into (or change within) the hold are locked,
+    # updated and have their segments cleared; an already-held row with the same reason
+    # is left alone. Lock first, in id order (the order every other multi-row `orders`
+    # writer uses), BEFORE touching segment rows: a /tasks save locks the order row and
+    # then writes its segments, so the opposite order could deadlock.
+    changed = (
+        "   AND (o.planning_status IS DISTINCT FROM 'needs_planning'"
+        "        OR o.planning_reason IS DISTINCT FROM v.reason"
+        "        OR o.scheduled_start IS NOT NULL"
+        "        OR o.scheduled_end IS NOT NULL"
+        "        OR o.manual_firmed IS TRUE)"
+    )
+    cur.execute(
+        "SELECT o.id FROM orders o"
+        f" JOIN (VALUES {placeholders}) AS v(id, reason) ON o.id = v.id"
+        " WHERE TRUE" + changed + " ORDER BY o.id FOR UPDATE OF o",
+        params,
+    )
     query = (
-        "UPDATE orders o SET"
+        "WITH upd AS (UPDATE orders o SET"
         " planning_status = 'needs_planning',"
         " planning_reason = v.reason,"
         " scheduled_start = NULL,"
@@ -759,15 +772,11 @@ def _write_holds_chunk(cur, rows: list[tuple]) -> None:
         " manual_firmed = FALSE,"
         " updated_at = NOW()"
         f" FROM (VALUES {placeholders}) AS v(id, reason)"
-        " WHERE o.id = v.id"
-        "   AND (o.planning_status IS DISTINCT FROM 'needs_planning'"
-        "        OR o.planning_reason IS DISTINCT FROM v.reason"
-        "        OR o.scheduled_start IS NOT NULL"
-        "        OR o.scheduled_end IS NOT NULL"
-        "        OR o.manual_firmed IS TRUE)"
+        " WHERE o.id = v.id" + changed +
+        " RETURNING o.id)"
+        " DELETE FROM order_schedule_segments WHERE order_id IN (SELECT id FROM upd)"
     )
     cur.execute(query, params)
-    cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", (held_ids,))
 
 
 def _new_report(is_cutover: bool) -> dict:

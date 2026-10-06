@@ -801,3 +801,40 @@ class TestSapTruthReupload:
         res = self.pg.upsert_orders([row_in(material_description="renamed")], source="sap")
         self._no_sap_reset(res)
         assert self._row()["scheduled_start"] == slot and self._row()["manual_firmed"] is True
+
+    # ---- fix round 1 ----
+    def test_machine_deleted_then_benign_write_takes_sap_default(self):
+        self._up()
+        self._sql("UPDATE orders SET machine=%s WHERE id=%s", (self.M2, self._oid()))
+        self._sql("UPDATE orders SET machine=%s WHERE id=%s", ("ZZTEST_ST_GONE", self._oid()))
+        self._up([self._line(MATERIAL_DESCRIPTION="renamed")], "zztest_st_2.xlsx")
+        assert self._row()["machine"] == self.M1, "a machine that no longer exists self-heals to SAP's default"
+
+    def test_plant_change_with_same_workcenter_takes_machine_of_new_plant(self):
+        plant2 = self.PLANT + "B"
+        self._sql("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')", (self.SUB, plant2))
+        self._sql("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode, default_machine)"
+                  " VALUES (%s, %s, 'single', %s)", (plant2, self.WC, "ZZTEST_ST_B1"))
+        self._sql("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                  (self.SUB, plant2, "ZZTEST_ST_B1", self.WC))
+        try:
+            self._up()
+            self._up([self._line(WERKS=plant2, MATERIAL_DESCRIPTION="moved")], "zztest_st_2.xlsx")
+            row = self._row()
+            assert row["plant"] == plant2 and row["machine"] == "ZZTEST_ST_B1"
+        finally:
+            self._sql("DELETE FROM orders WHERE plant = %s", (plant2,))
+            self._sql("DELETE FROM machine WHERE plant = %s", (plant2,))
+            self._sql("DELETE FROM sap_workcenter WHERE plant = %s", (plant2,))
+            self._sql("DELETE FROM plants WHERE plant = %s", (plant2,))
+
+    def test_unparseable_incoming_date_is_counted_in_a_warning(self):
+        def row_in(finish):
+            return {"production_order": self.ORDER, "material_number": self.MATERIAL, "machine": self.M1,
+                    "plant": self.PLANT, "basic_start_date": self.base, "basic_finish_date": finish,
+                    "order_quantity": 100, "run_time": 4.0}
+        res = self.pg.upsert_orders([row_in("not-a-date")], source="sap")
+        warn = next(w for w in res["warnings"] if w.get("category") == "unparseable_dates")
+        assert warn["count"] == 1
+        res = self.pg.upsert_orders([row_in(None)], source="sap")
+        assert not [w for w in res["warnings"] if w.get("category") == "unparseable_dates"]

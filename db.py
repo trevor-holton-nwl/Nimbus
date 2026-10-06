@@ -2518,6 +2518,9 @@ _RESOLVED_MACHINE_SQL = """CASE
              AND orders.machine IS NOT NULL
              AND orders.sap_workcenter IS NOT NULL
              AND orders.sap_workcenter IS NOT DISTINCT FROM EXCLUDED.sap_workcenter
+             AND EXISTS (SELECT 1 FROM machine km
+                          WHERE km.plant = COALESCE(EXCLUDED.plant, orders.plant)
+                            AND km.machine = orders.machine)
             THEN orders.machine
             WHEN EXCLUDED.parent_production_order IS NULL
              AND EXISTS (SELECT 1 FROM machine m
@@ -3194,10 +3197,14 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # over the resolved rows. `plan_structure` is held onto for `apply_fn` below.
     # Dates arrive as naive datetimes from Excel but as ISO strings from the SAP-sync
     # path; normalise first so change detection never compares str with datetime.
+    unparseable_dates = 0
     for row in rows:
         for date_col in ("basic_start_date", "basic_finish_date", "sap_basic_finish_date"):
             if date_col in row:
-                row[date_col] = _naive_dt(row[date_col])
+                original = row[date_col]
+                row[date_col] = _naive_dt(original)
+                if row[date_col] is None and original is not None and str(original).strip() not in ("", "NaT"):
+                    unparseable_dates += 1     # treated as "not sent" for change detection
     distribution_plan: dict = {}
     if plan_fn is not None:
         rows, distribution_plan, distribution_ingest_warnings = plan_fn(rows, batch_id)
@@ -3323,12 +3330,14 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # order. Children are judged on the PARENT's quantity instead -- SAP's new parent
     # quantity vs the one the distribution header stored at SAP's previous upload.
     parent_quantity_changed: set[tuple] = set()
+    parent_quantity_judged: set[tuple] = set()   # headers with both quantities known
     for pkey, pplan in (distribution_plan.get("parents") or {}).items():
         old_q = ((pplan.get("existing_header") or {}).get("order_quantity"))
         new_q = (pplan.get("parent_facts") or {}).get("order_quantity")
-        if (old_q is not None and new_q is not None
-                and Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001"))):
-            parent_quantity_changed.add(tuple(pkey))
+        if old_q is not None and new_q is not None:
+            parent_quantity_judged.add(tuple(pkey))
+            if Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001")):
+                parent_quantity_changed.add(tuple(pkey))
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
@@ -3371,12 +3380,14 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "sap_production_version": r.get("sap_production_version"),
                         "parent_production_order": r.get("parent_production_order"),
                     }
-                    is_child = bool(b["parent_production_order"])
+                    pkey = (b["plant"], b["parent_production_order"], b["material_number"])
+                    # Judged on the parent's quantity when the header knows it; a child with no
+                    # usable header quantity falls back to its own quantity comparison.
+                    is_child = bool(b["parent_production_order"]) and pkey in parent_quantity_judged
                     if is_child:
-                        incoming["order_quantity"] = None      # judged on the parent below
+                        incoming["order_quantity"] = None
                     fields = sap_changed_fields(b, incoming, b["machine_wc"])
-                    if is_child and (b["plant"], b["parent_production_order"],
-                                     b["material_number"]) in parent_quantity_changed:
+                    if is_child and pkey in parent_quantity_changed:
                         fields.add("quantity")
                     if fields:
                         changed.add(rid)
@@ -3580,6 +3591,20 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "plant": resolve_plant,
                         **resolve_result,
                     })
+                    if resolve_result.get("running_kept"):
+                        warnings.append({
+                            "level": "warn", "category": "routing_running_kept", "plant": resolve_plant,
+                            "count": resolve_result["running_kept"],
+                            "msg": (f"{resolve_result['running_kept']} order(s) in plant {resolve_plant} are "
+                                    f"running right now: their run time could not be recalculated from "
+                                    f"routing while running, so their run time, slot and firm were kept."),
+                        })
+            if unparseable_dates:
+                warnings.append({
+                    "level": "warn", "category": "unparseable_dates", "count": unparseable_dates,
+                    "msg": (f"{unparseable_dates} date value(s) could not be read and were treated as "
+                            f"not sent (they cannot count as an SAP date change)."),
+                })
             unchanged = len(tuples) - inserted - updated
             warnings.append({
                 "level": "info", "category": "upload_counts",

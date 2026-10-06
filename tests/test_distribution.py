@@ -4582,6 +4582,17 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
             assert sched is None and firmed is False
         assert next(w for w in res["warnings"] if w.get("category") == "sap_changed")["count"] == 2
 
+    def test_child_without_header_quantity_falls_back_to_its_own_quantity(self, pg):
+        self._upload(pg, [self._parent(self.MAT)])
+        self._place_and_firm(pg)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE order_distribution SET order_quantity = NULL WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            conn.commit()
+        self._upload(pg, [self._parent(self.MAT, order_quantity=120.0)])
+        for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+            assert sched is None and firmed is False
+
     def test_ingest_vs_save_vs_apply_lock_order_never_deadlocks(self, pg):
         """Stepped: a writer that locks in id order (what a /tasks save does) holds the
         EARLIER child and pauses while the ingest chunk is blocked on it, then takes the
