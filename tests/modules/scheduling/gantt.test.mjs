@@ -275,6 +275,20 @@ test('Timeline._itemForTask: className reflects firming status (order-firmed for
   assert.doesNotMatch(firmedItem.className, /\border-standard\b/);
 });
 
+test('G5: the live lock-band scan membership includes running orders, not only the frozen horizon', () => {
+  const now = new Date('2026-09-09T10:00:00');
+  const running = { id: 'lb-run', start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00') };
+  const future = { id: 'lb-fut', start_date: new Date('2026-09-09T14:00:00'), end_date: new Date('2026-09-09T16:00:00') };
+  const priorEnd = Store.frozenHorizonEnd;
+  try {
+    Store.setFrozenHorizonEnd(null, 'test');
+    assert.equal(Timeline._inLockBand(running, now), true, 'a running order is in the band even with no frozen horizon');
+    assert.equal(Timeline._inLockBand(future, now), false);
+    // Same order one tick earlier (not yet started) is outside, so the scan's diff repaints it at start.
+    assert.equal(Timeline._inLockBand(running, new Date('2026-09-09T07:59:00')), false);
+  } finally { Store.setFrozenHorizonEnd(priorEnd, 'test'); }
+});
+
 test('Timeline.rebuildSetupForLines batches setup additions, updates, and removals for the affected line only', () => {
   // This fails if setup changes route through full Timeline.rebuild(), if the
   // public line-scoped batch seam is removed, or if a stale setup bar survives.

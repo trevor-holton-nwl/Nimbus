@@ -1320,6 +1320,7 @@ const firmTask = (id, extra = {}) => ({ id, MACHINE: 'L1', RUN_TIME: 1, row_vers
 test('refresh copy-back updates both t.firmed and firmedIds from the server row', async () => {
   Store.setTasks([firmTask('rf-a', { firmed: true }), firmTask('rf-b')], 'unit-test');
   assert.ok(Store.firmedIds.has('rf-a'));
+  Persistence._firmDirtyIds.add('rf-a');                  // G4: a pending firm mark on an adopted row
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ missing: [], data: [
     { id: 'rf-a', MACHINE: 'L1', row_version: 9, firmed: false, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00', original_start_date: '2026-09-09T08:00:00' },
@@ -1331,7 +1332,8 @@ test('refresh copy-back updates both t.firmed and firmedIds from the server row'
     assert.equal(Store.tasks['rf-a'].firmed, false);
     assert.equal(Store.tasks['rf-b'].firmed, true);
     assert.deepEqual([...Store.firmedIds].sort(), ['rf-b']);
-  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); }
+    assert.equal(Persistence._firmDirtyIds.has('rf-a'), false, 'G4: adopting the server row clears its firm-dirty marker');
+  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
 });
 
 test('a cache holding firmedIds / fixedIds / tasks[].firmed restores no firms, but cached date edits still restore', () => {

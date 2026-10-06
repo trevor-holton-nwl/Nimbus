@@ -1471,3 +1471,62 @@ test('#27 undo of an APPLIED What-If restores calendar slices and re-syncs the b
     globalThis.document = priorDoc;
   }
 });
+
+test('G4: What-If discard snapshots and restores Persistence._firmDirtyIds (trial firm marks vanish, pre-enter marks stay)', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorFirmDirty = new Set(Persistence._firmDirtyIds);
+  const priorSchedule = Alerts.scheduleRecompute;
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+  try {
+    Store.setTasks([{ id: 'fd-kept', PLANT: 'FD', MACHINE: 'FD-L', RUN_TIME: 1 }, { id: 'fd-trial', PLANT: 'FD', MACHINE: 'FD-L', RUN_TIME: 1 }], 'unit-test');
+    Persistence._firmDirtyIds.clear();
+    Persistence._firmDirtyIds.add('fd-kept');
+    Sandbox.enter('unit-test');
+    Persistence._firmDirtyIds.add('fd-trial');          // a firm mark made inside the trial
+    Persistence._firmDirtyIds.delete('fd-kept');
+    Sandbox.exit(false, 'unit-test');
+    assert.deepEqual([...Persistence._firmDirtyIds], ['fd-kept'], 'discard restores the pre-enter firm-dirty set exactly');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Persistence._firmDirtyIds.clear();
+    for (const id of priorFirmDirty) Persistence._firmDirtyIds.add(id);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('G6: preview Apply drops candidate patches for orders that are running at apply time and toasts the count', () => {
+  const plant = 'APPLY-RUNNING';
+  const runningId = 'apply-running-1';
+  const freeId = 'apply-free-1';
+  const fixture = openTaskBaselinePreview(plant, [previewTask(runningId, plant, 5), previewTask(freeId, plant, 1)]);
+  const priorIsInProgress = Engine.isInProgress;
+  const priorShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+  try {
+    const patched = OptimizerPreview._candidate.patches.map(p => p.id);
+    assert.ok(patched.includes(runningId) && patched.includes(freeId), 'both orders are in the candidate');
+    // The order started running between preview and Apply: the live row now carries running dates.
+    Engine.isInProgress = (task, now) => (task.id === runningId ? true : priorIsInProgress.call(Engine, task, now));
+    const runningBefore = { start: Store.tasks[runningId].start_date, end: Store.tasks[runningId].end_date };
+    OptimizerPreview.apply();
+    assert.deepEqual({ start: Store.tasks[runningId].start_date, end: Store.tasks[runningId].end_date }, runningBefore,
+      'a running order is not moved by Apply');
+    assert.ok(Store.tasks[freeId].start_date instanceof Date, 'the other order still gets its candidate dates');
+    assert.ok(toasts.some(t => t.type === 'warn' && /opt_apply_running_skipped|running/i.test(t.msg)),
+      'the planner is told how many running orders were skipped');
+  } finally {
+    Engine.isInProgress = priorIsInProgress;
+    Toast.show = priorShow;
+    fixture.restore();
+  }
+});

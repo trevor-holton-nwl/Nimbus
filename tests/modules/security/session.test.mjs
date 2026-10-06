@@ -192,3 +192,21 @@ test('signOut still reloads when the session:changed emit throws', async () => {
     });
   } finally { Store.emit = origEmit; }
 });
+
+test('G2: clearExpired drops the session AND the local planner data (no confirm), keeps theme/locale', async () => {
+  seedPlannerData();
+  const origConfirm = Modal.confirm;
+  let confirms = 0;
+  Modal.confirm = async () => { confirms++; return true; };
+  try {
+    Session.clearExpired();
+  } finally { Modal.confirm = origConfirm; }
+  assert.equal(confirms, 0, 'an expired login discards unsaved work without a prompt');
+  const ls = globalThis.localStorage;
+  for (const k of ['nimbus.session', 'nimbus.state.v3', 'nimbus.state.v3.quarantine.1', 'nimbus.recentCmds', 'nimbus.patterns.v1', 'nimbus.calendar.pendingDeletes']) {
+    assert.equal(ls.getItem(k), null, k + ' must be cleared');
+  }
+  assert.equal(globalThis.sessionStorage.getItem('x'), null);
+  assert.equal(ls.getItem('nimbus.theme'), 'dark');
+  assert.equal(ls.getItem('nimbus.locale'), 'de');
+});

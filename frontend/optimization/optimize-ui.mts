@@ -2122,7 +2122,15 @@ export const OptimizerPreview = {
       }).catch(() => {});
     }
     // This is the sole schedule-state commit for a preview candidate.
-    Engine.applySchedulePatches(candidate.patches);
+    // A running order never moves, and the preview may have sat open while one started. Drop
+    // those patches at apply time (Remove Backlog is the one run that moves running orders).
+    const applyNow = new Date();
+    const keptPatches = mode === 'backlog'
+      ? candidate.patches
+      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live, applyNow)); });
+    const skippedRunning = candidate.patches.length - keptPatches.length;
+    Engine.applySchedulePatches(keptPatches);
+    if (skippedRunning) Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skippedRunning }), 'warn', 7000);
     Store.setLastOptimize(new Date(), 'engine');
     const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.

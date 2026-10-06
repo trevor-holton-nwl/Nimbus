@@ -395,7 +395,7 @@ export const Timeline = {
         Timeline._lastFirmScanTs = Date.now();
         const scanNow = new Date();
         const next = new Set<string>();
-        for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Engine.isFrozenHorizon(t, scanNow)) next.add(String(t.id));
+        for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Timeline._inLockBand(t, scanNow)) next.add(String(t.id));
         const prev = Timeline._frozenBandIds;
         if (prev) {
           for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
@@ -407,6 +407,13 @@ export const Timeline = {
 
     /* ----- subscribe to store changes ----------------------------------- */
     Timeline._unsubStore = Store.subscribe(evt => Timeline._onStore(evt), 'Timeline');
+  },
+
+  /** Membership of the live lock band the 30s scan diffs: inside the frozen horizon OR running now.
+   *  Running is included so an order that starts while the page is open gets its running lock
+   *  styling without a reload (C5). */
+  _inLockBand(t: NimbusTask, now: Date): boolean {
+    return Engine.isFrozenHorizon(t, now) || Engine.isInProgress(t, now);
   },
 
   // Cached lookup for the (static) #gantt-tab; lazily caches on first call so
@@ -1112,7 +1119,7 @@ export const Timeline = {
     {
       const nowForBand = Timeline._rebuildNow || new Date();
       const bandIds = new Set<string>();
-      for (const t of scopedTasks) if (Engine.isFrozenHorizon(t, nowForBand)) bandIds.add(String(t.id));
+      for (const t of scopedTasks) if (Timeline._inLockBand(t, nowForBand)) bandIds.add(String(t.id));
       Timeline._frozenBandIds = bandIds;
     }
 

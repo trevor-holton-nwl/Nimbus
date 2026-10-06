@@ -453,3 +453,12 @@ test('locale parity ratchet - missing-key count per locale never grows vs en.js'
     );
   }
 });
+
+test('G3: ui.firm_reason_running says running orders are protected from Optimize/auto-fixes (not "locked") in every locale', () => {
+  const val = (loc) => readFileSync(join(LOCALES_DIR, `${loc}.js`), 'utf8').match(/'ui\.firm_reason_running'\s*:\s*'([^']*)'/)?.[1];
+  assert.equal(val('en'), 'Running — protected from Optimize and auto-fixes');
+  for (const loc of ['de', 'es', 'fr', 'pt']) {
+    assert.ok(val(loc) && val(loc) !== val('en'), `${loc} must carry its own translation`);
+  }
+  assert.doesNotMatch(val('en'), /locked/i);
+});
