@@ -67,6 +67,9 @@ class TaskDTO(BaseModel):
     FORM_SIZE: str | None = None
     notes: str | None = None
     ecc_firmed: bool
+    # Planner's manual firm (orders.manual_firmed); SAP's own firming indicator
+    # stays in ecc_firmed and never locks an order.
+    firmed: bool = False
     planned_order_initial_quantity_gmein: float | None = Field(default=None, alias="PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)")
     reduced_quantity_gmein: float | None = Field(default=None, alias="REDUCED_QUANTITY_(GMEIN)")
     ORDER_CATEGORY: str | None = None
@@ -179,6 +182,7 @@ class TaskVersionRow(BaseModel):
     order_quantity_gmein: float | None = Field(default=None, alias="ORDER_QUANTITY_(GMEIN)")
     MATERIAL_NUMBER: str | None = None
     PLANT: str | None = None
+    firmed: bool = False
     original_start_date: str | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
@@ -248,6 +252,8 @@ class TaskDateUpdate(BaseModel):
     PRODUCTION_VERSION: str | None = None
     MACHINE: str | None = None
     RUN_TIME: float | None = None
+    # Planner's manual firm, sent only for rows whose firm the planner toggled.
+    FIRMED: bool | None = None
     schedule_segments: list[ScheduleSegmentInput] | None = None
     base_version: int | None = None
     force: bool = False

@@ -3340,6 +3340,11 @@ export interface components {
             notes?: string | null;
             /** Ecc Firmed */
             ecc_firmed: boolean;
+            /**
+             * Firmed
+             * @default false
+             */
+            firmed: boolean;
             /** Planned Order Initial Quantity (Gmein) */
             "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)"?: number | null;
             /** Reduced Quantity (Gmein) */
@@ -3414,6 +3419,8 @@ export interface components {
             MACHINE?: string | null;
             /** Run Time */
             RUN_TIME?: number | null;
+            /** Firmed */
+            FIRMED?: boolean | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentInput"][] | null;
             /** Base Version */
@@ -3492,6 +3499,11 @@ export interface components {
             MATERIAL_NUMBER?: string | null;
             /** Plant */
             PLANT?: string | null;
+            /**
+             * Firmed
+             * @default false
+             */
+            firmed: boolean;
             /** Original Start Date */
             original_start_date?: string | null;
             /** Schedule Segments */

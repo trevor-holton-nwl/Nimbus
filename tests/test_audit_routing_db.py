@@ -312,6 +312,36 @@ class TestRoutingEditTransactions:
         assert row["planning_status"] == "needs_planning" and row["planning_reason"] == reason
         assert row["scheduled_start"] is None and row["scheduled_end"] is None
 
+    def test_planner_unscheduled_save_persists_with_null_dates_and_resolver_leaves_it_queued(self, pg):
+        reason = {"code": "planner_unscheduled", "message": "Unscheduled by planner"}
+        result = self._save(pg, {"planning_status": "needs_planning", "planning_reason": reason})
+        assert result["persisted"] == 1
+        row = self._row(pg)
+        assert row["planning_status"] == "needs_planning" and row["planning_reason"] == reason
+        assert row["scheduled_start"] is None and row["scheduled_end"] is None
+        resolver.resolve_orders(self.PLANT, full=True)
+        row = self._row(pg)
+        assert row["planning_status"] == "needs_planning" and row["planning_reason"] == reason
+        assert row["scheduled_start"] is None and row["scheduled_end"] is None
+
+    def test_routing_switch_on_keeps_no_order_in_place(self, pg):
+        # Back to a never-switched-on plant: no routing-sourced order, wrong stored run
+        # times; one order firmed by SAP, the other firmed by the planner.
+        self._set(pg, "UPDATE orders SET run_time_source = NULL, run_time = 99, runtime_schedule_mismatch = FALSE,"
+                      " firming_indicator = CASE WHEN id = %s THEN 'X' ELSE NULL END,"
+                      " manual_firmed = (id = %s) WHERE plant = %s", (self.ids[0], self.ids[1], self.PLANT))
+        report = resolver.resolve_orders(self.PLANT)
+        assert report["resolved"] == 2
+        assert report.get("orders_kept_in_place", []) == []
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time, run_time_source, runtime_schedule_mismatch FROM orders"
+                        " WHERE plant = %s ORDER BY id", (self.PLANT,))
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        for run_time, source, mismatch in rows:
+            assert run_time == Decimal(3) and source == "routing"
+            assert mismatch is True   # every placed order is re-placed, SAP-firmed or planner-firmed alike
+
     @pytest.mark.parametrize("second_hours,accepted", [(5, True), (1, False)])
     def test_split_duration_validates_against_candidate_runtime(self, pg, second_hours, accepted):
         before = self._row(pg)

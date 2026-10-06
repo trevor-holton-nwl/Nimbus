@@ -572,6 +572,7 @@ _ORDERS_SELECT = f"""
         form_size             AS "FORM_SIZE",
         notes                 AS "NOTES",
         firming_indicator     AS "FIRMING_INDICATOR",
+        manual_firmed         AS "FIRMED",
         planned_order_initial_quantity AS "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)",
         reduced_quantity                AS "REDUCED_QUANTITY_(GMEIN)",
         order_category                  AS "ORDER_CATEGORY",
@@ -844,7 +845,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                o.plant, o.planning_status, o.planning_reason,
                o.run_time_source, o.run_time_basis,
                o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time,
-               o.order_quantity, o.material_number, o.basic_start_date
+               o.order_quantity, o.material_number, o.basic_start_date, o.manual_firmed
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -873,6 +874,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "ORDER_QUANTITY_(GMEIN)": r[16],
             "MATERIAL_NUMBER": r[17],
             "original_start_date": r[18].strftime("%Y-%m-%dT%H:%M:%S") if r[18] else None,
+            "firmed": bool(r[19]),
         }
         for r in rows
     ]
@@ -1110,6 +1112,9 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
     if row["has_runtime"]:
         pars.append(("run_time", "numeric", "{v}"))
         vals.append(row["run_time"])
+    if row["has_firmed"]:
+        pars.append(("manual_firmed", "boolean", "{v}"))
+        vals.append(row["firmed"])
     if row["manual_runtime_release"]:
         lits.append("run_time_source = 'manual'")
     if row["resolved_runtime"] is not None:
@@ -1337,12 +1342,13 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             }
             has_segments = "schedule_segments" in it
             has_runtime = "RUN_TIME" in it
+            has_firmed = it.get("FIRMED") is not None
             has_planning = "planning_status" in it
             planning_status = it.get("planning_status")
             planning_reason = it.get("planning_reason")
             queued = planning_status == "needs_planning"
             if (not tid or tid in seen_ids or
-                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_planning)):
+                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_firmed and not has_planning)):
                 invalid_ids.append(tid)
                 continue
             seen_ids.add(tid)
@@ -1567,6 +1573,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "planning_reason": row_planning_reason,
                 "run_time": requested_runtime,
                 "has_runtime": has_runtime,
+                "has_firmed": has_firmed,
+                "firmed": bool(it["FIRMED"]) if has_firmed else None,
                 "manual_runtime_release": manual_runtime_release,
                 "resolved_runtime": resolved_runtime,
                 "segments": segment_rows,

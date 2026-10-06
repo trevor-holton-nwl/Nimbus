@@ -103,6 +103,56 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert persisted_rows[0]["start_date"] == new_start_1.strftime("%Y-%m-%dT%H:%M:%S")
         assert persisted_rows[0]["end_date"] == new_end_1.strftime("%Y-%m-%dT%H:%M:%S")
 
+    def _manual_firmed(self, db_, oid):
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT manual_firmed FROM orders WHERE id = %s", (oid,))
+            return cur.fetchone()[0]
+
+    def test_firmed_only_save_persists_bumps_xmin_and_is_read_back(self, pg):
+        """A planner's manual firm travels alone (FIRMED, no dates/attrs): it is a
+        valid edit, bumps xmin, and both GET /tasks's frame and the refresh read
+        return it."""
+        db_ = pg
+        base_version = self._current_version(db_)
+        assert self._manual_firmed(db_, self.oid) is False
+        res = db_.update_task_dates_bulk(
+            [{"id": self.oid, "FIRMED": True, "base_version": base_version}], allowed_plants=[self.PLANT])
+        assert res["persisted"] == 1 and res["invalid_ids"] == []
+        assert res["versions"][self.oid] != base_version
+        assert self._manual_firmed(db_, self.oid) is True
+        assert db_.get_task_versions([self.oid])[0]["firmed"] is True
+        frame = db_.query_orders(plant=self.PLANT)[0]
+        by_id = {i: bool(f) for i, f in zip(frame["id"], frame["FIRMED"], strict=True)}
+        assert by_id[self.oid] is True and by_id[self.oid2] is False
+        res = db_.update_task_dates_bulk(
+            [{"id": self.oid, "FIRMED": False, "base_version": res["versions"][self.oid]}],
+            allowed_plants=[self.PLANT])
+        assert res["persisted"] == 1
+        assert self._manual_firmed(db_, self.oid) is False
+
+    def test_firmed_only_save_is_still_subject_to_the_stale_check(self, pg):
+        db_ = pg
+        base_version = self._current_version(db_)
+        db_.update_task_dates_bulk(
+            [{"id": self.oid, "start": self.start + dt.timedelta(hours=1), "end": self.end + dt.timedelta(hours=1),
+              "base_version": base_version}], allowed_plants=[self.PLANT])
+        res = db_.update_task_dates_bulk(
+            [{"id": self.oid, "FIRMED": True, "base_version": base_version}], allowed_plants=[self.PLANT])
+        assert res["persisted"] == 0 and res["stale"] == [self.oid]
+        assert self._manual_firmed(db_, self.oid) is False
+
+    def test_firmed_is_allowed_on_a_distribution_child(self, pg):
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET parent_production_order = %s, distribution_letter = 'A' WHERE id = %s",
+                        ("ZZTEST_PARENT", self.oid2))
+            conn.commit()
+        version = db_.get_task_versions([self.oid2])[0]["row_version"]
+        res = db_.update_task_dates_bulk(
+            [{"id": self.oid2, "FIRMED": True, "base_version": version}], allowed_plants=[self.PLANT])
+        assert res["persisted"] == 1 and res["invalid_ids"] == []
+        assert self._manual_firmed(db_, self.oid2) is True
+
     def test_heterogeneous_batch_writes_only_each_rows_own_columns(self, pg):
         """P6 (#26): rows with different SET shapes are batched per shape; each
         row still gets its own new xmin back, and neither an unedited row nor

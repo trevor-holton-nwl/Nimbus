@@ -210,6 +210,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "FORM_SIZE": row.get("FORM_SIZE"),
                 "notes": row.get("NOTES"),
                 "ecc_firmed": row.get("FIRMING_INDICATOR") == "X",
+                "firmed": bool(row.get("FIRMED")),
                 "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": row.get("PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)"),
                 "REDUCED_QUANTITY_(GMEIN)": row.get("REDUCED_QUANTITY_(GMEIN)"),
                 "ORDER_CATEGORY": row.get("ORDER_CATEGORY"),
@@ -335,6 +336,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             invalid_ids.append(it.id)
             continue
         has_runtime = "RUN_TIME" in supplied
+        has_firmed = "FIRMED" in supplied and it.FIRMED is not None
         has_segments = "schedule_segments" in supplied
         segments: list[dict] | None = None
         if has_segments:
@@ -362,7 +364,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 })
             if segments is None:
                 continue
-        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_segments and not has_planning:
+        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_firmed and not has_segments and not has_planning:
             if atomic_optimizer:
                 invalid += 1
                 invalid_ids.append(it.id)
@@ -375,6 +377,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             item["planning_reason"] = it.planning_reason
         if has_runtime:
             item["RUN_TIME"] = it.RUN_TIME
+        if has_firmed:
+            item["FIRMED"] = it.FIRMED
         if has_segments:
             item["schedule_segments"] = segments
         norm.append(item)

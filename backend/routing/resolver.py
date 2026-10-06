@@ -39,8 +39,9 @@ one's inline comment for the reasoning):
   3. Cutover detection (`resolve_orders`): "this plant has zero orders with
      run_time_source = 'routing' yet" -- there's no explicit "first cutover"
      flag on `plants`, so this is inferred.
-  4. Cutover re-placement for a normal (non-firmed, non-frozen) already-
-     scheduled order reuses the EXISTING `runtime_schedule_mismatch` flag +
+  4. Cutover re-placement for every already-scheduled order (firmed or
+     frozen or not: nothing is kept in place -- a manual firm or a running
+     order protects a SLOT, not a run time) reuses the EXISTING `runtime_schedule_mismatch` flag +
      `_EFF_END_SQL`/`_EFF_END_WITH_RUNTIME_MISMATCH_SQL` mechanism (db.py)
      rather than computing a new `scheduled_end` directly. No re-place/
      resequence helper exists anywhere in backend/scheduling/ (only a
@@ -49,9 +50,6 @@ one's inline comment for the reasoning):
      re-place its bar" (ROUTING_RUNTIME_DESIGN.md §4 item 6: "The resolver's
      write is the only thing allowed to set runtime_schedule_mismatch, and
      only when the number it writes actually differs from what's stored").
-     A firmed/frozen-window order NEVER gets this flag and NEVER has its
-     scheduled_start/scheduled_end touched -- it keeps its exact stored
-     schedule, full stop, and is reported in `orders_kept_in_place`.
   5. A `fallback_legacy` outcome only WRITES (relabels `run_time_source` to
      'legacy') when the order's CURRENT `run_time_source` is NULL. An order
      that already carries a real label (manual/distributed/sap_order/
@@ -74,7 +72,6 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from psycopg.types.json import Jsonb
 
-import db
 from db import _pool
 
 # ---------------------------------------------------------------------------
@@ -606,12 +603,6 @@ def _is_routing_hold(planning_reason) -> bool:
     return step is None or step in ROUTING_HOLD_STEPS
 
 
-def _effective_start(order: dict):
-    """COALESCE(scheduled_start, basic_start_date) -- same precedence as
-    db.py's own `_EFF_START_SQL`/eff_start projections."""
-    return order.get("scheduled_start") or order.get("basic_start_date")
-
-
 def _build_held_row(order: dict, step: str):
     """One row for the held-outcomes' VALUES-joined UPDATE, or None when the
     order is currently held for a DIFFERENT, non-routing reason (defensive:
@@ -626,7 +617,7 @@ def _build_held_row(order: dict, step: str):
     return (order["id"], Jsonb(reason))
 
 
-def _build_write_row(order: dict, result: dict, is_cutover: bool, frozen_horizon_end, report: dict):
+def _build_write_row(order: dict, result: dict, is_cutover: bool):
     """One row for the non-held outcomes' VALUES-joined UPDATE, or None when
     this outcome must leave the order genuinely untouched (judgment call #5,
     module docstring: an already-labeled fallback_legacy order)."""
@@ -648,22 +639,19 @@ def _build_write_row(order: dict, result: dict, is_cutover: bool, frozen_horizon
         and _is_routing_hold(order.get("planning_reason"))
     )
 
-    # Judgment call #4 (module docstring): cutover re-place/keep-in-place,
-    # only for an order that was already `scheduled` (pulled in by the
-    # cutover-only clause in _load_orders) -- a previously-held order
-    # resolving now is an ordinary release, not a cutover re-place.
+    # Judgment call #4 (module docstring): cutover re-place, only for an
+    # order that was already `scheduled` (pulled in by the cutover-only clause
+    # in _load_orders) -- a previously-held order resolving now is an ordinary
+    # release, not a cutover re-place. No order is kept in place: SAP's firming
+    # indicator, a planner's manual firm and the frozen horizon do not protect
+    # a run time at switch-on.
     set_mismatch = False
-    if is_cutover and order.get("planning_status") == "scheduled":
-        firmed = order.get("firming_indicator") == "X"
-        eff_start = _effective_start(order)
-        frozen = frozen_horizon_end is not None and eff_start is not None and eff_start < frozen_horizon_end
-        if firmed or frozen:
-            report.setdefault("orders_kept_in_place", []).append(order["id"])
-        elif order.get("scheduled_start") is not None or order.get("scheduled_end") is not None:
-            # Only a genuinely user-placed order needs a re-place signal --
-            # one that's merely "scheduled" via basic_start_date alone picks
-            # up the new run_time automatically through _EFF_END_SQL.
-            set_mismatch = True
+    if (is_cutover and order.get("planning_status") == "scheduled"
+            and (order.get("scheduled_start") is not None or order.get("scheduled_end") is not None)):
+        # Only a genuinely user-placed order needs a re-place signal --
+        # one that's merely "scheduled" via basic_start_date alone picks
+        # up the new run_time automatically through _EFF_END_SQL.
+        set_mismatch = True
 
     return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch)
 
@@ -757,8 +745,6 @@ def _new_report(is_cutover: bool) -> dict:
         "unmapped_workcenters": [],
         "lot_size_warnings": 0,
     }
-    if is_cutover:
-        report["orders_kept_in_place"] = []
     return report
 
 
@@ -808,13 +794,6 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         machine_workcenter = _load_machine_workcenter(cur, plant)
         rules = _load_rules(cur, plant)
 
-        frozen_horizon_end = None
-        if is_cutover:
-            # Only fetched for a cutover run -- a routine resolve never
-            # needs it (nothing but the cutover clause cares about firmed/
-            # frozen orders' scheduled_start/scheduled_end).
-            frozen_horizon_end = db.plant_horizons(plant).get("frozen_horizon_end")
-
         write_rows: list[tuple] = []
         held_rows: list[tuple] = []
         unmapped_workcenters: set[str] = set()
@@ -846,7 +825,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             elif status == "fallback_legacy":
                 report["legacy_retained"] += 1
 
-            write_row = _build_write_row(order, result, is_cutover, frozen_horizon_end, report)
+            write_row = _build_write_row(order, result, is_cutover)
             if write_row is not None:
                 write_rows.append(write_row)
 
