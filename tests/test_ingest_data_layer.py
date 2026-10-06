@@ -345,23 +345,286 @@ class TestPurgeOrdersByDateRealDb:
                 cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
                 conn.commit()
 
-    def test_blank_production_version_on_reupload_keeps_stored_value(self, pg):
-        """Plan Part 2 #21 (H7, PV half): SAP omitting PRODUCTION_VERSION must
-        not wipe a stored/planner-chosen one; the kept case is counted."""
-        db_ = pg
-        base = {"PRODUCTION_ORDER": self.ORDER, "MATERIAL_NUMBER": self.MATERIAL, "WERKS": self.PLANT,
-                "MACHINE": self.MACHINE, "BASIC_START_DATE": "2026-09-10 08:00"}
-        assert db_.ingest_orders_from_excel(
-            _xlsx([{**base, "PRODUCTION_VERSION": "PV7"}]), "zztest_ingest_pv1.xlsx")["status"] == "ok"
-        result = db_.ingest_orders_from_excel(_xlsx([base]), "zztest_ingest_pv2.xlsx")
-        with db_._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT production_version FROM orders WHERE production_order = %s", (self.ORDER,))
-            assert cur.fetchone()[0] == "PV7"
-        kept = [w for w in result["warnings"] if w.get("category") == "pv_kept_on_blank"]
-        assert kept and kept[0]["count"] == 1
-        # a non-blank incoming value still overwrites
-        db_.ingest_orders_from_excel(
-            _xlsx([{**base, "PRODUCTION_VERSION": "PV8"}]), "zztest_ingest_pv3.xlsx")
-        with db_._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT production_version FROM orders WHERE production_order = %s", (self.ORDER,))
-            assert cur.fetchone()[0] == "PV8"
+
+@pytest.mark.pg
+class TestSapTruthReupload:
+    """SAP-is-truth re-upload rules: planner machine kept inside SAP's work
+    center, locked reset only when SAP changed the order, unchanged rows
+    skipped, PV and manual run-time rules."""
+    SUB, PLANT = "ZZTEST_STS", "ZZTEST_STP"
+    WC, WC2 = "ZZTEST_ST_WC", "ZZTEST_ST_WC2"
+    M1, M2, M3 = "ZZTEST_ST_M1", "ZZTEST_ST_M2", "ZZTEST_ST_M3"
+    ORDER, MATERIAL, MATERIAL2 = "ZZTEST_ST_ORD", "ZZTEST_ST_MAT", "ZZTEST_ST_MAT2"
+    DEFAULT_PV = "DPV1"
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
+        cur.execute("DELETE FROM upload_audit WHERE filename LIKE 'zztest_st_%'")
+        cur.execute("DELETE FROM machine WHERE plant = %s", (self.PLANT,))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s", (self.PLANT,))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s", (self.PLANT,))
+        cur.execute("DELETE FROM materials WHERE material_id IN (%s, %s)", (self.MATERIAL, self.MATERIAL2))
+        cur.execute("DELETE FROM plants WHERE plant = %s AND subnetwork = %s", (self.PLANT, self.SUB))
+        cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.pg = pg
+        # A future, non-running slot well outside any default horizon.
+        self.base = (dt.datetime.now() + dt.timedelta(days=40)).replace(hour=8, minute=0, second=0, microsecond=0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'sap truth test')", (self.SUB,))
+            cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')",
+                        (self.SUB, self.PLANT))
+            cur.execute("INSERT INTO materials (material_id) VALUES (%s)", (self.MATERIAL,))
+            cur.execute("INSERT INTO material_plants (material_id, plant, default_production_version)"
+                        " VALUES (%s, %s, %s)", (self.MATERIAL, self.PLANT, self.DEFAULT_PV))
+            for wc, default in ((self.WC, self.M1), (self.WC2, self.M3)):
+                cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode, default_machine)"
+                            " VALUES (%s, %s, 'single', %s)", (self.PLANT, wc, default))
+            for m, wc in ((self.M1, self.WC), (self.M2, self.WC), (self.M3, self.WC2)):
+                cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                            (self.SUB, self.PLANT, m, wc))
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    # ---- helpers -------------------------------------------------------
+    def _line(self, **kw):
+        row = {
+            "PRODUCTION_ORDER": self.ORDER, "MATERIAL_NUMBER": self.MATERIAL, "WERKS": self.PLANT,
+            "MACHINE": self.WC, "BASIC_START_DATE": self.base,
+            "BASIC_FINISH_DATE": self.base + dt.timedelta(days=1), "RUN_TIME": 4,
+            "ORDER_QUANTITY_(GMEIN)": 100,
+        }
+        row.update(kw)
+        return row
+
+    def _up(self, rows=None, name="zztest_st_1.xlsx"):
+        rows = rows if rows is not None else [self._line()]
+        res = self.pg.ingest_orders_from_excel(_xlsx(rows), name)
+        assert res["status"] == "ok", res
+        return res
+
+    def _oid(self, order=None):
+        return self.pg.make_id(order or self.ORDER, self.MATERIAL)
+
+    def _row(self, oid=None):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, machine, production_version, order_quantity, run_time, run_time_source,"
+                " scheduled_start, scheduled_end, manual_firmed, planning_status, basic_start_date,"
+                " basic_finish_date, sap_workcenter, sap_production_version, sap_basic_start_date,"
+                " sap_basic_finish_date, xmin::text::bigint AS version, plant"
+                " FROM orders WHERE id = %s", (oid or self._oid(),))
+            return dict(zip([c.name for c in cur.description], cur.fetchone(), strict=True))
+
+    def _sql(self, sql, params=()):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            conn.commit()
+
+    def _schedule(self, start, hours=4, machine=None, firm=True, oid=None):
+        """Planner state: moved/placed slot + segment + firm."""
+        oid = oid or self._oid()
+        end = start + dt.timedelta(hours=hours)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=%s,"
+                " machine=COALESCE(%s, machine) WHERE id=%s", (start, end, firm, machine, oid))
+            cur.execute("DELETE FROM order_schedule_segments WHERE order_id=%s", (oid,))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start,"
+                        " scheduled_end) VALUES (%s, 1, %s, %s)", (oid, start, end))
+            conn.commit()
+
+    def _segments(self, oid=None):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id=%s", (oid or self._oid(),))
+            return cur.fetchone()[0]
+
+    # ---- machine rules -------------------------------------------------
+    def test_same_workcenter_move_survives_reupload(self):
+        self._up()
+        assert self._row()["machine"] == self.M1               # single-mode default
+        self._sql("UPDATE orders SET machine=%s WHERE id=%s", (self.M2, self._oid()))
+        self._up([self._line(**{"ORDER_QUANTITY_(GMEIN)": 120})], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["machine"] == self.M2, "planner's machine inside SAP's work center must survive"
+        assert row["order_quantity"] == 120
+
+    def test_changed_workcenter_takes_new_default(self):
+        self._up()
+        self._sql("UPDATE orders SET machine=%s WHERE id=%s", (self.M2, self._oid()))
+        self._up([self._line(MACHINE=self.WC2)], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["machine"] == self.M3 and row["sap_workcenter"] == self.WC2
+
+    def test_workcenter_echo_keeps_machine(self):
+        # NIMBUS moved the order to a machine of ANOTHER work center and SAP
+        # now sends that work center back: the correction came back, no reset.
+        self._up()
+        slot = self.base + dt.timedelta(days=2)
+        self._schedule(slot, machine=self.M3)
+        res = self._up([self._line(MACHINE=self.WC2)], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["machine"] == self.M3
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+        assert row["sap_workcenter"] == self.WC2
+        assert not [w for w in res["warnings"] if w.get("category") == "sap_changed"]
+
+    def test_unregistered_workcenter_passthrough_unchanged(self):
+        self._up([self._line(MACHINE="ZZTEST_ST_UNREG")])
+        self._up([self._line(MACHINE="ZZTEST_ST_UNREG", **{"ORDER_QUANTITY_(GMEIN)": 110})], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["machine"] == "ZZTEST_ST_UNREG" and row["sap_workcenter"] == "ZZTEST_ST_UNREG"
+
+    # ---- reset on SAP change ------------------------------------------
+    def test_sap_date_change_resets_slot_and_unfirms(self):
+        self._up()
+        self._schedule(self.base + dt.timedelta(days=3))
+        self._sql("UPDATE orders SET planning_status='scheduled' WHERE id=%s", (self._oid(),))
+        res = self._up([self._line(BASIC_START_DATE=self.base + dt.timedelta(days=1),
+                                   BASIC_FINISH_DATE=self.base + dt.timedelta(days=2))], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] is None and row["scheduled_end"] is None
+        assert row["manual_firmed"] is False and row["planning_status"] == "scheduled"
+        assert self._segments() == 0
+        assert row["sap_basic_start_date"] == self.base + dt.timedelta(days=1)
+        cats = {w["category"]: w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")}
+        assert cats["sap_changed"]["count"] == 1 and cats["unfirmed"]["count"] == 1
+
+    def test_sap_change_on_running_order_keeps_slot_and_warns(self):
+        self._up()
+        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        self._schedule(now - dt.timedelta(hours=1), hours=3)
+        before = self._row()
+        res = self._up([self._line(**{"ORDER_QUANTITY_(GMEIN)": 150})], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] == before["scheduled_start"] and row["manual_firmed"] is True
+        assert self._segments() == 1
+        assert row["order_quantity"] == 150
+        warn = next(w for w in res["warnings"] if w.get("category") == "sap_changed_running")
+        assert warn["count"] == 1 and self._oid() in warn["order_ids"]
+        assert not [w for w in res["warnings"] if w.get("category") == "sap_changed"]
+
+    def test_sap_change_on_frozen_order_resets(self):
+        self._up()
+        self._sql("UPDATE plants SET frozen_horizon_days=3650 WHERE plant=%s", (self.PLANT,))
+        self._schedule(self.base)
+        self._up([self._line(**{"ORDER_QUANTITY_(GMEIN)": 150})], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] is None and row["manual_firmed"] is False
+
+    def test_unchanged_reupload_keeps_slot_firm_xmin_and_manual_runtime(self):
+        self._up()
+        self._schedule(self.base + dt.timedelta(days=3))
+        # Non-routing plant: SAP's run time (4) stays the truth, so the planner's flag is
+        # only observable here on a run time equal to SAP's; the routing-plant rule (a
+        # manual value surviving) is pinned in test_audit_routing_db.py.
+        self._sql("UPDATE orders SET run_time=4, run_time_source='manual' WHERE id=%s", (self._oid(),))
+        before = self._row()
+        res = self._up(name="zztest_st_2.xlsx")
+        after = self._row()
+        assert after == before, "an unchanged re-upload must not touch the row (xmin included)"
+        assert res["inserted"] == 0 and res["updated"] == 0 and res["unchanged"] == 1
+
+    def test_baseline_correct_then_same_file_resets_nothing(self):
+        # No finish in the file: the finish is derived (start + RUN_TIME) on every
+        # upload, and the stored baseline is that same derived value.
+        line = self._line()
+        del line["BASIC_FINISH_DATE"]
+        self._up([line])
+        self._schedule(self.base + dt.timedelta(days=3))
+        row = self._row()
+        corrected = row["basic_start_date"] + dt.timedelta(days=5)
+        out = self.pg.correct_due_date_baselines(
+            [{"id": row["id"], "basic_finish_date": corrected, "base_version": row["version"]}])
+        assert out["persisted"] == 1
+        before = self._row()
+        assert before["basic_finish_date"] == corrected
+        res = self._up([line], "zztest_st_2.xlsx")
+        after = self._row()
+        assert after == before and res["unchanged"] == 1 and res["updated"] == 0
+
+    def test_first_upload_after_migration_resets_nothing(self):
+        self._up()
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot, machine=self.M2)
+        self._sql("UPDATE orders SET production_version='PLNR', sap_workcenter=NULL, sap_production_version=NULL,"
+                  " sap_basic_start_date=NULL, sap_basic_finish_date=NULL WHERE id=%s", (self._oid(),))
+        self._up([self._line(BASIC_START_DATE=self.base + dt.timedelta(days=1),
+                             BASIC_FINISH_DATE=self.base + dt.timedelta(days=2),
+                             PRODUCTION_VERSION="SAP1")], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+        assert row["machine"] == self.M2, "same-work-center move survives the first upload"
+        assert row["production_version"] == "PLNR", "planner PV survives while the baseline is unknown"
+        assert row["sap_workcenter"] == self.WC and row["sap_production_version"] == "SAP1"
+        assert row["sap_basic_start_date"] == self.base + dt.timedelta(days=1)
+
+    # ---- duplicates ----------------------------------------------------
+    def test_duplicate_rows_reordered_keep_ids(self):
+        early = self._line(BASIC_START_DATE=self.base, BASIC_FINISH_DATE=self.base + dt.timedelta(days=1))
+        late = self._line(BASIC_START_DATE=self.base + dt.timedelta(days=2),
+                          BASIC_FINISH_DATE=self.base + dt.timedelta(days=3))
+        self._up([early, late])
+        plain, suffixed = self._oid(), self._oid() + "_1"
+        assert self._row(plain)["basic_start_date"] == self.base
+        assert self._row(suffixed)["basic_start_date"] == self.base + dt.timedelta(days=2)
+        before = (self._row(plain), self._row(suffixed))
+        res = self._up([late, early], "zztest_st_2.xlsx")
+        assert (self._row(plain), self._row(suffixed)) == before
+        assert res["updated"] == 0 and res["unchanged"] == 2
+
+    # ---- production version -------------------------------------------
+    def test_pv_echo_is_not_a_change(self):
+        self._up([self._line(PRODUCTION_VERSION="PV01")])
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        self._sql("UPDATE orders SET production_version='PV02' WHERE id=%s", (self._oid(),))
+        self._up([self._line(PRODUCTION_VERSION="PV02")], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["production_version"] == "PV02" and row["sap_production_version"] == "PV02"
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+
+    def test_planner_pv_survives_when_sap_pv_unchanged(self):
+        self._up([self._line(PRODUCTION_VERSION="PV01")])
+        self._sql("UPDATE orders SET production_version='PV02' WHERE id=%s", (self._oid(),))
+        self._up([self._line(PRODUCTION_VERSION="PV01", **{"ORDER_QUANTITY_(GMEIN)": 130})], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["production_version"] == "PV02" and row["order_quantity"] == 130
+
+    def test_blank_pv_takes_material_default(self):
+        self._up([self._line(PRODUCTION_VERSION="PV07")])
+        assert self._row()["production_version"] == "PV07"
+        self._up([self._line(PRODUCTION_VERSION=None)], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["production_version"] == self.DEFAULT_PV and row["sap_production_version"] == ""
+
+    def test_pv_column_absent_keeps_stored_version(self):
+        self._up([self._line(PRODUCTION_VERSION="PV07")])
+        self._up([self._line(**{"ORDER_QUANTITY_(GMEIN)": 130})], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["production_version"] == "PV07" and row["sap_production_version"] == "PV07"
+
+    # ---- reports / counts ---------------------------------------------
+    def test_missing_master_data_report_includes_unchanged_rows(self):
+        line = self._line(MATERIAL_NUMBER=self.MATERIAL2)
+        self._up([line])
+        res = self._up([line], "zztest_st_2.xlsx")
+        assert res["unchanged"] == 1
+        entry = next(w for w in res["warnings"] if w.get("category") == "missing_master_data")
+        assert [e["material_number"] for e in entry["exceptions"]] == [self.MATERIAL2]
+
+    def test_counts_inserted_updated_unchanged(self):
+        rows = [self._line(PRODUCTION_ORDER=f"{self.ORDER}_{i}") for i in range(3)]
+        res1 = self._up(rows)
+        assert (res1["inserted"], res1["updated"], res1["unchanged"]) == (3, 0, 0)
+        rows[1] = {**rows[1], "ORDER_QUANTITY_(GMEIN)": 999}
+        res2 = self._up(rows, "zztest_st_2.xlsx")
+        assert (res2["inserted"], res2["updated"], res2["unchanged"]) == (0, 1, 2)
+        notes = [w for w in res2["warnings"] if w.get("category") == "upload_counts"]
+        assert notes and notes[0]["unchanged"] == 2

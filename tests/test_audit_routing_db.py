@@ -381,7 +381,7 @@ class TestRoutingEditTransactions:
         from types import SimpleNamespace
         from backend.routing.routes import recompute_plant
 
-        def boom(plant, *, conn, batch_id=None):
+        def boom(plant, *, conn, batch_id=None, ids=None):
             with conn.cursor() as cur:
                 cur.execute("SELECT 1/0")
 
@@ -409,19 +409,43 @@ class TestRoutingEditTransactions:
         assert row["planning_reason"]["code"] == "runtime_unknown"
         assert row["run_time_source"] == "sap_order"
 
-    def test_reupload_keeps_manual_run_time(self, pg):
+    def test_reupload_keeps_manual_run_time_when_row_unchanged(self, pg):
+        # First upload records SAP's baseline; the identical second upload is skipped,
+        # so the planner's manual run time is untouched.
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=10, plant=self.PLANT)])
+        self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
+        before = self._row(pg)
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=10, plant=self.PLANT)])
+        row = self._row(pg)
+        assert row["run_time"] == Decimal(7) and row["run_time_source"] == "manual"
+        assert row["version"] == before["version"]
+
+    def test_reupload_recalculates_manual_run_time_when_sap_changed_the_row(self, pg):
+        # SAP sent a different quantity: the row is written, the manual run time is dropped
+        # and the resolver recalculates it from routing (quantity 20 -> 6h).
+        self._upload(pg, [self._upload_row(self.ids[0], quantity=10, plant=self.PLANT)])
         self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
         self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT)])
+        row = self._row(pg)
+        assert row["run_time"] == Decimal(6) and row["run_time_source"] == "routing"
+
+    def test_first_upload_after_migration_keeps_manual_run_time(self, pg):
+        # Baselines are NULL (fixture rows predate them): filling them is not "SAP changed it".
+        self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
+        line = self._upload_row(self.ids[0], quantity=10, plant=self.PLANT)
+        line["production_order"] = "ZZTEST_AR_O1"   # exactly what the fixture row already holds
+        self._upload(pg, [line])
         row = self._row(pg)
         assert row["run_time"] == Decimal(7) and row["run_time_source"] == "manual"
 
     def test_reupload_without_plant_column_still_holds_resolves_and_keeps_manual(self, pg):
         # No PLANT column: plant is only known after the machine backfill.
+        self._upload(pg, [self._upload_row(self.ids[1], quantity=10)])  # records the baseline
         self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[1],))
         new_id = pg.make_id("ZZTEST_AR_O3", self.MATERIAL)
         res = self._upload(pg, [
             self._upload_row(self.ids[0], quantity=20),
-            self._upload_row(self.ids[1], quantity=20),
+            self._upload_row(self.ids[1], quantity=10),
             self._upload_row(new_id, quantity=30),
         ])
         assert res["status"] == "ok"
@@ -441,7 +465,7 @@ class TestRoutingEditTransactions:
         new_id = pg.make_id("ZZTEST_AR_O3", self.MATERIAL)
         seen = {}
 
-        def spy(plant, *, conn, batch_id=None):
+        def spy(plant, *, conn, batch_id=None, ids=None):
             with conn.cursor() as cur:
                 cur.execute("SELECT planning_status, planning_reason->>'code' FROM orders WHERE id=%s",
                             (new_id,))
@@ -481,7 +505,7 @@ class TestRoutingEditTransactions:
         assert row["run_time_source"] == "manual" and row["planning_status"] == "scheduled"
 
     def test_resolver_failure_becomes_upload_warning_not_failed_upload(self, pg):
-        def boom(plant, *, conn, batch_id=None):
+        def boom(plant, *, conn, batch_id=None, ids=None):
             with conn.cursor() as cur:
                 cur.execute("SELECT 1/0")
 

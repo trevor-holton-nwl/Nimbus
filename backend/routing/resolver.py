@@ -524,7 +524,7 @@ def _load_machine_workcenter(cur, plant: str) -> dict:
 
 
 def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
-                 full: bool = False) -> list[dict]:
+                 full: bool = False, ids: list[str] | None = None) -> list[dict]:
     """The set of orders one resolve run considers (§4 item 4's "resolve
     after distribution" ordering is the CALLER's concern, not this query's --
     resolve_orders is called per-plant on demand, over whatever rows exist
@@ -539,10 +539,13 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
     in, per D5/§5.5's cutover behavior.
 
     `batch_id` (the post-upload resolve): ALSO pulls in every non-manual order
-    stamped with that upload batch. A re-upload keeps the stored run_time on a
+    stamped with that upload batch, and `ids` (the orders that upload actually
+    wrote: an unchanged row is skipped and keeps its old batch tag, so the tag
+    alone no longer identifies them). A re-upload keeps the stored run_time on a
     routing plant (db._UPSERT_SQL; SAP's value is nulled before the write), so
     an order whose quantity just changed is neither held, routing-sourced nor
-    run_time-NULL and would otherwise keep a stale duration.
+    run_time-NULL and would otherwise keep a stale duration. A planner's manual
+    run time that the upload dropped (source reset to NULL) is re-derived here.
 
     `full=True` (the explicit /routing/{plant}/recompute admin action) loads
     EVERY non-manual order of the plant, so an upload whose post-upload resolve
@@ -570,8 +573,9 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
         "        OR planning_status = 'needs_planning'"
         "        OR run_time IS NULL"
         "        OR upload_batch_id = %s"
+        "        OR id = ANY(%s)"
         "        OR (%s AND planning_status = 'scheduled'))",
-        (plant, batch_id, is_cutover),
+        (plant, batch_id, list(ids or []), is_cutover),
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
@@ -679,6 +683,9 @@ def _write_outcomes(cur, rows: list[tuple]) -> None:
     own VALUES-joined bulk updates: an all-NULL column would otherwise be of
     unknown type. `IS DISTINCT FROM` in the WHERE clause keeps a genuinely
     unchanged row from bumping orders.xmin (§5.5)."""
+    # Sorted by id: the UPDATE ... FROM (VALUES ...) locks rows in VALUES order, and
+    # every other multi-row writer of orders locks in id order.
+    rows = sorted(rows, key=lambda r: r[0])
     for i in range(0, len(rows), _WRITE_CHUNK):
         _write_outcomes_chunk(cur, rows[i:i + _WRITE_CHUNK])
 
@@ -715,6 +722,7 @@ def _write_holds(cur, rows: list[tuple]) -> None:
     existing orders_planning_state_check CHECK constraint, which demands
     both be NULL whenever planning_status = 'needs_planning'; a row that's
     already held has them NULL already, so this is a no-op for it."""
+    rows = sorted(rows, key=lambda r: r[0])   # id order, like every other multi-row orders writer
     for i in range(0, len(rows), _WRITE_CHUNK):
         _write_holds_chunk(cur, rows[i:i + _WRITE_CHUNK])
 
@@ -754,7 +762,8 @@ def _new_report(is_cutover: bool) -> dict:
     return report
 
 
-def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False) -> dict:
+def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False,
+                            ids: list[str] | None = None) -> dict:
     """Does the real work of `resolve_orders` on an already-open connection;
     never commits (that's `resolve_orders`' job -- either its own, for a
     connection it opened itself, or the caller's, for one it was given)."""
@@ -790,7 +799,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
 
         report = _new_report(is_cutover)
 
-        orders = _load_orders(cur, plant, is_cutover, batch_id, full)
+        orders = _load_orders(cur, plant, is_cutover, batch_id, full, ids)
         if not orders:
             return report
 
@@ -848,7 +857,8 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
     return report
 
 
-def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False) -> dict:
+def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False,
+                   ids: list[str] | None = None) -> dict:
     """§5's thin DB wrapper -- the shape a later task wires into
     `db.upsert_orders`'s `resolve_fn` seam.
 
@@ -859,14 +869,15 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: 
     itself, exactly like every other self-contained write path in this
     codebase (e.g. `backend/routing/routes.py`'s `_do_upload_operations`).
 
-    `batch_id` (db.upsert_orders' post-upload call) additionally re-derives
-    every non-manual order of that upload batch -- see `_load_orders`.
+    `batch_id` and `ids` (db.upsert_orders' post-upload call) additionally
+    re-derive every non-manual order of that upload batch / every order the
+    upload wrote -- see `_load_orders`.
     `full=True` (explicit recompute) re-derives every non-manual order.
     """
     if conn is not None:
-        return _resolve_orders_on_conn(plant, conn, batch_id, full)
+        return _resolve_orders_on_conn(plant, conn, batch_id, full, ids)
     with _pool.connection() as new_conn:
-        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full)
+        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids)
         new_conn.commit()
         return report
 

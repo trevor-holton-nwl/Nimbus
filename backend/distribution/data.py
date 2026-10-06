@@ -849,6 +849,12 @@ def _plan_one_parent(plant: str, production_order: str, material_number: str, ro
     child_rows, child_ids_by_machine, zero_qty_count = _build_child_rows(
         plant, production_order, material_number, parent_facts, shares, letters, mat_attrs,
     )
+    # SAP baselines for the children: the parent's RAW work center and production
+    # version (as SAP sent them; never the per-machine rewrite).
+    raw_pv = row["sap_production_version"] if "sap_production_version" in row else row.get("production_version")
+    for child in child_rows:
+        child["sap_workcenter"] = row.get("sap_workcenter", raw_code)
+        child["sap_production_version"] = raw_pv
     warnings["zero_quantity_children"] += zero_qty_count
 
     parent_plan = {
@@ -880,7 +886,13 @@ def _plan_core(cur, rows: list[dict], batch_id: str, warnings: dict) -> tuple[li
     machine_lookup, workcenter_lookup = _load_lookups(cur)
 
     items = []
-    for row in rows:
+    for incoming_row in rows:
+        # The raw work-center/machine value SAP sent, captured BEFORE any default-machine
+        # rewrite below: it is the baseline the next upload's SAP-change detection
+        # compares against (ordinary, single, unregistered, zero-weight and ambiguous
+        # rows alike; a distribution parent hands it to its children).
+        row = incoming_row if "sap_workcenter" in incoming_row else {
+            **incoming_row, "sap_workcenter": incoming_row.get("machine")}
         plant, plant_warning = service.resolve_plant(row, machine_lookup, workcenter_lookup)
         if plant_warning:
             warnings["ambiguous_workcenter_plant"].append({
@@ -1275,14 +1287,18 @@ _CHILD_UPSERT_SQL = """
         run_time, color, order_quantity, form_size, firming_indicator,
         planned_order_initial_quantity, reduced_quantity, order_category, order_type,
         bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
-        parent_production_order, distribution_letter, upload_batch_id, updated_at
+        parent_production_order, distribution_letter,
+        sap_workcenter, sap_production_version, sap_basic_start_date, sap_basic_finish_date,
+        upload_batch_id, updated_at
     ) VALUES (
         %(id)s, %(production_order)s, %(material_number)s, %(material_description)s,
         %(machine)s, %(plant)s, %(basic_start_date)s, %(basic_finish_date)s,
         %(run_time)s, %(color)s, %(order_quantity)s, %(form_size)s, %(firming_indicator)s,
         %(planned_order_initial_quantity)s, %(reduced_quantity)s, %(order_category)s, %(order_type)s,
         %(bom_alternative)s, %(bom_usage)s, %(labor_hours)s, %(machine_hours)s, %(no_of_fte)s,
-        %(parent_production_order)s, %(distribution_letter)s, %(batch_id)s, NOW()
+        %(parent_production_order)s, %(distribution_letter)s,
+        %(sap_workcenter)s, %(sap_production_version)s, %(sap_basic_start_date)s, %(sap_basic_finish_date)s,
+        %(batch_id)s, NOW()
     )
     ON CONFLICT (id) DO UPDATE SET
         order_quantity          = EXCLUDED.order_quantity,
@@ -1308,7 +1324,13 @@ _CHILD_UPSERT_SQL = """
         plant                   = EXCLUDED.plant,
         parent_production_order = EXCLUDED.parent_production_order,
         distribution_letter     = EXCLUDED.distribution_letter,
-        upload_batch_id         = EXCLUDED.upload_batch_id,
+        -- SAP baselines (see db._UPSERT_SQL): an incoming NULL never erases a stored one.
+        -- upload_batch_id is deliberately NOT here: the batch tag is only stamped on
+        -- INSERT, so an unchanged re-upload leaves a child's xmin alone.
+        sap_workcenter          = COALESCE(EXCLUDED.sap_workcenter, orders.sap_workcenter),
+        sap_production_version  = COALESCE(EXCLUDED.sap_production_version, orders.sap_production_version),
+        sap_basic_start_date    = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),
+        sap_basic_finish_date   = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),
         -- H10/D33: a SCHEDULED child whose effective run time actually changed needs
         -- its bar re-fitted (the client reconcile reads this flag); anything else
         -- keeps the existing flag untouched. Effective = the run_time CASE above.
@@ -1321,13 +1343,22 @@ _CHILD_UPSERT_SQL = """
             ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
         updated_at              = NOW()
     WHERE orders.order_quantity IS DISTINCT FROM EXCLUDED.order_quantity
-       OR orders.run_time IS DISTINCT FROM EXCLUDED.run_time
+       OR (CASE WHEN orders.run_time_source IN ('routing', 'manual') THEN orders.run_time
+                ELSE EXCLUDED.run_time END) IS DISTINCT FROM orders.run_time
        OR orders.labor_hours IS DISTINCT FROM EXCLUDED.labor_hours
        OR orders.machine_hours IS DISTINCT FROM EXCLUDED.machine_hours
        OR orders.material_description IS DISTINCT FROM EXCLUDED.material_description
-       OR orders.basic_start_date IS DISTINCT FROM EXCLUDED.basic_start_date
-       OR orders.basic_finish_date IS DISTINCT FROM EXCLUDED.basic_finish_date
-       OR orders.color IS DISTINCT FROM EXCLUDED.color
+       -- SAP's dates are compared against the stored SAP baseline, never basic_*
+       -- (baseline-correct rewrites basic_finish_date). color is re-stamped from
+       -- master data and upload_batch_id is just a tag: neither is a difference.
+       OR (EXCLUDED.sap_basic_start_date IS NOT NULL
+           AND orders.sap_basic_start_date IS DISTINCT FROM EXCLUDED.sap_basic_start_date)
+       OR (EXCLUDED.sap_basic_finish_date IS NOT NULL
+           AND orders.sap_basic_finish_date IS DISTINCT FROM EXCLUDED.sap_basic_finish_date)
+       OR (EXCLUDED.sap_workcenter IS NOT NULL
+           AND orders.sap_workcenter IS DISTINCT FROM EXCLUDED.sap_workcenter)
+       OR (EXCLUDED.sap_production_version IS NOT NULL
+           AND orders.sap_production_version IS DISTINCT FROM EXCLUDED.sap_production_version)
        OR orders.form_size IS DISTINCT FROM EXCLUDED.form_size
        OR orders.firming_indicator IS DISTINCT FROM EXCLUDED.firming_indicator
        OR orders.planned_order_initial_quantity IS DISTINCT FROM EXCLUDED.planned_order_initial_quantity
@@ -1341,7 +1372,6 @@ _CHILD_UPSERT_SQL = """
        OR orders.plant IS DISTINCT FROM EXCLUDED.plant
        OR orders.parent_production_order IS DISTINCT FROM EXCLUDED.parent_production_order
        OR orders.distribution_letter IS DISTINCT FROM EXCLUDED.distribution_letter
-       OR orders.upload_batch_id IS DISTINCT FROM EXCLUDED.upload_batch_id
 """
 # Deliberately NOT in the SET clause (mirrors db.py's own _UPSERT_SQL
 # comment): scheduled_start, scheduled_end, notes, planning_status,
@@ -1404,9 +1434,13 @@ def _apply_children(cur, parent: dict) -> int:
     shares call for (§5.3 materialization + §5.4 steps 3 and 5). Any child
     NOT in `previous_child_ids` is brand-new and gets the anchor carry;
     everything else is a guarded, no-op-when-unchanged correction. Returns
-    the number of rows actually written (touched)."""
+    the number of rows actually written (touched); when the caller put a list
+    under `parent["_touched_ids"]`, the ids of those rows are appended to it
+    (the ingest seam re-stamps and re-resolves exactly those, instead of a
+    batch tag)."""
     previous_ids = parent["previous_child_ids"]
     anchor = parent.get("anchor")
+    touched_ids = parent.get("_touched_ids")
     touched = 0
     # Deadlock guard: a concurrent /tasks save locks child rows in id order,
     # while the upserts below run in letter order. Lock every child this
@@ -1422,9 +1456,18 @@ def _apply_children(cur, parent: dict) -> int:
         params = dict(child_row)
         params["id"] = child_id
         params["batch_id"] = parent["batch_id"]
+        # SAP baselines: rows planned by ingest carry them; a re-weight/reset/repair
+        # child (built from the header's SAP facts) records the header's dates and
+        # work center, and never a production version of its own.
+        params.setdefault("sap_workcenter", parent.get("sap_workcenter"))
+        params.setdefault("sap_production_version", None)
+        params.setdefault("sap_basic_start_date", params.get("basic_start_date"))
+        params.setdefault("sap_basic_finish_date", params.get("basic_finish_date"))
         cur.execute(_CHILD_UPSERT_SQL, params)
         if cur.rowcount:
             touched += 1
+            if touched_ids is not None:
+                touched_ids.append(child_id)
         if is_new:
             _carry_anchor_onto_new_child(cur, child_id, anchor)
     return touched
@@ -1625,6 +1668,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
     )
 
     keys = sorted(parents.keys())
+    applied_ids: list[str] = []   # children this apply() actually wrote (for the ingest seam's stamp/resolve)
     counters = {
         "parents_distributed": 0, "children_upserted": 0, "children_deleted": 0,
         "headers_created": 0, "headers_refreshed": 0, "replanned_after_reweight": 0,
@@ -1707,6 +1751,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
                     local["headers_refreshed"] += 1
                     _write_shares(cur, parent)
 
+            parent["_touched_ids"] = local["_ids"]
             local["children_upserted"] += _apply_children(cur, parent)
             local["children_total"] += len(parent["child_rows"])
             local["parents_distributed"] += 1
@@ -1749,13 +1794,17 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
         for ci in range(0, len(keys), chunk_size):
             chunk = keys[ci:ci + chunk_size]
             local = {name: 0 for name in counters}
+            local["_ids"] = []
             if _run_savepointed(f"dist_chunk_{ci}", chunk, local):
+                applied_ids.extend(local.pop("_ids"))
                 for name, n_ in local.items():
                     counters[name] += n_
                 continue
             for k in chunk:
                 local = {name: 0 for name in counters}
+                local["_ids"] = []
                 if _run_savepointed(f"dist_parent_{ci}", [k], local):
+                    applied_ids.extend(local.pop("_ids"))
                     for name, n_ in local.items():
                         counters[name] += n_
                 else:
@@ -1768,7 +1817,8 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
     if failed_parents:
         ingest_warnings["failed_parents"] = failed_parents
     warnings_entry = _build_warnings_entry(ingest_warnings, counters)
-    return {**counters, "warnings_entry": warnings_entry, "ingest_warnings": ingest_warnings}
+    return {**counters, "warnings_entry": warnings_entry, "ingest_warnings": ingest_warnings,
+            "touched_ids": sorted(set(applied_ids))}
 
 
 # =====================================================================
@@ -2769,13 +2819,17 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
     )
 
 
-def _stamp_batch_children(conn, batch_id: str) -> None:
-    """D11: give children written under `batch_id` the same machine_key and
+def _stamp_batch_children(conn, ids: list[str]) -> None:
+    """D11: give the children just written (`ids`) the same machine_key and
     material_plants attributes (prt_01/prt_02/production_version/color) an
     ordinary upload stamps, so re-weight/reset/repair/resolve-created
     sub-orders are not unknown-setup (optimizer) or held (routing plants).
-    Scoped to this batch's rows only; same transaction, no commit. Mirrors
-    db.upsert_orders' machine_key backfill + `_stamp_order_attributes`."""
+    Scoped to those ids only (the batch tag is no longer re-stamped on
+    unchanged rows); same transaction, no commit. Mirrors db.upsert_orders'
+    machine_key backfill + `_stamp_order_attributes`."""
+    ids = sorted(set(ids))
+    if not ids:
+        return
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2784,15 +2838,15 @@ def _stamp_batch_children(conn, batch_id: str) -> None:
                    SELECT m.machine_key FROM machine m
                     WHERE m.plant = o.plant AND m.machine = o.machine
                )
-             WHERE o.upload_batch_id = %s AND o.machine_key IS NULL AND o.plant IS NOT NULL
+             WHERE o.id = ANY(%s) AND o.machine_key IS NULL AND o.plant IS NOT NULL
                AND (
                    SELECT COUNT(*) FROM machine m
                     WHERE m.plant = o.plant AND m.machine = o.machine
                ) = 1
             """,
-            (batch_id,),
+            (ids,),
         )
-    db._stamp_order_attributes(conn, batch_id=batch_id)
+    db._stamp_order_attributes(conn, ids=ids)
 
 
 def _write_reweight_shares(cur, plant: str, order: str, material: str,
@@ -3078,6 +3132,8 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
         "anchor": anchor, "child_rows": child_rows, "batch_id": upload_batch_id,
         "letters": letters, "child_ids": child_ids_by_machine,
     }
+    touched_child_ids: list[str] = []
+    parent_stub["_touched_ids"] = touched_child_ids
     touched = _apply_children(cur, parent_stub)
     if collapse:
         _collapse_to_survivor(cur, collapse["old_child_id"], collapse["new_child_id"])
@@ -3085,7 +3141,8 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     deleted = _delete_superseded_children(cur, superseded)
     _write_reweight_shares(cur, plant, order, material, letters, desired_weights)
     _update_share_child_ids(cur, parent_stub)
-    _stamp_batch_children(cur.connection, upload_batch_id)
+    _stamp_batch_children(cur.connection, touched_child_ids + sorted(
+        ({collapse["new_child_id"]} if collapse else set()) | set(parent_stub["child_ids"].values())))
 
     reviewed_val, reviewed_by, reviewed_at, reviewed_quantity = _resolve_review_stamp(header, reviewed, actor)
     _write_reweight_header(
@@ -3597,7 +3654,7 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
         apply_result = {"headers_created": 0, "children_upserted": 0}
         if plan_structure.get("parents"):
             apply_result = apply(plan_structure, batch_id, conn, actor=actor)
-            _stamp_batch_children(conn, batch_id)
+            _stamp_batch_children(conn, apply_result.get("touched_ids") or [])
             conn.commit()
         else:
             conn.commit()

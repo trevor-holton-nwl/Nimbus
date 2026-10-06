@@ -4303,32 +4303,6 @@ class TestUploadMessageCountsPlannedChildren(_ReweightFixtureBase):
                 conn.commit()
 
 
-@pytest.mark.pg
-class TestPvKeptOnBlankIgnoresDistributionChildren(_ReweightFixtureBase):
-    """Senior audit #7: distribution children arrive blank on every re-upload,
-    so `pv_kept_on_blank` fired for each of them."""
-    WC, L1, L2 = "ZZTEST_WC_PVKEEP", "ZZTEST_L1_PVKEEP", "ZZTEST_L2_PVKEEP"
-    ORD, MAT = "ZZTEST_ORD_PVKEEP", "ZZT_MAT_PVKEEP"
-
-    def test_children_not_counted(self, pg):
-        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
-        try:
-            with pg._pool.connection() as conn, conn.cursor() as cur:
-                cur.execute("UPDATE orders SET production_version = 'PV7' WHERE plant=%s AND parent_production_order=%s",
-                            (self.PLANT, self.ORD))
-                conn.commit()
-            row = {"production_order": self.ORD, "material_number": self.MAT, "machine": self.WC,
-                   "plant": self.PLANT, "basic_start_date": dt.datetime(2026, 10, 1, 8),
-                   "basic_finish_date": dt.datetime(2026, 10, 1, 18), "order_quantity": 100.0, "run_time": 10.0}
-            res = pg.upsert_orders([row], plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
-                                   resolve_fn=routing_resolver.resolve_orders)
-            assert not [w for w in res["warnings"] if w.get("category") == "pv_kept_on_blank"], res["warnings"]
-        finally:
-            with pg._pool.connection() as conn, conn.cursor() as cur:
-                self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
-                conn.commit()
-
-
 def _wait_for_lock_wait(db_, timeout=10.0):
     """Deterministically wait until some backend of this DB is blocked on a
     heavyweight lock (pg_stat_activity), instead of sleeping."""
@@ -4499,6 +4473,135 @@ class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
 
 
 @pytest.mark.pg
+class TestSapTruthDistributionReupload(_ReweightFixtureBase):
+    """SAP-is-truth re-upload on distributed orders: an unchanged upload leaves
+    every child untouched; a SAP change on one child resets ALL children of
+    that parent+material (and only them) under the ordered row lock."""
+    WC, L1, L2 = "ZZTEST_WC_STR", "ZZTEST_L1_STR", "ZZTEST_L2_STR"
+    ORD, MAT, MAT2 = "ZZTEST_ORD_STR", "ZZT_MAT_STR", "ZZT_MAT2_STR"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            _seed_distribution_material(cur, self.MAT2, self.PLANT)
+            conn.commit()
+        self.base = (dt.datetime.now() + dt.timedelta(days=40)).replace(hour=8, minute=0, second=0, microsecond=0)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s", (self.PLANT, self.MAT2))
+            cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT2,))
+            conn.commit()
+
+    def _parent(self, mat, **kw):
+        row = {"production_order": self.ORD, "material_number": mat, "machine": self.WC, "plant": self.PLANT,
+               "basic_start_date": self.base, "basic_finish_date": self.base + dt.timedelta(hours=10),
+               "order_quantity": 100.0, "run_time": 10.0}
+        row.update(kw)
+        return row
+
+    def _upload(self, pg, rows, **kw):
+        return pg.upsert_orders(rows, batch_id=str(uuid.uuid4()), source="excel", filename="f.xlsx",
+                                plan_fn=distribution_data.plan, apply_fn=distribution_data.apply, **kw)
+
+    def _state(self, pg, mat):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id, scheduled_start, manual_firmed, xmin::text::bigint FROM orders"
+                        " WHERE plant=%s AND parent_production_order=%s AND material_number=%s ORDER BY id",
+                        (self.PLANT, self.ORD, mat))
+            return cur.fetchall()
+
+    def _place_and_firm(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=TRUE"
+                        " WHERE plant=%s AND parent_production_order=%s",
+                        (self.base + dt.timedelta(days=2), self.base + dt.timedelta(days=2, hours=4),
+                         self.PLANT, self.ORD))
+            conn.commit()
+
+    def test_unchanged_reupload_keeps_child_xmin(self, pg):
+        self._upload(pg, [self._parent(self.MAT)])
+        self._place_and_firm(pg)
+        before = self._state(pg, self.MAT)
+        assert len(before) == 2
+        res = self._upload(pg, [self._parent(self.MAT)])
+        assert self._state(pg, self.MAT) == before
+        assert res["updated"] == 0 and res["unchanged"] == 2
+
+    def test_child_change_resets_all_siblings_only(self, pg):
+        def rows():
+            return [self._parent(self.MAT), self._parent(self.MAT2)]
+        self._upload(pg, rows())
+        self._place_and_firm(pg)
+        mat_before, mat2_before = self._state(pg, self.MAT), self._state(pg, self.MAT2)
+        assert len(mat_before) == 2 and len(mat2_before) == 2
+        # SAP "changed" ONE child of MAT only (its stored baseline differs from what arrives).
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET sap_basic_start_date = sap_basic_start_date - interval '1 day'"
+                        " WHERE id = %s", (mat_before[-1][0],))
+            conn.commit()
+        mat2_before = self._state(pg, self.MAT2)
+        with mock.patch.object(pg, "_UPSERT_CHUNK", 1):
+            res = self._upload(pg, rows())
+        for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+            assert sched is None and firmed is False
+        assert self._state(pg, self.MAT2) == mat2_before, "a second material on the same order is untouched"
+        assert next(w for w in res["warnings"] if w.get("category") == "sap_changed")["count"] == 2
+
+    def test_ingest_vs_save_vs_apply_lock_order_never_deadlocks(self, pg):
+        import threading
+        self._upload(pg, [self._parent(self.MAT)])
+        self._place_and_firm(pg)
+        kids = self._state(pg, self.MAT)
+        ids = [k[0] for k in kids]
+        vers = {k[0]: k[3] for k in kids}
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET sap_basic_start_date = sap_basic_start_date - interval '1 day'"
+                        " WHERE id = ANY(%s)", (ids,))
+            conn.commit()
+        res = {}
+
+        def run(name, fn):
+            try:
+                res[name] = fn()
+            except Exception as exc:  # noqa: BLE001
+                res[name] = exc
+
+        def save():
+            t0 = self.base + dt.timedelta(days=5)
+            return pg.update_task_dates_bulk(
+                [{"id": i, "start": t0, "end": t0 + dt.timedelta(hours=3), "base_version": vers[i]}
+                 for i in ids])
+
+        # A third writer holds the LATER child; ingest (id-ordered lock) takes the earlier one
+        # and waits, the save then queues behind the ingest -- nobody may deadlock.
+        holder = pg._pool.connection()
+        hconn = holder.__enter__()
+        hcur = hconn.cursor()
+        hcur.execute("SELECT id FROM orders WHERE id = %s FOR UPDATE", (max(ids),))
+        try:
+            with mock.patch.object(pg, "_UPSERT_CHUNK", 1):
+                ti = threading.Thread(target=run, daemon=True, args=(
+                    "ingest", lambda: self._upload(pg, [self._parent(self.MAT)])))
+                ti.start()
+                assert _wait_for_lock_wait(pg, 10.0), "ingest never blocked on the held row"
+                ts = threading.Thread(target=run, args=("save", save), daemon=True)
+                ts.start()
+                _wait_for_lock_wait(pg, 2.0)
+                hconn.rollback()
+                ti.join(40)
+                ts.join(40)
+        finally:
+            hconn.rollback()
+            holder.__exit__(None, None, None)
+        assert not ti.is_alive() and not ts.is_alive()
+        for name in ("ingest", "save"):
+            assert not isinstance(res[name], Exception), f"{name} raised {res[name]!r}"
+        assert res["ingest"]["unchanged"] == 0
+
+
+@pytest.mark.pg
 class TestMutationHolesChildUpsertAndDelete(_ReweightFixtureBase):
     """Mutation-testing holes: D07 (ordinary upload clears a stale child link AND
     letter), D17 (superseded-child delete locks rows before touching overrides)
@@ -4524,6 +4627,7 @@ class TestMutationHolesChildUpsertAndDelete(_ReweightFixtureBase):
         "firming_indicator", "planned_order_initial_quantity", "reduced_quantity", "order_category",
         "order_type", "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
         "parent_production_order", "distribution_letter",
+        "sap_workcenter", "sap_production_version", "sap_basic_start_date", "sap_basic_finish_date",
     )
 
     def _child(self, pg, machine):
