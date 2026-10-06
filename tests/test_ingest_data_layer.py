@@ -358,7 +358,7 @@ class TestSapTruthReupload:
     DEFAULT_PV = "DPV1"
 
     def _cleanup(self, cur):
-        cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
+        cur.execute("DELETE FROM orders WHERE plant = %s OR production_order LIKE 'ZZTEST_ST_ORD%%'", (self.PLANT,))
         cur.execute("DELETE FROM upload_audit WHERE filename LIKE 'zztest_st_%'")
         cur.execute("DELETE FROM machine WHERE plant = %s", (self.PLANT,))
         cur.execute("DELETE FROM sap_workcenter WHERE plant = %s", (self.PLANT,))
@@ -628,3 +628,38 @@ class TestSapTruthReupload:
         assert (res2["inserted"], res2["updated"], res2["unchanged"]) == (0, 1, 2)
         notes = [w for w in res2["warnings"] if w.get("category") == "upload_counts"]
         assert notes and notes[0]["unchanged"] == 2
+
+    def test_unchanged_reupload_heals_null_plant_and_machine_key(self):
+        # No plant on the row and a machine master data does not know yet: plant stays
+        # NULL. (Straight to upsert_orders, no plan_fn, so only the post-upload backfill
+        # can fill it once the machine exists and the row itself is unchanged.)
+        row_in = {"production_order": self.ORDER, "material_number": self.MATERIAL,
+                  "machine": "ZZTEST_ST_LATE", "basic_start_date": self.base,
+                  "basic_finish_date": self.base + dt.timedelta(days=1), "order_quantity": 100,
+                  "run_time": 4.0}
+        self.pg.upsert_orders([dict(row_in)], source="excel", filename="zztest_st_1.xlsx")
+        assert self._row()["plant"] is None
+        self._sql("INSERT INTO machine (subnetwork, plant, machine) VALUES (%s, %s, %s)",
+                  (self.SUB, self.PLANT, "ZZTEST_ST_LATE"))
+        res = self.pg.upsert_orders([dict(row_in)], source="excel", filename="zztest_st_2.xlsx")
+        row = self._row()
+        assert res["unchanged"] == 1 and res["updated"] == 0
+        assert row["plant"] == self.PLANT
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT machine_key FROM orders WHERE id = %s", (self._oid(),))
+            assert cur.fetchone()[0] is not None
+
+    def test_routing_switch_on_padding_is_not_a_pv_change(self):
+        # Baseline '1' recorded while the plant was not routing-enabled; enabling routing
+        # pads the incoming '1' to '0001' -- must be neither a write nor a reset.
+        row = {"production_order": self.ORDER, "material_number": self.MATERIAL, "machine": self.M1,
+               "plant": self.PLANT, "basic_start_date": self.base,
+               "basic_finish_date": self.base + dt.timedelta(days=1), "order_quantity": 100,
+               "run_time": 4.0, "production_version": "1"}
+        self.pg.upsert_orders([dict(row)], source="excel", filename="zztest_st_1.xlsx")
+        self._schedule(self.base + dt.timedelta(days=3))
+        self._sql("UPDATE plants SET routing_runtime_enabled = TRUE WHERE plant = %s", (self.PLANT,))
+        before = self._row()
+        res = self.pg.upsert_orders([dict(row)], source="excel", filename="zztest_st_2.xlsx")
+        assert res["updated"] == 0 and res["unchanged"] == 1
+        assert self._row() == before

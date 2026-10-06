@@ -2395,6 +2395,23 @@ def run_analyze(table: str) -> dict:
 # =========================
 # INGESTION
 # =========================
+def _norm_pv(value) -> str | None:
+    """Padding-insensitive production-version form ('1' == '0001' == ' 0001 '):
+    zero-padding is only applied on routing-enabled plants, so switching routing
+    on must not turn a stored '1' into an "SAP changed it". Blank stays ''."""
+    if value is None:
+        return None
+    s = str(value).strip().upper()
+    return s.zfill(4) if s else s
+
+
+def _norm_pv_sql(expr: str) -> str:
+    """SQL twin of _norm_pv for the skip-unchanged / PV-wins comparisons."""
+    return (f"(CASE WHEN COALESCE({expr}, '') = '' THEN {expr} "
+            f"WHEN length(btrim({expr})) >= 4 THEN upper(btrim({expr})) "
+            f"ELSE lpad(upper(btrim({expr})), 4, '0') END)")
+
+
 def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None) -> set[str]:
     """Which SAP-owned fields did this upload change vs SAP's previous upload?
 
@@ -2440,9 +2457,9 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     base_pv = before.get("sap_production_version")
     if (base_pv is not None and incoming.get("sap_production_version") is not None
             and not incoming.get("parent_production_order")):
-        in_pv = incoming["sap_production_version"].strip()
-        cur_pv = (before.get("production_version") or "").strip()
-        if in_pv != base_pv.strip() and in_pv != cur_pv:
+        in_pv = _norm_pv(incoming["sap_production_version"])
+        cur_pv = _norm_pv(before.get("production_version") or "")
+        if in_pv != _norm_pv(base_pv) and in_pv != cur_pv:
             changed.add("production_version")
 
     return changed
@@ -2503,7 +2520,8 @@ _SAP_DIFFERS_SQL = f"""(
         OR (orders.sap_workcenter IS NOT NULL AND EXCLUDED.sap_workcenter IS NOT NULL
             AND orders.sap_workcenter IS DISTINCT FROM EXCLUDED.sap_workcenter)
         OR (orders.sap_production_version IS NOT NULL AND EXCLUDED.sap_production_version IS NOT NULL
-            AND orders.sap_production_version IS DISTINCT FROM EXCLUDED.sap_production_version)
+            AND {_norm_pv_sql('orders.sap_production_version')}
+                IS DISTINCT FROM {_norm_pv_sql('EXCLUDED.sap_production_version')})
     )"""
 
 # A row whose SAP baseline is still unknown (NULL, e.g. the first upload after
@@ -2620,7 +2638,8 @@ _UPSERT_SQL = f"""
             WHEN EXCLUDED.parent_production_order IS NULL
              AND orders.sap_production_version IS NOT NULL
              AND EXCLUDED.sap_production_version IS NOT NULL
-             AND EXCLUDED.sap_production_version IS DISTINCT FROM orders.sap_production_version
+             AND {_norm_pv_sql('EXCLUDED.sap_production_version')}
+                 IS DISTINCT FROM {_norm_pv_sql('orders.sap_production_version')}
             THEN NULLIF(EXCLUDED.production_version, '')
             ELSE COALESCE(NULLIF(orders.production_version, ''), NULLIF(EXCLUDED.production_version, ''))
         END,
@@ -2928,18 +2947,24 @@ def _order_is_running(b: dict, now: datetime) -> bool:
     return end is not None and start <= now < end
 
 
-def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | None = None) -> dict:
+def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | None = None,
+                        heal_ids: list[str] | None = None) -> dict:
     """Post-upsert steps scoped to `ids` (the orders an upload actually wrote):
     lock them in id order, derive a missing plant from the machine, derive
     machine_key, then stamp color/PRT/production version from material_plants
     (Seam 2). Returns _stamp_order_attributes' missing-master-data summary, which
-    covers `report_ids` (default `ids`). Shares the caller's transaction and
-    commits it at the end."""
+    covers `report_ids` (default `ids`). `heal_ids` are rows the upload did NOT
+    write (skipped as unchanged) that are checked for a NULL plant/machine_key:
+    they are locked with the rest, but only written (and stamped) when the
+    backfill can actually fill them -- the result's `healed_ids` lists those.
+    Shares the caller's transaction and commits it at the end."""
     ids = sorted(set(ids))
-    if ids:
+    scope = sorted(set(ids) | set(heal_ids or []))
+    healed: set[str] = set()
+    if scope:
         # Lock first (id order) so these multi-row UPDATEs can never deadlock a
         # concurrent save/distribution writer locking the same rows in id order.
-        cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (ids,))
+        cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (scope,))
         # Materialize plant for rows this upload didn't carry one for, deriving it from
         # the machine->plant master-data mapping. Only derive when the machine maps to
         # EXACTLY ONE plant; a machine code shared across plants is left NULL (and
@@ -2956,9 +2981,11 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
                    SELECT COUNT(DISTINCT m.plant) FROM machine m
                     WHERE m.machine = o.machine
                ) = 1
+            RETURNING o.id
             """,
-            (ids,),
+            (scope,),
         )
+        healed.update(r[0] for r in cur.fetchall())
         # Same idea for machine_key, strictly downstream of the plant backfill
         # just above (a row still NULL there stays NULL here too).
         cur.execute(
@@ -2973,12 +3000,16 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
                    SELECT COUNT(*) FROM machine m
                     WHERE m.plant = o.plant AND m.machine = o.machine
                ) = 1
+            RETURNING o.id
             """,
-            (ids,),
+            (scope,),
         )
+        healed.update(r[0] for r in cur.fetchall())
+    healed -= set(ids)
     # Seam 2 -- strictly downstream of the plant backfill above (it reads o.plant).
     # The upload ALWAYS succeeds regardless of how much is unmatched (N5/N6/N7).
-    result = _stamp_order_attributes(conn, ids=ids, report_ids=report_ids)
+    result = _stamp_order_attributes(conn, ids=sorted(set(ids) | healed), report_ids=report_ids)
+    result["healed_ids"] = sorted(healed)
     conn.commit()
     return result
 
@@ -3284,7 +3315,14 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # Post-upload steps are scoped to the ids this upload wrote (never to
             # the batch tag: rows skipped as unchanged keep their old batch id).
             touched_ids = sorted(touched)
-            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids)
+            # Unchanged (skipped) rows used to be healed by the batch-scoped backfill;
+            # keep that: any incoming row still missing plant/machine_key is checked too.
+            cur.execute("SELECT id FROM orders WHERE id = ANY(%s) AND (plant IS NULL OR machine_key IS NULL)",
+                        (all_ids,))
+            heal_ids = [r[0] for r in cur.fetchall()]
+            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids)
+            touched.update(attr_result["healed_ids"])
+            touched_ids = sorted(touched)
             missing_master_data = attr_result["exceptions"]
             if attr_result["unmatched_pairs"]:
                 warnings.append({

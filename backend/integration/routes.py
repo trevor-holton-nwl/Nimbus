@@ -79,7 +79,7 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
         request, filename=file.filename or "upload.xlsx",
         rows_received=result.get("raw_row_count", 0), inserted=result.get("inserted", 0),
         updated=result.get("updated", 0), unchanged=result.get("unchanged", 0),
-        warning_count=len(result.get("warnings") or []),
+        warning_count=len([w for w in (result.get("warnings") or []) if w.get("category") != "upload_counts"]),
     )
     # Soft-warn on production lines not yet in master data (lines come from the
     # ingest result now, not a global frame). Never let this blow up the response.

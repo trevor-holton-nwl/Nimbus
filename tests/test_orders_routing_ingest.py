@@ -540,6 +540,11 @@ class Test_sap_changed_fields:
     def test_production_version_strip_not_changed(self):
         assert self._run(incoming=self._incoming(sap_production_version=" 0001 ")) == set()
 
+    def test_production_version_padding_insensitive_not_changed(self):
+        # routing switched on: stored baseline '1' vs incoming zero-padded '0001'
+        before = self._before(sap_production_version="1", production_version="1")
+        assert self._run(before, self._incoming(sap_production_version="0001")) == set()
+
     def test_production_version_echo_of_planner_value_not_changed(self):
         before = self._before(production_version="0007")
         assert self._run(before, self._incoming(sap_production_version="0007")) == set()

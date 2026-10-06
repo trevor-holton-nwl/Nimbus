@@ -1433,7 +1433,9 @@ export const AdminCockpit = {
             { reqId, errorCode: body?.error_code || 'http.status' });
           return;
         }
-        const warnCount = body.warnings?.length ?? 0;
+        // The upload_counts entry is bookkeeping (shown in the summary line), not a warning.
+        const realWarnings = (body.warnings ?? []).filter(x => x.category !== 'upload_counts');
+        const warnCount = realWarnings.length;
         const w = warnCount ? ` (${warnCount} warning${warnCount === 1 ? '' : 's'})` : '';
         AdminCockpit._setStatus(
           status,
@@ -1458,7 +1460,7 @@ export const AdminCockpit = {
         ErrorLog.info('admin',
           `Upload OK: inserted=${body.inserted} updated=${body.updated} unchanged=${body.unchanged ?? 0} batch=${body.batch_id}`, body);
         if (warnCount) {
-          ErrorLog.warn('admin', `Upload had ${warnCount} warning(s)`, body.warnings);
+          ErrorLog.warn('admin', `Upload had ${warnCount} warning(s)`, realWarnings);
         }
         Toast.show(Util.t('toast.upload_ok', { count: body.inserted + body.updated }), 'success');
         setTimeout(() => AdminCockpit._clearUpload(), 2000);
@@ -2622,7 +2624,8 @@ export const AdminCockpit = {
 
         const tb = document.createElement('tbody');
         for (const it of items) {
-          const hasWarnings = it.warnings && it.warnings.length > 0;
+          const visibleWarnings = (it.warnings ?? []).filter(x => x.category !== 'upload_counts');
+          const hasWarnings = visibleWarnings.length > 0;
 
           const tr = document.createElement('tr');
           if (hasWarnings) tr.classList.add('admin-audit-has-warn');
@@ -2637,7 +2640,7 @@ export const AdminCockpit = {
             String(it.updated ?? '—'),
             String(it.warnings?.find((x) => x.category === 'upload_counts')?.unchanged ?? '—'),
             batchShort,
-            hasWarnings ? `⚠ ${it.warnings.length}` : '✓',
+            hasWarnings ? `⚠ ${visibleWarnings.length}` : '✓',
           ];
           cells.forEach((c, i) => {
             const td = document.createElement('td');
@@ -2664,7 +2667,7 @@ export const AdminCockpit = {
             }
 
             // Show other warnings
-            const otherWarnings = it.warnings.filter(w => (w as AdminUploadWarning).category !== 'distribution');
+            const otherWarnings = visibleWarnings.filter(w => (w as AdminUploadWarning).category !== 'distribution');
             if (otherWarnings.length > 0) {
               warnContainer.appendChild(AdminCockpit._warningList(otherWarnings));
             }
