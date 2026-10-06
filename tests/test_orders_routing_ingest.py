@@ -45,6 +45,7 @@ executing real SQL. Two consequences of that:
     live engine to trust once the parameters themselves are proven correct.
 """
 from contextlib import contextmanager
+from decimal import Decimal
 
 
 import db
@@ -429,3 +430,119 @@ def test_distribution_warnings_entry_not_surfaced_when_only_single_rewrites(monk
     )
 
     assert warnings_entry not in result["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# sap_changed_fields — pure "did SAP change this order" detection (DB-free)
+# ---------------------------------------------------------------------------
+class Test_sap_changed_fields:
+    from datetime import datetime as _dt
+    S0, F0 = _dt(2026, 10, 1, 6), _dt(2026, 10, 2, 6)
+    S1, F1 = _dt(2026, 10, 3, 6), _dt(2026, 10, 4, 6)
+
+    def _before(self, **kw):
+        base = {
+            "sap_basic_start_date": self.S0, "sap_basic_finish_date": self.F0,
+            "sap_workcenter": "WC1", "order_quantity": 100,
+            "sap_production_version": "0001", "production_version": "0001",
+            "scheduled_start": None, "scheduled_end": None,
+        }
+        base.update(kw)
+        return base
+
+    def _incoming(self, **kw):
+        base = {
+            "basic_start_date": self.S0, "basic_finish_date": self.F0,
+            "sap_workcenter": "WC1", "order_quantity": 100,
+            "sap_production_version": "0001", "parent_production_order": None,
+        }
+        base.update(kw)
+        return base
+
+    def _run(self, before=None, incoming=None, wc="M1"):
+        return db.sap_changed_fields(before or self._before(), incoming or self._incoming(), wc)
+
+    def test_unchanged_returns_empty(self):
+        assert self._run() == set()
+
+    def test_dates_changed(self):
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        assert self._run(incoming=inc) == {"dates"}
+
+    def test_dates_finish_only_changed(self):
+        assert self._run(incoming=self._incoming(basic_finish_date=self.F1)) == {"dates"}
+
+    def test_dates_echo_of_schedule_not_changed(self):
+        before = self._before(scheduled_start=self.S1, scheduled_end=self.F1)
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        assert self._run(before, inc) == set()
+
+    def test_dates_partial_echo_still_changed(self):
+        before = self._before(scheduled_start=self.S1, scheduled_end=self.F0)
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        assert self._run(before, inc) == {"dates"}
+
+    def test_dates_echo_needs_both_schedule_values(self):
+        before = self._before(scheduled_start=self.S1, scheduled_end=None)
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        assert self._run(before, inc) == {"dates"}
+
+    def test_null_date_baselines_not_changed(self):
+        before = self._before(sap_basic_start_date=None, sap_basic_finish_date=None)
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        assert self._run(before, inc) == set()
+
+    def test_workcenter_changed(self):
+        assert self._run(incoming=self._incoming(sap_workcenter="WC2")) == {"workcenter"}
+
+    def test_workcenter_echo_of_current_machine_not_changed(self):
+        assert self._run(incoming=self._incoming(sap_workcenter="M9"), wc="M9") == set()
+
+    def test_null_workcenter_baseline_not_changed(self):
+        before = self._before(sap_workcenter=None)
+        assert self._run(before, self._incoming(sap_workcenter="WC2")) == set()
+
+    def test_quantity_changed(self):
+        assert self._run(incoming=self._incoming(order_quantity=120)) == {"quantity"}
+
+    def test_quantity_100_vs_100_0_not_changed(self):
+        before = self._before(order_quantity=100)
+        assert self._run(before, self._incoming(order_quantity=100.0)) == set()
+        before = self._before(order_quantity=Decimal("100.000"))
+        assert self._run(before, self._incoming(order_quantity="100.0")) == set()
+
+    def test_quantity_none_safe(self):
+        before = self._before(order_quantity=None)
+        assert self._run(before, self._incoming(order_quantity=5)) == set()
+        assert self._run(incoming=self._incoming(order_quantity=None)) == {"quantity"}
+
+    def test_production_version_changed(self):
+        assert self._run(incoming=self._incoming(sap_production_version="0002")) == {"production_version"}
+
+    def test_production_version_blank_vs_value_changed(self):
+        assert self._run(incoming=self._incoming(sap_production_version="  ")) == {"production_version"}
+
+    def test_production_version_strip_not_changed(self):
+        assert self._run(incoming=self._incoming(sap_production_version=" 0001 ")) == set()
+
+    def test_production_version_echo_of_planner_value_not_changed(self):
+        before = self._before(production_version="0007")
+        assert self._run(before, self._incoming(sap_production_version="0007")) == set()
+
+    def test_null_production_version_baseline_not_changed(self):
+        before = self._before(sap_production_version=None)
+        assert self._run(before, self._incoming(sap_production_version="0002")) == set()
+
+    def test_child_row_production_version_ignored(self):
+        inc = self._incoming(sap_production_version="0002", parent_production_order="P1")
+        assert self._run(incoming=inc) == set()
+
+    def test_child_row_other_fields_still_detected(self):
+        inc = self._incoming(sap_production_version="0002", parent_production_order="P1",
+                             order_quantity=7)
+        assert self._run(incoming=inc) == {"quantity"}
+
+    def test_several_fields_at_once(self):
+        inc = self._incoming(basic_start_date=self.S1, sap_workcenter="WC2",
+                             order_quantity=1, sap_production_version="0002")
+        assert self._run(incoming=inc) == {"dates", "workcenter", "quantity", "production_version"}
