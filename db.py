@@ -3326,9 +3326,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     for pkey, pplan in (distribution_plan.get("parents") or {}).items():
         old_q = ((pplan.get("existing_header") or {}).get("order_quantity"))
         new_q = (pplan.get("parent_facts") or {}).get("order_quantity")
-        if old_q is not None and new_q is not None:
-            if Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001")):
-                parent_quantity_changed.add(tuple(pkey))
+        if (old_q is not None and new_q is not None
+                and Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001"))):
+            parent_quantity_changed.add(tuple(pkey))
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
