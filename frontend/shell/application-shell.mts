@@ -2271,7 +2271,7 @@ const App = {
         Toast.show(Util.t('toast.firm_needs_save'), 'info', 6000);
       }
     }
-    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._firmDirtyIds.clear(); }
     Persistence._syncUnsaved();
   },
   // First firm toggle of the session explains that a firm is shared only after Save.

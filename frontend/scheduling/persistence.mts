@@ -306,6 +306,7 @@ export const Persistence = {
       Persistence._dirtyIds.clear();
       Persistence._forceIds.clear();
       Persistence._conflictedIds.clear();
+      Persistence._firmDirtyIds.clear();
       for (const key of Object.keys(Store.dependencies)) delete Store.dependencies[key];
     };
     // Captured before any async work starts; every continuation below that would
@@ -516,9 +517,9 @@ export const Persistence = {
           throw new Error('Incomplete task hydration; local edits retained');
         }
 
-        // Restore user state (blocks, calendars, firmedIds, lineSettings) from localStorage
+        // Restore user state (blocks, calendars, lineSettings) from localStorage
         // before setTasks so alerts compute with the correct context. The backend is
-        // authoritative for task schema; the cache owns blocks/calendars/firmedIds AND
+        // authoritative for task schema; the cache owns blocks/calendars AND
         // any manually-positioned task dates the user has placed beyond the auto-snap baseline.
         let cacheData = null;
         try {
@@ -1266,7 +1267,7 @@ export const Persistence = {
 
   // Restore non-task user state from a cache snapshot. Called both from _loadCache()
   // and from the backend load path (where the backend owns task dates but localStorage
-  // owns everything else: blocks, calendars, firmedIds, lineSettings, plants).
+  // owns everything else: blocks, calendars, lineSettings, plants; firms are server state).
   _restoreNonTaskState(data: Partial<StoredState>): void {
     if (data.lineSettings && Object.keys(data.lineSettings).length) {
       const ls = Store.lineSettings;

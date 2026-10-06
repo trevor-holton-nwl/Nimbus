@@ -316,3 +316,23 @@ test('first firm toggle per session shows toast.firm_needs_save once', async () 
     Persistence._dirtyIds.clear();
   }
 });
+
+test('a firm toggle followed by a reload (tasks:bulk) leaves no stale FIRMED for a later date-only edit', () => withDirtyTracking(async () => {
+  Store.setTasks([firmTask('fr-a')], 'unit-test');
+  Store.setFirmed(['fr-a'], true, 'table');
+  assert.ok(Persistence._firmDirtyIds.has('fr-a'));
+  Store.setTasks([firmTask('fr-a', { firmed: false })], 'persistence');   // reload / plant switch
+  assert.equal(Persistence._firmDirtyIds.size, 0, 'tasks:bulk clears the firm marker with the dirty set');
+  Store.updateTask('fr-a', { start_date: new Date('2026-09-09T10:00:00'), end_date: new Date('2026-09-09T11:00:00') }, 'table');
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'fr-a': 4 } }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(!('FIRMED' in calls[0].tasks[0]));
+  } finally { globalThis.fetch = originalFetch; }
+}));
