@@ -328,6 +328,9 @@ export const Store = {
   // Replace all tasks (e.g. after backend load or optimiser run).
   setTasks(tasks: NimbusTask[], source?: string): { inserted: number; collisions: number } {
     this._state.tasks = {};
+    // firmedIds is derived from task.firmed (server state) on every wholesale
+    // load, so a stale local id (old browser firm, previous plant) cannot survive.
+    this._state.firmedIds.clear();
     let collisions = 0;
     const collisionSamples: Array<{ id: string; text?: string; line: string }> = [];
     for (const t of tasks) {
@@ -687,14 +690,20 @@ export const Store = {
     this.emit({ type: 'plantBlocks:change', source });
   },
   replaceFirmedIds(idSet: Set<string>, source?: string): void {
-    const changedIds = new Set([...this._state.firmedIds, ...idSet]);
+    // Report ONLY ids whose membership actually changed (symmetric difference):
+    // the old union reported every firmed id on every replace, and the dirty
+    // tracker would have mass-dirtied the whole firm set on a What-If undo.
+    const prior = this._state.firmedIds;
+    const changedIds: string[] = [];
+    for (const id of prior) if (!idSet.has(id)) changedIds.push(id);
+    for (const id of idSet) if (!prior.has(id)) changedIds.push(id);
     this._state.firmedIds = new Set([...idSet]);
-    for (const id of this._state.firmedIds) {
+    for (const id of changedIds) {
       const t = this._state.tasks[id];
-      if (t) t.firmed = true;
+      if (t) t.firmed = this._state.firmedIds.has(id);
     }
     this.emit({ type: 'firmed:replace', source });
-    this.emit({ type: 'firmed:change', ids: [...changedIds], source });
+    this.emit({ type: 'firmed:change', ids: changedIds, source });
   },
 
   // Patch a single task reference inside the _tasksByPlant index after updateTask swaps
@@ -931,7 +940,12 @@ export const Store = {
     // separately as task.ecc_firmed and the frozen-horizon reason is derived live —
     // the three unite in Engine.firmingStatus(); derived firming never enters firmedIds.
     task.firmed = !!task.firmed;
-    if (task.firmed) Store._state.firmedIds.add(String(task.id));
+    // firmedIds mirrors task.firmed both ways, so undo/restore of a snapshot
+    // (updateMany with firmed:false) also drops the id.
+    if (task.id != null) {
+      if (task.firmed) Store._state.firmedIds.add(String(task.id));
+      else Store._state.firmedIds.delete(String(task.id));
+    }
     if (task.id != null) task.id = String(task.id);
   }
 };
@@ -989,7 +1003,9 @@ export const UndoStack = {
     }).filter(Boolean) as NimbusTask[];
   },
   restoreTasks(snapshot: NimbusTask[]): void {
-    const patches = snapshot.map(s => ({ id: s.id, changes: { ...s, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } }));
+    // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
+    // carry the key, and an undone Unschedule must not leave its reason behind.
+    const patches = snapshot.map(s => ({ id: s.id, changes: { ...s, planning_reason: s.planning_reason ?? null, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } }));
     Store.updateMany(patches, 'undo');
   },
 };

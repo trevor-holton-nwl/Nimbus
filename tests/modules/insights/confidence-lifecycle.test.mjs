@@ -457,15 +457,20 @@ test('palette Unfirm N orders (all selected firmed) unfirms them and undo re-fir
   });
 });
 
-test('palette freeze intent firms only the not-yet-firmed orders, and one undo restores the prior firmed set', async () => {
-  await withPaletteHarness(({ UndoStack, setFirmedCalls, pushCalls }) => {
+test('palette freeze intent asks confirm.firm_all with the count, firms only the not-yet-firmed orders, and one undo restores the prior firmed set', async () => {
+  await withPaletteHarness(async ({ UndoStack, setFirmedCalls, pushCalls }) => {
     Store.setTasks([mkTask('f1'), mkTask('f2'), mkTask('f3')], 'test');
     Store.setFirmed(['f2'], true, 'test');
     setFirmedCalls.length = 0;
 
     const freeze = nimbus.NeedsEngine.resolveIntent('freeze everything').find(r => r.type === 'intent');
     assert.ok(freeze, 'freeze intent resolves');
-    freeze.run();
+    const asked = [];
+    const priorConfirm = context.window.confirm;
+    context.window.confirm = msg => { asked.push(msg); return true; };
+    try { freeze.run(); } finally { context.window.confirm = priorConfirm; }
+    assert.equal(asked.length, 1, 'Firm All asks before firming');
+    assert.match(asked[0], /confirm.firm_all/, 'the prompt is the confirm.firm_all message');
     assert.deepEqual(brief(setFirmedCalls), [{ ids: ['f1', 'f3'], firmed: true, source: 'cmd-palette' }]);
     assert.equal(pushCalls[0].label, 'Firm All (freeze)');
     assert.deepEqual(pushCalls[0].ids, ['f1', 'f3'], 'already-firmed f2 is not part of the undo scope');
@@ -478,12 +483,31 @@ test('palette freeze intent firms only the not-yet-firmed orders, and one undo r
   });
 });
 
+test('palette freeze declined at the confirm firms nothing and pushes no undo entry', async () => {
+  await withPaletteHarness(async ({ UndoStack, setFirmedCalls, pushCalls }) => {
+    Store.setTasks([mkTask('d1'), mkTask('d2')], 'test');
+    setFirmedCalls.length = 0;
+    const priorConfirm = context.window.confirm;
+    context.window.confirm = () => false;
+    try { nimbus.NeedsEngine.resolveIntent('freeze').find(r => r.type === 'intent').run(); }
+    finally { context.window.confirm = priorConfirm; }
+    assert.equal(setFirmedCalls.length, 0);
+    assert.equal(pushCalls.length, 0);
+    assert.ok(!Store.isFirmed('d1') && !Store.isFirmed('d2'));
+  });
+});
+
 test('palette freeze with nothing left to firm pushes no undo entry and does not call setFirmed', async () => {
-  await withPaletteHarness(({ UndoStack, setFirmedCalls, pushCalls }) => {
+  await withPaletteHarness(async ({ UndoStack, setFirmedCalls, pushCalls }) => {
     Store.setTasks([mkTask('n1')], 'test');
     Store.setFirmed(['n1'], true, 'test');
     setFirmedCalls.length = 0;
-    nimbus.NeedsEngine.resolveIntent('freeze').find(r => r.type === 'intent').run();
+    const priorConfirm = context.window.confirm;
+    let asked = 0;
+    context.window.confirm = () => { asked++; return true; };
+    try { nimbus.NeedsEngine.resolveIntent('freeze').find(r => r.type === 'intent').run(); }
+    finally { context.window.confirm = priorConfirm; }
+    assert.equal(asked, 0, 'nothing to firm, so nothing to confirm');
     assert.equal(setFirmedCalls.length, 0);
     assert.equal(pushCalls.length, 0);
     assert.equal(UndoStack._entries.length, 0);

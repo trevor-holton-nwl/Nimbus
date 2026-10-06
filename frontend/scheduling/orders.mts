@@ -468,7 +468,7 @@ export const Table = {
         },
         {
           headerName: Util.t('col.firmed'), colId: 'firmed',
-          // Union value (SAP OR frozen-horizon OR manual), not the raw manual
+          // Union value (frozen-horizon OR running OR manual), not the raw manual
           // `fixed` field — see Engine.firmingStatus.
           valueGetter: (p: { data: NimbusTask }) => Engine.firmingStatus(p.data).firmed,
           width: 60, minWidth: 60, maxWidth: 60, flex: 0,
@@ -507,7 +507,13 @@ export const Table = {
           valueGetter: (p: { data: NimbusTask }) => p.data?.planning_status === 'needs_planning'
             ? Util.t('ui.needs_planning') : Util.t('ui.planning_status_scheduled') },
         { headerName: Util.t('col.planning_reason'), colId: 'planning_reason', minWidth: 240, editable: false,
-          valueGetter: (p: { data: NimbusTask }) => p.data?.planning_reason?.message ?? '' },
+          valueGetter: (p: { data: NimbusTask }) => {
+            const reason = p.data?.planning_reason;
+            if (!reason) return '';
+            // A planner Delete carries a fixed code; resolve it through the locale so the
+            // label follows the user's language. Other codes keep their stored message.
+            return reason.code === 'planner_unscheduled' ? Util.t('planning_reason.planner_unscheduled') : (reason.message ?? '');
+          } },
         { headerName: Util.t('col.planning_window'), colId: 'planning_window', minWidth: 260, editable: false,
           valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),
           tooltipValueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },
@@ -1875,7 +1881,7 @@ export const Table = {
 type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 /** P2: after clearing the MANUAL firm layer, tell the planner if the order is
- *  still firmed via the union (SAP flag or frozen horizon) — otherwise
+ *  still firmed via the union (frozen horizon or running; SAP's flag never locks) — otherwise
  *  "Unfirm" silently no-ops from the planner's point of view. Called from
  *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
 export function notifyResidualFirming(ids: string[]): void {
@@ -2105,7 +2111,9 @@ export const Inspector = {
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
     const firmed = Store.isFirmed(task.id);        // manual layer — drives the Firm/Unfirm button
-    const firmedUnion = Engine.firmingStatus(task).firmed;  // SAP OR frozen-horizon OR manual — drives the one banner below
+    const firmStatus = Engine.firmingStatus(task);
+    const firmedUnion = firmStatus.firmed;  // frozen-horizon OR manual OR running — drives the one banner below
+    const sapFirmed = Engine.isSapFirmed(task);  // display-only info row; never locks
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
@@ -2134,7 +2142,8 @@ export const Inspector = {
 
     Inspector._destroyStartPicker();
     body.innerHTML = `
-      ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
+      ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}${firmStatus.reasons.includes('running') ? `<div>${Util.t('ui.firm_reason_running')}</div>` : ''}</div>` : ''}
+      ${sapFirmed ? `<div class="insp-sap-firm-info">${Util.t('ui.sap_firm_marker')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
         ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(a.msg)}</div>`).join('')}

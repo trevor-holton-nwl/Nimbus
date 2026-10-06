@@ -90,3 +90,42 @@ test('distribution-review need run callback navigates to distribution tab', () =
   assert.deepEqual(callbacks[0], { action: 'goto', tab: 'gantt' }, 'first action goes to gantt tab');
   assert.deepEqual(callbacks[1], { action: 'gotoGanttSub', sub: 'distribution' }, 'second action navigates to distribution sub-tab');
 });
+
+// Task 8: the command-palette "Unschedule selected" action has no unschedule logic of
+// its own; it delegates to the Gantt's single implementation (Interaction.unscheduleIds),
+// which owns the manual/frozen/running/split guard, the Needs Planning patch, undo and
+// the alerts recompute (covered in tests/modules/scheduling/gantt.test.mjs).
+test('command palette Unschedule delegates the selected ids to Interaction.unscheduleIds', async () => {
+  const { readFileSync } = await import('node:fs');
+  const vm = await import('node:vm');
+  const { Selection } = await import('../../frontend/scheduling/selection.mjs');
+  const { Util } = await import('../../frontend/platform/foundation.mjs');
+
+  const delegated = [];
+  const NIMBUS = {
+    Store, Selection, Util,
+    Interaction: { unscheduleIds: (ids) => delegated.push([...ids]) },
+    Toast: { show() {} }, Alerts: { scheduleRecompute() {} },
+    AlertsUIAdapter: {}, Utilization: {}, UndoStack: {},
+  };
+  const doc = Object.assign(Object.create(globalThis.document), {
+    readyState: 'loading', querySelectorAll() { return []; }, head: { appendChild() {} },
+    documentElement: { classList: { add() {}, remove() {} }, setAttribute() {}, style: {} },
+  });
+  const sandbox = { NIMBUS, t: (k, v) => Util.t(k, v), window: { NIMBUS }, document: doc, console, setTimeout, clearTimeout,
+    localStorage: { getItem() { return null; }, setItem() {} } };
+  sandbox.window.window = sandbox.window;
+  vm.runInNewContext(readFileSync(new URL('../../frontend/nimbus-intelligence.js', import.meta.url), 'utf8'), sandbox);
+
+  Store.setTasks([{ id: 'pc-a', PLANT: 'P1', MACHINE: 'L1' }, { id: 'pc-b', PLANT: 'P1', MACHINE: 'L1' }], 'test');
+  try {
+    Selection.set(['pc-a', 'pc-b']);
+    const cmd = NIMBUS.CommandPalette._buildSelectionCommands().find(c => /unschedule/i.test(c.label));
+    assert.ok(cmd, 'Unschedule command present');
+    cmd.run();
+    assert.deepEqual(delegated, [['pc-a', 'pc-b']]);
+  } finally {
+    Selection.clear();
+    Store.setTasks([], 'test');
+  }
+});

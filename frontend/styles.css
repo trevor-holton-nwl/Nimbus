@@ -1353,6 +1353,13 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   color: var(--fg-mute, #9b9ca3);
   margin-left: 6px;
 }
+/* SAP's own firm flag: informational only (never locks an order), so it stays quiet. */
+#nimbus-hover-card .hov-sap-firm {
+  font-weight: 500;
+  font-size: 10px;
+  color: var(--fg-faint);
+  margin-left: 6px;
+}
 #nimbus-hover-card .hov-mat {
   color: var(--fg-mute, #9b9ca3);
   margin-bottom: 8px;
@@ -1516,6 +1523,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   padding: 12px;
   margin-bottom: 10px;
 }
+.insp-sap-firm-info { font-size: 12px; color: var(--fg-mute); margin: 0 0 8px; }
 .insp-card h4 {
   font-size: 11px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.07em;

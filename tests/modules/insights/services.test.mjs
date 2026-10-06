@@ -507,7 +507,7 @@ test('fix round 1 — a stale in-flight request must not overwrite the null a la
 });
 
 
-test('#28 Alerts.applyFix refuses SAP-firmed and manually-firmed orders (effective firmed set) and leaves them unmoved', () => {
+test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed and running orders (effective firmed set)', () => {
   const plant = '5512';
   const line = 'FIRMFIX-LINE';
   const start = new Date('2026-08-25T08:00:00');
@@ -515,18 +515,27 @@ test('#28 Alerts.applyFix refuses SAP-firmed and manually-firmed orders (effecti
   const priorPlant = Store.selectedPlant;
   const priorAlerts = structuredClone(Store.alerts);
   const priorFirmed = new Set(Store.firmedIds);
+  const runStart = new Date(Date.now() - 3600_000);
+  const runEnd = new Date(Date.now() + 3600_000);
   try {
     Store.setSelectedPlant(plant, 'unit-test');
     Store.setTasks([
       { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, ecc_firmed: true },
       { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
+      { id: 'ff-run', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: runStart, end_date: runEnd },
     ], 'unit-test');
     Store.setFirmed(['ff-man'], true, 'unit-test');
-    for (const id of ['ff-ecc', 'ff-man']) {
+    // SAP firm is display-only: the fix goes ahead and moves the order.
+    const sapAlert = { id: 'ff-alert-ff-ecc', type: 'blackout', taskId: 'ff-ecc' };
+    Store.setAlerts([sapAlert], 'unit-test');
+    Alerts.applyFix(sapAlert.id);
+    assert.equal(Store.alerts.length, 0, 'an SAP-firmed order IS fixed (not refused): the alert is dismissed');
+    for (const id of ['ff-man', 'ff-run']) {
+      const t0 = Store.tasks[id].start_date.getTime();
       const alert = { id: `ff-alert-${id}`, type: 'blackout', taskId: id };
       Store.setAlerts([alert], 'unit-test');
       Alerts.applyFix(alert.id);
-      assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), `${id} must not be moved by a one-click fix`);
+      assert.equal(Store.tasks[id].start_date.getTime(), t0, `${id} must not be moved by a one-click fix`);
       assert.equal(Store.alerts.length, 1, `${id}: the alert is not dismissed when the fix is refused`);
     }
   } finally {

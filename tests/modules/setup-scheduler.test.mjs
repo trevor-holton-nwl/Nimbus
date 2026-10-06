@@ -3968,9 +3968,9 @@ test('activePriorityKeys and Engine.flattenConstraints agree on the same plants.
   }
 });
 
-test('an in-progress firmed boundary never freezes the line: free work is patched after it, using its state as predecessor', () => {
-  // Regression for the e24b12b never-freeze bug: an SAP ECC-firmed order
-  // folded into `firmedIds` can already be in progress (start < bounds.now),
+test('a running boundary never freezes the line: free work is patched after it, using its state as predecessor', () => {
+  // Regression for the e24b12b never-freeze bug: a running (in-progress) order
+  // folded into `firmedIds` has already started (start < bounds.now),
   // tripping the old `boundary.start < fragmentStart` freeze guard. The line
   // must still schedule, with the in-progress boundary's own state acting as
   // predecessor once its run ends.
@@ -4002,7 +4002,7 @@ test('an in-progress firmed boundary never freezes the line: free work is patche
   }
 });
 
-test('a fully-past firmed boundary never freezes the line: free work uses its state as predecessor, not the persisted machine state', () => {
+test('a fully-elapsed running-then-finished boundary never freezes the line: free work uses its state as predecessor, not the persisted machine state', () => {
   // The persisted current machine state is GREEN (setupTruth's default), but
   // a fully-elapsed firmed run (end <= bounds.now) must still be adopted as
   // the effective predecessor for whatever free work follows, rather than
@@ -4028,16 +4028,16 @@ test('a fully-past firmed boundary never freezes the line: free work uses its st
   assert.equal(result.missingEdges.some(edge => edge.reason === 'firmed-boundary-invalid'), false);
 });
 
-test('overlapping firmed boundaries never freeze the line: free work is scheduled after the later-ending boundary', () => {
-  // Two SAP ECC-firmed runs on the same line can genuinely overlap in the
+test('overlapping running boundaries never freeze the line: free work is scheduled after the later-ending boundary', () => {
+  // Two running orders on the same line can genuinely overlap in the
   // source data. The old code froze the whole line the instant a second
   // boundary's start preceded the cursor established by the first; the fix
   // folds both into the monotone cursor instead.
   const first = scheduledTask(
-    'overlap-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T09:00:00', '2026-08-03T11:00:00',
+    'overlap-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T07:00:00', '2026-08-03T11:00:00',
   );
   const second = scheduledTask(
-    'overlap-yellow', 1, 'YELLOW', '2026-08-03T12:00:00', '2026-08-03T10:00:00', '2026-08-03T12:00:00',
+    'overlap-yellow', 1, 'YELLOW', '2026-08-03T12:00:00', '2026-08-03T07:30:00', '2026-08-03T12:00:00',
   );
   const freeRed = scheduledTask('overlap-free-red', 1, 'RED', '2026-08-03T15:00:00');
   const setup = setupTruth({ rows: [

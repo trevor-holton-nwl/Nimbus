@@ -621,6 +621,7 @@
     "GanttFilter.isolateLine",
     "Hierarchy.render",
     "Inspector.show",
+    "Interaction.unscheduleIds",
     "Session.flushPrefs",
     "Session.setPref",
     "Store.alerts",

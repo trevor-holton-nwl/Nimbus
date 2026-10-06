@@ -146,8 +146,10 @@ test('real optimizer worker boundary localizes its deadline and round-trips effe
     ...snapshot,
     selectedPlant: 'P',
     tasks: [
-      { id: 'worker-ecc', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 1,
+      { id: 'worker-sap', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 1,
         ecc_firmed: true, start_date: new Date('2035-08-10T08:00:00'), end_date: new Date('2035-08-10T09:00:00') },
+      { id: 'worker-running', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 2,
+        start_date: new Date('2035-08-06T07:00:00'), end_date: new Date('2035-08-06T09:00:00') },
       { id: 'worker-frozen', PLANT: 'P', MACHINE: 'L1', COLOR: 'BLUE', RUN_TIME: 1,
         start_date: new Date('2035-08-06T09:00:00'), end_date: new Date('2035-08-06T10:00:00') },
     ],
@@ -173,8 +175,8 @@ test('real optimizer worker boundary localizes its deadline and round-trips effe
   assert.ok(evaluated.validationContext, 'the worker evaluator must produce apply metadata');
   const response = buildOptimizerWorkerResponse(request, () => 5000);
   assert.ok(response.validation, 'the real worker response must include validation metadata');
-  assert.deepEqual(new Set(response.validation.effectiveFirmedIds), new Set(['worker-ecc', 'worker-frozen']),
-    'ECC and frozen effective firming must survive worker serialization');
+  assert.deepEqual(new Set(response.validation.effectiveFirmedIds), new Set(['worker-running', 'worker-frozen']),
+    'running and frozen effective firming must survive worker serialization; SAP firm never folds');
 
   // Plant-scoped runs send `lines: null` (Optimize dialog default). That must
   // serialize as undefined and rehydrate on the main thread without throwing.

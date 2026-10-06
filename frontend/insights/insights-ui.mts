@@ -909,7 +909,7 @@ export const Dashboard = {
   _renderFirmedList(): void {
     const list = document.getElementById('firmed-list');
     if (!list) return;
-    // Union count/list (SAP OR frozen-horizon OR manual) — see Engine.firmingStatus.
+    // Union count/list (frozen-horizon OR running OR manual; SAP firm is display-only) — see Engine.firmingStatus.
     const firmed = Dashboard._filteredTasks().filter(t => Engine.firmingStatus(t).firmed);
     if (!firmed.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_firmed_orders')}</div>`; return; }
     list.innerHTML = firmed.slice(0, 12).map(t => `
@@ -1316,7 +1316,7 @@ export const AlertsUIAdapter = {
       const t = Store.tasks?.[id];
       return Util.orderNumber(t);
     };
-    // Union (SAP OR frozen-horizon OR manual) — see Engine.firmingStatus.
+    // Union (frozen-horizon OR running OR manual; SAP firm is display-only) — see Engine.firmingStatus.
     const taskFirmed = (id: string) => { const t = Store.tasks?.[id]; return !!t && Engine.firmingStatus(t).firmed; };
 
     const renderChip = (id: string) => `

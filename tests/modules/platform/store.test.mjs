@@ -233,3 +233,53 @@ test('UndoStack.pop ignores re-entrant pops while an async undo is pending (seni
   if (!hadWin) delete globalThis.window;
   if (!hadDoc) delete globalThis.document;
 });
+
+// ---- Task 6: firm is server state (task.firmed is the single source) -------
+test('Store.replaceFirmedIds emits only ids whose membership changed and clears t.firmed on removed ids', () => {
+  Store.setTasks([{ id: 'ra', firmed: true }, { id: 'rb', firmed: true }, { id: 'rc' }], 'unit-test');
+  assert.deepEqual([...Store.firmedIds].sort(), ['ra', 'rb']);
+  const changes = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'firmed:change') changes.push(evt); });
+  Store.replaceFirmedIds(new Set(['rb', 'rc']), 'unit-test');   // ra removed, rc added, rb unchanged
+  off();
+  assert.equal(changes.length, 1);
+  assert.deepEqual([...changes[0].ids].sort(), ['ra', 'rc'], 'unchanged rb must not be reported');
+  assert.equal(Store.tasks.ra.firmed, false, 'removed id loses its firmed mirror');
+  assert.equal(Store.tasks.rc.firmed, true);
+  assert.equal(Store.tasks.rb.firmed, true);
+  assert.deepEqual([...Store.firmedIds].sort(), ['rb', 'rc']);
+});
+
+test('Store.replaceFirmedIds with an identical set reports no changed ids', () => {
+  Store.setTasks([{ id: 'same', firmed: true }], 'unit-test');
+  const changes = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'firmed:change') changes.push(evt); });
+  Store.replaceFirmedIds(new Set(['same']), 'sandbox');
+  off();
+  assert.deepEqual(changes.map(e => e.ids), [[]]);
+});
+
+test('Store.setTasks rebuilds firmedIds from server task.firmed so a stale local id disappears', () => {
+  Store.setTasks([{ id: 'srv1', firmed: true }, { id: 'srv2' }], 'unit-test');
+  Store.firmedIds.add('stale-local');            // e.g. a browser-only firm from an old cache
+  Store.setTasks([{ id: 'srv1', firmed: true }, { id: 'srv2', firmed: false }, { id: 'srv3', firmed: true }], 'persistence');
+  assert.deepEqual([...Store.firmedIds].sort(), ['srv1', 'srv3']);
+  assert.ok(!Store.isFirmed('stale-local'));
+});
+
+test('undo of a firm restores both t.firmed and firmedIds', () => {
+  Store.setTasks([{ id: 'uf1', RUN_TIME: 1 }], 'unit-test');
+  const snap = UndoStack.snapshotTasks(['uf1']);
+  Store.setFirmed(['uf1'], true, 'table');
+  assert.equal(Store.tasks.uf1.firmed, true);
+  UndoStack.restoreTasks(snap);
+  assert.equal(Store.tasks.uf1.firmed, false);
+  assert.ok(!Store.firmedIds.has('uf1'), 'firmedIds follows the restored mirror');
+  const snapFirmed = UndoStack.snapshotTasks(['uf1']);
+  Store.setFirmed(['uf1'], true, 'table');
+  Store.setFirmed(['uf1'], false, 'table');
+  Store.updateTask('uf1', { firmed: true }, 'undo');
+  assert.ok(Store.firmedIds.has('uf1'));
+  UndoStack.restoreTasks(snapFirmed);
+  assert.ok(!Store.firmedIds.has('uf1'));
+});

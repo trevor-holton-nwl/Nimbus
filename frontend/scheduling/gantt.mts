@@ -3739,8 +3739,11 @@ export const Interaction = {
             rel.slice(0, 3).map(a => (a.type || a.sev || '')).filter(Boolean).join(', ')
           }${rel.length > 3 ? '…' : ''}</div>`
         : '';
-      const firmedBadge = Engine.firmingStatus(t).firmed
-        ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '';
+      const firmStatus = Engine.firmingStatus(t);
+      const firmedBadge = (firmStatus.firmed
+        ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '')
+        + (firmStatus.reasons.includes('running') ? `<span class="hov-firmed">${Util.t('ui.firm_reason_running')}</span>` : '')
+        + (Engine.isSapFirmed(t) ? `<span class="hov-sap-firm">${Util.t('ui.sap_firm_marker')}</span>` : '');
       const suborderHtml = t.PARENT_ORDER ? (() => {
         const siblings = Store.siblingsByParent().get(t.PARENT_ORDER) || [];
         const getQty = (task: any) => {
@@ -4650,8 +4653,12 @@ export const Interaction = {
     }
   },
 
-  _unscheduleSelected(): void {
-    const ids = Selection.ids().filter(id => !Store.isFirmed(id));
+  _unscheduleSelected(): void { Interaction.unscheduleIds(Selection.ids()); },
+
+  /** The single Delete / Unschedule implementation (Delete key and command palette). */
+  unscheduleIds(requestedIds: string[]): void {
+    // Manual-firmed, frozen-horizon and running orders are locked (Engine.firmingStatus union).
+    const ids = requestedIds.filter(id => { const t = Store.tasks[id]; return !!t && !Engine.firmingStatus(t).firmed; });
     if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_firmed'), 'warn'); return; }
     // An explicit segment aggregate is atomic. Do not clear just its parent
     // envelope, which Store would correctly reconstruct from its children.
@@ -4661,8 +4668,9 @@ export const Interaction = {
       return;
     }
     const snap = UndoStack.snapshotTasks(eligibleIds);
-    const patches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
+    const patches = eligibleIds.map(id => ({ id, changes: Engine.plannerUnscheduleChanges() }));
     Store.updateMany(patches, 'interaction');
+    Alerts.scheduleRecompute();
     UndoStack.push(`Unschedule ${eligibleIds.length} order(s)`,
                    () => UndoStack.restoreTasks(snap), eligibleIds);
     Toast.show(

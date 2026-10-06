@@ -286,3 +286,12 @@ test('Engine rejects a missing plant timezone and never mutates schedule', () =>
   Store.setMasterData({ plants: [{ subnetwork: 'SN', plant }], lines: [{ machine: line, plant }] }, 'test');
   assert.throws(() => Engine.removeBacklog(opts()), /timezone/i);
 });
+
+test('Engine.removeBacklog may still move a running (in-progress) order -- the one exemption from the running lock', () => {
+  seed({ hours: allDays(0, 24), tasks: [task('running-backlog', '2026-08-12T06:00', 3)] });
+  assert.equal(Engine.isInProgress(Store.tasks['running-backlog'], at('2026-08-12T08:00')), true, 'fixture is running at "now"');
+  const result = Engine.removeBacklog(opts());
+  const moved = patch(result, 'running-backlog');
+  assert.ok(moved, 'Remove Backlog repairs a running order');
+  assert.equal(+moved.changes.start_date, +at('2026-08-12T08:00'));
+});

@@ -332,7 +332,16 @@ const SessionUIAdapter = {
     const signOutBtn = document.getElementById('us-signout-btn') as WiredElement | null;
     if (signOutBtn && !signOutBtn._wired) {
       signOutBtn._wired = true;
-      signOutBtn.addEventListener('click', Session.signOut);
+      let signingOut = false;   // a double-click must not stack two confirms
+      signOutBtn.addEventListener('click', () => {
+        if (signingOut) return;
+        signingOut = true;
+        // Shell owns the Persistence knowledge; Session takes it as callbacks (no import cycle).
+        void Session.signOut({
+          hasPendingWork: () => Persistence.hasPendingWork(),
+          beforeClear:    () => Persistence.haltCacheWrites(),
+        }).finally(() => { signingOut = false; });
+      });
     }
     const saveBtn = document.getElementById('us-save-btn') as WiredElement | null;
     if (saveBtn && !saveBtn._wired) {
@@ -2255,9 +2264,27 @@ const App = {
       Persistence._dirtyIds.add(String(id));
       if (force) Persistence._forceIds.add(String(id));
     });
-    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+    // A manual firm is server state saved through the same explicit Save: a toggle dirties
+    // exactly the ids it touched. 'sandbox' (What-If discard replays the snapshot) is not a
+    // planner edit. A firm is never an optimizer marker, so it must not join _forceIds (atomic group).
+    if (evt.type === 'firmed:change' && evt.source !== 'sandbox') {
+      let touched = false;
+      for (const id of (evt.ids ?? []) as Array<string | number>) {
+        if (!Store.tasks[String(id)]) continue;
+        Persistence._dirtyIds.add(String(id));
+        Persistence._firmDirtyIds.add(String(id));
+        touched = true;
+      }
+      if (touched && evt.source !== 'undo' && !App._firmHintShown) {
+        App._firmHintShown = true;
+        Toast.show(Util.t('toast.firm_needs_save'), 'info', 6000);
+      }
+    }
+    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._firmDirtyIds.clear(); }
     Persistence._syncUnsaved();
   },
+  // First firm toggle of the session explains that a firm is shared only after Save.
+  _firmHintShown: false,
 
   // First tab (in nav order) the current role can see; 'home' if somehow none
   // are — home is the only tab a role can't have hidden via the Roles tab UI

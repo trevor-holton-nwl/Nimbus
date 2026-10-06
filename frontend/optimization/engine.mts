@@ -196,12 +196,11 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
 }
 
 /** The setup-aware evaluators' single notion of "immovable" for a run: the
- * caller's own firmed set (manual `Store.isFirmed` ids), folded with every
- * ECC-firmed and frozen-horizon task. `respectFirmed` gates BOTH the manual
- * ids and the ECC fold — matching the legacy per-line walk's
- * `(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed))` gate exactly
- * — while `Engine.isFrozenHorizon` always folds in regardless, since the
- * frozen horizon is a scheduling-window constraint, not a firming concept.
+ * caller's own firmed set (manual `Store.isFirmed` ids, gated by
+ * `respectFirmed`), folded with every running (in-progress) and frozen-horizon
+ * task. Running and frozen fold in regardless of `respectFirmed`: a running
+ * order never moves, and the frozen horizon is a scheduling-window constraint.
+ * SAP's firm flag (`ecc_firmed`) is display-only and never locks anything.
  * Pure and run-local: never written back to Store. */
 export function effectiveFirmedIdSet(
   tasks: ReadonlyArray<NimbusTask>,
@@ -213,7 +212,7 @@ export function effectiveFirmedIdSet(
   const ids = new Set<string>(respectFirmed ? Array.from(baseFirmedIds, String) : []);
   const frozenEnd = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
   for (const t of tasks) {
-    if ((respectFirmed && t.ecc_firmed) || Engine.isFrozenHorizon(t, runNow, frozenEnd)) ids.add(String(t.id));
+    if (Engine.isInProgress(t, runNow) || Engine.isFrozenHorizon(t, runNow, frozenEnd)) ids.add(String(t.id));
   }
   return ids;
 }
@@ -1019,14 +1018,42 @@ export const Engine = {
     return task.start_date >= now && task.start_date < end;
   },
 
+  /** True while the order is in progress: start_date <= now < end_date (both set).
+   *  Running orders never move (optimizer, autoReflow, alert fixes); Remove Backlog
+   *  is the one exemption. Not gated by "Respect firmed". */
+  isInProgress(task: NimbusTask, now: Date = new Date()): boolean {
+    if (!task.start_date || !task.end_date) return false;
+    return task.start_date <= now && now < task.end_date;
+  },
+
+  /** SAP's firm flag. DISPLAY ONLY — NIMBUS never locks on it. */
+  isSapFirmed(task: NimbusTask): boolean {
+    return !!task.ecc_firmed;
+  },
+
+  /** The one Delete / Unschedule patch (Gantt key + command palette). The order goes to
+   *  Needs Planning with no committed dates or segments; SAP's own dates stay on the row
+   *  (original_*) for reference, and a following Due Date run re-places it. Fresh object
+   *  per call so callers never share a mutable patch. */
+  plannerUnscheduleChanges(): Partial<NimbusTask> {
+    return {
+      start_date: null,
+      end_date: null,
+      scheduleSegments: [],
+      planning_status: 'needs_planning',
+      planning_reason: { code: 'planner_unscheduled', message: 'Unscheduled by planner' },
+    };
+  },
+
   /** Union firming status. UI/live-path ONLY — reads live Store (isFirmed, frozenHorizonEnd).
    *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
-   *  fold below, never this. reasons: 'ecc' (SAP), 'frozen' (horizon band), 'manual' (planner). */
-  firmingStatus(task: NimbusTask, now: Date = new Date()): { firmed: boolean; reasons: Array<'ecc'|'frozen'|'manual'> } {
-    const reasons: Array<'ecc'|'frozen'|'manual'> = [];
-    if (task.ecc_firmed) reasons.push('ecc');
+   *  fold below, never this. reasons: 'frozen' (horizon band), 'manual' (planner),
+   *  'running' (in progress). SAP firm is never a reason. */
+  firmingStatus(task: NimbusTask, now: Date = new Date()): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
+    const reasons: Array<'frozen'|'manual'|'running'> = [];
     if (Engine.isFrozenHorizon(task, now)) reasons.push('frozen');
     if (Store.isFirmed(task.id)) reasons.push('manual');
+    if (Engine.isInProgress(task, now)) reasons.push('running');
     return { firmed: reasons.length > 0, reasons };
   },
 
@@ -2100,18 +2127,14 @@ export const Engine = {
       // setup-scheduler.mts, sourceLineWorkHours above) only ever looks up a
       // line that survived this same plant's task filter, so no other
       // plant's lines are ever needed here.
-      // C2: fold any ECC-firmed or frozen-window order into the SAME firmedIds
+      // C2: fold any running or frozen-window order into the SAME firmedIds
       // set the setup-aware evaluators already treat as immovable — Engine.
       // isFrozenHorizon carries its own distinct reason for the UI (never
       // written to Store.isFirmed itself), this is purely an internal input
       // to the evaluator so it never re-sequences an order it shouldn't touch.
-      // respectFirmed gates BOTH the manual firmed ids and the ECC-firmed
-      // fold, exactly like the legacy walk's `(respectFirmed && (sourceIsFirmed
-      // (t.id) || !!t.ecc_firmed))` guard below — unchecking "Respect firmed"
-      // in the Optimize dialog must free ECC-firmed orders here too, not just
-      // in the legacy per-line path. The frozen-horizon fold is unconditional
-      // regardless of respectFirmed, since it is a scheduling-window
-      // constraint, not a firming concept. Passes runNow (this run's
+      // respectFirmed gates only the manual firmed ids. The running and
+      // frozen-horizon folds are unconditional regardless of respectFirmed.
+      // SAP's firm flag never locks. Passes runNow (this run's
       // own "now", injectedNow-aware for candidate runs) rather than the
       // real-time default, so a detached preview evaluated at a simulated
       // instant agrees with itself. Never written back to the Store — this
@@ -2325,7 +2348,8 @@ export const Engine = {
     // repairable merely because the legacy walk has no setup-aware
     // `eligibleTasks` call of its own.
     const legacyProtected = (task: NimbusTask): boolean => (
-      (respectFirmed && (sourceIsFirmed(task.id) || !!task.ecc_firmed))
+      (respectFirmed && sourceIsFirmed(task.id))
+      || Engine.isInProgress(task, runNow)
       || Engine.isFrozenHorizon(task, runNow, detachedFrozenHorizonEnd)
     );
     const legacyEligible = (task: NimbusTask): boolean => {
@@ -2367,14 +2391,13 @@ export const Engine = {
       // a task is immovable, only that it is. Passes the captured runNow as
       // this check's "now" — the SAME reference isAged/isOutOfWin already use —
       // so all three agree on one clock for this run instead of splitting.
-      // ECC-firmed rides the respectFirmed gate exactly like a manual firm — so
-      // 'backlog' mode (which sets respect off / moves firmed by design) may
-      // move ECC-firmed orders too (confirmed product decision).
+      // A running (in-progress) order is likewise pinned, not gated by
+      // respectFirmed. SAP's firm flag never pins anything.
       const firmedTasks = tasks.filter(t =>
-        (respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
+        (respectFirmed && sourceIsFirmed(t.id)) || Engine.isInProgress(t, runNow) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
       );
       let freeTasks = tasks.filter(t =>
-        !(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed)) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
+        !(respectFirmed && sourceIsFirmed(t.id)) && !Engine.isInProgress(t, runNow) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
       );
 
       firmedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
@@ -2627,7 +2650,7 @@ export const Engine = {
           const requiredSetupMinutes = setupMinutes(predecessor, p);
           const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
           if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-          if (Store.isFirmed(p.id) || !!p.ecc_firmed || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+          if (Store.isFirmed(p.id) || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
             // Firmed, frozen-window, or aged orders don't move — if there's a
             // conflict, an alert will fire — but later unfirmed peers must
             // still be de-overlapped, and the immovable order becomes the
@@ -2683,7 +2706,7 @@ export const Engine = {
       const requiredSetupMinutes = setupMinutes(predecessor, p);
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFirmed(p.id) || !!p.ecc_firmed || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+      if (Store.isFirmed(p.id) || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
         // Firmed, frozen-window, or aged orders don't move — if there's a
         // conflict, an alert will fire — but later unfirmed peers must still
         // be de-overlapped, and the immovable order becomes the setup
