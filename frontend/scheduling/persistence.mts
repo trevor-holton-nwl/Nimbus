@@ -1741,8 +1741,7 @@ export const Persistence = {
           tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
           tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
           // The server's manual firm is authoritative; _normalizeDates re-syncs firmedIds from it.
-          // (TaskVersionRow.firmed is not in the generated types until the backend task regenerates them.)
-          const serverFirmed = (row as unknown as { firmed?: boolean }).firmed;
+          const serverFirmed = row.firmed;
           if (typeof serverFirmed === 'boolean') tk.firmed = serverFirmed;
           Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
