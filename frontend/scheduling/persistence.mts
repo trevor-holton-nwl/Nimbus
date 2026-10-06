@@ -245,6 +245,23 @@ export const Persistence = {
   _lastCacheAt: 0,
   _cacheDegraded: false,
   _autosaveDisabled: false,
+  // Set at sign-out so no late _saveCache (autosave, in-flight save .finally) can rewrite
+  // the planner cache that sign-out just cleared.
+  _cacheWritesHalted: false,
+  haltCacheWrites(): void { Persistence._cacheWritesHalted = true; },
+  // Unsaved work a sign-out would discard. Deliberately includes What-If and queued calendar
+  // deletes; unsaved admin-form edits (setup, master data) are not detectable here.
+  hasPendingWork(): boolean {
+    if (Persistence._dirtyIds.size || Persistence._forceIds.size
+        || Persistence._conflictedIds.size || Persistence._firmDirtyIds.size) return true;
+    if (Sandbox.active) return true;
+    try {
+      const raw = localStorage.getItem('nimbus.calendar.pendingDeletes');
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) return true;
+    } catch { /* unreadable storage: nothing detectable */ }
+    return false;
+  },
   _lastQuarantineKey: null as string | null,
   // Re-entrancy guard for saveAll(): a second call while a save is already in
   // flight would build a NEW payload from current (possibly further-edited) Store
@@ -1878,6 +1895,7 @@ export const Persistence = {
   },
 
   _saveCache(): void {
+    if (Persistence._cacheWritesHalted) return;
     try {
       // Annotated so a future field rename on either side (Store or StoredState)
       // is caught here rather than silently drifting.

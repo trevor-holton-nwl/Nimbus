@@ -1369,3 +1369,41 @@ test('_saveCache never writes firmedIds or per-task firmed', () => {
   assert.equal(Store.tasks['wr-a'].firmed, true, 'the live task keeps its mirror');
   globalThis.localStorage.removeItem(Config.LS_KEY);
 });
+
+test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending calendar deletes and What-If; haltCacheWrites stops _saveCache', async () => {
+  const { Sandbox } = await import('../../../frontend/optimization/sandbox.mjs');
+  const sets = ['_dirtyIds', '_forceIds', '_conflictedIds', '_firmDirtyIds'];
+  const memStore = new Map();
+  const origLS = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: k => (memStore.has(k) ? memStore.get(k) : null),
+    setItem: (k, v) => { memStore.set(k, String(v)); },
+    removeItem: k => { memStore.delete(k); },
+    get length() { return memStore.size; }, key: i => [...memStore.keys()][i] ?? null,
+  };
+  const origActive = Sandbox.active;
+  try {
+    assert.equal(Persistence.hasPendingWork(), false);
+    for (const s of sets) {
+      Persistence[s].add('x');
+      assert.equal(Persistence.hasPendingWork(), true, s);
+      Persistence[s].delete('x');
+    }
+    memStore.set('nimbus.calendar.pendingDeletes', '{}');
+    assert.equal(Persistence.hasPendingWork(), false, 'empty pendingDeletes is not pending');
+    memStore.set('nimbus.calendar.pendingDeletes', JSON.stringify({ a: { line: [], plant: [] } }));
+    assert.equal(Persistence.hasPendingWork(), true);
+    memStore.delete('nimbus.calendar.pendingDeletes');
+    Sandbox.active = true;
+    assert.equal(Persistence.hasPendingWork(), true, 'What-If active');
+    Sandbox.active = false;
+    Persistence.haltCacheWrites();
+    memStore.clear();
+    Persistence._saveCache();
+    assert.equal(memStore.has(Config.LS_KEY), false, 'no cache rewrite after halt');
+  } finally {
+    Sandbox.active = origActive;
+    Persistence._cacheWritesHalted = false;
+    globalThis.localStorage = origLS;
+  }
+});

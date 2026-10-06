@@ -2901,17 +2901,7 @@ export const AdminCockpit = {
       tone:         'warn',
     });
     if (!ok) return;
-    try { localStorage.removeItem(Config.LS_KEY); } catch {}
-    try { sessionStorage.clear(); } catch {}
-    try {
-      const prefix = `${Config.LS_KEY}.quarantine.`;
-      const toRemove: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && k.startsWith(prefix)) toRemove.push(k);
-      }
-      toRemove.forEach(k => { try { localStorage.removeItem(k); } catch {} });
-    } catch {}
+    Session.clearLocalPlannerData();
     ErrorLog.info('admin', 'Client state reset by user — reloading');
     // Give the log a frame to render in case of debounce, then hard-reload bypassing HTTP cache.
     setTimeout(() => location.reload(), 50);

@@ -332,7 +332,13 @@ const SessionUIAdapter = {
     const signOutBtn = document.getElementById('us-signout-btn') as WiredElement | null;
     if (signOutBtn && !signOutBtn._wired) {
       signOutBtn._wired = true;
-      signOutBtn.addEventListener('click', Session.signOut);
+      signOutBtn.addEventListener('click', () => {
+        // Shell owns the Persistence knowledge; Session takes it as callbacks (no import cycle).
+        void Session.signOut({
+          hasPendingWork: () => Persistence.hasPendingWork(),
+          beforeClear:    () => Persistence.haltCacheWrites(),
+        });
+      });
     }
     const saveBtn = document.getElementById('us-save-btn') as WiredElement | null;
     if (saveBtn && !saveBtn._wired) {

@@ -20,7 +20,7 @@
 // No cross-package dependency on scheduling/persistence.mjs or
 // calendar/calendar-sync.mjs exists (verified fresh at this phase) — Session
 // only needs Store, for role/plant-scoping resolvers wired at boot.
-import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import type { TopLevelTab } from '../platform/types.mjs';
 
@@ -73,7 +73,7 @@ interface CachedSessionUser {
        settings: optimistic Store write + a debounced PATCH /security/me/settings
      Session.signIn(u, p)    — POST /security/login; persists session, emits
                                 {type:'session:changed', kind:'signin'}
-     Session.signOut()       — clears session, emits kind:'signout', reloads the page
+     Session.signOut(opts?)  — confirms if opts.hasPendingWork(), clears session + local planner data, emits kind:'signout', reloads
      Session.refresh()       — reconciles cached role/settings/plant-scope against
                                 GET /security/me; emits kind:'refresh'
      Session.onAuthDenied()  — a gated request came back 403; re-reconciles via refresh()
@@ -181,10 +181,44 @@ export const Session = (() => {
     return data;
   }
 
-  function signOut() {
+  // Wipes the planner's local working data (state cache, quarantined caches, command/pattern
+  // history, queued calendar deletes, sessionStorage) so a shared PC leaves nothing behind.
+  // Keeps display preferences (nimbus.theme / nimbus.locale) and does NOT touch the session
+  // blob (signOut / clearExpired own that). Also used by admin "Reset client state".
+  function clearLocalPlannerData(): void {
+    const quarantinePrefix = `${Config.LS_KEY}.quarantine.`;
+    try {
+      const toRemove: string[] = [Config.LS_KEY, 'nimbus.recentCmds', 'nimbus.patterns.v1', 'nimbus.calendar.pendingDeletes'];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(quarantinePrefix)) toRemove.push(k);
+      }
+      toRemove.forEach(k => { try { localStorage.removeItem(k); } catch { /* blocked */ } });
+    } catch { /* storage unavailable */ }
+    try { sessionStorage.clear(); } catch { /* storage unavailable */ }
+  }
+
+  // The shell supplies hasPendingWork/beforeClear so this file needs no import of
+  // scheduling/persistence (which would add a security -> scheduling cycle).
+  // Returns false when the planner cancels the unsaved-work confirm.
+  async function signOut(opts: { hasPendingWork?: () => boolean; beforeClear?: () => void } = {}): Promise<boolean> {
+    let pending = false;
+    try { pending = !!opts.hasPendingWork?.(); } catch { pending = false; }
+    if (pending) {
+      const ok = await Modal.confirm({
+        title:        Util.t('confirm.signout_title'),
+        message:      Util.t('confirm.signout_unsaved'),
+        confirmLabel: Util.t('confirm.signout_confirm'),
+        tone:         'warn',
+      });
+      if (!ok) return false;
+    }
+    try { opts.beforeClear?.(); } catch { /* best effort */ }
     localStorage.removeItem(KEY);
+    clearLocalPlannerData();
     Store.emit({ type: 'session:changed', kind: 'signout' });
     location.reload();
+    return true;
   }
 
   // 12-hour local cache lifetime, checked ONLY at the boot gate (app.js
@@ -356,7 +390,7 @@ export const Session = (() => {
 
   return {
     currentUser, actor, isAdmin, allowedPlants, canAccessTab, DEFAULT_PAGE_ACCESS,
-    signIn, signOut, refresh, onAuthDenied,
+    signIn, signOut, clearLocalPlannerData, refresh, onAuthDenied,
     setPref, flushPrefs, pref, updateCachedUser,
     isExpired, clearExpired,
   };

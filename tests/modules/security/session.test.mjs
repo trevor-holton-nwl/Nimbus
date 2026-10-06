@@ -101,3 +101,72 @@ test('#30 Session.signIn keeps the HTTP status and readable text so the login sc
     globalThis.fetch = origFetch;
   }
 });
+
+// ---- Task 7: sign-out clears shared-PC planner data -----------------------
+import { Modal, Util } from '../../../frontend/platform/foundation.mjs';
+
+function seedPlannerData() {
+  const ls = globalThis.localStorage;
+  ls.setItem('nimbus.session', JSON.stringify({ username: 'trevor', role: 'admin' }));
+  ls.setItem('nimbus.state.v3', '{}');
+  ls.setItem('nimbus.state.v3.quarantine.1', '{}');
+  ls.setItem('nimbus.recentCmds', '[]');
+  ls.setItem('nimbus.patterns.v1', '{}');
+  ls.setItem('nimbus.calendar.pendingDeletes', '{}');
+  ls.setItem('nimbus.theme', 'dark');
+  ls.setItem('nimbus.locale', 'de');
+  globalThis.sessionStorage = globalThis.sessionStorage || makeStorage();
+  globalThis.sessionStorage.setItem('x', '1');
+}
+
+function withSignOutStubs(confirmResult, fn) {
+  const origConfirm = Modal.confirm;
+  const origLoc = globalThis.location;
+  const calls = { order: [], confirms: 0 };
+  Modal.confirm = async () => { calls.confirms++; calls.order.push('confirm'); return confirmResult; };
+  globalThis.location = { reload: () => calls.order.push('reload') };
+  return fn(calls).finally(() => { Modal.confirm = origConfirm; globalThis.location = origLoc; });
+}
+
+test('signOut with nothing pending clears planner data, keeps theme/locale, reloads without confirming', async () => {
+  seedPlannerData();
+  await withSignOutStubs(true, async (calls) => {
+    await Session.signOut({ hasPendingWork: () => false, beforeClear: () => calls.order.push('before') });
+    assert.equal(calls.confirms, 0);
+    assert.deepEqual(calls.order, ['before', 'reload']);
+  });
+  const ls = globalThis.localStorage;
+  for (const k of ['nimbus.session', 'nimbus.state.v3', 'nimbus.state.v3.quarantine.1', 'nimbus.recentCmds', 'nimbus.patterns.v1', 'nimbus.calendar.pendingDeletes']) {
+    assert.equal(ls.getItem(k), null, k + ' must be cleared');
+  }
+  assert.equal(globalThis.sessionStorage.getItem('x'), null);
+  assert.equal(ls.getItem('nimbus.theme'), 'dark');
+  assert.equal(ls.getItem('nimbus.locale'), 'de');
+});
+
+test('signOut with pending work confirms first; Cancel aborts and clears nothing', async () => {
+  seedPlannerData();
+  await withSignOutStubs(false, async (calls) => {
+    const out = await Session.signOut({ hasPendingWork: () => true, beforeClear: () => calls.order.push('before') });
+    assert.equal(out, false);
+    assert.deepEqual(calls.order, ['confirm']);
+  });
+  assert.notEqual(globalThis.localStorage.getItem('nimbus.state.v3'), null);
+  assert.notEqual(globalThis.localStorage.getItem('nimbus.session'), null);
+});
+
+test('signOut with pending work: reload happens only after the confirm resolves', async () => {
+  seedPlannerData();
+  await withSignOutStubs(true, async (calls) => {
+    await Session.signOut({ hasPendingWork: () => true, beforeClear: () => calls.order.push('before') });
+    assert.deepEqual(calls.order, ['confirm', 'before', 'reload']);
+  });
+  assert.equal(globalThis.localStorage.getItem('nimbus.state.v3'), null);
+});
+
+test('clearLocalPlannerData is exported and keeps theme/locale', () => {
+  seedPlannerData();
+  Session.clearLocalPlannerData();
+  assert.equal(globalThis.localStorage.getItem('nimbus.state.v3.quarantine.1'), null);
+  assert.equal(globalThis.localStorage.getItem('nimbus.theme'), 'dark');
+});
