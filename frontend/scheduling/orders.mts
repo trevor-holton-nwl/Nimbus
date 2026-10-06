@@ -507,7 +507,13 @@ export const Table = {
           valueGetter: (p: { data: NimbusTask }) => p.data?.planning_status === 'needs_planning'
             ? Util.t('ui.needs_planning') : Util.t('ui.planning_status_scheduled') },
         { headerName: Util.t('col.planning_reason'), colId: 'planning_reason', minWidth: 240, editable: false,
-          valueGetter: (p: { data: NimbusTask }) => p.data?.planning_reason?.message ?? '' },
+          valueGetter: (p: { data: NimbusTask }) => {
+            const reason = p.data?.planning_reason;
+            if (!reason) return '';
+            // A planner Delete carries a fixed code; resolve it through the locale so the
+            // label follows the user's language. Other codes keep their stored message.
+            return reason.code === 'planner_unscheduled' ? Util.t('planning_reason.planner_unscheduled') : (reason.message ?? '');
+          } },
         { headerName: Util.t('col.planning_window'), colId: 'planning_window', minWidth: 260, editable: false,
           valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),
           tooltipValueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },

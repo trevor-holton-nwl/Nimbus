@@ -285,6 +285,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.unknown_machine_tooltip':        'Not a machine of this plant — no distribution default will apply',
   'col.planning_status':               'Planning status',
   'col.planning_reason':               'Planning reason',
+  'planning_reason.planner_unscheduled': 'Unscheduled by planner',
   'col.planning_window':               'Allowed window',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

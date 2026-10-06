@@ -3673,3 +3673,45 @@ test('deriveSetupObservation availability matches the legacy per-order scan with
     assert.equal(interval.availableMinutes, 15, 'free time is bounded by the previous order end, not the window start');
   }
 });
+
+// Task 8: an order a planner Deleted (Needs Planning, reason planner_unscheduled,
+// SAP's original_* dates still on the row) is taken back by the next Due Date run.
+function _runDeletedOrderThrough(mode) {
+  const plant = 'DELP';
+  const line = 'DL1';
+  const runNow = new Date('2035-08-06T10:00:00');
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  try {
+    Store.setTasks([{
+      id: 'deleted-order', PLANT: plant, MACHINE: line, RUN_TIME: 2, COLOR: 'GREEN',
+      original_start_date: new Date('2035-08-07T08:00:00'), original_end_date: new Date('2035-08-08T18:00:00'),
+      ...Engine.plannerUnscheduleChanges(),
+    }], 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    const result = Engine.evaluateSchedule(mode, {
+      plant, planningStart: runNow, runNow, now: runNow, endDate: new Date('2035-08-20T18:00:00'),
+      respectCalendar: true, respectFirmed: true,
+    });
+    return result.patches.find(p => p.id === 'deleted-order' && p.changes.planning_status !== 'needs_planning');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+}
+
+test('Delete -> Needs Planning order is re-placed by a following Due Date optimizer run (setup-aware path; Due Date has no legacy path — only Remove Backlog reaches the legacy walk)', () => {
+  const patch = _runDeletedOrderThrough('duedate');
+  assert.ok(patch, 'the planner-unscheduled order must receive a placement');
+  assert.ok(patch.changes.start_date instanceof Date && patch.changes.end_date instanceof Date);
+});

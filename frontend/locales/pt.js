@@ -246,6 +246,7 @@ window.__NIMBUS_LOCALES.pt = {
   'col.default_machine':               'Máquina Padrão',
   'col.planning_status':               'Status de planejamento',
   'col.planning_reason':               'Motivo de planejamento',
+  'planning_reason.planner_unscheduled': 'Desprogramada pelo planejador',
   'col.planning_window':               'Janela permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

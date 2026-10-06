@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound } from '../../../frontend/scheduling/gantt.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
@@ -1845,4 +1845,116 @@ test('#33 Timeline._itemForTask re-applies the active Gantt filter dimming so a 
   } finally {
     GanttFilter._selectedColors.clear();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task 8 (SAP-is-truth firming): Delete / Unschedule is one saved action —
+// the order goes to Needs Planning (SAP's dates stay on the row for
+// reference) and is refused on manual-firmed, frozen and running orders.
+// ---------------------------------------------------------------------------
+function _unscheduleFixture(extra = []) {
+  const farStart = new Date('2035-03-01T08:00:00');
+  const farEnd   = new Date('2035-03-01T12:00:00');
+  const mk = (id, over = {}) => ({
+    id, PRODUCTION_ORDER: id, MATERIAL_NUMBER: 'M', MACHINE: 'L1', plant: '5512', PLANT: '5512',
+    start_date: farStart, end_date: farEnd, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+    original_start_date: new Date('2035-02-27T08:00:00'), original_end_date: new Date('2035-02-27T12:00:00'),
+    ...over,
+  });
+  Store.setTasks([mk('un-ok'), mk('un-manual'), mk('un-frozen'), mk('un-running', {
+    start_date: new Date(Date.now() - 3600_000), end_date: new Date(Date.now() + 3600_000),
+  }), mk('un-split', { scheduleSegments: [
+    { sequence: 1, startDate: farStart, endDate: farEnd }, { sequence: 2, startDate: new Date('2035-03-02T08:00:00'), endDate: new Date('2035-03-02T12:00:00') },
+  ] }), ...extra], 'test');
+  Store.setFirmed(['un-manual'], true, 'test');
+}
+
+function _stubUnscheduleSideEffects() {
+  const priors = { toast: Toast.show, recompute: Alerts.scheduleRecompute, frozen: Engine.isFrozenHorizon };
+  const calls = { toasts: [], recomputes: 0 };
+  Toast.show = (msg, type) => { calls.toasts.push({ msg, type }); };
+  Alerts.scheduleRecompute = () => { calls.recomputes += 1; };
+  Engine.isFrozenHorizon = (t) => t.id === 'un-frozen';
+  return { calls, restore() {
+    Toast.show = priors.toast; Alerts.scheduleRecompute = priors.recompute; Engine.isFrozenHorizon = priors.frozen;
+  } };
+}
+
+test('Interaction._unscheduleSelected sends an eligible order to Needs Planning with the planner_unscheduled reason', () => {
+  _unscheduleFixture();
+  const stub = _stubUnscheduleSideEffects();
+  try {
+    Selection.clear();
+    Selection.set(['un-ok']);
+    Interaction._unscheduleSelected();
+    const t = Store.tasks['un-ok'];
+    assert.equal(t.start_date, null);
+    assert.equal(t.end_date, null);
+    assert.equal(t.planning_status, 'needs_planning');
+    assert.deepEqual(t.planning_reason, { code: 'planner_unscheduled', message: 'Unscheduled by planner' });
+    assert.deepEqual(t.scheduleSegments, []);
+    assert.equal(t.original_end_date.getTime(), new Date('2035-02-27T12:00:00').getTime(), "SAP's dates stay on the row");
+    assert.equal(stub.calls.recomputes, 1, 'Alerts.scheduleRecompute must be called');
+  } finally { stub.restore(); Selection.clear(); }
+});
+
+test('Interaction._unscheduleSelected refuses manual-firmed, frozen and running orders', () => {
+  _unscheduleFixture();
+  const stub = _stubUnscheduleSideEffects();
+  try {
+    for (const id of ['un-manual', 'un-frozen', 'un-running']) {
+      const before = Store.tasks[id].start_date;
+      Selection.clear();
+      Selection.set([id]);
+      Interaction._unscheduleSelected();
+      assert.equal(Store.tasks[id].start_date, before, `${id} must keep its slot`);
+      assert.notEqual(Store.tasks[id].planning_status, 'needs_planning', `${id} must not be sent to Needs Planning`);
+    }
+    assert.equal(stub.calls.toasts.length, 3);
+    assert.ok(stub.calls.toasts.every(c => c.type === 'warn'));
+  } finally { stub.restore(); Selection.clear(); }
+});
+
+test('Interaction._unscheduleSelected keeps refusing split orders and leaves them intact', () => {
+  _unscheduleFixture();
+  const stub = _stubUnscheduleSideEffects();
+  try {
+    Selection.clear();
+    Selection.set(['un-split']);
+    Interaction._unscheduleSelected();
+    assert.ok(Store.tasks['un-split'].start_date, 'split order keeps its dates');
+    assert.equal(Store.tasks['un-split'].scheduleSegments.length, 2);
+    assert.equal(stub.calls.toasts.at(-1).type, 'warn');
+  } finally { stub.restore(); Selection.clear(); }
+});
+
+test('Interaction._unscheduleSelected is undoable: undo restores dates and scheduled status', () => {
+  _unscheduleFixture();
+  const stub = _stubUnscheduleSideEffects();
+  try {
+    const start = Store.tasks['un-ok'].start_date.getTime();
+    Selection.clear();
+    Selection.set(['un-ok']);
+    Interaction._unscheduleSelected();
+    assert.equal(Store.tasks['un-ok'].planning_status, 'needs_planning');
+    UndoStack.pop();
+    const t = Store.tasks['un-ok'];
+    assert.equal(t.start_date.getTime(), start);
+    assert.notEqual(t.planning_status, 'needs_planning');
+    assert.equal(t.planning_reason ?? null, null);
+  } finally { stub.restore(); Selection.clear(); }
+});
+
+test('Interaction._unscheduleSelected mixed selection unschedules only the eligible orders and recomputes alerts', () => {
+  _unscheduleFixture();
+  const stub = _stubUnscheduleSideEffects();
+  try {
+    Selection.clear();
+    Selection.set(['un-ok', 'un-manual', 'un-running']);
+    Interaction._unscheduleSelected();
+    assert.equal(Store.tasks['un-ok'].planning_status, 'needs_planning');
+    assert.ok(Store.tasks['un-manual'].start_date);
+    assert.ok(Store.tasks['un-running'].start_date);
+    assert.equal(stub.calls.recomputes, 1);
+  } finally { stub.restore(); Selection.clear(); }
 });

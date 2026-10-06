@@ -246,6 +246,7 @@ window.__NIMBUS_LOCALES.de = {
   'col.default_machine':               'Standardmaschine',
   'col.planning_status':               'Planungsstatus',
   'col.planning_reason':               'Planungsgrund',
+  'planning_reason.planner_unscheduled': 'Vom Planer ausgeplant',
   'col.planning_window':               'Zulässiges Fenster',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

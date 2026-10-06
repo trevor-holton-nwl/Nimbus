@@ -4654,7 +4654,8 @@ export const Interaction = {
   },
 
   _unscheduleSelected(): void {
-    const ids = Selection.ids().filter(id => !Store.isFirmed(id));
+    // Manual-firmed, frozen-horizon and running orders are locked (Engine.firmingStatus union).
+    const ids = Selection.ids().filter(id => { const t = Store.tasks[id]; return !!t && !Engine.firmingStatus(t).firmed; });
     if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_firmed'), 'warn'); return; }
     // An explicit segment aggregate is atomic. Do not clear just its parent
     // envelope, which Store would correctly reconstruct from its children.
@@ -4664,8 +4665,9 @@ export const Interaction = {
       return;
     }
     const snap = UndoStack.snapshotTasks(eligibleIds);
-    const patches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
+    const patches = eligibleIds.map(id => ({ id, changes: Engine.plannerUnscheduleChanges() }));
     Store.updateMany(patches, 'interaction');
+    Alerts.scheduleRecompute();
     UndoStack.push(`Unschedule ${eligibleIds.length} order(s)`,
                    () => UndoStack.restoreTasks(snap), eligibleIds);
     Toast.show(

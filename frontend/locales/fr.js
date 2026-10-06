@@ -246,6 +246,7 @@ window.__NIMBUS_LOCALES.fr = {
   'col.default_machine':               'Machine par Défaut',
   'col.planning_status':               'Statut de planification',
   'col.planning_reason':               'Motif de planification',
+  'planning_reason.planner_unscheduled': 'Déprogrammé par le planificateur',
   'col.planning_window':               'Fenêtre autorisée',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

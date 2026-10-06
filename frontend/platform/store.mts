@@ -1003,7 +1003,9 @@ export const UndoStack = {
     }).filter(Boolean) as NimbusTask[];
   },
   restoreTasks(snapshot: NimbusTask[]): void {
-    const patches = snapshot.map(s => ({ id: s.id, changes: { ...s, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } }));
+    // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
+    // carry the key, and an undone Unschedule must not leave its reason behind.
+    const patches = snapshot.map(s => ({ id: s.id, changes: { ...s, planning_reason: s.planning_reason ?? null, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } }));
     Store.updateMany(patches, 'undo');
   },
 };

@@ -1031,6 +1031,20 @@ export const Engine = {
     return !!task.ecc_firmed;
   },
 
+  /** The one Delete / Unschedule patch (Gantt key + command palette). The order goes to
+   *  Needs Planning with no committed dates or segments; SAP's own dates stay on the row
+   *  (original_*) for reference, and a following Due Date run re-places it. Fresh object
+   *  per call so callers never share a mutable patch. */
+  plannerUnscheduleChanges(): Partial<NimbusTask> {
+    return {
+      start_date: null,
+      end_date: null,
+      scheduleSegments: [],
+      planning_status: 'needs_planning',
+      planning_reason: { code: 'planner_unscheduled', message: 'Unscheduled by planner' },
+    };
+  },
+
   /** Union firming status. UI/live-path ONLY — reads live Store (isFirmed, frozenHorizonEnd).
    *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
    *  fold below, never this. reasons: 'frozen' (horizon band), 'manual' (planner),
