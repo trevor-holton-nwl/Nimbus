@@ -4653,9 +4653,12 @@ export const Interaction = {
     }
   },
 
-  _unscheduleSelected(): void {
+  _unscheduleSelected(): void { Interaction.unscheduleIds(Selection.ids()); },
+
+  /** The single Delete / Unschedule implementation (Delete key and command palette). */
+  unscheduleIds(requestedIds: string[]): void {
     // Manual-firmed, frozen-horizon and running orders are locked (Engine.firmingStatus union).
-    const ids = Selection.ids().filter(id => { const t = Store.tasks[id]; return !!t && !Engine.firmingStatus(t).firmed; });
+    const ids = requestedIds.filter(id => { const t = Store.tasks[id]; return !!t && !Engine.firmingStatus(t).firmed; });
     if (!ids.length) { Toast.show(Util.t('toast.unschedule_all_firmed'), 'warn'); return; }
     // An explicit segment aggregate is atomic. Do not clear just its parent
     // envelope, which Store would correctly reconstruct from its children.

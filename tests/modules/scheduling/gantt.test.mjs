@@ -1958,3 +1958,17 @@ test('Interaction._unscheduleSelected mixed selection unschedules only the eligi
     assert.equal(stub.calls.recomputes, 1);
   } finally { stub.restore(); Selection.clear(); }
 });
+
+test('Interaction.unscheduleIds (the palette entry point) applies the same guard and patch for an explicit id list', () => {
+  _unscheduleFixture();
+  const stub = _stubUnscheduleSideEffects();
+  try {
+    Selection.clear();
+    Interaction.unscheduleIds(['un-ok', 'un-manual', 'un-frozen', 'un-running', 'un-split']);
+    assert.equal(Store.tasks['un-ok'].planning_status, 'needs_planning');
+    for (const id of ['un-manual', 'un-frozen', 'un-running', 'un-split']) {
+      assert.ok(Store.tasks[id].start_date, `${id} keeps its slot`);
+    }
+    assert.equal(stub.calls.recomputes, 1);
+  } finally { stub.restore(); }
+});

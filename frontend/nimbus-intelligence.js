@@ -1270,20 +1270,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_remove_start_end_times'),
         run() {
           CommandPalette.close();
-          // Clearing only a parent envelope would leave its child aggregate
-          // behind. Full unscheduling is a separate persistence behavior, so
-          // leave split parents untouched rather than creating a partial edit.
-          const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
-          const unschPatches = eligibleIds.map(id => ({ id, changes: { start_date: null, end_date: null } }));
-          if (unschPatches.length) {
-            _pushTaskUndo(`Unschedule ${eligibleIds.length} orders`, eligibleIds);
-            Store.updateMany(unschPatches, 'cmd-palette');
-          }
-          Alerts.scheduleRecompute();
-          Toast.show(
-            eligibleIds.length ? t('toast.unscheduled_bulk', { count: eligibleIds.length }) :
-              t('cmdp.toast_split_orders_whole'),
-            eligibleIds.length ? 'success' : 'warn', eligibleIds.length ? 1400 : 3000);
+          // One implementation: the Gantt Delete key. It owns the guard (manual,
+          // frozen, running, split), the Needs Planning patch, undo and alerts.
+          NIMBUS.Interaction.unscheduleIds(ids);
         }
       });
 
