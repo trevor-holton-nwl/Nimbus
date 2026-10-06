@@ -1163,7 +1163,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.no':                             'Non',
   'ui.insp_firmed_banner':             '🔒 Cette commande est ferme — l\'optimiseur planifiera autour d\'elle.',
   'ui.sap_firm_marker':               'Ferme dans SAP (information uniquement — NIMBUS ne la verrouille pas)',
-  'ui.firm_reason_running':           'En cours — verrouillée pendant son exécution',
+  'ui.firm_reason_running':           'En cours — protégée de l’optimisation et des corrections automatiques',
   'ui.hov_firmed_badge':               'Ferme',
   'ui.hov_suborder':                   'Sous-commande {{letter}} de {{parent}} · {{pct}}% · {{count}} sous-commandes',
   'ui.insp_frozen_horizon_banner':     '🧊 Cette commande commence dans la fenêtre gelée de l\'usine — les exécutions d\'optimisation ne la déplaceront pas, mais Supprimer le travail en retard et les glissements manuels peuvent.',

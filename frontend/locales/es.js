@@ -1167,7 +1167,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.no':                             'No',
   'ui.insp_firmed_banner':             '🔒 Este pedido está en firme — el optimizador planificará en torno a él.',
   'ui.sap_firm_marker':               'Firme en SAP (solo informativo — NIMBUS no lo bloquea)',
-  'ui.firm_reason_running':           'En curso — bloqueada mientras está en ejecución',
+  'ui.firm_reason_running':           'En curso — protegida de la optimización y de las correcciones automáticas',
   'ui.hov_firmed_badge':               'En firme',
   'ui.hov_suborder':                   'Subpedido {{letter}} de {{parent}} · {{pct}}% · {{count}} subpedidos',
   'ui.insp_frozen_horizon_banner':     '🧊 Este pedido comienza dentro de la ventana congelada de la planta — las ejecuciones del optimizador no lo moverán, pero Eliminar atraso y arrastres manuales aún pueden.',

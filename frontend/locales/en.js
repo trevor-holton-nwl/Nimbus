@@ -858,7 +858,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.no':                             'No',
   'ui.insp_firmed_banner':             '🔒 Firmed order — the optimiser will not move it.',
   'ui.sap_firm_marker':               'SAP firmed (information only — NIMBUS does not lock it)',
-  'ui.firm_reason_running':           'Running — locked while in progress',
+  'ui.firm_reason_running':           'Running — protected from Optimize and auto-fixes',
   'ui.hov_firmed_badge':               'Firmed',
   'ui.hov_suborder':                   'Sub-order {{letter}} of {{parent}} · {{pct}}% · {{count}} sub-orders',
   'ui.insp_frozen_horizon_banner':     '🧊 This order starts inside the plant\'s frozen window — optimizer runs will not move it, but Remove Backlog and manual drags still can.',

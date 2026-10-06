@@ -1162,7 +1162,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.no':                             'Nein',
   'ui.insp_firmed_banner':             '🔒 Dieser Auftrag ist festgeschrieben — der Optimierer plant um ihn herum.',
   'ui.sap_firm_marker':               'SAP-fixiert (nur zur Information — NIMBUS sperrt den Auftrag nicht)',
-  'ui.firm_reason_running':           'Läuft — gesperrt, solange er in Arbeit ist',
+  'ui.firm_reason_running':           'Läuft — vor Optimierung und automatischen Korrekturen geschützt',
   'ui.hov_firmed_badge':               'Festgeschrieben',
   'ui.hov_suborder':                   'Teilauftrag {{letter}} von {{parent}} · {{pct}}% · {{count}} Teilaufträge',
   'ui.insp_frozen_horizon_banner':     '🧊 Dieser Auftrag beginnt innerhalb des Sperrfensters des Werks — Optimierungsläufe werden ihn nicht verschieben, aber Rückstandsentfernung und manuelles Verschieben können das.',
