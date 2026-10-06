@@ -3318,6 +3318,17 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # run_time_source-'routing' resolve is still pending.
     inserted_ids: list[str] = []
     touched: set[str] = set()      # ids this upload actually wrote (upsert or reset)
+    # A distribution child's own quantity is its SHARE of the parent, which a planner's
+    # re-weight changes (and a stale plan can put back): it is never SAP changing the
+    # order. Children are judged on the PARENT's quantity instead -- SAP's new parent
+    # quantity vs the one the distribution header stored at SAP's previous upload.
+    parent_quantity_changed: set[tuple] = set()
+    for pkey, pplan in (distribution_plan.get("parents") or {}).items():
+        old_q = ((pplan.get("existing_header") or {}).get("order_quantity"))
+        new_q = (pplan.get("parent_facts") or {}).get("order_quantity")
+        if old_q is not None and new_q is not None:
+            if Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001")):
+                parent_quantity_changed.add(tuple(pkey))
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
@@ -3360,7 +3371,14 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "sap_production_version": r.get("sap_production_version"),
                         "parent_production_order": r.get("parent_production_order"),
                     }
-                    if sap_changed_fields(b, incoming, b["machine_wc"]):
+                    is_child = bool(b["parent_production_order"])
+                    if is_child:
+                        incoming["order_quantity"] = None      # judged on the parent below
+                    fields = sap_changed_fields(b, incoming, b["machine_wc"])
+                    if is_child and (b["plant"], b["parent_production_order"],
+                                     b["material_number"]) in parent_quantity_changed:
+                        fields.add("quantity")
+                    if fields:
                         changed.add(rid)
                 if changed:
                     # (d) a changed distribution child takes every sibling (same plant,
@@ -3376,7 +3394,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                     reset_ids: list[str] = []
                     for rid in sorted(candidates):
                         if _order_is_running(before[rid], _plant_local_now(before[rid]["tz"])):
-                            running_changed_ids.append(rid)
+                            # Only a really scheduled order has a slot/firm that was "kept"; a
+                            # never-scheduled order whose SAP window covers now has nothing to protect.
+                            if before[rid]["scheduled_start"] is not None or before[rid]["first_start"] is not None:
+                                running_changed_ids.append(rid)
                         else:
                             reset_ids.append(rid)
                     # (f) slot + firm back to SAP's dates

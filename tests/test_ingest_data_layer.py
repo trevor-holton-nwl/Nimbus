@@ -521,6 +521,15 @@ class TestSapTruthReupload:
         assert warn["count"] == 1 and self._oid() in warn["order_ids"]
         assert not [w for w in res["warnings"] if w.get("category") == "sap_changed"]
 
+    def test_sap_change_on_never_scheduled_running_window_is_not_a_kept_slot(self):
+        # Nothing was scheduled, so there is no slot or firm that "was kept".
+        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        start, finish = now - dt.timedelta(hours=2), now + dt.timedelta(hours=6)
+        self._up([self._line(BASIC_START_DATE=start, BASIC_FINISH_DATE=finish)])
+        res = self._up([self._line(BASIC_START_DATE=start + dt.timedelta(days=1),
+                                   BASIC_FINISH_DATE=finish + dt.timedelta(days=1))], "zztest_st_2.xlsx")
+        assert not [w for w in res["warnings"] if w.get("category") == "sap_changed_running"]
+
     def test_sap_change_on_frozen_order_resets(self):
         self._up()
         self._sql("UPDATE plants SET frozen_horizon_days=3650 WHERE plant=%s", (self.PLANT,))

@@ -4555,6 +4555,33 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         assert self._state(pg, self.MAT2) == mat2_before, "a second material on the same order is untouched"
         assert next(w for w in res["warnings"] if w.get("category") == "sap_changed")["count"] == 2
 
+    def test_planner_reweight_during_stale_plan_upload_is_not_an_sap_change(self, pg):
+        # The plan is computed, a planner re-weights and firms, then the upload runs on the
+        # stale plan: the children's own share quantities differ from the re-weighted ones,
+        # but SAP changed nothing about the PARENT, so no slot/firm reset.
+        self._upload(pg, [self._parent(self.MAT)])
+        stale_rows, stale_plan, stale_warnings = distribution_data.plan([self._parent(self.MAT)], "stale-batch")
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}],
+            base_version=header["xmin"], actor="tester")
+        self._place_and_firm(pg)
+        res = pg.upsert_orders([self._parent(self.MAT)], batch_id=str(uuid.uuid4()), source="excel",
+                               filename="f.xlsx", plan_fn=lambda rows, batch: (stale_rows, stale_plan, stale_warnings),
+                               apply_fn=distribution_data.apply)
+        assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
+        for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+            assert sched is not None and firmed is True
+
+    def test_parent_quantity_change_resets_all_children(self, pg):
+        self._upload(pg, [self._parent(self.MAT)])
+        self._place_and_firm(pg)
+        res = self._upload(pg, [self._parent(self.MAT, order_quantity=120.0)])
+        for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+            assert sched is None and firmed is False
+        assert next(w for w in res["warnings"] if w.get("category") == "sap_changed")["count"] == 2
+
     def test_ingest_vs_save_vs_apply_lock_order_never_deadlocks(self, pg):
         """Stepped: a writer that locks in id order (what a /tasks save does) holds the
         EARLIER child and pauses while the ingest chunk is blocked on it, then takes the

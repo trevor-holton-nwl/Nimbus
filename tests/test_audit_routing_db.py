@@ -332,7 +332,7 @@ class TestRoutingEditTransactions:
                       " manual_firmed = (id = %s) WHERE plant = %s", (self.ids[0], self.ids[1], self.PLANT))
         report = resolver.resolve_orders(self.PLANT)
         assert report["resolved"] == 2
-        assert report.get("orders_kept_in_place", []) == []
+        assert "orders_kept_in_place" not in report
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT run_time, run_time_source, runtime_schedule_mismatch FROM orders"
                         " WHERE plant = %s ORDER BY id", (self.PLANT,))
