@@ -411,7 +411,7 @@ class TestRoutingEditTransactions:
         from types import SimpleNamespace
         from backend.routing.routes import recompute_plant
 
-        def boom(plant, *, conn, batch_id=None, ids=None):
+        def boom(plant, *, conn, batch_id=None, ids=None, protect_ids=None):
             with conn.cursor() as cur:
                 cur.execute("SELECT 1/0")
 
@@ -495,7 +495,7 @@ class TestRoutingEditTransactions:
         new_id = pg.make_id("ZZTEST_AR_O3", self.MATERIAL)
         seen = {}
 
-        def spy(plant, *, conn, batch_id=None, ids=None):
+        def spy(plant, *, conn, batch_id=None, ids=None, protect_ids=None):
             with conn.cursor() as cur:
                 cur.execute("SELECT planning_status, planning_reason->>'code' FROM orders WHERE id=%s",
                             (new_id,))
@@ -535,7 +535,7 @@ class TestRoutingEditTransactions:
         assert row["run_time_source"] == "manual" and row["planning_status"] == "scheduled"
 
     def test_resolver_failure_becomes_upload_warning_not_failed_upload(self, pg):
-        def boom(plant, *, conn, batch_id=None, ids=None):
+        def boom(plant, *, conn, batch_id=None, ids=None, protect_ids=None):
             with conn.cursor() as cur:
                 cur.execute("SELECT 1/0")
 
@@ -562,3 +562,69 @@ class TestRoutingEditTransactions:
         self._set(pg, "UPDATE orders SET run_time=7, run_time_source='manual' WHERE id=%s", (self.ids[0],))
         self._upload(pg, [self._upload_row(self.ids[0], quantity=20, plant=self.PLANT, run_time=99.0)])
         assert self._row(pg)["run_time"] == Decimal(99)
+
+    # ---- audit fix round: a running order is never held (F1) / a hold clears firm + segments (F2) ----
+    def _make_running(self, pg, oid=None, *, firm=True):
+        from zoneinfo import ZoneInfo
+        now = dt.datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        start, end = now - dt.timedelta(hours=1), now + dt.timedelta(hours=2)
+        self._set(pg, "UPDATE orders SET scheduled_start=%s, scheduled_end=%s, basic_start_date=%s,"
+                      " basic_finish_date=%s, run_time=3, manual_firmed=%s WHERE id=%s",
+                  (start, end, start, end, firm, oid or self.ids[0]))
+        return start, end
+
+    def _state(self, pg, oid=None):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT planning_status, scheduled_start, manual_firmed,"
+                        " (SELECT count(*) FROM order_schedule_segments WHERE order_id = o.id)"
+                        " FROM orders o WHERE id=%s", (oid or self.ids[0],))
+            return cur.fetchone()
+
+    def test_running_order_stays_scheduled_when_sap_changes_pv_to_one_without_routing(self, pg):
+        start, end = self._make_running(pg)
+
+        def line(**kw):   # fresh dict per upload: upsert_orders annotates the rows it is given
+            return dict(self._upload_row(self.ids[0], quantity=10, plant=self.PLANT),
+                        basic_start_date=start, basic_finish_date=end, **kw)
+
+        self._upload(pg, [line()])                      # records SAP's baseline
+        res = self._upload(pg, [line(production_version="9999")])
+        status, sched_start, firmed, _ = self._state(pg)
+        assert status == "scheduled" and sched_start == start and firmed is True
+        warn = next(w for w in res["warnings"] if w.get("category") == "sap_changed_running")
+        assert self.ids[0] in warn["order_ids"]
+        assert "kept" in warn["msg"]
+
+    def test_full_resolve_never_holds_a_running_order(self, pg):
+        start, _ = self._make_running(pg)
+        self._set(pg, "UPDATE orders SET production_version='9999' WHERE id=%s", (self.ids[0],))
+        resolver.resolve_orders(self.PLANT, full=True)
+        status, sched_start, firmed, _ = self._state(pg)
+        assert status == "scheduled" and sched_start == start and firmed is True
+        # ... while an identical order that is NOT running is held as before.
+        self._set(pg, "UPDATE orders SET production_version='9999' WHERE id=%s", (self.ids[1],))
+        resolver.resolve_orders(self.PLANT, full=True)
+        assert self._state(pg, self.ids[1])[0] == "needs_planning"
+
+    def test_protect_ids_are_never_held(self, pg):
+        self._set(pg, "UPDATE orders SET production_version='9999' WHERE id=%s", (self.ids[1],))
+        resolver.resolve_orders(self.PLANT, full=True, protect_ids=[self.ids[1]])
+        assert self._state(pg, self.ids[1])[0] == "scheduled"
+
+    def test_hold_clears_manual_firm_and_segments_and_release_leaves_no_stale_bar(self, pg):
+        t0 = dt.datetime(2026, 10, 20, 8)
+        self._set(pg, "UPDATE orders SET manual_firmed=TRUE, scheduled_start=%s, scheduled_end=%s WHERE id=%s",
+                  (t0, t0 + dt.timedelta(hours=3), self.ids[0]))
+        self._set(pg, "INSERT INTO order_schedule_segments(order_id, segment_no, scheduled_start, scheduled_end)"
+                      " VALUES (%s,1,%s,%s),(%s,2,%s,%s)",
+                  (self.ids[0], t0, t0 + dt.timedelta(hours=1), self.ids[0],
+                   t0 + dt.timedelta(hours=5), t0 + dt.timedelta(hours=7)))
+        self._set(pg, "UPDATE orders SET production_version='9999' WHERE id=%s", (self.ids[0],))
+        resolver.resolve_orders(self.PLANT, full=True)
+        assert self._state(pg) == ("needs_planning", None, False, 0)
+        self._set(pg, "UPDATE orders SET production_version='0001' WHERE id=%s", (self.ids[0],))
+        resolver.resolve_orders(self.PLANT, full=True)
+        status, sched_start, firmed, segments = self._state(pg)
+        assert (status, sched_start, firmed, segments) == ("scheduled", None, False, 0)
+        task = pg.get_task_versions([self.ids[0]])[0]
+        assert not task["schedule_segments"]

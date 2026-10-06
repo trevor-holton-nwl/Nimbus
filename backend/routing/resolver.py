@@ -72,6 +72,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from psycopg.types.json import Jsonb
 
+import db
 from db import _pool
 
 # ---------------------------------------------------------------------------
@@ -603,6 +604,29 @@ def _is_routing_hold(planning_reason) -> bool:
     return step is None or step in ROUTING_HOLD_STEPS
 
 
+def _running_ids(cur, plant: str, order_ids: list[str]) -> set[str]:
+    """Which of `order_ids` are RUNNING right now (plant-local): the same
+    effective-window rule db.upsert_orders' SAP-change protection uses
+    (`db._order_is_running`). A running order is never held or un-scheduled by a
+    resolve: its slot, firm and bar stay (a re-derived run time may still move
+    its end, never its start). An order already in Needs Planning has no window,
+    so it is never running."""
+    if not order_ids:
+        return set()
+    cur.execute("SELECT timezone FROM plants WHERE plant = %s", (plant,))
+    row = cur.fetchone()
+    now = db._plant_local_now(row[0] if row else None)
+    cur.execute(
+        "SELECT o.id, o.planning_status, o.scheduled_start, o.scheduled_end, o.basic_start_date,"
+        " o.basic_finish_date, o.run_time, seg.first_start, seg.last_end"
+        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL +
+        " WHERE o.id = ANY(%s)",
+        (order_ids,),
+    )
+    cols = [d[0] for d in cur.description]
+    return {r[0] for r in cur.fetchall() if db._order_is_running(dict(zip(cols, r, strict=True)), now)}
+
+
 def _build_held_row(order: dict, step: str):
     """One row for the held-outcomes' VALUES-joined UPDATE, or None when the
     order is currently held for a DIFFERENT, non-routing reason (defensive:
@@ -718,21 +742,32 @@ def _write_holds(cur, rows: list[tuple]) -> None:
 def _write_holds_chunk(cur, rows: list[tuple]) -> None:
     placeholders = ", ".join(["(%s::text, %s::jsonb)"] * len(rows))
     params = [v for row in rows for v in row]
+    held_ids = [row[0] for row in rows]
+    # Lock the rows first, in id order (the order every other multi-row `orders`
+    # writer uses), BEFORE touching their segment rows: a /tasks save locks the
+    # order row and then writes its segments, so the opposite order could deadlock.
+    cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (held_ids,))
     query = (
         "UPDATE orders o SET"
         " planning_status = 'needs_planning',"
         " planning_reason = v.reason,"
         " scheduled_start = NULL,"
         " scheduled_end = NULL,"
+        # A held order has no slot, so it has no manual firm either (the same pair the
+        # SAP reset in db.upsert_orders clears): otherwise a stale firm and split slot
+        # would resurface as a bar when the hold is released.
+        " manual_firmed = FALSE,"
         " updated_at = NOW()"
         f" FROM (VALUES {placeholders}) AS v(id, reason)"
         " WHERE o.id = v.id"
         "   AND (o.planning_status IS DISTINCT FROM 'needs_planning'"
         "        OR o.planning_reason IS DISTINCT FROM v.reason"
         "        OR o.scheduled_start IS NOT NULL"
-        "        OR o.scheduled_end IS NOT NULL)"
+        "        OR o.scheduled_end IS NOT NULL"
+        "        OR o.manual_firmed IS TRUE)"
     )
     cur.execute(query, params)
+    cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", (held_ids,))
 
 
 def _new_report(is_cutover: bool) -> dict:
@@ -749,7 +784,7 @@ def _new_report(is_cutover: bool) -> dict:
 
 
 def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False,
-                            ids: list[str] | None = None) -> dict:
+                            ids: list[str] | None = None, protect_ids: list[str] | None = None) -> dict:
     """Does the real work of `resolve_orders` on an already-open connection;
     never commits (that's `resolve_orders`' job -- either its own, for a
     connection it opened itself, or the caller's, for one it was given)."""
@@ -796,6 +831,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
 
         write_rows: list[tuple] = []
         held_rows: list[tuple] = []
+        held_candidates: list[tuple[dict, str]] = []
         unmapped_workcenters: set[str] = set()
 
         for order in orders:
@@ -804,13 +840,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             status = result["status"]
 
             if status == "held":
-                step = result.get("detail_step") or result["reason_code"]
-                report["unknown_by_step"][step] = report["unknown_by_step"].get(step, 0) + 1
-                if step == "workcenter_unmapped" and order.get("machine"):
-                    unmapped_workcenters.add(order["machine"])
-                held_row = _build_held_row(order, step)
-                if held_row is not None:
-                    held_rows.append(held_row)
+                held_candidates.append((order, result.get("detail_step") or result["reason_code"]))
                 continue
 
             if status == "resolved":
@@ -829,6 +859,25 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             if write_row is not None:
                 write_rows.append(write_row)
 
+        # A running order is never held / un-scheduled (SAP-truth decision 7): the ids the
+        # caller already knows are running (`protect_ids`) plus any held candidate that is
+        # running right now. Its slot, firm and bar stay; nothing is written for it.
+        protected = set(protect_ids or ())
+        protected |= _running_ids(
+            cur, plant,
+            [o["id"] for o, _ in held_candidates
+             if o["id"] not in protected and o.get("planning_status") != "needs_planning"])
+        for order, step in held_candidates:
+            if order["id"] in protected:
+                report["running_kept"] = report.get("running_kept", 0) + 1
+                continue
+            report["unknown_by_step"][step] = report["unknown_by_step"].get(step, 0) + 1
+            if step == "workcenter_unmapped" and order.get("machine"):
+                unmapped_workcenters.add(order["machine"])
+            held_row = _build_held_row(order, step)
+            if held_row is not None:
+                held_rows.append(held_row)
+
         _write_outcomes(cur, write_rows)
         _write_holds(cur, held_rows)
 
@@ -837,7 +886,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
 
 
 def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False,
-                   ids: list[str] | None = None) -> dict:
+                   ids: list[str] | None = None, protect_ids: list[str] | None = None) -> dict:
     """§5's thin DB wrapper -- the shape a later task wires into
     `db.upsert_orders`'s `resolve_fn` seam.
 
@@ -852,11 +901,14 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: 
     re-derive every non-manual order of that upload batch / every order the
     upload wrote -- see `_load_orders`.
     `full=True` (explicit recompute) re-derives every non-manual order.
+    `protect_ids` (db.upsert_orders passes the orders it just kept in place because
+    they are running) are never held; a RUNNING order is never held on any path,
+    whether or not the caller lists it.
     """
     if conn is not None:
-        return _resolve_orders_on_conn(plant, conn, batch_id, full, ids)
+        return _resolve_orders_on_conn(plant, conn, batch_id, full, ids, protect_ids)
     with _pool.connection() as new_conn:
-        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids)
+        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids, protect_ids)
         new_conn.commit()
         return report
 

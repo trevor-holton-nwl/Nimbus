@@ -3130,7 +3130,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         never silently dropped.
       - `resolve_fn` is the optional routing-runtime ingest seam
         (ROUTING_RUNTIME_DESIGN.md §4/§5) — also defaults to None. When given,
-        it is called as `resolve_fn(plant, conn=conn, batch_id=..., ids=...)` —
+        it is called as `resolve_fn(plant, conn=conn, batch_id=..., ids=...,
+        protect_ids=...)` (`protect_ids` = SAP-changed orders kept in place because
+        they are running; the resolver never holds them) —
         matching `backend.routing.resolver.resolve_orders`'s signature, reusing
         the connection already open at that point (`ids` = every order this
         upload wrote, since unchanged rows are skipped and keep their old batch
@@ -3534,7 +3536,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 for resolve_plant in sorted(resolve_plants):
                     cur.execute("SAVEPOINT routing_resolve")
                     try:
-                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id, ids=touched_ids)
+                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id, ids=touched_ids,
+                                                    protect_ids=running_changed_ids)
                         cur.execute("RELEASE SAVEPOINT routing_resolve")
                     except Exception as exc:
                         cur.execute("ROLLBACK TO SAVEPOINT routing_resolve")

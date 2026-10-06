@@ -540,7 +540,7 @@ class TestWriteChunkingAndPendingHold:
         assert [len(p) // 6 for _, p in cur.calls] == [5000, 5000, 2001]
         cur = Cur()
         r._write_holds(cur, [(f"o{i}", "{}") for i in range(10001)])
-        assert [len(p) // 2 for _, p in cur.calls] == [5000, 5000, 1]
+        assert [len(p) // 2 for q, p in cur.calls if q.startswith("UPDATE")] == [5000, 5000, 1]
         cur = Cur()
         r._write_outcomes(cur, [])
         r._write_holds(cur, [])
