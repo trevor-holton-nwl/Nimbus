@@ -514,7 +514,22 @@ class Test_sap_changed_fields:
     def test_quantity_none_safe(self):
         before = self._before(order_quantity=None)
         assert self._run(before, self._incoming(order_quantity=5)) == set()
-        assert self._run(incoming=self._incoming(order_quantity=None)) == {"quantity"}
+        assert self._run(incoming=self._incoming(order_quantity=None)) == set()
+
+    def test_incoming_none_dates_not_changed(self):
+        assert self._run(incoming=self._incoming(basic_start_date=None)) == set()
+        assert self._run(incoming=self._incoming(basic_finish_date=None)) == set()
+        inc = self._incoming(basic_start_date=None, basic_finish_date=self.F1)
+        assert self._run(incoming=inc) == {"dates"}
+
+    def test_incoming_none_workcenter_not_changed(self):
+        assert self._run(incoming=self._incoming(sap_workcenter=None)) == set()
+
+    def test_incoming_none_production_version_not_changed(self):
+        assert self._run(incoming=self._incoming(sap_production_version=None)) == set()
+
+    def test_incoming_blank_production_version_is_a_change(self):
+        assert self._run(incoming=self._incoming(sap_production_version="")) == {"production_version"}
 
     def test_production_version_changed(self):
         assert self._run(incoming=self._incoming(sap_production_version="0002")) == {"production_version"}

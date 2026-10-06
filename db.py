@@ -2404,7 +2404,10 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     `scheduled_start`/`scheduled_end`); `incoming` is the parsed upload row.
     A field counts as changed only when its baseline is non-NULL, the incoming
     value differs from it, and the incoming value is not an echo of NIMBUS's
-    own current value (SAP sending back what a planner set). Returns a subset
+    own current value (SAP sending back what a planner set). An incoming None means "column/cell
+    not sent or unparseable" and is never a change for that field (each date is
+    judged individually); an incoming "" (blank cell present) is a real value.
+    Returns a subset
     of {"dates", "workcenter", "quantity", "production_version"}.
     """
     changed: set[str] = set()
@@ -2414,7 +2417,8 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     base_s, base_f = before.get("sap_basic_start_date"), before.get("sap_basic_finish_date")
     in_s, in_f = incoming.get("basic_start_date"), incoming.get("basic_finish_date")
     sched_s, sched_e = before.get("scheduled_start"), before.get("scheduled_end")
-    dates_differ = (base_s is not None and in_s != base_s) or (base_f is not None and in_f != base_f)
+    dates_differ = ((base_s is not None and in_s is not None and in_s != base_s)
+                    or (base_f is not None and in_f is not None and in_f != base_f))
     dates_echo = (sched_s is not None and sched_e is not None
                   and in_s == sched_s and in_f == sched_e)
     if dates_differ and not dates_echo:
@@ -2422,19 +2426,21 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
 
     base_wc = before.get("sap_workcenter")
     in_wc = incoming.get("sap_workcenter")
-    if base_wc is not None and in_wc != base_wc and in_wc != current_machine_wc:
+    if base_wc is not None and in_wc is not None and in_wc != base_wc and in_wc != current_machine_wc:
         changed.add("workcenter")
 
     def _q(v):
         return None if v is None else Decimal(str(v)).quantize(Decimal("0.001"))
     base_q = _q(before.get("order_quantity"))
-    if base_q is not None and _q(incoming.get("order_quantity")) != base_q:
+    in_q = _q(incoming.get("order_quantity"))
+    if base_q is not None and in_q is not None and in_q != base_q:
         changed.add("quantity")
 
     # production version: child sub-orders carry none of their own.
     base_pv = before.get("sap_production_version")
-    if base_pv is not None and not incoming.get("parent_production_order"):
-        in_pv = (incoming.get("sap_production_version") or "").strip()
+    if (base_pv is not None and incoming.get("sap_production_version") is not None
+            and not incoming.get("parent_production_order")):
+        in_pv = incoming["sap_production_version"].strip()
         cur_pv = (before.get("production_version") or "").strip()
         if in_pv != base_pv.strip() and in_pv != cur_pv:
             changed.add("production_version")
