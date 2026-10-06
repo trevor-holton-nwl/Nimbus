@@ -267,19 +267,18 @@ test('Store.setTasks rebuilds firmedIds from server task.firmed so a stale local
   assert.ok(!Store.isFirmed('stale-local'));
 });
 
-test('undo of a firm restores both t.firmed and firmedIds', () => {
-  Store.setTasks([{ id: 'uf1', RUN_TIME: 1 }], 'unit-test');
-  const snap = UndoStack.snapshotTasks(['uf1']);
-  Store.setFirmed(['uf1'], true, 'table');
-  assert.equal(Store.tasks.uf1.firmed, true);
-  UndoStack.restoreTasks(snap);
-  assert.equal(Store.tasks.uf1.firmed, false);
-  assert.ok(!Store.firmedIds.has('uf1'), 'firmedIds follows the restored mirror');
-  const snapFirmed = UndoStack.snapshotTasks(['uf1']);
-  Store.setFirmed(['uf1'], true, 'table');
-  Store.setFirmed(['uf1'], false, 'table');
-  Store.updateTask('uf1', { firmed: true }, 'undo');
+test('G1: undo (restoreTasks) never changes a manual firm; firm moves only via setFirmed/replaceFirmedIds', () => {
+  Store.setTasks([{ id: 'uf1', RUN_TIME: 1, firmed: false }], 'unit-test');
+  const snap = UndoStack.snapshotTasks(['uf1']);        // drag-undo snapshot taken while unfirmed
+  Store.setFirmed(['uf1'], true, 'table');              // planner firms afterwards
+  UndoStack.restoreTasks(snap);                         // Ctrl+Z of the earlier drag
+  assert.equal(Store.tasks.uf1.firmed, true, 'undo must not silently unfirm');
   assert.ok(Store.firmedIds.has('uf1'));
-  UndoStack.restoreTasks(snapFirmed);
-  assert.ok(!Store.firmedIds.has('uf1'));
+  // The reverse: a snapshot taken while firmed must not re-firm an order unfirmed since.
+  Store.setTasks([{ id: 'uf2', RUN_TIME: 1, firmed: true }], 'unit-test');
+  const snap2 = UndoStack.snapshotTasks(['uf2']);
+  Store.setFirmed(['uf2'], false, 'table');
+  UndoStack.restoreTasks(snap2);
+  assert.equal(Store.tasks.uf2.firmed, false);
+  assert.ok(!Store.firmedIds.has('uf2'));
 });

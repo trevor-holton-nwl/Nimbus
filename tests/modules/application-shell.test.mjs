@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { App, PlantSelector, EmptyState, SessionUIAdapter, showLoginScreen, Settings } from '../../frontend/shell/application-shell.mjs';
 import { Util, Config, Toast } from '../../frontend/platform/foundation.mjs';
-import { Store } from '../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../frontend/platform/store.mjs';
 import { Sandbox } from '../../frontend/optimization/sandbox.mjs';
 import { Persistence } from '../../frontend/scheduling/persistence.mjs';
 import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
@@ -233,6 +233,27 @@ test('a firm toggle dirties just that task and saveAll sends FIRMED without goin
     assert.equal(calls[0].tasks[0].FIRMED, true);
     assert.equal(calls[0].tasks[0].force, !Config.CONCURRENCY_CHECK);
     assert.equal(Persistence._dirtyIds.size, 0, 'a persisted firm clears its dirty flag');
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('G1: drag, firm, then undo the drag keeps the firm and the save payload sends FIRMED:true (never false)', () => withDirtyTracking(async () => {
+  Store.setTasks([firmTask('un-a')], 'unit-test');
+  const snap = UndoStack.snapshotTasks(['un-a']);
+  Store.updateTask('un-a', { start_date: new Date('2026-09-09T10:00:00'), end_date: new Date('2026-09-09T11:00:00') }, 'interaction');
+  Store.setFirmed(['un-a'], true, 'interaction');
+  UndoStack.restoreTasks(snap);
+  assert.equal(Store.isFirmed('un-a'), true);
+  assert.equal(Store.tasks['un-a'].firmed, true);
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'un-a': 4 } }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls[0].tasks[0].FIRMED, true, 'the firm is sent as the planner left it');
   } finally { globalThis.fetch = originalFetch; }
 }));
 

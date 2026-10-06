@@ -1005,7 +1005,13 @@ export const UndoStack = {
   restoreTasks(snapshot: NimbusTask[]): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
-    const patches = snapshot.map(s => ({ id: s.id, changes: { ...s, planning_reason: s.planning_reason ?? null, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } }));
+    // `firmed` is deliberately NOT restored: the manual firm is a separate planner edit that
+    // only setFirmed/replaceFirmedIds may change (they mark it firm-dirty). Restoring it here
+    // flipped a firm without a marker, so the save sent no FIRMED and the UI diverged from the server.
+    const patches = snapshot.map(s => {
+      const { firmed: _firmed, ...rest } = s;
+      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
+    });
     Store.updateMany(patches, 'undo');
   },
 };
