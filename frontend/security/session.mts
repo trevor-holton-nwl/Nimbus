@@ -244,8 +244,12 @@ export const Session = (() => {
   // no event emit, no reload — the boot gate calls this once, synchronously,
   // before _domReadyGate falls through to the same showLoginScreen() path an
   // ordinary "not logged in" state already uses.
+  // An expired login also wipes the local planner data exactly like Sign out does, but WITHOUT
+  // the unsaved-work confirm (owner ruling 2026-10-06: the expired session's unsaved work is
+  // discarded). Theme/locale are kept. Runs pre-boot (app.js gate), so no autosave/cache writer exists yet to cancel.
   function clearExpired(): void {
     localStorage.removeItem(KEY);
+    clearLocalPlannerData();
   }
 
   // Reconcile the role cached at login (which the admin UI gates on) against the
