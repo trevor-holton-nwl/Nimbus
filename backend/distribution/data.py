@@ -561,7 +561,8 @@ def _load_material_attrs(cur, keys: set[tuple[str, str]]) -> dict:
 def _load_anchor_sources(cur, ids: list[str]) -> dict:
     """For every id that CURRENTLY exists as an `orders` row, capture the
     §5.2 anchor -- COALESCE(first segment start, scheduled_start) -- plus
-    notes/planning_status/planning_reason, carried onto new lettered children
+    notes/planning_status/planning_reason and the manual firm (the firm
+    follows the slot), carried onto new lettered children
     on a 1->N transition (a plain order arrived before its work center was
     configured as `distribute`). Only ids that actually exist come back."""
     if not ids:
@@ -575,7 +576,7 @@ def _load_anchor_sources(cur, ids: list[str]) -> dict:
                      WHERE s.order_id = o.id),
                    o.scheduled_start
                ) AS anchor,
-               o.notes, o.planning_status, o.planning_reason
+               o.notes, o.planning_status, o.planning_reason, o.manual_firmed
           FROM orders o
          WHERE o.id = ANY(%s)
         """,
@@ -583,8 +584,8 @@ def _load_anchor_sources(cur, ids: list[str]) -> dict:
     )
     return {
         oid: {"anchor": anchor, "notes": notes, "planning_status": planning_status,
-              "planning_reason": planning_reason}
-        for oid, anchor, notes, planning_status, planning_reason in cur.fetchall()
+              "planning_reason": planning_reason, "manual_firmed": bool(manual_firmed)}
+        for oid, anchor, notes, planning_status, planning_reason, manual_firmed in cur.fetchall()
     }
 
 
@@ -1420,15 +1421,17 @@ def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> Non
         UPDATE orders
            SET scheduled_start = %(start)s, scheduled_end = %(end)s,
                notes = %(notes)s, planning_status = 'scheduled',
-               planning_reason = NULL, updated_at = NOW()
+               planning_reason = NULL, manual_firmed = %(firmed)s, updated_at = NOW()
          WHERE id = %(id)s
            AND (scheduled_start IS DISTINCT FROM %(start)s
              OR scheduled_end IS DISTINCT FROM %(end)s
              OR notes IS DISTINCT FROM %(notes)s
              OR planning_status IS DISTINCT FROM 'scheduled'
-             OR planning_reason IS NOT NULL)
+             OR planning_reason IS NOT NULL
+             OR manual_firmed IS DISTINCT FROM %(firmed)s)
         """,
-        {"start": start, "end": end, "notes": anchor.get("notes"), "id": child_id},
+        {"start": start, "end": end, "notes": anchor.get("notes"), "id": child_id,
+         "firmed": bool(anchor.get("manual_firmed"))},
     )
 
 
@@ -2785,7 +2788,7 @@ def _compute_reweight_anchor(cur, plant: str, order: str, material: str, fallbac
 def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
     """SS5.5 bullet 6, the N->1 collapse: when the surviving 100 % machine
     already had a living child, copy that child's `scheduled_*`, `notes`,
-    `planning_status`/`planning_reason` and re-point its
+    `planning_status`/`planning_reason`, `manual_firmed` and re-point its
     `order_schedule_segments` rows onto the NEW bare id BEFORE the old
     lettered child is deleted -- schedule-preserving collapse. Must run
     AFTER the new bare row has been upserted (so it exists as an UPDATE
@@ -2799,6 +2802,8 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
                notes           = old_o.notes,
                planning_status = old_o.planning_status,
                planning_reason = old_o.planning_reason,
+               -- the slot is carried, so the manual firm follows it
+               manual_firmed   = old_o.manual_firmed,
                production_version = old_o.production_version,
                prt_01          = old_o.prt_01,
                prt_02          = old_o.prt_02,

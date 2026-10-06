@@ -1285,8 +1285,8 @@ class TestPlanApplyAnchorCarry:
             # carries a note.
             cur.execute(
                 "INSERT INTO orders (id, production_order, material_number, machine, plant, "
-                "basic_start_date, basic_finish_date, scheduled_start, scheduled_end, notes, run_time) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "basic_start_date, basic_finish_date, scheduled_start, scheduled_end, notes, run_time,"
+                " manual_firmed) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)",
                 (self.plain_id, self.ORD, self.MAT, self.WC, self.PLANT,
                  dt.datetime(2026, 10, 1, 0, 0), dt.datetime(2026, 10, 2, 0, 0),
                  self.anchor_start, self.anchor_start + dt.timedelta(hours=10),
@@ -1337,6 +1337,9 @@ class TestPlanApplyAnchorCarry:
         for child in children:
             assert child["scheduled_start"] == self.anchor_start
             assert child["notes"] == "Planner note"
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT manual_firmed FROM orders WHERE parent_production_order = %s", (self.ORD,))
+            assert [r[0] for r in cur.fetchall()] == [True, True], "the slot is carried, so the firm follows it"
 
         # The old plain id must be gone.
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -3004,7 +3007,8 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
         sched_end = dt.datetime(2026, 10, 1, 12, 0)
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE orders SET scheduled_start = %s, scheduled_end = %s, notes = %s WHERE id = %s",
+                "UPDATE orders SET scheduled_start = %s, scheduled_end = %s, notes = %s, manual_firmed = TRUE"
+                " WHERE id = %s",
                 (sched_start, sched_end, "keep me", old_child_id),
             )
             cur.execute(
@@ -3027,7 +3031,8 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
 
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT scheduled_start, scheduled_end, notes FROM orders WHERE id = %s", (new_bare_id,),
+                "SELECT scheduled_start, scheduled_end, notes, manual_firmed FROM orders WHERE id = %s",
+                (new_bare_id,),
             )
             new_row = cur.fetchone()
             cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (old_child_id,))
@@ -3041,6 +3046,7 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
         assert new_row is not None, "the surviving 100% machine's bare id must exist"
         assert new_row[0] == sched_start and new_row[1] == sched_end
         assert new_row[2] == "keep me"
+        assert new_row[3] is True, "the slot is carried, so the manual firm must follow it"
         assert segment_owner is not None and segment_owner[0] == new_bare_id, \
             "the segment must be re-pointed onto the new bare id, not cascade-deleted"
 
@@ -4550,12 +4556,18 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         assert next(w for w in res["warnings"] if w.get("category") == "sap_changed")["count"] == 2
 
     def test_ingest_vs_save_vs_apply_lock_order_never_deadlocks(self, pg):
+        """Stepped: a writer that locks in id order (what a /tasks save does) holds the
+        EARLIER child and pauses while the ingest chunk is blocked on it, then takes the
+        LATER child. That only works when the chunk lock is id-ordered: a chunk that locked
+        the later child first would hold it while waiting for the earlier one, and the
+        two would deadlock (PostgreSQL aborts one of them with DeadlockDetected)."""
         import threading
         self._upload(pg, [self._parent(self.MAT)])
         self._place_and_firm(pg)
         kids = self._state(pg, self.MAT)
-        ids = [k[0] for k in kids]
-        vers = {k[0]: k[3] for k in kids}
+        ids = sorted(k[0] for k in kids)
+        first, last = ids[0], ids[-1]
+        assert first < last
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("UPDATE orders SET sap_basic_start_date = sap_basic_start_date - interval '1 day'"
                         " WHERE id = ANY(%s)", (ids,))
@@ -4568,35 +4580,29 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
             except Exception as exc:  # noqa: BLE001
                 res[name] = exc
 
-        def save():
-            t0 = self.base + dt.timedelta(days=5)
-            return pg.update_task_dates_bulk(
-                [{"id": i, "start": t0, "end": t0 + dt.timedelta(hours=3), "base_version": vers[i]}
-                 for i in ids])
-
-        # A third writer holds the LATER child; ingest (id-ordered lock) takes the earlier one
-        # and waits, the save then queues behind the ingest -- nobody may deadlock.
         holder = pg._pool.connection()
         hconn = holder.__enter__()
         hcur = hconn.cursor()
-        hcur.execute("SELECT id FROM orders WHERE id = %s FOR UPDATE", (max(ids),))
+        hcur.execute("SELECT id FROM orders WHERE id = %s FOR UPDATE", (first,))
         try:
             with mock.patch.object(pg, "_UPSERT_CHUNK", 1):
                 ti = threading.Thread(target=run, daemon=True, args=(
                     "ingest", lambda: self._upload(pg, [self._parent(self.MAT)])))
                 ti.start()
-                assert _wait_for_lock_wait(pg, 10.0), "ingest never blocked on the held row"
-                ts = threading.Thread(target=run, args=("save", save), daemon=True)
-                ts.start()
-                _wait_for_lock_wait(pg, 2.0)
+                assert _wait_for_lock_wait(pg, 10.0), "ingest never blocked on the held earlier row"
+                try:
+                    # the save-like writer's second lock: must not collide with the ingest
+                    hcur.execute("SELECT id FROM orders WHERE id = %s FOR UPDATE", (last,))
+                    res["holder"] = "ok"
+                except Exception as exc:  # noqa: BLE001
+                    res["holder"] = exc
                 hconn.rollback()
                 ti.join(40)
-                ts.join(40)
         finally:
             hconn.rollback()
             holder.__exit__(None, None, None)
-        assert not ti.is_alive() and not ts.is_alive()
-        for name in ("ingest", "save"):
+        assert not ti.is_alive()
+        for name in ("holder", "ingest"):
             assert not isinstance(res[name], Exception), f"{name} raised {res[name]!r}"
         assert res["ingest"]["unchanged"] == 0
 
