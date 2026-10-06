@@ -67,7 +67,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.frozen_schedule':             'Schedule frozen — all orders firmed and snapshot saved',
   'toast.firmed_orders':               'Firmed {{count}} orders',
   'toast.unfirmed_orders':             'Unfirmed {{count}} orders',
-  'toast.still_firmed':                'Order remains firmed (SAP or frozen horizon).',
+  'toast.still_firmed':                'Order remains firmed (frozen horizon, running or manual).',
   'toast.pushed_orders':               'Pushed {{count}} orders +1h',
   'toast.unscheduled_bulk':            'Unscheduled {{count}} orders',
   'toast.order_moved':                 'Moved "{{name}}" to {{date}}',

@@ -66,7 +66,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.frozen_schedule':             'Plan eingefroren — alle Aufträge festgeschrieben und Momentaufnahme gespeichert',
   'toast.firmed_orders':               '{{count}} Aufträge festgeschrieben',
   'toast.unfirmed_orders':             '{{count}} Aufträge freigegeben',
-  'toast.still_firmed':                'Auftrag bleibt festgeschrieben (SAP oder Sperrfenster).',
+  'toast.still_firmed':                'Auftrag bleibt festgeschrieben (eingefrorener Horizont, laufend oder manuell).',
   'toast.pushed_orders':               '{{count}} Aufträge um +1h verschoben',
   'toast.unscheduled_bulk':            '{{count}} Aufträge abgeplant',
   'toast.order_moved':                 '"{{name}}" verschoben nach {{date}}',

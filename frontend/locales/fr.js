@@ -66,7 +66,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.frozen_schedule':             'Programme gelé — tous les ordres fermes et instantané enregistré',
   'toast.firmed_orders':               '{{count}} ordres passés en ferme',
   'toast.unfirmed_orders':             '{{count}} ordres libérés',
-  'toast.still_firmed':                'La commande reste ferme (SAP ou fenêtre gelée).',
+  'toast.still_firmed':                'La commande reste ferme (horizon gelé, en cours ou manuel).',
   'toast.pushed_orders':               '{{count}} ordres décalés +1h',
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé à {{date}}',

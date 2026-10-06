@@ -66,7 +66,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.frozen_schedule':             'Programação congelada — todas as ordens firmadas e instantâneo salvo',
   'toast.firmed_orders':               '{{count}} ordens firmadas',
   'toast.unfirmed_orders':             '{{count}} ordens liberadas',
-  'toast.still_firmed':                'O pedido permanece firmado (SAP ou janela congelada).',
+  'toast.still_firmed':                'O pedido permanece firmado (horizonte congelado, em execução ou manual).',
   'toast.pushed_orders':               '{{count}} ordens avançadas +1h',
   'toast.unscheduled_bulk':            '{{count}} ordens desagendadas',
   'toast.order_moved':                 '"{{name}}" movida para {{date}}',

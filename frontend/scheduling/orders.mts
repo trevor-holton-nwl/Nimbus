@@ -468,7 +468,7 @@ export const Table = {
         },
         {
           headerName: Util.t('col.firmed'), colId: 'firmed',
-          // Union value (SAP OR frozen-horizon OR manual), not the raw manual
+          // Union value (frozen-horizon OR running OR manual), not the raw manual
           // `fixed` field — see Engine.firmingStatus.
           valueGetter: (p: { data: NimbusTask }) => Engine.firmingStatus(p.data).firmed,
           width: 60, minWidth: 60, maxWidth: 60, flex: 0,
@@ -1875,7 +1875,7 @@ export const Table = {
 type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 /** P2: after clearing the MANUAL firm layer, tell the planner if the order is
- *  still firmed via the union (SAP flag or frozen horizon) — otherwise
+ *  still firmed via the union (frozen horizon or running; SAP's flag never locks) — otherwise
  *  "Unfirm" silently no-ops from the planner's point of view. Called from
  *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
 export function notifyResidualFirming(ids: string[]): void {
@@ -2137,7 +2137,7 @@ export const Inspector = {
     Inspector._destroyStartPicker();
     body.innerHTML = `
       ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}${firmStatus.reasons.includes('running') ? `<div>${Util.t('ui.firm_reason_running')}</div>` : ''}</div>` : ''}
-      ${sapFirmed ? `<div class="insp-sap-firm-info" style="font-size:12px;color:var(--text-muted);margin:0 0 8px;">${Util.t('ui.sap_firm_marker')}</div>` : ''}
+      ${sapFirmed ? `<div class="insp-sap-firm-info">${Util.t('ui.sap_firm_marker')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
         ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(a.msg)}</div>`).join('')}
