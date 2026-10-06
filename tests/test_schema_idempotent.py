@@ -170,6 +170,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-25-orders-run-time-bounds.sql",
         "2026-09-26-orders-run-time-bounds-validate.sql",
         "2026-10-01-order-distribution-plant-start-index.sql",
+        "2026-10-06-sap-truth-firming.sql",
     }
     all_names = {
         os.path.basename(path)
@@ -583,3 +584,24 @@ class TestHorizonMigrationIdempotent:
             conn.commit()
             cur.execute("SELECT 1 FROM schema_migrations WHERE id = 'plants_horizon_minutes'")
             assert cur.fetchone() is not None
+
+
+SAP_TRUTH_COLUMN_STATEMENTS = (
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_firmed BOOLEAN NOT NULL DEFAULT FALSE;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_workcenter TEXT;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_production_version TEXT;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_start_date TIMESTAMP;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_finish_date TIMESTAMP;",
+)
+
+
+def test_sap_truth_columns_in_schema_and_migration():
+    """SAP-is-truth firming: five additive orders columns must exist in both
+    schema.sql and the dated migration deploys actually apply."""
+    migration_path = os.path.join(ROOT, "migrations", "2026-10-06-sap-truth-firming.sql")
+    with open(migration_path, encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    for stmt in SAP_TRUTH_COLUMN_STATEMENTS:
+        assert stmt in schema_text, stmt
+        assert stmt in migration_text, stmt
