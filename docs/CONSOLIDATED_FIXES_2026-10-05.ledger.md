@@ -232,3 +232,47 @@ Task 5 performance note: both before/after optimizer runs were deadline-bound at
 - pytest on fresh `nimbus_final_sap` (this worktree's schema.sql, ON_ERROR_STOP=1, 127.0.0.1:55441): first run 1045 passed, 1 skipped, 1 failed (`test_refresh_returns_all_writable_attributes_with_version` - its fake row lacked the `manual_firmed` column Task 4 added to `get_task_versions`); fixed in a19f9c7 (fake row + `firmed` assertion); rerun 1046 passed, 1 skipped (pre-existing #203), 0 failed. Baseline was 990 / 1.
 - Migration replay: DB from main's schema.sql (bcecc7a), then 34 top-level `migrations/*.sql` in name order, twice: pass 1 0 failures, pass 2 0 failures.
 - NUL scan of 59 files changed since bcecc7a: 0 NUL bytes added.
+
+### Senior audit round (2026-10-06)
+
+Branches fix/sap-audit-be and fix/sap-audit-fe, both forked from b8a779f and merged into this branch with no conflicts.
+
+**Fixed (back end)**
+- A running order is never put on hold by the routing switch-on; it keeps its slot and is reported in the upload warnings.
+- Putting an order on hold now also clears its manual firm and its bars, so a held order cannot stay firmed.
+- Changing only the run time in the upload file no longer counts as an SAP change, so it no longer resets a planned slot.
+- When a split order collapses to one order, or one order becomes several, the manual firm is carried over.
+- The re-upload read of distribution children now uses an index instead of scanning the whole order table (about 2.5 times faster on 100k orders).
+- A planner's machine move, even to another work center, survives SAP writes while SAP's work center is unchanged and the machine still exists in the plant; a deleted machine or a plant change falls back to SAP's default.
+- A re-weight of child shares no longer looks like an SAP quantity change; only a change to the parent's quantity does.
+- Re-uploading fills in missing master-data attributes (color, tooling, default production version) on existing orders.
+- Dates sent as text or with a time zone are normalised before comparison; unreadable dates are counted and reported as an upload warning.
+- A planning-exception hold is no longer cleared by an unrelated SAP change when the order is already waiting for planning.
+- Running-order warning now counts only orders that actually hold a slot.
+- Tests tightened (hold, firm and lock-order cases); routing, integration and distribution docs updated.
+
+**Fixed (front end)**
+- Undo of a drag no longer restores an old firm state, so a firm toggled after the drag is not silently reverted.
+- An expired login now clears local planner data like Sign out.
+- The running-order lock label now reads "protected from Optimize and auto-fixes" (five languages).
+- Firm-changed markers are proven to clear after a save, after a refresh, and after discarding a What-If.
+- The 30-second lock-band scan now includes running orders, consistent with the baseline taken on rebuild.
+- Applying an Optimize preview drops any running order from the batch and tells the planner how many were skipped (Remove Backlog is exempt).
+- Optimization and security docs updated.
+
+**Owner rulings**
+- A hand-keyed run time is KEPT when routing is switched on for a plant; it lasts until SAP sends a different value.
+- An expired login clears local data exactly like Sign out, with no confirmation.
+- Running orders stay manually draggable; the label now says they are protected from Optimize and auto-fixes.
+
+**Accepted Low residuals**
+- Back end (fix-be-rereview): a row that begins to qualify for a hold between the lock and the write is locked outside the id-ordered lock (needs a concurrent writer inside one statement gap); an already-held row with no slot and stray bars is no longer cleaned (invisible, no known producer); when the parent's previous quantity is unknown, children are judged by their own share, so a re-weight racing an upload could read as a quantity change; an unreadable date can be counted twice in the warning for sync rows.
+- Front end (fix-fe-review): the Optimize-apply toast test checks the message loosely and no test asserts Remove Backlog keeps its patches; the expired-login start-up wiring is untested (one line); the 30-second scan loop itself is not exercised, only its helper; a date edit plus firm no longer reverts the firm on date undo (intended by the undo fix).
+
+**Gates (integration HEAD)**
+- build, typecheck, lint (0 errors, 35 warnings), static assets, legacy surface: pass.
+- `npm test`: legacy 40/40, modules 1072/1072; same with TZ=America/New_York.
+- `ruff check .`: pass.
+- pytest on fresh DB: 1070 passed, 1 skipped (pre-existing #203).
+- API types regenerated: no diff. Migration replay (34 files onto main's schema, twice): 0 failures both passes.
+- NUL scan of the 30 files changed since b8a779f: 0 NUL bytes.
