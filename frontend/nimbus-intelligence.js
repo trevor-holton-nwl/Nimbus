@@ -41,11 +41,13 @@
   // H3f: command-palette actions used to push an empty undo, so Ctrl+Z reverted an
   // UNRELATED earlier edit. Snapshot the affected tasks (and which of them were firmed —
   // firmedIds is a separate set that restoreTasks does not rebuild) before mutating.
-  function _pushTaskUndo(label, ids) {
-    const snap = UndoStack.snapshotTasks(ids);
+  // `firmOnly`: a pure Firm/Unfirm change restores only the firm membership. Restoring whole task
+  // snapshots would emit an 'undo' bulk update, which is an atomic-optimizer marker for Save.
+  function _pushTaskUndo(label, ids, firmOnly = false) {
+    const snap = firmOnly ? null : UndoStack.snapshotTasks(ids);
     const wasFirmed = new Set(ids.filter(id => Store.isFirmed(id)).map(String));
     UndoStack.push(label, () => {
-      UndoStack.restoreTasks(snap);
+      if (snap) UndoStack.restoreTasks(snap);
       const live = ids.filter(id => Store.tasks[id]);
       const on  = live.filter(id => wasFirmed.has(String(id)));
       const off = live.filter(id => !wasFirmed.has(String(id)));
@@ -751,7 +753,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             const unfirmedIds = Store.tasksArr.filter(t => !Store.isFirmed(t.id)).map(t => t.id);
             if (unfirmedIds.length) {
-              _pushTaskUndo('Firm All (freeze)', unfirmedIds);
+              // A firm is shared with every planner once saved, so a bulk Firm All asks first.
+              // Native confirm on purpose: Modal.confirm would add a NIMBUS.Modal consumer to this
+              // classic script, and the legacy-surface ratchet only allows that surface to shrink.
+              if (!window.confirm(t('confirm.firm_all', { count: unfirmedIds.length }))) return;
+              _pushTaskUndo('Firm All (freeze)', unfirmedIds, true);
               Store.setFirmed(unfirmedIds, true, 'cmd-palette');
             }
             Alerts.scheduleRecompute();
@@ -1207,7 +1213,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           const newFirmed = !allFirmed;
           const validIds = ids.filter(id => Store.tasks[id]);
           if (validIds.length) {
-            _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, validIds);
+            _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, validIds, true);
             Store.setFirmed(validIds, newFirmed, 'cmd-palette');
           }
           Alerts.scheduleRecompute();

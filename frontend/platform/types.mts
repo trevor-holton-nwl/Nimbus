@@ -563,7 +563,9 @@ export interface StoredState {
   tasks: Array<Record<string, unknown>>;
   blocks: NimbusBlock[];
   calendars: Record<string, { workHours: WorkHours }>;
-  firmedIds: string[];
+  /** Legacy: never written and ignored on read. Manual firm is server state (`task.firmed`);
+   *  firms found in an old cache are dropped ("start fresh"). */
+  firmedIds?: string[];
   plants: Record<string, { workHours: WorkHours }>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;

@@ -1312,3 +1312,60 @@ test('Persistence.load (non-reload) with a failed server load falls back to the 
     globalThis.localStorage.removeItem(Config.LS_KEY);
   });
 });
+
+// ---- Task 6: manual firm is server state (the dirty-tracking half lives in tests/modules/application-shell.test.mjs) ----
+const firmTask = (id, extra = {}) => ({ id, MACHINE: 'L1', RUN_TIME: 1, row_version: 3,
+  start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00'), ...extra });
+
+test('refresh copy-back updates both t.firmed and firmedIds from the server row', async () => {
+  Store.setTasks([firmTask('rf-a', { firmed: true }), firmTask('rf-b')], 'unit-test');
+  assert.ok(Store.firmedIds.has('rf-a'));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ missing: [], data: [
+    { id: 'rf-a', MACHINE: 'L1', row_version: 9, firmed: false, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00', original_start_date: '2026-09-09T08:00:00' },
+    { id: 'rf-b', MACHINE: 'L1', row_version: 9, firmed: true, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00', original_start_date: '2026-09-09T08:00:00' },
+  ] }) });
+  try {
+    Persistence._refreshTasks(['rf-a', 'rf-b']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['rf-a'].firmed, false);
+    assert.equal(Store.tasks['rf-b'].firmed, true);
+    assert.deepEqual([...Store.firmedIds].sort(), ['rf-b']);
+  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); }
+});
+
+test('a cache holding firmedIds / fixedIds / tasks[].firmed restores no firms, but cached date edits still restore', () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  const cached = firmTask('old-firm', { firmed: true });
+  Store.setTasks([cached], 'unit-test');
+  Persistence._dirtyIds.add('old-firm');
+  Persistence._saveCache();
+  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
+  parsed.firmedIds = ['old-firm', 'ghost'];
+  parsed.fixedIds = ['old-firm'];
+  parsed.tasks[0].firmed = true;
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify(parsed));
+  Store.setTasks([], 'unit-test');
+  Store.firmedIds.add('leftover');
+  assert.equal(Persistence._loadCache(), true);
+  assert.equal(Store.firmedIds.size, 0, 'no firm is revived from the browser cache');
+  assert.equal(Store.tasks['old-firm'].firmed, false);
+  assert.ok(Persistence._dirtyIds.has('old-firm'), 'cached edits still restore');
+  assert.equal(Store.tasks['old-firm'].start_date.getTime(), new Date('2026-09-09T08:00:00').getTime());
+
+  // The backend-load path restores non-task state only: same rule.
+  Persistence._restoreNonTaskState({ firmedIds: ['old-firm'], fixedIds: ['old-firm'] });
+  assert.equal(Store.firmedIds.size, 0);
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  globalThis.localStorage.removeItem(Config.LS_KEY);
+});
+
+test('_saveCache never writes firmedIds or per-task firmed', () => {
+  Store.setTasks([firmTask('wr-a', { firmed: true })], 'unit-test');
+  Persistence._saveCache();
+  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
+  assert.ok(!('firmedIds' in parsed));
+  assert.ok(parsed.tasks.every(t => !('firmed' in t)));
+  assert.equal(Store.tasks['wr-a'].firmed, true, 'the live task keeps its mirror');
+  globalThis.localStorage.removeItem(Config.LS_KEY);
+});

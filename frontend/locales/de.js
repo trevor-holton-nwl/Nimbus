@@ -67,6 +67,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.firmed_orders':               '{{count}} Aufträge festgeschrieben',
   'toast.unfirmed_orders':             '{{count}} Aufträge freigegeben',
   'toast.still_firmed':                'Auftrag bleibt festgeschrieben (eingefrorener Horizont, laufend oder manuell).',
+  'toast.firm_needs_save': 'Die Festschreibung wird erst nach dem Speichern mit anderen Planern geteilt',
+  'confirm.firm_all': 'Alle {{count}} nicht festgeschriebenen Aufträge festschreiben? Die Festschreibung wird nach dem Speichern mit anderen Planern geteilt.',
   'toast.pushed_orders':               '{{count}} Aufträge um +1h verschoben',
   'toast.unscheduled_bulk':            '{{count}} Aufträge abgeplant',
   'toast.order_moved':                 '"{{name}}" verschoben nach {{date}}',

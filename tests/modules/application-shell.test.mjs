@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { App, PlantSelector, EmptyState, SessionUIAdapter, showLoginScreen, Settings } from '../../frontend/shell/application-shell.mjs';
-import { Util } from '../../frontend/platform/foundation.mjs';
+import { Util, Config, Toast } from '../../frontend/platform/foundation.mjs';
+import { Store } from '../../frontend/platform/store.mjs';
+import { Sandbox } from '../../frontend/optimization/sandbox.mjs';
 import { Persistence } from '../../frontend/scheduling/persistence.mjs';
 import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
 
@@ -187,5 +189,130 @@ test("App.goto deactivates the Distribution pane when leaving gantt entirely whi
     globalThis.document = priorDocument;
     App._ganttSub = priorSub;
     App._currentTab = priorCurrentTab;
+  }
+});
+
+// ---- Task 6: manual firm round-trips through the explicit Save (Task 6) ----
+globalThis.window = globalThis.window || {};
+async function withDirtyTracking(body) {
+  const off = Store.subscribe(evt => App._trackDirty(evt), 'test.dirty');
+  const priorHint = App._firmHintShown;
+  App._firmHintShown = true;               // keep the first-toggle toast out of unrelated assertions
+  const priorToast = Toast.show;
+  Toast.show = () => {};
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  const finish = () => {
+    off(); Toast.show = priorToast; App._firmHintShown = priorHint;
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  };
+  try {
+    await body({ App, Sandbox });
+  } finally { finish(); }
+}
+const firmTask = (id, extra = {}) => ({ id, MACHINE: 'L1', RUN_TIME: 1, row_version: 3,
+  start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T09:00:00'), ...extra });
+
+test('a firm toggle dirties just that task and saveAll sends FIRMED without going atomic or forced', () => withDirtyTracking(async () => {
+  Store.setTasks([firmTask('fm-a'), firmTask('fm-b')], 'unit-test');
+  Store.setFirmed(['fm-a'], true, 'table');
+  assert.deepEqual([...Persistence._dirtyIds], ['fm-a']);
+  assert.equal(Persistence._forceIds.size, 0, 'a firm-only row is never an optimizer (atomic) row');
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'fm-a': 4 } }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].atomic_optimizer, false);
+    assert.equal(calls[0].tasks.length, 1);
+    assert.equal(calls[0].tasks[0].id, 'fm-a');
+    assert.equal(calls[0].tasks[0].FIRMED, true);
+    assert.equal(calls[0].tasks[0].force, !Config.CONCURRENCY_CHECK);
+    assert.equal(Persistence._dirtyIds.size, 0, 'a persisted firm clears its dirty flag');
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('a date-only edit does not send FIRMED (a stale local copy must never overwrite another planner firm)', () => withDirtyTracking(async () => {
+  Store.setTasks([firmTask('fm-date', { firmed: true })], 'unit-test');
+  Store.updateTask('fm-date', { start_date: new Date('2026-09-09T10:00:00'), end_date: new Date('2026-09-09T11:00:00') }, 'table');
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'fm-date': 4 } }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(!('FIRMED' in calls[0].tasks[0]));
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('firmed:change from sandbox or refresh never dirties; What-If apply leaves the dirty set unchanged', () => withDirtyTracking(({ App, Sandbox }) => {
+  Store.setTasks([firmTask('wi-a', { firmed: true }), firmTask('wi-b')], 'unit-test');
+  App._trackDirty({ type: 'firmed:change', ids: ['wi-a', 'wi-b'], source: 'sandbox', revision: 1, mode: 'live' });
+  App._trackDirty({ type: 'firmed:change', ids: ['wi-a'], source: 'refresh', revision: 2, mode: 'live' });
+  assert.equal(Persistence._dirtyIds.size, 0);
+
+  Store.setFirmed(['wi-b'], true, 'table');                 // one genuine planner firm
+  assert.deepEqual([...Persistence._dirtyIds], ['wi-b']);
+  Sandbox.enter('unit-test');
+  Sandbox.exit(true, 'unit-test');                          // apply: promotes, emits no firm events
+  assert.deepEqual([...Persistence._dirtyIds], ['wi-b'], 'apply must not mass-dirty firms');
+  assert.equal(Persistence._forceIds.size, 0);
+
+  // Discard replays the snapshot through replaceFirmedIds('sandbox'): no dirtying even for changed ids.
+  Persistence._dirtyIds.clear();
+  Sandbox.enter('unit-test');
+  Store.setFirmed(['wi-a'], false, 'table');
+  Persistence._dirtyIds.clear();
+  Store.replaceFirmedIds(new Set(['wi-a']), 'sandbox');
+  assert.equal(Persistence._dirtyIds.size, 0, 'a sandbox-sourced firm replacement must not dirty');
+  Sandbox.exit(false, 'unit-test');
+}));
+
+test('a firm toggled while a save is in flight stays dirty (edit generation)', () => withDirtyTracking(async () => {
+  Store.setTasks([firmTask('fl-a')], 'unit-test');
+  Store.setFirmed(['fl-a'], true, 'table');
+  const originalFetch = globalThis.fetch;
+  let release;
+  globalThis.fetch = async () => { await new Promise(r => { release = r; });
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'fl-a': 4 } }) }; };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    Store.setFirmed(['fl-a'], false, 'table');              // toggled after the payload was captured
+    release();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.ok(Persistence._dirtyIds.has('fl-a'), 'the newer firm state was never sent, so it must stay dirty');
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('first firm toggle per session shows toast.firm_needs_save once', async () => {
+  const priorToast = Toast.show;
+  const priorHint = App._firmHintShown;
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.firm_needs_save': 'FIRM-HINT' } };
+  Store.setTasks([firmTask('t-1')], 'unit-test');
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  App._firmHintShown = false;
+  Persistence._dirtyIds.clear();
+  try {
+    App._trackDirty({ type: 'firmed:change', ids: ['t-1'], firmed: true, source: 'table', revision: 1, mode: 'live' });
+    App._trackDirty({ type: 'firmed:change', ids: ['t-1'], firmed: false, source: 'table', revision: 2, mode: 'live' });
+    assert.equal(toasts.filter(t => t.msg === 'FIRM-HINT').length, 1);
+    App._firmHintShown = false;
+    toasts.length = 0;
+    App._trackDirty({ type: 'firmed:change', ids: ['t-1'], source: 'sandbox', revision: 3, mode: 'live' });
+    assert.equal(toasts.length, 0, 'sandbox/refresh sourced events never toast');
+  } finally {
+    Toast.show = priorToast; App._firmHintShown = priorHint;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Persistence._dirtyIds.clear();
   }
 });

@@ -208,6 +208,10 @@ export const Persistence = {
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
   _conflictedIds: new Set<string>(),  // retained local edits cannot adopt a server version without reconciliation
+  // Ids whose manual firm the planner changed (Firm/Unfirm/undo). Only these rows send FIRMED:
+  // an ordinary date edit must not write this client's possibly stale firm copy back over
+  // another planner's firm. Never an optimizer (atomic) marker; see App._trackDirty.
+  _firmDirtyIds: new Set<string>(),
   async confirmPlantSwitch(plant: string | null): Promise<boolean> {
     if (plant === Store.selectedPlant || Persistence._dirtyIds.size === 0) return true;
     const discard = await Modal.confirm({
@@ -220,6 +224,7 @@ export const Persistence = {
     Persistence._dirtyIds.clear();
     Persistence._forceIds.clear();
     Persistence._conflictedIds.clear();
+    Persistence._firmDirtyIds.clear();
     // A later re-selection of the outgoing plant must fetch its saved state,
     // including when the user cleared the selector before re-selecting it.
     Persistence._currentLoadedPlant = null;
@@ -564,11 +569,6 @@ export const Persistence = {
         stats.dedup_collisions = setResult.collisions;
         stats.rendered = Store.tasksArr.length;
         Persistence._currentLoadedPlant = plant;
-
-        // Apply firmed flag to tasks restored from cache
-        for (const id of Store.firmedIds) {
-          const t = Store.tasks[id]; if (t) t.firmed = true;
-        }
 
         (payload.links || []).forEach(link => {
           (Store.dependencies[link.target] ||= []).push(link.source);
@@ -1209,6 +1209,7 @@ export const Persistence = {
 
     try {
       const tasks = data.tasks.map(Persistence._prepTask);
+      for (const t of tasks) (t as NimbusTask).firmed = false;  // cached firms are never restored
       // Stage 3 fix, same class as load()'s clear above: this path hydrates tasks and
       // emits 'schedule:hydrated' (so alerts + their auto-fix buttons render) but
       // NEVER calls loadPriorityRankMaps — it is the offline/backend-failed restore.
@@ -1253,9 +1254,6 @@ export const Persistence = {
         }
       }
       Persistence._syncUnsaved();
-      for (const id of Store.firmedIds) {
-        const t = Store.tasks[id]; if (t) t.firmed = true;
-      }
       for (const t of tasks) {
         Store.ensureCalendar(t.MACHINE || 'Unknown');
         Store.ensureLineSettings(t.MACHINE || 'Unknown');
@@ -1290,11 +1288,8 @@ export const Persistence = {
       for (const k of Object.keys(cal)) delete cal[k];
       Object.assign(cal, data.calendars);
     }
-    const _legacyIds = (data as any).firmedIds ?? (data as any).fixedIds;  // pre-rename caches used 'fixedIds'
-    if (Array.isArray(_legacyIds)) {
-      Store.firmedIds.clear();
-      for (const id of _legacyIds) Store.firmedIds.add(String(id));
-    }
+    // firmedIds / fixedIds / per-task firmed in an old cache are deliberately ignored: the manual
+    // firm is server state (task.firmed from GET /tasks), and browser-only firms are dropped.
     if (data.plants && Object.keys(data.plants).length) {
       const pl = Store.plants;
       for (const k of Object.keys(pl)) delete pl[k];
@@ -1396,6 +1391,8 @@ export const Persistence = {
    *  function guarantees the two snapshots are comparable. */
   _taskEditSnapshot(t: NimbusTask): Record<string, unknown> {
     return {
+      // Manual firm: sent only for rows whose firm the planner changed (see _firmDirtyIds).
+      ...(Persistence._firmDirtyIds.has(String(t.id)) ? { FIRMED: !!t.firmed } : {}),
       planning_status: t.planning_status ?? 'scheduled',
       planning_reason: t.planning_reason ?? null,
       start_date: t.start_date ? Util.toLocalSeconds(t.start_date) as NaiveLocalTs : null,
@@ -1593,6 +1590,7 @@ export const Persistence = {
           if (stillMatchesSent) {
             Persistence._dirtyIds.delete(id);
             Persistence._forceIds.delete(id);
+            Persistence._firmDirtyIds.delete(id);
           }
           // else: leave dirty — the next saveAll() will pick up the newer edit.
         }
@@ -1724,11 +1722,16 @@ export const Persistence = {
           tk.planning_reason = planning.planning_reason ?? null;
           tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
           tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
+          // The server's manual firm is authoritative; _normalizeDates re-syncs firmedIds from it.
+          // (TaskVersionRow.firmed is not in the generated types until the backend task regenerates them.)
+          const serverFirmed = (row as unknown as { firmed?: boolean }).firmed;
+          if (typeof serverFirmed === 'boolean') tk.firmed = serverFirmed;
           Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
           Persistence._forceIds.delete(String(row.id));
           Persistence._conflictedIds.delete(String(row.id));
+          Persistence._firmDirtyIds.delete(String(row.id));
           applied.push(String(row.id));
         }
         if (applied.length) {
@@ -1883,10 +1886,10 @@ export const Persistence = {
         _savedAt:       new Date().toISOString(),
         _optimizerDirtyIds: [...Persistence._forceIds].filter(id => Persistence._dirtyIds.has(id)),
         _dirtyIds:      [...Persistence._dirtyIds],
-        tasks:          Store.tasksArr,
+        // firm is server state: never cached (a cached copy could revive a stale firm).
+        tasks:          Store.tasksArr.map(({ firmed: _firmed, ...rest }) => rest as Record<string, unknown>),
         blocks:         Store.blocks,
         calendars:      Store.calendars,
-        firmedIds:      [...Store.firmedIds],
         plants:         Store.plants,
         plantBlocks:    Store.plantBlocks,
         lineSettings:   Store.lineSettings,
@@ -1925,7 +1928,6 @@ export const Persistence = {
       { ...baseMeta,
         selectedPlant: snapshot.selectedPlant,
         lineSettings:  snapshot.lineSettings,
-        firmedIds:     snapshot.firmedIds,
         tasks:         [] },
     ];
     for (let i = 0; i < tiers.length; i++) {
@@ -2007,7 +2009,7 @@ Store.subscribe(evt => {
   }
   if (evt.source === 'refresh') return;
   const ids = evt.type === 'task:update' ? [String(evt.id)]
-    : evt.type === 'tasks:bulkUpdate' ? (evt.ids as Array<string | number>).map(String) : [];
+    : (evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change') ? ((evt.ids ?? []) as Array<string | number>).map(String) : [];
   for (const id of ids) taskEditGenerations.set(id, (taskEditGenerations.get(id) ?? 0) + 1);
 }, 'Persistence.conflictGenerations');
 

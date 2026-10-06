@@ -67,6 +67,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.firmed_orders':               '{{count}} ordres passés en ferme',
   'toast.unfirmed_orders':             '{{count}} ordres libérés',
   'toast.still_firmed':                'La commande reste ferme (horizon gelé, en cours ou manuel).',
+  'toast.firm_needs_save': 'Le statut ferme n\'est partagé avec les autres planificateurs qu\'après l\'enregistrement',
+  'confirm.firm_all': 'Mettre en ferme les {{count}} commandes qui ne le sont pas encore ? Le statut ferme est partagé avec les autres planificateurs après l\'enregistrement.',
   'toast.pushed_orders':               '{{count}} ordres décalés +1h',
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé à {{date}}',

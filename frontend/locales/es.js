@@ -67,6 +67,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.firmed_orders':               '{{count}} pedidos puestos en firme',
   'toast.unfirmed_orders':             '{{count}} pedidos liberados de firme',
   'toast.still_firmed':                'El pedido sigue en firme (horizonte congelado, en curso o manual).',
+  'toast.firm_needs_save': 'El estado firme no se comparte con otros planificadores hasta que guarde',
+  'confirm.firm_all': '¿Poner en firme los {{count}} pedidos que aún no lo están? El estado firme se comparte con otros planificadores al guardar.',
   'toast.pushed_orders':               '{{count}} pedidos movidos +1h',
   'toast.unscheduled_bulk':            '{{count}} pedidos desplanificados',
   'toast.order_moved':                 'Movido "{{name}}" a {{date}}',
