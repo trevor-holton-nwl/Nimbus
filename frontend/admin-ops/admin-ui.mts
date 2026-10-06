@@ -311,6 +311,10 @@ interface AdminUploadWarning {
   msg?: string;
   status?: string;
   category?: string;
+  // Upload counts entry (category 'upload_counts')
+  inserted?: number;
+  updated?: number;
+  unchanged?: number;
   // Distribution warning fields
   parents_distributed?: number;
   children_upserted?: number;
@@ -337,6 +341,8 @@ interface AdminUploadResult {
   raw_row_count: number;
   inserted: number;
   updated: number;
+  /** Rows SAP sent nothing different for (skipped, nothing rewritten). */
+  unchanged?: number;
   warnings: AdminUploadWarning[];
   lines?: string[];
   error_code?: string;
@@ -1431,7 +1437,10 @@ export const AdminCockpit = {
         const w = warnCount ? ` (${warnCount} warning${warnCount === 1 ? '' : 's'})` : '';
         AdminCockpit._setStatus(
           status,
-          `✓ Inserted ${body.inserted}, updated ${body.updated} of ${body.raw_row_count} rows${w}`,
+          Util.t('toast.upload_summary', {
+            inserted: body.inserted, updated: body.updated,
+            unchanged: body.unchanged ?? 0, rows: body.raw_row_count,
+          }) + w,
           'success'
         );
 
@@ -1447,7 +1456,7 @@ export const AdminCockpit = {
         }
 
         ErrorLog.info('admin',
-          `Upload OK: inserted=${body.inserted} updated=${body.updated} batch=${body.batch_id}`, body);
+          `Upload OK: inserted=${body.inserted} updated=${body.updated} unchanged=${body.unchanged ?? 0} batch=${body.batch_id}`, body);
         if (warnCount) {
           ErrorLog.warn('admin', `Upload had ${warnCount} warning(s)`, body.warnings);
         }
@@ -2603,7 +2612,7 @@ export const AdminCockpit = {
         tbl.className = 'admin-audit-tbl';
         const thead = document.createElement('thead');
         const htr = document.createElement('tr');
-        for (const h of [Util.t('ui.audit_col_when'), Util.t('ui.audit_col_file'), Util.t('ui.audit_col_rows'), Util.t('ui.audit_col_inserted'), Util.t('ui.audit_col_updated'), Util.t('ui.audit_col_batch'), Util.t('ui.audit_col_warnings')]) {
+        for (const h of [Util.t('ui.audit_col_when'), Util.t('ui.audit_col_file'), Util.t('ui.audit_col_rows'), Util.t('ui.audit_col_inserted'), Util.t('ui.audit_col_updated'), Util.t('ui.audit_col_unchanged'), Util.t('ui.audit_col_batch'), Util.t('ui.audit_col_warnings')]) {
           const th = document.createElement('th');
           th.textContent = h;
           htr.appendChild(th);
@@ -2626,14 +2635,15 @@ export const AdminCockpit = {
             String(it.row_count ?? '—'),
             String(it.inserted ?? '—'),
             String(it.updated ?? '—'),
+            String(it.warnings?.find((x) => x.category === 'upload_counts')?.unchanged ?? '—'),
             batchShort,
             hasWarnings ? `⚠ ${it.warnings.length}` : '✓',
           ];
           cells.forEach((c, i) => {
             const td = document.createElement('td');
             td.textContent = c;
-            if (i === 6 && hasWarnings) td.style.color = 'var(--warn,#b57a0a)';
-            if (i === 5 && it.batch_id) td.title = it.batch_id;
+            if (i === 7 && hasWarnings) td.style.color = 'var(--warn,#b57a0a)';
+            if (i === 6 && it.batch_id) td.title = it.batch_id;
             tr.appendChild(td);
           });
 
@@ -2642,7 +2652,7 @@ export const AdminCockpit = {
             warnRow.className = 'admin-audit-warn-detail';
             warnRow.style.display = 'none';
             const td = document.createElement('td');
-            td.colSpan = 7;
+            td.colSpan = 8;
             td.style.padding = '0';
             const warnContainer = document.createElement('div');
             warnContainer.style.padding = '12px';

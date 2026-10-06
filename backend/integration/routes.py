@@ -73,11 +73,13 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
 
     _log_event("info", "upload", "Orders uploaded and ingested",
                filename=file.filename, inserted=result.get("inserted", 0),
-               updated=result.get("updated", 0), raw=result.get("raw_row_count", 0))
+               updated=result.get("updated", 0), unchanged=result.get("unchanged", 0),
+               raw=result.get("raw_row_count", 0))
     _set_admin_log_details(
         request, filename=file.filename or "upload.xlsx",
         rows_received=result.get("raw_row_count", 0), inserted=result.get("inserted", 0),
-        updated=result.get("updated", 0), warning_count=len(result.get("warnings") or []),
+        updated=result.get("updated", 0), unchanged=result.get("unchanged", 0),
+        warning_count=len(result.get("warnings") or []),
     )
     # Soft-warn on production lines not yet in master data (lines come from the
     # ingest result now, not a global frame). Never let this blow up the response.
