@@ -572,6 +572,7 @@ _ORDERS_SELECT = f"""
         form_size             AS "FORM_SIZE",
         notes                 AS "NOTES",
         firming_indicator     AS "FIRMING_INDICATOR",
+        manual_firmed         AS "FIRMED",
         planned_order_initial_quantity AS "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)",
         reduced_quantity                AS "REDUCED_QUANTITY_(GMEIN)",
         order_category                  AS "ORDER_CATEGORY",
@@ -844,7 +845,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                o.plant, o.planning_status, o.planning_reason,
                o.run_time_source, o.run_time_basis,
                o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time,
-               o.order_quantity, o.material_number, o.basic_start_date
+               o.order_quantity, o.material_number, o.basic_start_date, o.manual_firmed
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -873,6 +874,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "ORDER_QUANTITY_(GMEIN)": r[16],
             "MATERIAL_NUMBER": r[17],
             "original_start_date": r[18].strftime("%Y-%m-%dT%H:%M:%S") if r[18] else None,
+            "firmed": bool(r[19]),
         }
         for r in rows
     ]
@@ -1110,6 +1112,9 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
     if row["has_runtime"]:
         pars.append(("run_time", "numeric", "{v}"))
         vals.append(row["run_time"])
+    if row["has_firmed"]:
+        pars.append(("manual_firmed", "boolean", "{v}"))
+        vals.append(row["firmed"])
     if row["manual_runtime_release"]:
         lits.append("run_time_source = 'manual'")
     if row["resolved_runtime"] is not None:
@@ -1337,12 +1342,13 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             }
             has_segments = "schedule_segments" in it
             has_runtime = "RUN_TIME" in it
+            has_firmed = it.get("FIRMED") is not None
             has_planning = "planning_status" in it
             planning_status = it.get("planning_status")
             planning_reason = it.get("planning_reason")
             queued = planning_status == "needs_planning"
             if (not tid or tid in seen_ids or
-                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_planning)):
+                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_firmed and not has_planning)):
                 invalid_ids.append(tid)
                 continue
             seen_ids.add(tid)
@@ -1567,6 +1573,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "planning_reason": row_planning_reason,
                 "run_time": requested_runtime,
                 "has_runtime": has_runtime,
+                "has_firmed": has_firmed,
+                "firmed": bool(it["FIRMED"]) if has_firmed else None,
                 "manual_runtime_release": manual_runtime_release,
                 "resolved_runtime": resolved_runtime,
                 "segments": segment_rows,
@@ -2395,7 +2403,154 @@ def run_analyze(table: str) -> dict:
 # =========================
 # INGESTION
 # =========================
-_UPSERT_SQL = """
+def _norm_pv(value) -> str | None:
+    """Padding-insensitive production-version form ('1' == '0001' == ' 0001 '):
+    zero-padding is only applied on routing-enabled plants, so switching routing
+    on must not turn a stored '1' into an "SAP changed it". Blank stays ''."""
+    if value is None:
+        return None
+    s = str(value).strip().upper()
+    return s.zfill(4) if s else s
+
+
+def _norm_pv_sql(expr: str) -> str:
+    """SQL twin of _norm_pv for the skip-unchanged / PV-wins comparisons."""
+    return (f"(CASE WHEN COALESCE({expr}, '') = '' THEN {expr} "
+            f"WHEN length(btrim({expr})) >= 4 THEN upper(btrim({expr})) "
+            f"ELSE lpad(upper(btrim({expr})), 4, '0') END)")
+
+
+def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None) -> set[str]:
+    """Which SAP-owned fields did this upload change vs SAP's previous upload?
+
+    Pure (no DB). `before` is the stored orders row (SAP baselines
+    `sap_basic_start_date`/`sap_basic_finish_date`/`sap_workcenter`/
+    `sap_production_version`, plus `order_quantity`, `production_version`,
+    `scheduled_start`/`scheduled_end`); `incoming` is the parsed upload row.
+    A field counts as changed only when its baseline is non-NULL, the incoming
+    value differs from it, and the incoming value is not an echo of NIMBUS's
+    own current value (SAP sending back what a planner set). An incoming None means "column/cell
+    not sent or unparseable" and is never a change for that field (each date is
+    judged individually); an incoming "" (blank cell present) is a real value.
+    Returns a subset
+    of {"dates", "workcenter", "quantity", "production_version"}.
+    """
+    changed: set[str] = set()
+
+    # dates: either baseline non-NULL and differing, unless both incoming dates
+    # echo NIMBUS's current scheduled_start AND scheduled_end (both non-NULL).
+    base_s, base_f = before.get("sap_basic_start_date"), before.get("sap_basic_finish_date")
+    in_s, in_f = incoming.get("basic_start_date"), incoming.get("basic_finish_date")
+    sched_s, sched_e = before.get("scheduled_start"), before.get("scheduled_end")
+    dates_differ = ((base_s is not None and in_s is not None and in_s != base_s)
+                    or (base_f is not None and in_f is not None and in_f != base_f))
+    dates_echo = (sched_s is not None and sched_e is not None
+                  and in_s == sched_s and in_f == sched_e)
+    if dates_differ and not dates_echo:
+        changed.add("dates")
+
+    base_wc = before.get("sap_workcenter")
+    in_wc = incoming.get("sap_workcenter")
+    if base_wc is not None and in_wc is not None and in_wc != base_wc and in_wc != current_machine_wc:
+        changed.add("workcenter")
+
+    def _q(v):
+        return None if v is None else Decimal(str(v)).quantize(Decimal("0.001"))
+    base_q = _q(before.get("order_quantity"))
+    in_q = _q(incoming.get("order_quantity"))
+    if base_q is not None and in_q is not None and in_q != base_q:
+        changed.add("quantity")
+
+    # production version: child sub-orders carry none of their own.
+    base_pv = before.get("sap_production_version")
+    if (base_pv is not None and incoming.get("sap_production_version") is not None
+            and not incoming.get("parent_production_order")):
+        in_pv = _norm_pv(incoming["sap_production_version"])
+        cur_pv = _norm_pv(before.get("production_version") or "")
+        if in_pv != _norm_pv(base_pv) and in_pv != cur_pv:
+            changed.add("production_version")
+
+    return changed
+
+
+# Routing-enabled plant test for the row being upserted (the plant may be omitted
+# from the file, hence the COALESCE against the stored plant).
+_ROUTING_PLANT_SQL = """EXISTS (
+            SELECT 1 FROM plants rp
+             WHERE rp.plant = COALESCE(EXCLUDED.plant, orders.plant)
+               AND rp.routing_runtime_enabled = TRUE)"""
+
+# H7 (SAP wins on the WORK CENTER, not the exact machine): an ordinary order
+# keeps the planner's machine whenever that machine belongs to the work center
+# SAP just sent; otherwise (new work center, or SAP sent a machine name) the
+# incoming machine wins. Children (parent link set) always take the incoming
+# machine. The plant / machine_key CASEs below compare against this SAME
+# resolved expression, never against the raw EXCLUDED.machine.
+_RESOLVED_MACHINE_SQL = """CASE
+            WHEN EXCLUDED.parent_production_order IS NULL
+             AND EXISTS (SELECT 1 FROM machine m
+                          WHERE m.plant = COALESCE(EXCLUDED.plant, orders.plant)
+                            AND m.machine = orders.machine
+                            AND m.sap_workcenter = EXCLUDED.sap_workcenter)
+            THEN orders.machine ELSE EXCLUDED.machine END"""
+
+# "SAP sent something different" (D15/P12): every SAP-owned column the upload
+# carries EXCEPT the ones re-stamped from master data (color, prt_01/prt_02,
+# production_version), upload_batch_id, updated_at and machine. SAP's dates are
+# compared against the stored SAP baseline (never basic_*: baseline-correct
+# rewrites basic_finish_date). A NULL incoming baseline value means "not sent"
+# and a NULL stored baseline means "unknown": neither is a difference here.
+_SAP_DIFFERS_SQL = f"""(
+           orders.production_order IS DISTINCT FROM EXCLUDED.production_order
+        OR orders.material_number IS DISTINCT FROM EXCLUDED.material_number
+        OR orders.material_description IS DISTINCT FROM EXCLUDED.material_description
+        OR orders.order_quantity IS DISTINCT FROM EXCLUDED.order_quantity
+        OR orders.form_size IS DISTINCT FROM EXCLUDED.form_size
+        OR orders.firming_indicator IS DISTINCT FROM EXCLUDED.firming_indicator
+        OR orders.planned_order_initial_quantity IS DISTINCT FROM EXCLUDED.planned_order_initial_quantity
+        OR orders.reduced_quantity IS DISTINCT FROM EXCLUDED.reduced_quantity
+        OR orders.order_category IS DISTINCT FROM EXCLUDED.order_category
+        OR orders.order_type IS DISTINCT FROM EXCLUDED.order_type
+        OR orders.bom_alternative IS DISTINCT FROM EXCLUDED.bom_alternative
+        OR orders.bom_usage IS DISTINCT FROM EXCLUDED.bom_usage
+        OR orders.labor_hours IS DISTINCT FROM EXCLUDED.labor_hours
+        OR orders.machine_hours IS DISTINCT FROM EXCLUDED.machine_hours
+        OR orders.no_of_fte IS DISTINCT FROM EXCLUDED.no_of_fte
+        OR orders.parent_production_order IS DISTINCT FROM EXCLUDED.parent_production_order
+        OR orders.distribution_letter IS DISTINCT FROM EXCLUDED.distribution_letter
+        OR (EXCLUDED.plant IS NOT NULL AND EXCLUDED.plant IS DISTINCT FROM orders.plant)
+        OR (NOT {_ROUTING_PLANT_SQL}
+            AND EXCLUDED.run_time IS DISTINCT FROM orders.run_time)
+        OR (orders.sap_basic_start_date IS NOT NULL AND EXCLUDED.sap_basic_start_date IS NOT NULL
+            AND orders.sap_basic_start_date IS DISTINCT FROM EXCLUDED.sap_basic_start_date)
+        OR (orders.sap_basic_finish_date IS NOT NULL AND EXCLUDED.sap_basic_finish_date IS NOT NULL
+            AND orders.sap_basic_finish_date IS DISTINCT FROM EXCLUDED.sap_basic_finish_date)
+        OR (orders.sap_workcenter IS NOT NULL AND EXCLUDED.sap_workcenter IS NOT NULL
+            AND orders.sap_workcenter IS DISTINCT FROM EXCLUDED.sap_workcenter)
+        OR (orders.sap_production_version IS NOT NULL AND EXCLUDED.sap_production_version IS NOT NULL
+            AND {_norm_pv_sql('orders.sap_production_version')}
+                IS DISTINCT FROM {_norm_pv_sql('EXCLUDED.sap_production_version')})
+    )"""
+
+# A row whose SAP baseline is still unknown (NULL, e.g. the first upload after
+# the baseline columns shipped) is written once so the baseline gets recorded,
+# but that is NOT "SAP changed it" (no reset, manual run time kept).
+_SAP_BASELINE_FILL_SQL = """(
+           (orders.sap_basic_start_date IS NULL AND EXCLUDED.sap_basic_start_date IS NOT NULL)
+        OR (orders.sap_basic_finish_date IS NULL AND EXCLUDED.sap_basic_finish_date IS NOT NULL)
+        OR (orders.sap_workcenter IS NULL AND EXCLUDED.sap_workcenter IS NOT NULL)
+        OR (orders.sap_production_version IS NULL AND EXCLUDED.sap_production_version IS NOT NULL)
+    )"""
+
+# Routing-plant run time as an upload would leave it: SAP's value is nulled
+# before the write, so the stored value is kept until the post-upload resolve
+# re-derives it (a 'manual' source is dropped separately, see run_time_source).
+_RUN_TIME_AFTER_UPLOAD_SQL = f"""(CASE
+            WHEN NOT {_ROUTING_PLANT_SQL} THEN EXCLUDED.run_time
+            ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
+        END)"""
+
+_UPSERT_SQL = f"""
     INSERT INTO orders (
         id, production_order, material_number, material_description,
         machine, plant, basic_start_date, basic_finish_date,
@@ -2404,21 +2559,22 @@ _UPSERT_SQL = """
         planned_order_initial_quantity, reduced_quantity, order_category, order_type,
         bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
         parent_production_order, distribution_letter,
+        sap_workcenter, sap_production_version, sap_basic_start_date, sap_basic_finish_date,
         upload_batch_id, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
         material_description  = EXCLUDED.material_description,
-        machine                = EXCLUDED.machine,
+        machine                = {_RESOLVED_MACHINE_SQL},
         -- Plant: an explicitly uploaded plant always wins; otherwise, if the MACHINE
         -- changed on this re-upload, reset to NULL so the post-upsert derivation
         -- re-resolves it from the NEW machine (matches the old join's self-healing);
         -- otherwise keep the existing (already-derived) plant.
         plant                 = CASE
             WHEN EXCLUDED.plant IS NOT NULL THEN EXCLUDED.plant
-            WHEN EXCLUDED.machine IS DISTINCT FROM orders.machine THEN NULL
+            WHEN ({_RESOLVED_MACHINE_SQL}) IS DISTINCT FROM orders.machine THEN NULL
             ELSE orders.plant
         END,
         -- machine_key has no EXCLUDED counterpart (it's derived, never uploaded), so unlike
@@ -2427,12 +2583,19 @@ _UPSERT_SQL = """
         -- below re-derives it. Plant-changed check is NULL-safe (EXCLUDED.plant IS NOT
         -- NULL guard) so a plain re-upload with no WERKS/PLANT column doesn't null it.
         machine_key            = CASE
-            WHEN EXCLUDED.machine IS DISTINCT FROM orders.machine THEN NULL
+            WHEN ({_RESOLVED_MACHINE_SQL}) IS DISTINCT FROM orders.machine THEN NULL
             WHEN EXCLUDED.plant IS NOT NULL AND EXCLUDED.plant IS DISTINCT FROM orders.plant THEN NULL
             ELSE orders.machine_key
         END,
         basic_start_date      = EXCLUDED.basic_start_date,
         basic_finish_date     = EXCLUDED.basic_finish_date,
+        -- SAP baselines: the last SAP-sent values, written ONLY here (and by
+        -- distribution's child upsert). An incoming NULL means "not sent" and
+        -- never erases a stored baseline.
+        sap_workcenter        = COALESCE(EXCLUDED.sap_workcenter, orders.sap_workcenter),
+        sap_production_version = COALESCE(EXCLUDED.sap_production_version, orders.sap_production_version),
+        sap_basic_start_date  = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),
+        sap_basic_finish_date = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),
         -- Ingest itself no longer flags this on every re-upload regardless of
         -- whether the value moved (ROUTING_RUNTIME_DESIGN.md §4 item 6) — plain
         -- carry-forward. Only the resolver (backend/routing/resolver.py) is
@@ -2444,38 +2607,28 @@ _UPSERT_SQL = """
             -- ingest writes children through THIS statement before distribution's
             -- own child upsert runs (whose identical CASE would then see no change).
             WHEN orders.parent_production_order IS NOT NULL
-                 AND (CASE
-                        WHEN NOT EXISTS (
-                            SELECT 1 FROM plants rp
-                             WHERE rp.plant = COALESCE(EXCLUDED.plant, orders.plant)
-                               AND rp.routing_runtime_enabled = TRUE
-                        ) THEN EXCLUDED.run_time
-                        WHEN orders.run_time_source = 'manual' THEN orders.run_time
-                        ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
-                      END) IS DISTINCT FROM orders.run_time
+                 AND {_RUN_TIME_AFTER_UPLOAD_SQL} IS DISTINCT FROM orders.run_time
                  AND (orders.scheduled_start IS NOT NULL
                       OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
             THEN TRUE
             ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
         -- Routing plants: upsert_orders nulls the file's run_time before this
         -- write, so EXCLUDED.run_time is NULL and COALESCE keeps the stored
-        -- value; a planner-keyed ('manual') run time is kept unconditionally.
-        -- The post-upload resolve (batch_id) re-derives every non-manual row
-        -- of the batch, so a kept value can't go stale when quantity changes.
-        -- run_time_source/run_time_basis are never in this SET, so they carry
-        -- forward untouched.
-        -- The manual/COALESCE arms apply ONLY to routing-enabled plants; a
-        -- disabled plant (even one holding a leftover 'manual' row) takes the
-        -- file's value as before.
-        run_time              = CASE
-            WHEN NOT EXISTS (
-                SELECT 1 FROM plants rp
-                 WHERE rp.plant = COALESCE(EXCLUDED.plant, orders.plant)
-                   AND rp.routing_runtime_enabled = TRUE
-            ) THEN EXCLUDED.run_time
-            WHEN orders.run_time_source = 'manual' THEN orders.run_time
-            ELSE COALESCE(EXCLUDED.run_time, orders.run_time)
-        END,
+        -- value until the post-upload resolve re-derives it. A planner-keyed
+        -- ('manual') run time lasts until SAP next updates the order: this
+        -- statement only runs for a row whose SAP data actually differs (see
+        -- the WHERE below), and then run_time_source drops back to NULL so the
+        -- resolver recalculates it from the incoming production version. A row
+        -- written only to record the SAP baseline keeps its manual run time.
+        -- The arms apply ONLY to routing-enabled plants; a disabled plant (even
+        -- one holding a leftover 'manual' row) takes the file's value as before.
+        run_time              = {_RUN_TIME_AFTER_UPLOAD_SQL},
+        run_time_source       = CASE
+            WHEN orders.run_time_source = 'manual'
+             AND {_ROUTING_PLANT_SQL}
+             AND {_SAP_DIFFERS_SQL}
+            THEN NULL
+            ELSE orders.run_time_source END,
         color                 = EXCLUDED.color,
         -- prt_01/prt_02/production_version: written from the uploaded row like color
         -- (NULL today — no upload source carries them yet), then overwritten for
@@ -2484,10 +2637,20 @@ _UPSERT_SQL = """
         -- docs/scheduling_priority.md).
         prt_01                = EXCLUDED.prt_01,
         prt_02                = EXCLUDED.prt_02,
-        -- A blank incoming production_version (SAP omits it) keeps the stored one,
-        -- so a planner-chosen version survives a re-upload (H7, PV half); the
-        -- kept cases are counted into the upload warnings (pv_kept_on_blank).
-        production_version    = COALESCE(NULLIF(EXCLUDED.production_version, ''), orders.production_version),
+        -- Production version: the planner's choice survives unless SAP's OWN
+        -- production version changed since SAP's previous upload (then SAP wins;
+        -- a blank SAP value becomes NULL and the material default fills it in
+        -- _stamp_order_attributes). Distribution children carry none of their
+        -- own. A blank stored version takes whatever SAP sent.
+        production_version    = CASE
+            WHEN EXCLUDED.parent_production_order IS NULL
+             AND orders.sap_production_version IS NOT NULL
+             AND EXCLUDED.sap_production_version IS NOT NULL
+             AND {_norm_pv_sql('EXCLUDED.sap_production_version')}
+                 IS DISTINCT FROM {_norm_pv_sql('orders.sap_production_version')}
+            THEN NULLIF(EXCLUDED.production_version, '')
+            ELSE COALESCE(NULLIF(orders.production_version, ''), NULLIF(EXCLUDED.production_version, ''))
+        END,
         order_quantity        = EXCLUDED.order_quantity,
         form_size             = EXCLUDED.form_size,
         firming_indicator     = EXCLUDED.firming_indicator,
@@ -2507,10 +2670,15 @@ _UPSERT_SQL = """
         distribution_letter             = EXCLUDED.distribution_letter,
         upload_batch_id       = EXCLUDED.upload_batch_id,
         updated_at            = NOW()
+    -- Skip unchanged rows (D15/P12): an upload that sends nothing different from
+    -- what SAP sent last time writes nothing (xmin, slot, firm, manual run time
+    -- all untouched) and RETURNs no row.
+    WHERE {_SAP_DIFFERS_SQL} OR {_SAP_BASELINE_FILL_SQL}
     RETURNING id, (xmax = 0) AS inserted
 """
 # Deliberately NOT in the UPDATE SET: scheduled_start, scheduled_end.
-# That's the whole point — user drag/drop edits survive a re-upload.
+# That's the whole point — user drag/drop edits survive a re-upload (unless the
+# locked reset in upsert_orders decides SAP changed the order).
 
 
 # Build the per-row tuple in the exact _UPSERT_SQL column order. The SQL VALUES
@@ -2519,7 +2687,8 @@ _UPSERT_SQL = """
 # prt_01, prt_02, production_version, order_quantity, form_size, firming_indicator,
 # planned_order_initial_quantity, reduced_quantity, order_category, order_type,
 # bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
-# parent_production_order, distribution_letter, upload_batch_id.
+# parent_production_order, distribution_letter, sap_workcenter,
+# sap_production_version, sap_basic_start_date, sap_basic_finish_date, upload_batch_id.
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
     "machine", "plant", "basic_start_date", "basic_finish_date",
@@ -2528,15 +2697,22 @@ _UPSERT_ROW_COLS = (
     "planned_order_initial_quantity", "reduced_quantity", "order_category", "order_type",
     "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
     "parent_production_order", "distribution_letter",
+    "sap_workcenter", "sap_production_version", "sap_basic_start_date", "sap_basic_finish_date",
 )
 
 
-def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | None = None) -> dict:
+def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | None = None,
+                            ids: list[str] | None = None,
+                            report_ids: list[str] | None = None) -> dict:
     """Seam 2 (docs/scheduling_priority.md): the ONE place attribute provenance
     lives for color/prt_01/prt_02/production_version. One UPDATE orders ... FROM
     material_plants keyed (plant, material_number = material_id), scoped either
-    to a single ingest batch (batch_id — called post-upsert from upsert_orders)
-    or to a whole plant (plant — called from POST /master-data/resync-order-attributes).
+    to a list of order ids (ids — called post-upsert from upsert_orders with the
+    rows the upload actually wrote), to a single ingest batch (batch_id), or to
+    a whole plant (plant — called from POST /master-data/resync-order-attributes).
+    With `ids`, the missing-master-data exception report covers `report_ids`
+    (default: `ids`) so an upload whose rows were all skipped as unchanged still
+    reports every incoming row.
 
     Must run AFTER orders.plant is derived, since it reads the derived value —
     callers scoped by batch_id must call this after the plant/machine_key backfill,
@@ -2559,11 +2735,43 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
     N9) and can only occur in the batch_id scope; a plant-scoped resync only
     ever sees "no_mp_row" by construction.
     """
-    if batch_id is None and plant is None:
-        raise ValueError("_stamp_order_attributes requires batch_id or plant")
+    if batch_id is None and plant is None and ids is None:
+        raise ValueError("_stamp_order_attributes requires ids, batch_id or plant")
 
     with conn.cursor() as cur:
-        if batch_id is not None:
+        if ids is not None:
+            ids = sorted(set(ids))
+            if ids:
+                cur.execute(
+                    """
+                    UPDATE orders o
+                       SET color              = mp.color,
+                           prt_01             = mp.prt_01,
+                           prt_02             = mp.prt_02,
+                           production_version = COALESCE(NULLIF(o.production_version, ''), mp.default_production_version),
+                           updated_at         = NOW()
+                      FROM material_plants mp
+                     WHERE mp.plant = o.plant
+                       AND mp.material_id = o.material_number
+                       AND o.id = ANY(%s)
+                    """,
+                    (ids,),
+                )
+            report = sorted(set(report_ids)) if report_ids is not None else ids
+            cur.execute(
+                """
+                SELECT o.plant, o.material_number, COUNT(*),
+                       CASE WHEN o.plant IS NULL THEN 'no_plant_derived' ELSE 'no_mp_row' END
+                  FROM orders o
+                  LEFT JOIN material_plants mp
+                    ON mp.plant = o.plant AND mp.material_id = o.material_number
+                 WHERE o.id = ANY(%s)
+                   AND mp.material_id IS NULL
+                 GROUP BY o.plant, o.material_number
+                """,
+                (report,),
+            )
+        elif batch_id is not None:
             cur.execute(
                 """
                 UPDATE orders o
@@ -2677,6 +2885,143 @@ def missing_master_data_for_plant(plant: str) -> dict:
     }
 
 
+# Rows per upsert transaction (module-level so tests can shrink it to exercise
+# chunk boundaries).
+_UPSERT_CHUNK = 500
+
+# Step (a) of the per-chunk reset: ONE statement that row-locks, ORDER BY id,
+# every row the chunk may write (its own ids) plus, for any distribution child
+# among them, every sibling (same plant + parent order + material) that a
+# reset may have to reach -- and reads the "before" image the SAP-change
+# detection and the running-order check need, plus each row's current
+# machine's work center. Locking a superset up front is what keeps this
+# ordering identical to /tasks saves and distribution (id order, all before any
+# write), so the three can never hold a pair of rows in opposite order.
+_CHUNK_READ_COLS = (
+    "id", "plant", "parent_production_order", "material_number", "manual_firmed",
+    "sap_basic_start_date", "sap_basic_finish_date", "sap_workcenter", "order_quantity",
+    "sap_production_version", "production_version", "scheduled_start", "scheduled_end",
+    "basic_start_date", "basic_finish_date", "run_time", "planning_status",
+    "machine_wc", "first_start", "last_end", "tz",
+)
+_CHUNK_READ_SQL = f"""
+    SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed,
+           o.sap_basic_start_date, o.sap_basic_finish_date, o.sap_workcenter, o.order_quantity,
+           o.sap_production_version, o.production_version, o.scheduled_start, o.scheduled_end,
+           o.basic_start_date, o.basic_finish_date, o.run_time, o.planning_status,
+           (SELECT MIN(m.sap_workcenter) FROM machine m
+             WHERE m.plant = o.plant AND m.machine = o.machine) AS machine_wc,
+           seg.first_start, seg.last_end,
+           (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz
+      FROM orders o
+      {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+     WHERE o.id = ANY(%(ids)s)
+        OR (o.plant, o.parent_production_order, o.material_number) IN (
+             SELECT x.plant, x.parent_production_order, x.material_number FROM orders x
+              WHERE x.id = ANY(%(ids)s) AND x.parent_production_order IS NOT NULL)
+     ORDER BY o.id
+       FOR UPDATE OF o
+"""
+
+
+def _plant_local_now(tz_name: str | None) -> datetime:
+    """Naive plant-local wall-clock now (orders' timestamps are plant-local and
+    naive); an unknown/missing timezone falls back to UTC like the horizon math."""
+    now_utc = datetime.now(timezone.utc)
+    try:
+        local = now_utc.astimezone(ZoneInfo(tz_name)) if tz_name else now_utc
+    except (ZoneInfoNotFoundError, ValueError):
+        local = now_utc
+    return local.replace(tzinfo=None)
+
+
+def _order_is_running(b: dict, now: datetime) -> bool:
+    """Running = effective start <= now < effective end, using the same
+    effective-window rule as the /tasks read path (first segment, else
+    scheduled_*, else the SAP dates; run_time-derived end first). An order in
+    Needs Planning has no window, so it is never running."""
+    if b.get("planning_status") == "needs_planning":
+        return False
+    start = b.get("first_start") or b.get("scheduled_start") or b.get("basic_start_date")
+    if start is None:
+        return False
+    end = b.get("last_end")
+    if end is None:
+        base = b.get("scheduled_start") or b.get("basic_start_date")
+        if base is not None and b.get("run_time") is not None:
+            end = base + timedelta(hours=float(b["run_time"]))
+        else:
+            end = b.get("scheduled_end") or b.get("basic_finish_date")
+    return end is not None and start <= now < end
+
+
+def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | None = None,
+                        heal_ids: list[str] | None = None) -> dict:
+    """Post-upsert steps scoped to `ids` (the orders an upload actually wrote):
+    lock them in id order, derive a missing plant from the machine, derive
+    machine_key, then stamp color/PRT/production version from material_plants
+    (Seam 2). Returns _stamp_order_attributes' missing-master-data summary, which
+    covers `report_ids` (default `ids`). `heal_ids` are rows the upload did NOT
+    write (skipped as unchanged) that are checked for a NULL plant/machine_key:
+    they are locked with the rest, but only written (and stamped) when the
+    backfill can actually fill them -- the result's `healed_ids` lists those.
+    Shares the caller's transaction and commits it at the end."""
+    ids = sorted(set(ids))
+    scope = sorted(set(ids) | set(heal_ids or []))
+    healed: set[str] = set()
+    if scope:
+        # Lock first (id order) so these multi-row UPDATEs can never deadlock a
+        # concurrent save/distribution writer locking the same rows in id order.
+        cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (scope,))
+        # Materialize plant for rows this upload didn't carry one for, deriving it from
+        # the machine->plant master-data mapping. Only derive when the machine maps to
+        # EXACTLY ONE plant; a machine code shared across plants is left NULL (and
+        # warned) rather than silently mis-attributed to the lowest plant code.
+        cur.execute(
+            """
+            UPDATE orders o
+               SET plant = (
+                   SELECT MIN(m.plant) FROM machine m
+                    WHERE m.machine = o.machine
+               )
+             WHERE o.id = ANY(%s) AND o.plant IS NULL
+               AND (
+                   SELECT COUNT(DISTINCT m.plant) FROM machine m
+                    WHERE m.machine = o.machine
+               ) = 1
+            RETURNING o.id
+            """,
+            (scope,),
+        )
+        healed.update(r[0] for r in cur.fetchall())
+        # Same idea for machine_key, strictly downstream of the plant backfill
+        # just above (a row still NULL there stays NULL here too).
+        cur.execute(
+            """
+            UPDATE orders o
+               SET machine_key = (
+                   SELECT m.machine_key FROM machine m
+                    WHERE m.plant = o.plant AND m.machine = o.machine
+               )
+             WHERE o.id = ANY(%s) AND o.machine_key IS NULL AND o.plant IS NOT NULL
+               AND (
+                   SELECT COUNT(*) FROM machine m
+                    WHERE m.plant = o.plant AND m.machine = o.machine
+               ) = 1
+            RETURNING o.id
+            """,
+            (scope,),
+        )
+        healed.update(r[0] for r in cur.fetchall())
+    healed -= set(ids)
+    # Seam 2 -- strictly downstream of the plant backfill above (it reads o.plant).
+    # The upload ALWAYS succeeds regardless of how much is unmatched (N5/N6/N7).
+    result = _stamp_order_attributes(conn, ids=sorted(set(ids) | healed), report_ids=report_ids)
+    result["healed_ids"] = sorted(healed)
+    conn.commit()
+    return result
+
+
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None,
@@ -2721,9 +3066,11 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         never silently dropped.
       - `resolve_fn` is the optional routing-runtime ingest seam
         (ROUTING_RUNTIME_DESIGN.md §4/§5) — also defaults to None. When given,
-        it is called as `resolve_fn(plant, conn=conn)` — matching
-        `backend.routing.resolver.resolve_orders`'s `(plant, *, conn=None)`
-        signature reusing the connection already open at that point — once per
+        it is called as `resolve_fn(plant, conn=conn, batch_id=..., ids=...)` —
+        matching `backend.routing.resolver.resolve_orders`'s signature, reusing
+        the connection already open at that point (`ids` = every order this
+        upload wrote, since unchanged rows are skipped and keep their old batch
+        tag) — once per
         distinct plant among this batch's rows, AFTER `apply_fn` has run and
         BEFORE the `upload_audit` INSERT. Each call's report dict is folded
         into `warnings` as `{"level": "info", "category": "routing_resolve",
@@ -2733,7 +3080,14 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     both `backend/distribution/data.py` and `backend/routing/resolver.py`
     import `db`); callers pass these functions in instead.
 
-    Returns: {status:"ok", batch_id, inserted, updated, failed, warnings, lines}.
+    SAP-is-truth re-upload rules: a row SAP sent nothing different for is skipped
+    (`unchanged`); the planner's machine is kept while it belongs to the work
+    center SAP sent; and for orders SAP actually changed (dates, work center,
+    quantity, production version -- see `sap_changed_fields`) the slot and the
+    manual firm are reset, per chunk, under id-ordered row locks taken before
+    any write. Running orders keep their slot (warning `sap_changed_running`).
+
+    Returns: {status:"ok", batch_id, inserted, updated, unchanged, failed, warnings, lines}.
     """
     if batch_id is None:
         batch_id = str(uuid.uuid4())
@@ -2785,20 +3139,35 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     lines = sorted({str(row["machine"]) for row in rows if row.get("machine")})
 
     # ---------- IDs + dedup (mirrors brain.py:131-150) ----------
-    # Compute id via make_id() when absent, then apply the cumcount-suffix dedup
-    # so colliding ids within this batch get a stable "_<n>" suffix.
-    id_counts: dict[str, int] = {}
+    # Compute id via make_id() when absent. ORDER|MATERIAL is not unique, so a
+    # colliding group is sorted by (start, quantity, raw machine) BEFORE the
+    # "_<n>" suffixes are handed out: the same file in a different row order
+    # then maps the same row to the same id (a plain row-order cumcount would
+    # shuffle ids between rows, silently swapping their planner state). Suffixed
+    # rows are flagged so they are never judged by the SAP-change detection.
+    base_ids = [row.get("id") or make_id(row.get("production_order", ""), row.get("material_number", ""))
+                for row in rows]
+    group_members: dict[str, list[int]] = {}
+    for i, rid in enumerate(base_ids):
+        group_members.setdefault(rid, []).append(i)
+
+    def _dup_sort_key(i: int):
+        r = rows[i]
+        start, qty = r.get("basic_start_date"), r.get("order_quantity")
+        return (start is None, start if start is not None else datetime.min,
+                qty is None, float(qty) if qty is not None else 0.0,
+                str(r.get("sap_workcenter") or r.get("machine") or ""))
+
     n_suffixed = 0
-    for row in rows:
-        rid = row.get("id")
-        if not rid:
-            rid = make_id(row.get("production_order", ""), row.get("material_number", ""))
-        seen = id_counts.get(rid, 0)
-        id_counts[rid] = seen + 1
-        if seen > 0:
-            rid = f"{rid}_{seen}"
-            n_suffixed += 1
-        row["id"] = rid
+    for rid, idxs in group_members.items():
+        ordered = sorted(idxs, key=_dup_sort_key) if len(idxs) > 1 else idxs
+        for pos, i in enumerate(ordered):
+            if pos == 0:
+                rows[i]["id"] = rid
+            else:
+                rows[i]["id"] = f"{rid}_{pos}"
+                rows[i]["_skip_change_detection"] = True
+                n_suffixed += 1
     if n_suffixed:
         warnings.append({
             "level": "warn",
@@ -2829,28 +3198,24 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # ---------- Zero-pad production_version (ROUTING_RUNTIME_DESIGN.md §4 item 3) ----------
     # Applies only to plants with routing_runtime_enabled = TRUE — a plain data-
     # hygiene fix against spreadsheet numeric coercion dropping leading zeros.
-    # Disabled plants have ingest unchanged.
+    # Disabled plants have ingest unchanged. SAP's own production version
+    # (`sap_production_version`: None = column not sent, "" = blank cell) is
+    # normalised the same way, so the baseline stored and the one compared on
+    # the next upload never disagree.
     for row in rows:
+        raw_pv = row["sap_production_version"] if "sap_production_version" in row else row.get("production_version")
+        sap_pv = None if raw_pv is None else str(raw_pv).strip()
         if row.get("plant") in routing_enabled_plants:
             pv = row.get("production_version")
             if pv:
                 row["production_version"] = _zero_pad(str(pv).strip().upper(), 4)
-
-    # ---------- Planner-chosen production_version kept on a blank re-upload (H7) ----------
-    # Counted BEFORE the upsert (afterwards the stored value is indistinguishable).
-    pv_kept_on_blank = 0
-    blank_pv_ids = [row["id"] for row in rows if not row.get("production_version")]
-    if blank_pv_ids:
-        with _pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                # Distribution children arrive blank on every re-upload (the
-                # aggregate row carries no PV for them), so counting them would
-                # raise this info warning on every unchanged distributed upload.
-                "SELECT COUNT(*) FROM orders WHERE id = ANY(%s) AND parent_production_order IS NULL"
-                " AND COALESCE(production_version, '') <> ''",
-                (blank_pv_ids,),
-            )
-            pv_kept_on_blank = int(cur.fetchone()[0])
+            if sap_pv:
+                sap_pv = _zero_pad(sap_pv.upper(), 4)
+        row["sap_production_version"] = sap_pv
+        # SAP's own dates, written to the baseline columns by the upsert only
+        # (never by baseline-correct or a drag).
+        row["sap_basic_start_date"] = row.get("basic_start_date")
+        row["sap_basic_finish_date"] = row.get("basic_finish_date")
 
     # ---------- Build row tuples in _UPSERT_SQL column order ----------
     tuples = []
@@ -2860,13 +3225,16 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             *(row.get(col) for col in _UPSERT_ROW_COLS),
             batch_id,
         ))
+    row_by_id = {row["id"]: row for row in rows}
+    all_ids = [row["id"] for row in rows]
 
-    # ---------- Upsert + audit ----------
-    # Chunked executemany(returning=True): commits every 500 rows so a large upload
-    # never holds a table lock for the full duration of the transaction. Each chunk
-    # is idempotent (ON CONFLICT DO UPDATE), so a mid-upload failure leaves a
-    # consistent partial state the user can recover from by re-uploading.
-    _UPSERT_CHUNK = 500
+    # ---------- Upsert + locked reset + audit ----------
+    # Chunked: each chunk is ONE transaction that (a) locks every row it may
+    # touch, ORDER BY id, in a single statement BEFORE any write (the same
+    # ordering /tasks saves and distribution use, so no two writers can hold a
+    # pair in opposite order), (b) upserts, (c-f) resets slot + firm for orders
+    # SAP actually changed. Each chunk is idempotent, so a mid-upload failure
+    # leaves a consistent partial state the user can recover from by re-uploading.
     inserted = 0
     updated = 0
     # Ids that were genuinely fresh inserts this batch (RETURNING's xmax=0
@@ -2874,70 +3242,95 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     # orders on an enabled plant instead of letting them look normal while a
     # run_time_source-'routing' resolve is still pending.
     inserted_ids: list[str] = []
+    touched: set[str] = set()      # ids this upload actually wrote (upsert or reset)
+    sap_changed_n = 0
+    unfirmed_n = 0
+    running_changed_ids: list[str] = []
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             for i in range(0, len(tuples), _UPSERT_CHUNK):
                 chunk = tuples[i:i + _UPSERT_CHUNK]
+                chunk_ids = [t[0] for t in chunk]
+                # (a) lock first (rows to be written + every sibling of a distribution child)
+                cur.execute(_CHUNK_READ_SQL, {"ids": chunk_ids})
+                before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
+                # (b) upsert (rows SAP did not change return nothing)
                 cur.executemany(_UPSERT_SQL, chunk, returning=True)
+                written_existing: list[str] = []
                 while True:
                     rec = cur.fetchone()
                     if rec is not None:
                         row_id, was_inserted = rec[0], rec[1]
+                        touched.add(row_id)
                         if was_inserted:
                             inserted += 1
                             inserted_ids.append(row_id)
                         else:
                             updated += 1
+                            written_existing.append(row_id)
                     if not cur.nextset():
                         break
+                # (c) which written orders did SAP actually change?
+                changed: set[str] = set()
+                for rid in written_existing:
+                    b, r = before.get(rid), row_by_id.get(rid)
+                    if b is None or r is None or r.get("_skip_change_detection"):
+                        continue
+                    incoming = {
+                        "basic_start_date": r.get("basic_start_date"),
+                        "basic_finish_date": r.get("basic_finish_date"),
+                        "sap_workcenter": r.get("sap_workcenter"),
+                        "order_quantity": r.get("order_quantity"),
+                        "sap_production_version": r.get("sap_production_version"),
+                        "parent_production_order": r.get("parent_production_order"),
+                    }
+                    if sap_changed_fields(b, incoming, b["machine_wc"]):
+                        changed.add(rid)
+                if changed:
+                    # (d) a changed distribution child takes every sibling (same plant,
+                    # parent order and material) with it -- only rows locked in (a).
+                    sibling_key = {rid: (b["plant"], b["parent_production_order"], b["material_number"])
+                                   for rid, b in before.items() if b["parent_production_order"]}
+                    changed_keys = {sibling_key[rid] for rid in changed if rid in sibling_key}
+                    candidates = set(changed)
+                    if changed_keys:
+                        candidates |= {rid for rid, k in sibling_key.items() if k in changed_keys}
+                    # (e) protection: a RUNNING order keeps its slot and firm (the new SAP
+                    # baseline is already written); frozen-horizon orders ARE reset.
+                    reset_ids: list[str] = []
+                    for rid in sorted(candidates):
+                        if _order_is_running(before[rid], _plant_local_now(before[rid]["tz"])):
+                            running_changed_ids.append(rid)
+                        else:
+                            reset_ids.append(rid)
+                    # (f) slot + firm back to SAP's dates
+                    if reset_ids:
+                        cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%(ids)s)",
+                                    {"ids": reset_ids})
+                        cur.execute(
+                            "UPDATE orders SET manual_firmed = FALSE, scheduled_start = NULL,"
+                            " scheduled_end = NULL, planning_status = 'scheduled', planning_reason = NULL,"
+                            " updated_at = NOW()"
+                            " WHERE id = ANY(%(ids)s) RETURNING id",
+                            {"ids": reset_ids},
+                        )
+                        reset_returned = [rec[0] for rec in cur.fetchall()]
+                        touched.update(reset_returned)
+                        sap_changed_n += len(reset_returned)
+                        unfirmed_n += sum(1 for rid in reset_returned if before[rid]["manual_firmed"])
                 conn.commit()
-            # Materialize plant for rows this upload didn't carry one for, deriving it from
-            # the machine→plant master-data mapping. Only derive when the machine maps to
-            # EXACTLY ONE plant; a machine code shared across plants is left NULL (and
-            # warned) rather than silently mis-attributed to the lowest plant code. Scoped
-            # to this batch.
-            cur.execute(
-                """
-                UPDATE orders o
-                   SET plant = (
-                       SELECT MIN(m.plant) FROM machine m
-                        WHERE m.machine = o.machine
-                   )
-                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
-                   AND (
-                       SELECT COUNT(DISTINCT m.plant) FROM machine m
-                        WHERE m.machine = o.machine
-                   ) = 1
-                """,
-                (batch_id,),
-            )
-            conn.commit()
-            # Same idea for machine_key, scoped to this batch, strictly downstream of the
-            # plant backfill just above (a row still NULL there stays NULL here too).
-            cur.execute(
-                """
-                UPDATE orders o
-                   SET machine_key = (
-                       SELECT m.machine_key FROM machine m
-                        WHERE m.plant = o.plant AND m.machine = o.machine
-                   )
-                 WHERE o.upload_batch_id = %s AND o.machine_key IS NULL AND o.plant IS NOT NULL
-                   AND (
-                       SELECT COUNT(*) FROM machine m
-                        WHERE m.plant = o.plant AND m.machine = o.machine
-                   ) = 1
-                """,
-                (batch_id,),
-            )
-            conn.commit()
-            # Seam 2 — materialize color/prt_01/prt_02/production_version from
-            # material_plants (docs/scheduling_priority.md). Strictly downstream of
-            # the plant backfill above: it reads o.plant, which must already be
-            # derived. The upload ALWAYS succeeds regardless of how much is
-            # unmatched (N5/N6/N7) — unmatched pairs become an exception report,
-            # never a block.
-            attr_result = _stamp_order_attributes(conn, batch_id=batch_id)
-            conn.commit()
+
+            # Post-upload steps are scoped to the ids this upload wrote (never to
+            # the batch tag: rows skipped as unchanged keep their old batch id).
+            touched_ids = sorted(touched)
+            # Unchanged (skipped) rows used to be healed by the batch-scoped backfill;
+            # keep that: any incoming row still missing plant/machine_key is checked too.
+            cur.execute("SELECT id FROM orders WHERE id = ANY(%s) AND (plant IS NULL OR machine_key IS NULL)",
+                        (all_ids,))
+            heal_ids = [r[0] for r in cur.fetchall()]
+            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids)
+            touched.update(attr_result["healed_ids"])
+            touched_ids = sorted(touched)
             missing_master_data = attr_result["exceptions"]
             if attr_result["unmatched_pairs"]:
                 warnings.append({
@@ -2956,21 +3349,15 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 """
                 SELECT o.machine, COUNT(*)
                   FROM orders o
-                 WHERE o.upload_batch_id = %s AND o.plant IS NULL
+                 WHERE o.id = ANY(%s) AND o.plant IS NULL
                    AND (
                        SELECT COUNT(DISTINCT m.plant) FROM machine m
                         WHERE m.machine = o.machine
                    ) > 1
                  GROUP BY o.machine
                 """,
-                (batch_id,),
+                (touched_ids,),
             )
-            if pv_kept_on_blank:
-                warnings.append({
-                    "level": "info", "category": "pv_kept_on_blank", "count": pv_kept_on_blank,
-                    "msg": (f"{pv_kept_on_blank} order(s) arrived without a production version; "
-                            f"kept the version already stored for them."),
-                })
             ambiguous = cur.fetchall()
             if ambiguous:
                 n_amb = sum(int(r[1]) for r in ambiguous)
@@ -3002,9 +3389,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                     """
                     SELECT DISTINCT o.plant FROM orders o
                       JOIN plants p ON p.plant = o.plant
-                     WHERE o.upload_batch_id = %s AND p.routing_runtime_enabled = TRUE
+                     WHERE o.id = ANY(%s) AND p.routing_runtime_enabled = TRUE
                     """,
-                    (batch_id,),
+                    (touched_ids,),
                 )
                 backfilled_enabled = {r[0] for r in cur.fetchall()}
                 routing_enabled_plants |= backfilled_enabled
@@ -3036,6 +3423,13 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # one dict, `level`/`msg` are the two fields the cockpit's
                 # warning list actually reads.
                 warnings.append(apply_res["warnings_entry"])
+                # Children apply() wrote itself (outside the generic upsert above)
+                # get the same machine_key / material-attribute stamp.
+                apply_touched = sorted(set(apply_res.get("touched_ids") or []) - touched)
+                if apply_touched:
+                    touched.update(apply_touched)
+                    touched_ids = sorted(touched)
+                    _backfill_and_stamp(cur, conn, apply_touched)
             elif (distribution_plan.get("warnings_entry")
                   and any(v for k, v in distribution_ingest_warnings.items() if k != "single_rewrites")):
                 # D04: no parent was planned this batch (apply_fn never ran,
@@ -3049,12 +3443,15 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 warnings.append(distribution_plan["warnings_entry"])
             # ---------- Routing runtime: resolve() seam (ROUTING_RUNTIME_DESIGN.md §4 item 4) ----------
             # Runs after Order Distribution's plan/apply step (so each sub-order
-            # resolves at its own machine/quantity) and after the new-order hold
-            # UPDATE above (so the resolver overwrites that placeholder with the
-            # real outcome), once per distinct plant in this batch, reusing the
-            # already-open `conn` (resolve_fn commits nothing on it itself —
-            # matches `resolve_orders`'s conn-reuse contract). A no-op for any
-            # plant resolve_fn/the caller never wires in.
+            # resolves at its own machine/quantity), after the SAP-change reset
+            # above (so the resolver sees the order's final state) and after the
+            # new-order hold UPDATE above (so the resolver overwrites that
+            # placeholder with the real outcome), once per distinct plant in this
+            # batch, reusing the already-open `conn` (resolve_fn commits nothing
+            # on it itself — matches `resolve_orders`'s conn-reuse contract).
+            # `ids` = every order this upload wrote, so a re-derive reaches them
+            # even though the batch tag is no longer stamped on unchanged rows.
+            # A no-op for any plant resolve_fn/the caller never wires in.
             if resolve_fn is not None:
                 # A resolver failure must not fail the upload: the rows are
                 # already committed (never fold ingest into one transaction --
@@ -3063,7 +3460,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 for resolve_plant in sorted(resolve_plants):
                     cur.execute("SAVEPOINT routing_resolve")
                     try:
-                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id)
+                        resolve_result = resolve_fn(resolve_plant, conn=conn, batch_id=batch_id, ids=touched_ids)
                         cur.execute("RELEASE SAVEPOINT routing_resolve")
                     except Exception as exc:
                         cur.execute("ROLLBACK TO SAVEPOINT routing_resolve")
@@ -3085,6 +3482,31 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "plant": resolve_plant,
                         **resolve_result,
                     })
+            unchanged = len(tuples) - inserted - updated
+            warnings.append({
+                "level": "info", "category": "upload_counts",
+                "inserted": inserted, "updated": updated, "unchanged": unchanged,
+                "msg": (f"{inserted} new, {updated} changed by SAP, {unchanged} unchanged "
+                        f"(skipped, nothing rewritten)."),
+            })
+            if sap_changed_n:
+                warnings.append({
+                    "level": "info", "category": "sap_changed", "count": sap_changed_n,
+                    "msg": (f"SAP changed {sap_changed_n} order(s) (dates, work center, quantity or "
+                            f"production version): their slot was reset to SAP's dates."),
+                })
+            if unfirmed_n:
+                warnings.append({
+                    "level": "info", "category": "unfirmed", "count": unfirmed_n,
+                    "msg": f"{unfirmed_n} manually firmed order(s) were un-firmed because SAP changed them.",
+                })
+            if running_changed_ids:
+                warnings.append({
+                    "level": "warn", "category": "sap_changed_running", "count": len(running_changed_ids),
+                    "order_ids": running_changed_ids[:200],
+                    "msg": (f"SAP changed {len(running_changed_ids)} order(s) that are running right now: "
+                            f"their slot and firm were kept. Review them against SAP."),
+                })
             cur.execute(
                 """
                 INSERT INTO upload_audit
@@ -3106,6 +3528,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         "batch_id": batch_id,
         "inserted": inserted,
         "updated": updated,
+        "unchanged": unchanged,
         "failed": 0,
         "warnings": warnings,
         # Resolved machine values (post-plan_fn) — see the "Unknown production
@@ -3332,6 +3755,14 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                 str(_v(r, "PRODUCTION_VERSION")).strip().upper()
                 if _v(r, "PRODUCTION_VERSION") is not None else None
             ),
+            # SAP's own production version, for change detection: None when the
+            # file has no such column ("not sent"), "" for a blank cell (SAP says
+            # "no version" -> the material default applies).
+            "sap_production_version": (
+                None if "PRODUCTION_VERSION" not in df.columns
+                else (str(_v(r, "PRODUCTION_VERSION")).strip().upper()
+                      if _v(r, "PRODUCTION_VERSION") is not None else "")
+            ),
             "order_quantity": float(r[qcol]) if (qcol in df.columns and pd.notna(r.get(qcol))) else None,
             "form_size": _v(r, "FORM_SIZE"),
             "firming_indicator": _v(r, "FIRMING_INDICATOR"),
@@ -3387,6 +3818,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
         "raw_row_count": raw_row_count,
         "inserted": result["inserted"],
         "updated": result["updated"],
+        "unchanged": result.get("unchanged", 0),
         "lines": lines,
         "warnings": result["warnings"],
     }

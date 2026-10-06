@@ -47,6 +47,7 @@ SAMPLE_TASK_ROW = {
     "FORM_SIZE": "MD",
     "notes": None,
     "ecc_firmed": False,
+    "firmed": False,
     "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": 1000.0,
     "REDUCED_QUANTITY_(GMEIN)": 50.0,
     "ORDER_CATEGORY": "PP01",
@@ -128,6 +129,36 @@ def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch)
         "base_version": 42,
         "force": False,
     }]
+
+
+def test_firmed_is_forwarded_only_when_the_planner_sent_it(monkeypatch):
+    captured = {}
+
+    def fake_update(items, allowed_plants=None):
+        captured["items"] = items
+        return {
+            "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
+            "not_found": 0, "invalid_ids": [], "not_found_ids": [],
+            "stale": [], "versions": {"abc123": 43},
+        }
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    # FIRMED alone is a valid edit (not an empty item dropped before the DB)
+    result = brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", FIRMED=True, base_version=42)])
+    assert result["persisted"] == 1
+    assert captured["items"] == [{"id": "abc123", "start": None, "end": None, "FIRMED": True,
+                                  "base_version": 42, "force": False}]
+    # an explicit False is sent (un-firm); an omitted FIRMED stays out
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", FIRMED=False, PRT_01="X")])
+    assert captured["items"][0]["FIRMED"] is False
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", PRT_01="X")])
+    assert "FIRMED" not in captured["items"][0]
+
+
+def test_task_version_row_carries_firmed():
+    from backend.scheduling.models import TaskVersionRow
+    assert TaskVersionRow(id="a", firmed=True).firmed is True
+    assert TaskVersionRow(id="a").firmed is False
 
 
 def test_split_schedule_update_is_forwarded_as_an_explicit_aggregate(monkeypatch):

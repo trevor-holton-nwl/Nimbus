@@ -639,6 +639,10 @@ def sync_object(object_key: str, *, user_email: str | None = None,
       master -> md.bulk_apply(table, {"upserts": rows, "deletes": []}, user_email)
       orders -> db.upsert_orders(rows, source="sap", ...)
 
+    `rows_updated` for the orders object means "changed": upsert_orders skips a
+    row SAP sent nothing different for (counted separately as `unchanged` in the
+    upload audit), so only rows that were actually rewritten are counted.
+
     Returns the contract dict. On any error the run row is marked 'error' with
     the message (NEVER credentials) and status 'error' is returned — the
     exception is swallowed so the scheduler/endpoint sees a structured result.

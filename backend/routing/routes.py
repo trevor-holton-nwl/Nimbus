@@ -198,7 +198,7 @@ def recompute_plant(plant: str, request: Request,
     import backend.routing.resolver as routing_resolver
     result = routing_resolver.resolve_orders(plant, full=True)
     _set_admin_log_details(request, plant=plant, **{
-        k: v for k, v in result.items() if k not in ("unknown_by_step", "unmapped_workcenters", "orders_kept_in_place")
+        k: v for k, v in result.items() if k not in ("unknown_by_step", "unmapped_workcenters")
     })
     return result
 

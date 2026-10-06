@@ -232,6 +232,14 @@ CREATE INDEX IF NOT EXISTS idx_orders_parent
     ON orders(plant, parent_production_order, material_number)
     WHERE parent_production_order IS NOT NULL;
 
+-- SAP-is-truth firming (2026-10-06): planner firm flag + SAP baselines written only by ingest.
+-- NULL baselines = unknown, never an SAP change. Mirrors migrations/2026-10-06-sap-truth-firming.sql.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_firmed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_workcenter TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_production_version TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_start_date TIMESTAMP;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_finish_date TIMESTAMP;
+
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a
 -- history of uploads with insert/update counts and any parser warnings.

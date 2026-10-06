@@ -39,8 +39,9 @@ one's inline comment for the reasoning):
   3. Cutover detection (`resolve_orders`): "this plant has zero orders with
      run_time_source = 'routing' yet" -- there's no explicit "first cutover"
      flag on `plants`, so this is inferred.
-  4. Cutover re-placement for a normal (non-firmed, non-frozen) already-
-     scheduled order reuses the EXISTING `runtime_schedule_mismatch` flag +
+  4. Cutover re-placement for every already-scheduled order (firmed or
+     frozen or not: nothing is kept in place -- a manual firm or a running
+     order protects a SLOT, not a run time) reuses the EXISTING `runtime_schedule_mismatch` flag +
      `_EFF_END_SQL`/`_EFF_END_WITH_RUNTIME_MISMATCH_SQL` mechanism (db.py)
      rather than computing a new `scheduled_end` directly. No re-place/
      resequence helper exists anywhere in backend/scheduling/ (only a
@@ -49,9 +50,6 @@ one's inline comment for the reasoning):
      re-place its bar" (ROUTING_RUNTIME_DESIGN.md §4 item 6: "The resolver's
      write is the only thing allowed to set runtime_schedule_mismatch, and
      only when the number it writes actually differs from what's stored").
-     A firmed/frozen-window order NEVER gets this flag and NEVER has its
-     scheduled_start/scheduled_end touched -- it keeps its exact stored
-     schedule, full stop, and is reported in `orders_kept_in_place`.
   5. A `fallback_legacy` outcome only WRITES (relabels `run_time_source` to
      'legacy') when the order's CURRENT `run_time_source` is NULL. An order
      that already carries a real label (manual/distributed/sap_order/
@@ -74,7 +72,6 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from psycopg.types.json import Jsonb
 
-import db
 from db import _pool
 
 # ---------------------------------------------------------------------------
@@ -524,7 +521,7 @@ def _load_machine_workcenter(cur, plant: str) -> dict:
 
 
 def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
-                 full: bool = False) -> list[dict]:
+                 full: bool = False, ids: list[str] | None = None) -> list[dict]:
     """The set of orders one resolve run considers (§4 item 4's "resolve
     after distribution" ordering is the CALLER's concern, not this query's --
     resolve_orders is called per-plant on demand, over whatever rows exist
@@ -539,10 +536,13 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
     in, per D5/§5.5's cutover behavior.
 
     `batch_id` (the post-upload resolve): ALSO pulls in every non-manual order
-    stamped with that upload batch. A re-upload keeps the stored run_time on a
+    stamped with that upload batch, and `ids` (the orders that upload actually
+    wrote: an unchanged row is skipped and keeps its old batch tag, so the tag
+    alone no longer identifies them). A re-upload keeps the stored run_time on a
     routing plant (db._UPSERT_SQL; SAP's value is nulled before the write), so
     an order whose quantity just changed is neither held, routing-sourced nor
-    run_time-NULL and would otherwise keep a stale duration.
+    run_time-NULL and would otherwise keep a stale duration. A planner's manual
+    run time that the upload dropped (source reset to NULL) is re-derived here.
 
     `full=True` (the explicit /routing/{plant}/recompute admin action) loads
     EVERY non-manual order of the plant, so an upload whose post-upload resolve
@@ -570,8 +570,9 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
         "        OR planning_status = 'needs_planning'"
         "        OR run_time IS NULL"
         "        OR upload_batch_id = %s"
+        "        OR id = ANY(%s)"
         "        OR (%s AND planning_status = 'scheduled'))",
-        (plant, batch_id, is_cutover),
+        (plant, batch_id, list(ids or []), is_cutover),
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
@@ -602,12 +603,6 @@ def _is_routing_hold(planning_reason) -> bool:
     return step is None or step in ROUTING_HOLD_STEPS
 
 
-def _effective_start(order: dict):
-    """COALESCE(scheduled_start, basic_start_date) -- same precedence as
-    db.py's own `_EFF_START_SQL`/eff_start projections."""
-    return order.get("scheduled_start") or order.get("basic_start_date")
-
-
 def _build_held_row(order: dict, step: str):
     """One row for the held-outcomes' VALUES-joined UPDATE, or None when the
     order is currently held for a DIFFERENT, non-routing reason (defensive:
@@ -622,7 +617,7 @@ def _build_held_row(order: dict, step: str):
     return (order["id"], Jsonb(reason))
 
 
-def _build_write_row(order: dict, result: dict, is_cutover: bool, frozen_horizon_end, report: dict):
+def _build_write_row(order: dict, result: dict, is_cutover: bool):
     """One row for the non-held outcomes' VALUES-joined UPDATE, or None when
     this outcome must leave the order genuinely untouched (judgment call #5,
     module docstring: an already-labeled fallback_legacy order)."""
@@ -644,22 +639,19 @@ def _build_write_row(order: dict, result: dict, is_cutover: bool, frozen_horizon
         and _is_routing_hold(order.get("planning_reason"))
     )
 
-    # Judgment call #4 (module docstring): cutover re-place/keep-in-place,
-    # only for an order that was already `scheduled` (pulled in by the
-    # cutover-only clause in _load_orders) -- a previously-held order
-    # resolving now is an ordinary release, not a cutover re-place.
+    # Judgment call #4 (module docstring): cutover re-place, only for an
+    # order that was already `scheduled` (pulled in by the cutover-only clause
+    # in _load_orders) -- a previously-held order resolving now is an ordinary
+    # release, not a cutover re-place. No order is kept in place: SAP's firming
+    # indicator, a planner's manual firm and the frozen horizon do not protect
+    # a run time at switch-on.
     set_mismatch = False
-    if is_cutover and order.get("planning_status") == "scheduled":
-        firmed = order.get("firming_indicator") == "X"
-        eff_start = _effective_start(order)
-        frozen = frozen_horizon_end is not None and eff_start is not None and eff_start < frozen_horizon_end
-        if firmed or frozen:
-            report.setdefault("orders_kept_in_place", []).append(order["id"])
-        elif order.get("scheduled_start") is not None or order.get("scheduled_end") is not None:
-            # Only a genuinely user-placed order needs a re-place signal --
-            # one that's merely "scheduled" via basic_start_date alone picks
-            # up the new run_time automatically through _EFF_END_SQL.
-            set_mismatch = True
+    if (is_cutover and order.get("planning_status") == "scheduled"
+            and (order.get("scheduled_start") is not None or order.get("scheduled_end") is not None)):
+        # Only a genuinely user-placed order needs a re-place signal --
+        # one that's merely "scheduled" via basic_start_date alone picks
+        # up the new run_time automatically through _EFF_END_SQL.
+        set_mismatch = True
 
     return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch)
 
@@ -679,6 +671,9 @@ def _write_outcomes(cur, rows: list[tuple]) -> None:
     own VALUES-joined bulk updates: an all-NULL column would otherwise be of
     unknown type. `IS DISTINCT FROM` in the WHERE clause keeps a genuinely
     unchanged row from bumping orders.xmin (§5.5)."""
+    # Sorted by id: the UPDATE ... FROM (VALUES ...) locks rows in VALUES order, and
+    # every other multi-row writer of orders locks in id order.
+    rows = sorted(rows, key=lambda r: r[0])
     for i in range(0, len(rows), _WRITE_CHUNK):
         _write_outcomes_chunk(cur, rows[i:i + _WRITE_CHUNK])
 
@@ -715,6 +710,7 @@ def _write_holds(cur, rows: list[tuple]) -> None:
     existing orders_planning_state_check CHECK constraint, which demands
     both be NULL whenever planning_status = 'needs_planning'; a row that's
     already held has them NULL already, so this is a no-op for it."""
+    rows = sorted(rows, key=lambda r: r[0])   # id order, like every other multi-row orders writer
     for i in range(0, len(rows), _WRITE_CHUNK):
         _write_holds_chunk(cur, rows[i:i + _WRITE_CHUNK])
 
@@ -749,12 +745,11 @@ def _new_report(is_cutover: bool) -> dict:
         "unmapped_workcenters": [],
         "lot_size_warnings": 0,
     }
-    if is_cutover:
-        report["orders_kept_in_place"] = []
     return report
 
 
-def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False) -> dict:
+def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False,
+                            ids: list[str] | None = None) -> dict:
     """Does the real work of `resolve_orders` on an already-open connection;
     never commits (that's `resolve_orders`' job -- either its own, for a
     connection it opened itself, or the caller's, for one it was given)."""
@@ -790,7 +785,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
 
         report = _new_report(is_cutover)
 
-        orders = _load_orders(cur, plant, is_cutover, batch_id, full)
+        orders = _load_orders(cur, plant, is_cutover, batch_id, full, ids)
         if not orders:
             return report
 
@@ -798,13 +793,6 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         op_lookup = _load_op_lookup(cur, plant)
         machine_workcenter = _load_machine_workcenter(cur, plant)
         rules = _load_rules(cur, plant)
-
-        frozen_horizon_end = None
-        if is_cutover:
-            # Only fetched for a cutover run -- a routine resolve never
-            # needs it (nothing but the cutover clause cares about firmed/
-            # frozen orders' scheduled_start/scheduled_end).
-            frozen_horizon_end = db.plant_horizons(plant).get("frozen_horizon_end")
 
         write_rows: list[tuple] = []
         held_rows: list[tuple] = []
@@ -837,7 +825,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             elif status == "fallback_legacy":
                 report["legacy_retained"] += 1
 
-            write_row = _build_write_row(order, result, is_cutover, frozen_horizon_end, report)
+            write_row = _build_write_row(order, result, is_cutover)
             if write_row is not None:
                 write_rows.append(write_row)
 
@@ -848,7 +836,8 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
     return report
 
 
-def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False) -> dict:
+def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False,
+                   ids: list[str] | None = None) -> dict:
     """§5's thin DB wrapper -- the shape a later task wires into
     `db.upsert_orders`'s `resolve_fn` seam.
 
@@ -859,14 +848,15 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: 
     itself, exactly like every other self-contained write path in this
     codebase (e.g. `backend/routing/routes.py`'s `_do_upload_operations`).
 
-    `batch_id` (db.upsert_orders' post-upload call) additionally re-derives
-    every non-manual order of that upload batch -- see `_load_orders`.
+    `batch_id` and `ids` (db.upsert_orders' post-upload call) additionally
+    re-derive every non-manual order of that upload batch / every order the
+    upload wrote -- see `_load_orders`.
     `full=True` (explicit recompute) re-derives every non-manual order.
     """
     if conn is not None:
-        return _resolve_orders_on_conn(plant, conn, batch_id, full)
+        return _resolve_orders_on_conn(plant, conn, batch_id, full, ids)
     with _pool.connection() as new_conn:
-        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full)
+        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids)
         new_conn.commit()
         return report
 
