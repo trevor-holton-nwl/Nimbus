@@ -3739,8 +3739,11 @@ export const Interaction = {
             rel.slice(0, 3).map(a => (a.type || a.sev || '')).filter(Boolean).join(', ')
           }${rel.length > 3 ? '…' : ''}</div>`
         : '';
-      const firmedBadge = Engine.firmingStatus(t).firmed
-        ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '';
+      const firmStatus = Engine.firmingStatus(t);
+      const firmedBadge = (firmStatus.firmed
+        ? `<span class="hov-firmed">🔒 ${Util.t('ui.hov_firmed_badge')}</span>` : '')
+        + (firmStatus.reasons.includes('running') ? `<span class="hov-firmed">${Util.t('ui.firm_reason_running')}</span>` : '')
+        + (Engine.isSapFirmed(t) ? `<span class="hov-sap-firm">${Util.t('ui.sap_firm_marker')}</span>` : '');
       const suborderHtml = t.PARENT_ORDER ? (() => {
         const siblings = Store.siblingsByParent().get(t.PARENT_ORDER) || [];
         const getQty = (task: any) => {

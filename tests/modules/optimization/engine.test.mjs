@@ -360,7 +360,7 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
 });
 
 // ---------------------------------------------------------------------------
-// Engine.firmingStatus — union of ecc/frozen/manual firming reasons.
+// Engine.firmingStatus — union of frozen/manual/running firming reasons (SAP firm is display-only).
 // ---------------------------------------------------------------------------
 
 
@@ -374,9 +374,20 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
     Store.setTasks([{ id: 'firming-none', RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-none'], now), { firmed: false, reasons: [] });
 
-    // 'ecc' alone -- via task.ecc_firmed, no manual firm.
+    // SAP firm is display-only: never a reason, never firmed.
     Store.setTasks([{ id: 'firming-ecc', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
-    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-ecc'], now), { firmed: true, reasons: ['ecc'] });
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-ecc'], now), { firmed: false, reasons: [] });
+    assert.equal(Engine.isSapFirmed(Store.tasks['firming-ecc']), true);
+    assert.equal(Engine.isSapFirmed({ id: 'plain' }), false);
+
+    // 'running' alone -- start <= now < end, both set; boundaries are half-open.
+    const runStart = new Date('2026-08-20T06:00:00'), runEnd = new Date('2026-08-20T10:00:00');
+    Store.setTasks([{ id: 'firming-run', RUN_TIME: '4', ecc_firmed: true, start_date: runStart, end_date: runEnd }], 'unit-test');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-run'], now), { firmed: true, reasons: ['running'] });
+    assert.equal(Engine.isInProgress(Store.tasks['firming-run'], runStart), true, 'start boundary is inclusive');
+    assert.equal(Engine.isInProgress(Store.tasks['firming-run'], runEnd), false, 'end boundary is exclusive');
+    assert.equal(Engine.isInProgress({ id: 'x', start_date: runStart, end_date: null }, now), false, 'missing end is never running');
+    assert.equal(Engine.isInProgress({ id: 'x', start_date: null, end_date: runEnd }, now), false, 'missing start is never running');
 
     // 'frozen' alone -- inside the horizon band, not manually firmed, not ECC-firmed.
     const frozenEnd = new Date('2026-08-25T00:00:00');
@@ -398,11 +409,14 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-manual'], now), { firmed: false, reasons: [] },
       'firmingStatus must follow Store.isFirmed, not a stale task.firmed mirror');
 
-    // Combination -- ecc + frozen + manual all at once.
+    // Combination -- frozen + manual + running at once (frozen needs start >= now, so use a later "now" for running via end).
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
     Store.setTasks([{ id: 'firming-all', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
     Store.setFirmed('firming-all', true, 'unit-test');
-    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-all'], now), { firmed: true, reasons: ['ecc', 'frozen', 'manual'] });
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-all'], now), { firmed: true, reasons: ['frozen', 'manual'] });
+    const atStart = new Date('2026-08-22T09:00:00');
+    Store.tasks['firming-all'].end_date = new Date('2026-08-22T10:00:00');
+    assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-all'], atStart), { firmed: true, reasons: ['frozen', 'manual', 'running'] });
   } finally {
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
@@ -953,6 +967,67 @@ test('legacy optimizer never lands an inherently overlong order inside a blackou
     Store.setSelectedPlant(priorPlant, 'unit-test');
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
     Store.replaceBlocks(priorBlocks, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+  }
+});
+
+test('running orders never move: legacy walk, changeover and autoReflow leave an in-progress order in place, even with respectFirmed off', () => {
+  const plant = 'RUN-LOCK-PLANT';
+  const line = 'RUN-LOCK-LINE';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorEnd = Store.frozenHorizonEnd;
+  const priorCalendar = Store.calendars[line];
+  const ALL_DAY = { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] };
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setFrozenHorizonEnd(null, 'unit-test');
+    Store.setMasterData({ plants: [{ plant, split_order_policy: 'never' }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setCalendar(line, ALL_DAY, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    const runStart = new Date('2035-08-06T07:00:00');
+    const runEnd = new Date('2035-08-06T09:00:00');
+    const runNow = new Date('2035-08-06T08:00:00');
+    const base = () => ([
+      { id: 'run-sap', PLANT: plant, MACHINE: line, RUN_TIME: 2, ecc_firmed: true, start_date: runStart, end_date: runEnd },
+      { id: 'run-free', PLANT: plant, MACHINE: line, RUN_TIME: 1, start_date: new Date('2035-08-06T08:30:00'), end_date: new Date('2035-08-06T09:30:00') },
+    ]);
+    const runOpts = { plant, respectFirmed: false, respectCalendar: true, planningStart: runNow, runNow, endDate: new Date('2035-08-10T00:00:00') };
+
+    // Legacy compatibility walk (non-public mode string, no setup snapshot).
+    Store.setTasks(base(), 'unit-test');
+    const legacy = Engine.evaluateSchedule('legacy-compat', runOpts);
+    assert.equal(legacy.patches.find(p => p.id === 'run-sap'), undefined, 'legacy walk must not patch a running order');
+
+    // Setup-aware changeover path.
+    Store.setTasks(base(), 'unit-test');
+    Engine.runAndApply('changeover', { ...runOpts, startDate: runNow });
+    assert.equal(Store.tasks['run-sap'].start_date.getTime(), runStart.getTime(), 'changeover must not move a running order');
+    assert.equal(Store.tasks['run-sap'].end_date.getTime(), runEnd.getTime());
+
+    // autoReflow: a running peer overlapped by a dragged order stays put (real clock).
+    const HOUR = 60 * 60 * 1000;
+    const stepMs = 15 * 60 * 1000; // the Store snaps stored times to Config.STEP_MS marks
+    const nowSnapped = Math.floor(Date.now() / stepMs) * stepMs;
+    const liveStart = new Date(nowSnapped - HOUR);
+    const liveEnd = new Date(nowSnapped + HOUR);
+    const dragStart = new Date(nowSnapped - 2 * HOUR);
+    Store.setTasks([
+      { id: 'drag', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: dragStart, end_date: new Date(dragStart.getTime() + 2.5 * HOUR) },
+      { id: 'live-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: liveStart, end_date: liveEnd },
+    ], 'unit-test');
+    Engine.autoReflow('drag');
+    assert.equal(Store.tasks['live-peer'].start_date.getTime(), liveStart.getTime(), 'autoReflow must not move a running peer');
+    assert.equal(Store.tasks['live-peer'].end_date.getTime(), liveEnd.getTime());
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
     if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
     else delete Store.calendars[line];
   }
@@ -3189,7 +3264,7 @@ test('Engine.runAndApply replaces stale setup results on synthetic SPT runs', ()
 });
 
 
-test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true, and only frozen under respectFirmed=false', () => {
+test('effectiveFirmedIdSet = manual (gated) + frozen + running (not gated); SAP firm never folds', () => {
   const now = new Date('2026-08-20T08:00:00');
   const priorEnd = Store.frozenHorizonEnd;
   const frozenEnd = new Date('2026-08-25T00:00:00');
@@ -3200,21 +3275,22 @@ test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true,
     const eccTask = { id: 'ecc-id', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') };
     const frozenTask = { id: 'frozen-id', start_date: new Date('2026-08-22T09:00:00') }; // inside [now, frozenEnd)
     const plainTask = { id: 'plain-id', start_date: new Date('2026-08-30T09:00:00') };
-    const tasks = [manualTask, eccTask, frozenTask, plainTask];
+    const runningTask = { id: 'running-id', start_date: new Date('2026-08-20T06:00:00'), end_date: new Date('2026-08-20T10:00:00') };
+    const tasks = [manualTask, eccTask, frozenTask, plainTask, runningTask];
     const baseFirmedIds = new Set(['manual-id']);
 
     const withRespect = effectiveFirmedIdSet(tasks, baseFirmedIds, now, true);
-    assert.deepEqual(withRespect, new Set(['manual-id', 'ecc-id', 'frozen-id']),
-      'respectFirmed=true folds manual + ecc + frozen, leaving the plain task out');
+    assert.deepEqual(withRespect, new Set(['manual-id', 'frozen-id', 'running-id']),
+      'respectFirmed=true folds manual + frozen + running; the SAP-firmed and plain tasks stay out');
 
     const withoutRespect = effectiveFirmedIdSet(tasks, baseFirmedIds, now, false);
-    assert.deepEqual(withoutRespect, new Set(['frozen-id']),
-      'respectFirmed=false drops BOTH the manual firmed id and the ecc fold, leaving only the unconditional frozen-horizon fold');
+    assert.deepEqual(withoutRespect, new Set(['frozen-id', 'running-id']),
+      'respectFirmed=false drops only the manual firmed id; frozen and running folds are unconditional');
 
     // baseFirmedIds may also arrive as a plain array (ScheduleSnapshot.firmedIds'
     // documented alternate shape) -- effectiveFirmedIdSet must coerce either way.
     const withArrayInput = effectiveFirmedIdSet(tasks, ['manual-id'], now, true);
-    assert.deepEqual(withArrayInput, new Set(['manual-id', 'ecc-id', 'frozen-id']));
+    assert.deepEqual(withArrayInput, new Set(['manual-id', 'frozen-id', 'running-id']));
   } finally {
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
@@ -3223,14 +3299,13 @@ test('effectiveFirmedIdSet folds manual + ecc + frozen under respectFirmed=true,
 // ---------------------------------------------------------------------------
 // Engine.runAndApply('changeover', ...) -- respectFirmed must gate the
 // setup-aware branch's ECC-firmed fold, mirroring the prior per-line
-// protection rule's `(respectFirmed && (sourceIsFirmed(t.id) || !!t.ecc_firmed))` guard. Before
-// this fix, unchecking "Respect firmed" in the Optimize dialog had no effect
-// on an ECC-firmed order in changeover mode; a frozen-horizon order must stay
+// protection rule. SAP's firm flag is display-only now: an SAP-firmed order is
+// free to move whatever respectFirmed says; a frozen-horizon order must stay
 // immovable regardless, since the frozen fold is unconditional.
 // ---------------------------------------------------------------------------
 
 
-test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respectFirmed, while a frozen-horizon order stays immovable regardless', () => {
+test('Engine.runAndApply("changeover") never locks on SAP firm: an SAP-firmed order is movable with respectFirmed true or false, while a frozen-horizon order stays immovable regardless', () => {
   const plant = 'CO-RESPECT-PLANT';
   const line = 'CO-RESPECT-LINE';
   const priorPlant = Store.selectedPlant;
@@ -3274,19 +3349,19 @@ test('Engine.runAndApply("changeover") gates the ECC-firmed fold by opts.respect
   ];
 
   try {
-    // --- respectFirmed omitted (defaults true): ECC-firmed order untouched.
+    // --- respectFirmed omitted (defaults true): the SAP-firmed order is still movable.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
     Engine.runAndApply('changeover', { plant, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
-    assert.equal(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
-      'with respectFirmed defaulted to true, an ECC-firmed order must be left exactly where it was');
+    assert.equal(Engine.lastSetupAwareResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
+      'with respectFirmed defaulted to true, an SAP-firmed order is still evaluated as movable');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime(),
       'a frozen-horizon order is never moved');
 
     // --- respectFirmed: true (explicit): same result.
     Store.setTasks(structuredClone(baseTasks), 'unit-test');
     Engine.runAndApply('changeover', { plant, respectFirmed: true, respectCalendar: true, startDate: horizonStart, runNow: horizonStart, endDate: new Date('2026-10-15T00:00:00') });
-    assert.equal(Store.tasks['co-ecc'].start_date.getTime(), eccOriginalStart.getTime(),
-      'with respectFirmed: true, the ECC-firmed order must still be left exactly where it was');
+    assert.equal(Engine.lastSetupAwareResult.dispositions.find(disposition => disposition.id === 'co-ecc').status, 'scheduled',
+      'with respectFirmed: true, an SAP-firmed order is still evaluated as movable');
     assert.equal(Store.tasks['co-frozen'].start_date.getTime(), frozenStart.getTime());
 
     // --- respectFirmed: false: the ECC-firmed order is freed and must be

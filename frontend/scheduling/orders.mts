@@ -2105,7 +2105,9 @@ export const Inspector = {
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
     const firmed = Store.isFirmed(task.id);        // manual layer — drives the Firm/Unfirm button
-    const firmedUnion = Engine.firmingStatus(task).firmed;  // SAP OR frozen-horizon OR manual — drives the one banner below
+    const firmStatus = Engine.firmingStatus(task);
+    const firmedUnion = firmStatus.firmed;  // frozen-horizon OR manual OR running — drives the one banner below
+    const sapFirmed = Engine.isSapFirmed(task);  // display-only info row; never locks
     const lineOptions = Table._getLineOptions();
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
@@ -2134,7 +2136,8 @@ export const Inspector = {
 
     Inspector._destroyStartPicker();
     body.innerHTML = `
-      ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}</div>` : ''}
+      ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}${firmStatus.reasons.includes('running') ? `<div>${Util.t('ui.firm_reason_running')}</div>` : ''}</div>` : ''}
+      ${sapFirmed ? `<div class="insp-sap-firm-info" style="font-size:12px;color:var(--text-muted);margin:0 0 8px;">${Util.t('ui.sap_firm_marker')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
         ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(a.msg)}</div>`).join('')}

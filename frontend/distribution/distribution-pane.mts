@@ -1435,7 +1435,7 @@ export const DistributionPane = (() => {
         || before.end_date?.getTime() !== after.end_date?.getTime();
     });
     if (!resizedIds.length) return;
-    const firmedIds = resizedIds.filter(id => Store.isFirmed(id) || !!Store.tasks[id]?.ecc_firmed);
+    const firmedIds = resizedIds.filter(id => { const t = Store.tasks[id]; return !!t && Engine.firmingStatus(t).firmed; });
     const undo = (): void => {
       UndoStack.restoreTasks(snapshot);
       _banner = null;
