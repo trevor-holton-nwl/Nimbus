@@ -205,3 +205,30 @@ Merged fix/cr1005-audit-be then fix/cr1005-audit-fe (--no-ff). Only conflict: th
 - migrations/*.sql (33 top-level files) onto a DB from main's schema.sql, name order: pass 1 0 failures, pass 2 0 failures.
 - generate:api-types regenerated: no content diff in frontend/types/api-generated.d.mts.
 - Literal NUL scan of 437 tracked files: 0.
+
+## SAP-truth round (2026-10-06)
+
+Branch fix/sap-truth-integration (BE track fix/sap-truth-be + FE track fix/sap-truth-fe, merged by Task 9), base bcecc7a. Spec: Owner decisions (2026-10-06) in Code_Review_Consolidated_10_05.md + plan Appendix A.
+
+| Task | Item | Status | Commits | Tests |
+|---|---|---|---|---|
+| 1 | orders `manual_firmed` + SAP baseline columns (schema + migration) | DONE | bcecc7a..9e1ce21 | test_schema_idempotent, migration tests |
+| 2 | Pure SAP-change detection with echo rule (None = not sent) | DONE | 9e1ce21..12e4b8e | sap_changed_fields unit tests |
+| 3 | Re-upload: WC-aware machine, locked reset on SAP change, skip unchanged, upload_counts, PV padding-insensitive compare | DONE | 12e4b8e..81c9e26 | ingest/upload pytest |
+| 4 | Persist manual firm; planner_unscheduled; routing switch-on is all-routing | DONE | 81c9e26..20b9f78 | test_audit_routing_db, scheduling pytest |
+| 5 | Optimizer: SAP firm display-only; running orders never move | DONE | bcecc7a..bfdd5e8 | optimizer/engine module tests |
+| 6 | Manual firm persisted server-side; local firms dropped; firm-dirty cleanup | DONE | bfdd5e8..247c476 | orders/firm module tests |
+| 7 | Sign-out clears local planner data, confirms on pending work | DONE | 247c476..0addcd4 | security/shell module tests |
+| 8 | Delete sends orders to Needs Planning; palette Unschedule delegates to Interaction.unscheduleIds | DONE | 0addcd4..c566927 | gantt/interaction module tests |
+| 9 | Integration merge of BE + FE tracks, api types regenerated | DONE | 087f8f3, e4ce8c9, ef2d067 | npm gates green |
+
+Task 5 performance note: both before/after optimizer runs were deadline-bound at about 5 s, so the timing numbers are uninformative and prove nothing either way.
+
+### Final verification (Task 10, HEAD includes a19f9c7)
+
+- `npm run build && npm run typecheck && npm run lint && npm run check:static-assets && npm run check:legacy-surface`: all pass; lint 0 errors / 35 warnings; static assets OK; legacy surface no drift.
+- `npm test` (TZ unset): legacy 40/40, modules 1066/1066. `TZ=America/New_York npm test`: 40/40, 1066/1066.
+- `ruff check .`: all checks passed.
+- pytest on fresh `nimbus_final_sap` (this worktree's schema.sql, ON_ERROR_STOP=1, 127.0.0.1:55441): first run 1045 passed, 1 skipped, 1 failed (`test_refresh_returns_all_writable_attributes_with_version` - its fake row lacked the `manual_firmed` column Task 4 added to `get_task_versions`); fixed in a19f9c7 (fake row + `firmed` assertion); rerun 1046 passed, 1 skipped (pre-existing #203), 0 failed. Baseline was 990 / 1.
+- Migration replay: DB from main's schema.sql (bcecc7a), then 34 top-level `migrations/*.sql` in name order, twice: pass 1 0 failures, pass 2 0 failures.
+- NUL scan of 59 files changed since bcecc7a: 0 NUL bytes added.
