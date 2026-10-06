@@ -855,6 +855,9 @@ def _plan_one_parent(plant: str, production_order: str, material_number: str, ro
     for child in child_rows:
         child["sap_workcenter"] = row.get("sap_workcenter", raw_code)
         child["sap_production_version"] = raw_pv
+        if "sap_basic_finish_date" in row:
+            # the finish SAP actually sent (None = not sent), never the derived one
+            child["sap_basic_finish_date"] = row["sap_basic_finish_date"]
     warnings["zero_quantity_children"] += zero_qty_count
 
     parent_plan = {
