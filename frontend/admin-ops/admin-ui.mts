@@ -2901,7 +2901,7 @@ export const AdminCockpit = {
       tone:         'warn',
     });
     if (!ok) return;
-    Session.clearLocalPlannerData();
+    Session.clearLocalPlannerData({ keepQueuedWork: true });
     ErrorLog.info('admin', 'Client state reset by user — reloading');
     // Give the log a frame to render in case of debounce, then hard-reload bypassing HTTP cache.
     setTimeout(() => location.reload(), 50);

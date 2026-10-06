@@ -170,3 +170,25 @@ test('clearLocalPlannerData is exported and keeps theme/locale', () => {
   assert.equal(globalThis.localStorage.getItem('nimbus.state.v3.quarantine.1'), null);
   assert.equal(globalThis.localStorage.getItem('nimbus.theme'), 'dark');
 });
+
+test('clearLocalPlannerData({keepQueuedWork}) keeps pendingDeletes but clears the rest; default clears it', () => {
+  seedPlannerData();
+  Session.clearLocalPlannerData({ keepQueuedWork: true });
+  assert.notEqual(globalThis.localStorage.getItem('nimbus.calendar.pendingDeletes'), null);
+  assert.equal(globalThis.localStorage.getItem('nimbus.recentCmds'), null);
+  assert.equal(globalThis.localStorage.getItem('nimbus.state.v3'), null);
+  Session.clearLocalPlannerData();
+  assert.equal(globalThis.localStorage.getItem('nimbus.calendar.pendingDeletes'), null);
+});
+
+test('signOut still reloads when the session:changed emit throws', async () => {
+  seedPlannerData();
+  const origEmit = Store.emit;
+  Store.emit = () => { throw new Error('boom'); };
+  try {
+    await withSignOutStubs(true, async (calls) => {
+      await assert.rejects(Session.signOut({ hasPendingWork: () => false }));
+      assert.deepEqual(calls.order, ['reload']);
+    });
+  } finally { Store.emit = origEmit; }
+});

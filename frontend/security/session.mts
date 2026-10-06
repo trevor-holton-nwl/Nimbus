@@ -185,10 +185,12 @@ export const Session = (() => {
   // history, queued calendar deletes, sessionStorage) so a shared PC leaves nothing behind.
   // Keeps display preferences (nimbus.theme / nimbus.locale) and does NOT touch the session
   // blob (signOut / clearExpired own that). Also used by admin "Reset client state".
-  function clearLocalPlannerData(): void {
+  function clearLocalPlannerData(opts: { keepQueuedWork?: boolean } = {}): void {
     const quarantinePrefix = `${Config.LS_KEY}.quarantine.`;
     try {
-      const toRemove: string[] = [Config.LS_KEY, 'nimbus.recentCmds', 'nimbus.patterns.v1', 'nimbus.calendar.pendingDeletes'];
+      const toRemove: string[] = [Config.LS_KEY, 'nimbus.recentCmds', 'nimbus.patterns.v1'];
+      // Queued unsent calendar deletes are work, not history: admin Reset keeps them.
+      if (!opts.keepQueuedWork) toRemove.push('nimbus.calendar.pendingDeletes');
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
         if (k && k.startsWith(quarantinePrefix)) toRemove.push(k);
@@ -216,8 +218,11 @@ export const Session = (() => {
     try { opts.beforeClear?.(); } catch { /* best effort */ }
     localStorage.removeItem(KEY);
     clearLocalPlannerData();
-    Store.emit({ type: 'session:changed', kind: 'signout' });
-    location.reload();
+    try {
+      Store.emit({ type: 'session:changed', kind: 'signout' });
+    } finally {
+      location.reload();
+    }
     return true;
   }
 

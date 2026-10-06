@@ -1397,6 +1397,9 @@ test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending ca
     Sandbox.active = true;
     assert.equal(Persistence.hasPendingWork(), true, 'What-If active');
     Sandbox.active = false;
+    memStore.clear();
+    Persistence._saveCache();
+    assert.equal(memStore.has(Config.LS_KEY), true, 'positive control: _saveCache writes before halt');
     Persistence.haltCacheWrites();
     memStore.clear();
     Persistence._saveCache();
