@@ -602,6 +602,19 @@ class Test_sap_changed_fields:
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == {"dates"}
 
+    def test_echo_finish_returned_as_date_only_midnight_matches_sent_date(self):
+        from datetime import datetime as _d
+        # L1: SAP echoed the finish as a date only (time 000000 -> plant-local midnight).
+        before = self._before(sap_sent_finish=_d(2026, 11, 1, 19, 0), sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=_d(2026, 11, 1, 0, 0))
+        assert self._run(before, inc) == set()
+
+    def test_midnight_finish_on_another_date_is_still_a_dates_change(self):
+        from datetime import datetime as _d
+        before = self._before(sap_sent_finish=_d(2026, 11, 1, 19, 0), sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=_d(2026, 11, 3, 0, 0))
+        assert self._run(before, inc) == {"dates"}
+
     def test_echo_does_not_hide_workcenter_or_quantity_changes(self):
         before = self._before(sap_sent_finish=self.F1, sap_sent_version="0001")
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1,
@@ -610,7 +623,7 @@ class Test_sap_changed_fields:
 
 
 # ---------------------------------------------------------------------------
-# D20: a planner's end/version change clears what was remembered as sent to SAP.
+# D20 (refined): a planner's end/version change does NOT clear what was remembered as sent to SAP.
 # ---------------------------------------------------------------------------
 class _BulkCursor:
     """Answers update_task_dates_bulk's lock SELECT with one canned row and
@@ -660,11 +673,10 @@ def _run_bulk(monkeypatch, item):
     return next(s for s, _p in cursor.executed if s.lstrip().startswith("UPDATE orders o SET"))
 
 
-def test_bulk_save_clears_sap_sent_when_end_changes(monkeypatch):
+def test_bulk_save_keeps_sap_sent_when_end_changes(monkeypatch):
     from datetime import datetime as _d
     sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 15)})
-    for col in ("sap_sent_finish", "sap_sent_version", "sap_sent_firm", "sap_sent_at"):
-        assert f"{col} = NULL" in sql
+    assert "sap_sent_" not in sql          # D20 refinement: only the next Send overwrites them
 
 
 def test_bulk_save_keeps_sap_sent_when_end_unchanged(monkeypatch):
@@ -674,9 +686,9 @@ def test_bulk_save_keeps_sap_sent_when_end_unchanged(monkeypatch):
     assert "sap_sent_" not in sql
 
 
-def test_bulk_save_clears_sap_sent_when_production_version_changes(monkeypatch):
+def test_bulk_save_keeps_sap_sent_when_production_version_changes(monkeypatch):
     sql = _run_bulk(monkeypatch, {"PRODUCTION_VERSION": "0002"})
-    assert "sap_sent_finish = NULL" in sql
+    assert "sap_sent_" not in sql
 
 
 def test_bulk_save_keeps_sap_sent_when_version_resent_unchanged(monkeypatch):

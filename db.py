@@ -1109,12 +1109,9 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
     if row["end"] is not None and not row["queued"]:
         pars.append(("scheduled_end", "timestamp", "{v}"))
         vals.append(row["end"])
-    if row.get("clear_sap_sent"):
-        # D20: the planner changed this order's end or version, so what was
-        # last sent to SAP no longer describes it; a later SAP change must be
-        # judged against the SAP baselines, not an obsolete echo.
-        lits.extend(["sap_sent_finish = NULL", "sap_sent_version = NULL",
-                     "sap_sent_firm = NULL", "sap_sent_at = NULL"])
+    # D20 (refined): `orders.sap_sent_*` are deliberately NOT cleared here. They are
+    # overwritten only by the next Send to SAP; clearing them on a planner edit let
+    # SAP's echo of the OLD send wipe the planner's newer edit.
     if row["has_runtime"]:
         pars.append(("run_time", "numeric", "{v}"))
         vals.append(row["run_time"])
@@ -1569,14 +1566,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 row_planning_status = "scheduled"
                 row_planning_reason = None
 
-            def _min(v):
-                return v.replace(second=0, microsecond=0) if isinstance(v, datetime) else v
-            end_changed = (new_end is None and cur_end is not None) if queued else (
-                (end is not None or has_segments) and new_end is not None
-                and _min(new_end) != _min(cur_end))
             update_rows.append({
                 "id": tid,
-                "clear_sap_sent": bool(end_changed or "PRODUCTION_VERSION" in attrs),
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,
@@ -2048,6 +2039,17 @@ def purge_orders_by_ids(plant: str, ids: list[str], *, user_email: str | None = 
             raise
 
 
+def _restore_columns(cur, table: str, json_rows: list) -> list[str]:
+    """Columns of `table` (information_schema) that appear as keys in the archived JSON rows --
+    the explicit column list for a restore, so schema drift since the archive cannot break it."""
+    keys: set = set()
+    for r in json_rows:
+        keys.update(r.keys())
+    cur.execute("SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema = current_schema() AND table_name = %s ORDER BY ordinal_position", (table,))
+    return [r[0] for r in cur.fetchall() if r[0] in keys]
+
+
 def restore_vanished_order(archive_id: int, *, user_email: str | None = None) -> dict:
     """Restore one archived (vanish-deleted) order and its schedule segments.
 
@@ -2065,15 +2067,25 @@ def restore_vanished_order(archive_id: int, *, user_email: str | None = None) ->
             if not row:
                 raise KeyError(f"archive row {archive_id} not found or already restored")
             plant, order_id, order_row, segments = row
+            # Explicit column lists (archived JSON keys that still exist as columns) so a column
+            # added or dropped since the archive was written cannot break the restore.
+            order_cols = _restore_columns(cur, "orders", [order_row] if isinstance(order_row, dict) else [])
             cur.execute(
-                "INSERT INTO orders SELECT * FROM json_populate_record(NULL::orders, %s::json)"
-                " ON CONFLICT (id) DO NOTHING", (Jsonb(order_row),))
+                sql.SQL("INSERT INTO orders ({c}) SELECT {c} FROM json_populate_record(NULL::orders, %s::json)"
+                         " ON CONFLICT (id) DO NOTHING").format(
+                    c=sql.SQL(", ").join(sql.Identifier(x) for x in order_cols)),
+                (Jsonb(order_row),))
             restored = cur.rowcount > 0
             if restored and segments:
-                cur.execute(
-                    "INSERT INTO order_schedule_segments"
-                    " SELECT * FROM json_populate_recordset(NULL::order_schedule_segments, %s::json)"
-                    " ON CONFLICT DO NOTHING", (Jsonb(segments),))
+                seg_cols = _restore_columns(cur, "order_schedule_segments",
+                                            [s for s in segments if isinstance(s, dict)])
+                if seg_cols:
+                    cur.execute(
+                        sql.SQL("INSERT INTO order_schedule_segments ({c}) SELECT {c}"
+                                 " FROM json_populate_recordset(NULL::order_schedule_segments, %s::json)"
+                                 " ON CONFLICT DO NOTHING").format(
+                            c=sql.SQL(", ").join(sql.Identifier(x) for x in seg_cols)),
+                        (Jsonb(segments),))
             cur.execute(
                 "UPDATE sap_stage_vanished_order SET restored_at = now(), restored_by = %s WHERE id = %s",
                 (user_email, archive_id))
@@ -2601,6 +2613,11 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     version is likewise not a change when `sap_sent_version` is unset or equals
     the incoming version. A different version than was sent still reports
     "production_version" (dates stay suppressed by the matching finish).
+    A finish SAP returned as a date only (time 000000, kept at plant-local midnight)
+    also echoes when its date equals the sent finish's date (L1).
+    The sent values are NOT cleared by a planner edit (D20 refinement); only the
+    next Send to SAP overwrites them, so an old echo cannot wipe a newer planner edit
+    unless the planner's edit happens to produce the very finish that was sent.
     """
     changed: set[str] = set()
 
@@ -2624,6 +2641,12 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
         return v.replace(second=0, microsecond=0) if isinstance(v, datetime) else v
     sent_f, sent_v = before.get("sap_sent_finish"), before.get("sap_sent_version")
     finish_echo = sent_f is not None and in_f is not None and _minute(in_f) == _minute(sent_f)
+    in_n, sent_n = _naive_dt(in_f), _naive_dt(sent_f)
+    if (not finish_echo and isinstance(in_n, datetime) and isinstance(sent_n, datetime)
+            and in_n.time() == dt_time.min and in_n.date() == sent_n.date()):
+        # L1: a finish SAP returned as a date only (time 000000) is kept at midnight, not
+        # zone-converted; it echoes our sent finish when the dates agree.
+        finish_echo = True
     in_pv_raw = incoming.get("sap_production_version")
     # An incoming version of None means "column not sent": it cannot contradict.
     version_echo = finish_echo and (sent_v is None or in_pv_raw is None

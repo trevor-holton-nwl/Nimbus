@@ -426,7 +426,7 @@ SAP_SYNC_ENABLED = os.getenv("NIMBUS_SAP_SYNC_ENABLED", "0") in ("1", "true", "T
 # backend/integration/sap_staging.py, not here:
 #   NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN (default 120) -- a batch left in `loading` longer is rejected as stale;
 #   NIMBUS_SAP_SYSTEM_TZ (IANA name, default UTC) -- the zone SAP's dates/times are expressed in.
-SAP_STAGING_POLL_SECONDS = int(os.getenv("NIMBUS_SAP_STAGING_POLL_SECONDS", "0") or 0)
+SAP_STAGING_POLL_SECONDS = sap_staging.env_int("NIMBUS_SAP_STAGING_POLL_SECONDS", 0, 0)
 
 
 # Request-ID middleware: accept inbound x-request-id, generate one if missing,
