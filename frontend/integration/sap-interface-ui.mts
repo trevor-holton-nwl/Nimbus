@@ -1148,8 +1148,9 @@ export const Interface = (() => {
     ].filter((t) => t[1]).map((t) => `<span>${Util.escapeHtml(String(t[0]))} ${Util.escapeHtml(_fmtTs(t[1]))}</span>`).join('');
     const warns = (b.warnings || []).map((w) => `<div class="sap-batch-warn">${Util.escapeHtml(stageWarningText(w))}</div>`).join('');
     const err = b.error ? `<div class="sap-batch-warn is-err">${Util.escapeHtml(b.error)}${c.step ? ` (${Util.escapeHtml(c.step)})` : ''}</div>` : '';
+    const needsRouting = (b.warnings || []).some((w) => w.code === 'routing_required');
     const heldBanner = held
-      ? `<div class="sap-banner sap-banner-err sap-batch-held"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(Util.t('ui.sap_stage_held_banner'))}</b></div></div>` : '';
+      ? `<div class="sap-banner sap-banner-err sap-batch-held"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(Util.t(needsRouting ? 'ui.sap_stage_held_routing' : 'ui.sap_stage_held_banner'))}</b></div></div>` : '';
     const btn = (act: string, key: string, cls = '') =>
       `<button class="btn btn-sm${cls ? ' ' + cls : ''}" data-bact="${act}" data-bid="${Util.escapeHtml(b.batch_id)}">${Util.escapeHtml(Util.t(key))}</button>`;
     let actions = '';

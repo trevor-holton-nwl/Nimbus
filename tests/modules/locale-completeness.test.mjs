@@ -402,6 +402,58 @@ test('Order Distribution feature (P2-22) keys exist in all 5 locales', () => {
   }
 });
 
+test('SAP staging (Admin > Interface > Staging) keys exist in all 5 locales', () => {
+  // docs/SAP_STAGING_DESIGN.md §3.5 — batch list, apply/confirm/discard, rejected rows,
+  // upload, Outbound (Send to SAP) and Archive panels, plus the per-status / per-warning
+  // families below. Real translations in de/es/fr/pt, not English copies.
+  const STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'applied', 'error', 'rejected', 'superseded', 'discarded'];
+  const WARNINGS = ['routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded'];
+  const REQUIRED_SAP_STAGING = [
+    'ui.sap_staging', 'ui.sap_staging_group', 'ui.sap_connectors_group',
+    'ui.sap_stage_batches', 'ui.sap_stage_no_batches',
+    'ui.sap_stage_apply', 'ui.sap_stage_confirm_apply', 'ui.sap_stage_retry_apply',
+    'ui.sap_stage_validate', 'ui.sap_stage_discard', 'ui.sap_stage_refresh',
+    'ui.sap_stage_apply_mode', 'ui.sap_stage_mode_manual', 'ui.sap_stage_mode_auto',
+    'ui.sap_stage_mode_hint', 'ui.sap_stage_mode_hint_auto', 'ui.sap_stage_mode_hint_manual',
+    'ui.sap_stage_plant_required',
+    'ui.sap_stage_rejected_rows', 'ui.sap_stage_rejected_empty', 'ui.sap_stage_rejected_shown',
+    'ui.sap_stage_download_csv', 'ui.sap_stage_upload',
+    'ui.sap_stage_held_banner', 'ui.sap_stage_held_routing',
+    'ui.sap_stage_vanish', 'ui.sap_stage_deletions', 'ui.sap_stage_deletions_more', 'ui.sap_stage_counts',
+    'ui.sap_stage_time_received', 'ui.sap_stage_time_ready', 'ui.sap_stage_time_validated', 'ui.sap_stage_time_applied',
+    'ui.sap_stage_col_order', 'ui.sap_stage_col_end', 'ui.sap_stage_col_firmed',
+    'ui.sap_stage_col_deleted_at', 'ui.sap_stage_col_deleted_by', 'ui.sap_stage_firmed_yes',
+    'ui.sap_stage_confirm_msg',
+    ...STATUSES.map(s => `ui.sap_stage_status_${s}`),
+    ...WARNINGS.map(w => `ui.sap_stage_warn_${w}`),
+    'ui.sap_outbound', 'ui.sap_outbound_last_queued', 'ui.sap_outbound_last_sent', 'ui.sap_outbound_error_csv',
+    'ui.sap_send_to_sap', 'ui.sap_send_confirm',
+    'ui.sap_send_status_ready', 'ui.sap_send_status_sent', 'ui.sap_send_status_error',
+    'ui.sap_archive', 'ui.sap_archive_restore', 'ui.sap_archive_restore_confirm',
+    'ui.sap_archive_restored', 'ui.sap_archive_empty',
+    'ui.sap_map_primer_staging',
+    'toast.sap_stage_applied', 'toast.sap_stage_apply_failed', 'toast.sap_stage_failed',
+    'toast.sap_stage_uploaded', 'toast.sap_stage_discarded', 'toast.sap_stage_validated',
+    'toast.sap_poll_done', 'toast.sap_sent_queued', 'toast.sap_archive_restored',
+    'alert.zero_open_quantity',
+  ];
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of REQUIRED_SAP_STAGING) {
+    for (const locale of LOCALES) {
+      assert.ok(perLocale[locale].has(key), `${locale}.js is missing key "${key}"`);
+    }
+  }
+  // Translated, not copied: every non-English value must differ from the English one,
+  // except the product-name/loanword labels that are identical by design.
+  const SAME_OK = new Set(['ui.sap_staging', 'ui.sap_staging_group', 'ui.sap_stage_mode_manual', 'ui.sap_stage_status_error', 'ui.sap_send_status_error', 'ui.sap_stage_status_ready', 'ui.sap_send_status_ready']);
+  const val = (loc, key) => readFileSync(join(LOCALES_DIR, `${loc}.js`), 'utf8').match(new RegExp(`'${key.replace(/\./g, '\\.')}'\\s*:\\s*'((?:[^'\\\\]|\\\\.)*)'`))?.[1];
+  for (const key of REQUIRED_SAP_STAGING.filter(k => !SAME_OK.has(k))) {
+    for (const loc of ['de', 'es', 'fr', 'pt']) {
+      assert.notEqual(val(loc, key), val('en', key), `${loc}.js carries the English text for "${key}"`);
+    }
+  }
+});
+
 test('F10 (D34) — every dist_/wc_-family key in en.js exists in all 5 locales', () => {
   // Task F10's parity test (docs/archive/… brief): derive the distribution/
   // work-center family from en.js itself rather than hand-listing every key
