@@ -42,7 +42,8 @@ const SHAPES = {
 
 const MODES = ['min-changeover', 'due-date', 'spt'];
 
-const NOW = new Date('2026-08-03T08:00:00Z').getTime();
+// Local wall-clock time: the calendar and the engine work in naive local dates.
+const NOW = new Date(2026, 7, 3, 8, 0, 0).getTime();
 const HORIZON_MS = 28 * 24 * 60 * 60 * 1000;
 const HORIZON_END = NOW + HORIZON_MS;
 
@@ -58,21 +59,16 @@ function makeCalendar() {
   );
 }
 
-// Generate blackout blocks: 2-3 four-hour blocks per line per run
+// Generate blackout blocks: 2-3 four-hour blocks per line per run.
+// Block shape is { plant, line, start, end } (what lineBlocksFor reads).
 function makeBlackouts(rng, plant, line) {
   const count = 2 + Math.floor(rng() * 2); // 2 or 3
   const blocks = [];
   for (let i = 0; i < count; i++) {
     const dayOffset = Math.floor(rng() * 28); // 0-27 days ahead
-    const dayStart = NOW + dayOffset * 24 * 60 * 60 * 1000;
-    const blockStart = new Date(dayStart + 8 * 60 * 60 * 1000); // 08:00 local
-    const blockEnd = new Date(blockStart.getTime() + 4 * 60 * 60 * 1000);
-    blocks.push({
-      plant,
-      machine: line,
-      start_date: blockStart,
-      end_date: blockEnd,
-    });
+    const start = new Date(NOW + dayOffset * 24 * 60 * 60 * 1000); // 08:00 local
+    const end = new Date(start.getTime() + 4 * 60 * 60 * 1000);
+    blocks.push({ plant, line, start, end });
   }
   return blocks;
 }
@@ -101,20 +97,11 @@ function makeOrder(rng, id, plant, line, colors, due) {
   };
 }
 
-// Generate scheduled task (80% of orders)
-function makeScheduledOrder(rng, id, plant, line, colors, due) {
-  const task = makeOrder(rng, id, plant, line, colors, due);
-  // Place it back-to-back from now, with random start time
-  const startOffset = Math.floor(rng() * 10 * 24 * 60 * 60 * 1000); // 0-10 days
-  const startTime = NOW + startOffset;
-  const endTime = startTime + (task.RUN_TIME * 60 * 60 * 1000);
-  task.start_date = new Date(startTime);
-  task.end_date = new Date(endTime);
-  task.planning_status = 'scheduled';
-  return task;
-}
-
-// Build synthetic plant
+// Build synthetic plant. Every order starts queued; makeInitialSchedule() then
+// lays a calendar- and setup-valid current schedule down from "now" and
+// re-queues ~20% of the orders. Hand-placed dates that ignore the calendar,
+// blackouts and setup gaps fail final validation, which silently un-schedules
+// the tail lines and wrecks lateness.
 function makePlant(rng, shape, colors) {
   const lines = [];
   for (let i = 0; i < shape.lines; i++) {
@@ -127,23 +114,32 @@ function makePlant(rng, shape, colors) {
 
   for (let lineIdx = 0; lineIdx < shape.lines; lineIdx++) {
     const line = `L${lineIdx + 1}`;
-
-    // Blackout blocks for this line
     blocks.push(...makeBlackouts(rng, 'P1', line));
-
-    // Orders for this line
     for (let orderIdx = 0; orderIdx < shape.ordersPerLine; orderIdx++) {
-      const isScheduled = rng() < 0.8; // 80% scheduled
-      if (isScheduled) {
-        tasks.push(makeScheduledOrder(rng, `O${taskId}`, 'P1', line, colors, NOW + HORIZON_MS / 2));
-      } else {
-        tasks.push(makeOrder(rng, `O${taskId}`, 'P1', line, colors, NOW + HORIZON_MS / 2));
-      }
+      tasks.push(makeOrder(rng, `O${taskId}`, 'P1', line, colors, NOW + HORIZON_MS / 2));
       taskId += 1;
     }
   }
 
   return { tasks, blocks, lines };
+}
+
+// Current schedule: run SPT-with-setup (generous budget) over the all-queued plant
+// so every order gets a valid back-to-back placement from now, then re-queue 20%.
+function makeInitialSchedule(rng, plant, setup, colors) {
+  const snapshot = makeSnapshot(plant, setup, colors);
+  const bounds = makeBounds(setup);
+  bounds.deadline = performance.now() + 10 * 60 * 1000;
+  bounds.iterationCap = 1e9;
+  const result = SetupScheduler.evaluateSptWithSetup(snapshot, bounds);
+  const placed = SetupScheduler.applyPatchesToSnapshot(plant.tasks, result.patches);
+  plant.tasks = placed.map(task => {
+    const scheduled = task.planning_status === 'scheduled' && task.start_date && task.end_date;
+    if (scheduled && rng() >= 0.2) return task;
+    return {
+      ...task, start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning',
+    };
+  });
 }
 
 // Build setup truth: full color-pair matrix
@@ -252,21 +248,17 @@ function makeBounds(setup) {
   };
 }
 
-// Count lines searched vs tail-only from patches
+// Lines searched vs tail-only, from the explanation codes. A line that got a real
+// search emits 'due-date-first-placement' for the orders it placed; a line laid
+// out as a tail (iteration-cap / deadline / unknown setup) emits only
+// 'unknown-setup-tail-placement' / 'unknown-setup-tail-unplaced'.
 function countLinesSearched(result, shape) {
-  // Get unique lines from patches (lines that were modified)
-  const patchedLines = new Set();
-  for (const patch of result.patches) {
-    if (patch.changes && patch.changes.MACHINE) {
-      patchedLines.add(patch.changes.MACHINE);
-    }
+  const searchedLines = new Set();
+  for (const entry of result.explanation) {
+    if (entry.code === 'due-date-first-placement' && entry.line) searchedLines.add(entry.line);
   }
-
-  // Heuristic: if no patches, no lines were searched; otherwise all patched lines were searched
-  const searched = patchedLines.size > 0 ? patchedLines.size : 0;
-  const tailOnly = Math.max(0, shape.lines - searched);
-
-  return { searched, tailOnly };
+  const searched = searchedLines.size;
+  return { searched, tailOnly: Math.max(0, shape.lines - searched) };
 }
 
 // Count late orders and lateness minutes
@@ -291,15 +283,18 @@ async function benchmark() {
   for (const [shapeName, shapeConfig] of Object.entries(SHAPES)) {
     if (targetShape && shapeName !== targetShape) continue;
 
+    // One plant per (shape, seed), shared by every mode so modes are comparable.
+    const colors = Array.from({ length: shapeConfig.colors }, (_, i) => `COLOR${i + 1}`);
+    const rng = mulberry32(seed);
+    const plant = makePlant(rng, shapeConfig, colors);
+    const setup = makeSetupTruth(colors, shapeConfig.lines);
+    makeInitialSchedule(rng, plant, setup, colors);
+
     for (const mode of MODES) {
       if (targetMode && mode !== targetMode) continue;
-
-      const colors = Array.from({ length: shapeConfig.colors }, (_, i) => `COLOR${i + 1}`);
-      const rng = mulberry32(seed);
-
-      const plant = makePlant(rng, shapeConfig, colors);
-      const setup = makeSetupTruth(colors, shapeConfig.lines);
-      const snapshot = makeSnapshot(plant, setup, colors);
+      // Fresh deep copies per mode so one evaluator can never leave state behind
+      // (caches, mutated tasks) that skews the next mode's timing.
+      const snapshot = makeSnapshot(structuredClone(plant), structuredClone(setup), colors);
       const bounds = makeBounds(setup);
 
       // Run evaluator
@@ -309,7 +304,7 @@ async function benchmark() {
         if (mode === 'min-changeover') {
           result = SetupScheduler.evaluateMinChangeover(snapshot, bounds);
         } else if (mode === 'due-date') {
-          result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+          result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
         } else {
           result = SetupScheduler.evaluateSptWithSetup(snapshot, bounds);
         }
@@ -317,14 +312,20 @@ async function benchmark() {
         console.error(`Error running ${shapeName}/${mode}:`, e.message);
         continue;
       }
+      // Lines searched / termination / candidates come from the search result.
+      // The engine (Engine.evaluateSetupAware) then runs one 1-second gap-fill pass
+      // that re-inserts orders final validation bounced; late/setup are read from
+      // that final candidate's objective facts.
+      const searchResult = result;
+      result = SetupScheduler.fillPlanningGaps(snapshot, bounds, searchResult);
       const elapsedMs = performance.now() - startTime;
 
       // Extract metrics
-      const { searched, tailOnly } = countLinesSearched(result, shapeConfig);
+      const { searched, tailOnly } = countLinesSearched(searchResult, shapeConfig);
       const { lateCount, lateMinutes } = countLateness(result);
       const setupMinutes = Math.round(result.objective?.setupMinutes || 0);
-      const candidates = result.diagnostics?.candidateCount ?? 0;
-      const termination = result.diagnostics?.termination ?? 'unknown';
+      const candidates = searchResult.diagnostics?.candidateCount ?? 0;
+      const termination = searchResult.diagnostics?.termination ?? 'unknown';
 
       results.push({
         shape: shapeName,
@@ -344,7 +345,7 @@ async function benchmark() {
   }
 
   console.log('\n');
-  console.log('Benchmark Results (seed 42)');
+  console.log(`Benchmark Results (seed ${seed})`);
   console.log('============================\n');
 
   // Print header
