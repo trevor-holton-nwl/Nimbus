@@ -67,6 +67,7 @@ one's inline comment for the reasoning):
      business material code under two different column names (historical),
      confirmed against schema.sql/migrations, not merely assumed.
 """
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -920,6 +921,21 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: 
         report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids, protect_ids)
         new_conn.commit()
         return report
+
+
+def recompute_plants(plants: Iterable[str]) -> None:
+    """§6.4's recompute hook: after a committed write to `production_version`/
+    `routing_operation` touches one or more plants, resolve each of them
+    (blank plants ignored, each plant once, in sorted order). Best-effort per
+    plant -- one plant's recompute failing is logged and must never mask (or
+    roll back) the write that already committed, mirroring the `machine`/
+    `sap_workcenter` post-write blocks in backend/master_data/routes.py."""
+    from backend.admin_ops.logbuffer import _log_event
+    for plant in sorted({p for p in plants if p}):
+        try:
+            resolve_orders(plant)
+        except Exception as e:
+            _log_event("warn", "routing", "Recompute after routing upload failed", plant=plant, error=str(e))
 
 
 # ===========================================================================

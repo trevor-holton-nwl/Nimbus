@@ -29,7 +29,7 @@ from psycopg.types.json import Jsonb
 import db
 import master_data as md
 import backend.routing.ingest as ingest
-from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
+from backend.admin_ops.logbuffer import _set_admin_log_details
 from backend.routing.models import RoutingUploadResult
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
@@ -38,23 +38,11 @@ router = APIRouter()
 
 
 def _recompute_after_write(plants: list[str]) -> None:
-    """§6.4's recompute hook, upload-route half: after a committed write to
-    `production_version`/`routing_operation` touches one or more plants,
-    resolve each of them. DEFERRED import -- resolver.py is a sibling
-    module in this same package, but the deferred-import convention this
-    task was told to match (`backend.distribution.data`'s) is about NEVER
-    importing a heavier, potentially-cyclic module at module scope; applied
-    here for consistency even though there's no actual cycle risk between
-    routes.py and resolver.py in this one domain. Best-effort per plant --
-    one plant's recompute failing must never mask (or roll back) the
-    upload write that already committed, mirroring the `machine`/
-    `sap_workcenter` post-write blocks in backend/master_data/routes.py."""
+    """Thin alias for `resolver.recompute_plants` (§6.4's recompute hook,
+    upload-route half), kept so existing references keep working. DEFERRED
+    import, matching the `backend.distribution.data` convention."""
     import backend.routing.resolver as routing_resolver
-    for plant in sorted({p for p in plants if p}):
-        try:
-            routing_resolver.resolve_orders(plant)
-        except Exception as e:
-            _log_event("warn", "routing", "Recompute after routing upload failed", plant=plant, error=str(e))
+    routing_resolver.recompute_plants(plants)
 
 # Same cap/env-var shape as backend/integration/routes.py's upload routes.
 NIMBUS_MAX_UPLOAD_BYTES = int(os.environ.get("NIMBUS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
@@ -69,7 +57,7 @@ def _do_upload_production_versions(file_bytes: bytes, user_email: str | None) ->
     the route below. §6.2: production_version is a plain upsert-by-key."""
     ops, warnings = ingest.parse_production_versions_upload(file_bytes)
     rejected = _rejected_count(warnings)
-    result = md.bulk_apply("production_version", ops, user_email=user_email)
+    result = write_production_versions(ops, user_email)
     _recompute_after_write([row.get("plant") for row in ops.get("upserts", [])])
     if len(warnings) > 200:
         warnings = warnings[:200]
@@ -95,6 +83,32 @@ def _do_upload_operations(file_bytes: bytes, user_email: str | None) -> dict:
         warnings = warnings[:200]
     if not groups:
         return {"inserted": 0, "updated": 0, "rejected": rejected, "warnings": warnings}
+
+    plants = sorted({key[0] for key in groups})
+    inserted = write_operation_groups(groups, user_email)
+    _recompute_after_write(plants)
+    return {"inserted": inserted, "updated": 0, "rejected": rejected, "warnings": warnings}
+
+
+def write_production_versions(ops: dict, user_email: str | None) -> dict:
+    """Upsert-by-key write of parsed production_version rows (`ops` is
+    `{"upserts": [...], "deletes": []}`, the shape
+    `ingest.parse_production_versions_rows` returns). Returns
+    `md.bulk_apply`'s `{inserted, updated, ...}` result. Does NOT recompute
+    -- the caller does that after the commit (`routing_resolver.recompute_plants`)."""
+    return md.bulk_apply("production_version", ops, user_email=user_email)
+
+
+def write_operation_groups(groups: dict[tuple, list[dict]], user_email: str | None) -> int:
+    """Scoped-replace write of parsed routing_operation rows, grouped by
+    routing key `(plant, material_id, task_list_type, routing_group,
+    group_counter)`: every key present has its existing rows deleted and
+    replaced, all in one transaction, serialized per plant via
+    `pg_advisory_xact_lock(hashtext(plant))`, plus one `admin_audit` row.
+    Returns the number of rows inserted. Does NOT recompute -- the caller does
+    that after the commit (`routing_resolver.recompute_plants`)."""
+    if not groups:
+        return 0
 
     # Every row this parse produced shares the same header-driven column
     # set (one worksheet, one header row) -- safe to read it off any row.
@@ -127,9 +141,7 @@ def _do_upload_operations(file_bytes: bytes, user_email: str | None) -> dict:
             (Jsonb({"plants": plants, "routing_keys": len(groups), "rows_written": inserted}), user_email),
         )
         conn.commit()
-
-    _recompute_after_write(plants)
-    return {"inserted": inserted, "updated": 0, "rejected": rejected, "warnings": warnings}
+    return inserted
 
 
 @router.post("/routing/upload/production-versions", response_model=RoutingUploadResult,

@@ -292,6 +292,53 @@ def test_missing_key_and_bad_numeric_rejected_per_row_others_still_parsed():
 
 
 # ---------------------------------------------------------------------------
+# 9. Row-level entry points (the SAP staging path reuses these directly)
+# ---------------------------------------------------------------------------
+def test_pv_rows_accepts_dict_rows_and_ignores_foreign_keys():
+    conn = _fake_conn(known_plants={"5512"}, known_mp={("5512", "1000261702")})
+
+    result, warnings = ingest.parse_production_versions_rows(
+        [{"plant": "5512", "material_id": "1000261702.0", "production_version": 1,
+          "group_counter": 1, "not_a_column": "x"}],
+        conn=conn)
+
+    assert warnings == []
+    (row,) = result["upserts"]
+    assert row["material_id"] == "1000261702"
+    assert row["production_version"] == "0001"
+    assert row["group_counter"] == "01"
+    assert "not_a_column" not in row
+
+
+def test_pv_rows_unknown_plant_rejected_with_row_number():
+    conn = _fake_conn(known_plants={"5512"}, known_mp={("5512", "1000261702")})
+
+    result, warnings = ingest.parse_production_versions_rows(
+        [{"plant": "9999", "material_id": "1000261702", "production_version": 1}],
+        conn=conn, first_row=1)
+
+    assert result["upserts"] == []
+    assert _reject_msgs(warnings)[0].startswith("unknown_plant:")
+    assert warnings[0]["row"] == 1
+
+
+def test_operation_rows_duplicate_key_rejected_and_grouped():
+    conn = _fake_conn(known_plants={"5512"}, known_mp={("5512", "1000261702")})
+    base = {"plant": "5512", "material_id": "1000261702", "task_list_type": "N",
+            "routing_group": "50001234", "group_counter": 1, "sequence_no": 10, "activity": 5}
+
+    groups, warnings = ingest.parse_routing_operations_rows(
+        [dict(base), dict(base), dict(base, sequence_no=20, deleted="X")], conn=conn)
+
+    assert any(r.startswith("duplicate_key:") for r in _reject_msgs(warnings))
+    ((key, rows),) = groups.items()
+    assert key == ("5512", "1000261702", "N", "50001234", "01")
+    assert len(rows) == 1
+    assert rows[0]["sequence_no"] == "000010"
+    assert rows[0]["sequence_category"] == "0"
+
+
+# ---------------------------------------------------------------------------
 # 8. Unknown/unrecognized header columns ignored with a warning, not an error
 # ---------------------------------------------------------------------------
 def test_unknown_header_column_ignored_with_warning_not_error():

@@ -219,6 +219,29 @@ def _reference_check(row: dict, known_plants: set, known_mp: set, known_wc: set)
     return None
 
 
+def _read_excel_rows(file_bytes: bytes, header_map: dict[str, str],
+                     key_headers: tuple[str, ...]) -> tuple[list[dict], list[dict]]:
+    """Excel adapter half of the `parse_*_upload` functions: read the sheet,
+    require the key headers (ValueError otherwise), map template headers to
+    NIMBUS column names, and return `(rows, prefix_warnings)` where the
+    warnings hold the unknown-header notice, if any. Only headers present in
+    the sheet produce keys, so a row never carries a column the sheet lacked."""
+    df = _read_excel(file_bytes)
+    headers_present = set(df.columns)
+    missing_required = [h for h in key_headers if h not in headers_present]
+    if missing_required:
+        raise ValueError(f"Missing required column(s): {', '.join(missing_required)}")
+    prefix: list[dict] = []
+    unk = _unknown_headers_warning(headers_present, header_map)
+    if unk:
+        prefix.append(unk)
+    rows = [
+        {col: record[header] for header, col in header_map.items() if header in record}
+        for record in df.to_dict("records")
+    ]
+    return rows, prefix
+
+
 def _unknown_headers_warning(headers_present: set[str], header_map: dict[str, str]) -> dict | None:
     unknown = sorted(h for h in headers_present if h not in header_map)
     if not unknown:
@@ -238,30 +261,34 @@ def parse_production_versions_upload(file_bytes: bytes, conn=None) -> tuple[dict
     -> `duplicate_key`. A rejected row is never included in `upserts` --
     rejection is per-row, never a whole-file failure.
     """
-    df = _read_excel(file_bytes)
-    headers_present = set(df.columns)
-    missing_required = [h for h in PRODUCTION_VERSION_KEY_HEADERS if h not in headers_present]
-    if missing_required:
-        raise ValueError(f"Missing required column(s): {', '.join(missing_required)}")
+    rows, prefix_warnings = _read_excel_rows(
+        file_bytes, PRODUCTION_VERSION_HEADERS, PRODUCTION_VERSION_KEY_HEADERS)
+    return parse_production_versions_rows(rows, conn=conn, prefix_warnings=prefix_warnings)
 
-    warnings: list[dict] = []
-    unk = _unknown_headers_warning(headers_present, PRODUCTION_VERSION_HEADERS)
-    if unk:
-        warnings.append(unk)
 
-    records = df.to_dict("records")
+def parse_production_versions_rows(rows: list[dict], conn=None, *, first_row: int = 2,
+                                   prefix_warnings: list[dict] | None = None) -> tuple[dict, list[dict]]:
+    """Validate already-normalised production_version rows (dicts keyed by
+    the NIMBUS column names -- `plant`, `material_id`, `production_version`,
+    ...) and return exactly what `parse_production_versions_upload` returns:
+    `{"upserts": [...], "deletes": []}` plus warnings. Every validation
+    (missing key, numeric/boolean parsing, zero-padding, unknown plant /
+    material / work center, duplicate key) lives here so a non-Excel caller
+    (the SAP staging path) gets identical behaviour. Keys outside the known
+    production_version columns are ignored. `first_row` is the number
+    reported for the first row in rejection warnings (2 for Excel: header is
+    row 1); `prefix_warnings` are file-level warnings listed before the
+    per-row ones (the Excel adapter's unknown-header notice)."""
+    warnings: list[dict] = list(prefix_warnings or [])
+    known_cols = frozenset(PRODUCTION_VERSION_HEADERS.values())
 
     # Pass 1: build candidate rows, coercing/validating in isolation (no DB
     # round trip yet) so the reference pre-fetch below only ever needs to
     # cover rows that already passed key-presence/numeric validation.
     candidates: list[tuple[int, dict]] = []
     rejected = 0
-    for i, record in enumerate(records, start=2):  # header is row 1
-        row: dict = {}
-        for header, col in PRODUCTION_VERSION_HEADERS.items():
-            if header not in record:
-                continue
-            row[col] = record[header]
+    for i, record in enumerate(rows, start=first_row):
+        row: dict = {c: record[c] for c in known_cols if c in record}
 
         plant = _clean_str(row.get("plant"))
         material_id = db._str_id(row.get("material_id"))
@@ -353,28 +380,32 @@ def parse_routing_operations_upload(file_bytes: bytes, conn=None) -> tuple[dict[
     anyway, and `deleted` stays an ordinary admin-editable column for a
     planner to flag directly in the grid later.
     """
-    df = _read_excel(file_bytes)
-    headers_present = set(df.columns)
-    missing_required = [h for h in ROUTING_OPERATION_KEY_HEADERS if h not in headers_present]
-    if missing_required:
-        raise ValueError(f"Missing required column(s): {', '.join(missing_required)}")
+    rows, prefix_warnings = _read_excel_rows(
+        file_bytes, ROUTING_OPERATION_HEADERS, ROUTING_OPERATION_KEY_HEADERS)
+    return parse_routing_operations_rows(rows, conn=conn, prefix_warnings=prefix_warnings)
 
-    warnings: list[dict] = []
-    unk = _unknown_headers_warning(headers_present, ROUTING_OPERATION_HEADERS)
-    if unk:
-        warnings.append(unk)
 
-    records = df.to_dict("records")
+def parse_routing_operations_rows(rows: list[dict], conn=None, *, first_row: int = 2,
+                                  prefix_warnings: list[dict] | None = None
+                                  ) -> tuple[dict[tuple, list[dict]], list[dict]]:
+    """Validate already-normalised routing_operation rows (dicts keyed by the
+    NIMBUS column names) and return exactly what
+    `parse_routing_operations_upload` returns: rows grouped by routing key
+    `(plant, material_id, task_list_type, routing_group, group_counter)`
+    plus warnings. All validation (DELETED skip, missing key, numeric /
+    integer / boolean parsing, zero-padding, unknown plant / material / work
+    center, duplicate full key) lives here so a non-Excel caller gets
+    identical behaviour. Keys outside the known routing_operation columns
+    are ignored; `first_row`/`prefix_warnings` as in
+    `parse_production_versions_rows`."""
+    warnings: list[dict] = list(prefix_warnings or [])
+    known_cols = frozenset(ROUTING_OPERATION_HEADERS.values())
 
     candidates: list[tuple[int, dict]] = []
     rejected = 0
     skipped_deleted = 0
-    for i, record in enumerate(records, start=2):
-        row: dict = {}
-        for header, col in ROUTING_OPERATION_HEADERS.items():
-            if header not in record:
-                continue
-            row[col] = record[header]
+    for i, record in enumerate(rows, start=first_row):
+        row: dict = {c: record[c] for c in known_cols if c in record}
 
         if "deleted" in row and _to_bool(row["deleted"]):
             skipped_deleted += 1
