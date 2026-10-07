@@ -1310,6 +1310,7 @@ def test_mulesoft_role_file_does_not_grant_server_owned_header_columns():
     assert "status" not in grant                                    # status always starts 'loading' (7.2 must not name it)
     assert "sap_stage_row_mulesoft_guard" in text and "BEFORE INSERT ON %I" in text   # no late rows / rows into upload batches
     assert "CONNECTION LIMIT" in text
+    assert "sap_stage_out_mulesoft_guard" in text and "OLD.row_status = 'ready' AND NEW.row_status IN ('sent', 'error')" in text   # outbound rows never leave sent/error
 
 
 # ===========================================================================

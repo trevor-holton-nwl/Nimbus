@@ -151,6 +151,28 @@ ALTER ROLE nimbus_mulesoft CONNECTION LIMIT 10;
 GRANT SELECT ON sap_stage_planned_order_out TO nimbus_mulesoft;
 GRANT UPDATE (row_status, sent_at, error_text) ON sap_stage_planned_order_out TO nimbus_mulesoft;
 
+-- Status guard for this login: an outbound row only ever moves ready -> sent or ready -> error (or is
+-- touched without changing status). It can never leave sent / error, so SAP cannot receive a row twice.
+-- NIMBUS itself (requeue retires ready rows to error) is unaffected.
+CREATE OR REPLACE FUNCTION sap_stage_out_mulesoft_guard() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF current_user = 'nimbus_mulesoft' THEN
+    IF NOT (NEW.row_status = OLD.row_status
+            OR (OLD.row_status = 'ready' AND NEW.row_status IN ('sent', 'error'))) THEN
+      RAISE EXCEPTION 'nimbus_mulesoft may only move an outbound row from ready to sent or error (row %, % -> %)',
+        OLD.id, OLD.row_status, NEW.row_status;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS trg_sap_stage_out_mulesoft_guard ON sap_stage_planned_order_out;
+CREATE TRIGGER trg_sap_stage_out_mulesoft_guard
+    BEFORE UPDATE ON sap_stage_planned_order_out
+    FOR EACH ROW EXECUTE FUNCTION sap_stage_out_mulesoft_guard();
+
 -- BIGSERIAL sequences behind the inbound id columns.
 GRANT USAGE, SELECT ON SEQUENCE sap_stage_material_plant_id_seq,
                                 sap_stage_planned_order_id_seq,
