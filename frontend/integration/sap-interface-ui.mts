@@ -4,7 +4,8 @@
 // docs/architecture/domain-refactor-plan.md, which split that
 // 11,308-line mega-module into 9 domain files).
 /* global NIMBUS */
-import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
+import { Store } from '../platform/store.mjs';
 import { Session } from '../security/session.mjs';
 
 // SAP transport kinds — must mirror sap_sync._CONNECTORS' keys in the backend contract.
@@ -39,7 +40,8 @@ interface SapRun {
 interface SapObject {
   object_key: string;
   label?: string;
-  kind?: 'master' | 'orders';
+  kind?: 'master' | 'orders' | 'staging';
+  apply_mode?: 'manual' | 'auto';
   enabled: boolean;
   transport?: SapTransport;
   schedule_cron?: string | null;
@@ -75,6 +77,7 @@ interface SapObjectConfig {
  *  merge, not a replace — see `sap_set_config`). */
 interface SapConfigPatch {
   enabled?: boolean;
+  apply_mode?: 'manual' | 'auto';
   transport?: SapTransport;
   schedule_cron?: string | null;
   source_params?: Record<string, string>;
@@ -169,6 +172,128 @@ interface SapUploadAuditResponse {
   audit: SapUploadAuditItem[];
 }
 
+// --- SAP staging (Mulesoft landing zone) wire shapes. The `/sap/staging/*`
+// routes carry no response_model, so api-generated.d.mts types their bodies as
+// untyped; these are hand-written from the backend contract
+// (backend/integration/sap_staging.py), same as the SapRun family above.
+
+/** One entry of a batch's `warnings` list — `msg` is what the backend writes today;
+ *  `message` is accepted too. Unknown codes render as the raw code. */
+interface StageWarning {
+  code?: string;
+  level?: string;
+  msg?: string;
+  message?: string;
+}
+
+interface StageCounts {
+  total?: number;
+  valid?: number;
+  rejected?: number;
+  by_reason?: Record<string, number>;
+  in_horizon_live?: number;
+  vanish_candidates?: number;
+  /** Fraction 0..1 (0.26 = 26 %), not a percentage. */
+  vanish_pct?: number;
+  held?: boolean;
+  confirmed_held?: boolean;
+  step?: string;
+}
+
+/** One `sap_stage_batch` header (`GET /sap/staging/batches`). */
+interface StageBatch {
+  batch_id: string;
+  object_key: string;
+  plant: string;
+  source?: string;
+  status: string;
+  row_count_expected?: number | null;
+  received_at?: string | null;
+  ready_at?: string | null;
+  validated_at?: string | null;
+  applied_at?: string | null;
+  applied_by?: string | null;
+  created_by?: string | null;
+  counts?: StageCounts | null;
+  warnings?: StageWarning[] | null;
+  error?: string | null;
+}
+
+interface StageBatchesResponse {
+  batches: StageBatch[];
+}
+
+/** One order a planned-order batch would delete (`GET .../deletions`). */
+interface StageDeletion {
+  id: string;
+  production_order: string | null;
+  material_number: string | null;
+  machine: string | null;
+  scheduled_start: string | null;
+  scheduled_end: string | null;
+  manual_firmed?: boolean | null;
+  firming_indicator?: string | null;
+  parent_production_order?: string | null;
+}
+
+/** One vanish-deleted order in the 30-day archive (`GET /sap/staging/archive/{plant}`). */
+interface ArchivedOrder {
+  id: number | string;
+  batch_id: string;
+  plant: string;
+  order_id: string;
+  production_order: string | null;
+  material_number: string | null;
+  machine: string | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  restored_at: string | null;
+  restored_by: string | null;
+}
+
+/** `GET /sap/staging/send/{plant}/status`. */
+interface SendStatus {
+  ready: number;
+  sent: number;
+  error: number;
+  last_queued_at: string | null;
+  last_sent_at: string | null;
+}
+
+interface StagePollResult {
+  processed?: number;
+  applied?: number;
+  held?: number;
+  skipped?: number;
+  errors?: number;
+}
+
+const STAGE_STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'applied', 'error', 'rejected', 'superseded', 'discarded'];
+const STAGE_WARN_CODES = ['routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded'];
+
+/** Pure formatter for a batch's status pill + counts text (rail status line and
+ *  batch rows). Unknown statuses fall back to the neutral pill with the raw status. */
+function stageStatusLine(b: StageBatch): { pillClass: string; text: string } {
+  const known = STAGE_STATUSES.indexOf(b.status) > -1;
+  const label = known ? Util.t(`ui.sap_stage_status_${b.status}`) : String(b.status);
+  const c = b.counts || {};
+  return {
+    pillClass: `sap-batch-pill sap-batch-pill-${known ? b.status : 'unknown'}`,
+    text: `${label} · ${c.valid ?? 0}/${c.rejected ?? 0}`,
+  };
+}
+
+/** One-line consequence of an apply mode, shown under the mode select. */
+function applyModeHint(mode: string | null | undefined): string {
+  return Util.t(mode === 'auto' ? 'ui.sap_stage_mode_hint_auto' : 'ui.sap_stage_mode_hint_manual');
+}
+
+function stageWarningText(w: StageWarning): string {
+  const code = w.code || '';
+  if (STAGE_WARN_CODES.indexOf(code) > -1) return Util.t(`ui.sap_stage_warn_${code}`);
+  return code || w.message || w.msg || '';
+}
+
 /* =============================================================================
    INTERFACE — SAP integration console (Admin → Interface sub-tab)
    A master-detail console rendered into #sap-interface-host, driven by the
@@ -190,7 +315,11 @@ export const Interface = (() => {
 
   let _objects: SapObject[] = [];         // last GET /objects payload — drives ribbon + rail
   let _selected: string | null = null;    // selected object_key (master selection)
-  let _tab: 'overview' | 'mapping' | 'history' = 'overview'; // active detail tab
+  type SapTab = 'overview' | 'staging' | 'mapping' | 'history';
+  let _tab: SapTab = 'overview'; // active detail tab
+  let _stagePlant = '';                   // plant chosen in the Staging tab's combobox ('' = none yet)
+  const _latest: Record<string, StageBatch | null> = {}; // object_key -> newest batch header (rail status line)
+  const _rejectedOpen = new Set<string>(); // batch_ids whose rejected-rows drawer is open
   let _testResult: SapTestResultUI | null = null; // last {cls,dot,msg} from a Test-connection click
   let _lastNewestKey: string | null = null; // object_key of the most-recent run (ribbon deep-link)
   const _config: Record<string, SapObjectConfig> = {}; // object_key -> GET /config payload (transport/params/has_secret)
@@ -245,7 +374,10 @@ export const Interface = (() => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       });
-      _objects = data.objects || [];
+      // Staging objects first (stable), legacy connectors after — same order as the rail groups.
+      const objs = data.objects || [];
+      _objects = [...objs.filter((o) => o.kind === 'staging'), ...objs.filter((o) => o.kind !== 'staging')];
+      await _loadLatest();
       if (!_selected || !_objects.some((o) => o.object_key === _selected)) {
         _selected = _objects.length ? _objects[0].object_key : null;
       }
@@ -256,6 +388,20 @@ export const Interface = (() => {
         + `<div class="sap-empty-d">${Util.escapeHtml((e as Error).message)}</div></div>`;
       ErrorLog.error('sap-interface', `Load objects failed: ${(e as Error).message}`);
     }
+  }
+
+  // Newest batch header per staging object (limit=1, no plant filter) for the rail status line.
+  // Best-effort: a failed probe just shows "no batches" rather than blocking the console.
+  async function _loadLatest(): Promise<void> {
+    await Promise.all(_objects.filter((o) => o.kind === 'staging').map(async (o) => {
+      try {
+        const d: StageBatchesResponse = await Util.fetchTraced(`${API}/sap/staging/batches?object=${encodeURIComponent(o.object_key)}&limit=1`).then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        _latest[o.object_key] = (d.batches && d.batches[0]) || null;
+      } catch { _latest[o.object_key] = null; }
+    }));
   }
 
   // Rebuild the whole console from cached _objects (no fetch).
@@ -323,14 +469,33 @@ export const Interface = (() => {
   function _renderRail(): void {
     const el = document.getElementById('sap-rail');
     if (!el) return;
-    const rows = _objects.map((o) => {
+    const rowHtml = (o: SapObject): string => {
       const sel = o.object_key === _selected ? ' sap-rail-row-sel' : '';
       const lr = o.last_run;
+      const kind = o.kind || 'master';
+      if (kind === 'staging') {
+        // Staging objects have no enable switch (the poll + apply mode govern them); the
+        // status line is the newest batch's pill + valid/rejected counts.
+        const lb = _latest[o.object_key] || null;
+        const dot = !lb ? '' : (lb.status === 'applied' || lb.status === 'validated' ? 'ok'
+          : (lb.status === 'held' ? 'warn' : (lb.status === 'error' || lb.status === 'rejected' ? 'err' : '')));
+        const sl = lb ? stageStatusLine(lb) : null;
+        const statusHtml = sl
+          ? `<span class="${Util.escapeHtml(sl.pillClass)}">${Util.escapeHtml(sl.text)}</span> <span class="sap-hint">${Util.escapeHtml(lb ? lb.plant : '')}</span>`
+          : Util.escapeHtml(Util.t('ui.sap_stage_no_batches'));
+        return `<div class="sap-rail-row sap-rail-row-staging${sel}" data-obj="${Util.escapeHtml(o.object_key)}" tabindex="0" role="button">
+          <span class="admin-health-dot ${dot}"></span>
+          <div class="sap-rail-main">
+            <div class="sap-rail-name">${Util.escapeHtml(o.label || o.object_key)} <span class="sap-kind sap-kind-staging">${Util.escapeHtml(Util.t('ui.sap_staging'))}</span></div>
+            <div class="sap-rail-meta">${Util.escapeHtml(o.object_key)} · ${Util.escapeHtml(o.apply_mode === 'auto' ? Util.t('ui.sap_stage_mode_auto') : Util.t('ui.sap_stage_mode_manual'))}</div>
+            <div class="sap-rail-status">${statusHtml}</div>
+          </div>
+        </div>`;
+      }
       const dotCls = !lr ? '' : (lr.status === 'ok' ? 'ok' : (lr.status === 'error' ? 'err' : (lr.status === 'running' ? 'warn' : '')));
       const statusTxt = !lr ? Util.t('ui.sap_never_run')
         : (lr.status === 'ok' ? `ok · ${_relTime(lr.started_at)}`
         : (lr.status === 'error' ? `failed · ${_relTime(lr.started_at)}` : lr.status));
-      const kind = o.kind || 'master';
       return `<div class="sap-rail-row${sel}" data-obj="${Util.escapeHtml(o.object_key)}">
         <span class="admin-health-dot ${dotCls}"></span>
         <div class="sap-rail-main">
@@ -343,11 +508,21 @@ export const Interface = (() => {
           <span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span>
         </label>
       </div>`;
-    }).join('');
+    };
+    const stagingObjs = _objects.filter((o) => o.kind === 'staging');
+    const legacyObjs = _objects.filter((o) => o.kind !== 'staging');
+    const group = (label: string, list: SapObject[]): string => list.length
+      ? `<div class="sap-rail-group">${Util.escapeHtml(label)}</div>${list.map(rowHtml).join('')}` : '';
+    // Group labels only make sense when both kinds exist (an older backend sends no staging kind).
+    const rows = stagingObjs.length
+      ? group(Util.t('ui.sap_staging_group'), stagingObjs) + group(Util.t('ui.sap_connectors_group'), legacyObjs)
+      : legacyObjs.map(rowHtml).join('');
     el.innerHTML = `<div class="panel">
       <div class="panel-head"><span class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_objects'))}</span>
         <span class="sap-hint">${_objects.filter((o) => o.enabled).length} / ${_objects.length}</span></div>
       <div class="sap-rail">${rows}</div></div>`;
+    el.querySelectorAll<HTMLElement>('.sap-rail-row-staging').forEach((r) =>
+      r.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); r.click(); } }));
     el.querySelectorAll<HTMLElement>('[data-obj]').forEach((r) =>
       r.addEventListener('click', () => { _selected = r.dataset.obj ?? null; _testResult = null; _renderRail(); _renderDetail(); }));
     el.querySelectorAll<HTMLInputElement>('[data-enable]').forEach((cb) => {
@@ -362,25 +537,52 @@ export const Interface = (() => {
     const o = _objects.find((x) => x.object_key === _selected);
     if (!o) { el.innerHTML = ''; return; }
     const kind = o.kind || 'master';
+    const isStaging = kind === 'staging';
+    // Staging objects have no Overview tab (no transport/cron/test-connection) and legacy ones no Staging tab.
+    if (isStaging && _tab === 'overview') _tab = 'staging';
+    if (!isStaging && _tab === 'staging') _tab = 'overview';
     const tabBtn = (id: string, label: string) => `<button class="sap-tab${_tab === id ? ' sap-tab-active' : ''}" data-tab="${id}">${Util.escapeHtml(label)}</button>`;
+    const mode = o.apply_mode === 'auto' ? 'auto' : 'manual';
+    const actions = isStaging
+      ? `<div class="sap-stage-mode">
+          <label class="sap-stage-mode-label" for="sap-apply-mode">${Util.escapeHtml(Util.t('ui.sap_stage_apply_mode'))}</label>
+          <select id="sap-apply-mode" class="sap-stage-mode-sel" title="${Util.escapeHtml(Util.t('ui.sap_stage_mode_hint'))}">
+            <option value="manual"${mode === 'manual' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.sap_stage_mode_manual'))}</option>
+            <option value="auto"${mode === 'auto' ? ' selected' : ''}>${Util.escapeHtml(Util.t('ui.sap_stage_mode_auto'))}</option>
+          </select>
+          <div class="sap-help" id="sap-apply-mode-hint">${Util.escapeHtml(applyModeHint(mode))}</div>
+        </div>
+        <button class="btn btn-sm btn-primary" id="sap-stage-refresh">${Util.escapeHtml(Util.t('ui.sap_stage_refresh'))}</button>`
+      : `<button class="btn btn-sm" data-act="dry">${Util.escapeHtml(Util.t('ui.sap_dry_run'))}</button>
+          <button class="btn btn-sm btn-primary" data-act="run">${Util.escapeHtml(Util.t('ui.sap_run_now'))} ▸</button>`;
+    const tabs = isStaging
+      ? tabBtn('staging', Util.t('ui.sap_staging')) + tabBtn('mapping', Util.t('ui.sap_mapping')) + tabBtn('history', Util.t('ui.sap_history'))
+      : tabBtn('overview', Util.t('ui.sap_overview')) + tabBtn('mapping', Util.t('ui.sap_mapping')) + tabBtn('history', Util.t('ui.sap_history'));
     el.innerHTML = `<div class="panel">
       <div class="sap-detail-head">
         <span class="sap-detail-name">${Util.escapeHtml(o.label || o.object_key)}</span>
-        <span class="sap-kind sap-kind-${Util.escapeHtml(kind)}">${Util.escapeHtml(kind)}</span>
+        <span class="sap-kind sap-kind-${Util.escapeHtml(kind)}">${Util.escapeHtml(isStaging ? Util.t('ui.sap_staging') : kind)}</span>
         <span class="sap-detail-key">${Util.escapeHtml(o.object_key)}</span>
-        <div class="sap-detail-actions">
-          <button class="btn btn-sm" data-act="dry">${Util.escapeHtml(Util.t('ui.sap_dry_run'))}</button>
-          <button class="btn btn-sm btn-primary" data-act="run">${Util.escapeHtml(Util.t('ui.sap_run_now'))} ▸</button>
-        </div>
+        <div class="sap-detail-actions">${actions}</div>
       </div>
-      <div class="sap-tabs">${tabBtn('overview', Util.t('ui.sap_overview'))}${tabBtn('mapping', Util.t('ui.sap_mapping'))}${tabBtn('history', Util.t('ui.sap_history'))}</div>
+      <div class="sap-tabs">${tabs}</div>
       <div class="sap-tabbody" id="sap-tabbody"><div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div></div>
     </div>`;
     el.querySelectorAll<HTMLElement>('[data-tab]').forEach((b) =>
-      b.addEventListener('click', () => { _tab = b.dataset.tab as 'overview' | 'mapping' | 'history'; _renderDetail(); }));
+      b.addEventListener('click', () => { _tab = b.dataset.tab as SapTab; _renderDetail(); }));
     el.querySelectorAll<HTMLElement>('[data-act]').forEach((b) =>
       b.addEventListener('click', () => _runNow(o.object_key, b.dataset.act === 'dry', b as HTMLButtonElement)));
+    if (isStaging) {
+      document.getElementById('sap-apply-mode')?.addEventListener('change', (e: Event) => {
+        const value = (e.target as HTMLSelectElement).value === 'auto' ? 'auto' : 'manual';
+        const hint = document.getElementById('sap-apply-mode-hint');
+        if (hint) hint.textContent = applyModeHint(value);
+        _saveConfig(o.object_key, { apply_mode: value }, null);
+      });
+      document.getElementById('sap-stage-refresh')?.addEventListener('click', (e: Event) => _pollNow(e.currentTarget as HTMLButtonElement));
+    }
     if (_tab === 'overview') _renderOverview(o);
+    else if (_tab === 'staging') _renderStaging(o);
     else if (_tab === 'mapping') _renderMapping(o);
     else _renderHistory(o);
   }
@@ -596,12 +798,15 @@ export const Interface = (() => {
     const st = _mapState[o.object_key];
     if (!body || !st) return;
     const isMaster = (o.kind || 'master') === 'master';
+    // Staging objects skip the MASTER_KEYS save-guard: the backend forces their key
+    // columns active on every save, so the editor never needs to block on them.
+    const isStaging = o.kind === 'staging';
     const keys = MASTER_KEYS[o.object_key] || [];
     const rails = `<div class="sap-flow-rails"><span class="sap-fr">▤ ${Util.escapeHtml(Util.t('ui.sap_field'))}</span><span class="sap-fr c">${Util.escapeHtml(Util.t('ui.sap_transform'))}</span><span class="sap-fr r">${Util.escapeHtml(Util.t('ui.sap_nimbus_column'))} ◆</span></div>`;
 
     if (!st.rows.length) {
       body.innerHTML = `${isMaster ? _keystrip(o, st) : ''}
-        <div class="sap-banner sap-banner-info"><span class="sap-banner-ico">→</span><div>${isMaster ? Util.escapeHtml(Util.t('ui.sap_map_primer_master')) : Util.escapeHtml(Util.t('ui.sap_map_primer_orders'))}</div></div>
+        <div class="sap-banner sap-banner-info"><span class="sap-banner-ico">→</span><div>${Util.escapeHtml(Util.t(isStaging ? 'ui.sap_map_primer_staging' : (isMaster ? 'ui.sap_map_primer_master' : 'ui.sap_map_primer_orders')))}</div></div>
         ${rails}
         <div class="sap-ghost-row"><div class="sap-ghost-node">SAP field</div><div class="sap-ghost-mid">transform</div><div class="sap-ghost-node">nimbus_column</div></div>
         <div class="sap-map-actions"><button class="btn btn-sm" id="sap-add-map">+ ${Util.escapeHtml(Util.t('ui.sap_add_first'))}</button></div>`;
@@ -629,6 +834,8 @@ export const Interface = (() => {
       if (blocked) {
         guard += `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(o.label || o.object_key)} ${Util.escapeHtml(Util.t('ui.sap_upsert_fail'))}</b> ${Util.escapeHtml(Util.t('ui.sap_key_missing'))} <span class="sap-mono">${missing.map(m => Util.escapeHtml(m)).join(', ')}</span>.</div></div>`;
       }
+    } else if (isStaging) {
+      guard = `<div class="sap-banner sap-banner-info"><span class="sap-banner-ico">ℹ</span><div>${Util.escapeHtml(Util.t('ui.sap_map_primer_staging'))}</div></div>`;
     } else if (!isMaster) {
       guard = `<div class="sap-help" style="margin-bottom:12px"><span class="sap-mono">production_order</span> ${Util.escapeHtml(Util.t('ui.sap_orders_identity'))}</div>`;
     }
@@ -693,6 +900,479 @@ export const Interface = (() => {
   }
 
   // -----------------------------------------------------------------------
+  // Staging tab — Mulesoft landing zone: batches, apply/confirm/discard,
+  // rejected rows, test upload, plus Outbound + Archive on planned orders.
+  // -----------------------------------------------------------------------
+
+  // One AbortController per live combobox container (its document-level click listener) —
+  // mirrors setup-admin.mts / master-data/admin-ui.mts / distribution-pane.mts, the
+  // deliberately duplicated searchable-combobox helper (frontend/CLAUDE.md "Cross-cutting
+  // hazards"); keep any change mirrored there.
+  const _comboAborts = new WeakMap<HTMLElement, AbortController>();
+
+  /** Searchable single-select combobox (Production Scale Roadmap: never chips for plants). */
+  function _mkCombobox(containerEl: HTMLElement | null, options: string[], opts: { value?: string; placeholder?: string; onSelect?: (value: string) => void } = {}): void {
+    if (!containerEl) return;
+    _comboAborts.get(containerEl)?.abort();
+    const _comboAbort = new AbortController();
+    _comboAborts.set(containerEl, _comboAbort);
+    const { value = '', placeholder = '', onSelect } = opts;
+    containerEl.innerHTML = `
+      <div class="hps-combobox md-bom-combobox">
+        <input type="text" class="hps-input" placeholder="${Util.escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"
+               aria-haspopup="listbox" aria-expanded="false" aria-label="${Util.escapeHtml(Util.t('ui.plant_label'))}">
+        <button type="button" class="hps-clear" hidden>&times;</button>
+        <div class="hps-dropdown" role="listbox" hidden></div>
+      </div>`;
+    const root = containerEl.querySelector('.hps-combobox') as HTMLElement;
+    const input = root.querySelector('.hps-input') as HTMLInputElement;
+    const clearBtn = root.querySelector('.hps-clear') as HTMLButtonElement;
+    const dropdown = root.querySelector('.hps-dropdown') as HTMLElement;
+    let filtered: string[] = [];
+    let activeIdx = -1;
+    let open = false;
+    let selected = value;
+
+    function reflect(): void {
+      input.value = selected || '';
+      root.classList.toggle('has-value', !!selected);
+      clearBtn.hidden = !selected;
+    }
+    function renderDropdown(query: string): void {
+      const q = (query || '').trim().toLowerCase();
+      const looksLikeLabel = selected && String(query).trim().toLowerCase() === String(selected).toLowerCase();
+      const filterQ = looksLikeLabel ? '' : q;
+      filtered = filterQ ? options.filter((o) => String(o).toLowerCase().includes(filterQ)) : options.slice();
+      if (!filtered.length) {
+        dropdown.innerHTML = `<div class="hps-empty">${Util.t(options.length ? 'ui.no_matches' : 'ui.no_options')}</div>`;
+        activeIdx = -1;
+        return;
+      }
+      dropdown.innerHTML = filtered.map((o, i) => `<div class="hps-option${o === selected ? ' selected' : ''}" role="option" data-idx="${i}">${Util.escapeHtml(o)}</div>`).join('');
+      activeIdx = Math.max(0, filtered.indexOf(selected));
+      highlight();
+      dropdown.querySelectorAll('.hps-option').forEach((el, i) => {
+        el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(filtered[i] as string); });
+      });
+    }
+    function highlight(): void {
+      const items = dropdown.querySelectorAll('.hps-option');
+      items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+      if (items[activeIdx]) items[activeIdx]!.scrollIntoView({ block: 'nearest' });
+    }
+    function openDd(): void { dropdown.hidden = false; open = true; input.setAttribute('aria-expanded', 'true'); }
+    function closeDd(): void { dropdown.hidden = true; open = false; activeIdx = -1; input.setAttribute('aria-expanded', 'false'); }
+    function pick(o: string): void {
+      selected = o;
+      reflect();
+      closeDd();
+      input.blur();
+      if (onSelect) onSelect(o);
+    }
+
+    input.addEventListener('focus', () => { renderDropdown(input.value); openDd(); });
+    input.addEventListener('input', () => { renderDropdown(input.value); openDd(); });
+    input.addEventListener('keydown', (e) => {
+      if (!open) {
+        if (e.key === 'ArrowDown' || e.key === 'Enter') { renderDropdown(input.value); openDd(); e.preventDefault(); }
+        return;
+      }
+      if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, filtered.length - 1); highlight(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlight(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (filtered[activeIdx]) pick(filtered[activeIdx] as string); }
+      else if (e.key === 'Escape') { closeDd(); reflect(); input.blur(); }
+    });
+    input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
+    clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
+    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboAbort.signal });
+
+    reflect();
+  }
+
+  /** Readable text out of a non-OK response body (409 → `detail.message`). */
+  function _errText(body: unknown, status: number): string {
+    const b = (body || {}) as { detail?: unknown; message?: unknown };
+    const d = b.detail as { message?: unknown } | string | undefined;
+    if (d && typeof d === 'object' && typeof d.message === 'string') return d.message;
+    return Util.errorDetailText(b.detail) || (typeof b.message === 'string' ? b.message : '') || `HTTP ${status}`;
+  }
+
+  /** One staging write: POST, toast the outcome, always reload. Returns the parsed body on success. */
+  async function _stagePost<T>(path: string, body: unknown, errKey: string | null): Promise<T | null> {
+    try {
+      const isForm = body instanceof FormData;
+      const r = await Util.fetchTraced(`${API}${path}`, {
+        method: 'POST',
+        headers: _writeHeaders(!isForm),
+        body: isForm ? body : JSON.stringify(body ?? {}),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = _errText(j, r.status);
+        Toast.show(errKey ? Util.t(errKey, { msg }) : msg, 'error', 6000);
+        ErrorLog.error('sap-interface', `Staging POST ${path} failed: ${msg}`);
+        return null;
+      }
+      return j as T;
+    } catch (e) {
+      Toast.show(errKey ? Util.t(errKey, { msg: (e as Error).message }) : (e as Error).message, 'error', 6000);
+      ErrorLog.error('sap-interface', `Staging POST ${path} failed: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  async function _pollNow(btn: HTMLButtonElement | null): Promise<void> {
+    if (btn) btn.disabled = true;
+    const res = await _stagePost<StagePollResult>('/sap/staging/poll', {}, null);
+    if (res) {
+      Toast.show(Util.t('toast.sap_poll_done', { processed: res.processed ?? 0, applied: res.applied ?? 0, held: res.held ?? 0 }), 'success');
+    }
+    await _reload();
+    if (btn) btn.disabled = false;
+  }
+
+  async function _downloadCsv(path: string, filename: string): Promise<void> {
+    try {
+      const r = await Util.fetchTraced(`${API}${path}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      Toast.show((e as Error).message, 'error');
+      ErrorLog.error('sap-interface', `CSV download failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function _getJson<T>(path: string): Promise<T> {
+    const r = await Util.fetchTraced(`${API}${path}`);
+    if (!r.ok) throw new Error(_errText(await r.json().catch(() => ({})), r.status));
+    return r.json();
+  }
+
+  function _stageIsCurrent(o: SapObject, body: HTMLElement): boolean {
+    return document.getElementById('sap-tabbody') === body && _tab === 'staging' && _selected === o.object_key;
+  }
+
+  async function _renderStaging(o: SapObject): Promise<void> {
+    const body = document.getElementById('sap-tabbody');
+    if (!body) return;
+    const isOrders = o.object_key === 'stage_planned_orders';
+    body.innerHTML = `
+      <div class="sap-stage-bar">
+        <div class="sap-field sap-stage-plant"><label>${Util.escapeHtml(Util.t('ui.plant_label'))}</label><div id="sap-stage-plant-host"></div></div>
+        <div class="sap-stage-upload">
+          <input type="file" id="sap-stage-file" accept=".xlsx,.xls,.csv" aria-label="${Util.escapeHtml(Util.t('ui.sap_stage_upload'))}">
+          <button class="btn btn-sm" id="sap-stage-upload-btn" disabled>${Util.escapeHtml(Util.t('ui.sap_stage_upload'))}</button>
+          <div class="sap-help" id="sap-stage-upload-hint"></div>
+        </div>
+      </div>
+      <div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_stage_batches'))}</div>
+      <div id="sap-stage-batches"><div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div></div>
+      ${isOrders ? '<div id="sap-stage-outbound" class="sap-stage-panel"></div><div id="sap-stage-archive" class="sap-stage-panel"></div>' : ''}`;
+
+    const fileEl = document.getElementById('sap-stage-file') as HTMLInputElement | null;
+    const upBtn = document.getElementById('sap-stage-upload-btn') as HTMLButtonElement | null;
+    const upHint = document.getElementById('sap-stage-upload-hint');
+    const syncUpload = (): void => {
+      if (upBtn) upBtn.disabled = !(_stagePlant && fileEl && fileEl.files && fileEl.files.length);
+      if (upHint) upHint.textContent = _stagePlant ? '' : Util.t('ui.sap_stage_plant_required');
+    };
+    fileEl?.addEventListener('change', syncUpload);
+    upBtn?.addEventListener('click', () => { void _uploadToStaging(o, fileEl, upBtn); });
+    syncUpload();
+
+    _mkCombobox(document.getElementById('sap-stage-plant-host'), Store.knownPlants(), {
+      value: _stagePlant,
+      placeholder: Util.t('ph.select_plant'),
+      onSelect: (p) => {
+        _stagePlant = p || '';
+        syncUpload();
+        void _loadBatches(o, body);
+        if (isOrders) { void _renderOutbound(o, body); void _renderArchive(o, body); }
+      },
+    });
+
+    await _loadBatches(o, body);
+    if (isOrders) { void _renderOutbound(o, body); void _renderArchive(o, body); }
+  }
+
+  async function _loadBatches(o: SapObject, body: HTMLElement): Promise<void> {
+    const host = document.getElementById('sap-stage-batches');
+    if (!host) return;
+    try {
+      const params = new URLSearchParams({ object: o.object_key, limit: '50' });
+      if (_stagePlant) params.set('plant', _stagePlant);
+      const d = await _getJson<StageBatchesResponse>(`/sap/staging/batches?${params.toString()}`);
+      if (!_stageIsCurrent(o, body)) return;
+      const batches = d.batches || [];
+      if (!batches.length) {
+        host.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_stage_no_batches'))}</div></div>`;
+        return;
+      }
+      host.innerHTML = `<div class="sap-batch-list">${batches.map(_batchRowHtml).join('')}</div>`;
+      host.querySelectorAll<HTMLButtonElement>('[data-bact]').forEach((btn) =>
+        btn.addEventListener('click', () => {
+          const b = batches.find((x) => x.batch_id === btn.dataset.bid);
+          if (b) void _stageAction(b, btn.dataset.bact as string, btn);
+        }));
+      host.querySelectorAll<HTMLButtonElement>('[data-brej]').forEach((btn) =>
+        btn.addEventListener('click', () => { void _toggleRejected(btn.dataset.brej as string, host); }));
+      host.querySelectorAll<HTMLButtonElement>('[data-bcsv]').forEach((btn) =>
+        btn.addEventListener('click', () => {
+          const bid = btn.dataset.bcsv as string;
+          void _downloadCsv(`/sap/staging/batches/${encodeURIComponent(bid)}/rejected?format=csv`, `rejected_${bid.slice(0, 8)}.csv`);
+        }));
+      _rejectedOpen.forEach((bid) => { if (host.querySelector(`#sap-rej-${CSS.escape(bid)}`)) void _fillRejected(bid, host); });
+    } catch (e) {
+      host.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_load_failed'))}</div><div class="sap-empty-d">${Util.escapeHtml((e as Error).message)}</div></div>`;
+      ErrorLog.error('sap-interface', `Load batches failed: ${(e as Error).message}`);
+    }
+  }
+
+  function _batchRowHtml(b: StageBatch): string {
+    const sl = stageStatusLine(b);
+    const c = b.counts || {};
+    const held = b.status === 'held';
+    const rejected = c.rejected ?? 0;
+    const vanishPct = c.vanish_pct != null ? Math.round(c.vanish_pct * 100) : null;
+    const vanish = vanishPct != null
+      ? `<span class="sap-batch-vanish${held ? ' is-held' : ''}">${Util.escapeHtml(Util.t('ui.sap_stage_vanish', { count: c.vanish_candidates ?? 0, pct: vanishPct }))}</span>` : '';
+    const times = [
+      [Util.t('ui.sap_stage_time_received'), b.received_at], [Util.t('ui.sap_stage_time_ready'), b.ready_at],
+      [Util.t('ui.sap_stage_time_validated'), b.validated_at], [Util.t('ui.sap_stage_time_applied'), b.applied_at],
+    ].filter((t) => t[1]).map((t) => `<span>${Util.escapeHtml(String(t[0]))} ${Util.escapeHtml(_fmtTs(t[1]))}</span>`).join('');
+    const warns = (b.warnings || []).map((w) => `<div class="sap-batch-warn">${Util.escapeHtml(stageWarningText(w))}</div>`).join('');
+    const err = b.error ? `<div class="sap-batch-warn is-err">${Util.escapeHtml(b.error)}${c.step ? ` (${Util.escapeHtml(c.step)})` : ''}</div>` : '';
+    const heldBanner = held
+      ? `<div class="sap-banner sap-banner-err sap-batch-held"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(Util.t('ui.sap_stage_held_banner'))}</b></div></div>` : '';
+    const btn = (act: string, key: string, cls = '') =>
+      `<button class="btn btn-sm${cls ? ' ' + cls : ''}" data-bact="${act}" data-bid="${Util.escapeHtml(b.batch_id)}">${Util.escapeHtml(Util.t(key))}</button>`;
+    let actions = '';
+    switch (b.status) {
+      case 'validated': actions = btn('apply', 'ui.sap_stage_apply', 'btn-primary') + btn('discard', 'ui.sap_stage_discard'); break;
+      case 'held': actions = btn('confirm', 'ui.sap_stage_confirm_apply', 'btn-danger') + btn('discard', 'ui.sap_stage_discard'); break;
+      case 'ready': case 'rejected': actions = btn('validate', 'ui.sap_stage_validate') + btn('discard', 'ui.sap_stage_discard'); break;
+      case 'error': actions = btn('validate', 'ui.sap_stage_validate') + btn('retry', 'ui.sap_stage_retry_apply', 'btn-primary') + btn('discard', 'ui.sap_stage_discard'); break;
+      default: actions = ''; // loading / applying / applied / superseded / discarded
+    }
+    const rejBtn = rejected > 0
+      ? `<button class="btn btn-sm btn-ghost" data-brej="${Util.escapeHtml(b.batch_id)}" aria-expanded="${_rejectedOpen.has(b.batch_id)}">${Util.escapeHtml(Util.t('ui.sap_stage_rejected_rows'))} (${rejected})</button>` : '';
+    return `<div class="sap-batch-row" data-batch="${Util.escapeHtml(b.batch_id)}">
+      <div class="sap-batch-head">
+        <span class="${Util.escapeHtml(sl.pillClass)}">${Util.escapeHtml(STAGE_STATUSES.indexOf(b.status) > -1 ? Util.t(`ui.sap_stage_status_${b.status}`) : String(b.status))}</span>
+        <span class="sap-batch-plant">${Util.escapeHtml(b.plant)}</span>
+        <span class="sap-batch-src">${Util.escapeHtml(b.source || '')}</span>
+        <span class="sap-batch-counts sap-mono">${Util.escapeHtml(Util.t('ui.sap_stage_counts', { total: c.total ?? 0, valid: c.valid ?? 0, rejected }))}</span>
+        ${vanish}
+        <span class="sap-batch-actions">${rejBtn}${actions}</span>
+      </div>
+      <div class="sap-batch-times">${times}</div>
+      ${heldBanner}${warns}${err}
+      <div class="sap-batch-rej" id="sap-rej-${Util.escapeHtml(b.batch_id)}"${_rejectedOpen.has(b.batch_id) ? '' : ' hidden'}></div>
+    </div>`;
+  }
+
+  async function _toggleRejected(bid: string, host: HTMLElement): Promise<void> {
+    if (_rejectedOpen.has(bid)) {
+      _rejectedOpen.delete(bid);
+      const el = host.querySelector<HTMLElement>(`#sap-rej-${CSS.escape(bid)}`);
+      if (el) el.hidden = true;
+      host.querySelector(`[data-brej="${CSS.escape(bid)}"]`)?.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    _rejectedOpen.add(bid);
+    host.querySelector(`[data-brej="${CSS.escape(bid)}"]`)?.setAttribute('aria-expanded', 'true');
+    await _fillRejected(bid, host);
+  }
+
+  async function _fillRejected(bid: string, host: HTMLElement): Promise<void> {
+    const el = host.querySelector<HTMLElement>(`#sap-rej-${CSS.escape(bid)}`);
+    if (!el) return;
+    el.hidden = false;
+    el.innerHTML = `<div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
+    try {
+      const d = await _getJson<{ rows: Record<string, unknown>[] }>(`/sap/staging/batches/${encodeURIComponent(bid)}/rejected?limit=50`);
+      const rows = (d.rows || []).slice(0, 50);
+      const csvBtn = `<button class="btn btn-sm btn-ghost" data-bcsv="${Util.escapeHtml(bid)}">${Util.escapeHtml(Util.t('ui.sap_stage_download_csv'))}</button>`;
+      if (!rows.length) { el.innerHTML = `<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_rejected_empty'))}</div>${csvBtn}`; }
+      else {
+        // reject_reason first, then up to 7 further columns that carry data in the first rows.
+        const keys = Object.keys(rows[0] as Record<string, unknown>).filter((k) => k !== 'reject_reason' && k !== 'batch_id' && k !== 'id');
+        const cols = ['reject_reason', ...keys].filter((k) => rows.some((r) => r[k] != null && r[k] !== '')).slice(0, 8);
+        el.innerHTML = `<div class="sap-batch-rej-scroll"><table class="sap-batch-table"><thead><tr>${cols.map((k) => `<th>${Util.escapeHtml(k)}</th>`).join('')}</tr></thead><tbody>${
+          rows.map((r) => `<tr>${cols.map((k) => `<td>${Util.escapeHtml(r[k] == null ? '' : String(r[k]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+          <div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_rejected_shown', { count: rows.length }))}</div>${csvBtn}`;
+      }
+      el.querySelector<HTMLButtonElement>('[data-bcsv]')?.addEventListener('click', () =>
+        void _downloadCsv(`/sap/staging/batches/${encodeURIComponent(bid)}/rejected?format=csv`, `rejected_${bid.slice(0, 8)}.csv`));
+    } catch (e) {
+      el.innerHTML = `<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
+    }
+  }
+
+  /** Confirm-and-apply modal for a held batch: lists the held warnings and, for the
+   *  vanish-threshold hold, the exact orders that will be deleted. */
+  async function _confirmHeld(b: StageBatch): Promise<boolean> {
+    const warnings = b.warnings || [];
+    const reasons = warnings.map((w) => `<li>${Util.escapeHtml(stageWarningText(w))}</li>`).join('');
+    let deletions = '';
+    if (warnings.some((w) => w.code === 'vanish_threshold')) {
+      try {
+        const d = await _getJson<{ orders: StageDeletion[] }>(`/sap/staging/batches/${encodeURIComponent(b.batch_id)}/deletions`);
+        const orders = d.orders || [];
+        const shown = orders.slice(0, 200);
+        const row = (x: StageDeletion): string => {
+          const firmed = !!x.manual_firmed || x.firming_indicator === 'X';
+          return `<tr><td>${Util.escapeHtml(x.production_order ?? '')}</td><td>${Util.escapeHtml(x.material_number ?? '')}</td>`
+            + `<td>${Util.escapeHtml(x.machine ?? '')}</td><td>${Util.escapeHtml(_fmtTs(x.scheduled_end))}</td>`
+            + `<td>${firmed ? Util.escapeHtml(Util.t('ui.sap_stage_firmed_yes')) : ''}</td></tr>`;
+        };
+        deletions = `<div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_stage_deletions'))} (${orders.length})</div>
+          <div class="sap-stage-deletions"><table class="sap-batch-table"><thead><tr>
+            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
+            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th></tr></thead>
+            <tbody>${shown.map(row).join('')}</tbody></table></div>
+          ${orders.length > shown.length ? `<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_deletions_more', { count: orders.length - shown.length }))}</div>` : ''}`;
+      } catch (e) {
+        deletions = `<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
+      }
+    }
+    return Modal.confirm({
+      title: Util.t('ui.sap_stage_confirm_apply'),
+      message: Util.t('ui.sap_stage_confirm_msg', { plant: b.plant }),
+      detail: `<ul class="sap-stage-reasons">${reasons}</ul>${deletions}`,
+      confirmLabel: Util.t('ui.sap_stage_confirm_apply'),
+      tone: 'danger',
+    });
+  }
+
+  async function _stageAction(b: StageBatch, act: string, btn: HTMLButtonElement): Promise<void> {
+    if (act === 'confirm' && !(await _confirmHeld(b))) return;
+    btn.disabled = true;
+    const base = `/sap/staging/batches/${encodeURIComponent(b.batch_id)}`;
+    if (act === 'validate') {
+      if (await _stagePost(`${base}/validate`, {}, 'toast.sap_stage_failed')) Toast.show(Util.t('toast.sap_stage_validated'), 'success');
+    } else if (act === 'discard') {
+      if (await _stagePost(`${base}/discard`, {}, 'toast.sap_stage_failed')) Toast.show(Util.t('toast.sap_stage_discarded'), 'info');
+    } else {
+      const res = await _stagePost(`${base}/apply`, act === 'confirm' ? { confirm_held: true } : {}, 'toast.sap_stage_apply_failed');
+      if (res) Toast.show(Util.t('toast.sap_stage_applied'), 'success');
+    }
+    await _reload();
+  }
+
+  async function _uploadToStaging(o: SapObject, fileEl: HTMLInputElement | null, btn: HTMLButtonElement): Promise<void> {
+    const f = fileEl && fileEl.files && fileEl.files[0];
+    if (!f || !_stagePlant) return;
+    btn.disabled = true;
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('plant', _stagePlant);
+    const res = await _stagePost<{ rows_staged?: number; rows_skipped?: number; status?: string }>(
+      `/sap/staging/upload/${encodeURIComponent(o.object_key)}`, fd, 'toast.sap_stage_failed');
+    if (res) {
+      Toast.show(Util.t('toast.sap_stage_uploaded', { staged: res.rows_staged ?? 0, skipped: res.rows_skipped ?? 0, status: res.status ?? '' }), 'success', 4000);
+    }
+    await _reload();
+  }
+
+  // Outbound panel (planned orders only): ready / sent / error tiles + Send to SAP.
+  async function _renderOutbound(o: SapObject, body: HTMLElement): Promise<void> {
+    const host = document.getElementById('sap-stage-outbound');
+    if (!host) return;
+    const title = `<div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_outbound'))}</div>`;
+    const plant = _stagePlant;
+    if (!plant) {
+      host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_plant_required'))}</div>
+        <button class="btn btn-sm btn-primary" disabled>${Util.escapeHtml(Util.t('ui.sap_send_to_sap'))}</button>`;
+      return;
+    }
+    try {
+      const s = await _getJson<SendStatus>(`/sap/staging/send/${encodeURIComponent(plant)}/status`);
+      if (!_stageIsCurrent(o, body) || plant !== _stagePlant) return;
+      const tile = (key: string, n: number, cls: string) =>
+        `<div class="kpi-tile${cls ? ' ' + cls : ''}"><div class="k">${Util.escapeHtml(Util.t(key))}</div><div class="v">${n}</div></div>`;
+      host.innerHTML = `${title}
+        <div class="sap-stage-tiles">${tile('ui.sap_send_status_ready', s.ready ?? 0, '')}${tile('ui.sap_send_status_sent', s.sent ?? 0, '')}${tile('ui.sap_send_status_error', s.error ?? 0, (s.error ?? 0) > 0 ? 'err' : '')}</div>
+        <div class="sap-kv sap-stage-kv"><span>${Util.escapeHtml(Util.t('ui.sap_outbound_last_queued'))}</span><span>${Util.escapeHtml(_fmtTs(s.last_queued_at))}</span>
+          <span>${Util.escapeHtml(Util.t('ui.sap_outbound_last_sent'))}</span><span>${Util.escapeHtml(_fmtTs(s.last_sent_at))}</span></div>
+        <div class="sap-stage-panel-actions">
+          <button class="btn btn-sm btn-primary" id="sap-send-btn">${Util.escapeHtml(Util.t('ui.sap_send_to_sap'))}</button>
+          <button class="btn btn-sm btn-ghost" id="sap-send-errcsv">${Util.escapeHtml(Util.t('ui.sap_outbound_error_csv'))}</button>
+        </div>`;
+      document.getElementById('sap-send-btn')?.addEventListener('click', (e) => { void _sendToSap(plant, e.currentTarget as HTMLButtonElement); });
+      document.getElementById('sap-send-errcsv')?.addEventListener('click', () =>
+        void _downloadCsv(`/sap/staging/send/${encodeURIComponent(plant)}/rows?status=error&format=csv`, `sap_send_errors_${plant}.csv`));
+    } catch (e) {
+      host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
+    }
+  }
+
+  async function _sendToSap(plant: string, btn: HTMLButtonElement): Promise<void> {
+    const ok = await Modal.confirm({
+      title: Util.t('ui.sap_send_to_sap'),
+      message: Util.t('ui.sap_send_confirm', { plant: Store.plantLabel ? Store.plantLabel(plant) : plant }),
+      confirmLabel: Util.t('ui.sap_send_to_sap'),
+      tone: 'warn',
+    });
+    if (!ok) return;
+    btn.disabled = true;
+    const res = await _stagePost<{ queued?: number; firmed?: number }>(`/sap/staging/send/${encodeURIComponent(plant)}`, {}, 'toast.sap_stage_failed');
+    if (res) Toast.show(Util.t('toast.sap_sent_queued', { queued: res.queued ?? 0, firmed: res.firmed ?? 0 }), 'success', 4000);
+    await _reload();
+  }
+
+  // Archive panel (planned orders only): vanish-deleted orders of the last 30 days, with Restore.
+  async function _renderArchive(o: SapObject, body: HTMLElement): Promise<void> {
+    const host = document.getElementById('sap-stage-archive');
+    if (!host) return;
+    const title = `<div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_archive'))}</div>`;
+    const plant = _stagePlant;
+    if (!plant) { host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_plant_required'))}</div>`; return; }
+    try {
+      const d = await _getJson<{ orders: ArchivedOrder[] }>(`/sap/staging/archive/${encodeURIComponent(plant)}?limit=50`);
+      if (!_stageIsCurrent(o, body) || plant !== _stagePlant) return;
+      const orders = d.orders || [];
+      if (!orders.length) { host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_archive_empty'))}</div>`; return; }
+      const row = (a: ArchivedOrder): string => `<tr>
+        <td>${Util.escapeHtml(a.production_order ?? a.order_id ?? '')}</td><td>${Util.escapeHtml(a.material_number ?? '')}</td><td>${Util.escapeHtml(a.machine ?? '')}</td>
+        <td>${Util.escapeHtml(_fmtTs(a.deleted_at))}</td><td>${Util.escapeHtml(a.deleted_by ?? '')}</td>
+        <td>${a.restored_at
+          ? `${Util.escapeHtml(Util.t('ui.sap_archive_restored'))} ${Util.escapeHtml(_fmtTs(a.restored_at))}`
+          : `<button class="btn btn-sm" data-restore="${Util.escapeHtml(String(a.id))}">${Util.escapeHtml(Util.t('ui.sap_archive_restore'))}</button>`}</td></tr>`;
+      host.innerHTML = `${title}<div class="sap-batch-rej-scroll"><table class="sap-batch-table"><thead><tr>
+        <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
+        <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_deleted_at'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_deleted_by'))}</th><th></th></tr></thead>
+        <tbody>${orders.map(row).join('')}</tbody></table></div>`;
+      host.querySelectorAll<HTMLButtonElement>('[data-restore]').forEach((btn) =>
+        btn.addEventListener('click', () => {
+          const a = orders.find((x) => String(x.id) === btn.dataset.restore);
+          if (a) void _restoreArchived(a, btn);
+        }));
+    } catch (e) {
+      host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
+    }
+  }
+
+  async function _restoreArchived(a: ArchivedOrder, btn: HTMLButtonElement): Promise<void> {
+    const ok = await Modal.confirm({
+      title: Util.t('ui.sap_archive_restore'),
+      message: Util.t('ui.sap_archive_restore_confirm', { order: a.production_order ?? a.order_id }),
+      confirmLabel: Util.t('ui.sap_archive_restore'),
+    });
+    if (!ok) return;
+    btn.disabled = true;
+    const res = await _stagePost(`/sap/staging/archive/${encodeURIComponent(String(a.id))}/restore`, {}, 'toast.sap_stage_failed');
+    if (res) Toast.show(Util.t('toast.sap_archive_restored'), 'success');
+    await _reload();
+  }
+
+  // -----------------------------------------------------------------------
   // History tab — run timeline (status, counts, duration, watermark, errors)
   // -----------------------------------------------------------------------
   async function _renderHistory(o: SapObject): Promise<void> {
@@ -720,7 +1400,7 @@ export const Interface = (() => {
       const sapAuditItems = auditData.audit || [];
 
       if (!runs.length && !sapAuditItems.length) {
-        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_no_runs'))}</div><div class="sap-empty-d">${Util.escapeHtml(Util.t('ui.sap_no_runs_hint'))}</div><button class="btn btn-sm" data-act-empty="dry">${Util.escapeHtml(Util.t('ui.sap_dry_run'))}</button></div>`;
+        body.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_no_runs'))}</div><div class="sap-empty-d">${Util.escapeHtml(Util.t('ui.sap_no_runs_hint'))}</div>${o.kind === 'staging' ? '' : `<button class="btn btn-sm" data-act-empty="dry">${Util.escapeHtml(Util.t('ui.sap_dry_run'))}</button>`}</div>`;
         body.querySelector('[data-act-empty]')?.addEventListener('click', () => _runNow(o.object_key, true, null));
         return;
       }
@@ -943,6 +1623,9 @@ export const Interface = (() => {
     // exposes it to tests/modules/integration/sap-interface-ui.test.mjs,
     // which otherwise cannot reach a non-exported module-scope function.
     _renderSapDistributionWarningForTest: _renderSapDistributionWarning,
+    // Pure staging formatters (no DOM) — same ForTest precedent, for the same test file.
+    _stageStatusLineForTest: stageStatusLine,
+    _applyModeHintForTest: applyModeHint,
   };
 })();
 

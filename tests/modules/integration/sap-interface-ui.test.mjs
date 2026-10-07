@@ -81,6 +81,27 @@ test('Interface._renderSapDistributionWarningForTest formats each warning-item s
   });
 });
 
+test('Interface._stageStatusLineForTest maps each batch status to its pill class and valid/rejected text', () => {
+  const batch = (status, counts) => ({ batch_id: 'b1', object_key: 'stage_planned_orders', plant: '5512', status, counts });
+  const held = Interface._stageStatusLineForTest(batch('held', { valid: 80, rejected: 3 }));
+  assert.equal(held.pillClass, 'sap-batch-pill sap-batch-pill-held');
+  assert.equal(held.text, 'ui.sap_stage_status_held · 80/3', 'no locales in the test realm: t() echoes the key');
+  const applied = Interface._stageStatusLineForTest(batch('applied', {}));
+  assert.equal(applied.pillClass, 'sap-batch-pill sap-batch-pill-applied');
+  assert.equal(applied.text, 'ui.sap_stage_status_applied · 0/0', 'missing counts read as 0/0');
+  const noCounts = Interface._stageStatusLineForTest({ batch_id: 'b2', object_key: 'x', plant: 'p', status: 'validated' });
+  assert.equal(noCounts.text, 'ui.sap_stage_status_validated · 0/0');
+  const unknown = Interface._stageStatusLineForTest(batch('weird', { valid: 1, rejected: 2 }));
+  assert.equal(unknown.pillClass, 'sap-batch-pill sap-batch-pill-unknown', 'an unknown status falls back to the neutral pill');
+  assert.equal(unknown.text, 'weird · 1/2', 'and shows the raw status');
+});
+
+test('Interface._applyModeHintForTest returns the consequence line for each apply mode', () => {
+  assert.equal(Interface._applyModeHintForTest('auto'), 'ui.sap_stage_mode_hint_auto');
+  assert.equal(Interface._applyModeHintForTest('manual'), 'ui.sap_stage_mode_hint_manual');
+  assert.equal(Interface._applyModeHintForTest(undefined), 'ui.sap_stage_mode_hint_manual', 'default is manual');
+});
+
 test('Interface._renderSapDistributionWarningForTest\'s review link navigates to the Gantt distribution sub-pane instead of a dead #gantt/distribution hash', () => {
   withFakeDom(() => {
     const priorNimbus = globalThis.NIMBUS;
