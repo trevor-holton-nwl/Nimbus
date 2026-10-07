@@ -658,7 +658,10 @@ def _cleanup(pg):
     with _conn(pg) as (conn, cur):
         cur.execute("DELETE FROM sap_stage_vanished_order WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM sap_stage_batch WHERE btrim(plant) = %s", (PLANT,))   # incl. the padded-plant test
+        cur.execute("DELETE FROM order_distribution WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM orders WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM machine WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM sap_workcenter WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM routing_operation WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM production_version WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM material_plants WHERE plant = %s", (PLANT,))
@@ -1641,3 +1644,41 @@ def test_a_second_concurrent_poll_skips_while_the_first_holds_the_advisory_lock(
                 hcur.execute("SELECT pg_advisory_unlock(hashtext('sap:staging-poll'))")
             holder.commit()
     assert st.poll_once(actor="pytest")["skipped"] == []                    # lock released: the next poll runs
+
+
+@pytest.mark.pg
+def test_sap_apply_keeps_excel_only_values_on_distributed_children(pg, stg_plant):
+    """Track 4 / E2: a SAP planned-order row carries no description / labor / FTE keys, so a distributed
+    parent's header facts and every child keep what the Excel upload stored (the plain-order rule)."""
+    import backend.distribution.data as dd
+    import backend.routing.resolver as rr
+    import db as db_
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES (%s, 'ZZWCD',"
+                    " 'distribute')", (PLANT,))
+        cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                    " VALUES (%s, %s, 'ZZMA', 'ZZWCD', 1), (%s, %s, 'ZZMB', 'ZZWCD', 1)", (SUB, PLANT, SUB, PLANT))
+        cur.execute("INSERT INTO materials (material_id) VALUES ('ZZSTGDIST') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO material_plants (material_id, plant) VALUES ('ZZSTGDIST', %s)", (PLANT,))
+        conn.commit()
+    start = datetime(2030, 1, 10, 6, 0)
+    excel_row = {"production_order": "9000001", "material_number": "ZZSTGDIST", "machine": "ZZWCD", "plant": PLANT,
+                 "basic_start_date": start, "basic_finish_date": start + timedelta(hours=8), "run_time": 8.0,
+                 "order_quantity": 100.0, "material_description": "Excel description", "labor_hours": 10.0,
+                 "no_of_fte": 2.0, "form_size": "XL"}
+    db_.upsert_orders([dict(excel_row)], source="excel", filename="t.xlsx", plan_fn=dd.plan, apply_fn=dd.apply,
+                      resolve_fn=rr.resolve_orders)
+    sap_row = {k: v for k, v in excel_row.items()
+               if k not in ("material_description", "labor_hours", "no_of_fte", "form_size")}
+    db_.upsert_orders([sap_row], source="sap", plan_fn=dd.plan, apply_fn=dd.apply, resolve_fn=rr.resolve_orders)
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT material_description, form_size, labor_hours, no_of_fte FROM orders"
+                    " WHERE plant = %s AND parent_production_order = '9000001' ORDER BY machine", (PLANT,))
+        kids = cur.fetchall()
+        cur.execute("SELECT sap_facts FROM order_distribution WHERE plant = %s AND production_order = '9000001'",
+                    (PLANT,))
+        facts = cur.fetchone()[0]
+    assert len(kids) == 2
+    for desc, form, labor, fte in kids:
+        assert desc == "Excel description" and form == "XL" and fte == 2 and float(labor) == 5.0
+    assert facts["material_description"] == "Excel description"

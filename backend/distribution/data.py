@@ -297,6 +297,10 @@ _SAP_FACTS_COPIED_KEYS = (
 # order_quantity/run_time/labor_hours/machine_hours are apportioned per child (Hamilton /
 # largest-remainder); everything else on a parent row is copied verbatim to every child.
 _ADDITIVE_COLS = ("order_quantity", "run_time", "labor_hours", "machine_hours")
+# The orders._EXCEL_ONLY_COLS subset a distribution header carries (db._EXCEL_ONLY_COLS; labor/machine hours are
+# re-derived from the living children, the rest live in sap_facts): kept when an ingest row omits the column.
+_EXCEL_ONLY_FACT_KEYS = ("material_description", "form_size", "order_category", "order_type",
+                         "labor_hours", "machine_hours", "no_of_fte")
 _QTY_MILLI_UNIT = Decimal("0.001")          # SAP QUAN 13,3 fallback unit (§5.3)
 _HOURS_APPORTION_UNIT = Decimal("0.01")     # labor_hours/machine_hours granularity (not specced
                                              # to a particular unit by aggregate_to_detail.md §5.3
@@ -778,7 +782,7 @@ def _build_child_rows(plant: str, production_order: str, material_number: str,
 def _plan_one_parent(plant: str, production_order: str, material_number: str, row: dict,
                      classification: dict, existing: dict | None, workcenter_lookup: dict,
                      mat_attrs: dict, anchor_sources: dict, plain_id: str, batch_id: str,
-                     warnings: dict) -> tuple[dict, list[dict]]:
+                     warnings: dict, cur=None) -> tuple[dict, list[dict]]:
     """Plan ONE distribute-mode parent -- either a brand-new header (§5.2
     "New") or an existing one, refreshed in place, possibly rerouted
     (decision I / §5.1 step 4). Returns (parent_plan, child_rows); the caller
@@ -844,6 +848,17 @@ def _plan_one_parent(plant: str, production_order: str, material_number: str, ro
             previous_workcenter = raw_code
 
     parent_facts, runtime_defaulted = _extract_parent_facts(row)
+    if existing is not None and cur is not None:
+        # An ingest row that does not CARRY an Excel-only column at all (a SAP planned-order row has no
+        # description / labor / FTE keys) must not blank what an Excel upload stored on this header and its
+        # children -- the same rule db._UPSERT_SQL_SAP applies to plain orders. A key that IS present (an
+        # Excel row, even with a blank cell) keeps overwrite semantics.
+        carried = [k for k in _EXCEL_ONLY_FACT_KEYS if k not in row]
+        if carried:
+            prior = _parent_facts_from_header(cur, plant, production_order, material_number, existing["header"])
+            for k in carried:
+                if parent_facts.get(k) is None and prior.get(k) is not None:
+                    parent_facts[k] = prior[k]
     if runtime_defaulted:
         warnings["parent_runtime_defaulted"] += 1
 
@@ -1015,7 +1030,7 @@ def _plan_core(cur, rows: list[dict], batch_id: str, warnings: dict) -> tuple[li
 
         parent_plan, child_rows = _plan_one_parent(
             plant, key[1], key[2], row, classification, existing, workcenter_lookup,
-            mat_attrs, anchor_sources, plain_ids.get(key), batch_id, warnings,
+            mat_attrs, anchor_sources, plain_ids.get(key), batch_id, warnings, cur=cur,
         )
         if ctype == "single_rewrite":
             warnings["single_rewrites"] += 1
