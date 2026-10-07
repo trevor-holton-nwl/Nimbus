@@ -264,6 +264,8 @@ def test_upload_captures_observation_before_ingesting_replacement(monkeypatch):
         if fn is brain.setup_data.capture_setup_states_before_schedule_mutation:
             calls.append(("snapshot", args, kwargs))
             return None
+        if fn is brain.md.known_plant_line_codes:        # the soft-warn lookup is off-loop since review round 4
+            return fn()
         calls.append(("ingest", args, kwargs))
         return {"status": "ok", "inserted": 1, "updated": 0, "raw_row_count": 1,
                 "warnings": [], "lines": []}
