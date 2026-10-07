@@ -219,10 +219,10 @@ Each step is independently shippable and testable with the scoped command in `fr
 
 | Step | Change | Effort | Expected effect |
 |---|---|---|---|
-| 1 | F1: gate exact search on multiset leaf count (≤ ~500) | ½ day | Every line gets searched; Due Date and Changeover stop timing out on normal plants; large quality gain |
-| 2 | F2: per-line free-interval index on the run context; skip re-normalization of indexed intervals | 1–2 days | 2.5× faster search, identical results; SPT covers all lines at target scale |
-| 3 | F4: iteration cap per line (or ~200k); check `seen` before consuming an iteration | ½ day | Removes the new binding limit after step 2 |
-| 4 | F3: add the due-ordered seed to Min Changeover | ½ day | Min Changeover becomes due-safe in practice (50 → 2 late on the medium shape) |
+| 1 | ✅ F1: gate exact search on multiset leaf count (≤ ~500) (8971236) | ½ day | Every line gets searched; Due Date and Changeover stop timing out on normal plants; large quality gain |
+| 2 | ✅ F2: per-line free-interval index on the run context; skip re-normalization of indexed intervals (2dcef80) | 1–2 days | 2.5× faster search, identical results; SPT covers all lines at target scale |
+| 3 | ✅ F4: iteration cap per line (or ~200k); check `seen` before consuming an iteration (af81a05) | ½ day | Removes the new binding limit after step 2 |
+| 4 | ~~F3: add the due-ordered seed to Min Changeover~~ **Dropped — replaced by Part 3 Step 4 (892a6f4)** | — | Min Changeover becomes due-safe by design (setup-first ranking, single search pass, count-based admission, date-limit enforcement) |
 | 5 | F5: charge unadmitted orders at fragment level | ½ day | Search objective agrees with the final objective; required before step 7 |
 | 6 | F7: single-pass Min Changeover (two incumbents from one search) | 1–2 days | Halves Min Changeover cost; large plants fit the 5 s budget |
 | 7 | F6: iterated first-improvement local search with per-line budget share | 2 days | Further lateness/setup gains on 20–40-order fragments |
@@ -457,6 +457,27 @@ Due date leaves Min Changeover's objective. It stays only as the pull-forward fl
 - Full `npm run test`, lint, typecheck. Benchmark table for all shapes × modes before (Step 0 baseline) and after, in the merge commit or PR body.
 - Doc hygiene: one sentence each in `docs/architecture/optimizer-dispatch.md` and `frontend/optimization/CLAUDE.md` (exact search gated on leaf count; per-line cap scaling; Min Changeover = least setup inside the date limits, admission by count, single search). Also correct the optimizer dialog's Min Changeover hint text if it promises on-time delivery (check the `tip.*` locale keys in all five locales).. Mark F1–F4 as shipped in this doc's §5 table.
 - Review pass (`/code-review` on the branch) before merging into `main`. Deploy via `promote-azure` is a separate, explicitly requested step.
+
+## 3.5 Results
+
+Measured with `node scripts/bench-optimizer.mjs --seed 42` (5 s deadline, 20,000-iteration base cap, single runs, wall times approximate). "Before" is the branch at 5e60997 (benchmark script only, none of F1-F4 or Step 4); "after" is the branch tip. Lines is searched/untouched; Late is the count of late orders and late minutes; all 12 rows admit the same number of orders before and after.
+
+| Shape, mode | Before: wall, lines | Before: late (min), setup min | After: wall, lines | After: late (min), setup min |
+|---|---|---|---|---|
+| small, Min Changeover | 5.1 s deadline, 0/5 | 5 (6,955), 3,861 | 0.1 s converged, 5/0 | 5 (6,352), 985 |
+| small, Due Date | 5.1 s deadline, 1/4 | 5 (6,955), 3,861 | 0.1 s converged, 5/0 | 1 (258), 2,058 |
+| small, SPT | 0.8 s converged, 5/0 | 5 (9,863), 4,105 | 0.1 s converged, 5/0 | 5 (9,863), 4,105 |
+| medium, Min Changeover | 5.7 s deadline, 1/9 | 81 (681,501), 22,235 | 0.6 s converged, 10/0 | 80 (540,410), 3,208 |
+| medium, Due Date | 5.5 s deadline, 1/9 | 81 (681,501), 22,235 | 0.6 s converged, 10/0 | 10 (11,567), 25,280 |
+| medium, SPT | 4.1 s converged, 10/0 | 89 (747,466), 24,335 | 0.4 s converged, 10/0 | 89 (747,466), 24,335 |
+| wide, Min Changeover | 6.0 s deadline, 5/65 | 27 (39,340), 32,236 | 2.3 s converged, 70/0 | 22 (30,200), 12,697 |
+| wide, Due Date | 5.5 s deadline, 5/65 | 27 (39,340), 32,236 | 2.2 s converged, 70/0 | 2 (725), 15,187 |
+| wide, SPT | 5.5 s deadline, 42/28 | 27 (41,672), 33,092 | 1.3 s converged, 70/0 | 27 (44,850), 33,902 |
+| large, Min Changeover | 8.9 s deadline, 1/69 | 470 (3,064,664), 126,679 | 7.2 s deadline, 55/15 | 379 (2,199,109), 40,528 |
+| large, Due Date | 7.8 s deadline, 1/69 | 447 (2,941,017), 127,516 | 5.0 s converged, 70/0 | 52 (144,727), 135,140 |
+| large, SPT | 8.0 s deadline, 13/57 | 403 (2,913,032), 131,762 | 6.7 s deadline, 68/2 | 419 (3,140,074), 138,686 |
+
+Reading it: F1/F2/F4 make every shape except the 70-line large plant converge and search every line, and cut Due Date lateness by 5-50x. Min Changeover now buys much less setup (medium 22,235 to 3,208; wide 32,236 to 12,697) and, because due dates are no longer an objective, its lateness is higher than Due Date's by design (D1). On the large shape Min Changeover still hits the 5 s deadline with 15 of 70 lines untouched (reported as an incomplete search); the Min Changeover seed set costs more per fragment than Due Date's, so this is the next place to look (see F5-F9 in the roadmap). The Min Changeover result carries explanation code `min-changeover-selected`; the old `min-changeover-due-safe` / `min-changeover-incumbent` codes are gone.
 
 ## 3.4 Revised roadmap after these decisions
 

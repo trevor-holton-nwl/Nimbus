@@ -1371,7 +1371,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.filter_by_scope':               'Filter by scope',
   'tip.no_wheel_loaded':               'No wheel loaded',
   'tip.spt_mode':                      'Shortest processing first — minimize average completion time',
-  'tip.changeover_mode':               'Min Changeover — the plant\'s priority lists rank first, then fewest orders over the push-forward limit, then fewest late orders and least late hours (never making an already-late order much later), then setup savings. Honors the pull-forward and push-forward limits.',
+  'tip.changeover_mode':               'Min Changeover groups orders to minimize total setup/changeover time; it never schedules an order earlier than the plant\'s pull-forward limit and avoids pushing past the push-forward limit; it schedules as many orders as possible; due dates otherwise don\'t drive the sequence; ties broken by the priority lists, then less lateness.',
   'tip.duedate_mode':                  'Due Date — lateness ranks first: fewest orders over the push-forward limit, then fewest late orders, then least late hours and smallest worst-case lateness. Only then do priority lists and color/setup grouping break ties. Never starts an order before its pull-forward limit.',
   'tip.backlog_mode':                  'Remove Backlog — shifts past-due scheduled orders forward without resequencing their line.',
   'ph.search_plants':                  'Search plants…',
