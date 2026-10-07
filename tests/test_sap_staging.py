@@ -1527,3 +1527,77 @@ def test_an_upload_batch_does_not_supersede_a_validated_mulesoft_batch(pg, stg_p
         conn.commit()
     assert _status(pg, mule) == "validated"
     st.apply_batch(mule, actor="pytest")                                # not blocked by the newer upload
+
+
+# ===========================================================================
+# Validation plan section 2 -- remaining proof lines
+# ===========================================================================
+@pytest.mark.pg
+def test_resume_after_a_crash_mid_vanish_reaches_applied_without_double_delete_or_duplicate_archive(
+        pg, stg_plant, monkeypatch):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 4, soon)
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("FZ1", soon)])
+    assert st.validate_batch(bid)["status"] == "held"                      # 3 of 4 would vanish
+    real_purge = st.db.purge_orders_by_ids
+    calls = {"n": 0}
+
+    def crash_after_commit(*a, **kw):
+        real_purge(*a, **kw)                                               # the delete + archive really commit
+        calls["n"] += 1
+        raise RuntimeError("forced crash after the purge committed")
+
+    monkeypatch.setattr(st.db, "purge_orders_by_ids", crash_after_commit)
+    with pytest.raises(RuntimeError, match="forced crash"):
+        st.apply_batch(bid, actor="pytest", confirm_held=True)
+    assert _status(pg, bid) == "error" and calls["n"] == 1
+    monkeypatch.setattr(st.db, "purge_orders_by_ids", real_purge)
+    out = st.apply_batch(bid, actor="pytest")                              # resume: the confirmation is remembered
+    assert out["status"] == "applied"
+    assert out["counts"]["deleted"] == 0                                   # nothing left to delete a second time
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT production_order FROM orders WHERE plant = %s ORDER BY 1", (PLANT,))
+        assert [r[0] for r in cur.fetchall()] == ["FZ1"]
+        cur.execute("SELECT order_row->>'production_order', count(*) FROM sap_stage_vanished_order"
+                    " WHERE plant = %s GROUP BY 1 ORDER BY 1", (PLANT,))
+        assert cur.fetchall() == [("FZ2", 1), ("FZ3", 1), ("FZ4", 1)]     # one archive row per order, no duplicates
+
+
+@pytest.mark.pg
+def test_a_running_order_that_vanished_from_the_snapshot_is_deleted_and_archived(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)                           # D21: deliberate, even while running
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 4, soon)
+    now = datetime.utcnow()
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE plant = %s"
+                    " AND production_order = 'FZ2'", (now - timedelta(hours=1), now + timedelta(hours=1), PLANT))
+        conn.commit()
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("FZ1", soon)])
+    assert st.validate_batch(bid)["status"] == "held"
+    out = st.apply_batch(bid, actor="pytest", confirm_held=True)
+    assert out["counts"]["deleted"] == 3 and out["counts"]["archived"] == 3
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT count(*) FROM orders WHERE plant = %s AND production_order = 'FZ2'", (PLANT,))
+        assert cur.fetchone()[0] == 0
+    assert "FZ2" in {a["production_order"] for a in st.list_archived(PLANT)}
+
+
+@pytest.mark.pg
+def test_a_second_concurrent_poll_skips_while_the_first_holds_the_advisory_lock(pg, stg_plant):
+    bid = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [{"matnr": "12345", "werks": PLANT}])
+    with pg._pool.connection() as holder:                                   # the first poll, running in another session
+        with holder.cursor() as hcur:
+            hcur.execute("SELECT pg_advisory_lock(hashtext('sap:staging-poll'))")
+        holder.commit()
+        try:
+            out = st.poll_once(actor="pytest")
+            assert out["skipped"] == [{"reason": "another poll is running"}]
+            assert out["processed"] == [] and out["errors"] == []
+            assert _status(pg, bid) == "ready"                              # untouched by the skipped poll
+        finally:
+            with holder.cursor() as hcur:
+                hcur.execute("SELECT pg_advisory_unlock(hashtext('sap:staging-poll'))")
+            holder.commit()
+    assert st.poll_once(actor="pytest")["skipped"] == []                    # lock released: the next poll runs

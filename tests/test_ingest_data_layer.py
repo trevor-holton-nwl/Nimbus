@@ -430,6 +430,45 @@ class TestPurgeOrdersByIdsRealDb:
         with pytest.raises(KeyError):
             db_.restore_vanished_order(archive_id)
 
+    def test_empty_id_list_deletes_nothing_and_writes_no_audit(self, pg):
+        db_ = pg
+        assert db_.purge_orders_by_ids(self.PLANT, [], user_email="t@example.com", archive_batch_id=None) == {
+            "status": "ok", "deleted": 0, "archived": 0, "shares_purged": 0, "headers_deleted": 0}
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self.oid,))
+            assert cur.fetchone()[0] == 1
+            cur.execute("SELECT COUNT(*) FROM admin_audit WHERE table_name = 'orders' AND details->>'plant' = %s",
+                        (self.PLANT,))
+            assert cur.fetchone()[0] == 0
+
+    def test_archive_restore_keeps_segments_and_leaves_untouched_orders_xmin_alone(self, pg):
+        db_ = pg
+        other = db_.make_id("ZZTEST_PIDS_OTHER", self.MATERIAL)
+        now = dt.datetime(2026, 9, 10, 8, 0)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date)"
+                " VALUES (%s,'ZZTEST_PIDS_OTHER',%s,%s,%s,%s)", (other, self.MATERIAL, self.MACHINE, self.PLANT, now))
+            conn.commit()
+            cur.execute("SELECT xmin::text FROM orders WHERE id = %s", (other,))
+            xmin_before = cur.fetchone()[0]
+        batch = "00000000-0000-0000-0000-00000000a003"
+        db_.purge_orders_by_ids(self.PLANT, [self.oid], user_email="t@example.com", archive_batch_id=batch)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM sap_stage_vanished_order WHERE plant = %s", (self.PLANT,))
+            archive_id = cur.fetchone()[0]
+        db_.restore_vanished_order(archive_id, user_email="t@example.com")
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT xmin::text FROM orders WHERE id = %s", (other,))
+            assert cur.fetchone()[0] == xmin_before                       # never touched by purge or restore
+            cur.execute("SELECT segment_no, scheduled_start, scheduled_end FROM order_schedule_segments"
+                        " WHERE order_id = %s", (self.oid,))
+            assert cur.fetchall() == [(1, now, now + dt.timedelta(hours=4))]
+            cur.execute("SELECT id FROM orders WHERE id = %s", (self.oid,))
+            assert cur.fetchone()[0] == self.oid                          # same id back
+        with pytest.raises(KeyError):                                     # already restored: refused
+            db_.restore_vanished_order(archive_id, user_email="t@example.com")
+
     def test_restore_with_live_id_collision_keeps_archive_restorable(self, pg):
         """A4: the id is live again -> ValueError('order_exists'), archive row not burned, no audit."""
         db_ = pg
@@ -552,6 +591,39 @@ class TestApplyOrderDateHygieneRows:
         assert [r["tag"] for r in out] == ["keep"]
         assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 15, 45)
         assert warnings == [{"level": "error", "msg": "1 row(s) dropped — unparseable BASIC_START_DATE"}]
+
+    # One shared fixture set: (start, finish, run_time) as the Excel frame and the SAP row dicts carry them.
+    PARITY_CASES = [
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 11), 2),                  # exact-midnight finish
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 6, 30), 3),           # finish before start
+        (dt.datetime(2026, 9, 10, 8, 0), None, None),                                   # no finish, no run time
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 8, 0), 4),            # finish == start
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 15, 45), 1),          # real finish kept
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 0, 30), "x"),         # junk run time
+        ("not-a-date", dt.datetime(2026, 9, 10, 12, 0), 1),                             # unparseable start: dropped
+    ]
+
+    def test_excel_and_sap_paths_give_identical_results_for_the_same_inputs(self):
+        import db as db_
+        import pandas as pd
+        ex_warn: list = []
+        df = db_._date_hygiene_df(pd.DataFrame({
+            "BASIC_START_DATE": [c[0] for c in self.PARITY_CASES],
+            "BASIC_FINISH_DATE": [c[1] for c in self.PARITY_CASES],
+            "RUN_TIME": [c[2] for c in self.PARITY_CASES],
+        }), ex_warn)
+        sap_warn: list = []
+        rows = db_.apply_order_date_hygiene_rows(
+            [{"basic_start_date": s, "basic_finish_date": f, "run_time": r} for s, f, r in self.PARITY_CASES],
+            sap_warn)
+        assert sap_warn == ex_warn and len(rows) == len(df) == len(self.PARITY_CASES) - 1
+        for (_, h), r in zip(df.iterrows(), rows, strict=True):
+            assert r["basic_start_date"] == h["BASIC_START_DATE"].to_pydatetime()
+            assert r["basic_finish_date"] == h["BASIC_FINISH_DATE"].to_pydatetime()
+            assert r["sap_basic_finish_date"] == (h["_SAP_FINISH_DATE"].to_pydatetime()
+                                                  if pd.notna(h["_SAP_FINISH_DATE"]) else None)
+            assert r["run_time"] == float(h["RUN_TIME"])
+            assert r["_run_time_was_defaulted"] == bool(h["_RUN_TIME_DEFAULTED"])
 
 
 @pytest.mark.pg
