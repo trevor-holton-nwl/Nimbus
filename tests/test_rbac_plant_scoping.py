@@ -318,6 +318,50 @@ def test_distribution_workcenter_write_is_admin_gated():
     assert "require_admin" in dep_names
 
 
+_STAGING_WRITE_PATHS = [
+    "/sap/staging/batches/{batch_id}/validate", "/sap/staging/batches/{batch_id}/apply",
+    "/sap/staging/batches/{batch_id}/discard", "/sap/staging/poll", "/sap/staging/upload/{object}",
+    "/sap/staging/archive/{archive_id}/restore", "/sap/staging/send/{plant}",
+]
+_STAGING_READ_PATHS = [
+    "/sap/staging/batches", "/sap/staging/batches/{batch_id}", "/sap/staging/batches/{batch_id}/rejected",
+    "/sap/staging/batches/{batch_id}/deletions", "/sap/staging/archive/{plant}",
+    "/sap/staging/send/{plant}/status", "/sap/staging/send/{plant}/rows",
+]
+
+
+@pytest.mark.parametrize("path", _STAGING_WRITE_PATHS)
+def test_sap_staging_writes_are_admin_and_api_key_gated(path):
+    """Apply / Send to SAP (and every other staging write) are admin-only (D14): require_admin AND
+    require_api_key present, and each is registered for the admin audit log."""
+    matches = [r for r in iter_route_contexts(brain.api.routes) if getattr(r, "path", None) == path]
+    assert len(matches) == 1
+    dep_names = {dep.call.__name__ for dep in matches[0].dependant.dependencies}
+    assert {"require_admin", "require_api_key"} <= dep_names
+    assert path in brain._ADMIN_WRITE_OPERATIONS
+
+
+@pytest.mark.parametrize("path", _STAGING_READ_PATHS)
+def test_sap_staging_reads_are_admin_gated(path):
+    matches = [r for r in iter_route_contexts(brain.api.routes) if getattr(r, "path", None) == path]
+    assert len(matches) == 1
+    assert "require_admin" in {dep.call.__name__ for dep in matches[0].dependant.dependencies}
+
+
+def test_sap_staging_apply_and_send_reject_an_out_of_scope_plant(distribution_admin_client, monkeypatch):
+    """Caller scope is {DIST_PLANT_A}: applying a batch of DIST_PLANT_B or sending DIST_PLANT_B is 403
+    and never reaches the staging service."""
+    import backend.integration.sap_staging as ss
+    reached = []
+    batch = {"batch_id": "b1", "plant": DIST_PLANT_B, "object_key": "stage_planned_orders"}
+    monkeypatch.setattr(ss, "get_batch", lambda bid: batch)
+    monkeypatch.setattr(ss, "apply_batch", lambda *a, **k: reached.append("apply"))
+    monkeypatch.setattr(ss, "queue_send_to_sap", lambda *a, **k: reached.append("send"))
+    assert distribution_admin_client.post("/sap/staging/batches/b1/apply").status_code == 403
+    assert distribution_admin_client.post(f"/sap/staging/send/{DIST_PLANT_B}").status_code == 403
+    assert reached == []
+
+
 def test_distribution_workcenter_write_rejects_a_non_admin_caller():
     """A merely-authenticated (non-admin) caller must be rejected 403 --
     require_admin overridden to throw directly (no live admin_exists() DB

@@ -736,6 +736,13 @@ _ADMIN_WRITE_OPERATIONS = {
     "/sap/interface/config/{object}": "sap.config_update",
     "/sap/interface/test-connection": "sap.connection_test",
     "/sap/interface/sync/{object}": "sap.manual_sync",
+    "/sap/staging/batches/{batch_id}/validate": "sap.staging_validate",
+    "/sap/staging/batches/{batch_id}/apply": "sap.staging_apply",
+    "/sap/staging/batches/{batch_id}/discard": "sap.staging_discard",
+    "/sap/staging/poll": "sap.staging_poll",
+    "/sap/staging/upload/{object}": "sap.staging_upload",
+    "/sap/staging/archive/{archive_id}/restore": "sap.staging_restore",
+    "/sap/staging/send/{plant}": "sap.send_to_sap",
     "/labor-plan": "labor_plan.write",
     "/labor-plan/line": "labor_plan.line_write",
     "/plant-calendar/plant-hours": "calendar.plant_hours_update",
@@ -765,7 +772,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/maintenance/analyze": "maintenance.analyze",
 }
 
-_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username"})
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id"})
 
 
 def _admin_route_details(request: Request) -> tuple[str | None, dict]:

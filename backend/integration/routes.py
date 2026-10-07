@@ -22,12 +22,13 @@ import io
 import os
 from datetime import datetime
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 import db
 import master_data as md
+import backend.integration.sap_staging as sap_staging
 import backend.integration.sap_sync as sap_sync
 import backend.setup.data as setup_data
 from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
@@ -616,3 +617,256 @@ def sap_runs(object: str | None = Query(default=None),
     if object is not None and object not in sap_sync.SAP_OBJECTS:
         raise HTTPException(status_code=404, detail=f"Unknown SAP object: {object!r}")
     return {"runs": sap_sync.list_runs(object_key=object, limit=limit)}
+
+
+# =============================================================================
+# SAP STAGING — batches landed by Mulesoft (or the test upload) in the sap_stage_*
+#               tables: list / inspect / validate / apply / discard, the on-demand
+#               poll, the Excel/CSV test upload, and the 30-day vanished-order archive.
+#               Design of record: docs/SAP_STAGING_DESIGN.md. Every route is admin-only
+#               (D14); writes also need the API key. Plant scope: a restricted admin only
+#               sees and acts on batches of their own plants (the batch's plant is read
+#               first, so an unknown id is 404 and an out-of-scope one is 403).
+#               Error mapping for apply/discard/validate: KeyError -> 404,
+#               BatchSuperseded -> 409 {error: "superseded", ...}, BatchNotApplicable ->
+#               409 {error: <code or "not_applicable">, ...} (the structured detail
+#               reaches the client unchanged through brain's HTTPException handler).
+# =============================================================================
+def _assert_stage_plant_allowed(plant: str, allowed_plants: list[str] | None) -> None:
+    """Same guard as the purge routes (`_assert_purge_plant_allowed`): require_admin proves the
+    caller is an admin, not that this plant is inside their role_plants scope."""
+    _assert_purge_plant_allowed(plant, allowed_plants)
+
+
+def _stage_actor(request: Request) -> str:
+    return request.headers.get("x-user-email") or "system"
+
+
+def _stage_batch_or_404(batch_id: str, allowed_plants: list[str] | None) -> dict:
+    """The batch header (404 when unknown), after the plant-scope check."""
+    batch = sap_staging.get_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}")
+    _assert_stage_plant_allowed(batch["plant"], allowed_plants)
+    return batch
+
+
+def _stage_conflict(exc: "sap_staging.BatchNotApplicable") -> HTTPException:
+    detail = dict(exc.detail)
+    code = "superseded" if isinstance(exc, sap_staging.BatchSuperseded) else detail.get("code", "not_applicable")
+    detail.pop("error", None)
+    return HTTPException(status_code=409, detail={"error": code, **detail})
+
+
+def _csv_response(rows: list[dict], filename: str) -> Response:
+    """Rows -> a BOM-prefixed, formula-guarded CSV download (columns = first-seen key order)."""
+    fields: list[str] = []
+    for r in rows:
+        for k in r:
+            if k not in fields:
+                fields.append(k)
+    buf = io.StringIO()
+    buf.write(CSV_BOM)
+    writer = csv.DictWriter(buf, fieldnames=fields)
+    writer.writeheader()
+    for r in rows:
+        writer.writerow({k: csv_cell(r.get(k)) for k in fields})
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get("/sap/staging/batches", dependencies=[Depends(require_admin)])
+def sap_stage_batches(object: str | None = Query(default=None), plant: str | None = Query(default=None),
+                      status: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=500),
+                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Batch headers, newest first, scoped to the caller's plants. Response: {batches: [header...]}."""
+    return {"batches": sap_staging.list_batches(object_key=object, plant=plant, status=status, limit=limit,
+                                                allowed_plants=allowed_plants)}
+
+
+@router.get("/sap/staging/batches/{batch_id}", dependencies=[Depends(require_admin)])
+def sap_stage_batch(batch_id: str, allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """One batch: header + `row_counts` (by row_status) + `actual_rows` + warnings."""
+    return _stage_batch_or_404(batch_id, allowed_plants)
+
+
+@router.get("/sap/staging/batches/{batch_id}/rejected", dependencies=[Depends(require_admin)])
+def sap_stage_rejected(batch_id: str, format: str | None = Query(default=None),
+                       limit: int = Query(default=1000, ge=1, le=10000),
+                       allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Rejected staging rows with `reject_reason`. JSON {rows: [...]} or `?format=csv`."""
+    _stage_batch_or_404(batch_id, allowed_plants)
+    try:
+        rows = sap_staging.rejected_rows(batch_id, limit=limit)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}") from e
+    if format == "csv":
+        return _csv_response(rows, f"sap-staging-rejected-{batch_id}.csv")
+    return {"rows": rows}
+
+
+@router.get("/sap/staging/batches/{batch_id}/deletions", dependencies=[Depends(require_admin)])
+def sap_stage_deletions(batch_id: str, allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """The orders a planned-order batch would delete on apply. Response: {orders: [...]}."""
+    _stage_batch_or_404(batch_id, allowed_plants)
+    try:
+        return {"orders": sap_staging.held_deletions(batch_id)}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}") from e
+
+
+@router.post("/sap/staging/batches/{batch_id}/validate",
+             dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_validate(batch_id: str, request: Request,
+                             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Re-run validation on a ready / validated / held batch. Response: validate_batch's result."""
+    batch = _stage_batch_or_404(batch_id, allowed_plants)
+    try:
+        result = await run_in_threadpool(sap_staging.validate_batch, batch_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}") from e
+    except sap_staging.BatchNotApplicable as e:
+        raise _stage_conflict(e) from e
+    _log_event("info", "sap_staging", "Staging batch validated", batch_id=batch_id, plant=batch["plant"],
+               object_key=batch["object_key"], actor=_stage_actor(request), outcome=result.get("status"))
+    return result
+
+
+@router.post("/sap/staging/batches/{batch_id}/apply",
+             dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_apply(batch_id: str, request: Request, body: dict = Body(default={}),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Apply a validated batch (or a held one with `confirm_held: true`) to the live tables.
+    Payload: { confirm_held?: bool }. 409 when superseded or not applicable."""
+    batch = _stage_batch_or_404(batch_id, allowed_plants)
+    actor = _stage_actor(request)
+    confirm_held = bool((body or {}).get("confirm_held"))
+    _log_event("info", "sap_staging", "Staging batch apply requested", batch_id=batch_id, plant=batch["plant"],
+               object_key=batch["object_key"], actor=actor, confirm_held=confirm_held)
+    try:
+        return await run_in_threadpool(sap_staging.apply_batch, batch_id, actor=actor, confirm_held=confirm_held)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}") from e
+    except sap_staging.BatchNotApplicable as e:
+        raise _stage_conflict(e) from e
+
+
+@router.post("/sap/staging/batches/{batch_id}/discard",
+             dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_discard(batch_id: str, request: Request,
+                            allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Discard an un-applied batch. Response: {batch_id, status: "discarded"}."""
+    batch = _stage_batch_or_404(batch_id, allowed_plants)
+    actor = _stage_actor(request)
+    try:
+        result = await run_in_threadpool(sap_staging.discard_batch, batch_id, actor=actor)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}") from e
+    except sap_staging.BatchNotApplicable as e:
+        raise _stage_conflict(e) from e
+    _log_event("info", "sap_staging", "Staging batch discarded", batch_id=batch_id, plant=batch["plant"],
+               object_key=batch["object_key"], actor=actor)
+    return result
+
+
+@router.post("/sap/staging/poll", dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_poll(request: Request):
+    """Run one staging poll now (the Interface tab's Refresh). Blocks until the pass finishes.
+    Response: {processed, applied, held, skipped, errors}."""
+    actor = _stage_actor(request)
+    result = await run_in_threadpool(sap_staging.poll_once, actor=actor)
+    _log_event("info", "sap_staging", "Manual staging poll", actor=actor,
+               processed=len(result.get("processed") or []), applied=len(result.get("applied") or []),
+               held=len(result.get("held") or []), errors=len(result.get("errors") or []))
+    return result
+
+
+@router.post("/sap/staging/upload/{object}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_upload(object: str, request: Request, file: UploadFile = File(...), plant: str = Form(...),
+                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Excel/CSV with SAP column headers -> a `source='upload'` staging batch (validated, never applied).
+    Multipart: `file` + form field `plant`."""
+    if object not in sap_sync.SAP_OBJECTS or sap_sync.SAP_OBJECTS[object].get("kind") != "staging":
+        raise HTTPException(status_code=404, detail=f"Unknown staging object: {object!r}")
+    plant = (plant or "").strip()
+    _assert_stage_plant_allowed(plant, allowed_plants)
+    raw = await file.read()
+    if len(raw) > NIMBUS_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds maximum allowed size of {NIMBUS_MAX_UPLOAD_BYTES} bytes")
+    actor = _stage_actor(request)
+    try:
+        result = await run_in_threadpool(sap_staging.stage_rows_from_upload, object, plant, raw,
+                                         file.filename or "upload.xlsx", actor=actor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _log_event("info", "sap_staging", "Staging upload received", object_key=object, plant=plant,
+               filename=file.filename, actor=actor, rows_staged=result.get("rows_staged", 0),
+               rows_skipped=result.get("rows_skipped", 0), outcome=result.get("status"))
+    return result
+
+
+@router.get("/sap/staging/archive/{plant}", dependencies=[Depends(require_admin)])
+def sap_stage_archive(plant: str, limit: int = Query(default=200, ge=1, le=1000),
+                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Vanish-deleted orders of the last 30 days. Response: {orders: [...]}."""
+    _assert_stage_plant_allowed(plant, allowed_plants)
+    return {"orders": sap_staging.list_archived(plant, limit=limit)}
+
+
+@router.post("/sap/staging/archive/{archive_id}/restore",
+             dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_restore(archive_id: int, request: Request,
+                            allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Restore one archived order (with its schedule). 404 when missing or already restored."""
+    actor = _stage_actor(request)
+    plant = await run_in_threadpool(sap_staging.archived_plant, archive_id)
+    if plant is None:
+        raise HTTPException(status_code=404, detail=f"Unknown archived order: {archive_id!r}")
+    _assert_stage_plant_allowed(plant, allowed_plants)
+    try:
+        result = await run_in_threadpool(sap_staging.restore_archived, archive_id, actor=actor)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]) if e.args else "Archived order not found") from e
+    _log_event("info", "sap_staging", "Archived order restored", archive_id=archive_id, plant=plant, actor=actor)
+    return result
+
+
+# -- Send to SAP (outbound) ---------------------------------------------------
+@router.post("/sap/staging/send/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def sap_stage_send(plant: str, request: Request,
+                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Queue the plant's scheduled orders for Mulesoft (retires any still-ready earlier queue).
+    Response: {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
+    _assert_stage_plant_allowed(plant, allowed_plants)
+    actor = _stage_actor(request)
+    _set_admin_log_details(request, plant=plant)
+    try:
+        result = await run_in_threadpool(sap_staging.queue_send_to_sap, plant, actor=actor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _log_event("info", "sap_staging", "Send to SAP queued", plant=plant, actor=actor,
+               send_batch_id=result.get("send_batch_id"), queued=result.get("queued"),
+               skipped_no_end=result.get("skipped_no_end"), firmed=result.get("firmed"))
+    return result
+
+
+@router.get("/sap/staging/send/{plant}/status", dependencies=[Depends(require_admin)])
+def sap_stage_send_status(plant: str, allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Outbound tiles. Response: {ready, sent, error, last_queued_at, last_sent_at}."""
+    _assert_stage_plant_allowed(plant, allowed_plants)
+    return sap_staging.outbound_status(plant)
+
+
+@router.get("/sap/staging/send/{plant}/rows", dependencies=[Depends(require_admin)])
+def sap_stage_send_rows(plant: str, status: str | None = Query(default=None),
+                        format: str | None = Query(default=None),
+                        limit: int = Query(default=1000, ge=1, le=10000),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Outbound rows (newest first). JSON {rows: [...]} or `?format=csv`; `status` = ready|sent|error."""
+    _assert_stage_plant_allowed(plant, allowed_plants)
+    if status is not None and status not in ("ready", "sent", "error"):
+        raise HTTPException(status_code=400, detail=f"Unknown status: {status!r}")
+    rows = sap_staging.outbound_rows(plant, status=status, limit=limit)
+    if format == "csv":
+        return _csv_response(rows, f"sap-send-{plant}{'-' + status if status else ''}.csv")
+    return {"rows": rows}

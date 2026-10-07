@@ -565,6 +565,165 @@ def test_sap_objects_lists_staging_keys_with_kind_and_apply_mode(admin_client, m
 
 
 # ---------------------------------------------------------------------------
+# /sap/staging/* routes -- service functions monkeypatched, no database
+# ---------------------------------------------------------------------------
+_BID = "11111111-1111-1111-1111-111111111111"
+
+
+@pytest.fixture
+def stage_client(monkeypatch):
+    """Admin caller, unrestricted plant scope, a stub service layer; `calls` records invocations."""
+    import backend.integration.sap_staging as ss
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", None)
+    calls: list = []
+    batch = {"batch_id": _BID, "object_key": "stage_planned_orders", "plant": "PL1", "status": "validated",
+             "row_counts": {"valid": 2}, "actual_rows": 2}
+
+    def rec(name, ret):
+        def f(*a, **k):
+            calls.append((name, a, k))
+            return ret
+        return f
+
+    monkeypatch.setattr(ss, "get_batch", lambda bid: batch if str(bid) == _BID else None)
+    monkeypatch.setattr(ss, "list_batches", rec("list_batches", [batch]))
+    monkeypatch.setattr(ss, "rejected_rows", rec("rejected_rows", [{"id": 1, "plnum": "=1", "reject_reason": "missing_key"}]))
+    monkeypatch.setattr(ss, "held_deletions", rec("held_deletions", [{"id": "o1", "production_order": "1001"}]))
+    monkeypatch.setattr(ss, "validate_batch", rec("validate_batch", {"status": "validated"}))
+    monkeypatch.setattr(ss, "apply_batch", rec("apply_batch", {"batch_id": _BID, "status": "applied", "counts": {}}))
+    monkeypatch.setattr(ss, "discard_batch", rec("discard_batch", {"batch_id": _BID, "status": "discarded"}))
+    monkeypatch.setattr(ss, "poll_once", rec("poll_once", {"processed": [], "applied": [], "held": [], "skipped": [], "errors": []}))
+    monkeypatch.setattr(ss, "stage_rows_from_upload", rec("stage_rows_from_upload", {"batch_id": _BID, "status": "validated", "rows_staged": 1, "rows_skipped": 0}))
+    monkeypatch.setattr(ss, "list_archived", rec("list_archived", [{"id": 7, "production_order": "1001"}]))
+    monkeypatch.setattr(ss, "archived_plant", lambda aid: "PL1" if aid == 7 else None)
+    monkeypatch.setattr(ss, "restore_archived", rec("restore_archived", {"status": "restored"}))
+    monkeypatch.setattr(ss, "queue_send_to_sap", rec("queue_send_to_sap", {"send_batch_id": _BID, "queued": 3, "skipped_no_end": 1, "firmed": 2, "rolled_up_groups": 1}))
+    monkeypatch.setattr(ss, "outbound_status", rec("outbound_status", {"ready": 3, "sent": 0, "error": 0, "last_queued_at": None, "last_sent_at": None}))
+    monkeypatch.setattr(ss, "outbound_rows", rec("outbound_rows", [{"plnum": "=1001", "row_status": "ready"}]))
+    brain.api.dependency_overrides[int_routes.require_admin] = lambda: "test-admin"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    try:
+        client = TestClient(brain.api)
+        client.calls = calls
+        yield client
+    finally:
+        brain.api.dependency_overrides.pop(int_routes.require_admin, None)
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+
+
+def test_stage_read_routes_return_expected_shapes(stage_client):
+    r = stage_client.get("/sap/staging/batches", params={"object": "stage_planned_orders", "plant": "PL1", "limit": 5})
+    assert r.status_code == 200 and r.json()["batches"][0]["batch_id"] == _BID
+    kw = [c for c in stage_client.calls if c[0] == "list_batches"][0][2]
+    assert kw["object_key"] == "stage_planned_orders" and kw["plant"] == "PL1" and kw["limit"] == 5
+    assert kw["allowed_plants"] is None
+    assert stage_client.get(f"/sap/staging/batches/{_BID}").json()["actual_rows"] == 2
+    assert stage_client.get(f"/sap/staging/batches/{_BID}/deletions").json() == {"orders": [{"id": "o1", "production_order": "1001"}]}
+    assert stage_client.get("/sap/staging/archive/PL1").json()["orders"][0]["id"] == 7
+    assert stage_client.get("/sap/staging/send/PL1/status").json()["ready"] == 3
+
+
+def test_stage_rejected_json_and_csv(stage_client):
+    assert stage_client.get(f"/sap/staging/batches/{_BID}/rejected").json()["rows"][0]["reject_reason"] == "missing_key"
+    r = stage_client.get(f"/sap/staging/batches/{_BID}/rejected", params={"format": "csv"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+    assert f"sap-staging-rejected-{_BID}.csv" in r.headers["content-disposition"]
+    assert r.content.startswith(b"\xef\xbb\xbf")
+    assert "'=1" in r.text           # formula-guarded
+
+
+def test_stage_unknown_batch_is_404_everywhere(stage_client):
+    unknown = "22222222-2222-2222-2222-222222222222"
+    for method, path in [("get", f"/sap/staging/batches/{unknown}"), ("get", f"/sap/staging/batches/{unknown}/rejected"),
+                         ("get", f"/sap/staging/batches/{unknown}/deletions"),
+                         ("post", f"/sap/staging/batches/{unknown}/validate"),
+                         ("post", f"/sap/staging/batches/{unknown}/apply"),
+                         ("post", f"/sap/staging/batches/{unknown}/discard"),
+                         ("post", "/sap/staging/archive/99/restore")]:
+        assert getattr(stage_client, method)(path).status_code == 404, path
+
+
+def test_stage_write_routes_return_service_results(stage_client):
+    assert stage_client.post(f"/sap/staging/batches/{_BID}/validate").json() == {"status": "validated"}
+    r = stage_client.post(f"/sap/staging/batches/{_BID}/apply", json={"confirm_held": True},
+                          headers={"x-user-email": "boss@example.com"})
+    assert r.status_code == 200 and r.json()["status"] == "applied"
+    name, args, kw = [c for c in stage_client.calls if c[0] == "apply_batch"][0]
+    assert kw == {"actor": "boss@example.com", "confirm_held": True}
+    assert stage_client.post(f"/sap/staging/batches/{_BID}/discard").json()["status"] == "discarded"
+    assert stage_client.post("/sap/staging/poll", headers={"x-user-email": "boss@example.com"}).json()["errors"] == []
+    assert [c for c in stage_client.calls if c[0] == "poll_once"][0][2] == {"actor": "boss@example.com"}
+    assert stage_client.post("/sap/staging/archive/7/restore").json() == {"status": "restored"}
+    sent = stage_client.post("/sap/staging/send/PL1").json()
+    assert sent["queued"] == 3 and sent["rolled_up_groups"] == 1
+    rows = stage_client.get("/sap/staging/send/PL1/rows", params={"status": "ready"}).json()
+    assert rows["rows"][0]["row_status"] == "ready"
+    csv_r = stage_client.get("/sap/staging/send/PL1/rows", params={"format": "csv"})
+    assert csv_r.status_code == 200 and "sap-send-PL1.csv" in csv_r.headers["content-disposition"]
+    assert stage_client.get("/sap/staging/send/PL1/rows", params={"status": "bogus"}).status_code == 400
+
+
+def test_stage_apply_maps_superseded_and_not_applicable_to_409(stage_client, monkeypatch):
+    import backend.integration.sap_staging as ss
+
+    def _superseded(*_a, **_k):
+        raise ss.BatchSuperseded("a newer batch exists", {"newer_batch_id": "n1"})
+
+    monkeypatch.setattr(ss, "apply_batch", _superseded)
+    r = stage_client.post(f"/sap/staging/batches/{_BID}/apply")
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "superseded" and r.json()["detail"]["newer_batch_id"] == "n1"
+
+    def _held(*_a, **_k):
+        raise ss.BatchNotApplicable("needs confirmation", {"code": "held_needs_confirm"})
+
+    monkeypatch.setattr(ss, "apply_batch", _held)
+    r = stage_client.post(f"/sap/staging/batches/{_BID}/apply")
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "held_needs_confirm"
+
+    def _plain(*_a, **_k):
+        raise ss.BatchNotApplicable("not now")
+
+    monkeypatch.setattr(ss, "discard_batch", _plain)
+    r = stage_client.post(f"/sap/staging/batches/{_BID}/discard")
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "not_applicable"
+
+
+def test_stage_upload_ok_400_404_and_413(stage_client, monkeypatch):
+    import backend.integration.sap_staging as ss
+    files = {"file": ("orders.csv", b"plnum,matnr\n1,2\n")}
+    r = stage_client.post("/sap/staging/upload/stage_planned_orders", files=files, data={"plant": "PL1"})
+    assert r.status_code == 200 and r.json()["rows_staged"] == 1
+    args = [c for c in stage_client.calls if c[0] == "stage_rows_from_upload"][0][1]
+    assert args[:2] == ("stage_planned_orders", "PL1")
+
+    assert stage_client.post("/sap/staging/upload/orders", files=files, data={"plant": "PL1"}).status_code == 404
+
+    def _bad(*_a, **_k):
+        raise ValueError("The file has no data rows")
+
+    monkeypatch.setattr(ss, "stage_rows_from_upload", _bad)
+    r = stage_client.post("/sap/staging/upload/stage_planned_orders", files=files, data={"plant": "PL1"})
+    assert r.status_code == 400 and "no data rows" in r.json()["detail"]
+
+    monkeypatch.setattr(int_routes, "NIMBUS_MAX_UPLOAD_BYTES", 10)
+    r = stage_client.post("/sap/staging/upload/stage_planned_orders", files={"file": ("big.csv", b"x" * 50)},
+                          data={"plant": "PL1"})
+    assert r.status_code == 413
+
+
+def test_stage_routes_enforce_plant_scope(stage_client):
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["OTHER"]
+    for method, path in [("get", f"/sap/staging/batches/{_BID}"), ("post", f"/sap/staging/batches/{_BID}/apply"),
+                         ("post", "/sap/staging/archive/7/restore"), ("get", "/sap/staging/archive/PL1"),
+                         ("post", "/sap/staging/send/PL1"), ("get", "/sap/staging/send/PL1/status"),
+                         ("get", "/sap/staging/send/PL1/rows")]:
+        assert getattr(stage_client, method)(path).status_code == 403, path
+    names = [c[0] for c in stage_client.calls]
+    assert "apply_batch" not in names and "queue_send_to_sap" not in names and "restore_archived" not in names
+
+
+# ---------------------------------------------------------------------------
 # Staging poll job on the lifespan scheduler (NIMBUS_SAP_STAGING_POLL_SECONDS)
 # ---------------------------------------------------------------------------
 def _run_lifespan(monkeypatch, *, poll_seconds, sync_enabled=False):
