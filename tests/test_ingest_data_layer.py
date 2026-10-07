@@ -355,6 +355,7 @@ class TestPurgeOrdersByIdsRealDb:
     def _cleanup(self, db_):
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM order_distribution WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM sap_workcenter WHERE plant = %s", (self.PLANT,))
             cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
             cur.execute("DELETE FROM sap_stage_vanished_order WHERE plant = %s", (self.PLANT,))
             cur.execute("DELETE FROM admin_audit WHERE table_name = 'orders' AND details->>'plant' = %s",
@@ -378,6 +379,9 @@ class TestPurgeOrdersByIdsRealDb:
             cur.execute(
                 "INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
                 " VALUES (%s, 1, %s, %s)", (self.oid, now, now + dt.timedelta(hours=4)))
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter) VALUES (%s,'WC')"
+                " ON CONFLICT DO NOTHING", (self.PLANT,))
             cur.execute(
                 "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter)"
                 " VALUES (%s,%s,%s,'WC')", (self.PLANT, self.ORDER, self.MATERIAL))

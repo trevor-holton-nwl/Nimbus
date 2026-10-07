@@ -20,6 +20,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
+from psycopg.types.json import Jsonb
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -656,7 +657,7 @@ def _conn(pg):
 def _cleanup(pg):
     with _conn(pg) as (conn, cur):
         cur.execute("DELETE FROM sap_stage_vanished_order WHERE plant = %s", (PLANT,))
-        cur.execute("DELETE FROM sap_stage_batch WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM sap_stage_batch WHERE btrim(plant) = %s", (PLANT,))   # incl. the padded-plant test
         cur.execute("DELETE FROM orders WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM routing_operation WHERE plant = %s", (PLANT,))
         cur.execute("DELETE FROM production_version WHERE plant = %s", (PLANT,))
@@ -724,8 +725,9 @@ def test_material_plant_apply_creates_bare_material_and_deletes_or_flags_absent_
                       [{"matnr": "000012345", "werks": PLANT, "mmsta": "A1", "minls": 10, "ltinc": 5,
                         "zz_subnet": "ABCD"}])
     res = st.validate_batch(bid)
-    assert res["status"] == "validated" and res["counts"]["valid"] == 1
-    out = st.apply_batch(bid, actor="pytest")
+    # Both live rows are absent from the snapshot (100 % > 25 %): held, so apply needs the confirmation.
+    assert res["status"] == "held" and "vanish_threshold" in res["held_reasons"] and res["counts"]["valid"] == 1
+    out = st.apply_batch(bid, actor="pytest", confirm_held=True)
     assert out["status"] == "applied"
     with _conn(pg) as (_c, cur):
         cur.execute("SELECT material_description FROM materials WHERE material_id = '12345'")
@@ -740,8 +742,8 @@ def test_material_plant_apply_creates_bare_material_and_deletes_or_flags_absent_
         assert cur.fetchone()[0] is True
     # Retention: a second applied batch removes the first.
     bid2 = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant",
-                       [{"matnr": "12345", "werks": PLANT}])
-    st.validate_batch(bid2)
+                       [{"matnr": "12345", "werks": PLANT}, {"matnr": "ZZSTGKEEP", "werks": PLANT}])
+    st.validate_batch(bid2)                                              # nothing absent now: validated, no hold
     st.apply_batch(bid2, actor="pytest")
     assert _status(pg, bid) is None and _status(pg, bid2) == "applied"
 
@@ -770,7 +772,7 @@ def test_planned_order_apply_holds_at_over_25_percent_then_confirm_archives_and_
         for i in range(1, 5):                                          # four live in-horizon orders
             cur.execute("INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
                         " basic_finish_date) VALUES (%s, %s, '777', %s, %s, %s)",
-                        (f"zzstg-live{i}", f"PO{i}", PLANT, soon, soon + timedelta(hours=4)))
+                        (pg.make_id(f"PO{i}", "777"), f"PO{i}", PLANT, soon, soon + timedelta(hours=4)))
         conn.commit()
     # The snapshot keeps only PO1: 3 of 4 (75 %) would vanish -> held.
     bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
@@ -815,12 +817,14 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
     t0 = datetime(2030, 1, 10, 6, 0)
 
     def ins(cur, oid, po, *, parent=None, start=t0, status="scheduled", run_time=2, with_dates=True):
+        queued = status == "needs_planning"          # orders_planning_state_check: queued = no slot + an object reason
         cur.execute(
             "INSERT INTO orders (id, production_order, material_number, plant, parent_production_order,"
-            " basic_start_date, basic_finish_date, scheduled_start, run_time, planning_status, production_version)"
-            " VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, 'V1')",
+            " basic_start_date, basic_finish_date, scheduled_start, run_time, planning_status, planning_reason,"
+            " production_version) VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, %s, 'V1')",
             (oid, po, PLANT, parent, start if with_dates else None, start + timedelta(hours=2) if with_dates else None,
-             start if with_dates else None, run_time if with_dates else None, status))
+             start if with_dates and not queued else None, run_time if with_dates else None, status,
+             Jsonb({"code": "test", "message": "test"}) if queued else None))
 
     with _conn(pg) as (conn, cur):
         ins(cur, "zzstg-p1", "P1")
@@ -1402,7 +1406,7 @@ def _live_orders(pg, n, start, prefix="FZ"):
         for i in range(1, n + 1):
             cur.execute("INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
                         " basic_finish_date) VALUES (%s, %s, '777', %s, %s, %s)",
-                        (f"zzstg-{prefix.lower()}{i}", f"{prefix}{i}", PLANT, start, start + timedelta(hours=4)))
+                        (pg.make_id(f"{prefix}{i}", "777"), f"{prefix}{i}", PLANT, start, start + timedelta(hours=4)))
         cur.execute("INSERT INTO routing_operation (plant, material_id, task_list_type, routing_group, group_counter,"
                     " sequence_no, activity) VALUES (%s, '777', 'N', 'G1', '01', '000010', '0010')"
                     " ON CONFLICT DO NOTHING", (PLANT,))
@@ -1454,8 +1458,11 @@ def test_zero_open_reset_leaves_a_planners_reslot_alone_on_an_unchanged_batch(pg
     st.validate_batch(first)
     st.apply_batch(first, actor="pytest")
     with _conn(pg) as (conn, cur):                                       # the planner re-slots the order
+        # ...with a hand-keyed run time (the resolver never loads manual rows; this plant has no production
+        # version, so a NULL run time would be re-resolved and held on every apply whatever SAP sent).
         cur.execute("UPDATE orders SET planning_status = 'scheduled', planning_reason = NULL,"
-                    " scheduled_start = %s, scheduled_end = %s WHERE plant = %s AND production_order = 'ZO1'",
+                    " scheduled_start = %s, scheduled_end = %s, run_time = 2, run_time_source = 'manual'"
+                    " WHERE plant = %s AND production_order = 'ZO1'",
                     (soon, soon + timedelta(hours=2), PLANT))
         conn.commit()
     second = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [row], age_minutes=-1)
@@ -1478,6 +1485,8 @@ def test_unbuildable_rows_are_rejected_at_apply_never_stamped_applied(pg, stg_pl
                     " gsmng, row_status, production_order, material_id, plant)"
                     " VALUES (%s, 'FZ2', '777', %s, %s, '060000', %s, '999999', 10, 'valid', 'FZ2', '777', %s)",
                     (bid, PLANT, soon.strftime("%Y%m%d"), soon.strftime("%Y%m%d"), PLANT))
+        # the completeness gate re-counts at apply: keep the header's expected count in step with the extra row
+        cur.execute("UPDATE sap_stage_batch SET row_count_expected = 2 WHERE batch_id = %s", (bid,))
         conn.commit()
     st.apply_batch(bid, actor="pytest", confirm_held=True)
     with _conn(pg) as (_c, cur):
