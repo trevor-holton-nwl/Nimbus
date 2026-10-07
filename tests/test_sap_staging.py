@@ -1682,3 +1682,33 @@ def test_sap_apply_keeps_excel_only_values_on_distributed_children(pg, stg_plant
     for desc, form, labor, fte in kids:
         assert desc == "Excel description" and form == "XL" and fte == 2 and float(labor) == 5.0
     assert facts["material_description"] == "Excel description"
+
+
+@pytest.mark.pg
+def test_repeat_material_snapshot_rewrites_nothing(pg, stg_plant):
+    """Track 4 / S2: a second identical Material Plant snapshot reports every row unchanged, leaves each
+    live row's xmin alone and writes no empty bulk_apply audit row."""
+    rows = [{"matnr": f"ZZSTGR{i}", "werks": PLANT, "mmsta": "B2", "minls": 20, "ltinc": 10} for i in range(4)]
+    first = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", rows, age_minutes=5)
+    st.validate_batch(first)
+    out1 = st.apply_batch(first, actor="pytest")
+    assert out1["counts"]["inserted"] == 4 and out1["counts"]["unchanged"] == 0
+
+    def snap():
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT material_id, xmin::text FROM material_plants WHERE plant = %s ORDER BY 1", (PLANT,))
+            x = dict(cur.fetchall())
+            cur.execute("SELECT count(*) FROM admin_audit WHERE table_name = 'material_plants'")
+            return x, cur.fetchone()[0]
+    x1, audits1 = snap()
+    second = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", rows, age_minutes=1)
+    st.validate_batch(second)
+    out2 = st.apply_batch(second, actor="pytest")
+    x2, audits2 = snap()
+    assert out2["counts"]["unchanged"] == 4 and out2["counts"]["updated"] == 0 and out2["counts"]["inserted"] == 0
+    assert x2 == x1 and audits2 == audits1
+    changed = [dict(r, mmsta="C3") if i == 0 else r for i, r in enumerate(rows)]       # one real change is still written
+    third = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", changed, age_minutes=0)
+    st.validate_batch(third)
+    out3 = st.apply_batch(third, actor="pytest")
+    assert out3["counts"]["updated"] == 1 and out3["counts"]["unchanged"] == 3

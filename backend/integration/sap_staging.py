@@ -1414,6 +1414,26 @@ def _bulk_delete(table: str, keys: list[dict], actor: str, bid=None) -> tuple[li
     return deleted, blocked
 
 
+def _drop_unchanged_material_rows(cur, plant: str, rows: list[dict]) -> tuple[list[dict], int]:
+    """Drop upsert rows whose mapped columns already equal the live row, so a repeat snapshot rewrites nothing
+    (no updated_at / xmin churn, an honest `unchanged` count, and no empty `bulk_apply` audit row).
+    Columns a row does not carry (None values were dropped upstream) are not compared."""
+    cols = sorted({c for r in rows for c in r if c not in ("material_id", "plant")})
+    if not rows or not cols:
+        return rows, 0
+    cur.execute(
+        sql.SQL("SELECT material_id, {c} FROM material_plants WHERE plant = %s AND material_id = ANY(%s)").format(
+            c=sql.SQL(", ").join(sql.Identifier(c) for c in cols)),
+        (plant, sorted({r["material_id"] for r in rows if r.get("material_id")})))
+    live = {r[0]: dict(zip(cols, r[1:], strict=True)) for r in cur.fetchall()}
+    keep = []
+    for r in rows:
+        cur_row = live.get(r.get("material_id"))
+        if cur_row is None or any(c in r and r[c] != cur_row[c] for c in cols):
+            keep.append(r)
+    return keep, len(rows) - len(keep)
+
+
 def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
     bid, plant = hdr["batch_id"], hdr["plant"]
     table = _spec(hdr["object_key"])["stage_table"]
@@ -1439,6 +1459,9 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
 
     step("upsert")
     inserted = updated = 0
+    with conn.cursor() as cur:
+        rows, unchanged = _drop_unchanged_material_rows(cur, plant, rows)
+    conn.commit()
     for i in range(0, len(rows), _APPLY_CHUNK):
         res = md.bulk_apply("material_plants", {"upserts": rows[i:i + _APPLY_CHUNK], "deletes": []}, actor)
         inserted += int(res.get("inserted", 0))
@@ -1488,8 +1511,8 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
             flagged = cur.rowcount or 0
         conn.commit()
     _audit_snapshot_vanish_finish(conn, audit_id, [d["material_id"] for d in done], flagged)
-    return {"inserted": inserted, "updated": updated, "deleted": deleted, "flagged": flagged,
-            "materials_created": created}
+    return {"inserted": inserted, "updated": updated, "unchanged": unchanged, "deleted": deleted,
+            "flagged": flagged, "materials_created": created}
 
 
 def _audit_snapshot_vanish_begin(conn, table_name: str, bid, plant: str, actor: str, planned: list):
