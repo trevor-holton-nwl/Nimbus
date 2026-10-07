@@ -171,6 +171,8 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-09-26-orders-run-time-bounds-validate.sql",
         "2026-10-01-order-distribution-plant-start-index.sql",
         "2026-10-06-sap-truth-firming.sql",
+        "2026-10-08-sap-staging-columns.sql",
+        "2026-10-08-sap-staging-tables.sql",
     }
     all_names = {
         os.path.basename(path)
@@ -605,3 +607,43 @@ def test_sap_truth_columns_in_schema_and_migration():
     for stmt in SAP_TRUTH_COLUMN_STATEMENTS:
         assert stmt in schema_text, stmt
         assert stmt in migration_text, stmt
+
+
+SAP_STAGE_TABLES = (
+    "sap_stage_batch",
+    "sap_stage_material_plant",
+    "sap_stage_planned_order",
+    "sap_stage_production_version",
+    "sap_stage_routing_operation",
+    "sap_stage_planned_order_out",
+    "sap_stage_vanished_order",
+)
+
+SAP_STAGE_COLUMN_STATEMENTS = (
+    "ALTER TABLE sap_sync_config ADD COLUMN IF NOT EXISTS apply_mode TEXT NOT NULL DEFAULT 'manual';",
+    "ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS sap_missing_since TIMESTAMPTZ;",
+    "ALTER TABLE production_version ADD COLUMN IF NOT EXISTS sap_missing_since TIMESTAMPTZ;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_finish TIMESTAMP;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_version TEXT;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_firm BOOLEAN;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_at TIMESTAMPTZ;",
+)
+
+
+def test_sap_staging_tables_in_schema_and_migration():
+    """SAP staging: the seven sap_stage_* tables and seven additive columns must
+    exist in both schema.sql and the dated migrations deploys actually apply."""
+    tables_path = os.path.join(ROOT, "migrations", "2026-10-08-sap-staging-tables.sql")
+    columns_path = os.path.join(ROOT, "migrations", "2026-10-08-sap-staging-columns.sql")
+    with open(tables_path, encoding="utf-8") as f:
+        tables_text = f.read()
+    with open(columns_path, encoding="utf-8") as f:
+        columns_text = f.read()
+    schema_text = _schema_text()
+    for table in SAP_STAGE_TABLES:
+        stmt = f"CREATE TABLE IF NOT EXISTS {table} ("
+        assert stmt in schema_text, stmt
+        assert stmt in tables_text, stmt
+    for stmt in SAP_STAGE_COLUMN_STATEMENTS:
+        assert stmt in schema_text, stmt
+        assert stmt in columns_text, stmt
