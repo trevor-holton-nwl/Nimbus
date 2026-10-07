@@ -679,6 +679,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.sap_stage_time_validated':       'Geprüft',
   'ui.sap_stage_time_applied':         'Übernommen',
   'ui.sap_stage_col_order':            'Auftrag',
+  'ui.sap_stage_col_key':              'Schlüssel',
+  'ui.sap_stage_deletions_rows':       'Zeilen, die gelöscht werden',
   'ui.sap_stage_col_end':              'Geplantes Ende',
   'ui.sap_stage_col_firmed':           'Fixiert',
   'ui.sap_stage_col_deleted_at':       'Gelöscht am',

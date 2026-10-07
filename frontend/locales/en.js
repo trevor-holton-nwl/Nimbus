@@ -1646,6 +1646,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.sap_stage_time_validated':       'Validated',
   'ui.sap_stage_time_applied':         'Applied',
   'ui.sap_stage_col_order':            'Order',
+  'ui.sap_stage_col_key':              'Key',
+  'ui.sap_stage_deletions_rows':       'Rows that will be deleted',
   'ui.sap_stage_col_end':              'Scheduled end',
   'ui.sap_stage_col_firmed':           'Firmed',
   'ui.sap_stage_col_deleted_at':       'Deleted at',

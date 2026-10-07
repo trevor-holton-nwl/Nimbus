@@ -683,6 +683,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.sap_stage_time_validated':       'Validado',
   'ui.sap_stage_time_applied':         'Aplicado',
   'ui.sap_stage_col_order':            'Orden',
+  'ui.sap_stage_col_key':              'Clave',
+  'ui.sap_stage_deletions_rows':       'Filas que se eliminarán',
   'ui.sap_stage_col_end':              'Fin programado',
   'ui.sap_stage_col_firmed':           'Firme',
   'ui.sap_stage_col_deleted_at':       'Eliminada el',

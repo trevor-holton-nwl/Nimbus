@@ -679,6 +679,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.sap_stage_time_validated':       'Validado',
   'ui.sap_stage_time_applied':         'Aplicado',
   'ui.sap_stage_col_order':            'Ordem',
+  'ui.sap_stage_col_key':              'Chave',
+  'ui.sap_stage_deletions_rows':       'Linhas que serão excluídas',
   'ui.sap_stage_col_end':              'Fim programado',
   'ui.sap_stage_col_firmed':           'Firme',
   'ui.sap_stage_col_deleted_at':       'Excluída em',

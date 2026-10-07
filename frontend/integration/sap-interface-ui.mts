@@ -225,12 +225,14 @@ interface StageBatchesResponse {
 
 /** One order a planned-order batch would delete (`GET .../deletions`). */
 interface StageDeletion {
-  id: string;
-  production_order: string | null;
-  material_number: string | null;
-  machine: string | null;
-  scheduled_start: string | null;
-  scheduled_end: string | null;
+  /** Display key of a master-object row (material / plant, production version, routing); absent for orders. */
+  key?: string;
+  id?: string;
+  production_order?: string | null;
+  material_number?: string | null;
+  machine?: string | null;
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
   manual_firmed?: boolean | null;
   firming_indicator?: string | null;
   parent_production_order?: string | null;
@@ -904,18 +906,20 @@ export const Interface = (() => {
   // rejected rows, test upload, plus Outbound + Archive on planned orders.
   // -----------------------------------------------------------------------
 
-  // One AbortController per live combobox container (its document-level click listener) —
-  // mirrors setup-admin.mts / master-data/admin-ui.mts / distribution-pane.mts, the
-  // deliberately duplicated searchable-combobox helper (frontend/CLAUDE.md "Cross-cutting
-  // hazards"); keep any change mirrored there.
-  const _comboAborts = new WeakMap<HTMLElement, AbortController>();
+  // One module-level AbortController for the staging tab's combobox (its document-level click
+  // listener). `_renderStaging` replaces the container's HTML on every render, so a per-container
+  // map never saw the old element again and leaked a listener per render; the controller is aborted
+  // at the start of every `_renderStaging`. Derived from setup-admin.mts / master-data/admin-ui.mts /
+  // distribution-pane.mts, the deliberately duplicated searchable-combobox helper
+  // (frontend/CLAUDE.md "Cross-cutting hazards").
+  let _comboAbort: AbortController | null = null;
 
   /** Searchable single-select combobox (Production Scale Roadmap: never chips for plants). */
   function _mkCombobox(containerEl: HTMLElement | null, options: string[], opts: { value?: string; placeholder?: string; onSelect?: (value: string) => void } = {}): void {
     if (!containerEl) return;
-    _comboAborts.get(containerEl)?.abort();
-    const _comboAbort = new AbortController();
-    _comboAborts.set(containerEl, _comboAbort);
+    _comboAbort?.abort();
+    _comboAbort = new AbortController();
+    const comboSignal = _comboAbort.signal;
     const { value = '', placeholder = '', onSelect } = opts;
     containerEl.innerHTML = `
       <div class="hps-combobox md-bom-combobox">
@@ -985,7 +989,7 @@ export const Interface = (() => {
     input.addEventListener('blur', () => { setTimeout(() => { closeDd(); reflect(); }, 120); });
     clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
     clearBtn.addEventListener('click', () => { selected = ''; reflect(); if (onSelect) onSelect(''); input.focus(); });
-    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: _comboAbort.signal });
+    document.addEventListener('click', (e) => { if (!root.contains(e.target as Node)) closeDd(); }, { signal: comboSignal });
 
     reflect();
   }
@@ -1061,6 +1065,7 @@ export const Interface = (() => {
   async function _renderStaging(o: SapObject): Promise<void> {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
+    _comboAbort?.abort();      // drop the previous render's document-level combobox listener
     const isOrders = o.object_key === 'stage_planned_orders';
     body.innerHTML = `
       <div class="sap-stage-bar">
@@ -1157,8 +1162,11 @@ export const Interface = (() => {
     switch (b.status) {
       case 'validated': actions = btn('apply', 'ui.sap_stage_apply', 'btn-primary') + btn('discard', 'ui.sap_stage_discard'); break;
       case 'held': actions = btn('confirm', 'ui.sap_stage_confirm_apply', 'btn-danger') + btn('discard', 'ui.sap_stage_discard'); break;
-      case 'ready': case 'rejected': actions = btn('validate', 'ui.sap_stage_validate') + btn('discard', 'ui.sap_stage_discard'); break;
-      case 'error': actions = btn('validate', 'ui.sap_stage_validate') + btn('retry', 'ui.sap_stage_retry_apply', 'btn-primary') + btn('discard', 'ui.sap_stage_discard'); break;
+      case 'ready': actions = btn('validate', 'ui.sap_stage_validate') + btn('discard', 'ui.sap_stage_discard'); break;
+      // A rejected batch has no valid rows (Validate would only repeat the verdict); an errored one is
+      // resumed with Retry apply (the apply path re-runs the gates), so Validate is not offered there.
+      case 'rejected': actions = btn('discard', 'ui.sap_stage_discard'); break;
+      case 'error': actions = btn('retry', 'ui.sap_stage_retry_apply', 'btn-primary') + btn('discard', 'ui.sap_stage_discard'); break;
       default: actions = ''; // loading / applying / applied / superseded / discarded
     }
     const rejBtn = rejected > 0
@@ -1227,16 +1235,22 @@ export const Interface = (() => {
         const d = await _getJson<{ orders: StageDeletion[] }>(`/sap/staging/batches/${encodeURIComponent(b.batch_id)}/deletions`);
         const orders = d.orders || [];
         const shown = orders.slice(0, 200);
+        // Master-object batches (material plants, production versions, routings) return a generic `key`
+        // per row; planned-order batches return the full order columns.
+        const generic = orders.length > 0 && orders.every((x) => x.key != null);
         const row = (x: StageDeletion): string => {
+          if (generic) return `<tr><td>${Util.escapeHtml(x.key ?? '')}</td></tr>`;
           const firmed = !!x.manual_firmed || x.firming_indicator === 'X';
           return `<tr><td>${Util.escapeHtml(x.production_order ?? '')}</td><td>${Util.escapeHtml(x.material_number ?? '')}</td>`
-            + `<td>${Util.escapeHtml(x.machine ?? '')}</td><td>${Util.escapeHtml(_fmtTs(x.scheduled_end))}</td>`
+            + `<td>${Util.escapeHtml(x.machine ?? '')}</td><td>${Util.escapeHtml(_fmtTs(x.scheduled_end ?? null))}</td>`
             + `<td>${firmed ? Util.escapeHtml(Util.t('ui.sap_stage_firmed_yes')) : ''}</td></tr>`;
         };
-        deletions = `<div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_stage_deletions'))} (${orders.length})</div>
-          <div class="sap-stage-deletions"><table class="sap-batch-table"><thead><tr>
-            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
-            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th></tr></thead>
+        const head = generic
+          ? `<th>${Util.escapeHtml(Util.t('ui.sap_stage_col_key'))}</th>`
+          : `<th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
+            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th>`;
+        deletions = `<div class="sap-section-label">${Util.escapeHtml(Util.t(generic ? 'ui.sap_stage_deletions_rows' : 'ui.sap_stage_deletions'))} (${orders.length})</div>
+          <div class="sap-stage-deletions"><table class="sap-batch-table"><thead><tr>${head}</tr></thead>
             <tbody>${shown.map(row).join('')}</tbody></table></div>
           ${orders.length > shown.length ? `<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_deletions_more', { count: orders.length - shown.length }))}</div>` : ''}`;
       } catch (e) {

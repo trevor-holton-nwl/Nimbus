@@ -679,6 +679,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.sap_stage_time_validated':       'Validé',
   'ui.sap_stage_time_applied':         'Appliqué',
   'ui.sap_stage_col_order':            'Commande',
+  'ui.sap_stage_col_key':              'Clé',
+  'ui.sap_stage_deletions_rows':       'Lignes qui seront supprimées',
   'ui.sap_stage_col_end':              'Fin planifiée',
   'ui.sap_stage_col_firmed':           'Ferme',
   'ui.sap_stage_col_deleted_at':       'Supprimée le',
