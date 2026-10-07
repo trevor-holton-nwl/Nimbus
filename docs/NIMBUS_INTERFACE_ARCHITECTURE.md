@@ -3,9 +3,9 @@
 > **Audience:** NIMBUS engineering (the team building and operating the integration on the NIMBUS side).
 > **Companion doc:** `SAP_INTEGRATION_ROADMAP.md` covers the *SAP-side* build (t-codes, ABAP, transports, Basis open questions). This doc covers the *NIMBUS-side* engineering structure that consumes that feed.
 >
-> **Status:** Non-live skeleton. The full Interface UX is clickable and every endpoint/table exists, but **no real SAP connectivity** is wired — every connector is a stub that returns `[]` / `{ok: false}`, and the scheduler is **disabled by default**. This document is the contract for the skeleton *and* the live build that follows it.
+> **Status:** Two layers. (1) The **pull connectors** (sections 1-6) remain a non-live skeleton: every connector is a stub that returns `[]` / `{ok: false}` and the per-object cron scheduler is **disabled by default**. (2) **SAP staging** (section 7, design of record `SAP_STAGING_DESIGN.md`) is implemented on `feature/sap-staging`: Mulesoft writes SAP snapshots straight into Postgres staging tables, NIMBUS polls, validates and applies them under admin control, and an outbound queue carries the plant schedule back to SAP. Staging is inert until `NIMBUS_SAP_STAGING_POLL_SECONDS` is set and Mulesoft has a database login (see `DEPLOYMENT.md`). This document is the contract for both.
 >
-> **Interface contract version:** `2026-06-30-b` (must match `APP_VERSION` in `app.js`, `NIMBUS_BUILD_ID` in `index.html`, and the styles cache-bust query — bump all together on deploy).
+> **Interface contract version:** `2026-10-07-1` (the `NIMBUS_BUILD_ID` in `frontend/index.html` at the time of the staging release; `NIMBUS_BUILD_ID` single-source-drives the asset cache-bust query, and a `BUILD_ID` build arg stamps it at image build time, see `DEPLOYMENT.md`).
 
 ---
 
@@ -17,6 +17,7 @@
 4. [Security posture](#4-security-posture)
 5. [Deferred hardening](#5-deferred-hardening)
 6. [How to go live](#6-how-to-go-live)
+7. [Staging contract (Mulesoft)](#7-staging-contract-mulesoft)
 
 ---
 
@@ -116,7 +117,7 @@ Appended to `schema.sql`, **strictly idempotent** (`CREATE … IF NOT EXISTS` + 
 
 Full DDL in §2.3.
 
-### 1.5 Lifespan-hosted APScheduler (disabled by default)
+### 1.5 Lifespan-hosted APScheduler (disabled by default; also hosts the staging poll)
 
 The scheduler lives **inside the single existing FastAPI `lifespan`** (`brain.py`) — no separate process. It is governed by **two-level safety**:
 
@@ -133,6 +134,8 @@ SELECT pg_try_advisory_lock(hashtext('sap:' || :object_key));
 ```
 
 `max_instances=1` only prevents overlap *within one process*; the advisory lock is what makes it safe *across replicas*. This is a deferred-hardening item (§5), not built this pass.
+
+**Staging poll (added with SAP staging).** A third knob, `NIMBUS_SAP_STAGING_POLL_SECONDS` (`brain.py`, integer seconds, default `0` = no job), adds an `IntervalTrigger` job `sap:staging-poll` (`max_instances=1`, `coalesce=True`) whose body `_run_sap_staging_poll` offloads `sap_staging.poll_once` to the threadpool. It is independent of the per-object cron schedule. **The scheduler object is created when either `NIMBUS_SAP_SYNC_ENABLED` or the poll interval is on**; the per-object cron jobs are still only registered when `SAP_SYNC_ENABLED` is true, so turning on only the poll starts a scheduler with exactly one job. `poll_once` also takes `pg_try_advisory_lock(hashtext('sap:staging-poll'))` (acquire-or-skip), so a second replica or an overlapping manual poll (`POST /sap/staging/poll`) skips instead of double-processing.
 
 `requirements.txt` adds `apscheduler==3.11.0`. (`httpx` is **not** added yet — it is deferred to OData go-live and lazy-imported.)
 
@@ -157,7 +160,7 @@ Localization: the tab label and UI strings are i18n keys (§2.6). The five local
 
 ## 2. The exact contract
 
-This section is the authoritative interface contract. All NIMBUS-side code (backend + frontend, built in parallel) must conform to exactly these signatures, names, and shapes. **Version string: `2026-06-30-b`.**
+This section is the authoritative interface contract. All NIMBUS-side code (backend + frontend, built in parallel) must conform to exactly these signatures, names, and shapes. **Version string: `2026-10-07-1`** (the current `NIMBUS_BUILD_ID` in `frontend/index.html`; the skeleton shipped as `2026-06-30-b`).
 
 ### 2.1 Object catalog (6 entries)
 
@@ -460,4 +463,139 @@ The skeleton is intentionally inert. Bringing a real feed online is a deliberate
 
 7. **Flip the master flag.** Set `NIMBUS_SAP_SYNC_ENABLED=1` on the backend and restart. The lifespan schedules one job per enabled object and logs "scheduler started, jobs=N". *(If still single-replica, this is safe as-is; if scaled out, the multi-replica advisory lock from §5 must be in place first.)*
 
-8. **Bump the version string** (`2026-06-30-b` → next) across `APP_VERSION`, `NIMBUS_BUILD_ID`, and the styles cache-bust on any deploy that changes static assets.
+8. **Bump the version string** (`NIMBUS_BUILD_ID` in `frontend/index.html`, currently `2026-10-07-1`) and the styles cache-bust on any deploy that changes static assets (a `BUILD_ID` build arg stamps both at image build time, see `DEPLOYMENT.md`).
+
+---
+
+## 7. Staging contract (Mulesoft)
+
+SAP staging is the live path for SAP data. Mulesoft does not call a NIMBUS endpoint: **the staging tables are the interface**. Mulesoft logs into Postgres as the restricted role `nimbus_mulesoft`, writes one full snapshot per object and plant, and marks it ready. NIMBUS polls, validates, and promotes ("applies") the snapshot into the live tables only under admin control. A second set of tables carries the plant schedule back to SAP. Design of record, with the settled decisions D1-D35: `SAP_STAGING_DESIGN.md`. Implementation: `backend/integration/sap_staging.py` (invariants in `backend/integration/CLAUDE.md`).
+
+### 7.1 What Mulesoft delivers
+
+| SAP export | Object key (`sap_stage_batch.object_key`) | Row table | Live target |
+|---|---|---|---|
+| Material Plant | `stage_material_plants` | `sap_stage_material_plant` | `material_plants` |
+| Routing, part 1 (production versions) | `stage_production_version` | `sap_stage_production_version` | `production_version` |
+| Routing, part 2 (operations) | `stage_routing_operation` | `sap_stage_routing_operation` | `routing_operation` |
+| Planned Order | `stage_planned_orders` | `sap_stage_planned_order` | `orders` |
+
+Every delivery is a **full snapshot for one plant** and one object: absence from the snapshot is meaningful (it can delete rows, see 7.5). Deliver in the order Material Plant, Routing, Planned Orders; NIMBUS applies ready batches in that order within one poll regardless of arrival order.
+
+### 7.2 The exact SQL sequence (per object, per plant, per attempt)
+
+```sql
+-- 1. Header. The UUID is generated by Mulesoft (a fresh UUIDv4 for EVERY attempt).
+INSERT INTO sap_stage_batch (batch_id, object_key, plant, source, status)
+VALUES (:batch_id, 'stage_planned_orders', :plant, 'mulesoft', 'loading');
+
+-- 2. Rows, carrying that batch_id. Never set row_status, reject_reason or the resolved columns.
+INSERT INTO sap_stage_planned_order (batch_id, plnum, mdv01, psttr, pstti, pedtr, pedti, gsmng, abmng,
+                                     matnr, verid, plwrk, auffx, stlan, stalt /* , ...the rest of the 25 */)
+VALUES (:batch_id, ...), (:batch_id, ...), ...;
+
+-- 3. Mark ready. N = the number of rows actually inserted in step 2.
+UPDATE sap_stage_batch
+   SET status = 'ready', ready_at = now(), row_count_expected = :n
+ WHERE batch_id = :batch_id;
+```
+
+If anything fails on the Mulesoft side before step 3, `UPDATE sap_stage_batch SET status = 'rejected', error = :reason WHERE batch_id = :batch_id`, then **retry with a brand-new `batch_id`**.
+
+### 7.3 Rules
+
+1. **A fresh UUID per attempt.** Never re-use a `batch_id`, never append rows to a batch that was already marked ready or rejected. A retry is a new header plus a full set of rows.
+2. **Plant match.** The header `plant` must equal the plant field of every row (`werks` for Material Plant, `plwrk` for Planned Orders, `plant` for the two routing tables). A row that disagrees is rejected `plant_mismatch`. The plant must exist in NIMBUS's `plants` table (`unknown_plant` otherwise).
+3. **Empty snapshot semantics.** `row_count_expected = 0` with no rows is legal and means "nothing in the planning window". For Planned Orders it would delete every in-horizon order, so it always trips the 25 % hold (7.5) whenever NIMBUS holds any in-horizon order for the plant; for the other objects it is held as `empty_snapshot`. An admin must confirm.
+4. **Never modify rows after `ready`.** No updates, deletes or late inserts. Mulesoft has no UPDATE right on the row tables and no DELETE right anywhere.
+5. **Completeness gate.** NIMBUS only takes a `ready` batch whose actual row count equals `row_count_expected`. A mismatch is skipped; once `NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN` (default 120) has passed since `ready_at` the batch is rejected (`incomplete_rows`).
+6. **Stale `loading`.** A batch left in `loading` longer than `NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN` is rejected as stale (`stale_loading`), so a crashed job never blocks the plant.
+7. **Newest wins.** When a newer complete batch exists for the same object and plant, older un-applied batches become `superseded`.
+8. **Formats.** Planned-order dates and times are raw text so a malformed value is a rejected row, never a failed insert: dates `YYYYMMDD` or `YYYY-MM-DD` (`00000000` or blank = not sent), times `HHMMSS` or `HH:MM:SS`; a missing or `000000` time means date-only. Dates and times are in the **SAP system time zone** (`NIMBUS_SAP_SYSTEM_TZ`); NIMBUS converts to each plant's own zone. Quantities are `NUMERIC(13,3)` and typed, so a non-numeric quantity fails the insert on the Mulesoft side. Materials may arrive zero-padded; NIMBUS strips leading zeros from all-digit materials and order numbers.
+9. **Batch status machine** (written by NIMBUS except where noted):
+
+```
+loading (Mulesoft) -> ready (Mulesoft) -> validated | held | rejected
+validated | held -> applying -> applied | error        (error is resumable: Apply again)
+any un-applied state -> superseded (newer batch) | discarded (admin) | rejected
+```
+
+`held` means validated but waiting for an admin to confirm (reason in `warnings`: `vanish_threshold`, `routing_required`, `empty_snapshot`). Mulesoft may read `status`, `counts`, `warnings` and `error` on its own batches (SELECT is granted on the header).
+
+### 7.4 Column lists (copied from `migrations/2026-10-08-sap-staging-tables.sql`)
+
+**Header `sap_stage_batch`:** `batch_id UUID PK`, `object_key`, `plant`, `source` (`mulesoft` | `upload`), `status`, `row_count_expected INTEGER`, `received_at` (default now), `ready_at`, `validated_at`, `applied_at`, `applied_by`, `created_by`, `counts JSONB`, `warnings JSONB`, `error`. Mulesoft inserts `batch_id`, `object_key`, `plant`, `source`, `status` and may update only `status`, `ready_at`, `row_count_expected`, `error`.
+
+**Housekeeping on every row table (NIMBUS-owned, leave to defaults):** `id BIGSERIAL`, `batch_id` (FK to the header, cascade), `row_status` (`new` | `valid` | `rejected` | `applied` | `superseded`), `reject_reason`, `received_at`, `applied_at`.
+
+**`sap_stage_material_plant` (13 SAP columns):** `matnr`, `werks`, `mmsta`, `webaz NUMERIC(3,0)`, `verkz`, `stlal`, `stlan`, `plnnr`, `aplal`, `minls NUMERIC(13,3)`, `ltinc NUMERIC(13,3)`, `zz_subnet`, `sauft`. Resolved by NIMBUS (do not write): `material_id`, `plant`.
+
+**`sap_stage_planned_order` (25 SAP columns):** `plnum`, `mdv01`, `psttr`, `pedtr`, `gsmng NUMERIC(13,3)`, `matnr`, `verid`, `prvbe`, `plwrk`, `paart`, `umskz`, `auffx`, `kdauf`, `rsnum`, `stlan`, `stalt`, `abmng NUMERIC(13,3)`, `pstti`, `pedti`, `knttp`, `vfmng NUMERIC(13,3)`, `gsbtr`, `kzavc`, `badi`, `dac_creation_date` (all other columns `TEXT`). Resolved by NIMBUS (do not write): `production_order`, `material_id`, `plant`.
+
+**`sap_stage_production_version` (18 columns, NIMBUS names until SAP Development supplies SAP names):** `plant`, `material_id VARCHAR(18)`, `production_version VARCHAR(4)`, `valid_from DATE`, `valid_to DATE`, `alternative_bom VARCHAR(2)`, `bom_usage VARCHAR(1)`, `task_list_type VARCHAR(1)`, `routing_group VARCHAR(8)`, `group_counter VARCHAR(2)`, `procurement_type VARCHAR(1)`, `special_procurement_type VARCHAR(2)`, `costing_lot_size NUMERIC(13,3)`, `sap_workcenter`, `production_version_text VARCHAR(40)`, `repetitive_mfg BOOLEAN`, `lot_size_from NUMERIC(13,3)`, `lot_size_to NUMERIC(13,3)`.
+
+**`sap_stage_routing_operation` (34 columns, NIMBUS names for now):** `plant`, `material_id VARCHAR(18)`, `task_list_type VARCHAR(1)`, `routing_group VARCHAR(8)`, `group_counter VARCHAR(2)`, `sequence_no VARCHAR(6)`, `activity VARCHAR(4)`, `sap_workcenter`, `workcenter_category VARCHAR(4)`, `base_quantity NUMERIC(13,3)`, `control_key VARCHAR(4)`, `operation_text VARCHAR(40)`, `operation_unit VARCHAR(3)`, `activity_type_machine VARCHAR(6)`, `std_value_machine NUMERIC(9,3)`, `std_value_unit_machine VARCHAR(3)`, `activity_type_labor VARCHAR(6)`, `std_value_labor NUMERIC(9,3)`, `std_value_unit_labor VARCHAR(3)`, `required_overlap BOOLEAN`, `optional_overlap BOOLEAN`, `required_split BOOLEAN`, `field_key VARCHAR(7)`, `num_splits INTEGER`, `task_list_text VARCHAR(40)`, `sequence_category VARCHAR(1)`, `sequence_text VARCHAR(40)`, `num_employees NUMERIC(5,2)`, `setup_group_category VARCHAR(6)`, `setup_group_key VARCHAR(6)`, `deleted BOOLEAN`, `header_status VARCHAR(3)`, `header_valid_from DATE`, `header_valid_to DATE`. A row flagged `deleted` is rejected (`deleted_flag`).
+
+**`sap_stage_planned_order_out` (outbound, 7.7):** `id`, `send_batch_id UUID`, `plant`, `matnr`, `plwrk`, `plnum`, `verid`, `pedtr DATE`, `pedti TIME`, `auffx`, `row_status` (`ready` | `sent` | `error`), `queued_at`, `queued_by`, `sent_at`, `error_text`, `nimbus_order_id`.
+
+**`sap_stage_vanished_order` (NIMBUS-internal archive; no Mulesoft access):** `id`, `batch_id`, `plant`, `order_id`, `order_row JSONB`, `segments JSONB`, `shares JSONB`, `deleted_at`, `deleted_by`, `restored_at`, `restored_by`.
+
+Mapping from SAP column to live column is the editable `sap_field_map` (seeded in the same migration, Appendix C of the design doc). Only **active** mapping rows reach a live column; unmapped SAP fields stay staging-only. Composite rules (start/finish from date + time, open quantity = total minus reduced, and so on) are fixed in code, not in the map.
+
+### 7.5 What NIMBUS does with a ready batch
+
+Validation sets each row `valid` or `rejected` with a reason and puts the batch in `validated`, `held` or `rejected`. Apply (manual click, or automatic when that object's `apply_mode` is `auto` and the batch validated clean) writes the live tables. Planned-order apply goes through the same order upsert the Excel upload uses, then **deletes in-horizon orders that are absent from the snapshot** (archived for 30 days, restorable), with three gates: more than **25 %** of the in-horizon orders vanishing, **routing not enabled** for the plant (or no routings loaded), and an **empty snapshot** each hold the batch for admin confirmation (routing cannot be confirmed away). Material plants and production versions absent from a snapshot are deleted when nothing references them and flagged otherwise; absent routings are deleted and their dependent orders go on hold. Apply is a resumable step ladder, not one transaction.
+
+### 7.6 Rejection and warning codes
+
+| Row rejection (`reject_reason`) | Meaning |
+|---|---|
+| `missing_key` | Material, plant or order number blank (an all-zero order number counts) |
+| `plant_mismatch` | Row plant differs from the header plant |
+| `unknown_plant` | Plant is not in NIMBUS's `plants` table |
+| `duplicate_key` | The key appears more than once in the batch (every copy is rejected) |
+| `invalid_date` | Unparseable date, or a planned order with no start date |
+| `invalid_time` | Unparseable time |
+| `invalid_number` | Total quantity missing or negative, or reduced quantity negative |
+| `invalid_int` | BOM usage / alternative is not a whole number |
+| `key_too_long` | Material id longer than 18 or plant longer than 10 characters (Material Plant) |
+| `deleted_flag` | Routing operation row flagged deleted by SAP |
+| `rejected_by_validator` / routing messages | The shared routing validators refused the row; their message is the reason |
+
+| Batch warning / hold (`warnings[].code`) | Meaning |
+|---|---|
+| `vanish_threshold` | More than 25 % of in-horizon orders are missing from the snapshot; admin must confirm |
+| `routing_required` | Plant routing runtime is off or no routings are loaded; planned orders cannot apply yet |
+| `empty_snapshot` | Zero rows delivered for a non-order object |
+| `horizon_unlimited_no_deletes` | Plant has an unlimited visibility horizon, so nothing is deleted |
+| `stale_loading` / `incomplete_rows` | Batch was never completed or its row count never matched; rejected |
+| `lot_size_rounded` | Fractional lot sizes were rounded to whole numbers |
+| `unknown_columns` / `rows_not_staged` | Excel/CSV test upload only: ignored headers / rows that did not fit their column |
+| `discarded` | An admin discarded the batch |
+
+### 7.7 Outbound contract (NIMBUS to SAP)
+
+An admin's **Send to SAP** click queues one row per planned order of the plant (distribution sub-orders roll up to their parent with the latest end) into `sap_stage_planned_order_out` with `row_status = 'ready'`, `pedtr`/`pedti` converted to the SAP system zone, and `auffx = 'X'` when the order is firmed (planner-firmed, already firmed in SAP, or inside the frozen horizon; **add-only**, NIMBUS never clears an SAP firm). Materials and order numbers are sent as NIMBUS stores them (no leading zeros); pad them on the Mulesoft side if SAP requires fixed width. Mulesoft then:
+
+```sql
+BEGIN;
+SELECT id, send_batch_id, plant, matnr, plwrk, plnum, verid, pedtr, pedti, auffx
+  FROM sap_stage_planned_order_out
+ WHERE row_status = 'ready' AND plant = :plant
+ ORDER BY id
+   FOR UPDATE SKIP LOCKED;
+-- push to SAP, then per row:
+UPDATE sap_stage_planned_order_out SET row_status = 'sent',  sent_at = now()                    WHERE id = :id;
+UPDATE sap_stage_planned_order_out SET row_status = 'error', sent_at = now(), error_text = :why WHERE id = :id;  -- SAP import-log reason
+COMMIT;
+```
+
+Mulesoft may update only `row_status`, `sent_at` and `error_text` and never deletes; NIMBUS purges `sent` rows (and rows it retired as `requeued`) after 30 days. If Mulesoft cannot write per-row status back, the Outbound tiles stay at `ready`; that capability is a go-live prerequisite (design D31). A later click retires any still-`ready` rows first (`error`, `error_text = 'requeued'`). NIMBUS also remembers what it sent on each order (`orders.sap_sent_*`) so SAP's echo of that finish is not misread as an SAP change (design D20).
+
+### 7.8 The `nimbus_mulesoft` role
+
+Created by hand from `migrations/manual/2026-10-08-nimbus-mulesoft-role.sql` (environment-specific; password set out of band, never in git; steps in `DEPLOYMENT.md`). Least privilege: `USAGE` on schema `public`; `SELECT` + `INSERT` on `sap_stage_batch` and the four inbound row tables; column-level `UPDATE` on the header (`status`, `ready_at`, `row_count_expected`, `error`) and on the outbound table (`row_status`, `sent_at`, `error_text`); `SELECT` on `sap_stage_planned_order_out`; `USAGE, SELECT` on the five `BIGSERIAL` sequences. Nothing else: no live NIMBUS table, no `DELETE`, no `sap_stage_vanished_order`. The grants go with the table, so re-run the file if a staging table is ever dropped and recreated. The login is a second way into a public database endpoint (`MIGRATION.md`), so it needs `sslmode=require` and a firewall rule limited to Mulesoft's egress addresses.
+
+### 7.9 Retention
+
+Latest applied batch per object and plant only (the previous applied batch is deleted at the next apply); rejected, discarded and superseded batches 7 days; vanished-order archive 30 days; outbound `sent` rows 30 days. The poll sweeps all of them.

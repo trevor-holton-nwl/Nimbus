@@ -30,6 +30,55 @@ the URL can use it).
 
 Apply `migrations/2026-09-09_optimizer_planning_exceptions.sql` through the migration ledger before releasing the dependent application. The application now reads `planning_status` and `planning_reason` on every task query. Queued orders preserve SAP baselines but have no committed dates or segments. Older application versions do not understand this state and can reconstruct dates from SAP baselines, so a rollback after orders enter Needs Planning must retain queue-aware application code. Build the frontend as part of the application release (pass `--build-arg BUILD_ID=<git short sha>` to `az acr build` so the cache-bust id is stamped automatically). Verify a queued order and a scheduled peer together through Save/reload, and verify that a stale optimizer save persists neither row.
 
+## SAP staging release (Mulesoft interface)
+
+Design of record `docs/SAP_STAGING_DESIGN.md`; the contract Mulesoft codes against is `docs/NIMBUS_INTERFACE_ARCHITECTURE.md` section 7. Nothing flows until the role exists, Mulesoft has network access and the poll interval is set, so the app can ship first and be switched on later.
+
+### 1. Migrations (through the ledger)
+
+Apply both new files with the `promote-azure` skill, in this order: `migrations/2026-10-08-sap-staging-tables.sql`, then `migrations/2026-10-08-sap-staging-columns.sql`. **Both need `-AllowDestructive` on `apply-migrations.ps1`:** the runner's filter is a plain word match over the whole file (comments included), so the columns file trips it on `ALTER` and the tables file trips it on `ON DELETE CASCADE` (and a comment). Both were reviewed and are additive only: `CREATE TABLE IF NOT EXISTS`, `INSERT ... ON CONFLICT DO NOTHING` and `ADD COLUMN IF NOT EXISTS` (nullable or defaulted), nothing dropped, rewritten or backfilled; re-running is a no-op. Run `-DryRun` first to see them listed as `DESTRUCTIVE -> blocked`, then pass `-AllowDestructive` as a deliberate decision.
+
+### 2. Environment variables on the Container App
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NIMBUS_SAP_STAGING_POLL_SECONDS` | `0` (no poll job) | Poll interval for new Mulesoft batches. Suggested pilot value `60`. Setting it creates the in-process scheduler even when `NIMBUS_SAP_SYNC_ENABLED` is off. |
+| `NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN` | `120` | A batch left in `loading` (or marked `ready` with a row count that never matches) longer than this is rejected as stale. |
+| `NIMBUS_SAP_SYSTEM_TZ` | `UTC` | IANA name of the time zone SAP's dates and times are expressed in (for example `America/New_York`). **Value to be confirmed with SAP Development**; a wrong value shifts every order's start and finish by whole hours. |
+
+```powershell
+az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev `
+  --set-env-vars NIMBUS_SAP_STAGING_POLL_SECONDS=60 NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN=120 NIMBUS_SAP_SYSTEM_TZ=<IANA name from SAP Development>
+```
+
+The poll holds a Postgres advisory lock, but the pilot stays single replica (`min = max = 1`); see `MIGRATION.md` for what is still open before scaling out.
+
+### 3. The `nimbus_mulesoft` database login (manual, once per environment)
+
+`migrations/manual/2026-10-08-nimbus-mulesoft-role.sql` is never applied by the runner (it lives under `migrations/manual/`) because the password and network rules differ per environment. A DB admin applies it by hand, after the tables migration:
+
+1. Run the file as the server admin (`TempAdmin`) against database `nimbus`, from a host allowed through the firewall: `psql "host=pgdb-nimbus-dev.postgres.database.azure.com port=5432 dbname=nimbus user=TempAdmin sslmode=require" -f migrations/manual/2026-10-08-nimbus-mulesoft-role.sql`. It creates `nimbus_mulesoft` (login) with least-privilege grants on the `sap_stage_*` tables only.
+2. Set the password **out of band; never in git, never in a ticket or chat**. Generate it, store it as a secret (a Container App secret such as `nimbus-mulesoft-pass`, or Key Vault once that exists) and run `ALTER ROLE nimbus_mulesoft PASSWORD '<value>'` interactively in `psql` so it does not land in shell history. Hand it to the Mulesoft team through the same secret store.
+3. Re-run the file if a staging table is ever dropped and recreated (grants go with the table).
+
+### 4. Network access for Mulesoft
+
+The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`, 0.0.0.0) and the app itself connects as the server admin; both are already tracked in `MIGRATION.md`. The Mulesoft login is a second way into that surface, so:
+
+- Require TLS: Mulesoft's JDBC URL must carry `sslmode=require` (`ssl=true` for the PostgreSQL JDBC driver).
+- Add a firewall rule limited to Mulesoft's egress IP addresses: `az postgres flexible-server firewall-rule create -g rg-nimbus-dev --server-name pgdb-nimbus-dev --name MulesoftEgress --start-ip-address <MULESOFT_EGRESS_IP> --end-ip-address <MULESOFT_EGRESS_IP>` (**placeholder: the runtime location and egress IPs are not known yet**, design D31; repeat per address).
+- Mulesoft's per-row write-back of outbound status is also unconfirmed; without it the Send to SAP tiles stay at `ready`.
+
+### 5. Operational rules (publish to planners and admins before the first apply)
+
+- **Keep the two horizons equal per plant.** SAP's planning horizon for the export and NIMBUS's `visibility_horizon_days` must match; NIMBUS uses its own to decide which orders are "in the window" and may vanish. A plant with an unlimited visibility horizon never deletes anything (batch warning).
+- **No Excel order uploads on a plant that receives SAP snapshots.** An order that exists only from Excel is absent from the next SAP snapshot and is deleted at apply.
+- **Routing runtime must be on, with routings loaded, before planned orders can apply.** Otherwise the batch is held (`routing_required`). Apply Material Plant and Routing first.
+- **The first SAP apply on a plant resets most scheduled slots** (SAP's dates differ from what NIMBUS holds). Plan it for a quiet moment and tell planners.
+- **Converted orders vanish, even if running.** A planned order converted to a production order leaves the SAP export and is deleted at the next apply. It is recoverable for **30 days** from the Archive panel (Restore) in Admin > Interface.
+- Open planner sessions learn of an apply only on save or reload.
+- Roll back by discarding an un-applied batch (Discard) or restoring archived orders; an applied batch is not undone automatically.
+
 ## Prerequisites
 
 - Azure CLI (`winget install --exact --id Microsoft.AzureCLI`), `az login`, and **Contributor on `rg-nimbus-dev`**.

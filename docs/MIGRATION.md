@@ -594,7 +594,7 @@ Ordered (user-assigned managed identity + Key Vault **before** the apps — a sy
 
 ## Workstream 8 — Schema bootstrap
 
-`schema.sql` is idempotent + Azure-safe. **Pilot: one-shot `psql` from Cloud Shell** (`sslmode=require`) right after the Postgres server is up, before backend traffic — `lifespan` only reads, so schema must exist first. Re-running on later deploys is safe. (CI option: Container Apps Job from the backend image — defer.)
+`schema.sql` is idempotent + Azure-safe. **Pilot: one-shot `psql` from Cloud Shell** (`sslmode=require`) right after the Postgres server is up, before backend traffic — `lifespan` runs idempotent `ensure_*` DDL at boot (`db.ensure_color_wheel_table`, `ensure_priority_list_table`, `ensure_order_schedule_segments_table`, `ensure_order_distribution_tables`, `md.ensure_labor_plan_table` and the `ensure_plant_*` column helpers, `brain.py` lifespan) on top of the migrated schema, so the base schema must exist first. Re-running on later deploys is safe. (CI option: Container Apps Job from the backend image — defer.)
 
 ---
 
@@ -777,6 +777,12 @@ Implications for a hosted plant pilot:
 > `sap_sync_config` / `sap_sync_run` / `sap_field_map` tables) ships as a **non-live skeleton** —
 > connectors are stubs, the in-process scheduler is **disabled by default**, and no real SAP
 > transport is wired. The items below must be resolved **before** any production SAP pull goes live.
+>
+> **SAP staging (2026-10-07, `feature/sap-staging`)** is the path that is built for real: Mulesoft
+> writes snapshots into `sap_stage_*` Postgres tables and NIMBUS validates/applies them under admin
+> control (`docs/SAP_STAGING_DESIGN.md`, contract in `docs/NIMBUS_INTERFACE_ARCHITECTURE.md`
+> section 7, runbook in `docs/DEPLOYMENT.md`). Its open items are the next four bullets and the two
+> lists after the hardening bullets.
 
 - **SAP credentials → Azure Key Vault.** SAP service-account creds (and any RFC/OData secrets) come
   from **env only** and must be sourced from Key Vault (per Workstream 7) — **never** in code, the
@@ -796,6 +802,51 @@ Implications for a hosted plant pilot:
 - **Classification extraction performance.** Deriving `COLOR` / `FORM_SIZE` classification must be
   resolved **server-side in SAP** (in the extractor / CDS view), not by post-hoc parsing in NIMBUS —
   per-row classification on the NIMBUS side does not scale to the production order volume.
+
+### SAP staging — deferred items (2026-10-07)
+
+- **Live "data changed" banner for open planner sessions (D35).** An applied batch (including
+  vanish deletions) reaches an open Gantt session only on its next save or reload; the server version
+  wins and the existing stale toast fires. A push or poll-driven "data changed, refresh" banner is
+  deferred.
+- **Multi-replica safety beyond the poll lock.** `poll_once` and each batch apply take advisory
+  locks (`sap:staging-poll`, `sap:apply:<batch>`), but the per-object cron jobs (`sap_sync.sync_object`)
+  still have no lock, the color-wheel cache and log ring buffer are per process, and staging has only
+  been exercised single replica.
+- **Dry-run apply for planned orders.** `db.upsert_orders` has no plan-only mode, so an admin cannot
+  preview exactly which orders an apply would insert or update (the deletion list is previewable;
+  inserts and updates are not). Needs a plan-only path through the shared upsert.
+- **Retention knobs.** The retention windows are constants in `sap_staging.py` (archive 30 days,
+  outbound `sent` rows 30 days, rejected/discarded/superseded batches 7 days, latest applied batch
+  per object and plant only); making them configurable is deferred.
+- **Owed by others before go-live:** SAP field names for the two routing tables (SAP Development,
+  follow-up rename migration); the FSD change request adding Material Description to the Material
+  Plant export (until then new materials have blank descriptions); the SAP system time zone for
+  `NIMBUS_SAP_SYSTEM_TZ`; Mulesoft runtime location, egress IPs, TLS and per-row write-back
+  capability, and the role password (integration team / Basis); confirmation that SAP accepts
+  unpadded material and order numbers or that Mulesoft pads them.
+- **Hardening now also covers the Mulesoft login.** The public Postgres endpoint with the allow-all-Azure
+  rule and the app connecting as the server admin (`TempAdmin`) are already tracked above (Workstream 7
+  item 4 / Fork 2, and the `TempAdmin` rotation in `docs/DEPLOYMENT.md`). The `nimbus_mulesoft` role
+  is a second login on that surface (least privilege, TLS required, firewall to its egress IPs, see
+  `docs/DEPLOYMENT.md`); private networking, a Key Vault secret for its password and rotating both
+  logins close the same gap.
+
+### SAP sync skeleton — discrepancies found while building staging (not fixed)
+
+Verified against `backend/integration/sap_sync.py` and `frontend/integration/sap-interface-ui.mts`:
+
+- **The sync watermark never advances.** `update_watermark()` has no caller, and `sync_object` writes
+  `watermark_after = watermark_before`, so delta pulls could never resume from the last run.
+- **No `sap_sync_config` seed for `sap_workcenter`.** The catalog has the `sap_workcenter` master
+  object but `migrations/2026-06-30-sap-interface.sql` seeds config rows only for the other six
+  objects (the staging migration seeds its four).
+- **The Interface tab's `MASTER_KEYS` lacks `sap_workcenter`**, so the key-column save guard does not
+  cover that object.
+- **`rows_failed` is always 0.** It is read from `db.upsert_orders`'s result `failed` key, which that
+  function never returns, and master-data syncs never set it.
+- **`_t_alpha` is misnamed.** It does no ALPHA (zero-pad/strip) conversion, only `db._str_id` (Excel
+  float-suffix strip); the new `alpha_strip` transform is the one that strips leading zeros.
 
 ---
 

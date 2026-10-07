@@ -82,6 +82,11 @@ Run: `python -m pytest tests/test_to_pydt.py tests/test_task_response_models.py 
 - **`RUN_TIME` is validated at the DTO.** `TaskDateUpdate.RUN_TIME` rejects NaN/Infinity/negative/>=168 hours (models.py `field_validator`, H8) so a crafted value cannot reach the schedule math.
 - **Body caps on the free-form sinks** (`brain.py` `_BODY_CAPS`, enforced on `Content-Length`; a missing/non-numeric length is 411, over the cap 413): `/logs/frontend` 1 MB, `/audit/log` 64 KB, `/logs/csp-report` 16 KB.
 
+## What was last sent to SAP: `orders.sap_sent_*` (2026-10-07, SAP staging)
+
+- **`orders.sap_sent_finish` / `sap_sent_version` / `sap_sent_firm` / `sap_sent_at`** are written only by Send to SAP (`sap_staging.queue_send_to_sap`, `backend/integration/CLAUDE.md`) and **cleared by `db.update_task_dates_bulk`** (`clear_sap_sent`, `db.py` ~1112 and ~1579) whenever a planner's save changes the order's end (minute precision, or queues/unqueues it) or edits its production version, so a later genuine SAP change is judged against the SAP baselines and not an obsolete echo. They are never part of the `/tasks` DTO.
+- **Effect on re-ingest (echo rule, D20).** `db.sap_changed_fields` (`db.py:2584`) treats an incoming SAP finish equal to `sap_sent_finish` as NOT an SAP date change even when SAP back-scheduled the start (and a version equal to `sap_sent_version` as not a version change), so a re-import of what NIMBUS just sent does not reset the planner's slot; the new SAP baselines are still written. A different finish, version or work center still re-plans the order as before.
+
 ## Manual firm and Delete (SAP-is-truth firming)
 
 - **A planner's firm is `orders.manual_firmed`, shared server-side.** `GET /tasks` returns it as `firmed: bool` (`_ORDERS_SELECT` alias `FIRMED`), the refresh read (`get_task_versions` -> `TaskVersionRow.firmed`) returns it too, and `POST /tasks/update` accepts `FIRMED: bool` **only for rows whose firm the planner toggled** (omitted or null means untouched). SAP's own firming indicator stays in `ecc_firmed` and locks nothing.

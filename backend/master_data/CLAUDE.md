@@ -7,6 +7,8 @@
 
 **Route-ordering hazard preserved from `brain.py`:** the literal-path routes (`_schema-export`, `_material-grid`, `_material-plant-grid`, `_routing-pv-grid`) are registered in `routes.py` *before* the generic `GET /master-data/{table}` — FastAPI/Starlette matches in registration order, not by specificity, so a literal route declared after `{table}` is permanently shadowed. (A former sibling, `_audit`, was actually unreachable in production before this was fixed, and was itself later removed entirely — see the comment preserved in `routes.py`.) `POST /master-data/material-plants/attributes` lives in `backend/integration/routes.py`, not here, and is NOT at this risk since it's a two-segment path the `{table}` `str` converter can't capture.
 
+- **The table browser de-emphasises `sap_stage_*` tables.** `browser.py`'s `_INTERNAL_PREFIXES = ("sap_sync_", "sap_stage_")` marks the SAP staging, outbound and archive tables `internal=True` (still listed, rendered de-emphasised); they are not in `ALLOWED_TABLES` and are written only by `backend/integration/sap_staging.py` and the `nimbus_mulesoft` login.
+
 ## Counterpart
 
 Frontend half: `frontend/master-data/admin-ui.mts` (`MasterData` — CRUD grids, plant policy forms, role page-access), `frontend/master-data/material-grids.mts` (`MaterialGrids` — Material / Material Plant grid UI), and `frontend/master-data/admin-tables.mts` (`AdminTables` — the read-only Table Browser UI over `browser.py`).

@@ -1,5 +1,7 @@
 # SAP ECC → NIMBUS Integration Roadmap
 
+> **Superseded in part (2026-10-07).** `docs/SAP_STAGING_DESIGN.md` (design of record) and `docs/NIMBUS_INTERFACE_ARCHITECTURE.md` section 7 supersede two statements below for the four FSD objects (Material Plant, Routing, Planned Order export, Planned Order import): (1) **"NIMBUS never writes back to ECC" no longer holds** — an admin's Send to SAP queues the plant schedule (end date/time, version, firm indicator) into an outbound staging table that Mulesoft carries to SAP; (2) **the file-drop-first recommendation is replaced** by Mulesoft writing directly into NIMBUS's Postgres staging tables, with NIMBUS validating and applying under admin control (the Excel/CSV upload into staging remains for testing and fallback). The rest of this roadmap (SAP-side field sources, Basis questions, the OData/RFC alternatives for other objects) is unchanged.
+
 **SAP-side build guide for the Basis / ABAP / Security teams**
 
 | | |
