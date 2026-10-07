@@ -4,10 +4,17 @@ Side-wide conventions for everything under `backend/`. Domain specifics live one
 
 ## Shape
 
-- `backend/<domain>/routes.py` holds each domain's FastAPI router, imported and registered in `brain.py` via `import backend.<domain>.routes as <domain>_routes` + `api.include_router(...)`. `brain.py` itself is a thin assembly (~700 lines) — middleware, lifespan, the nine `include_router` calls, then the `StaticFiles` mount last.
-- A handful of domains also have a narrow accessor/data module alongside `routes.py` (e.g. `backend/setup/data.py`, `backend/security/auth.py`, `backend/master_data/browser.py`, `backend/priority_lists/{cache,audit_log}.py`, `backend/admin_ops/{logbuffer,diagnostics_state}.py`) — these hold genuinely cross-domain shared state or logic that more than one router reaches into, imported the same `import backend.<domain>.<module> as <alias>` way.
+- `backend/<domain>/routes.py` holds each domain's FastAPI router, imported and registered in `brain.py` via `import backend.<domain>.routes as <domain>_routes` + `api.include_router(...)`. `brain.py` itself is a thin assembly (~800 lines) — middleware, lifespan, the eleven `include_router` calls (one per domain folder under `backend/`), then the `StaticFiles` mount last.
+- A handful of domains also have a narrow accessor/data module alongside `routes.py` (e.g. `backend/setup/data.py`, `backend/security/auth.py`, `backend/master_data/browser.py`, `backend/priority_lists/{cache,audit_log}.py`, `backend/admin_ops/{logbuffer,diagnostics_state}.py`, and the larger distribution/routing modules `backend/distribution/{data,service}.py`, `backend/routing/{ingest,resolver}.py`) — these hold genuinely cross-domain shared state or logic that more than one router reaches into, imported the same `import backend.<domain>.<module> as <alias>` way.
 - **`db.py` and `master_data.py` are intentionally NOT split into `backend/<domain>/`** — every router still imports them whole, bare, from repo root (`import db`, `import master_data as md`). This is deferred work, not an oversight — see root `CLAUDE.md`'s "Deferred" note and `docs/MIGRATION.md` → "Domain refactor — deferred backend data-layer split" for the target shape when it eventually happens.
 - Cross-domain imports inside this package always use the full `backend.<domain>.<module>` dotted path (never a relative `from . import`) — this is what every domain's own `CLAUDE.md` "Imports in"/"Imported by" section documents by name, so a domain's real dependency graph is grep-able rather than inferred.
+
+`backend/csv_util.py` (`csv_cell`/`csv_row`, `CSV_BOM`) is the one shared helper that sits directly under `backend/`: every backend CSV export routes text cells through it (spreadsheet-formula guard) and prefixes the UTF-8 BOM so Excel opens them correctly.
+
+## Request-wide guards in `brain.py`
+
+- `body_size_cap_mw` caps `Content-Length` on the free-form sinks (`_BODY_CAPS`: `/logs/frontend` 1 MB, `/audit/log` 64 KB, `/logs/csp-report` 16 KB); a missing/non-numeric length is 411, over the cap 413.
+- A report-only Content-Security-Policy header is added to HTML responses (`csp_report_only_mw`); nothing is blocked — see `frontend/shell/CLAUDE.md`.
 
 ## Back-compat re-exports
 

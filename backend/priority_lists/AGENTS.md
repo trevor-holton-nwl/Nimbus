@@ -4,7 +4,7 @@
 
 - `routes.py` (9 routes) — the generic priority-list family (`GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`), the legacy color-wheel-shaped compat family (`POST|GET|DELETE /color-wheel/{plant}`), plus the shared helpers `_resolve_priority_list_columns` (column/value/rank resolution + validation, shared by both upload paths) and `_persist_priority_list` (shared upsert+audit+cache-reload step). (`GET /color-wheels` was removed 2026-09 as confirmed dead — zero frontend callers; its own docstring cited a `frontend/plant-and-administration.mts` that no longer exists in this tree.)
 - `cache.py` (207 lines) — `PLANT_LISTS` (`{plant: {machine_or_'': {field_key: {VALUE: RANK}}}}`), `load_priority_lists()`, `_reload_one_plant_lists(plant)`, and `apply_priority_merge(df, plant=None)` + its private helper `_apply_priority_scope`. `apply_priority_merge` deliberately lives in the *same* module as `PLANT_LISTS` (not a separate reader module) because `load_priority_lists`/`_reload_one_plant_lists` **reassign** `PLANT_LISTS` wholesale — a cross-module `from ... import PLANT_LISTS` binding would go stale across a reload; every cross-module reader instead does `from backend.priority_lists import cache as plcache; plcache.PLANT_LISTS...`.
-- `audit_log.py` (59 lines) — `COLOR_WHEEL_DIR`, `_cw_audit_path()`, `_cw_append_audit()`, `_migrate_audit_log()` (JSON-array → JSON-Lines, idempotent, runs once at startup). This is the `_audit_log.json` trail shared with `master_data`'s `GET/POST /audit/log` endpoints (see `backend/master_data/CLAUDE.md`) and with `optimization_run` events posted from the frontend.
+- `audit_log.py` (60 lines) — `COLOR_WHEEL_DIR`, `_cw_audit_path()`, `_cw_append_audit()`, `_migrate_audit_log()` (JSON-array → JSON-Lines, idempotent, runs once at startup). This is the `_audit_log.json` trail shared with `master_data`'s `GET/POST /audit/log` endpoints (see `backend/master_data/CLAUDE.md`) and with `optimization_run` events posted from the frontend.
 
 `brain.py` still exposes a `PLANT_LISTS`-shaped attribute via a PEP 562 module `__getattr__` shim for backward compat with any code that did `brain.PLANT_LISTS` — this file (`cache.py`) is the real owner now.
 
@@ -12,7 +12,7 @@
 
 Frontend half: `frontend/priority-lists/mapping.mts` (`PriorityListMapping` — the upload/column-mapping modal) and `frontend/priority-lists/viewers.mts` (`ColorWheelViewer` — the legacy preview modal).
 
-Deferred split: `RANKABLE_FIELDS` and `CONFIGURABLE_PRIORITY_FIELDS` — the single source of truth for which fields are rankable (`colorWheel`/`prt01`/`prt02`/`productionVersion`, with `productionVersion` excluded from `CONFIGURABLE_PRIORITY_FIELDS`) — still physically live in root `master_data.py` (lines 120–145, current as of this doc). `routes.py` imports them as `md.RANKABLE_FIELDS`/`md.CONFIGURABLE_PRIORITY_FIELDS`. This extraction is explicitly deferred per `docs/MIGRATION.md`.
+Deferred split: `RANKABLE_FIELDS` and `CONFIGURABLE_PRIORITY_FIELDS` — the single source of truth for which fields are rankable (`colorWheel`/`prt01`/`prt02`/`productionVersion`, with `productionVersion` excluded from `CONFIGURABLE_PRIORITY_FIELDS`) — still physically live in root `master_data.py` (lines 156–185, current as of this doc; grep fresh, they drift). `routes.py` imports them as `md.RANKABLE_FIELDS`/`md.CONFIGURABLE_PRIORITY_FIELDS`. This extraction is explicitly deferred per `docs/MIGRATION.md`.
 
 ## Key invariants & hazards
 

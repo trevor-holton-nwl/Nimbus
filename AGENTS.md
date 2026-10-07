@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-NIMBUS combines a FastAPI/PostgreSQL backend with a directly served browser frontend, organized by domain (see the directory table below): `frontend/<domain>/` for frontend, `backend/<domain>/` for backend routers. `brain.py` (repo root) is now a thin assembly — middleware, lifespan, and `api.include_router(...)` for nine domain routers — while `db.py`/`master_data.py` (the shared data layer, not yet split) stay at repo root too. Python and Node tests are under `tests/`. Keep schema evolution in `schema.sql` and `migrations/`, operational guidance in `docs/`, and example workbooks in `sample-data/`. Each domain folder carries its own `CLAUDE.md` with the module-level detail — read it before working in that domain.
+NIMBUS combines a FastAPI/PostgreSQL backend with a directly served browser frontend, organized by domain (see the directory table below): `frontend/<domain>/` for frontend, `backend/<domain>/` for backend routers. `brain.py` (repo root) is now a thin assembly — middleware, lifespan, and `api.include_router(...)` for eleven domain routers — while `db.py`/`master_data.py` (the shared data layer, not yet split) stay at repo root too. Python and Node tests are under `tests/`. Keep schema evolution in `schema.sql` and `migrations/`, operational guidance in `docs/`, and example workbooks in `sample-data/`. Each domain folder carries its own `CLAUDE.md` with the module-level detail — read it before working in that domain.
 
 ## Build, Test, and Development Commands
 
@@ -10,7 +10,8 @@ NIMBUS combines a FastAPI/PostgreSQL backend with a directly served browser fron
 - `uvicorn brain:api --port 8000 --reload` runs the API and frontend locally.
 - `pytest` runs Python tests; database tests require a safe local target and `NIMBUS_TEST_DB=1`.
 - `npm test` builds TypeScript and runs legacy plus module Node tests.
-- `npm run lint`, `npm run typecheck`, and `npm run build` run frontend quality gates and emit compiled modules.
+- `npm run lint`, `npm run typecheck`, and `npm run build` run frontend quality gates and emit compiled modules; after editing any `.ts`/`.mts`, run `npm run build` before the server will serve the change.
+- `npm run check:static-assets` and `npm run check:legacy-surface` guard frontend import paths and the `app.js` legacy compatibility surface; `npm run generate:api-types` refreshes `frontend/types/api-generated.d.mts` from the OpenAPI dump.
 - `ruff check .` applies the configured Python lint rules.
 
 ## Coding Style & Naming Conventions
@@ -23,7 +24,7 @@ Name Python tests `test_*.py`; Node tests use `*.test.js` or `*.test.mjs`. Add f
 
 ## Commit & Pull Request Guidelines
 
-History uses short conventional subjects such as `fix:`, `docs:`, and `style:`. Keep commits focused and imperative. Pull requests should explain the problem and solution, list verification commands, link the relevant issue or plan, and include screenshots for visual changes. Call out schema migrations, environment changes, and deployment implications; bump `NIMBUS_BUILD_ID` when deploying static assets.
+History uses short conventional subjects such as `fix:`, `feat:`, `docs:`, `test:`, `chore:`, and `refactor:` (optionally scoped, e.g. `fix(ingest):`), plus `Merge <branch>` commits. Keep commits focused and imperative. Pull requests should explain the problem and solution, list verification commands, link the relevant issue or plan, and include screenshots for visual changes. Call out schema migrations (add a dated, idempotent file under `migrations/` alongside any `schema.sql` change; deploys apply `migrations/`, never `schema.sql`), environment changes, and deployment implications. Deploy via the `promote-azure` skill; the image build stamps `NIMBUS_BUILD_ID` and `styles.css?v=` in `frontend/index.html` from the git SHA, so don't hand-bump them.
 
 ## Security & Configuration
 
@@ -31,7 +32,7 @@ Keep credentials in an untracked `.env`; never commit passwords, API keys, or pr
 
 # Detailed NIMBUS Reference
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository. **Domain internals live in a per-domain `CLAUDE.md` network** (directory table below), auto-loaded from whatever folder you're editing — this section is the repo-wide remainder only. It is kept in sync with root `CLAUDE.md`; if the two ever disagree, `CLAUDE.md` is canonical.
+This section provides guidance to coding agents working in this repository. **Domain internals live in a per-domain `CLAUDE.md` network** (directory table below), auto-loaded from whatever folder you're editing — this section is the repo-wide remainder only. It is kept in sync with root `CLAUDE.md`; if the two ever disagree, `CLAUDE.md` is canonical.
 
 ## Project
 
@@ -39,7 +40,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Domain Directory
 
-The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<domain>/` (backend routers) folders. Each domain has a `CLAUDE.md` on both sides — substantive on whichever side carries the load-bearing invariants (both sides for scheduling and setup), a 3-line pointer on the other. `frontend/CLAUDE.md` and `backend/CLAUDE.md` sit one level above the domain files and hold side-wide conventions that don't belong to any one domain. `brain.py` is now a ~700-line thin assembly — middleware, lifespan, `api.include_router(...)` for nine domain routers, then the `StaticFiles` mount last. `db.py`/`master_data.py` stay unsplit at repo root; see "Deferred" below.
+The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<domain>/` (backend routers) folders. Each domain has a `CLAUDE.md` on both sides — substantive on whichever side carries the load-bearing invariants (both sides for scheduling and setup), a 3-line pointer on the other. `frontend/CLAUDE.md` and `backend/CLAUDE.md` sit one level above the domain files and hold side-wide conventions (build model, cross-cutting hazards, back-compat re-exports) that don't belong to any one domain. `brain.py` is now a ~800-line thin assembly — middleware, lifespan, `api.include_router(...)` for eleven domain routers (one per `backend/<domain>/` folder), then the `StaticFiles` mount last. `db.py`/`master_data.py` stay unsplit at repo root; see "Deferred" below.
 
 | Domain | Folder(s) | Covers | Substantive side |
 |---|---|---|---|
@@ -50,14 +51,16 @@ The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<dom
 | Calendar | `frontend/calendar/` + `backend/calendars/` | Working hours, blackouts, capacity-math engine (mirrored in `nimbus-compute-core.js`) | `frontend/calendar/` |
 | Insights | `frontend/insights/` | Alerts, Utilization matrix, Dashboard KPIs, the off-thread `Compute` worker client | `frontend/insights/` |
 | Priority Lists | `frontend/priority-lists/` + `backend/priority_lists/` | Per-plant rankable lists (color, PRT tooling, production version) feeding optimizer sort terms | `backend/priority_lists/` |
-| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the nine `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
+| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the twelve `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
 | Labor | `frontend/labor/` + `backend/labor/` | Aggregate and line-level available-labor-hours planning | `backend/labor/` |
 | Security | `frontend/security/` + `backend/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `backend/security/` |
 | Integration | `frontend/integration/` + `backend/integration/` | Excel order/BOM ingest, purge, upload audit, missing-master-data reports, SAP sync skeleton | `backend/integration/` |
+| Distribution | `frontend/distribution/` + `backend/distribution/` | SAP aggregate work center ↔ NIMBUS per-machine sub-order distribution; Work Centers master-data tab (lives in `frontend/master-data/`); Distribution Scheduling Board tab, dry-run share editor + Save/Reset/Undo; ingest plan/apply, read routes, planner + admin writes all shipped; deferred: deep-link routing, editor virtualization, unshared-member-as-editable-row | both sides |
+| Routing | `backend/routing/` + `frontend/routing/` | `production_version`/`routing_operation`/`routing_rules` master data feeding a per-plant run-time calculation from routings; Excel upload, resolver, ingest cutover, and a client-side rate-map mirror for instant drag/edit eligibility feedback (all phases shipped) | both sides |
 | Admin Ops | `frontend/admin-ops/` + `backend/admin_ops/` | Diagnostics, DB maintenance, `_BACKEND_LOG` ring buffer, System Configuration | `backend/admin_ops/` |
 | Shell | `frontend/shell/` | Boot, tab chrome, login screen, the intelligence layer, and the root-pinned classic scripts (`app.js`, `index.html`, `locales/`) | `frontend/shell/` |
 
-> **Compiled output is gitignored, not committed.** Each `.mts` file compiles to a `.mjs` twin next to it — `.gitignore` lists every compiled path and `git ls-files` confirms none are tracked. `npm run build` compiles fresh locally; the Dockerfile's `frontendbuild` stage compiles fresh before copying into the image.
+> **Compiled output is gitignored, not committed.** Each `.mts` file compiles to a `.mjs` twin next to it — `.gitignore` lists every compiled path and `git ls-files` confirms none are tracked. `npm run build` compiles fresh locally; the Dockerfile's `frontendbuild` stage compiles fresh before copying into the image. Nothing depends on a committed compiled artifact.
 
 ## Git Branch Conventions
 
@@ -65,7 +68,7 @@ The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<dom
 
 ## Design Context
 
-Strategic and visual design decisions live in **`PRODUCT.md`** and **`DESIGN.md`** (color/typography/component tokens, elevation, do's and don'ts — machine-readable frontmatter plus a sidecar at `.impeccable/design.json`). Read both before any UI/UX work; they were generated via `/impeccable` against the existing `styles.css` token system. Both stay at the project root by `/impeccable`'s own hardcoded convention.
+Strategic and visual design decisions live in **`PRODUCT.md`** (register, users, positioning, brand personality, anti-references, design principles) and **`DESIGN.md`** (color/typography/component tokens, elevation, do's and don'ts — machine-readable frontmatter plus a sidecar at `.impeccable/design.json`). Read both before any UI/UX work; they were generated via `/impeccable` against the existing `styles.css` token system. Both stay at the project root by `/impeccable`'s own hardcoded convention.
 
 ## Production Scale Roadmap
 
@@ -94,11 +97,11 @@ uvicorn brain:api --port 8000      # add --reload for auto-reload during dev
 # Then open http://localhost:8000/
 ```
 
-Most of the frontend has no build step — JS/CSS load directly, libraries come from CDN. **Exception:** a growing set of modules is real TypeScript compiled in place by `tsc` (module-by-module status in `docs/archive/typescript_migration.md`, now historical). **If you edit a `.ts`/`.mts` file, run `npm run build` before `uvicorn` will serve the updated output.**
+Most of the frontend has no build step — JS/CSS load directly, libraries come from CDN. **Exception:** a growing set of modules is real TypeScript compiled in place by `tsc` (module-by-module status in `docs/archive/typescript_migration.md`, now historical — see its own P6 note for current per-domain ownership). **If you edit a `.ts`/`.mts` file, run `npm run build` before `uvicorn` will serve the updated output.**
 
 ## Database Setup
 
-Postgres must be running locally. `schema.sql` is **safe to re-apply** — one-time data-mutating migrations are guarded by a `schema_migrations` ledger.
+Postgres must be running locally. `schema.sql` is **safe to re-apply** — one-time data-mutating migrations are guarded by a `schema_migrations` ledger (the former `plants` horizon ×1440 landmine is recorded as applied and no longer re-mutates).
 
 ```bash
 & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -c "CREATE DATABASE nimbus;"

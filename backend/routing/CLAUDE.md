@@ -17,7 +17,7 @@ The `GET /master-data/_routing-pv-grid` (read) and `POST /master-data/{table}/de
 
 ## Tests
 
-None yet (owed: `tests/test_routing_ingest.py` and `tests/test_routing_resolver.py` per `ROUTING_RUNTIME_DESIGN.md` §10 — header mapping, zero-padding, `_str_id`, row rejection, duplicate-key rejection, deleted-row skip; the resolver's §5.2 step/fallback state machine against `tests/modules/fixtures/routing_cases.json`).
+`tests/test_routing_ingest.py` (header mapping, zero-padding, row rejection/duplicate/deleted-row skip), `tests/test_routing_resolver.py` (the §5.2 state machine against `tests/modules/fixtures/routing_cases.json`, `build_rate_map` parity, `check_eligibility`, the `resolve_orders` plant-switch gate, write chunking) -- both fake-cursor, no DB -- plus `tests/test_audit_routing_db.py`/`tests/test_audit_routing_contracts.py` (in-transaction schedule-save edit contract, `runtime_preview_changed`, rate-map key contract; one `@pytest.mark.pg` class). Frontend: `tests/modules/routing/` (`runtime-client`, `rate-map-contract`, `machine-edit-contract`). Run: `python -m pytest tests/test_routing_ingest.py tests/test_routing_resolver.py tests/test_audit_routing_db.py tests/test_audit_routing_contracts.py -q`.
 
 ## Gotchas
 
