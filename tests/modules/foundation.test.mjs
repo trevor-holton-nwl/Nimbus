@@ -80,17 +80,27 @@ test('confirm backdrop cancels the active prompt and advances the queued prompt'
   const ids = ['confirm-modal', 'confirm-title', 'confirm-message', 'confirm-detail',
     'confirm-ok-btn', 'confirm-cancel-btn', 'confirm-close-btn'];
   const elements = Object.fromEntries(ids.map(id => [id, _fakeElement('div')]));
+  const aria = {};
+  elements['confirm-close-btn'].setAttribute = (k, v) => { aria[k] = v; };
   globalThis.document = { getElementById: id => elements[id] ?? null };
+  const previousWindow = globalThis.window;
+  globalThis.window = { __NIMBUS_LOCALES: { en: { 'btn.cancel': 'Cancel', 'btn.close': 'Close' }, de: { 'btn.cancel': 'Abbrechen', 'btn.close': 'Schließen' } } };
+  Util.setLocale('de');
   try {
     const first = Modal.confirm({ message: 'First' });
     const second = Modal.confirm({ message: 'Second' });
     elements['confirm-modal']._listeners.click({ target: elements['confirm-modal'] });
     assert.equal(await first, false);
+    // Track 9: the shared dialog localizes its fixed Cancel / Close controls on every open.
+    assert.equal(elements['confirm-cancel-btn'].textContent, 'Abbrechen');
+    assert.equal(aria['aria-label'], 'Schließen');
     assert.equal(elements['confirm-message'].textContent, 'Second');
     elements['confirm-ok-btn'].click();
     assert.equal(await second, true);
   } finally {
     globalThis.document = previousDocument;
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+    Util.setLocale('en');
   }
 });
 

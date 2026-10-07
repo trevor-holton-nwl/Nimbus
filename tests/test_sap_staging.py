@@ -1817,3 +1817,12 @@ def test_invalid_sap_system_tz_warns_on_every_batch_and_refuses_planned_order_ap
     assert st.apply_batch(mat, actor="pytest")["status"] == "applied"
     monkeypatch.setattr(st, "SAP_SYSTEM_TZ", "UTC")              # fixed -> the planned-order batch applies
     assert st.apply_batch(po, actor="pytest")["status"] == "applied"
+
+
+def test_unreadable_upload_says_so_in_plain_words():
+    """Track 9: a file that is not a spreadsheet gets a readable message, not the pandas engine jargon."""
+    with pytest.raises(ValueError) as exc:
+        st.stage_rows_from_upload("stage_planned_orders", "P1", b"\x00\x01 this is not a spreadsheet", "bad.xlsx", actor="pytest")
+    msg = str(exc.value)
+    assert msg.startswith("Could not read the file")
+    assert "engine" not in msg.lower()

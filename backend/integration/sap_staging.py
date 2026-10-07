@@ -2048,7 +2048,8 @@ def stage_rows_from_upload(object_key: str, plant: str, file_bytes: bytes, filen
         else:
             df = pd.read_excel(io.BytesIO(file_bytes), dtype=str)
     except Exception as exc:
-        raise ValueError(f"Could not read the file: {exc}") from exc
+        log.info("staging upload unreadable (%s): %s", filename, exc)
+        raise ValueError("Could not read the file: it is not a valid .xlsx or .csv file.") from exc
     if len(df) == 0:
         raise ValueError("The file has no data rows")
     df = db.clean(df)

@@ -151,6 +151,23 @@ test('raw staging codes are shown as plain words: reject reasons, warning codes 
   assert.equal(Interface._stageErrorCodeTextForTest('plain string'), null);
 });
 
+test('Track 9: the Refresh toast counts the poll result lists (the API returns lists, not numbers)', () => {
+  assert.deepEqual(Interface._pollCountsForTest({ processed: [{}, {}, {}], applied: [{}], held: [], skipped: [], errors: [] }),
+    { processed: 3, applied: 1, held: 0 });
+  assert.deepEqual(Interface._pollCountsForTest({}), { processed: 0, applied: 0, held: 0 }, 'missing lists read as 0');
+});
+
+test('Track 9: the 25 % hold says rows for master-data objects and orders for planned orders', () => {
+  const w = { code: 'vanish_threshold' };
+  assert.equal(Interface._stageWarningTextForTest(w, 'stage_planned_orders'), 'ui.sap_stage_warn_vanish_threshold');
+  assert.equal(Interface._stageWarningTextForTest(w, 'stage_material_plants'), 'ui.sap_stage_warn_vanish_threshold_rows');
+  assert.equal(Interface._stageWarningTextForTest(w), 'ui.sap_stage_warn_vanish_threshold', 'no object keeps the orders wording');
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const lc of ['en', 'de', 'es', 'fr', 'pt']) {
+    assert.ok(readFileSync(join(here, `../../../frontend/locales/${lc}.js`), 'utf8').includes("'ui.sap_stage_warn_vanish_threshold_rows'"), `${lc}.js lacks the rows wording`);
+  }
+});
+
 test('every code the UI maps has a key in en.js (reject_* and warn_*)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(join(here, '../../../frontend/integration/sap-interface-ui.mts'), 'utf8');

@@ -1640,8 +1640,13 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
   okBtn.textContent  = opts.confirmLabel || 'Confirm';
   okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
   const closeBtn = document.getElementById('confirm-close-btn')!;
+  // The shell's static markup is English-only; localize the two fixed controls each time the dialog opens.
+  if (typeof window !== 'undefined') {
+    document.getElementById('confirm-cancel-btn')!.textContent = Util.t('btn.cancel');
+    closeBtn.setAttribute('aria-label', Util.t('btn.close'));
+  }
   const backdrop = document.getElementById('confirm-modal')!;
-  const done = (ok: boolean): void => { cleanup(); resolve(ok); };
+  const done =(ok: boolean): void => { cleanup(); resolve(ok); };
   const cleanup = (): void => {
     okBtn.removeEventListener('click', onOk);
     document.getElementById('confirm-cancel-btn')!.removeEventListener('click', onCancel);

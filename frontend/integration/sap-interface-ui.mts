@@ -267,14 +267,26 @@ interface SendStatus {
   last_sent_at: string | null;
 }
 
+/** `POST /sap/staging/poll` — each field is a LIST of what the pass touched (not a count). */
 interface StagePollResult {
-  processed?: number;
-  applied?: number;
-  held?: number;
-  skipped?: number;
-  errors?: number;
+  processed?: unknown[];
+  applied?: unknown[];
+  held?: unknown[];
+  skipped?: unknown[];
+  errors?: unknown[];
 }
 
+/** The Refresh toast's three numbers: the lengths of the poll result's lists. */
+function pollCounts(res: StagePollResult): { processed: number; applied: number; held: number } {
+  const n = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
+  return { processed: n(res.processed), applied: n(res.applied), held: n(res.held) };
+}
+
+/** Bookkeeping columns of a staging row that say nothing to an admin reading the rejected-rows drawer. */
+const STAGE_REJECT_HIDDEN_COLS = new Set(['reject_reason', 'batch_id', 'id', 'row_status', 'received_at', 'applied_at']);
+
+/** The one free-text batch error the backend writes for an all-rejected batch (the rest are coded or technical). */
+const STAGE_NO_VALID_ROWS = 'no valid rows in batch';
 const STAGE_STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'applied', 'error', 'rejected', 'superseded', 'discarded'];
 /** Every batch warning / hold / error / apply-refusal code the backend emits (ui.sap_stage_warn_<code>). */
 const STAGE_WARN_CODES = [
@@ -307,10 +319,13 @@ function applyModeHint(mode: string | null | undefined): string {
   return Util.t(mode === 'auto' ? 'ui.sap_stage_mode_hint_auto' : 'ui.sap_stage_mode_hint_manual');
 }
 
-function stageWarningText(w: StageWarning): string {
+function stageWarningText(w: StageWarning, objectKey?: string): string {
   const code = w.code || w.category || '';
   if (STAGE_WARN_CODES.indexOf(code) > -1) {
-    const text = Util.t(`ui.sap_stage_warn_${code}`, { count: w.count ?? 0 });
+    // The 25 % hold says "orders" for planned orders and "rows" for the master-data objects.
+    const key = code === 'vanish_threshold' && objectKey && objectKey !== 'stage_planned_orders'
+      ? 'ui.sap_stage_warn_vanish_threshold_rows' : `ui.sap_stage_warn_${code}`;
+    const text = Util.t(key, { count: w.count ?? 0 });
     // These two carry the ignored column names / sample failures only in the backend text.
     const detail = code === 'unknown_columns' ? /: (.+)$/.exec(w.msg || '')
       : code === 'rows_not_staged' ? /\((.+)\)\s*$/.exec(w.msg || '') : null;
@@ -1081,7 +1096,8 @@ export const Interface = (() => {
     if (btn) btn.disabled = true;
     const res = await _stagePost<StagePollResult>('/sap/staging/poll', {}, null);
     if (res) {
-      Toast.show(Util.t('toast.sap_poll_done', { processed: res.processed ?? 0, applied: res.applied ?? 0, held: res.held ?? 0 }), 'success');
+      const errs = Array.isArray(res.errors) ? res.errors.length : 0;
+      Toast.show(Util.t('toast.sap_poll_done', pollCounts(res)), errs > 0 ? 'warn' : 'success');
     }
     await _reload();
     if (btn) btn.disabled = false;
@@ -1196,14 +1212,15 @@ export const Interface = (() => {
     const held = b.status === 'held';
     const rejected = c.rejected ?? 0;
     const vanishPct = c.vanish_pct != null ? Math.round(c.vanish_pct * 100) : null;
-    const vanish = vanishPct != null
+    const vanish = vanishPct != null && (c.vanish_candidates ?? 0) > 0
       ? `<span class="sap-batch-vanish${held ? ' is-held' : ''}">${Util.escapeHtml(Util.t('ui.sap_stage_vanish', { count: c.vanish_candidates ?? 0, pct: vanishPct }))}</span>` : '';
     const times = [
       [Util.t('ui.sap_stage_time_received'), b.received_at], [Util.t('ui.sap_stage_time_ready'), b.ready_at],
       [Util.t('ui.sap_stage_time_validated'), b.validated_at], [Util.t('ui.sap_stage_time_applied'), b.applied_at],
     ].filter((t) => t[1]).map((t) => `<span>${Util.escapeHtml(String(t[0]))} ${Util.escapeHtml(_fmtTs(t[1]))}</span>`).join('');
-    const warns = (b.warnings || []).map((w) => `<div class="sap-batch-warn">${Util.escapeHtml(stageWarningText(w))}</div>`).join('');
-    const errText = b.error && STAGE_WARN_CODES.indexOf(b.error) > -1 ? stageWarningText({ code: b.error }) : b.error;
+    const warns = (b.warnings || []).map((w) => `<div class="sap-batch-warn">${Util.escapeHtml(stageWarningText(w, b.object_key))}</div>`).join('');
+    const errText = b.error && STAGE_WARN_CODES.indexOf(b.error) > -1 ? stageWarningText({ code: b.error }, b.object_key)
+      : (b.error === STAGE_NO_VALID_ROWS ? Util.t('ui.sap_stage_err_no_valid_rows') : b.error);
     const err = b.error ? `<div class="sap-batch-warn is-err">${Util.escapeHtml(errText || '')}${c.step ? ` (${Util.escapeHtml(c.step)})` : ''}</div>` : '';
     const needsRouting = (b.warnings || []).some((w) => w.code === 'routing_required');
     const heldBanner = held
@@ -1228,7 +1245,7 @@ export const Interface = (() => {
         <span class="${Util.escapeHtml(sl.pillClass)}">${Util.escapeHtml(STAGE_STATUSES.indexOf(b.status) > -1 ? Util.t(`ui.sap_stage_status_${b.status}`) : String(b.status))}</span>
         <span class="sap-batch-plant">${Util.escapeHtml(b.plant)}</span>
         <span class="sap-batch-src">${Util.escapeHtml(b.source || '')}</span>
-        <span class="sap-batch-counts sap-mono">${Util.escapeHtml(Util.t('ui.sap_stage_counts', { total: c.total ?? 0, valid: c.valid ?? 0, rejected }))}</span>
+        ${c.total != null ? `<span class="sap-batch-counts sap-mono">${Util.escapeHtml(Util.t('ui.sap_stage_counts', { total: c.total, valid: c.valid ?? 0, rejected }))}</span>` : ''}
         ${vanish}
         <span class="sap-batch-actions">${rejBtn}${actions}</span>
       </div>
@@ -1263,7 +1280,7 @@ export const Interface = (() => {
       if (!rows.length) { el.innerHTML = `<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_rejected_empty'))}</div>${csvBtn}`; }
       else {
         // reject_reason first, then up to 7 further columns that carry data in the first rows.
-        const keys = Object.keys(rows[0] as Record<string, unknown>).filter((k) => k !== 'reject_reason' && k !== 'batch_id' && k !== 'id');
+        const keys = Object.keys(rows[0] as Record<string, unknown>).filter((k) => !STAGE_REJECT_HIDDEN_COLS.has(k));
         const cols = ['reject_reason', ...keys].filter((k) => rows.some((r) => r[k] != null && r[k] !== '')).slice(0, 8);
         const head = (k: string): string => (k === 'reject_reason' ? Util.t('ui.sap_stage_col_reason') : k);
         const cell = (r: Record<string, unknown>, k: string): string =>
@@ -1286,7 +1303,7 @@ export const Interface = (() => {
     const warnings = b.warnings || [];
     const held = b.status === 'held';
     const candidates = b.counts?.vanish_candidates ?? 0;
-    const reasons = held ? warnings.map((w) => `<li>${Util.escapeHtml(stageWarningText(w))}</li>`).join('') : '';
+    const reasons = held ? warnings.map((w) => `<li>${Util.escapeHtml(stageWarningText(w, b.object_key))}</li>`).join('') : '';
     let deletions = '';
     let notice = '';
     if (warnings.some((w) => w.code === 'vanish_threshold') || candidates > 0) {
@@ -1711,6 +1728,7 @@ export const Interface = (() => {
     _stageRejectTextForTest: stageRejectText,
     _stageErrorCodeTextForTest: stageErrorCodeText,
     _stageApplyNeedsConfirmForTest: stageApplyNeedsConfirm,
+    _pollCountsForTest: pollCounts,
   };
 })();
 

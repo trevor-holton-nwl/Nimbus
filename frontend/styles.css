@@ -6223,7 +6223,8 @@ body.dark .field-info-popover { box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
 .sap-v-sm { font-size: 18px; }
 
 /* master-detail */
-.sap-console { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+.sap-console { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
+.sap-console > * { min-width: 0; }
 .sap-section-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-mute); margin: 0 0 10px; }
 .sap-hint { font-family: var(--sap-mono); font-size: 11px; color: var(--fg-faint); }
 .sap-help { font-size: 11.5px; color: var(--fg-faint); margin-top: 4px; }
@@ -6471,10 +6472,10 @@ body.dark .sap-kind-orders { color: var(--accent); }
 
 @media (max-width: 980px) {
   .sap-ribbon { grid-template-columns: repeat(2, 1fr); }
-  .sap-console { grid-template-columns: 1fr; }
+  .sap-console { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 680px) {
-  .sap-ribbon { grid-template-columns: 1fr; }
+  .sap-ribbon { grid-template-columns: minmax(0, 1fr); }
   .sap-ov-grid { grid-template-columns: 1fr; }
   .sap-flow { min-width: 0; }
   .sap-flow-rails, .sap-map-row { min-width: 460px; }
