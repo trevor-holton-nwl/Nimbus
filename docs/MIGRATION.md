@@ -831,6 +831,12 @@ Implications for a hosted plant pilot:
   is a second login on that surface (least privilege, TLS required, firewall to its egress IPs, see
   `docs/DEPLOYMENT.md`); private networking, a Key Vault secret for its password and rotating both
   logins close the same gap.
+- **Known limits from the review round (documented, not fixed):**
+  - `POST /sap/staging/poll` is global, not plant-scoped: a plant-restricted admin triggers validation/auto-apply for every plant (it would have run on the timer anyway).
+  - The upload route's size check (413) runs after the file body is read, matching the existing `/upload` and `/bom/upload` routes.
+  - A plant with no `timezone` gets no SAP-zone conversion in either direction (both sides stay consistent, no warning).
+  - Requeueing outbound rows can race a Mulesoft read, so Mulesoft may send both queues; SAP last-write-wins makes it benign.
+  - The midnight-echo acceptance compares dates in the plant frame; a sent finish that crosses midnight when converted into the SAP zone (e.g. 19:00 Chicago to 00:00 UTC next day) is not recognised as an echo and causes one unnecessary re-plan for that order. Fix would need the plant timezone inside `sap_changed_fields`; deferred.
 
 ### SAP sync skeleton — discrepancies found while building staging (not fixed)
 
