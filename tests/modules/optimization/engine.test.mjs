@@ -1075,6 +1075,49 @@ test('Engine setup-aware routing carries respectCalendar into bounds and placeme
   }
 });
 
+test('F4: setup-aware iteration cap scales with this plant\'s lines only, even from an unscoped snapshot', () => {
+  const plant = 'ENGINE-CAP-A';
+  const other = 'ENGINE-CAP-B';
+  const lines = ['ENGINE-CAP-A1', 'ENGINE-CAP-A2', 'ENGINE-CAP-A3'];
+  const otherLines = ['ENGINE-CAP-B1', 'ENGINE-CAP-B2'];
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({
+      plants: [{ plant }, { plant: other }],
+      lines: [...lines.map(machine => ({ plant, machine })), ...otherLines.map(machine => ({ plant: other, machine }))],
+    }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    const mk = (line, owner, index) => ({
+      id: `engine-cap-${line}`, PLANT: owner, MACHINE: line, COLOR: 'GREEN', RUN_TIME: 2,
+      original_end_date: new Date(`2035-08-0${index + 1}T18:00:00`), start_date: null, end_date: null,
+    });
+    Store.setTasks([
+      ...lines.map((line, i) => mk(line, plant, i)),
+      ...otherLines.map((line, i) => mk(line, other, i)),
+    ], 'unit-test');
+    const opts = {
+      plant, planningStart: new Date('2035-08-01T08:00:00'),
+      runNow: new Date('2035-08-01T08:00:00'), endDate: new Date('2035-08-20T12:00:00'),
+    };
+    // Default snapshot is unscoped: it carries the other plant's tasks too.
+    const unscoped = snapshotSchedule();
+    assert.equal(unscoped.tasks.length, 5);
+    const all = Engine.evaluateSchedule('changeover', opts, unscoped);
+    assert.equal(all.validationContext?.bounds.iterationCap, 3 * 20000);
+    const scoped = Engine.evaluateSchedule('changeover', { ...opts, lines: lines.slice(0, 2) }, snapshotSchedule(plant));
+    assert.equal(scoped.validationContext?.bounds.iterationCap, 2 * 20000);
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+  }
+});
+
 test('Engine rejects invalid date inputs, parses date-only bounds as local wall time, and derives placementStart', () => {
   const plant = 'ENGINE-DATE-CONTRACT';
   const line = 'ENGINE-DATE-L1';

@@ -2147,7 +2147,13 @@ export const Engine = {
       const optsLinesSet = Array.isArray(opts.lines) && opts.lines.length
         ? new Set(opts.lines as string[])
         : null;
-      const linesInScope = optsLinesSet?.size ?? new Set(snapshot.tasks.map(t => t.MACHINE)).size;
+      // An injected candidate snapshot may be unscoped (evaluateSchedule's
+      // default is snapshotSchedule()), so count only this plant's non-blank
+      // lines, resolved the same way the evaluator groups them.
+      const linesInScope = optsLinesSet?.size ?? new Set(snapshot.tasks
+        .filter(t => resolveTaskPlant(t, snapshot) === plant)
+        .map(t => String(t.MACHINE ?? ''))
+        .filter(Boolean)).size;
       const bounds: DueDateFirstBounds = {
         // Non-null by construction: this branch is only reached when either
         // mode is one of the setup-aware modes, so effectiveSetupSnapshot is

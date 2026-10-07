@@ -2718,7 +2718,8 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   const coverageDelta = (left.score[SCORE_UNCOVERED] ?? 0) - (right.score[SCORE_UNCOVERED] ?? 0);
   if (coverageDelta) return coverageDelta;
   // All policies retain hard feasibility and configured policy tiers. Only the
-  // lower-order comparison changes: Min Changeover remains due-safe, while
+  // lower-order comparison changes: (Min Changeover and SPT return earlier via
+  // compareObjectiveFacts), while
   // Throughput may prefer setup savings and is constrained by its explicit
   // post-evaluation slip gate below.
   const terms = mode === 'throughput' ? [5, 2, 3, 4] : [2, 3, 4, 5];
@@ -5930,7 +5931,7 @@ function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
  * due-date push-forward limit ceiling) so a caller can compare before/after
  * over-cap counts the same way it already compares before/after lateness.
  * `selectThroughputCandidate` deliberately calls this WITHOUT `notAfter` —
- * the cap is a min-changeover-only due-safe rule, not a throughput one — so
+ * the cap is a due-date-limit rule, not a throughput one — so
  * every entry's `overCap` there is simply `false`. */
 function lateOrderFacts(
   tasks: ReadonlyArray<NimbusTask>,
