@@ -55,7 +55,31 @@ SAP_OBJECTS: dict[str, dict] = {
     "material_plants":  {"kind": "master", "table": "material_plants",  "label": "Material Plants"},
     "sap_workcenter":   {"kind": "master", "table": "sap_workcenter",   "label": "SAP Work Centers"},
     "orders":           {"kind": "orders", "table": "orders",           "label": "Production Orders"},
+    # Staging objects: SAP lands rows in a staging table (applied to the live
+    # table via /sap/staging/*), never through sync_object's master/orders path.
+    # `table` is the staging table; extra keys exist only on these entries.
+    "stage_material_plants": {
+        "kind": "staging", "table": "sap_stage_material_plant",
+        "stage_table": "sap_stage_material_plant", "live_table": "material_plants",
+        "key_fields": ("matnr", "werks"), "label": "Material Plant (SAP staging)"},
+    "stage_planned_orders": {
+        "kind": "staging", "table": "sap_stage_planned_order",
+        "stage_table": "sap_stage_planned_order", "live_table": "orders",
+        "key_fields": ("plnum", "matnr", "plwrk"), "label": "Planned Orders (SAP staging)"},
+    "stage_production_version": {
+        "kind": "staging", "table": "sap_stage_production_version",
+        "stage_table": "sap_stage_production_version", "live_table": "production_version",
+        "key_fields": ("plant", "material_id", "production_version"),
+        "label": "Production Versions (SAP staging)"},
+    "stage_routing_operation": {
+        "kind": "staging", "table": "sap_stage_routing_operation",
+        "stage_table": "sap_stage_routing_operation", "live_table": "routing_operation",
+        "key_fields": ("plant", "material_id", "task_list_type", "routing_group",
+                       "group_counter", "sequence_no", "activity"),
+        "label": "Routing Operations (SAP staging)"},
 }
+
+APPLY_MODES = ("manual", "auto")
 
 # Master-table composite keys — mirrors master_data._KEY_COLUMNS so map_records
 # can guarantee the key columns survive mapping for master objects.
@@ -101,6 +125,23 @@ def _t_strip_zeros(value):
     stripped = s.lstrip("0")
     # All-zeros input -> "" after lstrip; treat as null.
     return stripped if stripped != "" else None
+
+
+def _t_alpha_strip(value):
+    """SAP ALPHA output for an ID that may be numeric OR alphanumeric: an
+    all-digit value loses its leading zeros ('000000000012345678' ->
+    '12345678'); anything containing a non-digit is returned unchanged
+    ('ABC-001'). Excel float suffix and surrounding spaces are removed first
+    (db._str_id). Blank, None, and an all-zero value return None, like
+    strip_zeros."""
+    if value is None:
+        return None
+    s = _str_id(value).strip()
+    if s in NULL_SENTINELS:
+        return None
+    if s.isdigit():
+        return s.lstrip("0") or None
+    return s
 
 
 def _t_dats(value):
@@ -191,7 +232,8 @@ TRANSFORMS: dict[str, Callable] = {
     "none":        _t_none,
     "alpha":       _t_alpha,
     "strip_zeros": _t_strip_zeros,
-    "dats":        _t_dats,
+    "alpha_strip": _t_alpha_strip,
+    "dats":       _t_dats,
     "tims":        _t_tims,
     "decimal":     _t_decimal,
     "uom":         _t_uom,
@@ -428,7 +470,7 @@ def get_config(object_key: str) -> dict:
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT object_key, enabled, transport, schedule_cron,"
-            " source_params, last_watermark, updated_at"
+            " source_params, last_watermark, updated_at, apply_mode"
             " FROM sap_sync_config WHERE object_key = %s",
             (object_key,),
         )
@@ -442,6 +484,7 @@ def get_config(object_key: str) -> dict:
             "source_params":  {},
             "last_watermark": None,
             "updated_at":     None,
+            "apply_mode":     "manual",
         }
     return {
         "object_key":     r[0],
@@ -451,40 +494,46 @@ def get_config(object_key: str) -> dict:
         "source_params":  r[4] or {},
         "last_watermark": r[5],
         "updated_at":     r[6].isoformat() if r[6] else None,
+        "apply_mode":     r[7] or "manual",
     }
 
 
 def set_config(object_key: str, *, enabled: bool | None = None,
                transport: str | None = None, schedule_cron: str | None = None,
                source_params: dict | None = None,
-               last_watermark: str | None = None) -> dict:
+               last_watermark: str | None = None,
+               apply_mode: str | None = None) -> dict:
     """Upsert the sync config for an object. Only non-None fields are written;
     `source_params`, when supplied, is MERGED into the existing JSONB (omitted
-    keys are preserved, never wiped). Returns the updated config dict."""
+    keys are preserved, never wiped). `apply_mode` must be 'manual' or 'auto'
+    (ValueError otherwise). Returns the updated config dict."""
     if object_key not in SAP_OBJECTS:
         raise ValueError(f"Unknown SAP object: {object_key!r}")
     if transport is not None and transport not in _CONNECTORS:
         raise ValueError(f"Unknown SAP transport: {transport!r}")
+    if apply_mode is not None and apply_mode not in APPLY_MODES:
+        raise ValueError(f"Unknown apply_mode: {apply_mode!r} (expected 'manual' or 'auto')")
 
     with _pool.connection() as conn, conn.cursor() as cur:
         # Read current row (locking it) so the merge is atomic.
         cur.execute(
-            "SELECT enabled, transport, schedule_cron, source_params, last_watermark"
+            "SELECT enabled, transport, schedule_cron, source_params, last_watermark, apply_mode"
             " FROM sap_sync_config WHERE object_key = %s FOR UPDATE",
             (object_key,),
         )
         existing = cur.fetchone()
         if existing:
-            cur_enabled, cur_transport, cur_cron, cur_params, cur_wm = existing
+            cur_enabled, cur_transport, cur_cron, cur_params, cur_wm, cur_mode = existing
         else:
-            cur_enabled, cur_transport, cur_cron, cur_params, cur_wm = (
-                False, "file_drop", None, {}, None,
+            cur_enabled, cur_transport, cur_cron, cur_params, cur_wm, cur_mode = (
+                False, "file_drop", None, {}, None, "manual",
             )
 
         new_enabled   = cur_enabled   if enabled is None       else bool(enabled)
         new_transport = cur_transport if transport is None     else transport
         new_cron      = cur_cron      if schedule_cron is None else schedule_cron
         new_wm        = cur_wm        if last_watermark is None else last_watermark
+        new_mode      = (cur_mode or "manual") if apply_mode is None else apply_mode
         # Merge source_params (never wipe omitted keys).
         merged_params = dict(cur_params or {})
         if source_params is not None:
@@ -494,17 +543,19 @@ def set_config(object_key: str, *, enabled: bool | None = None,
 
         cur.execute(
             "INSERT INTO sap_sync_config"
-            " (object_key, enabled, transport, schedule_cron, source_params, last_watermark, updated_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, NOW())"
+            " (object_key, enabled, transport, schedule_cron, source_params, last_watermark,"
+            " apply_mode, updated_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())"
             " ON CONFLICT (object_key) DO UPDATE SET"
             "   enabled = EXCLUDED.enabled,"
             "   transport = EXCLUDED.transport,"
             "   schedule_cron = EXCLUDED.schedule_cron,"
             "   source_params = EXCLUDED.source_params,"
             "   last_watermark = EXCLUDED.last_watermark,"
+            "   apply_mode = EXCLUDED.apply_mode,"
             "   updated_at = NOW()",
             (object_key, new_enabled, new_transport, new_cron,
-             Jsonb(merged_params), new_wm),
+             Jsonb(merged_params), new_wm, new_mode),
         )
         conn.commit()
     return get_config(object_key)
@@ -545,6 +596,9 @@ def list_enabled_jobs() -> list[dict]:
                 "last_watermark": r[4],
             }
             for r in cur.fetchall()
+            # Staging objects are never pulled by the scheduler (sync_object
+            # refuses them); their rows arrive via the inbound feed.
+            if SAP_OBJECTS.get(r[0], {}).get("kind") != "staging"
         ]
 
 
@@ -664,6 +718,13 @@ def sync_object(object_key: str, *, user_email: str | None = None,
 
     kind = SAP_OBJECTS[object_key]["kind"]
     table = SAP_OBJECTS[object_key]["table"]
+
+    if kind == "staging":
+        # Staging objects are filled by the inbound feed and applied through
+        # /sap/staging/*; no run row is written for them here.
+        result["status"] = "error"
+        result["error"] = "staging objects are applied via /sap/staging/*"
+        return result
 
     cfg = get_config(object_key)
     watermark_before = cfg.get("last_watermark")

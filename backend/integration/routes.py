@@ -460,6 +460,7 @@ def sap_objects(request: Request):
             "enabled":       cfg.get("enabled", False),
             "transport":     cfg.get("transport"),
             "schedule_cron": cfg.get("schedule_cron"),
+            "apply_mode":    cfg.get("apply_mode", "manual"),
             "last_run":      last_run,
             "next_run":      next_run,
         })
@@ -504,6 +505,7 @@ def sap_get_config(object: str):
         "enabled":       cfg.get("enabled", False),
         "transport":     cfg.get("transport"),
         "schedule_cron": cfg.get("schedule_cron"),
+        "apply_mode":    cfg.get("apply_mode", "manual"),
         "source_params": _sap_strip_secrets(params),
         "has_secret":    _sap_has_secret(params),
     }
@@ -525,6 +527,11 @@ def sap_set_config(object: str, request: Request, body: dict = Body(default={}))
         if transport not in ("file_drop", "odata", "rfc"):
             raise HTTPException(status_code=400, detail=f"Unknown transport: {transport!r}")
         fields["transport"] = transport
+    if "apply_mode" in body:
+        apply_mode = body["apply_mode"]
+        if apply_mode not in ("manual", "auto"):
+            raise HTTPException(status_code=400, detail=f"Unknown apply_mode: {apply_mode!r}")
+        fields["apply_mode"] = apply_mode
     if "schedule_cron" in body:
         cron = body["schedule_cron"]
         if cron not in (None, ""):
@@ -561,6 +568,7 @@ def sap_set_config(object: str, request: Request, body: dict = Body(default={}))
         "enabled":       result.get("enabled", False),
         "transport":     result.get("transport"),
         "schedule_cron": result.get("schedule_cron"),
+        "apply_mode":    result.get("apply_mode", "manual"),
         "source_params": _sap_strip_secrets(cfg_params),
         "has_secret":    _sap_has_secret(cfg_params),
     }

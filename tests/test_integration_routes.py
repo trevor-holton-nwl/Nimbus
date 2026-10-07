@@ -485,3 +485,80 @@ def test_live_missing_master_data_csv_is_bom_prefixed_and_formula_guarded(monkey
         brain.api.dependency_overrides.pop(int_routes.require_admin, None)
         brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
     _assert_formula_guarded_csv(response)
+
+
+# ---------------------------------------------------------------------------
+# SAP staging catalog entries, apply_mode config, alpha_strip transform
+# ---------------------------------------------------------------------------
+_STAGING_KEYS = ("stage_material_plants", "stage_planned_orders",
+                 "stage_production_version", "stage_routing_operation")
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("000000000012345678", "12345678"),
+    ("ABC-001", "ABC-001"),
+    (" 12345678.0 ", "12345678"),
+    (None, None),
+    ("", None),
+    ("0000", None),
+])
+def test_alpha_strip_transform(raw, expected):
+    import backend.integration.sap_sync as sap_sync
+    assert sap_sync.apply_transform("alpha_strip", raw) == expected
+
+
+def test_staging_objects_in_catalog():
+    import backend.integration.sap_sync as sap_sync
+    for key in _STAGING_KEYS:
+        meta = sap_sync.SAP_OBJECTS[key]
+        assert meta["kind"] == "staging"
+        assert meta["stage_table"].startswith("sap_stage_")
+        assert meta["live_table"] and meta["key_fields"]
+    assert len(sap_sync.SAP_OBJECTS["stage_routing_operation"]["key_fields"]) == 7
+    assert "stage_table" not in sap_sync.SAP_OBJECTS["materials"]
+
+
+def test_map_records_staging_does_not_add_master_keys():
+    import backend.integration.sap_sync as sap_sync
+    fm = [{"sap_field": "MATNR", "nimbus_column": "material_id", "transform": "alpha_strip"}]
+    out = sap_sync.map_records("stage_material_plants", [{"MATNR": "0000012"}], field_map=fm)
+    assert out == [{"material_id": "12"}]
+
+
+def test_sync_object_staging_returns_error_without_run_row(monkeypatch):
+    import backend.integration.sap_sync as sap_sync
+
+    def _boom(*_a, **_k):
+        raise AssertionError("must not touch the database for a staging object")
+
+    monkeypatch.setattr(sap_sync, "_run_start", _boom)
+    monkeypatch.setattr(sap_sync, "get_config", _boom)
+    result = sap_sync.sync_object("stage_planned_orders")
+    assert result["status"] == "error"
+    assert result["error"] == "staging objects are applied via /sap/staging/*"
+    assert result["rows_read"] == 0 and result["run_id"] is None
+
+
+def test_set_config_rejects_bad_apply_mode():
+    import backend.integration.sap_sync as sap_sync
+    with pytest.raises(ValueError):
+        sap_sync.set_config("orders", apply_mode="bogus")
+
+
+def test_sap_config_route_rejects_bad_apply_mode_with_400(admin_client):
+    response = admin_client.post("/sap/interface/config/stage_planned_orders", json={"apply_mode": "bogus"})
+    assert response.status_code == 400
+
+
+def test_sap_objects_lists_staging_keys_with_kind_and_apply_mode(admin_client, monkeypatch):
+    import backend.integration.sap_sync as sap_sync
+    monkeypatch.setattr(sap_sync, "get_config", lambda key: {"enabled": False, "transport": "file_drop",
+                                                              "schedule_cron": None, "apply_mode": "auto"})
+    monkeypatch.setattr(sap_sync, "list_runs", lambda **_k: [])
+    response = admin_client.get("/sap/interface/objects")
+    assert response.status_code == 200
+    by_key = {o["object_key"]: o for o in response.json()["objects"]}
+    for key in _STAGING_KEYS:
+        assert by_key[key]["kind"] == "staging"
+        assert by_key[key]["apply_mode"] == "auto"
+    assert by_key["orders"]["kind"] == "orders"
