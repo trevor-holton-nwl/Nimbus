@@ -3569,6 +3569,13 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     for pkey, pplan in (distribution_plan.get("parents") or {}).items():
         old_q = ((pplan.get("existing_header") or {}).get("order_quantity"))
         new_q = (pplan.get("parent_facts") or {}).get("order_quantity")
+        # A3 / D15: judge the TOTAL when both the stored header and this row know it, so a partial
+        # conversion (reduced quantity up, total unchanged) does not unschedule an aggregate's children.
+        old_total = (((pplan.get("existing_header") or {}).get("sap_facts") or {})
+                     .get("planned_order_initial_quantity"))
+        new_total = (pplan.get("parent_facts") or {}).get("planned_order_initial_quantity")
+        if old_total is not None and new_total is not None:
+            old_q, new_q = old_total, new_total
         if old_q is not None and new_q is not None:
             parent_quantity_judged.add(tuple(pkey))
             if Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001")):
@@ -3613,6 +3620,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "basic_finish_date": r.get("sap_basic_finish_date"),
                         "sap_workcenter": r.get("sap_workcenter"),
                         "order_quantity": r.get("order_quantity"),
+                        # the TOTAL (A3 / D15): a partial conversion shrinks only the open quantity
+                        "planned_order_initial_quantity": r.get("planned_order_initial_quantity"),
                         "sap_production_version": r.get("sap_production_version"),
                         "parent_production_order": r.get("parent_production_order"),
                     }

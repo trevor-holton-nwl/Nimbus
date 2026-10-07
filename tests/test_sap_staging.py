@@ -1685,6 +1685,54 @@ def test_sap_apply_keeps_excel_only_values_on_distributed_children(pg, stg_plant
 
 
 @pytest.mark.pg
+def test_partial_conversion_keeps_the_slot_for_plain_and_distributed_orders(pg, stg_plant):
+    """Track 4 / E3b (D15 / A3): SAP raising the reduced quantity while the total stays the same is not a
+    quantity change -- it must not unschedule a plain order or the children of a distributed aggregate; a
+    different TOTAL still does."""
+    import backend.distribution.data as dd
+    import backend.routing.resolver as rr
+    import db as db_
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES (%s, 'ZZWCD',"
+                    " 'distribute')", (PLANT,))
+        cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                    " VALUES (%s, %s, 'ZZMA', 'ZZWCD', 1), (%s, %s, 'ZZMB', 'ZZWCD', 1), (%s, %s, 'ZZMP', NULL, NULL)",
+                    (SUB, PLANT, SUB, PLANT, SUB, PLANT))
+        cur.execute("INSERT INTO materials (material_id) VALUES ('ZZSTGDIST') ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO material_plants (material_id, plant) VALUES ('ZZSTGDIST', %s)", (PLANT,))
+        conn.commit()
+    start = datetime(2030, 1, 10, 6, 0)
+
+    def row(order, machine, total, reduced):
+        return {"production_order": order, "material_number": "ZZSTGDIST", "machine": machine, "plant": PLANT,
+                "basic_start_date": start, "basic_finish_date": start + timedelta(hours=8), "run_time": 8.0,
+                "order_quantity": float(total - reduced), "planned_order_initial_quantity": float(total),
+                "reduced_quantity": float(reduced)}
+
+    def go(rows, source):
+        db_.upsert_orders(rows, source=source, filename="t.xlsx" if source == "excel" else None,
+                          plan_fn=dd.plan, apply_fn=dd.apply, resolve_fn=rr.resolve_orders)
+
+    go([row("9100001", "ZZMP", 400, 0), row("9100002", "ZZWCD", 400, 0)], "excel")
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE plant = %s"
+                    " AND (production_order = '9100001' OR parent_production_order = '9100002')",
+                    (start + timedelta(hours=1), start + timedelta(hours=9), PLANT))
+        conn.commit()
+
+    def slots():
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT production_order, scheduled_start IS NOT NULL FROM orders WHERE plant = %s"
+                        " ORDER BY 1", (PLANT,))
+            return dict(cur.fetchall())
+    assert all(slots().values()) and len(slots()) == 3
+    go([row("9100001", "ZZMP", 400, 100), row("9100002", "ZZWCD", 400, 100)], "sap")      # partial conversion
+    assert all(slots().values()), slots()
+    go([row("9100001", "ZZMP", 500, 100), row("9100002", "ZZWCD", 500, 100)], "sap")      # the TOTAL changed
+    assert not any(slots().values()), slots()
+
+
+@pytest.mark.pg
 def test_repeat_material_snapshot_rewrites_nothing(pg, stg_plant):
     """Track 4 / S2: a second identical Material Plant snapshot reports every row unchanged, leaves each
     live row's xmin alone and writes no empty bulk_apply audit row."""
