@@ -383,6 +383,69 @@ def test_write_row_results_sets_status_reason_and_resolved_columns():
 
 
 # ===========================================================================
+# Send to SAP -- pure pieces (firm rule, roll-up, zone conversion of the outbound value)
+# ===========================================================================
+_FROZEN = datetime(2026, 10, 10)
+
+
+@pytest.mark.parametrize("manual, ind, start, frozen, expected", [
+    (False, None, datetime(2026, 10, 20), _FROZEN, ""),               # nothing qualifies
+    (True, None, datetime(2026, 10, 20), _FROZEN, "X"),               # planner firmed
+    (False, "X", datetime(2026, 10, 20), _FROZEN, "X"),               # SAP already firmed -- never blanked
+    (False, " x ", datetime(2026, 10, 20), None, "X"),                # tolerant of case / whitespace
+    (False, None, datetime(2026, 10, 9), _FROZEN, "X"),               # inside the frozen horizon
+    (False, None, datetime(2026, 10, 10), _FROZEN, ""),               # exactly at the boundary is outside
+    (False, None, datetime(2026, 10, 9), None, ""),                   # no frozen horizon -> no frozen firming
+    (False, None, None, _FROZEN, ""),                                 # no start -> cannot be inside
+    (False, "", datetime(2026, 10, 20), _FROZEN, ""),
+    (None, "N", datetime(2026, 10, 20), _FROZEN, ""),
+])
+def test_firm_flag_truth_table(manual, ind, start, frozen, expected):
+    assert st.firm_flag(manual, ind, start, frozen) == expected
+
+
+def _o(oid, po, *, parent=None, mat="777", end=datetime(2026, 11, 1, 8), start=datetime(2026, 11, 1, 2),
+       manual=False, ind=None, version="V1", status="scheduled"):
+    return {"id": oid, "production_order": po, "parent_production_order": parent, "material_number": mat,
+            "manual_firmed": manual, "firming_indicator": ind, "production_version": version,
+            "planning_status": status, "eff_start": start, "eff_end": end}
+
+
+def test_build_outbound_groups_rolls_children_up_with_max_end_and_any_firm():
+    rows = [
+        _o("c1", "PAR1-A", parent="PAR1", end=datetime(2026, 11, 1, 8), version=None),
+        _o("c2", "PAR1-B", parent="PAR1", end=datetime(2026, 11, 2, 9), manual=True, version="V2"),
+        _o("c3", "PAR1-C", parent="PAR1", end=None, status="needs_planning"),           # skipped member, still a member
+        _o("p1", "1001", end=datetime(2026, 11, 3, 6)),
+        _o("n1", "1002", end=None),
+        _o("n2", "1003", status="needs_planning"),
+    ]
+    groups, skipped = st.build_outbound_groups(rows, None)
+    by = {g["plnum"]: g for g in groups}
+    assert sorted(by) == ["1001", "PAR1"] and skipped == 3
+    par = by["PAR1"]
+    assert par["end"] == datetime(2026, 11, 2, 9)                                       # max child end
+    assert par["auffx"] == "X" and par["rolled_up"] is True and par["verid"] == "V2"
+    assert par["member_ids"] == ["c1", "c2", "c3"] and par["nimbus_order_id"] is None
+    plain = by["1001"]
+    assert plain["auffx"] == "" and plain["rolled_up"] is False and plain["nimbus_order_id"] == "p1"
+    assert plain["verid"] == "V1"
+
+
+def test_build_outbound_groups_groups_by_material_and_applies_frozen_firming():
+    rows = [_o("a", "9", mat="M1", start=datetime(2026, 10, 9)), _o("b", "9", mat="M2", start=datetime(2026, 10, 20))]
+    groups, skipped = st.build_outbound_groups(rows, _FROZEN)
+    assert skipped == 0 and len(groups) == 2
+    assert {g["matnr"]: g["auffx"] for g in groups} == {"M1": "X", "M2": ""}
+
+
+def test_outbound_end_is_converted_plant_local_to_sap_system_zone():
+    end = datetime(2026, 7, 1, 8, 30, 15, 999)                   # naive plant-local (America/Chicago, UTC-5 in July)
+    d, t = st.plant_local_to_sap(end, "America/Chicago", system_tz="Europe/Berlin")
+    assert (d, t) == (date(2026, 7, 1), time(15, 30, 15))        # Berlin is UTC+2 -> +7h, seconds precision
+
+
+# ===========================================================================
 # @pytest.mark.pg -- end-to-end against a real (local, opted-in) Postgres
 # ===========================================================================
 PLANT = "ZZSTG1"
@@ -549,3 +612,63 @@ def test_poll_once_supersedes_older_ready_batches(pg, stg_plant):
     assert _status(pg, new) in ("validated", "applied")               # manual mode unless configured auto
     assert _status(pg, incomplete) == "ready"
     assert any(p.get("batch_id") == str(new) for p in out["processed"])
+
+
+@pytest.mark.pg
+def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    t0 = datetime(2030, 1, 10, 6, 0)
+
+    def ins(cur, oid, po, *, parent=None, start=t0, status="scheduled", run_time=2, with_dates=True):
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, plant, parent_production_order,"
+            " basic_start_date, basic_finish_date, scheduled_start, run_time, planning_status, production_version)"
+            " VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, 'V1')",
+            (oid, po, PLANT, parent, start if with_dates else None, start + timedelta(hours=2) if with_dates else None,
+             start if with_dates else None, run_time if with_dates else None, status))
+
+    with _conn(pg) as (conn, cur):
+        ins(cur, "zzstg-p1", "P1")
+        ins(cur, "zzstg-c1", "PAR1-A", parent="PAR1")
+        ins(cur, "zzstg-c2", "PAR1-B", parent="PAR1", start=t0 + timedelta(days=1))
+        ins(cur, "zzstg-np", "NP", status="needs_planning")
+        ins(cur, "zzstg-nd", "ND", with_dates=False)
+        cur.execute("UPDATE orders SET manual_firmed = TRUE WHERE id = 'zzstg-c1'")
+        conn.commit()
+    try:
+        res = st.queue_send_to_sap(PLANT, actor="pytest")
+        assert res["queued"] == 2 and res["skipped_no_end"] == 2 and res["firmed"] == 1
+        assert res["rolled_up_groups"] == 1 and res["send_batch_id"]
+        rows = {r["plnum"]: r for r in st.outbound_rows(PLANT)}
+        assert sorted(rows) == ["P1", "PAR1"] and all(r["row_status"] == "ready" for r in rows.values())
+        assert rows["PAR1"]["auffx"] == "X" and rows["P1"]["auffx"] == ""
+        child_end = t0 + timedelta(days=1, hours=2)
+        d, t = st.plant_local_to_sap(child_end, "UTC")
+        assert rows["PAR1"]["pedtr"] == d.isoformat() and rows["PAR1"]["pedti"] == t.isoformat()
+        assert st.outbound_status(PLANT)["ready"] == 2
+
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT id, sap_sent_finish, sap_sent_version, sap_sent_firm, sap_sent_at IS NOT NULL"
+                        " FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
+            sent = {r[0]: r[1:] for r in cur.fetchall()}
+        assert sent["zzstg-c1"] == (child_end, "V1", True, True)         # children remember the rolled-up end
+        assert sent["zzstg-c2"] == (child_end, "V1", True, True)
+        assert sent["zzstg-p1"] == (t0 + timedelta(hours=2), "V1", False, True)
+        assert sent["zzstg-np"][0] is None and sent["zzstg-nd"][0] is None
+
+        again = st.queue_send_to_sap(PLANT, actor="pytest")
+        assert again["send_batch_id"] != res["send_batch_id"]
+        status = st.outbound_status(PLANT)
+        assert (status["ready"], status["error"]) == (2, 2)
+        old = st.outbound_rows(PLANT, status="error")
+        assert {r["error_text"] for r in old} == {"requeued"}
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT count(*) FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
+                        " AND action = 'send_to_sap' AND details->>'plant' = %s", (PLANT,))
+            assert cur.fetchone()[0] == 2
+    finally:
+        with _conn(pg) as (conn, cur):
+            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
+            cur.execute("DELETE FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
+                        " AND details->>'plant' = %s", (PLANT,))
+            conn.commit()

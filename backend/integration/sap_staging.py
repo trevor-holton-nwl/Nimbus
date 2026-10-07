@@ -1430,7 +1430,8 @@ def _poll_locked(conn, actor: str, out: dict) -> None:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM sap_stage_vanished_order WHERE deleted_at < now() - make_interval(days => %s)",
                         (ARCHIVE_RETENTION_DAYS,))
-            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE row_status = 'sent'"
+            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE (row_status = 'sent'"
+                        " OR (row_status = 'error' AND error_text = 'requeued'))"
                         " AND sent_at < now() - make_interval(days => %s)", (SENT_RETENTION_DAYS,))
             cur.execute("DELETE FROM sap_stage_batch WHERE status IN ('rejected','discarded','superseded')"
                         " AND received_at < now() - make_interval(days => %s)", (DEAD_BATCH_RETENTION_DAYS,))
@@ -1556,6 +1557,164 @@ def list_archived(plant: str, *, limit: int = 200) -> list[dict]:
                 for r in cur.fetchall()]
 
 
+def archived_plant(archive_id: int) -> str | None:
+    """Plant of one archive row (None when unknown) -- lets the route enforce plant scope before restoring."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT plant FROM sap_stage_vanished_order WHERE id = %s", (int(archive_id),))
+        r = cur.fetchone()
+    return r[0] if r else None
+
+
 def restore_archived(archive_id: int, *, actor: str) -> dict:
     """Restore one archived order (KeyError when missing / already restored)."""
     return db.restore_vanished_order(int(archive_id), user_email=actor)
+
+
+# ---------------------------------------------------------------------------
+# Send to SAP -- the outbound queue (NIMBUS -> SAP planned-order import)
+# ---------------------------------------------------------------------------
+def firm_flag(manual_firmed, firming_indicator, eff_start, frozen_end) -> str:
+    """Firm Indicator we send (D10): 'X' when the planner firmed the order, SAP already had it
+    firmed, or its effective start lies inside the frozen horizon (`frozen_end` None = no frozen
+    firming); blank otherwise. Add-only by construction: an existing SAP 'X' always yields 'X'."""
+    if manual_firmed:
+        return "X"
+    if str(firming_indicator or "").strip().upper() == "X":
+        return "X"
+    if frozen_end is not None and eff_start is not None and eff_start < frozen_end:
+        return "X"
+    return ""
+
+
+def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int]:
+    """Roll candidate order rows up to one outbound row per planned order (D9 / D17). Pure.
+
+    `rows`: dicts with id, production_order, parent_production_order, material_number, manual_firmed,
+    firming_indicator, production_version, planning_status, eff_start, eff_end (naive plant-local).
+    A row is a candidate when it has an effective end and is not 'needs_planning'; the rest are
+    counted as skipped. Rows group by (parent order or own order number, material): the group's end is
+    the latest member end, its firm flag is 'X' when ANY candidate member qualifies (`firm_flag`), its
+    version is the smallest non-blank member version (children of one parent carry the same one).
+    Returns (groups, skipped_no_end); a group carries `member_ids` (every row of the group, skipped
+    members included) and `rolled_up` (true when it stands for distribution children)."""
+    groups: dict[tuple, dict] = {}
+    skipped = 0
+    for r in rows:
+        key = (r.get("parent_production_order") or r["production_order"], r["material_number"])
+        g = groups.setdefault(key, {"plnum": key[0], "matnr": key[1], "end": None, "firm": False,
+                                    "versions": [], "member_ids": [], "rolled_up": False,
+                                    "single_id": r["id"]})
+        g["member_ids"].append(r["id"])
+        if r.get("parent_production_order"):
+            g["rolled_up"] = True
+        if r.get("eff_end") is None or r.get("planning_status") == "needs_planning":
+            skipped += 1
+            continue
+        if g["end"] is None or r["eff_end"] > g["end"]:
+            g["end"] = r["eff_end"]
+        if firm_flag(r.get("manual_firmed"), r.get("firming_indicator"), r.get("eff_start"), frozen_end) == "X":
+            g["firm"] = True
+        v = _text(r.get("production_version"))
+        if v:
+            g["versions"].append(v)
+    out = []
+    for g in groups.values():
+        if g["end"] is None:
+            continue
+        out.append({"plnum": g["plnum"], "matnr": g["matnr"], "end": g["end"],
+                    "auffx": "X" if g["firm"] else "", "verid": min(g["versions"]) if g["versions"] else None,
+                    "member_ids": g["member_ids"], "rolled_up": g["rolled_up"],
+                    "nimbus_order_id": None if g["rolled_up"] else g["single_id"]})
+    return out, skipped
+
+
+def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
+    cur.execute(
+        "SELECT id, production_order, parent_production_order, material_number, manual_firmed,"
+        " firming_indicator, production_version, planning_status,"
+        " COALESCE(seg.first_start, scheduled_start, basic_start_date),"
+        " COALESCE(seg.last_end, " + db._EFF_END_SQL + ")"
+        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE plant = %s ORDER BY id", (plant,))
+    names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",
+             "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end")
+    return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+
+
+def queue_send_to_sap(plant: str, *, actor: str) -> dict:
+    """Queue the plant's schedule for Mulesoft to pick up (one outbound row per planned order).
+
+    Still-`ready` rows from an earlier click are retired first (row_status='error',
+    error_text='requeued', so history survives; the poll sweeps them after 30 days). Every
+    scheduled order of the plant is queued (D9); distribution children roll up to their parent
+    order with the latest child end (D17); the end is converted plant-local -> SAP system zone
+    (D34); the firm flag is add-only (D10). NIMBUS also remembers what it sent on each member order
+    (`orders.sap_sent_*`, D20) so SAP's echo of that finish is not read as an SAP change.
+    Everything -- retire, insert, remember, audit -- is one transaction.
+    Returns {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
+    plant = (plant or "").strip()
+    if not plant:
+        raise ValueError("plant is required")
+    send_batch_id = str(uuid.uuid4())
+    with _pool.connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                tz = _plant_info(cur, plant)["timezone"]
+                _vis, frozen_end = db._horizon_bounds_for_plant(cur, plant)
+                groups, skipped = build_outbound_groups(_outbound_candidate_rows(cur, plant), frozen_end)
+                cur.execute("UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued',"
+                            " sent_at = now() WHERE plant = %s AND row_status = 'ready'", (plant,))
+                firmed = rolled = 0
+                for g in groups:
+                    pedtr, pedti = plant_local_to_sap(g["end"], tz)
+                    cur.execute(
+                        "INSERT INTO sap_stage_planned_order_out (send_batch_id, plant, matnr, plwrk, plnum, verid,"
+                        " pedtr, pedti, auffx, queued_by, nimbus_order_id)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (send_batch_id, plant, g["matnr"], plant, g["plnum"], g["verid"], pedtr, pedti,
+                         g["auffx"], actor, g["nimbus_order_id"]))
+                    cur.execute(
+                        "UPDATE orders SET sap_sent_finish = %s, sap_sent_version = %s, sap_sent_firm = %s,"
+                        " sap_sent_at = now() WHERE id = ANY(%s)",
+                        (g["end"].replace(microsecond=0), g["verid"], g["auffx"] == "X", g["member_ids"]))
+                    firmed += g["auffx"] == "X"
+                    rolled += bool(g["rolled_up"])
+                cur.execute(
+                    "INSERT INTO admin_audit (table_name, action, details, user_email)"
+                    " VALUES ('sap_stage_planned_order_out', 'send_to_sap', %s, %s)",
+                    (Jsonb({"plant": plant, "send_batch_id": send_batch_id, "queued": len(groups),
+                            "skipped_no_end": skipped, "firmed": firmed}), actor))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    _log("info", "SAP send queued", plant=plant, send_batch_id=send_batch_id, queued=len(groups),
+         skipped_no_end=skipped, firmed=firmed, user=actor)
+    return {"send_batch_id": send_batch_id, "queued": len(groups), "skipped_no_end": skipped,
+            "firmed": firmed, "rolled_up_groups": rolled}
+
+
+def outbound_status(plant: str) -> dict:
+    """{ready, sent, error, last_queued_at, last_sent_at} for one plant's outbound table."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FILTER (WHERE row_status = 'ready'), count(*) FILTER (WHERE row_status = 'sent'),"
+                    " count(*) FILTER (WHERE row_status = 'error'), max(queued_at), max(sent_at)"
+                    " FROM sap_stage_planned_order_out WHERE plant = %s", (plant,))
+        ready, sent, error, last_q, last_s = cur.fetchone()
+    return {"ready": int(ready or 0), "sent": int(sent or 0), "error": int(error or 0),
+            "last_queued_at": _iso(last_q), "last_sent_at": _iso(last_s)}
+
+
+def outbound_rows(plant: str, *, status: str | None = None, limit: int = 1000) -> list[dict]:
+    """Outbound rows of a plant, newest first (optionally one row_status)."""
+    where, params = ["plant = %s"], [plant]
+    if status:
+        where.append("row_status = %s")
+        params.append(status)
+    params.append(int(limit))
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, send_batch_id, plant, matnr, plwrk, plnum, verid, pedtr, pedti, auffx, row_status,"
+                    " queued_at, queued_by, sent_at, error_text, nimbus_order_id FROM sap_stage_planned_order_out"
+                    " WHERE " + " AND ".join(where) + " ORDER BY queued_at DESC, id DESC LIMIT %s", params)
+        names = [d.name for d in cur.description]
+        return [{k: (str(v) if k == "send_batch_id" else _iso(v)) for k, v in zip(names, r, strict=True)}
+                for r in cur.fetchall()]
