@@ -2,6 +2,7 @@
 
 import { createRequire } from 'node:module';
 import { performance } from 'node:perf_hooks';
+import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../frontend/nimbus-compute-core.js');
@@ -31,6 +32,11 @@ process.argv.slice(2).forEach((arg, i, arr) => {
 const targetShape = args.get('shape') || null;
 const targetMode = args.get('mode') || null;
 const seed = parseInt(args.get('seed') || '42', 10);
+// --no-index: turn the per-line free-interval index off (F2 comparison).
+// --no-deadline: effectively unlimited wall-clock budget so search behaviour
+// is clock-independent (the iteration cap still applies).
+const noIndex = args.has('no-index');
+const noDeadline = args.has('no-deadline');
 
 // Constants
 const SHAPES = {
@@ -235,7 +241,7 @@ function makeBounds(setup) {
     exactSearchThreshold: 8,
     iterationCap: 20000,
     clock: () => performance.now(),
-    deadline: performance.now() + 5000, // 5 second budget
+    deadline: performance.now() + (noDeadline ? 1e9 : 5000), // 5 second budget
     now,
     planningStart: now,
     runNow: now,
@@ -245,6 +251,7 @@ function makeBounds(setup) {
     notBefore: () => now,
     notAfter: () => horizonEnd,
     convergenceWindow: 2000,
+    ...(noIndex ? { disableFreeIndex: true } : {}),
   };
 }
 
@@ -325,6 +332,9 @@ async function benchmark() {
       const { lateCount, lateMinutes } = countLateness(result);
       const setupMinutes = Math.round(result.objective?.setupMinutes || 0);
       const candidates = searchResult.diagnostics?.candidateCount ?? 0;
+      // Digest of the pre-gap-fill search result (gap fill has its own soft
+      // wall-clock budget), for index-on vs index-off identity checks.
+      const digest = createHash('sha1').update(JSON.stringify([searchResult.patches, searchResult.objective, searchResult.score])).digest('hex').slice(0, 10);
       const termination = searchResult.diagnostics?.termination ?? 'unknown';
 
       results.push({
@@ -338,6 +348,7 @@ async function benchmark() {
         lateCount,
         lateMinutes,
         setupMinutes,
+        digest,
       });
 
       process.stdout.write('.');
@@ -350,7 +361,7 @@ async function benchmark() {
 
   // Print header
   console.log(
-    'Shape                Mode                 Wall      Termination      Candidates  Lines  Late     Late min  Setup min'
+    'Shape                Mode                 Wall      Termination      Candidates  Lines  Late     Late min  Setup min  Digest'
   );
   console.log(
     '─────────────────────────────────────────────────────────────────────────────────────────────────────────────────'
@@ -369,7 +380,7 @@ async function benchmark() {
     const setupStr = String(r.setupMinutes).padStart(10);
 
     console.log(
-      `${shapeStr} ${modeStr} ${wallStr} ${termStr} ${candStr} ${linesStr} ${lateStr} ${lateMinStr} ${setupStr}`
+      `${shapeStr} ${modeStr} ${wallStr} ${termStr} ${candStr} ${linesStr} ${lateStr} ${lateMinStr} ${setupStr}  ${r.digest}`
     );
   }
 }

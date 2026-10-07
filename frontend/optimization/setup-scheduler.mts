@@ -157,6 +157,27 @@ function normalizedIntervals(intervals: ReadonlyArray<PlacementInterval>, earlie
   })).filter(interval => interval.minutes > 0);
 }
 
+/** F2: `normalizedIntervals` minus the alignment/sort/merge work, for arrays
+ * `freeIntervalsForPlacement` already produced in that shape. Only the
+ * `earliestStart` clip remains; unclipped intervals are reused as-is. */
+function clipAlignedIntervals(intervals: ReadonlyArray<MinuteInterval>, earliestStart: Date): MinuteInterval[] {
+  const earliest = ceilMinute(earliestStart);
+  if (!earliest) return [];
+  const earliestMs = earliest.getTime();
+  const result: MinuteInterval[] = [];
+  for (const interval of intervals) {
+    if (interval.start.getTime() >= earliestMs) {
+      result.push(interval);
+    } else if (interval.end.getTime() > earliestMs) {
+      result.push({
+        start: new Date(earliestMs), end: interval.end,
+        minutes: Math.floor((interval.end.getTime() - earliestMs) / (60 * 1000)),
+      });
+    }
+  }
+  return result;
+}
+
 function mergeRanges(ranges: IntegerRange[]): IntegerRange[] {
   const ordered = ranges
     .filter(range => range.lo <= range.hi)
@@ -267,7 +288,9 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
 
   const runtimeMinutes = Math.round(Number(request.runtimeMinutes));
   if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return capacityFailure('invalid-runtime');
-  const intervals = normalizedIntervals(request.freeIntervals, request.earliestStart);
+  const intervals = (request.freeIntervals as unknown as Record<symbol, unknown>)[ALIGNED_FREE] === true
+    ? clipAlignedIntervals(request.freeIntervals as ReadonlyArray<MinuteInterval>, request.earliestStart)
+    : normalizedIntervals(request.freeIntervals, request.earliestStart);
   if (!intervals.length) return capacityFailure();
   const minProductiveSegmentMinutes = Number.isInteger(request.minProductiveSegmentMinutes)
     && (request.minProductiveSegmentMinutes as number) > 0
@@ -470,6 +493,22 @@ export interface DueDateFirstBounds {
    * schedule-services.mts sets this explicitly alongside the other
    * `SETUP_AWARE_*` constants; tests may shrink it to make a plateau cheap. */
   convergenceWindow?: number;
+  /** F2 test-only off switch: true makes `buildRunContext` skip the per-line
+   * free-interval index so the plain day-walk serves every request. Not part
+   * of the worker contract. */
+  disableFreeIndex?: boolean;
+}
+
+/** F2: one line's free intervals over the indexed span. `rs/re` hold the
+ * exact day-walk output (raw, possibly adjacent-but-separate at day
+ * boundaries, never minute-aligned); `ms/me` hold the same set minute-aligned
+ * (start ceil, end floor), empties dropped and touching pieces merged — what
+ * `normalizedIntervals` would produce for placement. */
+interface FreeIndexEntry {
+  rs: Float64Array;
+  re: Float64Array;
+  ms: Float64Array;
+  me: Float64Array;
 }
 
 /**
@@ -524,12 +563,34 @@ export interface SetupRunContext {
    *  memo — plant is folded into the key for the same reuse-across-plants
    *  reason as `_lineBlocks`. */
   _dayWindow: Map<string, PlacementInterval | null>;
+  /** F2: lazy per-(plant, line) index of the line's free intervals over
+   *  `freeIndexSpan`, built once by running the day-walk over the whole span.
+   *  Null caches "this line's walk output is not sorted/disjoint, never
+   *  index it". Same plant-in-key rationale as `_lineBlocks`. */
+  _freeIndex: Map<string, FreeIndexEntry | null>;
+  /** F2: [ms, ms] span the free index covers (planningStart floored to local
+   *  midnight through horizonEnd); null disables the index entirely
+   *  (`bounds.disableFreeIndex`, or an unusable span). Requests outside it
+   *  use the plain day-walk. */
+  freeIndexSpan: { from: number; through: number } | null;
   /** Lazy per-line pre-filtered active/version-matched overrides consumed by
    *  `inactiveOverrideForTransition` — the per-call residual checks
    *  (successor id, states) still run against this small filtered array. */
   _overridesByLine: Map<string, ReadonlyArray<SetupOccurrenceOverride>>;
   /** Built once, in full, on first use — covers every line at once. */
   _plantByLine: Map<string, string | null> | null;
+}
+
+/** F2: the span a run's free index covers, or null when the index is off or
+ * the bounds carry no usable dates. */
+function freeIndexSpanFor(bounds: Readonly<DueDateFirstBounds>): { from: number; through: number } | null {
+  if (bounds.disableFreeIndex === true) return null;
+  const start = timestamp(bounds.planningStart ?? bounds.now);
+  const end = timestamp(bounds.horizonEnd);
+  if (!start || !end) return null;
+  const from = new Date(start);
+  from.setHours(0, 0, 0, 0);
+  return +end > +from ? { from: +from, through: +end } : null;
 }
 
 /**
@@ -575,6 +636,8 @@ export function buildRunContext(
     _policyKeyForTask: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
+    _freeIndex: new Map(),
+    freeIndexSpan: freeIndexSpanFor(bounds),
     _overridesByLine: new Map(),
     _plantByLine: null,
   };
@@ -2312,10 +2375,10 @@ function jointWindowForDay(
   return result;
 }
 
-/** Derive only the availability present in the supplied immutable snapshot.
- * A missing calendar is unavailable rather than a prompt to synthesize a
- * default calendar into a detached candidate. */
-function freeIntervalsFor(
+/** The original day-walk: the exact free intervals for `[from, through]`
+ * from the snapshot's calendars and blackouts. `freeIntervalsFor` serves from
+ * the F2 index when it can and otherwise lands here. */
+function walkFreeIntervals(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
   ctx?: SetupRunContext,
 ): PlacementInterval[] {
@@ -2327,11 +2390,6 @@ function freeIntervalsFor(
   // while alerts kept computing as though hours existed.
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
-  if (through <= from) return [];
-  if (ctx?.respectCalendar === false) {
-    return [{ start: new Date(from), end: new Date(through) }];
-  }
-
   const result: PlacementInterval[] = [];
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
@@ -2353,6 +2411,137 @@ function freeIntervalsFor(
     }
     day.setDate(day.getDate() + 1);
   }
+  return result;
+}
+
+/** F2: builds (once per plant+line) the index over the run's span, or caches
+ * null when the day-walk output over the span is not strictly sorted and
+ * disjoint (e.g. work hours that overflow midnight), which binary search
+ * could not serve exactly. Returns null whenever this request must use the
+ * plain walk: no span, a different snapshot, or a window outside the span. */
+function freeIndexFor(
+  ctx: SetupRunContext | undefined, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
+  from: Date, through: Date,
+): FreeIndexEntry | null {
+  const span = ctx?.freeIndexSpan;
+  if (!ctx || !span || ctx.snapshot !== snapshot || ctx.respectCalendar === false) return null;
+  if (!(+from >= span.from && +through <= span.through)) return null; // also rejects NaN
+  const key = plant + CTX_KEY_SEP + line;
+  const cached = ctx._freeIndex.get(key);
+  if (cached !== undefined) return cached;
+  // The day-walk only visits days from a request's own midnight, so work
+  // hours that spill past a day's edge (outside 0-24) would make a span-wide
+  // build include pieces a narrower walk omits. Never index such a line.
+  const withinDay = (hours: WorkHours): boolean => Object.values(hours).every(range => (
+    !range || range.length !== 2 || (range[0] >= 0 && range[1] <= 24)
+  ));
+  const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+  if (!withinDay(lineHours) || !withinDay(plantHours)) {
+    ctx._freeIndex.set(key, null);
+    return null;
+  }
+  const raw = walkFreeIntervals(snapshot, line, plant, new Date(span.from), new Date(span.through), ctx);
+  let sorted = true;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (!(+raw[index].end > +raw[index].start) || (index && +raw[index].start < +raw[index - 1].end)) { sorted = false; break; }
+  }
+  if (!sorted) {
+    ctx._freeIndex.set(key, null);
+    return null;
+  }
+  const rs = new Float64Array(raw.length);
+  const re = new Float64Array(raw.length);
+  const alignedStarts: number[] = [];
+  const alignedEnds: number[] = [];
+  const MIN_MS = 60 * 1000;
+  for (let index = 0; index < raw.length; index += 1) {
+    const start = +raw[index].start;
+    const end = +raw[index].end;
+    rs[index] = start;
+    re[index] = end;
+    const alignedStart = start % MIN_MS ? start + MIN_MS - (start % MIN_MS) : start;
+    const alignedEnd = end - (end % MIN_MS);
+    if (alignedStart >= alignedEnd) continue;
+    if (alignedStarts.length && alignedStart <= alignedEnds[alignedEnds.length - 1]) {
+      if (alignedEnd > alignedEnds[alignedEnds.length - 1]) alignedEnds[alignedEnds.length - 1] = alignedEnd;
+    } else {
+      alignedStarts.push(alignedStart);
+      alignedEnds.push(alignedEnd);
+    }
+  }
+  const entry: FreeIndexEntry = { rs, re, ms: Float64Array.from(alignedStarts), me: Float64Array.from(alignedEnds) };
+  ctx._freeIndex.set(key, entry);
+  return entry;
+}
+
+/** First index whose end is strictly after `value`. */
+function firstEndAfter(ends: Float64Array, value: number): number {
+  let lo = 0;
+  let hi = ends.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (ends[mid] > value) hi = mid; else lo = mid + 1;
+  }
+  return lo;
+}
+
+/** Derive only the availability present in the supplied immutable snapshot.
+ * A missing calendar is unavailable rather than a prompt to synthesize a
+ * default calendar into a detached candidate.
+ *
+ * F2: with a run context, requests inside the run's indexed span are served
+ * from the per-line index (binary search + clip) and are exactly what the
+ * day-walk would return — raw, unmerged, unaligned. Everything else walks. */
+function freeIntervalsFor(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
+  ctx?: SetupRunContext,
+): PlacementInterval[] {
+  if (through <= from) return [];
+  if (ctx?.respectCalendar === false) {
+    return [{ start: new Date(from), end: new Date(through) }];
+  }
+  const entry = freeIndexFor(ctx, snapshot, line, plant, from, through);
+  if (!entry) return walkFreeIntervals(snapshot, line, plant, from, through, ctx);
+  const fromMs = +from;
+  const throughMs = +through;
+  const result: PlacementInterval[] = [];
+  for (let index = firstEndAfter(entry.re, fromMs); index < entry.rs.length && entry.rs[index] < throughMs; index += 1) {
+    const start = Math.max(entry.rs[index], fromMs);
+    const end = Math.min(entry.re[index], throughMs);
+    if (end > start) result.push({ start: new Date(start), end: new Date(end) });
+  }
+  return result;
+}
+
+/** Marker on arrays `freeIntervalsForPlacement` returns: every interval is
+ * minute-aligned, sorted, disjoint, merged and non-empty, so `placeWithSetup`
+ * may skip `normalizedIntervals` (it still clips to `earliestStart`). */
+const ALIGNED_FREE = Symbol('nimbus.alignedFreeIntervals');
+
+/** F2: free intervals shaped for `placeWithSetup`. Served from the index's
+ * pre-normalized arrays and marked so the placement skips re-normalizing
+ * them; any request the index cannot serve returns the plain (unmarked)
+ * `freeIntervalsFor` output, which `placeWithSetup` normalizes as before. */
+function freeIntervalsForPlacement(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
+  ctx?: SetupRunContext,
+): PlacementInterval[] {
+  if (through <= from || ctx?.respectCalendar === false) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
+  const entry = freeIndexFor(ctx, snapshot, line, plant, from, through);
+  if (!entry) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
+  const MIN_MS = 60 * 1000;
+  const fromMs = +from;
+  const throughMs = +through;
+  const lower = fromMs % MIN_MS ? fromMs + MIN_MS - (fromMs % MIN_MS) : fromMs;
+  const upper = throughMs - (throughMs % MIN_MS);
+  const result: MinuteInterval[] = [];
+  for (let index = firstEndAfter(entry.me, lower); index < entry.ms.length && entry.ms[index] < upper; index += 1) {
+    const start = Math.max(entry.ms[index], lower);
+    const end = Math.min(entry.me[index], upper);
+    if (end > start) result.push({ start: new Date(start), end: new Date(end), minutes: (end - start) / MIN_MS });
+  }
+  (result as unknown as Record<symbol, unknown>)[ALIGNED_FREE] = true;
   return result;
 }
 
@@ -2733,7 +2922,7 @@ function candidateForSequence(
           bounds.runContext,
         ),
       } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext),
+      freeIntervals: freeIntervalsForPlacement(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext),
       minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
         ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
@@ -4347,7 +4536,7 @@ export function placeUnknownTail(
       ...(splitPolicy === 'overlong_only' ? {
         isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext),
       } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext),
+      freeIntervals: freeIntervalsForPlacement(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext),
       minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
         ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
     });
@@ -6998,3 +7187,5 @@ function coversInterval(free: readonly PlacementInterval[], interval: PlacementI
 
 export const fragmentObjectiveFactsForTest = fragmentObjectiveFacts;
 export const checkDistributionSeparationForTest = checkDistributionSeparation;
+export const freeIntervalsForTest = freeIntervalsFor;
+export const freeIntervalsForPlacementTest = freeIntervalsForPlacement;

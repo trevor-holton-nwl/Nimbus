@@ -5370,3 +5370,146 @@ test('F1: exact search is gated on distinct-ordering count, not just state count
   assert.equal(run([2, 2, 1], { exactSearchLeafCap: 1 }).diagnostics.quality, 'heuristic', 'a tiny cap forces heuristic');
   assert.throws(() => run([1, 1], { exactSearchLeafCap: 0 }), TypeError, 'a non-positive leaf cap is rejected');
 });
+
+function freeIndexFixture(R, spanStart, spanEnd) {
+  const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+  const hoursFor = () => Object.fromEntries(Array.from({ length: 7 }, (_, day) => {
+    if (R() < 0.2) return [day, null];
+    const open = ri(0, 12) + (R() < 0.3 ? ri(0, 3) * 0.25 : 0);
+    // Some windows run to 24:00 so adjacent days touch at midnight.
+    return [day, [open, R() < 0.3 ? 24 : Math.min(24, open + ri(2, 14))]];
+  }));
+  const MIN = 60000;
+  const blocks = [];
+  const plantBlocks = [];
+  for (let i = 0; i < ri(0, 8); i++) {
+    // Deliberately not minute-aligned: seconds exercise the ceil/floor path.
+    const start = spanStart + ri(0, Math.floor((spanEnd - spanStart) / MIN)) * MIN + ri(0, 59) * 1000;
+    const block = { plant: 'P1', start: new Date(start), end: new Date(start + ri(1, 3000) * MIN + ri(0, 59) * 1000) };
+    if (R() < 0.4) plantBlocks.push(block); else blocks.push({ ...block, line: 'L1' });
+  }
+  return {
+    ...setupSnapshot([]), blocks, plantBlocks,
+    calendars: { L1: { workHours: hoursFor() } }, plants: { P1: { workHours: hoursFor() } },
+  };
+}
+
+function freeIndexEquivalence(tz, spanStartText, spanEndText, seeds) {
+  const previous = process.env.TZ;
+  try {
+    process.env.TZ = tz;
+    const MIN = 60000;
+    const spanStart = new Date(spanStartText).getTime();
+    const spanEnd = new Date(spanEndText).getTime();
+    let compared = 0, outside = 0, multi = 0;
+    for (const seed of seeds) {
+      const R = mulberry32(seed);
+      const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+      for (let c = 0; c < 25; c++) {
+        const snapshot = freeIndexFixture(R, spanStart, spanEnd);
+        const bounds = dueDateBounds(setupTruth(), {
+          now: new Date(spanStart + ri(0, 600) * MIN), planningStart: new Date(spanStart + ri(0, 600) * MIN),
+          horizonEnd: new Date(spanEnd), respectCalendar: true,
+        });
+        const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+        const spanFrom = ctx.freeIndexSpan.from;
+        for (let q = 0; q < 40; q++) {
+          const inside = R() < 0.75;
+          const lo = inside ? spanFrom : spanFrom - 5 * 86400000;
+          const hi = inside ? spanEnd : spanEnd + 5 * 86400000;
+          const from = new Date(lo + Math.floor(R() * (hi - lo - MIN)) + (R() < 0.5 ? 0 : ri(0, 59999)));
+          const through = new Date(+from + ri(1, 10 * 24 * 60) * MIN + (R() < 0.5 ? 0 : ri(0, 59999)));
+          if (+from < spanFrom || +through > spanEnd) outside += 1;
+          // Raw equivalence: indexed output is exactly the day-walk output.
+          const walked = SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through);
+          const indexed = SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx);
+          assert.deepEqual(indexed, walked, `raw intervals differ (seed ${seed}, case ${c}, query ${q})`);
+          // Placement equivalence: marked, pre-normalized intervals place identically.
+          const marked = SetupScheduler.freeIntervalsForPlacementTest(snapshot, 'L1', 'P1', from, through, ctx);
+          const earliest = new Date(+from + ri(0, 3 * 24 * 60) * MIN + (R() < 0.5 ? 0 : ri(0, 59999)));
+          for (const runtimeMinutes of [ri(1, 90), ri(30, 600), ri(600, 3000)]) {
+            for (const policy of ['never', 'overlong_only', 'partial_allowed']) {
+              const request = {
+                earliestStart: earliest, runtimeMinutes, setup: { kind: 'resolved', minutes: ri(0, 90) },
+                policy, isInherentlyOverlong: R() < 0.5, minProductiveSegmentMinutes: [undefined, 30, 45][ri(0, 2)],
+              };
+              const expected = SetupScheduler.placeWithSetup({ ...request, freeIntervals: walked });
+              const actual = SetupScheduler.placeWithSetup({ ...request, freeIntervals: marked });
+              assert.deepEqual(actual, expected, `placement differs (seed ${seed}, case ${c}, query ${q}, ${policy})`);
+              compared += 1;
+              if (expected.productiveSegments.length > 1) multi += 1;
+            }
+          }
+        }
+      }
+    }
+    assert.ok(compared > 1000 && outside > 50 && multi > 20, `weak coverage: ${compared}/${outside}/${multi}`);
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+}
+
+test('F2 free-interval index equals the day-walk on seeded random calendars, blackouts and windows (incl. outside the span)', () => {
+  freeIndexEquivalence('America/New_York', '2026-08-01T00:00:00', '2026-08-31T00:00:00', [3, 17, 2026]);
+});
+
+test('F2 free-interval index equals the day-walk across the DST end and start transitions', () => {
+  freeIndexEquivalence('America/New_York', '2026-10-25T00:00:00', '2026-11-12T00:00:00', [5, 31]);
+  freeIndexEquivalence('America/New_York', '2026-03-01T00:00:00', '2026-03-20T00:00:00', [8, 44]);
+});
+
+test('F2 index is skipped for work hours that overflow the day (walk and index would disagree)', () => {
+  const snapshot = setupSnapshot([]);
+  const overflow = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [20, 30]]));
+  snapshot.calendars.L1.workHours = overflow; snapshot.plants.P1.workHours = overflow;
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-08-03T00:00:00'), horizonEnd: at('2026-08-10T00:00:00') });
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const from = at('2026-08-04T00:00:00'); const through = at('2026-08-07T12:00:00');
+  assert.deepEqual(
+    SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx),
+    SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through),
+  );
+});
+
+test('F2 run-level: candidate count, patches and objective are identical with the free index on and off', () => {
+  const colors = ['RED', 'BLUE', 'GREEN', 'BLACK'];
+  const rows = [];
+  for (const a of colors) for (const b of colors) if (a !== b) rows.push(setupRow(a, b, 20 + 7 * ((a.length + b.length) % 5)));
+  const R = mulberry32(4242);
+  const tasks = [];
+  for (const line of ['L1', 'L2', 'L3']) {
+    for (let i = 0; i < 9; i++) {
+      tasks.push({
+        ...scheduledTask(`f2-${line}-${i}`, 0.5 + Math.floor(R() * 14) / 2, colors[Math.floor(R() * 4)], `2026-08-${String(5 + Math.floor(R() * 12)).padStart(2, '0')}T12:00:00`),
+        MACHINE: line,
+      });
+    }
+  }
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, day === 0 ? null : [6, 22]]));
+  const build = () => ({
+    ...setupSnapshot(tasks.map(t => ({ ...t }))),
+    masterData: { plants: [{ plant: 'P1' }], lines: ['L1', 'L2', 'L3'].map(machine => ({ plant: 'P1', machine })) },
+    calendars: Object.fromEntries(['L1', 'L2', 'L3'].map(l => [l, { workHours: hours }])),
+    plants: { P1: { workHours: hours } },
+    blocks: [{ plant: 'P1', line: 'L2', start: at('2026-08-05T10:00:30'), end: at('2026-08-05T15:00:00') },
+      { plant: 'P1', line: 'L3', start: at('2026-08-06T00:00:00'), end: at('2026-08-07T00:00:00') }],
+  });
+  const bounds = extra => dueDateBounds(setupTruth({ rows }), {
+    exactSearchThreshold: 8, iterationCap: 100000, convergenceWindow: 1000,
+    now: at('2026-08-03T08:00:00'), planningStart: at('2026-08-03T08:00:00'), runNow: at('2026-08-03T08:00:00'),
+    placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-24T00:00:00'), ...extra,
+  });
+  const runs = [
+    ['due-date', b => SetupScheduler.evaluateDueDateFirst(build(), b, 'due-date')],
+    ['spt', b => SetupScheduler.evaluateSptWithSetup(build(), b)],
+    ['min-changeover', b => SetupScheduler.evaluateMinChangeover(build(), b)],
+  ];
+  for (const [mode, run] of runs) {
+    const on = run(bounds({}));
+    const off = run(bounds({ disableFreeIndex: true }));
+    assert.ok(on.diagnostics.candidateCount > 0, `${mode} evaluated candidates`);
+    assert.equal(on.diagnostics.candidateCount, off.diagnostics.candidateCount, `${mode} candidate count`);
+    assert.equal(on.diagnostics.termination, off.diagnostics.termination, `${mode} termination`);
+    assert.deepEqual(on.objective, off.objective, `${mode} objective totals`);
+    assert.deepEqual(on.patches, off.patches, `${mode} winners/patches`);
+    assert.deepEqual(on.score, off.score, `${mode} score`);
+  }
+});
