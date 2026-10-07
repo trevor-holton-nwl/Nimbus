@@ -85,7 +85,7 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     # Soft-warn on production lines not yet in master data (lines come from the
     # ingest result now, not a global frame). Never let this blow up the response.
     try:
-        known = md.known_plant_line_codes()
+        known = await run_in_threadpool(md.known_plant_line_codes)
         if known["lines"]:
             for ul in sorted(set(result.get("lines", [])) - set(known["lines"])):
                 result.setdefault("warnings", []).append(
@@ -701,7 +701,16 @@ def sap_stage_rejected(batch_id: str, format: str | None = Query(default=None),
     except KeyError as e:
         raise HTTPException(status_code=404, detail=f"Unknown staging batch: {batch_id!r}") from e
     if format == "csv":
-        return _csv_response(rows, f"sap-staging-rejected-{batch_id}.csv")
+        # The raw code stays machine-readable; a human-readable column follows it.
+        with_text = []
+        for r in rows:
+            out = {}
+            for k, v in r.items():
+                out[k] = v
+                if k == "reject_reason":
+                    out["reject_reason_text"] = sap_staging.reject_reason_text(v)
+            with_text.append(out)
+        return _csv_response(with_text, f"sap-staging-rejected-{batch_id}.csv")
     return {"rows": rows}
 
 
@@ -720,7 +729,7 @@ def sap_stage_deletions(batch_id: str, allowed_plants: list[str] | None = Depend
 async def sap_stage_validate(batch_id: str, request: Request,
                              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Re-run validation on a ready / validated / held batch. Response: validate_batch's result."""
-    batch = _stage_batch_or_404(batch_id, allowed_plants)
+    batch = await run_in_threadpool(_stage_batch_or_404, batch_id, allowed_plants)
     try:
         result = await run_in_threadpool(sap_staging.validate_batch, batch_id)
     except KeyError as e:
@@ -738,7 +747,7 @@ async def sap_stage_apply(batch_id: str, request: Request, body: dict = Body(def
                           allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Apply a validated batch (or a held one with `confirm_held: true`) to the live tables.
     Payload: { confirm_held?: bool }. 409 when superseded or not applicable."""
-    batch = _stage_batch_or_404(batch_id, allowed_plants)
+    batch = await run_in_threadpool(_stage_batch_or_404, batch_id, allowed_plants)
     actor = _stage_actor(request)
     confirm_held = bool((body or {}).get("confirm_held"))
     _log_event("info", "sap_staging", "Staging batch apply requested", batch_id=batch_id, plant=batch["plant"],
@@ -756,7 +765,7 @@ async def sap_stage_apply(batch_id: str, request: Request, body: dict = Body(def
 async def sap_stage_discard(batch_id: str, request: Request,
                             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Discard an un-applied batch. Response: {batch_id, status: "discarded"}."""
-    batch = _stage_batch_or_404(batch_id, allowed_plants)
+    batch = await run_in_threadpool(_stage_batch_or_404, batch_id, allowed_plants)
     actor = _stage_actor(request)
     try:
         result = await run_in_threadpool(sap_staging.discard_batch, batch_id, actor=actor)

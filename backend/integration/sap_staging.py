@@ -766,12 +766,24 @@ def _vanish_candidates(cur, plant: str, order_numbers: set, visibility_end: date
     if not detail or not ids_sorted:
         return ids_sorted
     cur.execute(
-        "SELECT id, production_order, material_number, machine, scheduled_start, scheduled_end,"
-        " manual_firmed, firming_indicator, parent_production_order FROM orders"
-        " WHERE plant = %s AND id = ANY(%s) ORDER BY production_order, id", (plant, ids_sorted))
-    return [{"id": r[0], "production_order": r[1], "material_number": r[2], "machine": r[3],
-             "scheduled_start": _iso(r[4]), "scheduled_end": _iso(r[5]), "manual_firmed": bool(r[6]),
-             "firming_indicator": r[7], "parent_production_order": r[8]} for r in cur.fetchall()]
+        "SELECT o.id, o.production_order, o.material_number, o.machine, o.scheduled_start, o.scheduled_end,"
+        " o.manual_firmed, o.firming_indicator, o.parent_production_order, o.planning_status,"
+        " o.basic_start_date, o.basic_finish_date, o.run_time, seg.first_start, seg.last_end"
+        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL +
+        " WHERE o.plant = %s AND o.id = ANY(%s) ORDER BY o.production_order, o.id", (plant, ids_sorted))
+    rows = cur.fetchall()
+    cur.execute("SELECT MIN(timezone) FROM plants WHERE plant = %s", (plant,))
+    now = db._plant_local_now(cur.fetchone()[0])
+    out = []
+    for r in rows:
+        b = {"planning_status": r[9], "scheduled_start": r[4], "scheduled_end": r[5], "basic_start_date": r[10],
+             "basic_finish_date": r[11], "run_time": r[12], "first_start": r[13], "last_end": r[14]}
+        # D21: a vanished order is deleted even while running; flag it so the review can say so.
+        out.append({"id": r[0], "production_order": r[1], "material_number": r[2], "machine": r[3],
+                    "scheduled_start": _iso(r[4]), "scheduled_end": _iso(r[5]), "manual_firmed": bool(r[6]),
+                    "firming_indicator": r[7], "parent_production_order": r[8],
+                    "running": bool(db._order_is_running(b, now))})
+    return out
 
 
 def _sent_order_numbers(cur, table: str, batch_id) -> set:
@@ -952,6 +964,33 @@ def get_batch(batch_id) -> dict | None:
     hdr["row_counts"] = counts
     hdr["actual_rows"] = sum(counts.values())
     return hdr
+
+
+_REJECT_TEXT = {
+    "missing_key": "A key field is blank.",
+    "plant_mismatch": "The row's plant differs from the batch's plant.",
+    "unknown_plant": "The plant is not a NIMBUS plant.",
+    "duplicate_key": "The same key appears more than once in the batch, so every copy was rejected.",
+    "invalid_date": "A date is missing or not readable.",
+    "invalid_time": "A time is not readable.",
+    "invalid_number": "A quantity is not a valid number.",
+    "invalid_int": "A whole-number field has a fractional or non-numeric value.",
+    "key_too_long": "A key value is longer than NIMBUS can store.",
+    "value_too_long": "A value is longer than the field allows.",
+    "deleted_flag": "SAP marked this row as deleted.",
+    "rejected_by_validator": "The validation checks rejected this row.",
+}
+
+
+def reject_reason_text(reason) -> str:
+    """Plain-English text for a row `reject_reason` (for the CSV export, whose raw code stays machine-readable).
+    `value_too_long:<column>` keeps the column; an unrecognised reason is returned as sent."""
+    raw = "" if reason is None else str(reason)
+    base, _, rest = raw.partition(":")
+    text = _REJECT_TEXT.get(base)
+    if text is None:
+        return raw
+    return f"{text} ({rest.strip()})" if rest.strip() else text
 
 
 def rejected_rows(batch_id, *, limit: int = 1000) -> list[dict]:

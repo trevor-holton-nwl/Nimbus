@@ -4,6 +4,9 @@
 // was split into 9 domain files; this mirrors that split).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Interface } from '../../../frontend/integration/sap-interface-ui.mjs';
 
 // Same split-realm/no-DOM situation documented in
@@ -127,4 +130,47 @@ test('Interface._renderSapDistributionWarningForTest\'s review link navigates to
       if (priorNimbus === undefined) delete globalThis.NIMBUS; else globalThis.NIMBUS = priorNimbus;
     }
   });
+});
+
+test('raw staging codes are shown as plain words: reject reasons, warning codes and 409 codes', () => {
+  assert.equal(Interface._stageRejectTextForTest('missing_key'), 'ui.sap_stage_reject_missing_key');
+  assert.equal(Interface._stageRejectTextForTest('value_too_long:mmsta'), 'ui.sap_stage_reject_value_too_long (mmsta)',
+    'a suffixed code renders the base text plus the column');
+  assert.equal(Interface._stageRejectTextForTest('Row 5 has a bad routing'), 'Row 5 has a bad routing',
+    'text outside the known codes (routing validators) is shown as sent');
+  assert.equal(Interface._stageRejectTextForTest(null), '');
+  assert.equal(Interface._stageWarningTextForTest({ code: 'stale_loading' }), 'ui.sap_stage_warn_stale_loading');
+  assert.equal(Interface._stageWarningTextForTest({ category: 'sap_changed_running', count: 2 }), 'ui.sap_stage_warn_sap_changed_running',
+    'upsert warnings carry `category` instead of `code`');
+  assert.equal(Interface._stageWarningTextForTest({ code: 'unknown_columns', msg: 'Ignored column(s) that are not part of this staging table: foo, bar' }),
+    'ui.sap_stage_warn_unknown_columns (foo, bar)', 'the ignored column names stay visible');
+  assert.equal(Interface._stageWarningTextForTest({ code: 'made_up_code' }), 'made_up_code', 'an unknown code still falls back to the raw code');
+  assert.equal(Interface._stageErrorCodeTextForTest({ error: 'apply_in_progress' }), 'ui.sap_stage_warn_apply_in_progress');
+  assert.equal(Interface._stageErrorCodeTextForTest({ error: 'superseded', newer_batch_id: 'n1' }), 'ui.sap_stage_warn_superseded');
+  assert.equal(Interface._stageErrorCodeTextForTest({ error: 'nope' }), null);
+  assert.equal(Interface._stageErrorCodeTextForTest('plain string'), null);
+});
+
+test('every code the UI maps has a key in en.js (reject_* and warn_*)', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '../../../frontend/integration/sap-interface-ui.mts'), 'utf8');
+  const en = readFileSync(join(here, '../../../frontend/locales/en.js'), 'utf8');
+  const list = (name) => [...src.match(new RegExp(`const ${name} = \\[([^\\]]+)\\]`))[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  const warn = list('STAGE_WARN_CODES');
+  const reject = list('STAGE_REJECT_CODES');
+  assert.ok(warn.length >= 20 && reject.length === 12);
+  for (const c of warn) assert.ok(en.includes(`'ui.sap_stage_warn_${c}'`), `en.js lacks ui.sap_stage_warn_${c}`);
+  for (const c of reject) assert.ok(en.includes(`'ui.sap_stage_reject_${c}'`), `en.js lacks ui.sap_stage_reject_${c}`);
+});
+
+test('apply asks for confirmation whenever the batch will delete rows (held, or validated with deletions)', () => {
+  const batch = (status, vanish) => ({ batch_id: 'b', object_key: 'stage_planned_orders', plant: 'P', status, counts: { vanish_candidates: vanish } });
+  const needs = Interface._stageApplyNeedsConfirmForTest;
+  assert.equal(needs(batch('held', 9), 'confirm'), true, 'Confirm & Apply on a held batch always confirms');
+  assert.equal(needs(batch('validated', 3), 'apply'), true, 'a validated batch with deletions opens the same modal');
+  assert.equal(needs(batch('error', 3), 'retry'), true);
+  assert.equal(needs(batch('validated', 0), 'apply'), false, 'only a batch with zero deletions applies without a modal');
+  assert.equal(needs({ batch_id: 'b', object_key: 'x', plant: 'P', status: 'validated' }, 'apply'), false, 'no counts reads as no deletions');
+  assert.equal(needs(batch('ready', 3), 'validate'), false);
+  assert.equal(needs(batch('ready', 3), 'discard'), false);
 });

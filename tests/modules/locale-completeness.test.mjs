@@ -407,7 +407,14 @@ test('SAP staging (Admin > Interface > Staging) keys exist in all 5 locales', ()
   // upload, Outbound (Send to SAP) and Archive panels, plus the per-status / per-warning
   // families below. Real translations in de/es/fr/pt, not English copies.
   const STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'applied', 'error', 'rejected', 'superseded', 'discarded'];
-  const WARNINGS = ['routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded'];
+  const WARNINGS = [
+    'routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded',
+    'stale_loading', 'unknown_columns', 'rows_not_staged', 'discarded', 'unknown_object_key', 'unknown_plant',
+    'vanish_not_reviewed', 'revalidate_required', 'apply_in_progress', 'not_applicable', 'superseded', 'order_exists',
+    'sap_changed', 'unfirmed', 'sap_changed_running', 'unparseable_dates', 'routing_running_kept',
+  ];
+  const REJECTS = ['missing_key', 'plant_mismatch', 'unknown_plant', 'duplicate_key', 'invalid_date', 'invalid_time',
+    'invalid_number', 'invalid_int', 'key_too_long', 'value_too_long', 'deleted_flag', 'rejected_by_validator'];
   const REQUIRED_SAP_STAGING = [
     'ui.sap_staging', 'ui.sap_staging_group', 'ui.sap_connectors_group',
     'ui.sap_stage_batches', 'ui.sap_stage_no_batches',
@@ -427,6 +434,9 @@ test('SAP staging (Admin > Interface > Staging) keys exist in all 5 locales', ()
     'ui.sap_stage_confirm_msg',
     ...STATUSES.map(s => `ui.sap_stage_status_${s}`),
     ...WARNINGS.map(w => `ui.sap_stage_warn_${w}`),
+    ...REJECTS.map(r => `ui.sap_stage_reject_${r}`),
+    'ui.sap_stage_col_reason', 'ui.sap_stage_col_running', 'ui.sap_stage_running_yes',
+    'ui.sap_stage_delete_notice', 'ui.sap_stage_delete_running_count', 'ui.sap_stage_confirm_delete_msg',
     'ui.sap_outbound', 'ui.sap_outbound_last_queued', 'ui.sap_outbound_last_sent', 'ui.sap_outbound_error_csv',
     'ui.sap_send_to_sap', 'ui.sap_send_confirm',
     'ui.sap_send_status_ready', 'ui.sap_send_status_sent', 'ui.sap_send_status_error',

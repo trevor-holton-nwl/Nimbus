@@ -92,8 +92,8 @@ SAP is the source of truth; a re-upload only disturbs an order SAP actually chan
 |---|---|---|
 | `GET /sap/staging/batches` | admin | Batch headers, newest first (`object`, `plant`, `status`, `limit` filters), scoped to the caller's plants |
 | `GET /sap/staging/batches/{batch_id}` | admin | One batch: header + `row_counts` by row status + `actual_rows` + warnings |
-| `GET /sap/staging/batches/{batch_id}/rejected` | admin | Rejected rows with `reject_reason`; `?format=csv` for a formula-guarded CSV |
-| `GET /sap/staging/batches/{batch_id}/deletions` | admin | The exact orders a planned-order batch would delete on apply |
+| `GET /sap/staging/batches/{batch_id}/rejected` | admin | Rejected rows with `reject_reason`; `?format=csv` for a formula-guarded CSV (raw code kept, plus a plain-English `reject_reason_text` column) |
+| `GET /sap/staging/batches/{batch_id}/deletions` | admin | The exact orders a planned-order batch would delete on apply, each with a `running` flag (D21: running orders are deleted too; the UI says so) |
 | `POST /sap/staging/batches/{batch_id}/validate` | api key + admin | Re-run validation on a ready/validated/held batch |
 | `POST /sap/staging/batches/{batch_id}/apply` | api key + admin | Apply a validated batch; `{confirm_held: true}` for a held one; resumes an `error`/crashed `applying` batch |
 | `POST /sap/staging/batches/{batch_id}/discard` | api key + admin | Discard an un-applied batch (not allowed while applying or after applied) |

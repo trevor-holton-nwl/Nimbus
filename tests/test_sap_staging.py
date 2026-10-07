@@ -1583,12 +1583,41 @@ def test_a_running_order_that_vanished_from_the_snapshot_is_deleted_and_archived
         conn.commit()
     bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("FZ1", soon)])
     assert st.validate_batch(bid)["status"] == "held"
+    # The deletion review marks the running order so the admin is told before confirming.
+    assert {d["production_order"]: d["running"] for d in st.held_deletions(bid)} == {"FZ2": True, "FZ3": False, "FZ4": False}
     out = st.apply_batch(bid, actor="pytest", confirm_held=True)
     assert out["counts"]["deleted"] == 3 and out["counts"]["archived"] == 3
     with _conn(pg) as (_c, cur):
         cur.execute("SELECT count(*) FROM orders WHERE plant = %s AND production_order = 'FZ2'", (PLANT,))
         assert cur.fetchone()[0] == 0
     assert "FZ2" in {a["production_order"] for a in st.list_archived(PLANT)}
+
+
+@pytest.mark.pg
+def test_24_percent_missing_applies_without_confirmation_and_26_percent_is_held(pg, stg_plant):
+    """The 25 % boundary end to end: 50 live in-horizon orders, a snapshot of 38 (12 missing = 24 %) applies
+    straight from `validated`; a snapshot of 37 (13 missing = 26 %) is held and needs confirmation."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 50, soon)
+    ok = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
+                     [_snapshot_row(f"FZ{i}", soon) for i in range(1, 39)])
+    res = st.validate_batch(ok)
+    assert res["status"] == "validated", res
+    assert res["counts"]["in_horizon_live"] == 50 and res["counts"]["vanish_candidates"] == 12
+    out = st.apply_batch(ok, actor="pytest")                                 # no confirm_held needed
+    assert out["status"] == "applied" and out["counts"]["deleted"] == 12
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT count(*) FROM orders WHERE plant = %s", (PLANT,))
+        assert cur.fetchone()[0] == 38
+    _live_orders(pg, 12, soon, prefix="FY")                                  # back to 50 live orders
+    held = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
+                       [_snapshot_row(f"FZ{i}", soon) for i in range(1, 38)], age_minutes=-1)
+    res = st.validate_batch(held)
+    assert res["status"] == "held" and "vanish_threshold" in res["held_reasons"], res
+    assert res["counts"]["vanish_candidates"] == 13
+    with pytest.raises(st.BatchNotApplicable):
+        st.apply_batch(held, actor="pytest")                                 # 26 % needs confirmation
 
 
 @pytest.mark.pg

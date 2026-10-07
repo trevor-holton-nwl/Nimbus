@@ -649,3 +649,60 @@ def test_sap_staging_tables_in_schema_and_migration():
     # The remembered-send values are NOT orders columns any more.
     assert "orders ADD COLUMN IF NOT EXISTS sap_sent_" not in schema_text
     assert "orders ADD COLUMN IF NOT EXISTS sap_sent_" not in columns_text
+
+
+# --- Structural parity of the two SAP staging migrations (applied) -----------------------------------------
+STAGE_MIGRATIONS = ("2026-10-08-sap-staging-tables.sql", "2026-10-08-sap-staging-columns.sql")
+STAGE_COLUMNS = (("sap_sync_config", "apply_mode"), ("material_plants", "sap_missing_since"),
+                 ("production_version", "sap_missing_since"))
+STAGE_INDEXES = (
+    "idx_sap_stage_batch_lookup", "idx_sap_stage_material_plant_batch", "idx_sap_stage_planned_order_batch",
+    "idx_sap_stage_production_version_batch", "idx_sap_stage_routing_operation_batch",
+    "idx_sap_stage_planned_order_out_status", "idx_sap_stage_planned_order_out_send_batch",
+    "idx_sap_stage_planned_order_out_plant_status", "idx_sap_stage_vanished_order_plant_deleted",
+    "idx_order_sap_sent_plant",
+)
+
+
+def _schema_fingerprint(cur) -> dict:
+    """Tables + columns (type, nullability, default) + constraints + indexes of the public schema."""
+    cur.execute("SELECT table_name, column_name, data_type, is_nullable, column_default, character_maximum_length"
+                " FROM information_schema.columns WHERE table_schema = 'public' ORDER BY 1, ordinal_position")
+    columns = [tuple(r) for r in cur.fetchall()]
+    cur.execute("SELECT c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid) FROM pg_constraint c"
+                " JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = 'public' ORDER BY 1, 2")
+    constraints = [tuple(r) for r in cur.fetchall()]
+    cur.execute("SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1, 2")
+    indexes = [tuple(r) for r in cur.fetchall()]
+    return {"columns": columns, "constraints": constraints, "indexes": indexes}
+
+
+@pytest.mark.pg
+def test_sap_staging_migrations_are_idempotent_and_create_every_object(pg):
+    """Re-applying the two staging migrations changes nothing structurally (fingerprint before == after) and every
+    table, column, index and the apply_mode CHECK the design names exists afterwards."""
+    sqls = []
+    for name in STAGE_MIGRATIONS:
+        with open(os.path.join(ROOT, "migrations", name), encoding="utf-8") as f:
+            sqls.append(f.read())
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        for sql_text in sqls:                       # first apply (a no-op where schema.sql already built them)
+            cur.execute(sql_text)
+        conn.commit()
+        before = _schema_fingerprint(cur)
+        for sql_text in sqls:                       # second apply: must be a structural no-op
+            cur.execute(sql_text)
+        conn.commit()
+        after = _schema_fingerprint(cur)
+        assert after == before, "re-applying the staging migrations changed the schema"
+
+        tables = {r[0] for r in before["columns"]}
+        for table in SAP_STAGE_TABLES:
+            assert table in tables, f"{table} missing after the migrations"
+        have_cols = {(r[0], r[1]) for r in before["columns"]}
+        for tc in STAGE_COLUMNS:
+            assert tc in have_cols, f"{tc} missing after the migrations"
+        have_idx = {r[1] for r in before["indexes"]}
+        for idx in STAGE_INDEXES:
+            assert idx in have_idx, f"{idx} missing after the migrations"
+        assert any(r[1] == "chk_sap_sync_config_apply_mode" for r in before["constraints"])

@@ -181,7 +181,10 @@ interface SapUploadAuditResponse {
  *  `message` is accepted too. Unknown codes render as the raw code. */
 interface StageWarning {
   code?: string;
+  /** Warnings produced by the order upsert carry `category` instead of `code`. */
+  category?: string;
   level?: string;
+  count?: number;
   msg?: string;
   message?: string;
 }
@@ -236,6 +239,8 @@ interface StageDeletion {
   manual_firmed?: boolean | null;
   firming_indicator?: string | null;
   parent_production_order?: string | null;
+  /** True when the order is running right now (it is still deleted, D21). */
+  running?: boolean;
 }
 
 /** One vanish-deleted order in the 30-day archive (`GET /sap/staging/archive/{plant}`). */
@@ -271,7 +276,19 @@ interface StagePollResult {
 }
 
 const STAGE_STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'applied', 'error', 'rejected', 'superseded', 'discarded'];
-const STAGE_WARN_CODES = ['routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded'];
+/** Every batch warning / hold / error / apply-refusal code the backend emits (ui.sap_stage_warn_<code>). */
+const STAGE_WARN_CODES = [
+  'routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows',
+  'lot_size_rounded', 'stale_loading', 'unknown_columns', 'rows_not_staged', 'discarded', 'unknown_object_key',
+  'unknown_plant', 'vanish_not_reviewed', 'revalidate_required', 'apply_in_progress', 'not_applicable',
+  'superseded', 'order_exists', 'sap_changed', 'unfirmed', 'sap_changed_running', 'unparseable_dates',
+  'routing_running_kept',
+];
+/** Every row-level `reject_reason` the staging validators emit (ui.sap_stage_reject_<code>). */
+const STAGE_REJECT_CODES = [
+  'missing_key', 'plant_mismatch', 'unknown_plant', 'duplicate_key', 'invalid_date', 'invalid_time',
+  'invalid_number', 'invalid_int', 'key_too_long', 'value_too_long', 'deleted_flag', 'rejected_by_validator',
+];
 
 /** Pure formatter for a batch's status pill + counts text (rail status line and
  *  batch rows). Unknown statuses fall back to the neutral pill with the raw status. */
@@ -291,9 +308,41 @@ function applyModeHint(mode: string | null | undefined): string {
 }
 
 function stageWarningText(w: StageWarning): string {
-  const code = w.code || '';
-  if (STAGE_WARN_CODES.indexOf(code) > -1) return Util.t(`ui.sap_stage_warn_${code}`);
+  const code = w.code || w.category || '';
+  if (STAGE_WARN_CODES.indexOf(code) > -1) {
+    const text = Util.t(`ui.sap_stage_warn_${code}`, { count: w.count ?? 0 });
+    // These two carry the ignored column names / sample failures only in the backend text.
+    const detail = code === 'unknown_columns' ? /: (.+)$/.exec(w.msg || '')
+      : code === 'rows_not_staged' ? /\((.+)\)\s*$/.exec(w.msg || '') : null;
+    return detail ? `${text} (${detail[1]})` : text;
+  }
   return code || w.message || w.msg || '';
+}
+
+/** A row's `reject_reason` as plain words. `value_too_long:<column>` keeps the column; text outside the
+ *  known codes (the routing validators' own messages) is shown as sent. */
+function stageRejectText(reason: unknown): string {
+  const raw = reason == null ? '' : String(reason);
+  const i = raw.indexOf(':');
+  const base = i > -1 ? raw.slice(0, i) : raw;
+  if (STAGE_REJECT_CODES.indexOf(base) < 0) return raw;
+  const text = Util.t(`ui.sap_stage_reject_${base}`);
+  return i > -1 && raw.slice(i + 1).trim() ? `${text} (${raw.slice(i + 1).trim()})` : text;
+}
+
+/** Whether an apply click must go through the confirm modal: always for a held batch (Confirm & Apply),
+ *  and for a plain Apply / Retry whose batch will delete rows. Only a batch with zero deletions applies
+ *  straight away. */
+function stageApplyNeedsConfirm(b: StageBatch, act: string): boolean {
+  if (act === 'confirm') return true;
+  if (act !== 'apply' && act !== 'retry') return false;
+  return (b.counts?.vanish_candidates ?? 0) > 0;
+}
+
+/** A 409 body's `error` code (apply / validate / restore refusals) as plain words, else null. */
+function stageErrorCodeText(detail: unknown): string | null {
+  const code = detail && typeof detail === 'object' ? (detail as { error?: unknown }).error : null;
+  return typeof code === 'string' && STAGE_WARN_CODES.indexOf(code) > -1 ? Util.t(`ui.sap_stage_warn_${code}`, { count: 0 }) : null;
 }
 
 /* =============================================================================
@@ -998,6 +1047,8 @@ export const Interface = (() => {
   function _errText(body: unknown, status: number): string {
     const b = (body || {}) as { detail?: unknown; message?: unknown };
     const d = b.detail as { message?: unknown } | string | undefined;
+    const coded = stageErrorCodeText(d);
+    if (coded) return coded;
     if (d && typeof d === 'object' && typeof d.message === 'string') return d.message;
     return Util.errorDetailText(b.detail) || (typeof b.message === 'string' ? b.message : '') || `HTTP ${status}`;
   }
@@ -1152,7 +1203,8 @@ export const Interface = (() => {
       [Util.t('ui.sap_stage_time_validated'), b.validated_at], [Util.t('ui.sap_stage_time_applied'), b.applied_at],
     ].filter((t) => t[1]).map((t) => `<span>${Util.escapeHtml(String(t[0]))} ${Util.escapeHtml(_fmtTs(t[1]))}</span>`).join('');
     const warns = (b.warnings || []).map((w) => `<div class="sap-batch-warn">${Util.escapeHtml(stageWarningText(w))}</div>`).join('');
-    const err = b.error ? `<div class="sap-batch-warn is-err">${Util.escapeHtml(b.error)}${c.step ? ` (${Util.escapeHtml(c.step)})` : ''}</div>` : '';
+    const errText = b.error && STAGE_WARN_CODES.indexOf(b.error) > -1 ? stageWarningText({ code: b.error }) : b.error;
+    const err = b.error ? `<div class="sap-batch-warn is-err">${Util.escapeHtml(errText || '')}${c.step ? ` (${Util.escapeHtml(c.step)})` : ''}</div>` : '';
     const needsRouting = (b.warnings || []).some((w) => w.code === 'routing_required');
     const heldBanner = held
       ? `<div class="sap-banner sap-banner-err sap-batch-held"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(Util.t(needsRouting ? 'ui.sap_stage_held_routing' : 'ui.sap_stage_held_banner'))}</b></div></div>` : '';
@@ -1213,8 +1265,11 @@ export const Interface = (() => {
         // reject_reason first, then up to 7 further columns that carry data in the first rows.
         const keys = Object.keys(rows[0] as Record<string, unknown>).filter((k) => k !== 'reject_reason' && k !== 'batch_id' && k !== 'id');
         const cols = ['reject_reason', ...keys].filter((k) => rows.some((r) => r[k] != null && r[k] !== '')).slice(0, 8);
-        el.innerHTML = `<div class="sap-batch-rej-scroll"><table class="sap-batch-table"><thead><tr>${cols.map((k) => `<th>${Util.escapeHtml(k)}</th>`).join('')}</tr></thead><tbody>${
-          rows.map((r) => `<tr>${cols.map((k) => `<td>${Util.escapeHtml(r[k] == null ? '' : String(r[k]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+        const head = (k: string): string => (k === 'reject_reason' ? Util.t('ui.sap_stage_col_reason') : k);
+        const cell = (r: Record<string, unknown>, k: string): string =>
+          (k === 'reject_reason' ? stageRejectText(r[k]) : (r[k] == null ? '' : String(r[k])));
+        el.innerHTML = `<div class="sap-batch-rej-scroll"><table class="sap-batch-table"><thead><tr>${cols.map((k) => `<th>${Util.escapeHtml(head(k))}</th>`).join('')}</tr></thead><tbody>${
+          rows.map((r) => `<tr>${cols.map((k) => `<td>${Util.escapeHtml(cell(r, k))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
           <div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_rejected_shown', { count: rows.length }))}</div>${csvBtn}`;
       }
       el.querySelector<HTMLButtonElement>('[data-bcsv]')?.addEventListener('click', () =>
@@ -1224,13 +1279,17 @@ export const Interface = (() => {
     }
   }
 
-  /** Confirm-and-apply modal for a held batch: lists the held warnings and, for the
-   *  vanish-threshold hold, the exact orders that will be deleted. */
-  async function _confirmHeld(b: StageBatch): Promise<boolean> {
+  /** Confirm-and-apply modal. Opens for a held batch (lists the held warnings) and for any batch whose
+   *  apply would delete rows (`counts.vanish_candidates` > 0), listing the exact rows. For planned
+   *  orders it says plainly that running orders are deleted too and stay recoverable for 30 days (D21). */
+  async function _confirmApply(b: StageBatch): Promise<boolean> {
     const warnings = b.warnings || [];
-    const reasons = warnings.map((w) => `<li>${Util.escapeHtml(stageWarningText(w))}</li>`).join('');
+    const held = b.status === 'held';
+    const candidates = b.counts?.vanish_candidates ?? 0;
+    const reasons = held ? warnings.map((w) => `<li>${Util.escapeHtml(stageWarningText(w))}</li>`).join('') : '';
     let deletions = '';
-    if (warnings.some((w) => w.code === 'vanish_threshold')) {
+    let notice = '';
+    if (warnings.some((w) => w.code === 'vanish_threshold') || candidates > 0) {
       try {
         const d = await _getJson<{ orders: StageDeletion[] }>(`/sap/staging/batches/${encodeURIComponent(b.batch_id)}/deletions`);
         const orders = d.orders || [];
@@ -1243,12 +1302,18 @@ export const Interface = (() => {
           const firmed = !!x.manual_firmed || x.firming_indicator === 'X';
           return `<tr><td>${Util.escapeHtml(x.production_order ?? '')}</td><td>${Util.escapeHtml(x.material_number ?? '')}</td>`
             + `<td>${Util.escapeHtml(x.machine ?? '')}</td><td>${Util.escapeHtml(_fmtTs(x.scheduled_end ?? null))}</td>`
-            + `<td>${firmed ? Util.escapeHtml(Util.t('ui.sap_stage_firmed_yes')) : ''}</td></tr>`;
+            + `<td>${firmed ? Util.escapeHtml(Util.t('ui.sap_stage_firmed_yes')) : ''}</td>`
+            + `<td>${x.running ? `<b>${Util.escapeHtml(Util.t('ui.sap_stage_running_yes'))}</b>` : ''}</td></tr>`;
         };
         const head = generic
           ? `<th>${Util.escapeHtml(Util.t('ui.sap_stage_col_key'))}</th>`
           : `<th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
-            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th>`;
+            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_running'))}</th>`;
+        if (!generic && orders.length > 0) {
+          const running = orders.filter((x) => x.running).length;
+          notice = `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(Util.t('ui.sap_stage_delete_notice'))}</b>`
+            + `${running > 0 ? ` ${Util.escapeHtml(Util.t('ui.sap_stage_delete_running_count', { count: running }))}` : ''}</div></div>`;
+        }
         deletions = `<div class="sap-section-label">${Util.escapeHtml(Util.t(generic ? 'ui.sap_stage_deletions_rows' : 'ui.sap_stage_deletions'))} (${orders.length})</div>
           <div class="sap-stage-deletions"><table class="sap-batch-table"><thead><tr>${head}</tr></thead>
             <tbody>${shown.map(row).join('')}</tbody></table></div>
@@ -1257,17 +1322,18 @@ export const Interface = (() => {
         deletions = `<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
       }
     }
+    const label = Util.t(held ? 'ui.sap_stage_confirm_apply' : 'ui.sap_stage_apply');
     return Modal.confirm({
-      title: Util.t('ui.sap_stage_confirm_apply'),
-      message: Util.t('ui.sap_stage_confirm_msg', { plant: b.plant }),
-      detail: `<ul class="sap-stage-reasons">${reasons}</ul>${deletions}`,
-      confirmLabel: Util.t('ui.sap_stage_confirm_apply'),
+      title: label,
+      message: Util.t(held ? 'ui.sap_stage_confirm_msg' : 'ui.sap_stage_confirm_delete_msg', { plant: b.plant, count: candidates }),
+      detail: `${reasons ? `<ul class="sap-stage-reasons">${reasons}</ul>` : ''}${notice}${deletions}`,
+      confirmLabel: label,
       tone: 'danger',
     });
   }
 
   async function _stageAction(b: StageBatch, act: string, btn: HTMLButtonElement): Promise<void> {
-    if (act === 'confirm' && !(await _confirmHeld(b))) return;
+    if (stageApplyNeedsConfirm(b, act) && !(await _confirmApply(b))) return;
     btn.disabled = true;
     const base = `/sap/staging/batches/${encodeURIComponent(b.batch_id)}`;
     if (act === 'validate') {
@@ -1641,6 +1707,10 @@ export const Interface = (() => {
     // Pure staging formatters (no DOM) — same ForTest precedent, for the same test file.
     _stageStatusLineForTest: stageStatusLine,
     _applyModeHintForTest: applyModeHint,
+    _stageWarningTextForTest: stageWarningText,
+    _stageRejectTextForTest: stageRejectText,
+    _stageErrorCodeTextForTest: stageErrorCodeText,
+    _stageApplyNeedsConfirmForTest: stageApplyNeedsConfirm,
   };
 })();
 

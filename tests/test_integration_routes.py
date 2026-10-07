@@ -630,6 +630,9 @@ def test_stage_rejected_json_and_csv(stage_client):
     assert f"sap-staging-rejected-{_BID}.csv" in r.headers["content-disposition"]
     assert r.content.startswith(b"\xef\xbb\xbf")
     assert "'=1" in r.text           # formula-guarded
+    header = r.text.lstrip("﻿").splitlines()[0].split(",")
+    assert header[header.index("reject_reason") + 1] == "reject_reason_text"      # human text next to the raw code
+    assert "missing_key" in r.text and "A key field is blank." in r.text
 
 
 def test_stage_unknown_batch_is_404_everywhere(stage_client):
@@ -671,6 +674,23 @@ def test_stage_restore_order_exists_is_409(stage_client, monkeypatch):
     monkeypatch.setattr(ss, "restore_archived", _exists)
     r = stage_client.post("/sap/staging/archive/7/restore")
     assert r.status_code == 409 and r.json()["detail"] == {"error": "order_exists"}
+
+
+def test_stage_async_routes_offload_the_batch_lookup(stage_client, monkeypatch):
+    """validate/apply/discard are async: the batch header read (pool checkout + query) must go
+    through run_in_threadpool, not run on the event loop."""
+    offloaded = []
+    real = int_routes.run_in_threadpool
+
+    async def _spy(fn, *a, **k):
+        offloaded.append(getattr(fn, "__name__", ""))
+        return await real(fn, *a, **k)
+
+    monkeypatch.setattr(int_routes, "run_in_threadpool", _spy)
+    for action in ("validate", "apply", "discard"):
+        offloaded.clear()
+        assert stage_client.post(f"/sap/staging/batches/{_BID}/{action}").status_code == 200
+        assert "_stage_batch_or_404" in offloaded, action
 
 
 def test_stage_apply_maps_superseded_and_not_applicable_to_409(stage_client, monkeypatch):
