@@ -116,6 +116,37 @@ CREATE TRIGGER trg_sap_stage_batch_mulesoft_guard
     BEFORE INSERT OR UPDATE ON sap_stage_batch
     FOR EACH ROW EXECUTE FUNCTION sap_stage_batch_mulesoft_guard();
 
+-- Row guard for this login: rows may only be added to a batch that is still 'loading' and
+-- 'mulesoft'-sourced (the documented "never a late insert" rule, now enforced). Without it the
+-- login could append rows to a ready / applied batch or to an admin's Excel-upload batch.
+CREATE OR REPLACE FUNCTION sap_stage_row_mulesoft_guard() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF current_user = 'nimbus_mulesoft' THEN
+    IF NOT EXISTS (SELECT 1 FROM sap_stage_batch
+                    WHERE batch_id = NEW.batch_id AND status = 'loading' AND source = 'mulesoft') THEN
+      RAISE EXCEPTION 'nimbus_mulesoft may only add rows to a mulesoft batch that is still loading (batch %)', NEW.batch_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['sap_stage_material_plant', 'sap_stage_planned_order',
+                           'sap_stage_production_version', 'sap_stage_routing_operation']
+  LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS trg_%s_mulesoft_guard ON %I', t, t);
+    EXECUTE format('CREATE TRIGGER trg_%s_mulesoft_guard BEFORE INSERT ON %I '
+                   'FOR EACH ROW EXECUTE FUNCTION sap_stage_row_mulesoft_guard()', t, t);
+  END LOOP;
+END $$;
+
+-- A leaked or runaway login must not be able to exhaust the server's connection slots.
+ALTER ROLE nimbus_mulesoft CONNECTION LIMIT 10;
+
 -- Outbound queue: read ready rows, report sent / error per row.
 GRANT SELECT ON sap_stage_planned_order_out TO nimbus_mulesoft;
 GRANT UPDATE (row_status, sent_at, error_text) ON sap_stage_planned_order_out TO nimbus_mulesoft;

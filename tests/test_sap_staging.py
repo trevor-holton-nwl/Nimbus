@@ -1307,6 +1307,9 @@ def test_mulesoft_role_file_does_not_grant_server_owned_header_columns():
     grant = next(line for line in text.splitlines() if line.startswith("GRANT INSERT (batch_id"))
     assert "received_at" not in grant and "ready_at" not in grant and "created_by" not in grant
     assert "NEW.received_at := now()" in text and "NEW.ready_at := now()" in text   # the trigger owns the clocks
+    assert "status" not in grant                                    # status always starts 'loading' (7.2 must not name it)
+    assert "sap_stage_row_mulesoft_guard" in text and "BEFORE INSERT ON %I" in text   # no late rows / rows into upload batches
+    assert "CONNECTION LIMIT" in text
 
 
 # ===========================================================================
