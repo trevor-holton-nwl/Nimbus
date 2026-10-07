@@ -552,6 +552,8 @@ export interface SetupRunContext {
    *  (mirrors `setup-domain.mts`'s `joinIndexKey` convention). */
   _rankVector: Map<string, number[]>;
   _policyKeyForTask: Map<string, string>;
+  /** T1: per-(effective line, taskId) urgency-sort tuple (see `urgencyKeyFor`). */
+  _urgencyKey: Map<string, UrgencyKey>;
   /** Per-(plant, line) pre-filtered/merged/sorted blackout blocks (ms
    *  timestamps), filled in once per (plant, line) on first use — the
    *  `Calendar._runBlocks` equivalent for this detached evaluator. Keyed by
@@ -634,6 +636,7 @@ export function buildRunContext(
     _notAfter: new Map(),
     _rankVector: new Map(),
     _policyKeyForTask: new Map(),
+    _urgencyKey: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
     _freeIndex: new Map(),
@@ -6216,13 +6219,52 @@ function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
   return null;
 }
 
+/** T1: everything the `urgencyOrder` comparator reads about one order. `task`
+ * is the object the tuple was computed from: an entry is reused only for that
+ * same object (a patched copy with the same id recomputes), so a changed
+ * `start_date` can never be served stale. */
+interface UrgencyKey {
+  task: NimbusTask;
+  deadline: number;
+  policy: string;
+  due: number;
+  start: number;
+  id: string;
+}
+
+function urgencyKeyFor(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, task: NimbusTask,
+): UrgencyKey {
+  const effectiveLine = line || String(task.MACHINE);
+  const ctx = bounds.runContext;
+  // Only cache when notAfterFor would itself memoize per id (ctx present and a
+  // notAfter rule supplied); otherwise recompute exactly as the old path did.
+  const cacheKey = ctx && bounds.notAfter ? effectiveLine + CTX_KEY_SEP + taskId(task) : null;
+  if (cacheKey) {
+    const hit = ctx!._urgencyKey.get(cacheKey);
+    if (hit && hit.task === task) return hit;
+  }
+  const key: UrgencyKey = {
+    task,
+    deadline: notAfterFor(bounds, task)?.getTime() ?? Infinity,
+    policy: policyKeyForSequence(snapshot, bounds.setup.plant, effectiveLine, [task], ctx),
+    due: dueTimestamp(task),
+    start: timestamp(task.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER,
+    id: taskId(task),
+  };
+  if (cacheKey) ctx!._urgencyKey.set(cacheKey, key);
+  return key;
+}
+
 function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
-  return [...tasks].sort((a, b) => {
-    const deadline = (notAfterFor(bounds, a)?.getTime() ?? Infinity) - (notAfterFor(bounds, b)?.getTime() ?? Infinity);
+  const keyed = tasks.map(task => ({ task, key: urgencyKeyFor(snapshot, bounds, line, task) }));
+  keyed.sort((a, b) => {
+    const deadline = a.key.deadline - b.key.deadline;
     if (deadline && !Number.isNaN(deadline)) return deadline;
-    const priority = ordinalCompare(policyKeyForSequence(snapshot, bounds.setup.plant, line || String(a.MACHINE), [a], bounds.runContext), policyKeyForSequence(snapshot, bounds.setup.plant, line || String(b.MACHINE), [b], bounds.runContext));
-    return priority || dueTimestamp(a) - dueTimestamp(b) || (timestamp(a.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) - (timestamp(b.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) || ordinalCompare(taskId(a), taskId(b));
+    const priority = ordinalCompare(a.key.policy, b.key.policy);
+    return priority || a.key.due - b.key.due || a.key.start - b.key.start || ordinalCompare(a.key.id, b.key.id);
   });
+  return keyed.map(entry => entry.task);
 }
 
 interface TaskScope {
