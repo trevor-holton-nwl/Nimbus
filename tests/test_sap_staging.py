@@ -1,0 +1,551 @@
+"""Coverage for backend/integration/sap_staging.py (docs/SAP_STAGING_DESIGN.md, plan step 10).
+
+Two layers, mirroring tests/test_orders_routing_ingest.py:
+
+  * pure-logic tests -- zone conversion, open quantity, the vanish gate, the row builders,
+    the material-plant / planned-order validators, the upload value coercion, and the SQL
+    shape of the supersede / stale-expiry helpers on a recording fake cursor. No database.
+  * `@pytest.mark.pg` end-to-end tests (auto-skipped without a local test Postgres and
+    `NIMBUS_TEST_DB=1`): material-plant apply, the routing-required hold, the 25 % vanish
+    hold + confirmed apply with archive, and poll_once supersede ordering.
+
+The pg tests could not be run where this file was written (no local Postgres); they are
+written against the real schema and must be run before ship.
+"""
+import os
+import sys
+import uuid
+from contextlib import contextmanager
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
+
+import backend.integration.sap_staging as st  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Shared fixtures: a field map shaped like the migration seeds (Appendix C)
+# ---------------------------------------------------------------------------
+_PLANNED_MAP = [
+    ("PLNUM", "production_order", "strip_zeros"), ("MATNR", "material_number", "alpha_strip"),
+    ("PLWRK", "plant", "none"), ("MDV01", "machine", "none"),
+    ("PSTTR", "basic_start_date", "dats"), ("PSTTI", "basic_start_time", "tims"),
+    ("PEDTR", "basic_finish_date", "dats"), ("PEDTI", "basic_finish_time", "tims"),
+    ("GSMNG", "order_quantity", "decimal"), ("ABMNG", "reduced_quantity", "decimal"),
+    ("VERID", "production_version", "none"), ("AUFFX", "firming_indicator", "none"),
+    ("STLAN", "bom_usage", "none"), ("STALT", "bom_alternative", "none"),
+]
+_MATERIAL_MAP = [
+    ("MATNR", "material_id", "alpha_strip"), ("WERKS", "plant", "none"), ("MMSTA", "status_pl", "none"),
+    ("MINLS", "min_lot_size", "decimal"), ("LTINC", "incremental_lot_size", "decimal"),
+    ("ZZ_SUBNET", "subnetwork", "none"),
+]
+
+
+def _fmap(spec, inactive=()):
+    return [{"sap_field": f, "nimbus_column": c, "transform": t, "active": f not in inactive, "field_order": i}
+            for i, (f, c, t) in enumerate(spec)]
+
+
+def _planned_stage(**over):
+    row = {"id": 1, "plnum": "000000123", "matnr": "000000000000012345", "plwrk": "ZZP1", "mdv01": "LINE1",
+           "psttr": "20261008", "pstti": "060000", "pedtr": "20261008", "pedti": "180000",
+           "gsmng": Decimal("100"), "abmng": Decimal("30"), "verid": "", "auffx": "X", "stlan": "1", "stalt": "2",
+           "production_order": "123", "material_id": "12345", "plant": "ZZP1"}
+    row.update(over)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Zone conversion
+# ---------------------------------------------------------------------------
+def test_sap_to_plant_local_converts_system_zone_to_plant_zone():
+    # 15:30 New York == 14:30 Chicago, same day.
+    got = st.sap_to_plant_local("20261008", "153000", "America/Chicago", system_tz="America/New_York")
+    assert got == datetime(2026, 10, 8, 14, 30)
+    # 12:00 UTC == 21:00 Tokyo; ISO date + HH:MM:SS time are accepted too.
+    got = st.sap_to_plant_local("2026-10-08", "12:00:00", "Asia/Tokyo", system_tz="UTC")
+    assert got == datetime(2026, 10, 8, 21, 0)
+
+
+def test_sap_to_plant_local_date_only_and_sentinels_and_unknown_zone():
+    # '000000' / missing time = date-only: midnight, never zone-shifted onto the previous day.
+    assert st.sap_to_plant_local("20261008", "000000", "Asia/Tokyo", system_tz="America/New_York") \
+        == datetime(2026, 10, 8, 0, 0)
+    assert st.sap_to_plant_local("20261008", None, "Asia/Tokyo", system_tz="UTC") == datetime(2026, 10, 8)
+    assert st.sap_to_plant_local("00000000", "120000", "UTC") is None
+    assert st.sap_to_plant_local("", None, "UTC") is None
+    assert st.sap_to_plant_local(None, None, "UTC") is None
+    # Unknown / missing plant zone: no conversion.
+    assert st.sap_to_plant_local("20261008", "120000", None, system_tz="UTC") == datetime(2026, 10, 8, 12)
+    assert st.sap_to_plant_local("20261008", "120000", "Not/AZone", system_tz="UTC") == datetime(2026, 10, 8, 12)
+
+
+@pytest.mark.parametrize("d,t", [("2026-13-45", "120000"), ("20261340", None), ("abc", None),
+                                 ("20261008", "256000"), ("20261008", "12x"), ("20261008", "1:2:3:4")])
+def test_sap_to_plant_local_malformed_raises(d, t):
+    with pytest.raises(ValueError):
+        st.sap_to_plant_local(d, t, "UTC")
+
+
+def test_plant_local_to_sap_round_trips():
+    tz, sys_tz = "America/Chicago", "America/New_York"
+    local = st.sap_to_plant_local("20261008", "233000", tz, system_tz=sys_tz)
+    assert st.plant_local_to_sap(local, tz, system_tz=sys_tz) == (date(2026, 10, 8), time(23, 30))
+    # Crossing midnight: 23:30 New York == 22:30 Chicago, and back.
+    assert local == datetime(2026, 10, 8, 22, 30)
+    # Different zones that cross the date line.
+    local = st.sap_to_plant_local("20261008", "230000", "Asia/Tokyo", system_tz="UTC")
+    assert local == datetime(2026, 10, 9, 8, 0)
+    assert st.plant_local_to_sap(local, "Asia/Tokyo", system_tz="UTC") == (date(2026, 10, 8), time(23, 0))
+    # No zone: unchanged.
+    assert st.plant_local_to_sap(datetime(2026, 1, 2, 3, 4, 5, 999), None, system_tz="UTC") \
+        == (date(2026, 1, 2), time(3, 4, 5))
+
+
+# ---------------------------------------------------------------------------
+# Small pure helpers
+# ---------------------------------------------------------------------------
+def test_open_quantity():
+    assert st.open_quantity(Decimal("100"), Decimal("30")) == Decimal("70")
+    assert st.open_quantity("100.5", "0.5") == Decimal("100")
+    assert st.open_quantity(10, None) == Decimal("10")
+    assert st.open_quantity(5, 5) == Decimal("0")
+    assert st.open_quantity(5, 8) == Decimal("-3")
+    assert st.open_quantity(None, 3) is None
+    with pytest.raises(ValueError):
+        st.open_quantity("x", 1)
+
+
+def test_truncate_subnetwork():
+    assert st.truncate_subnetwork("ABCD") == "ABC"
+    assert st.truncate_subnetwork(" AB ") == "AB"
+    assert st.truncate_subnetwork("") is None
+    assert st.truncate_subnetwork(None) is None
+
+
+def test_vanish_gate_threshold_is_strictly_above_25_percent():
+    assert st.vanish_gate(100, 24) == (False, 0.24)
+    held, pct = st.vanish_gate(100, 26)
+    assert held is True and pct == pytest.approx(0.26)
+    assert st.vanish_gate(100, 25)[0] is False        # exactly 25 % applies
+    assert st.vanish_gate(0, 0) == (False, 0.0)       # nothing live: never held
+    assert st.vanish_gate(0, 5) == (False, 0.0)
+
+
+def test_active_map_honours_active_flag_and_lowercases():
+    m = st.active_map("stage_planned_orders", _fmap(_PLANNED_MAP, inactive=("MDV01",)))
+    assert "mdv01" not in m
+    assert m["psttr"] == ("basic_start_date", "dats")
+    assert m["matnr"] == ("material_number", "alpha_strip")
+
+
+def test_module_constants():
+    assert st.VANISH_HOLD_PCT == 0.25
+    assert st.APPLY_ORDER == ("stage_material_plants", "stage_production_version",
+                              "stage_routing_operation", "stage_planned_orders")
+    assert (st.ARCHIVE_RETENTION_DAYS, st.SENT_RETENTION_DAYS, st.DEAD_BATCH_RETENTION_DAYS) == (30, 30, 7)
+
+
+def test_exception_hierarchy():
+    e = st.BatchSuperseded("newer exists", {"newer_batch_id": "x"})
+    assert isinstance(e, st.BatchNotApplicable)
+    assert e.detail["newer_batch_id"] == "x" and e.detail["message"] == "newer exists"
+
+
+# ---------------------------------------------------------------------------
+# build_order_rows
+# ---------------------------------------------------------------------------
+def test_build_order_rows_composite_dates_quantity_and_casts(monkeypatch):
+    monkeypatch.setattr(st, "SAP_SYSTEM_TZ", "UTC")
+    warnings: list = []
+    rows, problems = st.build_order_rows([_planned_stage()], "America/Chicago", _fmap(_PLANNED_MAP), warnings)
+    assert problems == [] and len(rows) == 1
+    r = rows[0]
+    assert r["production_order"] == "123" and r["material_number"] == "12345" and r["plant"] == "ZZP1"
+    assert r["machine"] == "LINE1"
+    # 06:00 UTC -> 01:00 CDT; finish 18:00 UTC -> 13:00 CDT.
+    assert r["basic_start_date"] == datetime(2026, 10, 8, 1, 0)
+    assert r["basic_finish_date"] == datetime(2026, 10, 8, 13, 0)
+    assert r["sap_basic_finish_date"] == datetime(2026, 10, 8, 13, 0)
+    assert r["order_quantity"] == 70.0
+    assert r["planned_order_initial_quantity"] == 100.0 and r["reduced_quantity"] == 30.0
+    assert r["bom_usage"] == 1 and r["bom_alternative"] == 2
+    assert r["firming_indicator"] == "X"
+    assert r["_zero_open"] is False and r["_stage_row_id"] == 1
+    # The pseudo time columns never reach the upsert row.
+    assert "basic_start_time" not in r and "basic_finish_time" not in r
+
+
+def test_build_order_rows_blank_version_means_material_default_with_empty_baseline():
+    rows, _ = st.build_order_rows([_planned_stage(verid="")], None, _fmap(_PLANNED_MAP))
+    assert rows[0]["production_version"] is None and rows[0]["sap_production_version"] == ""
+    rows, _ = st.build_order_rows([_planned_stage(verid=" 0001 ")], None, _fmap(_PLANNED_MAP))
+    assert rows[0]["production_version"] == "0001" and rows[0]["sap_production_version"] == "0001"
+    # VERID inactive: column "not sent" -- neither key is produced.
+    rows, _ = st.build_order_rows([_planned_stage(verid="0002")], None, _fmap(_PLANNED_MAP, inactive=("VERID",)))
+    assert "sap_production_version" not in rows[0]
+
+
+def test_build_order_rows_zero_open_quantity_flags_needs_planning():
+    rows, _ = st.build_order_rows([_planned_stage(gsmng=Decimal("30"), abmng=Decimal("30")),
+                                   _planned_stage(id=2, plnum="000000124", production_order="124",
+                                                  gsmng=Decimal("30"), abmng=Decimal("40"))],
+                                  None, _fmap(_PLANNED_MAP))
+    assert [r["_zero_open"] for r in rows] == [True, True]
+    assert [r["order_quantity"] for r in rows] == [0.0, 0.0]       # never negative
+    assert st.zero_open_keys(rows) == ["123", "124"]
+
+
+def test_build_order_rows_inactive_map_rows_do_not_flow():
+    rows, _ = st.build_order_rows([_planned_stage()], None,
+                                  _fmap(_PLANNED_MAP, inactive=("MDV01", "GSMNG", "STLAN")))
+    r = rows[0]
+    assert r["machine"] is None
+    assert "planned_order_initial_quantity" not in r and "order_quantity" not in r
+    assert "bom_usage" not in r
+
+
+def test_build_order_rows_unparseable_start_is_dropped_and_reported():
+    rows, problems = st.build_order_rows([_planned_stage(id=7, psttr="00000000")], None, _fmap(_PLANNED_MAP))
+    assert rows == [] and problems == [(7, "invalid_date")]
+
+
+def test_build_order_rows_int_cast_failure_is_a_problem_not_a_crash():
+    rows, problems = st.build_order_rows([_planned_stage(id=9, stlan="x"), _planned_stage(id=10)], None,
+                                         _fmap(_PLANNED_MAP))
+    assert problems == [(9, "invalid_int")]
+    assert [r["_stage_row_id"] for r in rows] == [10]
+
+
+# ---------------------------------------------------------------------------
+# build_material_plant_rows
+# ---------------------------------------------------------------------------
+def test_build_material_plant_rows_int_casts_truncates_and_warns():
+    stage = [{"id": 1, "matnr": "000012345", "werks": "ZZP1", "mmsta": "A1", "minls": Decimal("10.4"),
+              "ltinc": Decimal("5"), "zz_subnet": "ABCD", "material_id": "12345", "plant": "ZZP1"},
+             {"id": 2, "matnr": "777", "werks": "ZZP1", "mmsta": None, "minls": None, "ltinc": None,
+              "zz_subnet": None, "material_id": "777", "plant": "ZZP1"}]
+    warnings: list = []
+    rows = st.build_material_plant_rows(stage, _fmap(_MATERIAL_MAP), warnings)
+    assert rows[0] == {"material_id": "12345", "plant": "ZZP1", "status_pl": "A1", "min_lot_size": 10,
+                       "incremental_lot_size": 5, "subnetwork": "ABC"}
+    # Missing SAP values are dropped (never NULL into a NOT NULL column); keys survive.
+    assert rows[1] == {"material_id": "777", "plant": "ZZP1"}
+    assert warnings == [{"level": "warn", "code": "lot_size_rounded", "count": 1,
+                         "msg": "1 fractional lot size value(s) were rounded to whole numbers."}]
+
+
+def test_build_material_plant_rows_no_warning_for_whole_lots():
+    stage = [{"id": 1, "matnr": "1", "werks": "P", "minls": Decimal("10.000"), "material_id": "1", "plant": "P"}]
+    warnings: list = []
+    rows = st.build_material_plant_rows(stage, _fmap(_MATERIAL_MAP), warnings)
+    assert rows[0]["min_lot_size"] == 10 and warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Pure validators
+# ---------------------------------------------------------------------------
+def _by_id(results):
+    return {r["id"]: r for r in results}
+
+
+def test_validate_material_plant_rows_reasons_and_duplicates():
+    rows = [
+        {"id": 1, "matnr": "000012345", "werks": "ZZP1"},          # valid, resolves to 12345
+        {"id": 2, "matnr": "", "werks": "ZZP1"},                   # missing_key
+        {"id": 3, "matnr": "000000000", "werks": "ZZP1"},          # all-zero material -> missing_key
+        {"id": 4, "matnr": "55", "werks": "OTHER"},                # plant_mismatch
+        {"id": 5, "matnr": "66", "werks": "ZZP1"},                 # unknown_plant (not in known set below)
+        {"id": 6, "matnr": "7" * 19, "werks": "ZZP1"},             # key_too_long
+        {"id": 7, "matnr": "88", "werks": "ZZP1"},                 # duplicate pair ...
+        {"id": 8, "matnr": "0088", "werks": "ZZP1"},               # ... after alpha_strip
+    ]
+    res = _by_id(st.validate_material_plant_rows(rows, "ZZP1", {"ZZP1"}))
+    assert res[1]["status"] == "valid" and res[1]["resolved"] == {"material_id": "12345", "plant": "ZZP1"}
+    assert res[2]["reason"] == "missing_key" and res[3]["reason"] == "missing_key"
+    assert res[4]["reason"] == "plant_mismatch"
+    assert res[6]["reason"] == "key_too_long"
+    assert res[7]["reason"] == res[8]["reason"] == "duplicate_key"        # ALL duplicates rejected
+    res = _by_id(st.validate_material_plant_rows([rows[4]], "ZZP1", {"SOMETHING"}))
+    assert res[5]["reason"] == "unknown_plant"
+
+
+def test_validate_planned_order_rows_reasons():
+    ok = _planned_stage()
+    rows = [
+        {**ok, "id": 1},
+        {**ok, "id": 2, "plnum": "000000000"},                      # all-zero order number -> missing_key
+        {**ok, "id": 3, "plnum": "300", "plwrk": "OTHER"},          # plant_mismatch
+        {**ok, "id": 4, "plnum": "400", "psttr": "20269999"},       # invalid_date
+        {**ok, "id": 5, "plnum": "500", "psttr": "00000000"},       # missing start -> invalid_date
+        {**ok, "id": 6, "plnum": "600", "pstti": "250000"},         # invalid_time
+        {**ok, "id": 7, "plnum": "700", "gsmng": None},             # invalid_number
+        {**ok, "id": 8, "plnum": "800", "abmng": Decimal("-1")},    # invalid_number
+        {**ok, "id": 9, "plnum": "900", "stalt": "x"},              # invalid_int
+        {**ok, "id": 10, "plnum": "1000", "pedtr": "00000000"},     # no finish: fine (hygiene fills it)
+        {**ok, "id": 11, "plnum": "0000001100"},                    # duplicate order+material ...
+        {**ok, "id": 12, "plnum": "1100"},                          # ... after strip_zeros
+    ]
+    res = _by_id(st.validate_planned_order_rows(rows, "ZZP1", {"ZZP1"}))
+    assert res[1]["status"] == "valid"
+    assert res[1]["resolved"] == {"production_order": "123", "material_id": "12345", "plant": "ZZP1"}
+    assert res[2]["reason"] == "missing_key"
+    assert res[3]["reason"] == "plant_mismatch"
+    assert res[4]["reason"] == "invalid_date" and res[5]["reason"] == "invalid_date"
+    assert res[6]["reason"] == "invalid_time"
+    assert res[7]["reason"] == "invalid_number" and res[8]["reason"] == "invalid_number"
+    assert res[9]["reason"] == "invalid_int"
+    assert res[10]["status"] == "valid"
+    assert res[11]["reason"] == res[12]["reason"] == "duplicate_key"
+    # A rejected row still resolves its order number (the vanish guard protects it).
+    assert res[4]["resolved"]["production_order"] == "400"
+    # Unknown header plant -> unknown_plant.
+    only = _by_id(st.validate_planned_order_rows([rows[0]], "ZZP1", set()))
+    assert only[1]["reason"] == "unknown_plant"
+
+
+# ---------------------------------------------------------------------------
+# Upload value coercion
+# ---------------------------------------------------------------------------
+def test_coerce_for_column():
+    assert st._coerce_for_column("12.5", "numeric") == Decimal("12.5")
+    assert st._coerce_for_column("7.0", "integer") == 7
+    assert st._coerce_for_column("", "numeric") is None
+    assert st._coerce_for_column(float("nan"), "text") is None
+    assert st._coerce_for_column(" abc ", "text") == "abc"
+    assert st._coerce_for_column("20261008", "date") == date(2026, 10, 8)
+    assert st._coerce_for_column("X", "boolean") is True and st._coerce_for_column("0", "boolean") is False
+    with pytest.raises(ValueError):
+        st._coerce_for_column("twelve", "numeric")
+    with pytest.raises(ValueError):
+        st._coerce_for_column("2026-99-99", "date")
+
+
+# ---------------------------------------------------------------------------
+# Recording fake cursor: SQL shape of the lifecycle helpers
+# ---------------------------------------------------------------------------
+class _RecCursor:
+    def __init__(self, fetchall_results=()):
+        self.executed = []
+        self._results = list(fetchall_results)
+
+    def execute(self, statement, params=None):
+        self.executed.append((str(getattr(statement, "as_string", lambda _c: statement)(None))
+                              if hasattr(statement, "as_string") else str(statement), params))
+
+    def fetchall(self):
+        return self._results.pop(0) if self._results else []
+
+
+def test_supersede_older_only_touches_older_unapplied_batches_and_their_rows():
+    keep = uuid.uuid4()
+    old = uuid.uuid4()
+    cur = _RecCursor([[(old,)]])
+    ids = st.supersede_older(cur, "stage_material_plants", "ZZP1", keep)
+    assert ids == [str(old)]
+    stmt, params = cur.executed[0]
+    assert "status = 'superseded'" in stmt and "received_at <" in stmt
+    assert params[0] == "stage_material_plants" and params[1] == "ZZP1" and params[2] == str(keep)
+    assert params[3] == ["ready", "validated", "held"]
+    assert len(cur.executed) == 2 and cur.executed[1][1] == ([str(old)],)
+
+
+def test_supersede_older_with_nothing_older_skips_the_row_update():
+    cur = _RecCursor([[]])
+    assert st.supersede_older(cur, "stage_planned_orders", "ZZP1", uuid.uuid4()) == []
+    assert len(cur.executed) == 1
+
+
+def test_expire_stale_loading_uses_the_timeout():
+    cur = _RecCursor([[(uuid.uuid4(),), (uuid.uuid4(),)]])
+    assert st.expire_stale_loading(cur) == 2
+    stmt, params = cur.executed[0]
+    assert "status = 'loading'" in stmt and "make_interval(mins => %s)" in stmt
+    assert params[-1] == st.LOADING_TIMEOUT_MIN
+
+
+def test_write_row_results_sets_status_reason_and_resolved_columns():
+    cur = _RecCursor()
+    results = [{"id": 1, "status": "valid", "reason": None, "resolved": {"material_id": "1", "plant": "P"}},
+               {"id": 2, "status": "rejected", "reason": "missing_key", "resolved": {"material_id": None,
+                                                                                    "plant": "P"}}]
+    st._write_row_results(cur, "sap_stage_material_plant", results, ("material_id", "plant"))
+    assert len(cur.executed) == 1
+    params = cur.executed[0][1]
+    assert params[0] == [1, 2] and params[1] == ["valid", "rejected"] and params[2] == [None, "missing_key"]
+    assert params[3] == ["1", None] and params[4] == ["P", "P"]
+
+
+# ===========================================================================
+# @pytest.mark.pg -- end-to-end against a real (local, opted-in) Postgres
+# ===========================================================================
+PLANT = "ZZSTG1"
+SUB = "ZZSTGSUB"
+
+
+@contextmanager
+def _conn(pg):
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        yield conn, cur
+
+
+def _cleanup(pg):
+    with _conn(pg) as (conn, cur):
+        cur.execute("DELETE FROM sap_stage_vanished_order WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM sap_stage_batch WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM orders WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM routing_operation WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM production_version WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM materials WHERE material_id LIKE 'ZZSTG%%' OR material_id IN ('12345', '777')")
+        cur.execute("DELETE FROM plants WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM subnetworks WHERE code = %s", (SUB,))
+        conn.commit()
+
+
+@pytest.fixture
+def stg_plant(pg):
+    """One throwaway plant (routing switch / horizon set per test via `_set_plant`). Cleans up."""
+    _cleanup(pg)
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (SUB, SUB))
+        cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')", (SUB, PLANT))
+        conn.commit()
+    yield PLANT
+    _cleanup(pg)
+
+
+def _set_plant(pg, *, routing: bool, horizon_days):
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET routing_runtime_enabled = %s, visibility_horizon_days = %s WHERE plant = %s",
+                    (routing, horizon_days, PLANT))
+        conn.commit()
+
+
+def _make_batch(pg, object_key, table, rows: list[dict], *, status="ready", age_minutes=0, expected=None):
+    """Header + rows + (ready) the way Mulesoft would write them."""
+    bid = uuid.uuid4()
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO sap_stage_batch (batch_id, object_key, plant, source, status, row_count_expected,"
+                    " received_at, ready_at) VALUES (%s, %s, %s, 'mulesoft', %s, %s,"
+                    " now() - make_interval(mins => %s), now() - make_interval(mins => %s))",
+                    (bid, object_key, PLANT, status, len(rows) if expected is None else expected,
+                     age_minutes, age_minutes))
+        for r in rows:
+            cols = list(r)
+            cur.execute(f"INSERT INTO {table} (batch_id, {', '.join(cols)}) VALUES (%s, {', '.join(['%s'] * len(cols))})",
+                        [bid, *r.values()])
+        conn.commit()
+    return bid
+
+
+def _status(pg, bid):
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT status FROM sap_stage_batch WHERE batch_id = %s", (bid,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+@pytest.mark.pg
+def test_material_plant_apply_creates_bare_material_and_deletes_or_flags_absent_rows(pg, stg_plant):
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO materials (material_id) VALUES ('ZZSTGDEL'), ('ZZSTGKEEP')")
+        cur.execute("INSERT INTO material_plants (material_id, plant) VALUES ('ZZSTGDEL', %s), ('ZZSTGKEEP', %s)",
+                    (PLANT, PLANT))
+        # ZZSTGKEEP is referenced by an order -> flagged, not deleted; ZZSTGDEL is unreferenced -> deleted.
+        cur.execute("INSERT INTO orders (id, production_order, material_number, plant) VALUES ('zzstg-o1','PO1',"
+                    "'ZZSTGKEEP', %s)", (PLANT,))
+        conn.commit()
+    bid = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant",
+                      [{"matnr": "000012345", "werks": PLANT, "mmsta": "A1", "minls": 10, "ltinc": 5,
+                        "zz_subnet": "ABCD"}])
+    res = st.validate_batch(bid)
+    assert res["status"] == "validated" and res["counts"]["valid"] == 1
+    out = st.apply_batch(bid, actor="pytest")
+    assert out["status"] == "applied"
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT material_description FROM materials WHERE material_id = '12345'")
+        assert cur.fetchone() == ("",)                                   # bare row, blank description
+        cur.execute("SELECT subnetwork, min_lot_size FROM material_plants WHERE material_id = '12345' AND plant = %s",
+                    (PLANT,))
+        assert cur.fetchone() == ("ABC", 10)
+        cur.execute("SELECT count(*) FROM material_plants WHERE material_id = 'ZZSTGDEL' AND plant = %s", (PLANT,))
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT sap_missing_since IS NOT NULL FROM material_plants WHERE material_id = 'ZZSTGKEEP'"
+                    " AND plant = %s", (PLANT,))
+        assert cur.fetchone()[0] is True
+    # Retention: a second applied batch removes the first.
+    bid2 = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant",
+                       [{"matnr": "12345", "werks": PLANT}])
+    st.validate_batch(bid2)
+    st.apply_batch(bid2, actor="pytest")
+    assert _status(pg, bid) is None and _status(pg, bid2) == "applied"
+
+
+@pytest.mark.pg
+def test_planned_order_batch_is_held_when_routing_is_off(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=30)
+    start = (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%d")
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
+                      [{"plnum": "000000001", "matnr": "777", "plwrk": PLANT, "psttr": start, "gsmng": 10}])
+    res = st.validate_batch(bid)
+    assert res["status"] == "held" and "routing_required" in res["held_reasons"]
+    assert any(w.get("code") == "routing_required" for w in res["warnings"])
+    with pytest.raises(st.BatchNotApplicable):
+        st.apply_batch(bid, actor="pytest", confirm_held=True)       # routing_required can never be confirmed
+    assert _status(pg, bid) == "held"
+
+
+@pytest.mark.pg
+def test_planned_order_apply_holds_at_over_25_percent_then_confirm_archives_and_deletes(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO routing_operation (plant, material_id, task_list_type, routing_group, group_counter,"
+                    " sequence_no, activity) VALUES (%s, '777', 'N', 'G1', '01', '000010', '0010')", (PLANT,))
+        for i in range(1, 5):                                          # four live in-horizon orders
+            cur.execute("INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
+                        " basic_finish_date) VALUES (%s, %s, '777', %s, %s, %s)",
+                        (f"zzstg-live{i}", f"PO{i}", PLANT, soon, soon + timedelta(hours=4)))
+        conn.commit()
+    # The snapshot keeps only PO1: 3 of 4 (75 %) would vanish -> held.
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
+                      [{"plnum": "PO1", "matnr": "777", "plwrk": PLANT, "psttr": soon.strftime("%Y%m%d"),
+                        "pstti": "060000", "pedtr": soon.strftime("%Y%m%d"), "pedti": "100000", "gsmng": 10}])
+    res = st.validate_batch(bid)
+    assert res["status"] == "held" and "vanish_threshold" in res["held_reasons"]
+    assert res["counts"]["in_horizon_live"] == 4 and res["counts"]["vanish_candidates"] == 3
+    dels = st.held_deletions(bid)
+    assert sorted(d["production_order"] for d in dels) == ["PO2", "PO3", "PO4"]
+    with pytest.raises(st.BatchNotApplicable):
+        st.apply_batch(bid, actor="pytest")                             # held needs confirmation
+    out = st.apply_batch(bid, actor="pytest", confirm_held=True)
+    assert out["status"] == "applied" and out["counts"]["deleted"] == 3 and out["counts"]["archived"] == 3
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT production_order FROM orders WHERE plant = %s ORDER BY production_order", (PLANT,))
+        assert [r[0] for r in cur.fetchall()] == ["PO1"]
+    archived = st.list_archived(PLANT)
+    assert sorted(a["production_order"] for a in archived) == ["PO2", "PO3", "PO4"]
+    restored = st.restore_archived(archived[0]["id"], actor="pytest")
+    assert restored["restored"] is True
+
+
+@pytest.mark.pg
+def test_poll_once_supersedes_older_ready_batches(pg, stg_plant):
+    row = {"matnr": "12345", "werks": PLANT}
+    old = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=30)
+    new = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=1)
+    incomplete = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=0,
+                             expected=5)                               # still loading rows: left alone
+    out = st.poll_once(actor="pytest")
+    assert out["errors"] == []
+    assert _status(pg, old) == "superseded"
+    assert _status(pg, new) in ("validated", "applied")               # manual mode unless configured auto
+    assert _status(pg, incomplete) == "ready"
+    assert any(p.get("batch_id") == str(new) for p in out["processed"])
