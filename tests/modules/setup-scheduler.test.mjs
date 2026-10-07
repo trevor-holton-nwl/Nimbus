@@ -5335,3 +5335,38 @@ test('setup availability without a calendar context falls back to the gap since 
   assert.equal(obs.intervals.length, 1);
   assert.equal(obs.intervals[0].availableMinutes, 45);
 });
+
+test('F1: exact search is gated on distinct-ordering count, not just state count', () => {
+  const build = (counts) => {
+    const colors = ['RED', 'BLUE', 'YELLOW', 'BLACK'];
+    const tasks = [];
+    counts.forEach((n, ci) => {
+      for (let i = 0; i < n; i++) {
+        tasks.push(scheduledTask(`f1-${colors[ci]}-${i}`, 1, colors[ci], `2026-08-03T${17 - tasks.length % 8}:00`));
+      }
+    });
+    return setupSnapshot(tasks);
+  };
+  const run = (counts, overrides = {}) => SetupScheduler.evaluateDueDateFirst(
+    build(counts),
+    dueDateBounds(setupTruth(), { exactSearchThreshold: 8, iterationCap: 100000, convergenceWindow: 1000, ...overrides }),
+    'due-date',
+  );
+
+  // 12 orders in 4 states = 369,600 orderings: over the leaf cap, so the
+  // bounded heuristic runs even though 4 states is under the threshold of 8.
+  const many = run([3, 3, 3, 3]);
+  assert.equal(many.diagnostics.quality, 'heuristic', '12 orders in 4 states take the heuristic path');
+  assert.ok((many.diagnostics.seedCount ?? 0) > 0, 'the heuristic path reports its seed set');
+
+  // 5 orders in 3 states = 30 orderings: exact.
+  const few = run([2, 2, 1]);
+  assert.equal(few.diagnostics.quality, 'exact', '5 orders in 3 states take the exact path');
+  assert.equal(few.diagnostics.termination, 'completed');
+
+  // multisetLeafCount boundary: 4 singleton states = 4! = 24 orderings.
+  assert.equal(run([1, 1, 1, 1], { exactSearchLeafCap: 24 }).diagnostics.quality, 'exact', 'cap equal to the leaf count stays exact');
+  assert.equal(run([1, 1, 1, 1], { exactSearchLeafCap: 23 }).diagnostics.quality, 'heuristic', 'cap below the leaf count goes heuristic');
+  assert.equal(run([2, 2, 1], { exactSearchLeafCap: 1 }).diagnostics.quality, 'heuristic', 'a tiny cap forces heuristic');
+  assert.throws(() => run([1, 1], { exactSearchLeafCap: 0 }), TypeError, 'a non-positive leaf cap is rejected');
+});

@@ -429,6 +429,10 @@ export interface DueDateFirstBounds {
   boundaryTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
+  /** Optional ceiling on the number of distinct orderings an exact search may
+   * enumerate (default `EXACT_SEARCH_LEAF_CAP`). Engine leaves it unset; tests
+   * that pin exact traversal pass `Infinity`. */
+  exactSearchLeafCap?: number;
   iterationCap: number;
   clock: () => number;
   deadline: number;
@@ -1883,6 +1887,38 @@ function orderedByProductiveRuntime(tasks: ReadonlyArray<NimbusTask>): NimbusTas
  * work visible and bounded. Exact fragments still enumerate their declared
  * search space; these limits apply only after a fragment is large enough to
  * use the greedy path. */
+/** Exact search is only chosen when a fragment has at most this many distinct
+ * orderings (multiset permutations). State count alone is not a bound: 12
+ * orders in 4 states is 369,600 leaves and drains the whole plant budget. */
+const EXACT_SEARCH_LEAF_CAP = 500;
+
+/** N! / (k1! * k2! * ...) built as a product of binomials, so every
+ * intermediate is an exact integer. Returns `cap + 1` as soon as the running
+ * value exceeds `cap`, which keeps it from overflowing on large fragments. */
+function multisetLeafCount(groupSizes: ReadonlyArray<number>, cap: number): number {
+  let total = 1;
+  let placed = 0;
+  for (const size of groupSizes) {
+    for (let i = 1; i <= size; i++) {
+      placed++;
+      // total * placed / i is an exact integer at every step (C(placed, i)
+      // accumulated one factor at a time).
+      total = (total * placed) / i;
+      if (total > cap) return cap + 1;
+    }
+  }
+  return total;
+}
+
+function exactSearchEligible(
+  groupSizes: ReadonlyArray<number>,
+  bounds: Readonly<DueDateFirstBounds>,
+): boolean {
+  const cap = bounds.exactSearchLeafCap ?? EXACT_SEARCH_LEAF_CAP;
+  return groupSizes.length <= bounds.exactSearchThreshold
+    && multisetLeafCount(groupSizes, cap) <= cap;
+}
+
 const HEURISTIC_INSERTION_LIMIT = 16;
 const HEURISTIC_SWAP_LIMIT = 16;
 
@@ -3420,7 +3456,8 @@ function searchFragment(
     // evaluated. Reserve `completed` for an exhaustive exact traversal; a
     // bounded heuristic that found no winner has converged on its explored
     // search space.
-    const heuristic = mode === 'spt' || groupsByState.size > bounds.exactSearchThreshold;
+    const heuristic = mode === 'spt'
+      || !exactSearchEligible([...groupsByState.values()].map((g) => g.tasks.length), bounds);
     return {
       candidateCount: 0,
       method: 'due-date-first-exact',
@@ -3556,7 +3593,7 @@ function searchFragment(
   // can no longer be true (A1 admits uncovered transitions instead of
   // rejecting the candidate), so a single exact/greedy run replaces the
   // former retry-with-demotion loop.
-  const run: SearchRun = groups.length <= bounds.exactSearchThreshold
+  const run: SearchRun = exactSearchEligible(groups.map((g) => g.tasks.length), bounds)
     ? exactSearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode)
     : greedySearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode);
   return {
@@ -5240,6 +5277,9 @@ function requireDueDateBounds(bounds: Readonly<DueDateFirstBounds>): void {
   if (!bounds.setup || !bounds.setup.plant) throw new TypeError('Due-date-first evaluation requires setup truth.');
   if (!Number.isInteger(bounds.exactSearchThreshold) || bounds.exactSearchThreshold < 0) {
     throw new TypeError('Due-date-first evaluation requires an exact-search threshold.');
+  }
+  if (bounds.exactSearchLeafCap !== undefined && !(bounds.exactSearchLeafCap > 0)) {
+    throw new TypeError('Due-date-first evaluation requires a positive exact-search leaf cap.');
   }
   if (!Number.isInteger(bounds.iterationCap) || bounds.iterationCap <= 0) {
     throw new TypeError('Due-date-first evaluation requires a positive iteration cap.');
