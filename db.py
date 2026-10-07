@@ -1851,6 +1851,65 @@ def preview_purge_orders(plant, start, end, machines=None) -> dict:
             "planner_overridden": int(planner_overridden)}
 
 
+def _purge_order_ids_on_cursor(cur, plant: str, ids: list[str], *, action: str,
+                               user_email: str | None, extra_details: dict | None = None) -> dict:
+    """Shared tail of every order purge. `ids` were already deleted by the
+    caller (DELETE ... RETURNING id) on `cur`'s transaction: retire the
+    distribution shares that pointed at them, delete headers left with no live
+    share, and write the admin_audit row. The caller owns commit/rollback.
+    """
+    deleted = len(ids)
+    shares_purged = 0
+    headers_deleted = 0
+    if ids:
+        # Scope by `plant =` so this at least narrows via
+        # idx_ods_machine(plant, machine) -- child_id itself has no index.
+        cur.execute(
+            """
+            UPDATE order_distribution_share
+               SET purged_at = now(), child_id = NULL
+             WHERE plant = %(plant)s AND child_id = ANY(%(ids)s)
+             RETURNING production_order, material_number
+            """,
+            {"plant": plant, "ids": ids},
+        )
+        purged_rows = cur.fetchall()
+        shares_purged = len(purged_rows)
+        if purged_rows:
+            prods = [row[0] for row in purged_rows]
+            mats = [row[1] for row in purged_rows]
+            cur.execute(
+                """
+                DELETE FROM order_distribution od
+                 WHERE plant = %(plant)s
+                   AND (production_order, material_number) IN (
+                       SELECT unnest(%(prods)s::text[]), unnest(%(mats)s::text[])
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM order_distribution_share s
+                        WHERE s.plant = od.plant
+                          AND s.production_order = od.production_order
+                          AND s.material_number = od.material_number
+                          AND s.weight > 0 AND s.purged_at IS NULL
+                   )
+                 RETURNING production_order, material_number
+                """,
+                {"plant": plant, "prods": prods, "mats": mats},
+            )
+            headers_deleted = len(cur.fetchall())
+
+    audit_details = {"plant": plant, "deleted": deleted, "order_ids": ids[:200],
+                     "order_id_count": len(ids), "truncated": len(ids) > 200,
+                     "shares_purged": shares_purged, "headers_deleted": headers_deleted,
+                     **(extra_details or {})}
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email)"
+        " VALUES ('orders', %s, %s, %s)",
+        (action, Jsonb(audit_details), user_email),
+    )
+    return {"deleted": deleted, "shares_purged": shares_purged, "headers_deleted": headers_deleted}
+
+
 def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -> dict:
     """DELETE orders in one plant whose effective end date (scheduled_end,
     falling back to basic_finish_date) falls in [start, end]. Plant-scoped
@@ -1886,68 +1945,136 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
         try:
             cur.execute(sql, params)
             ids = [row[0] for row in cur.fetchall()]
-            deleted = len(ids)
-
-            shares_purged = 0
-            headers_deleted = 0
-            if ids:
-                # Scope by `plant =` so this at least narrows via
-                # idx_ods_machine(plant, machine) -- child_id itself has no
-                # index.
-                cur.execute(
-                    """
-                    UPDATE order_distribution_share
-                       SET purged_at = now(), child_id = NULL
-                     WHERE plant = %(plant)s AND child_id = ANY(%(ids)s)
-                     RETURNING production_order, material_number
-                    """,
-                    {"plant": plant, "ids": ids},
-                )
-                purged_rows = cur.fetchall()
-                shares_purged = len(purged_rows)
-                if purged_rows:
-                    prods = [row[0] for row in purged_rows]
-                    mats = [row[1] for row in purged_rows]
-                    cur.execute(
-                        """
-                        DELETE FROM order_distribution od
-                         WHERE plant = %(plant)s
-                           AND (production_order, material_number) IN (
-                               SELECT unnest(%(prods)s::text[]), unnest(%(mats)s::text[])
-                           )
-                           AND NOT EXISTS (
-                               SELECT 1 FROM order_distribution_share s
-                                WHERE s.plant = od.plant
-                                  AND s.production_order = od.production_order
-                                  AND s.material_number = od.material_number
-                                  AND s.weight > 0 AND s.purged_at IS NULL
-                           )
-                         RETURNING production_order, material_number
-                        """,
-                        {"plant": plant, "prods": prods, "mats": mats},
-                    )
-                    headers_deleted = len(cur.fetchall())
-
-            audit_details = {"plant": plant, "machines": list(machines or []),
+            core = _purge_order_ids_on_cursor(
+                cur, plant, ids, action="purge_by_date_range", user_email=user_email,
+                extra_details={
+                    "machines": list(machines or []),
                     "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
                     "end": end.isoformat() if hasattr(end, "isoformat") else str(end),
-                    "deleted": deleted, "order_ids": ids[:200],
-                    "order_id_count": len(ids), "truncated": len(ids) > 200,
-                    "shares_purged": shares_purged, "headers_deleted": headers_deleted}
-            cur.execute(
-                "INSERT INTO admin_audit (table_name, action, details, user_email)"
-                " VALUES ('orders', 'purge_by_date_range', %s, %s)",
-                (Jsonb(audit_details), user_email),
+                },
             )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-    result = {"status": "ok", "deleted": deleted, "plant": plant, "machines": list(machines or [])}
-    if shares_purged:
-        result["shares_purged"] = shares_purged
-        result["headers_deleted"] = headers_deleted
+    result = {"status": "ok", "deleted": core["deleted"], "plant": plant, "machines": list(machines or [])}
+    if core["shares_purged"]:
+        result["shares_purged"] = core["shares_purged"]
+        result["headers_deleted"] = core["headers_deleted"]
     return result
+
+
+def purge_orders_by_ids(plant: str, ids: list[str], *, user_email: str | None = None,
+                        reason: str = "sap_snapshot_vanish", archive_batch_id: str | None = None,
+                        extra_details: dict | None = None, conn=None) -> dict:
+    """DELETE the given orders in one plant through the shared purge core
+    (share retirement, orphan-header cleanup, admin_audit row with
+    action=`reason`). Rows are locked FOR UPDATE first. When `archive_batch_id`
+    is given, each order row, its schedule segments and its distribution shares
+    are copied into `sap_stage_vanished_order` before the delete (30-day
+    archive, restorable via `restore_vanished_order`).
+
+    Pass `conn` to run inside the caller's transaction (nothing is committed
+    here); otherwise a pool connection is opened, committed and closed.
+    """
+    ids = sorted({str(i) for i in (ids or [])})
+    empty = {"status": "ok", "deleted": 0, "archived": 0, "shares_purged": 0, "headers_deleted": 0}
+    if not ids:
+        return empty
+
+    def _run(c):
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM orders WHERE plant = %s AND id = ANY(%s) ORDER BY id FOR UPDATE",
+                (plant, ids),
+            )
+            locked = [r[0] for r in cur.fetchall()]
+            if not locked:
+                return empty
+            archived = 0
+            if archive_batch_id is not None:
+                cur.execute("SELECT row_to_json(o) FROM orders o WHERE o.id = ANY(%s) ORDER BY o.id", (locked,))
+                rows = {r[0]["id"]: r[0] for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT order_id, row_to_json(s) FROM order_schedule_segments s"
+                    " WHERE order_id = ANY(%s)", (locked,))
+                segs: dict = {}
+                for oid, js in cur.fetchall():
+                    segs.setdefault(oid, []).append(js)
+                cur.execute(
+                    "SELECT child_id, row_to_json(d) FROM order_distribution_share d"
+                    " WHERE child_id = ANY(%s)", (locked,))
+                shs: dict = {}
+                for cid, js in cur.fetchall():
+                    shs.setdefault(cid, []).append(js)
+                for oid in locked:
+                    cur.execute(
+                        "INSERT INTO sap_stage_vanished_order"
+                        " (batch_id, plant, order_id, order_row, segments, shares, deleted_by)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (archive_batch_id, plant, oid, Jsonb(rows.get(oid, {})),
+                         Jsonb(segs.get(oid, [])), Jsonb(shs.get(oid, [])), user_email),
+                    )
+                    archived += 1
+            cur.execute("DELETE FROM orders WHERE plant = %s AND id = ANY(%s) RETURNING id", (plant, locked))
+            deleted_ids = [r[0] for r in cur.fetchall()]
+            details = {"archive_batch_id": archive_batch_id, **(extra_details or {})}
+            core = _purge_order_ids_on_cursor(
+                cur, plant, deleted_ids, action=reason, user_email=user_email, extra_details=details)
+            return {"status": "ok", "deleted": core["deleted"], "archived": archived,
+                    "shares_purged": core["shares_purged"], "headers_deleted": core["headers_deleted"]}
+
+    if conn is not None:
+        return _run(conn)
+    with _pool.connection() as c:
+        try:
+            out = _run(c)
+            c.commit()
+            return out
+        except Exception:
+            c.rollback()
+            raise
+
+
+def restore_vanished_order(archive_id: int, *, user_email: str | None = None) -> dict:
+    """Restore one archived (vanish-deleted) order and its schedule segments.
+
+    Raises KeyError when the archive row is missing or already restored.
+    Distribution shares are NOT restored: a re-upload of the parent revives
+    purged shares (D02, see `purge_orders_by_date`). An id that already exists
+    in `orders` is left alone (`restored` is False).
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute(
+                "SELECT plant, order_id, order_row, segments FROM sap_stage_vanished_order"
+                " WHERE id = %s AND restored_at IS NULL FOR UPDATE", (archive_id,))
+            row = cur.fetchone()
+            if not row:
+                raise KeyError(f"archive row {archive_id} not found or already restored")
+            plant, order_id, order_row, segments = row
+            cur.execute(
+                "INSERT INTO orders SELECT * FROM json_populate_record(NULL::orders, %s::json)"
+                " ON CONFLICT (id) DO NOTHING", (Jsonb(order_row),))
+            restored = cur.rowcount > 0
+            if restored and segments:
+                cur.execute(
+                    "INSERT INTO order_schedule_segments"
+                    " SELECT * FROM json_populate_recordset(NULL::order_schedule_segments, %s::json)"
+                    " ON CONFLICT DO NOTHING", (Jsonb(segments),))
+            cur.execute(
+                "UPDATE sap_stage_vanished_order SET restored_at = now(), restored_by = %s WHERE id = %s",
+                (user_email, archive_id))
+            cur.execute(
+                "INSERT INTO admin_audit (table_name, action, details, user_email)"
+                " VALUES ('orders', 'sap_vanish_restore', %s, %s)",
+                (Jsonb({"plant": plant, "order_id": order_id, "archive_id": archive_id,
+                        "restored": restored}), user_email))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return {"status": "ok", "order_id": order_id, "restored": restored}
 
 
 def clear_upload_audit() -> dict:

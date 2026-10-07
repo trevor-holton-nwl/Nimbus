@@ -347,6 +347,152 @@ class TestPurgeOrdersByDateRealDb:
 
 
 @pytest.mark.pg
+class TestPurgeOrdersByIdsRealDb:
+    ORDER, MATERIAL, PLANT, MACHINE = (
+        "ZZTEST_PIDS_ORD", "ZZTEST_PIDS_MAT", "ZZTEST_PIDS_PLANT", "ZZTEST_PIDS_LINE",
+    )
+
+    def _cleanup(self, db_):
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM order_distribution WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM sap_stage_vanished_order WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM admin_audit WHERE table_name = 'orders' AND details->>'plant' = %s",
+                        (self.PLANT,))
+            conn.commit()
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        db_ = pg
+        self._cleanup(db_)
+        now = dt.datetime(2026, 9, 10, 8, 0)
+        self.oid = db_.make_id(self.ORDER, self.MATERIAL)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, scheduled_start, scheduled_end) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.oid, self.ORDER, self.MATERIAL, self.MACHINE, self.PLANT,
+                 now, now + dt.timedelta(hours=4), now, now + dt.timedelta(hours=4)),
+            )
+            cur.execute(
+                "INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                " VALUES (%s, 1, %s, %s)", (self.oid, now, now + dt.timedelta(hours=4)))
+            cur.execute(
+                "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter)"
+                " VALUES (%s,%s,%s,'WC')", (self.PLANT, self.ORDER, self.MATERIAL))
+            cur.execute(
+                "INSERT INTO order_distribution_share (plant, production_order, material_number, machine,"
+                " letter, weight, child_id) VALUES (%s,%s,%s,%s,'A',1,%s)",
+                (self.PLANT, self.ORDER, self.MATERIAL, self.MACHINE, self.oid))
+            conn.commit()
+        yield
+        self._cleanup(db_)
+
+    def test_purge_by_ids_retires_shares_and_audits(self, pg):
+        db_ = pg
+        res = db_.purge_orders_by_ids(self.PLANT, [self.oid], user_email="t@example.com")
+        assert res == {"status": "ok", "deleted": 1, "archived": 0, "shares_purged": 1, "headers_deleted": 1}
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self.oid,))
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT COUNT(*) FROM order_distribution WHERE plant = %s", (self.PLANT,))
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT details FROM admin_audit WHERE action = 'sap_snapshot_vanish'"
+                        " AND details->>'plant' = %s", (self.PLANT,))
+            details = cur.fetchone()[0]
+        assert details["deleted"] == 1 and details["order_ids"] == [self.oid]
+        assert details["shares_purged"] == 1 and details["headers_deleted"] == 1
+
+    def test_purge_by_ids_archives_then_restore_roundtrip(self, pg):
+        db_ = pg
+        batch = "00000000-0000-0000-0000-00000000a001"
+        res = db_.purge_orders_by_ids(self.PLANT, [self.oid], user_email="t@example.com",
+                                      archive_batch_id=batch)
+        assert res["deleted"] == 1 and res["archived"] == 1
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id, order_row, segments, shares FROM sap_stage_vanished_order"
+                        " WHERE plant = %s", (self.PLANT,))
+            archive_id, order_row, segments, shares = cur.fetchone()
+        assert order_row["id"] == self.oid
+        assert len(segments) == 1 and len(shares) == 1
+        out = db_.restore_vanished_order(archive_id, user_email="t@example.com")
+        assert out == {"status": "ok", "order_id": self.oid, "restored": True}
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self.oid,))
+            assert cur.fetchone()[0] == 1
+            cur.execute("SELECT COUNT(*) FROM order_schedule_segments WHERE order_id = %s", (self.oid,))
+            assert cur.fetchone()[0] == 1
+        with pytest.raises(KeyError):
+            db_.restore_vanished_order(archive_id)
+
+
+class _AuditCursor:
+    """Fake cursor for the non-DB purge audit-shape test."""
+
+    def __init__(self):
+        self.executed = []
+        self._rows = []
+
+    def execute(self, stmt, params=None):
+        stmt = str(stmt)
+        self.executed.append((stmt, params))
+        if stmt.startswith("DELETE FROM orders"):
+            self._rows = [("O1",), ("O2",)]
+        elif "UPDATE order_distribution_share" in stmt:
+            self._rows = [("PO", "M")]
+        elif "DELETE FROM order_distribution od" in stmt:
+            self._rows = [("PO", "M")]
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return self._rows
+
+
+class _AuditConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def cursor(self):
+        import contextlib
+        return contextlib.nullcontext(self._cur)
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_purge_by_date_audit_details_keys_unchanged(monkeypatch):
+    import db as db_
+    cur = _AuditCursor()
+    conn = _AuditConn(cur)
+
+    class _P:
+        def connection(self):
+            return conn
+
+    monkeypatch.setattr(db_, "_pool", _P())
+    res = db_.purge_orders_by_date("P1", dt.date(2026, 9, 1), dt.date(2026, 9, 2), ["M1"], user_email="u@x")
+    assert res == {"status": "ok", "deleted": 2, "plant": "P1", "machines": ["M1"],
+                   "shares_purged": 1, "headers_deleted": 1}
+    audit = next((s, p) for s, p in cur.executed if "INSERT INTO admin_audit" in s)
+    assert "'orders', %s" in audit[0]
+    action, details, email = audit[1][0], audit[1][1].obj, audit[1][2]
+    assert action == "purge_by_date_range" and email == "u@x"
+    assert set(details) == {"plant", "machines", "start", "end", "deleted", "order_ids",
+                            "order_id_count", "truncated", "shares_purged", "headers_deleted"}
+
+
+@pytest.mark.pg
 class TestSapTruthReupload:
     """SAP-is-truth re-upload rules: planner machine kept inside SAP's work
     center, locked reset only when SAP changed the order, unchanged rows
