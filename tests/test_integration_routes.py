@@ -663,6 +663,16 @@ def test_stage_write_routes_return_service_results(stage_client):
     assert stage_client.get("/sap/staging/send/PL1/rows", params={"status": "bogus"}).status_code == 400
 
 
+def test_stage_restore_order_exists_is_409(stage_client, monkeypatch):
+    import backend.integration.sap_staging as ss
+
+    def _exists(*_a, **_k):
+        raise ValueError("order_exists")
+    monkeypatch.setattr(ss, "restore_archived", _exists)
+    r = stage_client.post("/sap/staging/archive/7/restore")
+    assert r.status_code == 409 and r.json()["detail"] == {"error": "order_exists"}
+
+
 def test_stage_apply_maps_superseded_and_not_applicable_to_409(stage_client, monkeypatch):
     import backend.integration.sap_staging as ss
 

@@ -13,6 +13,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -1109,7 +1110,7 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
     if row["end"] is not None and not row["queued"]:
         pars.append(("scheduled_end", "timestamp", "{v}"))
         vals.append(row["end"])
-    # D20 (refined): `orders.sap_sent_*` are deliberately NOT cleared here. They are
+    # D20 (refined): the `order_sap_sent` side-table values are deliberately NOT cleared here. They are
     # overwritten only by the next Send to SAP; clearing them on a planner edit let
     # SAP's echo of the OLD send wipe the planner's newer edit.
     if row["has_runtime"]:
@@ -2053,10 +2054,11 @@ def _restore_columns(cur, table: str, json_rows: list) -> list[str]:
 def restore_vanished_order(archive_id: int, *, user_email: str | None = None) -> dict:
     """Restore one archived (vanish-deleted) order and its schedule segments.
 
-    Raises KeyError when the archive row is missing or already restored.
+    Raises KeyError when the archive row is missing or already restored, and
+    ValueError("order_exists") when the order id is already live again (nothing is
+    written and the archive row stays restorable).
     Distribution shares are NOT restored: a re-upload of the parent revives
-    purged shares (D02, see `purge_orders_by_date`). An id that already exists
-    in `orders` is left alone (`restored` is False).
+    purged shares (D02, see `purge_orders_by_date`).
     """
     with _pool.connection() as conn, conn.cursor() as cur:
         try:
@@ -2076,7 +2078,11 @@ def restore_vanished_order(archive_id: int, *, user_email: str | None = None) ->
                     c=sql.SQL(", ").join(sql.Identifier(x) for x in order_cols)),
                 (Jsonb(order_row),))
             restored = cur.rowcount > 0
-            if restored and segments:
+            if not restored:
+                # A4: the id is live again; burning the archive row would make the
+                # archived schedule unrestorable while the live order has none.
+                raise ValueError("order_exists")
+            if segments:
                 seg_cols = _restore_columns(cur, "order_schedule_segments",
                                             [s for s in segments if isinstance(s, dict)])
                 if seg_cols:
@@ -2608,6 +2614,10 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     Returns a subset
     of {"dates", "workcenter", "quantity", "production_version"}.
 
+    Quantity (A3): judged on the TOTAL (`planned_order_initial_quantity`) when the
+    incoming row carries it, else on `order_quantity`; a partial conversion that only
+    shrinks the open quantity is not a change.
+
     Echo suppression (D20): when `before["sap_sent_finish"]` is set and the
     incoming finish equals it at minute precision, "dates" is not reported; the
     version is likewise not a change when `sap_sent_version` is unset or equals
@@ -2632,7 +2642,7 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
                   and in_s == sched_s and in_f == sched_e)
 
     # D20 echo suppression: NIMBUS remembers the finish/version it last sent to
-    # SAP (orders.sap_sent_*). SAP echoing that finish back is not an SAP change
+    # SAP (side table order_sap_sent, joined into the before-image). SAP echoing that finish back is not an SAP change
     # even when SAP back-scheduled the start; the new SAP baselines are still
     # written by the upsert. Only a finish, version or work center that differs
     # from what was sent re-plans the order.
@@ -2663,8 +2673,17 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
 
     def _q(v):
         return None if v is None else Decimal(str(v)).quantize(Decimal("0.001"))
-    base_q = _q(before.get("order_quantity"))
-    in_q = _q(incoming.get("order_quantity"))
+    # A3: when the incoming row carries the TOTAL (SAP planned orders: gsmng as
+    # planned_order_initial_quantity), judge the change on the total -- a partial
+    # conversion shrinks only the OPEN quantity and must not unschedule the order.
+    # Rows without a total (Excel) keep the order_quantity comparison.
+    in_total = _q(incoming.get("planned_order_initial_quantity"))
+    if in_total is not None:
+        base_q = _q(before.get("planned_order_initial_quantity"))
+        in_q = in_total
+    else:
+        base_q = _q(before.get("order_quantity"))
+        in_q = _q(incoming.get("order_quantity"))
     if base_q is not None and in_q is not None and in_q != base_q:
         changed.add("quantity")
 
@@ -2899,6 +2918,28 @@ _UPSERT_SQL = f"""
 # That's the whole point — user drag/drop edits survive a re-upload (unless the
 # locked reset in upsert_orders decides SAP changed the order).
 
+# A1: columns only the Excel upload carries. A SAP planned-order row never has
+# them (they arrive NULL), so the SAP-sourced statement keeps the stored value
+# (COALESCE in the SET) and only counts a NON-NULL differing incoming value as
+# "SAP changed it" (no blanking, no xmin churn on every Excel-loaded order).
+# The Excel statement (`_UPSERT_SQL`) keeps its exact semantics.
+_EXCEL_ONLY_COLS = ("material_description", "form_size", "order_category", "order_type",
+                    "labor_hours", "machine_hours", "no_of_fte")
+
+
+def _sap_source_sql(text: str) -> str:
+    for c in _EXCEL_ONLY_COLS:
+        text = text.replace(
+            f"orders.{c} IS DISTINCT FROM EXCLUDED.{c}",
+            f"(EXCLUDED.{c} IS NOT NULL AND orders.{c} IS DISTINCT FROM EXCLUDED.{c})")
+        text = re.sub(rf"(?m)^(\s+){c}(\s*)= EXCLUDED\.{c},$",
+                      rf"\g<1>{c}\g<2>= COALESCE(EXCLUDED.{c}, orders.{c}),", text)
+    return text
+
+
+_SAP_DIFFERS_SQL_SAP = _sap_source_sql(_SAP_DIFFERS_SQL)
+_UPSERT_SQL_SAP = _sap_source_sql(_UPSERT_SQL)
+
 
 # Build the per-row tuple in the exact _UPSERT_SQL column order. The SQL VALUES
 # clause expects: id, production_order, material_number, material_description,
@@ -3122,6 +3163,7 @@ _CHUNK_READ_COLS = (
     "sap_production_version", "production_version", "scheduled_start", "scheduled_end",
     "basic_start_date", "basic_finish_date", "run_time", "planning_status",
     "machine_wc", "first_start", "last_end", "tz", "sap_sent_finish", "sap_sent_version",
+    "planned_order_initial_quantity",
 )
 _CHUNK_READ_SQL = f"""
     SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
@@ -3132,8 +3174,10 @@ _CHUNK_READ_SQL = f"""
              WHERE m.plant = o.plant AND m.machine = o.machine) AS machine_wc,
            seg.first_start, seg.last_end,
            (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz,
-           o.sap_sent_finish, o.sap_sent_version
+           ss.sent_finish AS sap_sent_finish, ss.sent_version AS sap_sent_version,
+           o.planned_order_initial_quantity
       FROM orders o
+      LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
      WHERE o.id IN (
              -- the chunk's own rows (primary-key lookup) ...
@@ -3293,6 +3337,12 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
 
     The scheduled_start/scheduled_end/notes non-overwrite lives in _UPSERT_SQL
     (unchanged) — user drag/drop edits survive a re-ingest.
+
+    `source="sap"` runs `_UPSERT_SQL_SAP`, a source-scoped variant: the Excel-only
+    columns (`_EXCEL_ONLY_COLS`: description, form size, order category/type,
+    labor/machine hours, FTE) are kept when the SAP row does not carry them
+    (COALESCE in the SET; only a non-NULL differing value counts as a SAP change).
+    The Excel path (`_UPSERT_SQL`) keeps its overwrite semantics unchanged.
 
     `plan_fn`/`apply_fn` are the optional Order Distribution ingest seam
     (aggregate_to_detail.md §5) — both default to None so every caller that
@@ -3535,7 +3585,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 cur.execute(_CHUNK_READ_SQL, {"ids": chunk_ids})
                 before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
                 # (b) upsert (rows SAP did not change return nothing)
-                cur.executemany(_UPSERT_SQL, chunk, returning=True)
+                cur.executemany(_UPSERT_SQL_SAP if source == "sap" else _UPSERT_SQL,
+                                chunk, returning=True)
                 written_existing: list[str] = []
                 while True:
                     rec = cur.fetchone()

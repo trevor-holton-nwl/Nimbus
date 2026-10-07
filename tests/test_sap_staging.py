@@ -792,8 +792,14 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         ins(cur, "zzstg-nd", "ND", with_dates=False)
         cur.execute("UPDATE orders SET manual_firmed = TRUE WHERE id = 'zzstg-c1'")
         conn.commit()
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
+        xmin_initial = dict(cur.fetchall())
     try:
         res = st.queue_send_to_sap(PLANT, actor="pytest")
+        with _conn(pg) as (_c, cur):                                      # A2: the FIRST send writes no orders row
+            cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
+            assert dict(cur.fetchall()) == xmin_initial
         assert res["queued"] == 2 and res["skipped_no_end"] == 2 and res["firmed"] == 1
         assert res["rolled_up_groups"] == 1 and res["send_batch_id"]
         rows = {r["plnum"]: r for r in st.outbound_rows(PLANT)}
@@ -805,8 +811,9 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         assert st.outbound_status(PLANT)["ready"] == 2
 
         with _conn(pg) as (_c, cur):
-            cur.execute("SELECT id, sap_sent_finish, sap_sent_version, sap_sent_firm, sap_sent_at IS NOT NULL"
-                        " FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
+            cur.execute("SELECT id, ss.sent_finish, ss.sent_version, ss.sent_firm, ss.sent_at IS NOT NULL"
+                        " FROM orders o LEFT JOIN order_sap_sent ss ON ss.order_id = o.id"
+                        " WHERE o.plant = %s ORDER BY id", (PLANT,))
             sent = {r[0]: r[1:] for r in cur.fetchall()}
         assert sent["zzstg-c1"] == (child_end, "V1", True, True)         # children remember the rolled-up end
         assert sent["zzstg-c2"] == (child_end, "V1", True, True)

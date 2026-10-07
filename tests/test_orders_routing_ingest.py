@@ -48,6 +48,8 @@ from contextlib import contextmanager
 from decimal import Decimal
 
 
+import re
+
 import db
 
 
@@ -510,6 +512,32 @@ class Test_sap_changed_fields:
         assert self._run(before, self._incoming(order_quantity=100.0)) == set()
         before = self._before(order_quantity=Decimal("100.000"))
         assert self._run(before, self._incoming(order_quantity="100.0")) == set()
+
+    def test_partial_conversion_open_shrinks_total_unchanged_not_changed(self):
+        """A3: SAP total unchanged, open quantity smaller (partial conversion) is not a change."""
+        before = self._before(order_quantity=100, planned_order_initial_quantity=100)
+        inc = self._incoming(order_quantity=60, planned_order_initial_quantity=100)
+        assert self._run(before, inc) == set()
+
+    def test_total_changed_is_quantity_change_even_if_open_same(self):
+        before = self._before(order_quantity=100, planned_order_initial_quantity=100)
+        inc = self._incoming(order_quantity=100, planned_order_initial_quantity=130)
+        assert self._run(before, inc) == {"quantity"}
+
+    def test_quantity_without_total_falls_back_to_order_quantity(self):
+        before = self._before(order_quantity=100, planned_order_initial_quantity=100)
+        assert self._run(before, self._incoming(order_quantity=60)) == {"quantity"}
+
+    def test_sap_upsert_sql_is_source_scoped_for_excel_only_columns(self):
+        """A1: the SAP statement keeps stored Excel-only columns; the Excel statement is unchanged."""
+        for c in db._EXCEL_ONLY_COLS:
+            assert re.search(rf"\n\s+{c}\s*= COALESCE\(EXCLUDED\.{c}, orders\.{c}\),", db._UPSERT_SQL_SAP), c
+            assert re.search(rf"\n\s+{c}\s*= EXCLUDED\.{c},", db._UPSERT_SQL), c
+            assert f"(EXCLUDED.{c} IS NOT NULL AND orders.{c} IS DISTINCT FROM EXCLUDED.{c})" in db._SAP_DIFFERS_SQL_SAP
+            assert f"orders.{c} IS DISTINCT FROM EXCLUDED.{c}" in db._SAP_DIFFERS_SQL
+            assert f"EXCLUDED.{c} IS NOT NULL AND" not in db._SAP_DIFFERS_SQL
+            assert f"COALESCE(EXCLUDED.{c}" not in db._UPSERT_SQL
+        assert "(EXCLUDED.material_description IS NOT NULL" in db._UPSERT_SQL_SAP
 
     def test_quantity_none_safe(self):
         before = self._before(order_quantity=None)

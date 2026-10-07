@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration: SAP staging columns (apply mode, missing-since markers, sent echo)
+-- Migration: SAP staging columns (apply mode, missing-since markers)
 -- Date: 2026-10-08  |  Design of record: docs/SAP_STAGING_DESIGN.md
 -- ============================================================================
 -- Additive ALTERs; trips the deploy runner's -AllowDestructive filter -- verified additive.
@@ -20,8 +20,3 @@ END $$;
 
 ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS sap_missing_since TIMESTAMPTZ;
 ALTER TABLE production_version ADD COLUMN IF NOT EXISTS sap_missing_since TIMESTAMPTZ;
-
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_finish TIMESTAMP;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_version TEXT;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_firm BOOLEAN;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_at TIMESTAMPTZ;

@@ -827,6 +827,10 @@ async def sap_stage_restore(archive_id: int, request: Request,
         result = await run_in_threadpool(sap_staging.restore_archived, archive_id, actor=actor)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e.args[0]) if e.args else "Archived order not found") from e
+    except ValueError as e:
+        if str(e) == "order_exists":
+            raise HTTPException(status_code=409, detail={"error": "order_exists"}) from e
+        raise
     _log_event("info", "sap_staging", "Archived order restored", archive_id=archive_id, plant=plant, actor=actor)
     return result
 

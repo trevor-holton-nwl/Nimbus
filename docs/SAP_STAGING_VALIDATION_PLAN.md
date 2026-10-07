@@ -113,7 +113,7 @@ Script a fake Mulesoft in SQL (`scripts/fake_mulesoft.py`, throwaway, not shippe
 | S4 | Production versions, then routing operations, then planned orders for a routing-on plant | Orders scheduled with routing-derived run times; none at 1.0 h default |
 | S5 | Planned orders for a routing-off plant | `held`, `routing_required`; enabling routing then Validate → `validated` |
 | S6 | Planned-order snapshot with 30 % of orders missing | `held`; confirm modal lists exactly those orders; Confirm → archived + deleted + shares retired; Restore one → back on the Gantt after reload |
-| S7 | Send to SAP for the plant; fake Mulesoft marks half `sent`, half `error` | Tiles correct; error CSV correct; `sap_sent_*` set on every queued order |
+| S7 | Send to SAP for the plant; fake Mulesoft marks half `sent`, half `error` | Tiles correct; error CSV correct; `order_sap_sent` row present for every sent order |
 | S8 | Next planned-order snapshot echoing the sent finishes with back-scheduled starts | **No** order loses its slot; baselines updated |
 | S9 | Same, but one order's finish differs by 2 hours | Only that order resets; siblings of a distributed parent reset together |
 | S10 | Auto mode on; snapshot arrives while a planner has an unsaved drag | Planner's save shows the concurrent-edit notice; server state wins; nothing crashes |
@@ -191,7 +191,7 @@ Measure (local DB, app running):
 - Validate time and apply time per object for the big plant; the vanish candidate query plan (`EXPLAIN ANALYZE`) — it must use the plant index, not scan `orders`.
 - Poll tick duration with 50 ready batches; thread-pool occupancy (does a 10-minute apply starve `/upload` or `/tasks`?).
 - `GET /sap/staging/batches` with 5,000 batches in history (retention should keep this small; confirm).
-- Outbound queue for 10,000 orders: time, and the `UPDATE orders SET sap_sent_*` row count (must equal changed orders only).
+- Outbound queue for 10,000 orders: time, and the `order_sap_sent` upsert row count (must equal changed orders only) and that no `orders` xmin moved.
 - Interface tab render with 50 batches and a 5,000-row deletion list in the confirm modal (capped at 200 rows displayed; confirm the cap).
 
 **Pass bar:** apply of 10,000 orders under 2 minutes; no query without an index on `plant`; the UI stays responsive.

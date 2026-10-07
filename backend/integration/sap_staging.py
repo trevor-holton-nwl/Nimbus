@@ -1846,10 +1846,11 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
     scheduled order of the plant is queued (D9); distribution children roll up to their parent
     order with the latest child end (D17); the end is converted plant-local -> SAP system zone
     (D34); the firm flag is add-only (D10). NIMBUS also remembers what it sent on each member order
-    (`orders.sap_sent_*`, D20) so SAP's echo of that finish is not read as an SAP change. Only member
+    (side table `order_sap_sent`, D20) so SAP's echo of that finish is not read as an SAP change. Only member
     orders that were actually sent (they had an effective end) are written, and only when their remembered
-    finish / version / firm value differs from the new one: an unchanged order is NOT rewritten, so its xmin
-    (the optimistic-concurrency `base_version`) is untouched and a planner's unsaved edit survives the click.
+    finish / version / firm value differs from the new one. The table is separate from `orders`, so no
+    `orders` row is ever written by a Send: xmin (the optimistic-concurrency `base_version`) is untouched
+    and a planner's unsaved edit survives the click.
     Everything -- retire, insert, remember, audit -- is one transaction.
     Returns {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
     plant = (plant or "").strip()
@@ -1875,14 +1876,21 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                          g["auffx"], actor, g["nimbus_order_id"]))
                     sent_vals = (g["end"].replace(microsecond=0), g["verid"], g["auffx"] == "X")
                     if g["sent_ids"]:
-                        # M4: only rewrite an order whose remembered values actually change (an unchanged
-                        # row keeps its xmin, so a planner's unsaved edit is not discarded by the next save).
+                        # A2: the remembered values live in the side table order_sap_sent, never on
+                        # `orders`, so remembering a send cannot bump an order's xmin (the
+                        # optimistic-concurrency base_version) and discard a planner's unsaved edit.
+                        # A row is rewritten only when its remembered values actually change.
                         cur.execute(
-                            "UPDATE orders SET sap_sent_finish = %s::timestamp, sap_sent_version = %s::text,"
-                            " sap_sent_firm = %s::boolean, sap_sent_at = now() WHERE id = ANY(%s)"
-                            " AND (sap_sent_finish, sap_sent_version, sap_sent_firm)"
-                            " IS DISTINCT FROM (%s::timestamp, %s::text, %s::boolean)",
-                            (*sent_vals, g["sent_ids"], *sent_vals))
+                            "INSERT INTO order_sap_sent AS s (order_id, plant, sent_finish, sent_version,"
+                            " sent_firm, sent_at)"
+                            " SELECT oid, %s, %s::timestamp, %s::text, %s::boolean, now()"
+                            "   FROM unnest(%s::text[]) AS oid"
+                            " ON CONFLICT (order_id) DO UPDATE SET plant = EXCLUDED.plant,"
+                            " sent_finish = EXCLUDED.sent_finish, sent_version = EXCLUDED.sent_version,"
+                            " sent_firm = EXCLUDED.sent_firm, sent_at = now()"
+                            " WHERE (s.sent_finish, s.sent_version, s.sent_firm)"
+                            " IS DISTINCT FROM (EXCLUDED.sent_finish, EXCLUDED.sent_version, EXCLUDED.sent_firm)",
+                            (plant, *sent_vals, list(g["sent_ids"])))
                     firmed += g["auffx"] == "X"
                     rolled += bool(g["rolled_up"])
                 cur.execute(

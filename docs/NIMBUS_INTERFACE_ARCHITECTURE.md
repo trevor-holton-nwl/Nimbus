@@ -590,7 +590,7 @@ UPDATE sap_stage_planned_order_out SET row_status = 'error', sent_at = now(), er
 COMMIT;
 ```
 
-Mulesoft may update only `row_status`, `sent_at` and `error_text` and never deletes; NIMBUS purges `sent` rows (and rows it retired as `requeued`) after 30 days. If Mulesoft cannot write per-row status back, the Outbound tiles stay at `ready`; that capability is a go-live prerequisite (design D31). A later click retires any still-`ready` rows first (`error`, `error_text = 'requeued'`). NIMBUS also remembers what it sent on each order (`orders.sap_sent_*`) so SAP's echo of that finish is not misread as an SAP change (design D20).
+Mulesoft may update only `row_status`, `sent_at` and `error_text` and never deletes; NIMBUS purges `sent` rows (and rows it retired as `requeued`) after 30 days. If Mulesoft cannot write per-row status back, the Outbound tiles stay at `ready`; that capability is a go-live prerequisite (design D31). A later click retires any still-`ready` rows first (`error`, `error_text = 'requeued'`). NIMBUS also remembers what it sent on each order (side table `order_sap_sent`; no `orders` row is written) so SAP's echo of that finish is not misread as an SAP change (design D20).
 
 ### 7.8 The `nimbus_mulesoft` role
 

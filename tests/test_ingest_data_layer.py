@@ -426,6 +426,28 @@ class TestPurgeOrdersByIdsRealDb:
         with pytest.raises(KeyError):
             db_.restore_vanished_order(archive_id)
 
+    def test_restore_with_live_id_collision_keeps_archive_restorable(self, pg):
+        """A4: the id is live again -> ValueError('order_exists'), archive row not burned, no audit."""
+        db_ = pg
+        batch = "00000000-0000-0000-0000-00000000a002"
+        db_.purge_orders_by_ids(self.PLANT, [self.oid], user_email="t@example.com", archive_batch_id=batch)
+        now = dt.datetime(2026, 9, 11, 8, 0)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM sap_stage_vanished_order WHERE plant = %s", (self.PLANT,))
+            archive_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date)"
+                " VALUES (%s,%s,%s,%s,%s,%s)", (self.oid, self.ORDER, self.MATERIAL, self.MACHINE, self.PLANT, now))
+            conn.commit()
+        with pytest.raises(ValueError, match="order_exists"):
+            db_.restore_vanished_order(archive_id, user_email="t@example.com")
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT restored_at FROM sap_stage_vanished_order WHERE id = %s", (archive_id,))
+            assert cur.fetchone()[0] is None
+            cur.execute("SELECT COUNT(*) FROM admin_audit WHERE action = 'sap_vanish_restore'"
+                        " AND details->>'archive_id' = %s", (str(archive_id),))
+            assert cur.fetchone()[0] == 0
+
 
 class _AuditCursor:
     """Fake cursor for the non-DB purge audit-shape test."""
@@ -1009,6 +1031,28 @@ class TestSapTruthReupload:
             self._sql("DELETE FROM machine WHERE plant = %s", (plant2,))
             self._sql("DELETE FROM sap_workcenter WHERE plant = %s", (plant2,))
             self._sql("DELETE FROM plants WHERE plant = %s", (plant2,))
+
+    def test_sap_apply_keeps_excel_only_columns_and_identical_reapply_keeps_xmin(self):
+        """A1: a SAP row never carries description / labor / FTE; they must survive a SAP apply,
+        and an identical re-apply must write nothing (xmin unchanged)."""
+        def row_in(qty):
+            return {"production_order": self.ORDER, "material_number": self.MATERIAL, "machine": self.M1,
+                    "plant": self.PLANT, "basic_start_date": self.base,
+                    "basic_finish_date": self.base + dt.timedelta(days=1),
+                    "order_quantity": qty, "planned_order_initial_quantity": qty, "run_time": 4.0}
+        seed = row_in(100)
+        seed.update(material_description="Widget", labor_hours=7.5, no_of_fte=3)
+        self.pg.upsert_orders([seed], source="excel", filename="zztest_st_1.xlsx")
+        res = self.pg.upsert_orders([row_in(150)], source="sap")
+        assert res["updated"] == 1
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT material_description, labor_hours, no_of_fte, order_quantity FROM orders WHERE id=%s",
+                        (self._oid(),))
+            desc, labor, fte, qty = cur.fetchone()
+        assert desc == "Widget" and float(labor) == 7.5 and float(fte) == 3 and float(qty) == 150
+        before = self._row()
+        res = self.pg.upsert_orders([row_in(150)], source="sap")
+        assert res["unchanged"] == 1 and self._row()["version"] == before["version"]
 
     def test_unparseable_incoming_date_is_counted_in_a_warning(self):
         def row_in(finish):

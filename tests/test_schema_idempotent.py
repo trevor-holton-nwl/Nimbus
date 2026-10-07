@@ -618,22 +618,20 @@ SAP_STAGE_TABLES = (
     "sap_stage_routing_operation",
     "sap_stage_planned_order_out",
     "sap_stage_vanished_order",
+    "order_sap_sent",
 )
 
 SAP_STAGE_COLUMN_STATEMENTS = (
     "ALTER TABLE sap_sync_config ADD COLUMN IF NOT EXISTS apply_mode TEXT NOT NULL DEFAULT 'manual';",
     "ALTER TABLE material_plants ADD COLUMN IF NOT EXISTS sap_missing_since TIMESTAMPTZ;",
     "ALTER TABLE production_version ADD COLUMN IF NOT EXISTS sap_missing_since TIMESTAMPTZ;",
-    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_finish TIMESTAMP;",
-    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_version TEXT;",
-    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_firm BOOLEAN;",
-    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_sent_at TIMESTAMPTZ;",
 )
 
 
 def test_sap_staging_tables_in_schema_and_migration():
-    """SAP staging: the seven sap_stage_* tables and seven additive columns must
-    exist in both schema.sql and the dated migrations deploys actually apply."""
+    """SAP staging: the seven sap_stage_* tables, the order_sap_sent side table (D20, kept
+    off `orders` so a Send never bumps xmin) and the three additive columns must exist in
+    both schema.sql and the dated migrations deploys actually apply."""
     tables_path = os.path.join(ROOT, "migrations", "2026-10-08-sap-staging-tables.sql")
     columns_path = os.path.join(ROOT, "migrations", "2026-10-08-sap-staging-columns.sql")
     with open(tables_path, encoding="utf-8") as f:
@@ -648,3 +646,6 @@ def test_sap_staging_tables_in_schema_and_migration():
     for stmt in SAP_STAGE_COLUMN_STATEMENTS:
         assert stmt in schema_text, stmt
         assert stmt in columns_text, stmt
+    # The remembered-send values are NOT orders columns any more.
+    assert "orders ADD COLUMN IF NOT EXISTS sap_sent_" not in schema_text
+    assert "orders ADD COLUMN IF NOT EXISTS sap_sent_" not in columns_text

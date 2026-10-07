@@ -204,6 +204,19 @@ CREATE TABLE IF NOT EXISTS sap_stage_vanished_order (
 );
 CREATE INDEX IF NOT EXISTS idx_sap_stage_vanished_order_plant_deleted ON sap_stage_vanished_order (plant, deleted_at DESC);
 
+-- What NIMBUS last sent to SAP per order (D20 echo suppression). A side table, NOT
+-- columns on orders: remembering a send must never write an orders row (xmin is the
+-- planners' optimistic-concurrency base_version).
+CREATE TABLE IF NOT EXISTS order_sap_sent (
+    order_id     TEXT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+    plant        TEXT NOT NULL,
+    sent_finish  TIMESTAMP,
+    sent_version TEXT,
+    sent_firm    BOOLEAN,
+    sent_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_order_sap_sent_plant ON order_sap_sent (plant);
+
 -- Seed one disabled config row per inbound staging object
 INSERT INTO sap_sync_config (object_key, transport) VALUES
     ('stage_material_plants',    'file_drop'),
