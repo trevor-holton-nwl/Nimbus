@@ -733,6 +733,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.sap_stage_warn_sap_changed_running': 'SAP hat {{count}} derzeit laufende(n) Auftrag/Aufträge geändert; Slot und Fixierung blieben erhalten. Prüfen Sie sie gegen SAP.',
   'ui.sap_stage_warn_unparseable_dates': '{{count}} Datumswert(e) konnten nicht gelesen werden und wurden als nicht gesendet behandelt.',
   'ui.sap_stage_warn_routing_running_kept': '{{count}} laufende(r) Auftrag/Aufträge behielten Laufzeit, Slot und Fixierung, weil der Arbeitsplan sie während der Ausführung nicht neu berechnen kann.',
+  'ui.sap_stage_warn_sap_system_tz_invalid': 'Die Einstellung für die SAP-Zeitzone (NIMBUS_SAP_SYSTEM_TZ) ist kein gültiger Zonenname, daher werden SAP-Datums- und Zeitwerte nicht umgerechnet. Planaufträge und Senden an SAP werden abgelehnt, bis ein Administrator dies korrigiert.',
   'ui.sap_stage_delete_notice': 'Die hier aufgeführten Aufträge werden beim Übernehmen aus dem Plan gelöscht, auch wenn sie gerade laufen. Gelöschte Aufträge können 30 Tage lang aus dem Archiv wiederhergestellt werden.',
   'ui.sap_stage_delete_running_count': '{{count}} davon laufen gerade.',
   'ui.sap_stage_col_running': 'Läuft',

@@ -737,6 +737,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.sap_stage_warn_sap_changed_running': 'SAP cambió {{count}} orden(es) que se están ejecutando; se conservaron su franja y su firmeza. Revíselas frente a SAP.',
   'ui.sap_stage_warn_unparseable_dates': '{{count}} valor(es) de fecha no se pudieron leer y se trataron como no enviados.',
   'ui.sap_stage_warn_routing_running_kept': '{{count}} orden(es) en ejecución conservaron su tiempo de ejecución, franja y firmeza porque la ruta no puede recalcularlas mientras se ejecutan.',
+  'ui.sap_stage_warn_sap_system_tz_invalid': 'El ajuste de zona horaria de SAP (NIMBUS_SAP_SYSTEM_TZ) no es un nombre de zona válido, por lo que las fechas y horas de SAP no se convierten. Las órdenes planificadas y el envío a SAP se rechazan hasta que un administrador lo corrija.',
   'ui.sap_stage_delete_notice': 'Las órdenes listadas se eliminan del programa al aplicar, aunque se estén ejecutando ahora mismo. Las órdenes eliminadas se pueden restaurar desde el Archivo durante 30 días.',
   'ui.sap_stage_delete_running_count': '{{count}} de ellas se están ejecutando ahora.',
   'ui.sap_stage_col_running': 'En ejecución',

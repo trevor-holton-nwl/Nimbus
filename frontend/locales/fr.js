@@ -733,6 +733,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.sap_stage_warn_sap_changed_running': 'SAP a modifié {{count}} commande(s) en cours d\'exécution ; leur créneau et leur fermeté ont été conservés. Vérifiez-les par rapport à SAP.',
   'ui.sap_stage_warn_unparseable_dates': '{{count}} valeur(s) de date n\'ont pas pu être lues et ont été traitées comme non envoyées.',
   'ui.sap_stage_warn_routing_running_kept': '{{count}} commande(s) en cours ont conservé leur durée, leur créneau et leur fermeté car la gamme ne peut pas les recalculer pendant l\'exécution.',
+  'ui.sap_stage_warn_sap_system_tz_invalid': 'Le paramètre de fuseau horaire SAP (NIMBUS_SAP_SYSTEM_TZ) n\'est pas un nom de fuseau valide ; les dates et heures SAP ne sont donc pas converties. Les ordres planifiés et l\'envoi vers SAP sont refusés tant qu\'un administrateur ne l\'a pas corrigé.',
   'ui.sap_stage_delete_notice': 'Les commandes listées sont supprimées du planning à l\'application, même si elles sont en cours d\'exécution. Les commandes supprimées peuvent être restaurées depuis l\'Archive pendant 30 jours.',
   'ui.sap_stage_delete_running_count': '{{count}} d\'entre elles sont en cours d\'exécution.',
   'ui.sap_stage_col_running': 'En cours',

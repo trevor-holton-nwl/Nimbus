@@ -733,6 +733,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.sap_stage_warn_sap_changed_running': 'O SAP alterou {{count}} ordem(ns) em execução; o horário e a firmeza foram mantidos. Revise-as em relação ao SAP.',
   'ui.sap_stage_warn_unparseable_dates': '{{count}} valor(es) de data não puderam ser lidos e foram tratados como não enviados.',
   'ui.sap_stage_warn_routing_running_kept': '{{count}} ordem(ns) em execução mantiveram tempo de execução, horário e firmeza porque o roteiro não consegue recalculá-las durante a execução.',
+  'ui.sap_stage_warn_sap_system_tz_invalid': 'A configuração de fuso horário do SAP (NIMBUS_SAP_SYSTEM_TZ) não é um nome de fuso válido, portanto as datas e horas do SAP não são convertidas. Ordens planejadas e o envio ao SAP são recusados até que um administrador corrija isso.',
   'ui.sap_stage_delete_notice': 'As ordens listadas são excluídas da programação ao aplicar, mesmo que estejam em execução agora. As ordens excluídas podem ser restauradas do Arquivo por 30 dias.',
   'ui.sap_stage_delete_running_count': '{{count}} delas estão em execução agora.',
   'ui.sap_stage_col_running': 'Em execução',

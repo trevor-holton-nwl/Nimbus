@@ -282,7 +282,7 @@ const STAGE_WARN_CODES = [
   'lot_size_rounded', 'stale_loading', 'unknown_columns', 'rows_not_staged', 'discarded', 'unknown_object_key',
   'unknown_plant', 'vanish_not_reviewed', 'revalidate_required', 'apply_in_progress', 'not_applicable',
   'superseded', 'order_exists', 'sap_changed', 'unfirmed', 'sap_changed_running', 'unparseable_dates',
-  'routing_running_kept',
+  'routing_running_kept', 'sap_system_tz_invalid',
 ];
 /** Every row-level `reject_reason` the staging validators emit (ui.sap_stage_reject_<code>). */
 const STAGE_REJECT_CODES = [

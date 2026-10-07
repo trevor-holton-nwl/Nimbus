@@ -1700,6 +1700,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.sap_stage_warn_sap_changed_running': 'SAP changed {{count}} order(s) that are running now; their slot and firm were kept. Review them against SAP.',
   'ui.sap_stage_warn_unparseable_dates': '{{count}} date value(s) could not be read and were treated as not sent.',
   'ui.sap_stage_warn_routing_running_kept': '{{count}} running order(s) kept their run time, slot and firm because routing cannot recalculate them while running.',
+  'ui.sap_stage_warn_sap_system_tz_invalid': 'The SAP time zone setting (NIMBUS_SAP_SYSTEM_TZ) is not a valid zone name, so SAP dates and times are not converted. Planned orders and Send to SAP are refused until an administrator fixes it.',
   'ui.sap_stage_delete_notice': 'Orders listed here are deleted from the schedule when you apply, even if they are running right now. Deleted orders can be restored from the Archive for 30 days.',
   'ui.sap_stage_delete_running_count': '{{count}} of them are running now.',
   'ui.sap_stage_col_running': 'Running',

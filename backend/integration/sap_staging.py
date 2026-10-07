@@ -60,6 +60,8 @@ def env_int(name: str, default: int, minimum: int) -> int:
     except ValueError:
         log.warning("%s=%r is not an integer; using %s", name, raw, default)
         return default
+    if value < minimum:
+        log.warning("%s=%r is below the minimum; using %s", name, raw, minimum)
     return max(minimum, value)
 
 
@@ -142,6 +144,19 @@ def _zone(name: str | None):
         return ZoneInfo(str(name))
     except (ZoneInfoNotFoundError, ValueError, OSError):
         return None
+
+
+def sap_system_tz_invalid() -> bool:
+    """True when `NIMBUS_SAP_SYSTEM_TZ` does not name a usable IANA zone (unknown or blank). Conversion then
+    silently does nothing, which would shift every SAP date by the real zone's offset, so validation warns
+    on every batch (`sap_system_tz_invalid`) and planned-order apply / Send to SAP refuse until it is fixed."""
+    return _zone(SAP_SYSTEM_TZ) is None
+
+
+_SAP_SYSTEM_TZ_MSG = ("NIMBUS_SAP_SYSTEM_TZ is not a valid time zone name, so SAP dates and times cannot be "
+                      "converted; planned orders and Send to SAP are refused until it is fixed.")
+if sap_system_tz_invalid():
+    log.warning("%s (NIMBUS_SAP_SYSTEM_TZ=%r)", _SAP_SYSTEM_TZ_MSG, SAP_SYSTEM_TZ)
 
 
 def _parse_sap_date(text) -> date | None:
@@ -501,6 +516,8 @@ def validate_planned_order_rows(rows: list[dict], header_plant: str, known_plant
             reason = "plant_mismatch"
         elif pl not in known_plants:
             reason = "unknown_plant"
+        elif len(mat) > _MATERIAL_ID_MAX or len(pl) > _PLANT_MAX:
+            reason = "key_too_long"         # `orders.material_number` is TEXT, but no master row can ever match it
         if reason is None:
             try:
                 if _parse_sap_date(r.get("psttr")) is None:
@@ -1167,6 +1184,8 @@ def _validate(conn, bid) -> dict:
         counts = {"total": total, "valid": valid, "rejected": total - valid, "by_reason": by_reason}
         warnings: list[dict] = []
         held: list[str] = []
+        if sap_system_tz_invalid():
+            warnings.append({"level": "error", "code": "sap_system_tz_invalid", "msg": _SAP_SYSTEM_TZ_MSG})
 
         if object_key == "stage_planned_orders":
             sent = {r["resolved"]["production_order"] for r in results if r["resolved"].get("production_order")}
@@ -1295,6 +1314,9 @@ def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
         # A confirmation only counts when the batch really was held at validation.
         confirmed = bool(counts0.get("confirmed_held") or (confirm_held and (status == "held" or counts0.get("held"))))
         if object_key == "stage_planned_orders":
+            if sap_system_tz_invalid():
+                # A wrong zone would shift every order's dates; refuse before anything is written.
+                raise BatchNotApplicable(_SAP_SYSTEM_TZ_MSG, code="sap_system_tz_invalid")
             sent = _sent_order_numbers(cur, spec["stage_table"], bid)
             info, _w, held_codes, _ve = _planned_order_gates(cur, plant, sent)
             if counts0.get("horizon_end_present") is False and info.get("horizon_end_present"):
@@ -2210,6 +2232,8 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
     plant = (plant or "").strip()
     if not plant:
         raise ValueError("plant is required")
+    if sap_system_tz_invalid():
+        raise ValueError(_SAP_SYSTEM_TZ_MSG)
     send_batch_id = str(uuid.uuid4())
     with _pool.connection() as conn:
         try:

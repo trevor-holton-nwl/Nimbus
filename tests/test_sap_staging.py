@@ -388,13 +388,15 @@ def test_write_row_results_sets_status_reason_and_resolved_columns():
 # ---------------------------------------------------------------------------
 # Review round: completeness gate, auto-apply rule, frozen deletion set, env parsing, length checks
 # ---------------------------------------------------------------------------
-def test_env_int_never_raises_and_floors(monkeypatch):
+def test_env_int_never_raises_and_floors(monkeypatch, caplog):
     monkeypatch.setenv("NIMBUS_T_ENV", "30s")
     assert st.env_int("NIMBUS_T_ENV", 120, 1) == 120                  # not an integer -> default
     monkeypatch.setenv("NIMBUS_T_ENV", " 45 ")
     assert st.env_int("NIMBUS_T_ENV", 120, 1) == 45
     monkeypatch.setenv("NIMBUS_T_ENV", "-3")
-    assert st.env_int("NIMBUS_T_ENV", 120, 1) == 1                    # floored at the minimum
+    with caplog.at_level("WARNING", logger="nimbus.sap"):
+        assert st.env_int("NIMBUS_T_ENV", 120, 1) == 1                # floored at the minimum, with a warning
+    assert "below the minimum" in caplog.text
     monkeypatch.setenv("NIMBUS_T_ENV", "")
     assert st.env_int("NIMBUS_T_ENV", 7, 0) == 7
     monkeypatch.delenv("NIMBUS_T_ENV")
@@ -1760,3 +1762,58 @@ def test_repeat_material_snapshot_rewrites_nothing(pg, stg_plant):
     st.validate_batch(third)
     out3 = st.apply_batch(third, actor="pytest")
     assert out3["counts"]["updated"] == 1 and out3["counts"]["unchanged"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Track 5 (failure injection): F7 invalid SAP system zone, F8 19-character order material
+# ---------------------------------------------------------------------------
+def test_planned_order_material_longer_than_18_is_key_too_long_and_still_protected():
+    ok = _planned_stage()
+    rows = [{**ok, "id": 1}, {**ok, "id": 2, "plnum": "200", "matnr": "A" * 19}]
+    res = _by_id(st.validate_planned_order_rows(rows, "ZZP1", {"ZZP1"}))
+    assert res[1]["status"] == "valid"
+    assert res[2]["reason"] == "key_too_long"
+    assert res[2]["resolved"]["production_order"] == "200"      # the vanish guard still protects the order SAP sent
+
+
+def test_sap_system_tz_invalid_flag(monkeypatch):
+    for good in ("UTC", "America/New_York"):
+        monkeypatch.setattr(st, "SAP_SYSTEM_TZ", good)
+        assert st.sap_system_tz_invalid() is False
+    for bad in ("Not/AZone", "", None):
+        monkeypatch.setattr(st, "SAP_SYSTEM_TZ", bad)
+        assert st.sap_system_tz_invalid() is True
+
+
+@pytest.mark.pg
+def test_invalid_sap_system_tz_warns_on_every_batch_and_refuses_planned_order_apply_and_send(pg, stg_plant, monkeypatch):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO routing_operation (plant, material_id, task_list_type, routing_group, group_counter,"
+                    " sequence_no, activity) VALUES (%s, '777', 'N', 'G1', '01', '000010', '0010')", (PLANT,))
+        conn.commit()
+    monkeypatch.setattr(st, "SAP_SYSTEM_TZ", "Not/AZone")
+    mat = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [{"matnr": "ZZSTGT1", "werks": PLANT}])
+    res = st.validate_batch(mat)
+    assert res["status"] == "validated"                          # the batch still validates ...
+    assert [w["code"] for w in res["warnings"] if w["code"] == "sap_system_tz_invalid"] == ["sap_system_tz_invalid"]
+    po = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
+                     [{"plnum": "PT1", "matnr": "777", "plwrk": PLANT, "psttr": soon.strftime("%Y%m%d"),
+                       "pstti": "060000", "pedtr": soon.strftime("%Y%m%d"), "pedti": "100000", "gsmng": 10}])
+    res = st.validate_batch(po)
+    assert res["status"] == "validated"
+    assert any(w["code"] == "sap_system_tz_invalid" for w in res["warnings"])
+    with pytest.raises(st.BatchNotApplicable) as ei:             # ... but planned orders never apply on a wrong zone
+        st.apply_batch(po, actor="pytest")
+    assert ei.value.detail["code"] == "sap_system_tz_invalid"
+    assert _status(pg, po) == "validated"
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT count(*) FROM orders WHERE plant = %s", (PLANT,))
+        assert cur.fetchone()[0] == 0
+    with pytest.raises(ValueError, match="NIMBUS_SAP_SYSTEM_TZ"):
+        st.queue_send_to_sap(PLANT, actor="pytest")
+    # master objects are not time-dependent: they still apply
+    assert st.apply_batch(mat, actor="pytest")["status"] == "applied"
+    monkeypatch.setattr(st, "SAP_SYSTEM_TZ", "UTC")              # fixed -> the planned-order batch applies
+    assert st.apply_batch(po, actor="pytest")["status"] == "applied"
