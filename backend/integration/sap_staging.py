@@ -49,8 +49,26 @@ log = logging.getLogger("nimbus.sap")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+def env_int(name: str, default: int, minimum: int) -> int:
+    """Integer env knob that can never stop the app booting: unset / blank -> `default`; a value that
+    is not an integer -> `default` with a warning; anything below `minimum` -> `minimum`."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        log.warning("%s=%r is not an integer; using %s", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
 VANISH_HOLD_PCT = 0.25                      # more than 25 % of in-horizon orders vanishing -> held
-LOADING_TIMEOUT_MIN = int(os.getenv("NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN", "120"))
+FROZEN_SET_TOLERANCE_PCT = 0.05             # a confirmed apply tolerates this much growth of the reviewed deletion set ...
+FROZEN_SET_TOLERANCE_ROWS = 5               # ... or this many rows, whichever is larger
+_FROZEN_KEYS_CAP = 5000                     # deletion keys stored in counts at validation
+_AUDIT_KEYS_CAP = 200                       # deleted keys written into one admin_audit row
+LOADING_TIMEOUT_MIN = env_int("NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN", 120, 1)
 SAP_SYSTEM_TZ = os.getenv("NIMBUS_SAP_SYSTEM_TZ", "UTC")
 ARCHIVE_RETENTION_DAYS = 30
 SENT_RETENTION_DAYS = 30
@@ -60,7 +78,9 @@ APPLY_ORDER = ("stage_material_plants", "stage_production_version",
 
 _MATERIAL_ID_MAX = 18                       # materials / material_plants.material_id VARCHAR(18)
 _PLANT_MAX = 10                             # material_plants.plant VARCHAR(10)
-_APPLY_CHUNK = 2000                         # rows per md.bulk_apply call
+# staging column -> longest value its live target accepts (material_plants.status_pl is VARCHAR(2)).
+_MATERIAL_PLANT_MAX_LEN = {"mmsta": 2}
+_APPLY_CHUNK = 2000                        # rows per md.bulk_apply call
 _VALIDATE_WRITE_CHUNK = 20000
 
 _NULL_DATES = frozenset({"", "00000000", "0000-00-00"})
@@ -83,9 +103,11 @@ class BatchNotApplicable(Exception):
     """The batch cannot be validated / applied in its current state. `.detail`
     carries a machine-readable dict for the route layer."""
 
-    def __init__(self, message: str, detail: dict | None = None):
+    def __init__(self, message: str, detail: dict | None = None, *, code: str | None = None):
         super().__init__(message)
         self.detail = dict(detail or {})
+        if code:
+            self.detail["code"] = code
         self.detail.setdefault("message", message)
 
 
@@ -406,7 +428,8 @@ def _finalize(results: list[dict], key_of) -> list[dict]:
 
 def validate_material_plant_rows(rows: list[dict], header_plant: str, known_plants: set) -> list[dict]:
     """Row verdicts for a material-plant batch: [{id, status, reason, resolved}]. Reasons:
-    missing_key, plant_mismatch, unknown_plant, key_too_long, duplicate_key."""
+    missing_key, plant_mismatch, unknown_plant, key_too_long, value_too_long:<staging column> (a value
+    longer than the VARCHAR(n) it lands in, `_MATERIAL_PLANT_MAX_LEN`), duplicate_key."""
     results = []
     for r in rows:
         mat = sap_sync._t_alpha_strip(r.get("matnr"))
@@ -420,6 +443,12 @@ def validate_material_plant_rows(rows: list[dict], header_plant: str, known_plan
             reason = "unknown_plant"
         elif len(mat) > _MATERIAL_ID_MAX or len(pl) > _PLANT_MAX:
             reason = "key_too_long"
+        else:
+            for col, limit in _MATERIAL_PLANT_MAX_LEN.items():
+                v = _text(r.get(col))
+                if v is not None and len(v) > limit:
+                    reason = f"value_too_long:{col}"
+                    break
         results.append({"id": r["id"], "reason": reason, "resolved": {"material_id": mat, "plant": pl}})
     return _finalize(results, lambda x: (x["resolved"]["material_id"], x["resolved"]["plant"]))
 
@@ -554,7 +583,9 @@ def _header_dict(row) -> dict:
     d["batch_id"] = str(d["batch_id"])
     for k in ("received_at", "ready_at", "validated_at", "applied_at"):
         d[k] = _iso(d[k])
-    d["counts"] = d["counts"] or {}
+    # `vanish_keys` (the reviewed deletion keys, up to 5000) stay in the database row for forensics but are
+    # not shipped with every header / list response; `held_deletions` serves the live list.
+    d["counts"] = {k: v for k, v in (d["counts"] or {}).items() if k != "vanish_keys"}
     d["warnings"] = d["warnings"] or []
     return d
 
@@ -703,6 +734,99 @@ def _sent_order_numbers(cur, table: str, batch_id) -> set:
     return {r[0] for r in cur.fetchall()}
 
 
+def check_batch_complete(source: str | None, expected, actual) -> None:
+    """Completeness gate (H2). A Mulesoft batch is only usable when `row_count_expected` was set and equals
+    the number of staged rows -- otherwise a half-loaded snapshot would look like a mass deletion. Upload
+    batches keep today's behaviour (NIMBUS set the count itself). Raises BatchNotApplicable(incomplete_rows)."""
+    if source != "mulesoft":
+        return
+    if expected is None or int(expected) != int(actual):
+        raise BatchNotApplicable(
+            f"the batch is incomplete: expected {'no count' if expected is None else expected} rows, "
+            f"found {actual}", code="incomplete_rows")
+
+
+def _stage_row_count(cur, table: str, bid) -> int:
+    cur.execute(sql.SQL("SELECT count(*) FROM {} WHERE batch_id = %s").format(sql.Identifier(table)), (str(bid),))
+    return int(cur.fetchone()[0])
+
+
+def should_auto_apply(source: str | None, status: str, apply_mode: str | None) -> bool:
+    """Only a clean `validated` Mulesoft batch of an `auto` object is applied by the poll; an Excel/CSV upload
+    batch is never auto-applied (D18)."""
+    return status == "validated" and apply_mode == "auto" and source != "upload"
+
+
+def vanish_set_exceeded(stored, current) -> bool:
+    """True when the live deletion candidates have grown past what the admin reviewed (M2): more than
+    `stored` + max(FROZEN_SET_TOLERANCE_ROWS, FROZEN_SET_TOLERANCE_PCT * stored)."""
+    stored, current = int(stored or 0), int(current or 0)
+    return current - stored > max(FROZEN_SET_TOLERANCE_ROWS, FROZEN_SET_TOLERANCE_PCT * stored)
+
+
+# --- master-object (material plant / production version / routing) snapshot deletions ----------------
+_MASTER_LABEL = {"stage_material_plants": "material-plant rows", "stage_production_version": "production versions",
+                 "stage_routing_operation": "routings"}
+
+
+def _sent_material_ids(cur, table: str, bid) -> set:
+    """Material ids of EVERY row SAP sent (valid or rejected), the protection set of the material-plant
+    absent sweep. Rows whose key SAP did not really send (missing key, other / unknown plant, over-long
+    key) are not protected -- mirrors `_sent_order_numbers` / `_sent_routing_keys`."""
+    cur.execute(sql.SQL("SELECT DISTINCT material_id FROM {} WHERE batch_id = %s AND material_id IS NOT NULL"
+                        " AND row_status IN ('valid','rejected','applied') AND COALESCE(reject_reason, '')"
+                        " NOT IN ('missing_key', 'plant_mismatch', 'unknown_plant', 'key_too_long')").format(
+        sql.Identifier(table)), (str(bid),))
+    return {r[0] for r in cur.fetchall()}
+
+
+def master_vanish_stats(live: set, protect: set) -> tuple[int, list, bool, float]:
+    """(live_count, absent_keys_sorted, held, fraction) for a master-object snapshot: `absent` = live keys
+    SAP did not send. Held on the same 25 % rule as planned orders (`vanish_gate`)."""
+    absent = sorted(live - protect)
+    held, pct = vanish_gate(len(live), len(absent))
+    return len(live), absent, held, pct
+
+
+def _master_live_keys(cur, object_key: str, plant: str) -> set:
+    if object_key == "stage_material_plants":
+        cur.execute("SELECT material_id FROM material_plants WHERE plant = %s", (plant,))
+    elif object_key == "stage_production_version":
+        cur.execute("SELECT material_id, production_version FROM production_version WHERE plant = %s", (plant,))
+    else:
+        cur.execute("SELECT DISTINCT material_id, task_list_type, routing_group, group_counter"
+                    " FROM routing_operation WHERE plant = %s", (plant,))
+    return {tuple(r) for r in cur.fetchall()}
+
+
+def _master_protect_keys(cur, object_key: str, table: str, bid) -> set:
+    if object_key == "stage_material_plants":
+        return {(m,) for m in _sent_material_ids(cur, table, bid)}
+    sent = _sent_routing_keys(cur, table, bid, object_key)
+    if object_key == "stage_production_version":
+        return {(k[1], k[2]) for k in sent}
+    return {tuple(k[1:5]) for k in sent}
+
+
+def _master_gate(cur, object_key: str, plant: str, bid, table: str) -> tuple[dict, list[dict], list[str], list[tuple]]:
+    """Snapshot-deletion gate for a master-object batch: (counts info, warnings, held codes, absent keys)."""
+    live, absent, held, pct = master_vanish_stats(_master_live_keys(cur, object_key, plant),
+                                                  _master_protect_keys(cur, object_key, table, bid))
+    warnings: list[dict] = []
+    codes: list[str] = []
+    if held:
+        codes.append("vanish_threshold")
+        warnings.append({"level": "warn", "code": "vanish_threshold",
+                         "msg": (f"{len(absent)} of {live} live {_MASTER_LABEL[object_key]} ({pct:.0%}) are missing "
+                                 f"from this snapshot; more than {VANISH_HOLD_PCT:.0%} needs admin confirmation.")})
+    return ({"in_horizon_live": live, "vanish_candidates": len(absent), "vanish_pct": round(pct, 4)},
+            warnings, codes, absent)
+
+
+def _key_label(key: tuple) -> str:
+    return " / ".join(str(p) for p in key)
+
+
 # ---------------------------------------------------------------------------
 # Batch lifecycle -- read side
 # ---------------------------------------------------------------------------
@@ -739,7 +863,15 @@ def get_batch(batch_id) -> dict | None:
         hdr = _load_header(cur, bid)
         if hdr is None:
             return None
-        table = _spec(hdr["object_key"])["stage_table"]
+        try:
+            table = _spec(hdr["object_key"])["stage_table"]
+        except ValueError:
+            # A header whose object_key is not a staging object (hand-edited row): show the header with
+            # a warning instead of failing the whole route with a 500.
+            hdr["warnings"] = [*hdr["warnings"], {"level": "error", "code": "unknown_object_key",
+                                                  "msg": f"Unknown object key {hdr['object_key']!r}."}]
+            hdr["row_counts"], hdr["actual_rows"] = {}, 0
+            return hdr
         cur.execute(sql.SQL("SELECT row_status, count(*) FROM {} WHERE batch_id = %s GROUP BY row_status")
                     .format(sql.Identifier(table)), (str(bid),))
         counts = {r[0]: int(r[1]) for r in cur.fetchall()}
@@ -769,12 +901,24 @@ def rejected_rows(batch_id, *, limit: int = 1000) -> list[dict]:
 
 
 def held_deletions(batch_id) -> list[dict]:
-    """The orders a planned-order batch would delete (live, same predicate as validation)."""
+    """What an apply would delete (live, same predicate as validation): the orders of a planned-order
+    batch, or -- for a master-object batch -- the live rows absent from the snapshot as
+    `{key, material_id, plant[, production_version | task_list_type, routing_group, group_counter]}`
+    (`key` is the display label; capped at 2000)."""
     bid = _as_uuid(batch_id)
     with _pool.connection() as conn, conn.cursor() as cur:
         hdr = _load_header(cur, bid)
         if hdr is None:
             raise KeyError(f"batch {batch_id} not found")
+        if hdr["object_key"] in _MASTER_LABEL:
+            _info, _w, _codes, absent = _master_gate(cur, hdr["object_key"], hdr["plant"], bid,
+                                                     _spec(hdr["object_key"])["stage_table"])
+            names = {"stage_material_plants": ("material_id",),
+                     "stage_production_version": ("material_id", "production_version"),
+                     "stage_routing_operation": ("material_id", "task_list_type", "routing_group",
+                                                 "group_counter")}[hdr["object_key"]]
+            return [{"key": _key_label(k), "plant": hdr["plant"], **dict(zip(names, k, strict=True))}
+                    for k in absent[:2000]]
         if hdr["object_key"] != "stage_planned_orders":
             return []
         visibility_end, _ = db._horizon_bounds_for_plant(cur, hdr["plant"])
@@ -864,6 +1008,7 @@ def _validate(conn, bid) -> dict:
             raise BatchNotApplicable(f"batch is {hdr['status']} and cannot be validated", {"status": hdr["status"]})
         object_key, plant = hdr["object_key"], hdr["plant"]
         table = _spec(object_key)["stage_table"]
+        check_batch_complete(hdr["source"], hdr["row_count_expected"], _stage_row_count(cur, table, bid))
         rows = _fetch_rows(cur, table, bid, ("new", "valid", "rejected"))
         row_plants = {_text(r.get("werks") or r.get("plwrk") or r.get("plant")) for r in rows}
         known = _known_plants(cur, row_plants | {plant})
@@ -889,13 +1034,24 @@ def _validate(conn, bid) -> dict:
 
         if object_key == "stage_planned_orders":
             sent = {r["resolved"]["production_order"] for r in results if r["resolved"].get("production_order")}
-            info, gate_warnings, held, _ve = _planned_order_gates(cur, plant, sent)
+            info, gate_warnings, held, visibility_end = _planned_order_gates(cur, plant, sent)
             counts.update(info)
             warnings += gate_warnings
-        elif total == 0:
-            held.append("empty_snapshot")
-            warnings.append({"level": "warn", "code": "empty_snapshot",
-                             "msg": "The snapshot is empty; applying it would remove every unreferenced row."})
+            if info["vanish_candidates"]:
+                # M2: freeze what the admin reviews; a confirmed apply aborts if the set grew past tolerance.
+                counts["vanish_keys"] = _vanish_candidates(cur, plant, sent, visibility_end)[:_FROZEN_KEYS_CAP]
+        else:
+            if total == 0:
+                held.append("empty_snapshot")
+                warnings.append({"level": "warn", "code": "empty_snapshot",
+                                 "msg": "The snapshot is empty; applying it would remove every unreferenced row."})
+            # H4: master-object deletions get the same 25 % hold as planned orders.
+            info, gate_warnings, gate_held, absent = _master_gate(cur, object_key, plant, bid, table)
+            counts.update(info)
+            warnings += gate_warnings
+            held += gate_held
+            if absent:
+                counts["vanish_keys"] = [_key_label(k) for k in absent[:_FROZEN_KEYS_CAP]]
 
         if total > 0 and valid == 0:
             status, error = "rejected", "no valid rows in batch"
@@ -968,19 +1124,33 @@ def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
         if newer:
             raise BatchSuperseded("a newer complete batch exists for this object and plant",
                                   {"batch_id": str(bid), "newer_batch_id": str(newer[0]), "newer_status": newer[1]})
-        if object_key == "stage_planned_orders" and status in ("validated", "held"):
+        # H2: completeness is re-checked here, not only at validation (rows may have changed since).
+        check_batch_complete(hdr["source"], hdr["row_count_expected"], _stage_row_count(cur, spec["stage_table"], bid))
+        # M1: the gates run on EVERY apply entry, including a resume of an `error` / crashed `applying` batch.
+        # A confirmation only counts when the batch really was held at validation.
+        confirmed = bool(counts0.get("confirmed_held") or (confirm_held and (status == "held" or counts0.get("held"))))
+        if object_key == "stage_planned_orders":
             sent = _sent_order_numbers(cur, spec["stage_table"], bid)
-            _info, _w, held_codes, _ve = _planned_order_gates(cur, plant, sent)
-            if "routing_required" in held_codes:
-                raise BatchNotApplicable("routing must be enabled with routings loaded before planned orders apply",
-                                         {"code": "routing_required"})
-            if "vanish_threshold" in held_codes and not (status == "held" and confirm_held):
+            info, _w, held_codes, _ve = _planned_order_gates(cur, plant, sent)
+        else:
+            info, _w, held_codes, _absent = _master_gate(cur, object_key, plant, bid, spec["stage_table"])
+        if "routing_required" in held_codes:
+            raise BatchNotApplicable("routing must be enabled with routings loaded before planned orders apply",
+                                     {"code": "routing_required"})
+        if "vanish_threshold" in held_codes:
+            if not confirmed:
                 raise BatchNotApplicable("the vanish threshold is now exceeded; re-validate and confirm",
                                          {"code": "vanish_threshold"})
+            # M2: the admin confirmed the deletion set they reviewed; refuse if it has grown since.
+            stored = counts0.get("vanish_candidates")
+            if stored is not None and vanish_set_exceeded(stored, info.get("vanish_candidates")):
+                raise BatchNotApplicable(
+                    f"the deletion set grew since it was reviewed ({stored} -> {info.get('vanish_candidates')} "
+                    "rows); re-validate and confirm again", code="revalidate_required")
         cur.execute(
             "UPDATE sap_stage_batch SET status = 'applying', error = NULL, counts = counts || %s::jsonb"
             " WHERE batch_id = %s",
-            (Jsonb({"step": "start", "confirmed_held": bool(confirm_held or counts0.get("confirmed_held"))}),
+            (Jsonb({"step": "start", "confirmed_held": confirmed}),
              str(bid)))
     conn.commit()
 
@@ -1050,6 +1220,9 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
         warnings: list = []
         rows = build_material_plant_rows(stage, None, warnings)
         _append_warnings(cur, bid, warnings)
+        # H3: the absent sweep is protected by EVERY material SAP sent (valid rows and rows rejected for
+        # a reason other than a bad key), not only the rows that were valid.
+        protect = sorted(_sent_material_ids(cur, table, bid))
     conn.commit()
     present = sorted({r["material_id"] for r in rows})
 
@@ -1080,7 +1253,7 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
     deleted = flagged = 0
     with conn.cursor() as cur:
         cur.execute("SELECT material_id FROM material_plants WHERE plant = %s AND material_id <> ALL(%s)",
-                    (plant, present))
+                    (plant, protect))
         absent = [r[0] for r in cur.fetchall()]
         referenced: set = set()
         if absent:
@@ -1103,8 +1276,23 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
                         " WHERE plant = %s AND material_id = ANY(%s)", (plant, to_flag))
             flagged = cur.rowcount or 0
         conn.commit()
+    _audit_snapshot_vanish("material_plants", bid, plant, actor, [d["material_id"] for d in done], flagged)
     return {"inserted": inserted, "updated": updated, "deleted": deleted, "flagged": flagged,
             "materials_created": created}
+
+
+def _audit_snapshot_vanish(table_name: str, bid, plant: str, actor: str, deleted_keys: list, flagged: int) -> None:
+    """admin_audit row for a snapshot sweep that deleted or flagged master rows (H4); the deleted keys are
+    capped at `_AUDIT_KEYS_CAP`. Its own short transaction -- the deletes already committed."""
+    if not deleted_keys and not flagged:
+        return
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO admin_audit (table_name, action, details, user_email)"
+                    " VALUES (%s, 'sap_snapshot_vanish', %s, %s)",
+                    (table_name, Jsonb({"batch_id": str(bid), "plant": plant, "deleted_count": len(deleted_keys),
+                                        "deleted": [str(k) for k in deleted_keys[:_AUDIT_KEYS_CAP]],
+                                        "flagged": int(flagged)}), actor))
+        conn.commit()
 
 
 def _sent_routing_keys(cur, table: str, bid, object_key: str) -> set:
@@ -1186,6 +1374,8 @@ def _apply_production_versions(conn, hdr, actor: str, step) -> dict:
                         (plant, [f[0] for f in flag], [f[1] for f in flag]))
             flagged = cur.rowcount or 0
         conn.commit()
+    _audit_snapshot_vanish("production_version", bid, plant, actor,
+                           [f"{d['material_id']}/{d['production_version']}" for d in done], flagged)
 
     step("recompute")
     resolver.recompute_plants([plant])
@@ -1367,7 +1557,7 @@ def _poll_locked(conn, actor: str, out: dict) -> None:
             table = _spec(object_key)["stage_table"]
             with conn.cursor() as cur:
                 cur.execute(
-                    sql.SQL("SELECT b.batch_id, b.plant, b.status, b.row_count_expected,"
+                    sql.SQL("SELECT b.batch_id, b.plant, b.status, b.source, b.row_count_expected,"
                             " COALESCE(b.ready_at, b.received_at),"
                             " (SELECT count(*) FROM {t} s WHERE s.batch_id = b.batch_id)"
                             " FROM sap_stage_batch b WHERE b.object_key = %s AND b.status IN ('ready','validated')"
@@ -1380,7 +1570,7 @@ def _poll_locked(conn, actor: str, out: dict) -> None:
             out["errors"].append({"object_key": object_key, "error": str(exc)})
             continue
         seen_plants: set = set()
-        for bid, plant, status, expected, ready_at, actual in candidates:
+        for bid, plant, status, source, expected, ready_at, actual in candidates:
             if plant in seen_plants:
                 continue            # older than the newest of this plant; superseded below
             try:
@@ -1412,11 +1602,16 @@ def _poll_locked(conn, actor: str, out: dict) -> None:
                                          "status": result["status"]})
                 if result["status"] == "held":
                     out["held"].append({"batch_id": str(bid), "object_key": object_key, "plant": plant})
-                elif (result["status"] == "validated"
-                      and sap_sync.get_config(object_key).get("apply_mode") == "auto"):
-                    applied = apply_batch(bid, actor=actor)
-                    out["applied"].append({"batch_id": str(bid), "object_key": object_key, "plant": plant,
-                                           "counts": applied.get("counts")})
+                elif result["status"] == "validated":
+                    apply_mode = sap_sync.get_config(object_key).get("apply_mode")
+                    if should_auto_apply(source, result["status"], apply_mode):
+                        applied = apply_batch(bid, actor=actor)
+                        out["applied"].append({"batch_id": str(bid), "object_key": object_key, "plant": plant,
+                                               "counts": applied.get("counts")})
+                    elif apply_mode == "auto":
+                        # D18: an Excel/CSV upload is validated but never auto-applied.
+                        out["skipped"].append({"batch_id": str(bid), "object_key": object_key, "plant": plant,
+                                               "reason": "upload batches are never auto-applied"})
             except BatchNotApplicable as exc:
                 conn.rollback()
                 out["skipped"].append({"batch_id": str(bid), "object_key": object_key, "reason": str(exc)})
@@ -1596,13 +1791,15 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
     the latest member end, its firm flag is 'X' when ANY candidate member qualifies (`firm_flag`), its
     version is the smallest non-blank member version (children of one parent carry the same one).
     Returns (groups, skipped_no_end); a group carries `member_ids` (every row of the group, skipped
-    members included) and `rolled_up` (true when it stands for distribution children)."""
+    members included), `sent_ids` (only the members that had an effective end and were not in Needs
+    Planning -- the ones whose sent values are remembered) and `rolled_up` (true when it stands for
+    distribution children)."""
     groups: dict[tuple, dict] = {}
     skipped = 0
     for r in rows:
         key = (r.get("parent_production_order") or r["production_order"], r["material_number"])
         g = groups.setdefault(key, {"plnum": key[0], "matnr": key[1], "end": None, "firm": False,
-                                    "versions": [], "member_ids": [], "rolled_up": False,
+                                    "versions": [], "member_ids": [], "sent_ids": [], "rolled_up": False,
                                     "single_id": r["id"]})
         g["member_ids"].append(r["id"])
         if r.get("parent_production_order"):
@@ -1610,6 +1807,7 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
         if r.get("eff_end") is None or r.get("planning_status") == "needs_planning":
             skipped += 1
             continue
+        g["sent_ids"].append(r["id"])
         if g["end"] is None or r["eff_end"] > g["end"]:
             g["end"] = r["eff_end"]
         if firm_flag(r.get("manual_firmed"), r.get("firming_indicator"), r.get("eff_start"), frozen_end) == "X":
@@ -1623,7 +1821,7 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
             continue
         out.append({"plnum": g["plnum"], "matnr": g["matnr"], "end": g["end"],
                     "auffx": "X" if g["firm"] else "", "verid": min(g["versions"]) if g["versions"] else None,
-                    "member_ids": g["member_ids"], "rolled_up": g["rolled_up"],
+                    "member_ids": g["member_ids"], "sent_ids": g["sent_ids"], "rolled_up": g["rolled_up"],
                     "nimbus_order_id": None if g["rolled_up"] else g["single_id"]})
     return out, skipped
 
@@ -1633,7 +1831,7 @@ def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
         "SELECT id, production_order, parent_production_order, material_number, manual_firmed,"
         " firming_indicator, production_version, planning_status,"
         " COALESCE(seg.first_start, scheduled_start, basic_start_date),"
-        " COALESCE(seg.last_end, " + db._EFF_END_SQL + ")"
+        " COALESCE(seg.last_end, " + db._EFF_END_WITH_RUNTIME_MISMATCH_SQL + ")"      # the Gantt's effective end (M3)
         " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE plant = %s ORDER BY id", (plant,))
     names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",
              "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end")
@@ -1648,7 +1846,10 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
     scheduled order of the plant is queued (D9); distribution children roll up to their parent
     order with the latest child end (D17); the end is converted plant-local -> SAP system zone
     (D34); the firm flag is add-only (D10). NIMBUS also remembers what it sent on each member order
-    (`orders.sap_sent_*`, D20) so SAP's echo of that finish is not read as an SAP change.
+    (`orders.sap_sent_*`, D20) so SAP's echo of that finish is not read as an SAP change. Only member
+    orders that were actually sent (they had an effective end) are written, and only when their remembered
+    finish / version / firm value differs from the new one: an unchanged order is NOT rewritten, so its xmin
+    (the optimistic-concurrency `base_version`) is untouched and a planner's unsaved edit survives the click.
     Everything -- retire, insert, remember, audit -- is one transaction.
     Returns {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
     plant = (plant or "").strip()
@@ -1672,10 +1873,16 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                         " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (send_batch_id, plant, g["matnr"], plant, g["plnum"], g["verid"], pedtr, pedti,
                          g["auffx"], actor, g["nimbus_order_id"]))
-                    cur.execute(
-                        "UPDATE orders SET sap_sent_finish = %s, sap_sent_version = %s, sap_sent_firm = %s,"
-                        " sap_sent_at = now() WHERE id = ANY(%s)",
-                        (g["end"].replace(microsecond=0), g["verid"], g["auffx"] == "X", g["member_ids"]))
+                    sent_vals = (g["end"].replace(microsecond=0), g["verid"], g["auffx"] == "X")
+                    if g["sent_ids"]:
+                        # M4: only rewrite an order whose remembered values actually change (an unchanged
+                        # row keeps its xmin, so a planner's unsaved edit is not discarded by the next save).
+                        cur.execute(
+                            "UPDATE orders SET sap_sent_finish = %s::timestamp, sap_sent_version = %s::text,"
+                            " sap_sent_firm = %s::boolean, sap_sent_at = now() WHERE id = ANY(%s)"
+                            " AND (sap_sent_finish, sap_sent_version, sap_sent_firm)"
+                            " IS DISTINCT FROM (%s::timestamp, %s::text, %s::boolean)",
+                            (*sent_vals, g["sent_ids"], *sent_vals))
                     firmed += g["auffx"] == "X"
                     rolled += bool(g["rolled_up"])
                 cur.execute(
