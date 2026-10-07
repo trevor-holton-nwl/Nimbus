@@ -41,7 +41,7 @@ log = logging.getLogger("nimbus.admin_tables")
 # naming-pattern families (SAP sync's tables).
 # ---------------------------------------------------------------------------
 _INTERNAL_EXACT = frozenset({"schema_migrations", "admin_audit", "column_metadata", "sap_field_map"})
-_INTERNAL_PREFIXES = ("sap_sync_",)
+_INTERNAL_PREFIXES = ("sap_sync_", "sap_stage_")
 
 # OD-E1: streaming CSV export soft cap. Not a hard error — export.csv keeps
 # working past this many rows, it just truncates and tells the caller where

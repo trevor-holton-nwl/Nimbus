@@ -117,6 +117,7 @@ def test_manual_migrations_folder_is_pinned_and_retired_column_stays_out_of_top_
         "2026-08-17-line-key-columns.sql",
         "2026-08-20-line-to-machine.sql",
         "2026-08-20-setup-value-case-fold-backfill.sql",
+        "2026-10-08-nimbus-mulesoft-role.sql",
     }
     for name in os.listdir(mig):
         if name.endswith(".sql"):

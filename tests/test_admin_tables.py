@@ -42,6 +42,7 @@ def test_internal_flag_marks_known_system_tables():
     assert at._is_internal("sap_field_map")
     assert at._is_internal("sap_sync_config")
     assert at._is_internal("sap_sync_run")
+    assert at._is_internal("sap_stage_batch")
 
 
 def test_internal_flag_leaves_business_tables_alone():
