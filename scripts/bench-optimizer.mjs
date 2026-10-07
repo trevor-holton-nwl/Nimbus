@@ -134,7 +134,8 @@ function makePlant(rng, shape, colors) {
 // so every order gets a valid back-to-back placement from now, then re-queue 20%.
 function makeInitialSchedule(rng, plant, setup, colors) {
   const snapshot = makeSnapshot(plant, setup, colors);
-  const bounds = makeBounds(setup);
+  const linesInScope = new Set(plant.tasks.map(t => t.MACHINE)).size;
+  const bounds = makeBounds(setup, linesInScope);
   bounds.deadline = performance.now() + 10 * 60 * 1000;
   bounds.iterationCap = 1e9;
   const result = SetupScheduler.evaluateSptWithSetup(snapshot, bounds);
@@ -233,13 +234,15 @@ function makeSnapshot(plant, setup, colors) {
 }
 
 // Build bounds for evaluation
-function makeBounds(setup) {
+function makeBounds(setup, linesInScope) {
   const now = new Date(NOW);
   const horizonEnd = new Date(HORIZON_END);
+  // F4: Scale iteration cap per line to match Engine.runAndApply behavior
+  const baseIterationCap = 20000;
   return {
     setup,
     exactSearchThreshold: 8,
-    iterationCap: 20000,
+    iterationCap: baseIterationCap * Math.max(1, linesInScope),
     clock: () => performance.now(),
     deadline: performance.now() + (noDeadline ? 1e9 : 5000), // 5 second budget
     now,
@@ -302,7 +305,7 @@ async function benchmark() {
       // Fresh deep copies per mode so one evaluator can never leave state behind
       // (caches, mutated tasks) that skews the next mode's timing.
       const snapshot = makeSnapshot(structuredClone(plant), structuredClone(setup), colors);
-      const bounds = makeBounds(setup);
+      const bounds = makeBounds(setup, shapeConfig.lines);
 
       // Run evaluator
       const startTime = performance.now();

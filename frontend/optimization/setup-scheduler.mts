@@ -3422,13 +3422,15 @@ function greedySearch(
       termination = 'deadline';
       return null;
     }
+    // F4: Check for duplicate neighbors before consuming a budget iteration,
+    // so duplicate sequences don't burn budget.
+    const key = sequence.map(taskId).join('\u0000');
+    if (seen.has(key)) return null;
+    seen.add(key);
     if (!consumeSearchIteration(budget)) {
       termination = 'iteration-cap';
       return null;
     }
-    const key = sequence.map(taskId).join('\u0000');
-    if (seen.has(key)) return null;
-    seen.add(key);
     candidateCount += 1;
     const candidate = candidateForSequence(
       snapshot,
