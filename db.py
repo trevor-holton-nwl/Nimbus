@@ -3820,6 +3820,113 @@ def extract_upload_plants(file_bytes: bytes) -> list[str] | None:
     return plants or None
 
 
+def _date_hygiene_df(df, warnings: list):
+    """Order date rules shared by the Excel ingest and the SAP staging path.
+
+    Expects BASIC_START_DATE (required), BASIC_FINISH_DATE and RUN_TIME
+    (both optional) columns. Returns the frame with: BASIC_START_DATE and
+    BASIC_FINISH_DATE parsed; `_SAP_FINISH_DATE` = the finish as SENT (NaT when
+    absent/blank/unparseable, captured before any derivation); a missing finish
+    filled with the start; RUN_TIME numeric with 1.0 default and
+    `_RUN_TIME_DEFAULTED` flagged; finish <= start or an exact-midnight finish
+    re-derived as start + RUN_TIME hours; rows with an unparseable start
+    dropped (index reset) with one `error` warning appended.
+    """
+    df["BASIC_START_DATE"] = pd.to_datetime(df["BASIC_START_DATE"], errors="coerce")
+    if "BASIC_FINISH_DATE" not in df.columns:
+        df["BASIC_FINISH_DATE"] = pd.NaT
+    df["BASIC_FINISH_DATE"] = pd.to_datetime(df["BASIC_FINISH_DATE"], errors="coerce")
+    # The finish date SAP actually SENT (NaT = column absent / blank / unparseable), kept
+    # before any NIMBUS derivation below: it is what the SAP baseline and the
+    # SAP-change detection compare, so a RUN_TIME change can never look like SAP
+    # moving the dates.
+    df["_SAP_FINISH_DATE"] = df["BASIC_FINISH_DATE"]
+    df["BASIC_FINISH_DATE"] = df["BASIC_FINISH_DATE"].fillna(df["BASIC_START_DATE"])
+
+    # RUN_TIME must be parsed BEFORE the "bad" (missing/corrupt finish) branch
+    # below so that branch can resolve to start + RUN_TIME hours instead of a
+    # hardcoded bump. A hardcoded +1h produced a THIRD, undetected raw shape
+    # whenever RUN_TIME != 1 — one that app.js's due-date-baseline correction
+    # heuristic (which only recognizes "== start" or "== start + RUN_TIME
+    # hours") never matched, permanently misclassifying those orders as
+    # already-correct.
+    # D54: capture whether RUN_TIME was genuinely absent/unparseable BEFORE the
+    # fillna(1.0) default overwrites that absence — as a column (not a boolean
+    # mask) because the dropna().reset_index(drop=True) a few lines below would
+    # misalign a mask built against the pre-dropna index.
+    _rt = pd.to_numeric(
+        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(float("nan"), index=df.index),
+        errors="coerce",
+    )
+    df["_RUN_TIME_DEFAULTED"] = _rt.isna()
+    df["RUN_TIME"] = _rt.fillna(1.0)
+
+    bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
+    df.loc[bad, "BASIC_FINISH_DATE"] = (
+        df.loc[bad, "BASIC_START_DATE"]
+        + pd.to_timedelta(df.loc[bad, "RUN_TIME"], unit="h")
+    )
+
+    bad_start = df["BASIC_START_DATE"].isna()
+    if bad_start.any():
+        warnings.append({
+            "level": "error",
+            "msg": f"{int(bad_start.sum())} row(s) dropped — unparseable BASIC_START_DATE",
+        })
+    df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
+
+    # A genuinely date-only (but not "bad") finish — SAP supplied a real
+    # calendar date with no time-of-day — is likewise re-derived from
+    # RUN_TIME rather than trusted as a bare midnight, mirroring app.js's
+    # date-only-start handling (Persistence._snapToWorkingHours).
+    # Only an EXACT midnight can be date-only: read_excel yields 00:00:00 for a
+    # bare date cell, whereas a real 00:01-00:59 finish carries minutes/seconds
+    # (the old `.dt.hour == 0` test rewrote those as start + RUN_TIME).
+    _fin = df["BASIC_FINISH_DATE"]
+    mask_notime = _fin.notna() & (_fin == _fin.dt.normalize())
+    df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
+        df.loc[mask_notime, "BASIC_START_DATE"]
+        + pd.to_timedelta(df.loc[mask_notime, "RUN_TIME"], unit="h")
+    )
+
+    return df
+
+
+def apply_order_date_hygiene_rows(rows: list[dict], warnings: list) -> list[dict]:
+    """Row-dict twin of the Excel date hygiene, for the SAP staging path.
+
+    Reads `basic_start_date`, `basic_finish_date`, `run_time` from each row
+    dict and returns the surviving rows (a row with an unparseable start is
+    dropped, with the same warning the Excel path emits), each updated in place
+    with the repaired `basic_start_date` / `basic_finish_date` / `run_time` plus
+    `sap_basic_finish_date` (the finish as sent, or None) and
+    `_run_time_was_defaulted`. Other keys pass through untouched.
+    """
+    if not rows:
+        return []
+    df = pd.DataFrame({
+        "_i": range(len(rows)),
+        "BASIC_START_DATE": [r.get("basic_start_date") for r in rows],
+        "BASIC_FINISH_DATE": [r.get("basic_finish_date") for r in rows],
+        "RUN_TIME": [r.get("run_time") for r in rows],
+    })
+    df = _date_hygiene_df(df, warnings)
+
+    def _ts(val):
+        return val.to_pydatetime() if pd.notna(val) else None
+
+    out: list[dict] = []
+    for _, h in df.iterrows():
+        row = rows[int(h["_i"])]
+        row["basic_start_date"] = _ts(h["BASIC_START_DATE"])
+        row["basic_finish_date"] = _ts(h["BASIC_FINISH_DATE"])
+        row["sap_basic_finish_date"] = _ts(h["_SAP_FINISH_DATE"])
+        row["run_time"] = float(h["RUN_TIME"]) if pd.notna(h["RUN_TIME"]) else None
+        row["_run_time_was_defaulted"] = bool(h["_RUN_TIME_DEFAULTED"])
+        out.append(row)
+    return out
+
+
 def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     """
     Parse an uploaded sequence_testing-shaped xlsx, normalize/clean,
@@ -3888,63 +3995,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                 "raw_row_count": raw_row_count, "inserted": 0, "updated": 0,
                 "warnings": [], "batch_id": batch_id}
 
-    # ---------- Date hygiene (mirrors brain.py:102-127) ----------
-    df["BASIC_START_DATE"] = pd.to_datetime(df["BASIC_START_DATE"], errors="coerce")
-    if "BASIC_FINISH_DATE" not in df.columns:
-        df["BASIC_FINISH_DATE"] = pd.NaT
-    df["BASIC_FINISH_DATE"] = pd.to_datetime(df["BASIC_FINISH_DATE"], errors="coerce")
-    # The finish date SAP actually SENT (NaT = column absent / blank / unparseable), kept
-    # before any NIMBUS derivation below: it is what the SAP baseline and the
-    # SAP-change detection compare, so a RUN_TIME change can never look like SAP
-    # moving the dates.
-    df["_SAP_FINISH_DATE"] = df["BASIC_FINISH_DATE"]
-    df["BASIC_FINISH_DATE"] = df["BASIC_FINISH_DATE"].fillna(df["BASIC_START_DATE"])
-
-    # RUN_TIME must be parsed BEFORE the "bad" (missing/corrupt finish) branch
-    # below so that branch can resolve to start + RUN_TIME hours instead of a
-    # hardcoded bump. A hardcoded +1h produced a THIRD, undetected raw shape
-    # whenever RUN_TIME != 1 — one that app.js's due-date-baseline correction
-    # heuristic (which only recognizes "== start" or "== start + RUN_TIME
-    # hours") never matched, permanently misclassifying those orders as
-    # already-correct.
-    # D54: capture whether RUN_TIME was genuinely absent/unparseable BEFORE the
-    # fillna(1.0) default overwrites that absence — as a column (not a boolean
-    # mask) because the dropna().reset_index(drop=True) a few lines below would
-    # misalign a mask built against the pre-dropna index.
-    _rt = pd.to_numeric(
-        df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(float("nan"), index=df.index),
-        errors="coerce",
-    )
-    df["_RUN_TIME_DEFAULTED"] = _rt.isna()
-    df["RUN_TIME"] = _rt.fillna(1.0)
-
-    bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
-    df.loc[bad, "BASIC_FINISH_DATE"] = (
-        df.loc[bad, "BASIC_START_DATE"]
-        + pd.to_timedelta(df.loc[bad, "RUN_TIME"], unit="h")
-    )
-
-    bad_start = df["BASIC_START_DATE"].isna()
-    if bad_start.any():
-        warnings.append({
-            "level": "error",
-            "msg": f"{int(bad_start.sum())} row(s) dropped — unparseable BASIC_START_DATE",
-        })
-    df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
-
-    # A genuinely date-only (but not "bad") finish — SAP supplied a real
-    # calendar date with no time-of-day — is likewise re-derived from
-    # RUN_TIME rather than trusted as a bare midnight, mirroring app.js's
-    # date-only-start handling (Persistence._snapToWorkingHours).
-    # Only an EXACT midnight can be date-only: read_excel yields 00:00:00 for a
-    # bare date cell, whereas a real 00:01-00:59 finish carries minutes/seconds
-    # (the old `.dt.hour == 0` test rewrote those as start + RUN_TIME).
-    _fin = df["BASIC_FINISH_DATE"]
-    mask_notime = _fin.notna() & (_fin == _fin.dt.normalize())
-    df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
-        df.loc[mask_notime, "BASIC_START_DATE"]
-        + pd.to_timedelta(df.loc[mask_notime, "RUN_TIME"], unit="h")
-    )
+    df = _date_hygiene_df(df, warnings)
 
     qcol = "ORDER_QUANTITY_(GMEIN)"
     if qcol in df.columns:

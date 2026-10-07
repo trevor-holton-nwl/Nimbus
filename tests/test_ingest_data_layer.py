@@ -492,6 +492,44 @@ def test_purge_by_date_audit_details_keys_unchanged(monkeypatch):
                             "order_id_count", "truncated", "shares_purged", "headers_deleted"}
 
 
+class TestApplyOrderDateHygieneRows:
+    """Non-DB: the shared date rules used by the Excel and SAP staging paths."""
+
+    S = dt.datetime(2026, 9, 10, 8, 0)
+
+    def _run(self, rows):
+        import db as db_
+        warnings: list = []
+        return db_.apply_order_date_hygiene_rows(rows, warnings), warnings
+
+    def test_midnight_finish_becomes_start_plus_run_time(self):
+        out, _ = self._run([{"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 11),
+                             "run_time": 2}])
+        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 10, 0)
+        assert out[0]["sap_basic_finish_date"] == dt.datetime(2026, 9, 11)
+
+    def test_finish_before_start_becomes_start_plus_run_time(self):
+        out, _ = self._run([{"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 6, 30),
+                             "run_time": 3}])
+        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 11, 0)
+
+    def test_missing_finish_defaults_to_start_then_run_time_default(self):
+        out, _ = self._run([{"basic_start_date": self.S, "basic_finish_date": None, "run_time": None}])
+        # finish := start, then start-equal finish is "bad" -> start + default 1.0h
+        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 9, 0)
+        assert out[0]["sap_basic_finish_date"] is None
+        assert out[0]["run_time"] == 1.0 and out[0]["_run_time_was_defaulted"] is True
+
+    def test_real_time_of_day_finish_kept_and_bad_start_dropped_with_warning(self):
+        good = {"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 15, 45),
+                "run_time": 1, "tag": "keep"}
+        bad = {"basic_start_date": "not-a-date", "basic_finish_date": None, "run_time": 1}
+        out, warnings = self._run([bad, good])
+        assert [r["tag"] for r in out] == ["keep"]
+        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 15, 45)
+        assert warnings == [{"level": "error", "msg": "1 row(s) dropped — unparseable BASIC_START_DATE"}]
+
+
 @pytest.mark.pg
 class TestSapTruthReupload:
     """SAP-is-truth re-upload rules: planner machine kept inside SAP's work
