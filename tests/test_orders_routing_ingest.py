@@ -566,3 +566,119 @@ class Test_sap_changed_fields:
         inc = self._incoming(basic_start_date=self.S1, sap_workcenter="WC2",
                              order_quantity=1, sap_production_version="0002")
         assert self._run(incoming=inc) == {"dates", "workcenter", "quantity", "production_version"}
+
+    # ---- D20 echo suppression (orders.sap_sent_*) -------------------------
+    def test_echo_finish_with_moved_start_is_not_a_dates_change(self):
+        before = self._before(sap_sent_finish=self.F1, sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        # F1 differs from the F0 baseline too: without the echo this is "dates"
+        assert self._run(before, inc) == set()
+
+    def test_echo_finish_minute_precision_ignores_seconds(self):
+        from datetime import timedelta
+        before = self._before(sap_sent_finish=self.F1, sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1 + timedelta(seconds=40))
+        assert self._run(before, inc) == set()
+
+    def test_echo_finish_but_different_version_still_reports_version_not_dates(self):
+        before = self._before(sap_sent_finish=self.F1, sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1,
+                             sap_production_version="0002")
+        assert self._run(before, inc) == {"production_version"}
+
+    def test_echo_with_no_version_sent_suppresses_version_too(self):
+        before = self._before(sap_sent_finish=self.F1, sap_sent_version=None)
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1,
+                             sap_production_version="0002")
+        assert self._run(before, inc) == set()
+
+    def test_different_finish_than_sent_is_a_dates_change(self):
+        before = self._before(sap_sent_finish=self.F1, sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1.replace(hour=9))
+        assert self._run(before, inc) == {"dates"}
+
+    def test_no_sent_finish_behaves_as_before(self):
+        before = self._before(sap_sent_finish=None, sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
+        assert self._run(before, inc) == {"dates"}
+
+    def test_echo_does_not_hide_workcenter_or_quantity_changes(self):
+        before = self._before(sap_sent_finish=self.F1, sap_sent_version="0001")
+        inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1,
+                             sap_workcenter="WC2", order_quantity=5)
+        assert self._run(before, inc) == {"workcenter", "quantity"}
+
+
+# ---------------------------------------------------------------------------
+# D20: a planner's end/version change clears what was remembered as sent to SAP.
+# ---------------------------------------------------------------------------
+class _BulkCursor:
+    """Answers update_task_dates_bulk's lock SELECT with one canned row and
+    records every other statement; fetchone/fetchall return harmless empties."""
+
+    def __init__(self, eff_row):
+        self.eff_row = eff_row
+        self.executed = []
+        self._all = []
+        self._one = (0,)
+
+    def execute(self, stmt, params=None):
+        stmt = str(stmt)
+        self.executed.append((stmt, params))
+        self._one = (0,)
+        if "FOR UPDATE OF o" in stmt:
+            self._all = [self.eff_row]
+        elif stmt.lstrip().startswith("UPDATE orders o SET"):
+            self._all = [(self.eff_row[0], 4242)]
+        else:
+            self._all = []
+
+    def executemany(self, stmt, params_list, returning=False):
+        self.executed.append((str(stmt), params_list))
+
+    def fetchall(self):
+        return self._all
+
+    def fetchone(self):
+        return self._one
+
+
+def _bulk_eff_row(oid="O1"):
+    from datetime import datetime as _d
+    # id, eff_start, eff_end, run_time, row_version, segment_count, plant, machine,
+    # planning_status, reason_code, routing_runtime_enabled, parent_order,
+    # run_time_source, material_number, order_quantity, basic_start_date, production_version
+    return (oid, _d(2026, 10, 1, 6), _d(2026, 10, 1, 14), 8.0, 7, 0, "P1", "M1",
+            "scheduled", None, False, None, None, "MAT", 100,
+            _d(2026, 10, 1, 6), "0001")
+
+
+def _run_bulk(monkeypatch, item):
+    cursor = _BulkCursor(_bulk_eff_row())
+    monkeypatch.setattr(db, "_pool", _Pool(cursor))
+    db.update_task_dates_bulk([{"id": "O1", **item}])
+    return next(s for s, _p in cursor.executed if s.lstrip().startswith("UPDATE orders o SET"))
+
+
+def test_bulk_save_clears_sap_sent_when_end_changes(monkeypatch):
+    from datetime import datetime as _d
+    sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 15)})
+    for col in ("sap_sent_finish", "sap_sent_version", "sap_sent_firm", "sap_sent_at"):
+        assert f"{col} = NULL" in sql
+
+
+def test_bulk_save_keeps_sap_sent_when_end_unchanged(monkeypatch):
+    from datetime import datetime as _d
+    # same end as the current row (14:00), only the start moves
+    sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 14)})
+    assert "sap_sent_" not in sql
+
+
+def test_bulk_save_clears_sap_sent_when_production_version_changes(monkeypatch):
+    sql = _run_bulk(monkeypatch, {"PRODUCTION_VERSION": "0002"})
+    assert "sap_sent_finish = NULL" in sql
+
+
+def test_bulk_save_keeps_sap_sent_when_version_resent_unchanged(monkeypatch):
+    sql = _run_bulk(monkeypatch, {"PRODUCTION_VERSION": "0001", "FIRMED": True})
+    assert "sap_sent_" not in sql

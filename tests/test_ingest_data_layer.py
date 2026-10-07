@@ -439,9 +439,7 @@ class _AuditCursor:
         self.executed.append((stmt, params))
         if stmt.startswith("DELETE FROM orders"):
             self._rows = [("O1",), ("O2",)]
-        elif "UPDATE order_distribution_share" in stmt:
-            self._rows = [("PO", "M")]
-        elif "DELETE FROM order_distribution od" in stmt:
+        elif "UPDATE order_distribution_share" in stmt or "DELETE FROM order_distribution od" in stmt:
             self._rows = [("PO", "M")]
         else:
             self._rows = []

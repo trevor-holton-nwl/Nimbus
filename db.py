@@ -1109,6 +1109,12 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
     if row["end"] is not None and not row["queued"]:
         pars.append(("scheduled_end", "timestamp", "{v}"))
         vals.append(row["end"])
+    if row.get("clear_sap_sent"):
+        # D20: the planner changed this order's end or version, so what was
+        # last sent to SAP no longer describes it; a later SAP change must be
+        # judged against the SAP baselines, not an obsolete echo.
+        lits.extend(["sap_sent_finish = NULL", "sap_sent_version = NULL",
+                     "sap_sent_firm = NULL", "sap_sent_at = NULL"])
     if row["has_runtime"]:
         pars.append(("run_time", "numeric", "{v}"))
         vals.append(row["run_time"])
@@ -1563,8 +1569,14 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 row_planning_status = "scheduled"
                 row_planning_reason = None
 
+            def _min(v):
+                return v.replace(second=0, microsecond=0) if isinstance(v, datetime) else v
+            end_changed = (new_end is None and cur_end is not None) if queued else (
+                (end is not None or has_segments) and new_end is not None
+                and _min(new_end) != _min(cur_end))
             update_rows.append({
                 "id": tid,
+                "clear_sap_sent": bool(end_changed or "PRODUCTION_VERSION" in attrs),
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,
@@ -2583,6 +2595,12 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     judged individually); an incoming "" (blank cell present) is a real value.
     Returns a subset
     of {"dates", "workcenter", "quantity", "production_version"}.
+
+    Echo suppression (D20): when `before["sap_sent_finish"]` is set and the
+    incoming finish equals it at minute precision, "dates" is not reported; the
+    version is likewise not a change when `sap_sent_version` is unset or equals
+    the incoming version. A different version than was sent still reports
+    "production_version" (dates stay suppressed by the matching finish).
     """
     changed: set[str] = set()
 
@@ -2595,7 +2613,23 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
                     or (base_f is not None and in_f is not None and in_f != base_f))
     dates_echo = (sched_s is not None and sched_e is not None
                   and in_s == sched_s and in_f == sched_e)
-    if dates_differ and not dates_echo:
+
+    # D20 echo suppression: NIMBUS remembers the finish/version it last sent to
+    # SAP (orders.sap_sent_*). SAP echoing that finish back is not an SAP change
+    # even when SAP back-scheduled the start; the new SAP baselines are still
+    # written by the upsert. Only a finish, version or work center that differs
+    # from what was sent re-plans the order.
+    def _minute(v):
+        v = _naive_dt(v)
+        return v.replace(second=0, microsecond=0) if isinstance(v, datetime) else v
+    sent_f, sent_v = before.get("sap_sent_finish"), before.get("sap_sent_version")
+    finish_echo = sent_f is not None and in_f is not None and _minute(in_f) == _minute(sent_f)
+    in_pv_raw = incoming.get("sap_production_version")
+    # An incoming version of None means "column not sent": it cannot contradict.
+    version_echo = finish_echo and (sent_v is None or in_pv_raw is None
+                                    or _norm_pv(in_pv_raw) == _norm_pv(sent_v))
+
+    if dates_differ and not dates_echo and not finish_echo:
         changed.add("dates")
 
     base_wc = before.get("sap_workcenter")
@@ -2614,7 +2648,7 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     # production version: child sub-orders carry none of their own.
     base_pv = before.get("sap_production_version")
     if (base_pv is not None and incoming.get("sap_production_version") is not None
-            and not incoming.get("parent_production_order")):
+            and not incoming.get("parent_production_order") and not version_echo):
         in_pv = _norm_pv(incoming["sap_production_version"])
         cur_pv = _norm_pv(before.get("production_version") or "")
         if in_pv != _norm_pv(base_pv) and in_pv != cur_pv:
@@ -3064,7 +3098,7 @@ _CHUNK_READ_COLS = (
     "sap_basic_start_date", "sap_basic_finish_date", "sap_workcenter", "order_quantity",
     "sap_production_version", "production_version", "scheduled_start", "scheduled_end",
     "basic_start_date", "basic_finish_date", "run_time", "planning_status",
-    "machine_wc", "first_start", "last_end", "tz",
+    "machine_wc", "first_start", "last_end", "tz", "sap_sent_finish", "sap_sent_version",
 )
 _CHUNK_READ_SQL = f"""
     SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
@@ -3074,7 +3108,8 @@ _CHUNK_READ_SQL = f"""
            (SELECT MIN(m.sap_workcenter) FROM machine m
              WHERE m.plant = o.plant AND m.machine = o.machine) AS machine_wc,
            seg.first_start, seg.last_end,
-           (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz
+           (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz,
+           o.sap_sent_finish, o.sap_sent_version
       FROM orders o
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
      WHERE o.id IN (
