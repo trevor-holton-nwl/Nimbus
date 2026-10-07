@@ -686,6 +686,25 @@ Each is marked with what it blocks.
 
 None of questions 1–9 block T1, T3 or T4.
 
+## 4.9 Results (2026-10-07)
+
+**Shipped** on `feature/optimizer-f1-f4`: G guards `57fcf1a` (digest now covers patches, objective, score, explanation, dispositions, validation findings and diagnostics, minus the clock fields `runtimeMs`/`budgetMs`/`deadlineAt`; two placement boundary tests), T1 urgency-sort key cache `a556d9a`, T3 stop building free intervals past the first fit for whole-order placement `57502e5`, T4 planning-defect memo `2778dbb`. T2 and T5 were not built.
+
+Median wall time, seed 42, normal deadline, seconds (G baseline to final):
+
+| Shape | min-changeover | due-date | spt |
+|---|---|---|---|
+| small | 0.06 to 0.04 | 0.08 to 0.04 | 0.07 to 0.03 |
+| medium | 0.38 to 0.21 | 0.35 to 0.21 | 0.30 to 0.17 |
+| wide | 0.66 to 0.37 | 0.75 to 0.38 | 0.41 to 0.23 |
+| large | 2.09 to 1.16 | 2.23 to 1.05 | 1.90 to 0.92 |
+
+T3 accounts for roughly 2x of that, T1 a small share, and T4 no measurable gain. `--no-deadline` digests are unchanged for every shape and seed in the G baseline, and are stable across repeated runs.
+
+**Review outcome.** An independent review found no defects. `placeWithSetup` is exported and also serves the live Gantt/drag path, so T3's refactor of it was checked separately: the two old continuous branches (policy forbids splitting; runtime under the segment floor) were identical loops, so merging them is behavior-preserving. A differential fuzz of old vs new `placeWithSetup` (40,000 random requests across every policy, overlong flag, runtime including invalid values, segment floor including invalid values, setup null/unresolved/negative/fractional, empty and unsorted intervals, earliest-start variants) produced zero differences. T1 sort keys reproduce the old comparator exactly (same NaN/Infinity fall-through and id tiebreak) and are reused only for the same task object, so they can never be stale; no code writes task fields in place during a run. T4 is correct (same task, master-data and plant guards, copy returned, expired-window check still live per call).
+
+**T4 recommendation: revert.** It added about 35 lines and a second cache with a staleness surface (it trusts that master data is not mutated in place) for a gain below measurement noise. Nothing else depends on it. Keeping it is harmless today but buys nothing; reverting `2778dbb` is the simpler codebase.
+
 ---
 
 ## Appendix A — Context
