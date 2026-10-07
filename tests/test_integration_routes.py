@@ -562,3 +562,67 @@ def test_sap_objects_lists_staging_keys_with_kind_and_apply_mode(admin_client, m
         assert by_key[key]["kind"] == "staging"
         assert by_key[key]["apply_mode"] == "auto"
     assert by_key["orders"]["kind"] == "orders"
+
+
+# ---------------------------------------------------------------------------
+# Staging poll job on the lifespan scheduler (NIMBUS_SAP_STAGING_POLL_SECONDS)
+# ---------------------------------------------------------------------------
+def _run_lifespan(monkeypatch, *, poll_seconds, sync_enabled=False):
+    """Enter/exit brain.lifespan with every database touch stubbed out; returns
+    (job_ids registered on the scheduler, scheduler-was-created)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import db as db_mod
+    import master_data as md_mod
+
+    for mod in (db_mod, md_mod, auth):
+        for name in dir(mod):
+            if name.startswith("ensure_"):
+                monkeypatch.setattr(mod, name, lambda *a, **k: None)
+    monkeypatch.setattr(brain, "_migrate_audit_log", lambda: None)
+    monkeypatch.setattr(brain.plcache, "load_priority_lists", lambda: None)
+    monkeypatch.setattr(brain.db, "get_health_stats", lambda: {"total_orders": 0, "connected": True})
+    monkeypatch.setattr(brain, "SAP_STAGING_POLL_SECONDS", poll_seconds)
+    monkeypatch.setattr(brain, "SAP_SYNC_ENABLED", sync_enabled)
+    monkeypatch.setattr(brain.sap_sync, "list_enabled_jobs", lambda: [])
+    app = SimpleNamespace(state=SimpleNamespace())
+    seen = {}
+
+    async def _go():
+        async with brain.lifespan(app):
+            sched = app.state.sap_scheduler
+            seen["created"] = sched is not None
+            seen["jobs"] = [j.id for j in sched.get_jobs()] if sched is not None else []
+
+    asyncio.run(_go())
+    return seen["jobs"], seen["created"]
+
+
+def test_lifespan_registers_staging_poll_job_when_interval_set(monkeypatch):
+    pytest.importorskip("apscheduler")      # pinned in requirements.txt; absent from some dev venvs
+    jobs, created = _run_lifespan(monkeypatch, poll_seconds=30)
+    assert created and jobs == ["sap:staging-poll"]
+
+
+def test_lifespan_has_no_scheduler_when_poll_and_sync_are_off(monkeypatch):
+    jobs, created = _run_lifespan(monkeypatch, poll_seconds=0)
+    assert not created and jobs == []
+
+
+@pytest.mark.parametrize("result", [
+    {"processed": [], "applied": [], "held": [], "skipped": [], "errors": []},
+    {"errors": [{"error": "x"}]},
+])
+def test_run_sap_staging_poll_offloads_poll_once_and_never_raises(monkeypatch, result):
+    import asyncio
+    calls = []
+    monkeypatch.setattr(brain.sap_staging, "poll_once", lambda **k: calls.append(k) or result)
+    asyncio.run(brain._run_sap_staging_poll())
+    assert calls == [{"actor": "sap-staging-poll"}]
+
+    def _boom(**_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(brain.sap_staging, "poll_once", _boom)
+    asyncio.run(brain._run_sap_staging_poll())     # must not raise

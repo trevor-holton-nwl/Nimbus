@@ -59,6 +59,7 @@ from pathlib import Path
 
 import db
 import master_data as md
+import backend.integration.sap_staging as sap_staging
 import backend.integration.sap_sync as sap_sync
 import backend.security.auth as auth
 import backend.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
@@ -258,6 +259,23 @@ async def _run_sap_job(object_key: str) -> None:
                    exc=e, object_key=object_key)
 
 
+async def _run_sap_staging_poll() -> None:
+    """APScheduler job body for the SAP staging poll (expire stale loading -> validate ready
+    batches -> auto-apply objects in auto mode -> sweeps). `poll_once` is blocking and never
+    raises; it is offloaded to the threadpool so the event loop is never stalled. This wrapper
+    also never raises."""
+    from fastapi.concurrency import run_in_threadpool
+    try:
+        result = await run_in_threadpool(sap_staging.poll_once, actor="sap-staging-poll")
+        errors = result.get("errors") or []
+        _log_event("error" if errors else "info", "sap_staging", "Scheduled staging poll finished",
+                   processed=len(result.get("processed") or []), applied=len(result.get("applied") or []),
+                   held=len(result.get("held") or []), skipped=len(result.get("skipped") or []),
+                   errors=len(errors))
+    except Exception as e:
+        _log_event("error", "sap_staging", "Scheduled staging poll raised", exc=e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
@@ -313,12 +331,15 @@ async def lifespan(app: FastAPI):
     # When enabled, register one cron job per enabled+scheduled SAP object. APScheduler
     # is imported lazily so it is only a hard dependency when the feature is on.
     app.state.sap_scheduler = None
-    if SAP_SYNC_ENABLED:
+    # The scheduler object also exists when only the staging poll is on
+    # (NIMBUS_SAP_STAGING_POLL_SECONDS > 0); the per-object cron jobs stay under SAP_SYNC_ENABLED.
+    if SAP_SYNC_ENABLED or SAP_STAGING_POLL_SECONDS > 0:
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from apscheduler.triggers.cron import CronTrigger
+            from apscheduler.triggers.interval import IntervalTrigger
             scheduler = AsyncIOScheduler()
-            jobs = sap_sync.list_enabled_jobs()
+            jobs = sap_sync.list_enabled_jobs() if SAP_SYNC_ENABLED else []
             for job in jobs:
                 object_key = job["object_key"]
                 scheduler.add_job(
@@ -330,14 +351,30 @@ async def lifespan(app: FastAPI):
                     coalesce=True,
                     replace_existing=True,
                 )
+            if SAP_STAGING_POLL_SECONDS > 0:
+                scheduler.add_job(
+                    _run_sap_staging_poll,
+                    IntervalTrigger(seconds=SAP_STAGING_POLL_SECONDS),
+                    id="sap:staging-poll",
+                    max_instances=1,
+                    coalesce=True,
+                    replace_existing=True,
+                )
             scheduler.start()
             app.state.sap_scheduler = scheduler
-            _log_event("info", "sap_sync", "SAP sync scheduler started",
-                       jobs=len(jobs))
+            if SAP_SYNC_ENABLED:
+                _log_event("info", "sap_sync", "SAP sync scheduler started", jobs=len(jobs))
+            else:
+                _log_event("info", "sap_sync", "SAP sync scheduler disabled (NIMBUS_SAP_SYNC_ENABLED not set)")
+            if SAP_STAGING_POLL_SECONDS > 0:
+                _log_event("info", "sap_staging", "SAP staging poll started",
+                           interval_seconds=SAP_STAGING_POLL_SECONDS)
         except Exception as e:
-            _log_event("error", "sap_sync", "SAP sync scheduler failed to start", exc=e)
+            _log_event("error", "sap_sync", "SAP scheduler failed to start", exc=e)
     else:
         _log_event("info", "sap_sync", "SAP sync scheduler disabled (NIMBUS_SAP_SYNC_ENABLED not set)")
+    if SAP_STAGING_POLL_SECONDS <= 0:
+        _log_event("info", "sap_staging", "SAP staging poll disabled (NIMBUS_SAP_STAGING_POLL_SECONDS not set)")
 
     yield
 
@@ -383,6 +420,13 @@ api.add_middleware(GZipMiddleware, minimum_size=1000)
 # skeleton stance: connectors are stubs and nothing reaches out on a timer until
 # an operator opts in. Honored once at startup in the lifespan below.
 SAP_SYNC_ENABLED = os.getenv("NIMBUS_SAP_SYNC_ENABLED", "0") in ("1", "true", "True")
+
+# SAP staging (Mulesoft -> sap_stage_* tables) poll interval in seconds; 0 (default) = no
+# poll job. Independent of SAP_SYNC_ENABLED. Two more knobs are read inside
+# backend/integration/sap_staging.py, not here:
+#   NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN (default 120) -- a batch left in `loading` longer is rejected as stale;
+#   NIMBUS_SAP_SYSTEM_TZ (IANA name, default UTC) -- the zone SAP's dates/times are expressed in.
+SAP_STAGING_POLL_SECONDS = int(os.getenv("NIMBUS_SAP_STAGING_POLL_SECONDS", "0") or 0)
 
 
 # Request-ID middleware: accept inbound x-request-id, generate one if missing,
