@@ -266,6 +266,38 @@ function capacityFailure(reason: PlacementInfeasibility['reason'] = 'no-feasible
   return { kind: 'infeasible', reason, productiveSegments: [] };
 }
 
+function normalizedMinProductiveSegment(value: number | undefined): number {
+  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+}
+
+/** True when `placeWithSetup` must place the order whole in a single free
+ * interval: `never`, `overlong_only` for an order that is not inherently
+ * overlong, or a runtime under the productive-segment floor. The single source
+ * of truth for that branch, also used to decide when interval building may stop
+ * at the first fit (T3). */
+function placementIsContinuous(
+  policy: SplitOrderPolicy, isInherentlyOverlong: boolean | undefined, runtimeMinutes: number, minProductiveSegmentMinutes: number,
+): boolean {
+  return policy === 'never'
+    || (policy === 'overlong_only' && isInherentlyOverlong !== true)
+    || runtimeMinutes < minProductiveSegmentMinutes;
+}
+
+/** T3: minutes of one free interval that satisfy a continuous placement
+ * (setup + runtime), or undefined when the placement may split, the setup is
+ * unresolved, or the runtime is invalid — in all of which `placeWithSetup`
+ * needs every interval and the builder must not stop early. */
+function continuousFitMinutes(
+  setup: PlaceWithSetupRequest['setup'], runtimeMinutes: number, policy: SplitOrderPolicy,
+  isInherentlyOverlong: boolean | undefined, minProductiveSegmentMinutes: number | undefined,
+): number | undefined {
+  if (!setup || setup.kind !== 'resolved' || !Number.isInteger(setup.minutes) || setup.minutes < 0) return undefined;
+  const runtime = Math.round(Number(runtimeMinutes));
+  if (!Number.isFinite(runtime) || runtime <= 0) return undefined;
+  if (!placementIsContinuous(policy, isInherentlyOverlong, runtime, normalizedMinProductiveSegment(minProductiveSegmentMinutes))) return undefined;
+  return setup.minutes + runtime;
+}
+
 /**
  * Pure setup-aware placement over caller-supplied effective operating
  * intervals. It emits only derived setup capacity plus productive ranges;
@@ -292,10 +324,7 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     ? clipAlignedIntervals(request.freeIntervals as ReadonlyArray<MinuteInterval>, request.earliestStart)
     : normalizedIntervals(request.freeIntervals, request.earliestStart);
   if (!intervals.length) return capacityFailure();
-  const minProductiveSegmentMinutes = Number.isInteger(request.minProductiveSegmentMinutes)
-    && (request.minProductiveSegmentMinutes as number) > 0
-    ? (request.minProductiveSegmentMinutes as number)
-    : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+  const minProductiveSegmentMinutes = normalizedMinProductiveSegment(request.minProductiveSegmentMinutes);
 
   const place = (start: Date, productiveMinutes: number, productiveSegments: PlacementInterval[]): PlacementSuccess => {
     const productiveStart = new Date(start.getTime() + setup.minutes * 60 * 1000);
@@ -310,22 +339,15 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     };
   };
 
-  const requiresContinuous = request.policy === 'never'
-    || (request.policy === 'overlong_only' && request.isInherentlyOverlong !== true);
-  if (requiresContinuous) {
+  // Whole-order placement: policy forbids splitting, or the under-floor
+  // exemption (explicitly complete-and-unsplit; it does not permit a
+  // setup-only tail followed by a tiny continuation). The first interval that
+  // holds setup + runtime wins.
+  if (placementIsContinuous(request.policy, request.isInherentlyOverlong, runtimeMinutes, minProductiveSegmentMinutes)) {
     const requiredMinutes = setup.minutes + runtimeMinutes;
     for (const interval of intervals) {
       if (interval.minutes < requiredMinutes) continue;
       return place(interval.start, runtimeMinutes, []);
-    }
-    return capacityFailure();
-  }
-
-  // The under-floor exemption is explicitly complete-and-unsplit. It does not
-  // permit a setup-only tail followed by a tiny continuation.
-  if (runtimeMinutes < minProductiveSegmentMinutes) {
-    for (const interval of intervals) {
-      if (interval.minutes >= setup.minutes + runtimeMinutes) return place(interval.start, runtimeMinutes, []);
     }
     return capacityFailure();
   }
@@ -2528,7 +2550,7 @@ const ALIGNED_FREE = Symbol('nimbus.alignedFreeIntervals');
  * `freeIntervalsFor` output, which `placeWithSetup` normalizes as before. */
 function freeIntervalsForPlacement(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
-  ctx?: SetupRunContext,
+  ctx?: SetupRunContext, stopAfterFitMinutes?: number,
 ): PlacementInterval[] {
   if (through <= from || ctx?.respectCalendar === false) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
   const entry = freeIndexFor(ctx, snapshot, line, plant, from, through);
@@ -2542,7 +2564,15 @@ function freeIntervalsForPlacement(
   for (let index = firstEndAfter(entry.me, lower); index < entry.ms.length && entry.ms[index] < upper; index += 1) {
     const start = Math.max(entry.ms[index], lower);
     const end = Math.min(entry.me[index], upper);
-    if (end > start) result.push({ start: new Date(start), end: new Date(end), minutes: (end - start) / MIN_MS });
+    if (end > start) {
+      const minutes = (end - start) / MIN_MS;
+      result.push({ start: new Date(start), end: new Date(end), minutes });
+      // T3: a continuous placement takes the first interval that fits, so
+      // later windows can never be chosen. `from` is the placement's
+      // earliestStart at both call sites, so the earliestStart clip is already
+      // applied above.
+      if (stopAfterFitMinutes !== undefined && minutes >= stopAfterFitMinutes) break;
+    }
   }
   (result as unknown as Record<symbol, unknown>)[ALIGNED_FREE] = true;
   return result;
@@ -2924,24 +2954,22 @@ function candidateForSequence(
 
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
     const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    const isInherentlyOverlong = splitPolicy === 'overlong_only'
+      ? !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext)
+      : undefined;
+    const minProductiveSegmentMinutes = bounds.runContext?.minProductiveSegmentMinutes
+      ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
       setup: setupRequirement,
       policy: splitPolicy,
-      ...(splitPolicy === 'overlong_only' ? {
-        isInherentlyOverlong: !hasNominalWindow(
-          snapshot,
-          line,
-          bounds.setup.plant,
-          cursor,
-          runtimeMinutes,
-          bounds.runContext,
-        ),
-      } : {}),
-      freeIntervals: freeIntervalsForPlacement(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext),
-      minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
-        ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
+      ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
+      freeIntervals: freeIntervalsForPlacement(
+        snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext,
+        continuousFitMinutes(setupRequirement, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
+      ),
+      minProductiveSegmentMinutes,
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       unadmitted.push(task);
@@ -4547,17 +4575,23 @@ export function placeUnknownTail(
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+    const tailSetup = { kind: 'resolved' as const, minutes: tailChargeableMinutes };
+    const isInherentlyOverlong = splitPolicy === 'overlong_only'
+      ? !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext)
+      : undefined;
+    const minProductiveSegmentMinutes = bounds.runContext?.minProductiveSegmentMinutes
+      ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
-      setup: { kind: 'resolved', minutes: tailChargeableMinutes },
+      setup: tailSetup,
       policy: splitPolicy,
-      ...(splitPolicy === 'overlong_only' ? {
-        isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext),
-      } : {}),
-      freeIntervals: freeIntervalsForPlacement(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext),
-      minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
-        ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
+      ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
+      freeIntervals: freeIntervalsForPlacement(
+        snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext,
+        continuousFitMinutes(tailSetup, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
+      ),
+      minProductiveSegmentMinutes,
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       // B2: this order alone doesn't fit at the current cursor — defer it
