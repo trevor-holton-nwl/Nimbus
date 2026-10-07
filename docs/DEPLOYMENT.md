@@ -44,6 +44,7 @@ Apply both new files with the `promote-azure` skill, in this order: `migrations/
 |---|---|---|
 | `NIMBUS_SAP_STAGING_POLL_SECONDS` | `0` (no poll job) | Poll interval for new Mulesoft batches. Suggested pilot value `60`. Setting it creates the in-process scheduler even when `NIMBUS_SAP_SYNC_ENABLED` is off. |
 | `NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN` | `120` | A batch left in `loading` (or marked `ready` with a row count that never matches) longer than this is rejected as stale. |
+| `NIMBUS_SAP_STAGING_STATEMENT_TIMEOUT_MS` | `600000` | `statement_timeout` (ms) for the staging module's own validate / apply / sweep connections; the pool-wide default is 30 s (`NIMBUS_PG_STATEMENT_TIMEOUT_MS`), too short for a snapshot of tens of thousands of rows. The planned-order upsert itself runs on `db.upsert_orders`' own connections and keeps the pool default. |
 | `NIMBUS_SAP_SYSTEM_TZ` | `UTC` | IANA name of the time zone SAP's dates and times are expressed in (for example `America/New_York`). **Value to be confirmed with SAP Development**; a wrong value shifts every order's start and finish by whole hours. |
 
 ```powershell

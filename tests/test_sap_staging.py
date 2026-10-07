@@ -350,9 +350,11 @@ def test_supersede_older_only_touches_older_unapplied_batches_and_their_rows():
     ids = st.supersede_older(cur, "stage_material_plants", "ZZP1", keep)
     assert ids == [str(old)]
     stmt, params = cur.executed[0]
-    assert "status = 'superseded'" in stmt and "received_at <" in stmt
+    assert "status = 'superseded'" in stmt
+    assert "(received_at, COALESCE(ready_at, received_at), batch_id) < (SELECT" in stmt     # B4: total order
     assert params[0] == "stage_material_plants" and params[1] == "ZZP1" and params[2] == str(keep)
     assert params[3] == ["ready", "validated", "held"]
+    assert params[4] is None and params[5] is None                                         # no source restriction
     assert len(cur.executed) == 2 and cur.executed[1][1] == ([str(old)],)
 
 
@@ -433,14 +435,50 @@ def test_master_vanish_stats_uses_the_25_percent_gate():
     assert st.master_vanish_stats(set(), set())[2] is False            # nothing live -> never held
 
 
-def test_material_protection_set_excludes_only_unkeyed_rejections():
+def test_material_protection_set_excludes_only_foreign_or_overlong_rejections():
     cur = _RecCursor([[("A",), ("B",)]])
     assert st._sent_material_ids(cur, "sap_stage_material_plant", uuid.uuid4()) == {"A", "B"}
     stmt = cur.executed[0][0]
-    for protected in ("duplicate_key", "value_too_long"):                # rejected, but SAP did send the key
+    # B1: rejected rows are protected whenever material_id resolved -- duplicates, too-long values AND
+    # missing_key (a blank plant column must not make the sweep delete the live row).
+    for protected in ("duplicate_key", "value_too_long", "missing_key"):
         assert protected not in stmt
-    for unprotected in ("missing_key", "plant_mismatch", "unknown_plant", "key_too_long"):
+    assert "material_id IS NOT NULL" in stmt
+    for unprotected in ("plant_mismatch", "unknown_plant", "key_too_long"):
         assert unprotected in stmt
+
+
+def test_blank_plant_material_row_resolves_its_material_so_it_is_protected():
+    res = st.validate_material_plant_rows([{"id": 1, "matnr": "000555", "werks": ""}], "ZZP1", {"ZZP1"})
+    assert res[0]["reason"] == "missing_key" and res[0]["resolved"]["material_id"] == "555"
+
+
+class _DescCursor(_RecCursor):
+    """Recording cursor that also answers `.description` for `SELECT *` readers."""
+
+    def __init__(self, names, rows):
+        super().__init__([rows])
+        self.description = [type("D", (), {"name": n})() for n in names]
+
+
+def test_routing_group_is_protected_even_when_activity_is_blank():
+    cols = ["id", "plant", "material_id", "task_list_type", "routing_group", "group_counter", "sequence_no",
+            "activity", "row_status", "reject_reason"]
+    rows = [(1, "ZZP1", "000777", "N", "G1", "1", "10", "", "rejected", "missing_key"),      # blank activity
+            (2, "ZZP1", "888", "N", "G2", "01", "10", "0010", "valid", None),                # complete
+            (3, "ZZP1", "999", "N", "", "01", "10", "0010", "rejected", "missing_key")]      # no group: nothing to protect
+    cur = _DescCursor(cols, rows)
+    keys = st._sent_routing_keys(cur, "sap_stage_routing_operation", uuid.uuid4(), "stage_routing_operation")
+    groups = {tuple(k[1:5]) for k in keys}
+    assert ("777", "N", "G1", "01") in groups and ("888", "N", "G2", "01") in groups
+    assert not any(g[0] == "999" for g in groups)
+    assert "missing_key" not in cur.executed[0][0] and "deleted_flag" in cur.executed[0][0]
+
+
+def test_production_version_with_a_blank_version_is_not_protected_by_a_group_key():
+    cols = ["id", "plant", "material_id", "production_version", "row_status", "reject_reason"]
+    cur = _DescCursor(cols, [(1, "ZZP1", "777", "", "rejected", "missing_key")])
+    assert st._sent_routing_keys(cur, "sap_stage_production_version", uuid.uuid4(), "stage_production_version") == set()
 
 
 def test_material_plant_value_too_long_rejected_with_column_name():
@@ -990,3 +1028,493 @@ def test_send_uses_the_runtime_mismatch_effective_end(pg, stg_plant):
             cur.execute("DELETE FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
                         " AND details->>'plant' = %s", (PLANT,))
             conn.commit()
+
+
+# ===========================================================================
+# Reviewer round 3 (B1-B18) -- pure regressions
+# ===========================================================================
+class _FakeConn:
+    """Pool-connection stand-in: scripted fetchone() answers, records statements, optional unlock failure."""
+
+    def __init__(self, ones=(), fail_on=None):
+        self.ones = list(ones)
+        self.executed = []
+        self.fail_on = fail_on
+        self.closed = False
+        self.commits = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self
+
+    def execute(self, statement, params=None):
+        text = str(statement)
+        self.executed.append((text, params))
+        if self.fail_on and self.fail_on in text:
+            raise RuntimeError("boom")
+
+    def fetchone(self):
+        return self.ones.pop(0) if self.ones else None
+
+    def fetchall(self):
+        return []
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def connection(self):
+        return self.conn
+
+
+def test_int_or_none_rejects_non_finite_and_fractions_without_overflow():
+    assert st._int_or_none("12", "f") == 12 and st._int_or_none(" 7.0 ", "f") == 7 and st._int_or_none("", "f") is None
+    for bad in ("inf", "-Infinity", "2.5", "abc"):
+        with pytest.raises(ValueError, match="integer"):
+            st._int_or_none(bad, "f")
+    assert st._int_or_none("2.5", "f", round_fraction=True) == 2
+    assert st._int_or_none("3.5", "f", round_fraction=True) == 4            # banker's rounding, same as round()
+
+
+def test_planned_order_inf_integer_field_is_invalid_int_not_a_crash():
+    res = st.validate_planned_order_rows([_planned_stage(id=1, stlan="inf")], "ZZP1", {"ZZP1"})
+    assert res[0]["reason"] == "invalid_int"
+
+
+def test_material_lot_sizes_validated_and_built_without_crashing_on_inf():
+    rows = [{"id": 1, "matnr": "1", "werks": "ZZP1", "minls": "inf"},
+            {"id": 2, "matnr": "2", "werks": "ZZP1", "ltinc": "abc"},
+            {"id": 3, "matnr": "3", "werks": "ZZP1", "minls": Decimal("2.5"), "ltinc": Decimal("5")}]
+    res = _by_id(st.validate_material_plant_rows(rows, "ZZP1", {"ZZP1"}))
+    assert res[1]["reason"] == "invalid_int" and res[2]["reason"] == "invalid_int" and res[3]["status"] == "valid"
+    stage = [{"id": 1, "matnr": "1", "werks": "ZZP1", "minls": Decimal("Infinity"), "material_id": "1", "plant": "ZZP1"}]
+    built = st.build_material_plant_rows(stage, _fmap(_MATERIAL_MAP), [])
+    assert "min_lot_size" not in built[0]
+
+
+def test_coerce_for_column_integer_columns_reject_inf_and_fractions():
+    for bad in ("inf", "1.5"):
+        with pytest.raises(ValueError):
+            st._coerce_for_column(bad, "integer")
+    with pytest.raises(ValueError):
+        st._coerce_for_column("inf", "numeric")
+
+
+def test_supersede_older_can_be_limited_to_uploads():
+    cur = _RecCursor([[]])
+    st.supersede_older(cur, "stage_planned_orders", "ZZP1", uuid.uuid4(), source="upload")
+    stmt, params = cur.executed[0]
+    assert "source = %s::text" in stmt and params[4] == "upload" and params[5] == "upload"
+
+
+def test_absent_predicate_skips_the_array_for_an_empty_list():
+    assert st._absent_predicate("x", set()) == ("TRUE", ())
+    assert st._absent_predicate("x", {"b", "a"}) == ("x <> ALL(%s)", (["a", "b"],))
+
+
+def test_zero_row_planned_order_batch_gates_without_an_empty_array(monkeypatch):
+    monkeypatch.setattr(st, "_plant_info", lambda cur, plant: {"timezone": None, "routing_enabled": True})
+    monkeypatch.setattr(st.db, "_horizon_bounds_for_plant", lambda cur, plant: (datetime(2026, 11, 1), None))
+
+    class Cur(_RecCursor):
+        def fetchone(self):
+            return (True,) if "routing_operation" in self.executed[-1][0] else (4, 4)
+
+    cur = Cur()
+    info, _w, held, _ve = st._planned_order_gates(cur, "ZZP1", set())
+    assert info["in_horizon_live"] == 4 and info["vanish_candidates"] == 4 and "vanish_threshold" in held
+    assert info["horizon_end_present"] is True
+    assert all("ALL(" not in stmt for stmt, _ in cur.executed)
+    cur2 = _RecCursor([[]])
+    assert st._vanish_candidates(cur2, "ZZP1", set(), datetime(2026, 11, 1)) == []
+    assert "ALL(" not in cur2.executed[0][0]
+
+
+def test_zero_row_material_batch_is_held_empty_snapshot_not_an_error(monkeypatch):
+    monkeypatch.setattr(st, "_known_plants", lambda cur, plants: {"ZZP1"})
+    monkeypatch.setattr(st, "_fetch_rows", lambda *a, **k: [])
+    monkeypatch.setattr(st, "_master_gate", lambda *a, **k: (
+        {"in_horizon_live": 3, "vanish_candidates": 3, "vanish_pct": 1.0},
+        [{"code": "vanish_threshold"}], ["vanish_threshold"], [("A",), ("B",), ("C",)]))
+    cur = _ScriptCursor([_hdr_row(status="ready", expected=0), (0,)])
+    out = st._validate(cur, uuid.uuid4())
+    assert out["status"] == "held" and "empty_snapshot" in out["held_reasons"]
+
+
+def test_validate_sets_a_transaction_local_statement_timeout_first():
+    cur = _ScriptCursor([_hdr_row(status="ready", expected=5), (3,)])
+    with pytest.raises(st.BatchNotApplicable):
+        st._validate(cur, uuid.uuid4())
+    first = cur.executed[0][0]
+    assert "SET LOCAL statement_timeout" in first and str(st.STATEMENT_TIMEOUT_MS) in first
+
+
+def test_validate_rejects_a_header_naming_an_unknown_plant(monkeypatch):
+    monkeypatch.setattr(st, "_known_plants", lambda cur, plants: set())
+    monkeypatch.setattr(st, "_fetch_rows", lambda *a, **k: [])
+    cur = _ScriptCursor([_hdr_row(status="ready", expected=0), (0,)])
+    out = st._validate(cur, uuid.uuid4())
+    assert out["status"] == "rejected" and out["warnings"][0]["code"] == "unknown_plant"
+    assert any("error = 'unknown_plant'" in s for s, _ in cur.executed)
+
+
+def test_header_plant_is_trimmed():
+    row = list(_hdr_row())
+    row[2] = " ZZP1  "
+    assert st._header_dict(tuple(row))["plant"] == "ZZP1"
+
+
+def test_frozen_vanish_reads_the_raw_list_and_regate_refuses_an_unconfirmed_trip():
+    cur = _ScriptCursor([(["a", "b"], "true", "true")])
+    assert st._frozen_vanish(cur, uuid.uuid4()) == {"keys": {"a", "b"}, "confirmed": True}
+    assert st._frozen_vanish(_ScriptCursor([(["a"], "false", None)]), uuid.uuid4())["keys"] is None   # over the cap
+    assert st._frozen_vanish(_ScriptCursor([(None, None, None)]), uuid.uuid4())["keys"] is None       # legacy batch
+    with pytest.raises(st.BatchNotApplicable) as ei:
+        st._regate_deletion(10, 3, False, "orders")
+    assert ei.value.detail["code"] == "vanish_threshold"
+    st._regate_deletion(10, 3, True, "orders")
+    st._regate_deletion(10, 2, False, "orders")
+
+
+def test_apply_batch_refuses_when_another_apply_holds_the_object_plant_lock(monkeypatch):
+    conn = _FakeConn([_hdr_row(status="validated"), (False,)])
+    monkeypatch.setattr(st, "_pool", _FakePool(conn))
+    with pytest.raises(st.BatchNotApplicable) as ei:
+        st.apply_batch(uuid.uuid4(), actor="pytest")
+    assert ei.value.detail["code"] == "apply_in_progress"
+    lock = [p for s, p in conn.executed if "pg_try_advisory_lock" in s][0]
+    assert lock == ("sap:apply:stage_material_plants:ZZP1",)         # per object + plant, not per batch
+
+
+def test_apply_batch_closes_the_connection_when_unlock_fails(monkeypatch):
+    conn = _FakeConn([_hdr_row(status="validated"), (True,)], fail_on="pg_advisory_unlock")
+    monkeypatch.setattr(st, "_pool", _FakePool(conn))
+    monkeypatch.setattr(st, "_apply_locked", lambda *a, **k: {"status": "applied"})
+    logged = []
+    monkeypatch.setattr(st, "_log", lambda level, msg, **ctx: logged.append((level, msg, ctx)))
+    assert st.apply_batch(uuid.uuid4(), actor="pytest") == {"status": "applied"}
+    assert conn.closed is True
+    assert any(level == "error" and isinstance(ctx.get("exc"), RuntimeError) for level, _m, ctx in logged)
+
+
+def test_apply_batch_keeps_the_connection_when_unlock_succeeds(monkeypatch):
+    conn = _FakeConn([_hdr_row(status="validated"), (True,)])
+    monkeypatch.setattr(st, "_pool", _FakePool(conn))
+    monkeypatch.setattr(st, "_apply_locked", lambda *a, **k: {})
+    st.apply_batch(uuid.uuid4(), actor="pytest")
+    assert conn.closed is False
+    assert any("pg_advisory_unlock" in s for s, _ in conn.executed)
+    assert any("SET statement_timeout" in s for s, _ in conn.executed)
+
+
+def test_bulk_delete_blocks_only_reference_errors(monkeypatch):
+    blocked_msg = "Cannot apply change to 'material_plants': it is referenced by or references other rows."
+    logged = []
+    monkeypatch.setattr(st, "_log", lambda level, msg, **ctx: logged.append((level, msg, ctx)))
+    calls = []
+
+    def reference_then_ok(table, ops, actor):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError(blocked_msg)
+
+    monkeypatch.setattr(st.md, "bulk_apply", reference_then_ok)
+    keys = [{"material_id": str(i), "plant": "P"} for i in range(600)]          # chunks of 500 / 100
+    done, blocked = st._bulk_delete("material_plants", keys, "pytest", "bid-2")
+    assert len(blocked) == 500 and len(done) == 100
+    assert logged and logged[0][2]["batch_id"] == "bid-2" and logged[0][2]["rows"] == 500
+
+    def other_error(table, ops, actor):
+        raise ValueError("Column 'x' is a system column")
+
+    monkeypatch.setattr(st.md, "bulk_apply", other_error)
+    with pytest.raises(ValueError, match="system column"):
+        st._bulk_delete("material_plants", keys, "pytest", "bid-3")
+
+
+def test_mark_rejected_at_apply_writes_reasons_and_logs(monkeypatch):
+    conn = _FakeConn()
+    logged = []
+    monkeypatch.setattr(st, "_log", lambda level, msg, **ctx: logged.append((level, msg, ctx)))
+    st._mark_rejected_at_apply(conn, "sap_stage_planned_order", "bid-1", [(7, "invalid_date"), (9, "invalid_int")])
+    stmt, params = conn.executed[0]
+    assert "row_status = 'rejected'" in stmt and "row_status = 'valid'" in stmt
+    assert params == ([7, 9], ["invalid_date", "invalid_int"], "bid-1") and conn.commits == 1
+    assert logged[0][0] == "warn" and logged[0][2]["batch_id"] == "bid-1" and logged[0][2]["count"] == 2
+    conn2 = _FakeConn()
+    st._mark_rejected_at_apply(conn2, "t", "bid", [])
+    assert conn2.executed == []
+
+
+def test_build_order_rows_reports_each_unbuildable_row_with_a_reason():
+    stage = [_planned_stage(id=1), _planned_stage(id=2, stlan="inf"), _planned_stage(id=3, psttr="2026-99-99")]
+    rows, problems = st.build_order_rows(stage, "UTC", _fmap(_PLANNED_MAP))
+    assert [r["_stage_row_id"] for r in rows] == [1]
+    assert dict(problems) == {2: "invalid_int", 3: "invalid_date"}
+
+
+def test_poll_error_keeps_the_exception_class_and_logs_with_the_batch_id(monkeypatch):
+    logged = []
+    monkeypatch.setattr(st, "_log", lambda level, msg, **ctx: logged.append((level, msg, ctx)))
+    out = {"errors": []}
+    exc = KeyError("nope")
+    st._poll_error(out, exc, batch_id="bid-1", object_key="stage_planned_orders")
+    assert out["errors"] == [{"object_key": "stage_planned_orders", "batch_id": "bid-1", "error": "KeyError: 'nope'"}]
+    assert logged[0][0] == "error" and logged[0][2]["exc"] is exc and logged[0][2]["batch_id"] == "bid-1"
+    st._poll_error(out, ValueError("x"), step="sweeps")
+    assert out["errors"][1] == {"step": "sweeps", "error": "ValueError: x"}
+
+
+def test_snapshot_vanish_audit_is_written_before_the_deletes_and_finished_after():
+    conn = _FakeConn([(42,)])
+    audit_id = st._audit_snapshot_vanish_begin(conn, "material_plants", "bid-1", "ZZP1", "pytest", ["A", "B"])
+    assert audit_id == 42 and "INSERT INTO admin_audit" in conn.executed[0][0] and conn.commits == 1
+    st._audit_snapshot_vanish_finish(conn, audit_id, ["A"], 1)
+    assert "UPDATE admin_audit" in conn.executed[1][0] and conn.executed[1][1][1] == 42
+    assert st._audit_snapshot_vanish_begin(_FakeConn(), "t", "b", "p", "a", []) is None
+    st._audit_snapshot_vanish_finish(_FakeConn(), None, [], 0)
+
+
+def test_mulesoft_role_file_does_not_grant_server_owned_header_columns():
+    path = os.path.join(ROOT, "migrations", "manual", "2026-10-08-nimbus-mulesoft-role.sql")
+    text = open(path, encoding="utf-8").read()
+    grant = next(line for line in text.splitlines() if line.startswith("GRANT INSERT (batch_id"))
+    assert "received_at" not in grant and "ready_at" not in grant and "created_by" not in grant
+    assert "NEW.received_at := now()" in text and "NEW.ready_at := now()" in text   # the trigger owns the clocks
+
+
+# ===========================================================================
+# Reviewer round 3 -- pg regressions
+# ===========================================================================
+@pytest.mark.pg
+def test_apply_refuses_while_another_apply_for_the_object_and_plant_runs(pg, stg_plant):
+    row = {"matnr": "12345", "werks": PLANT}
+    b_batch = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=5)
+    a_batch = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=1)
+    st.validate_batch(a_batch)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE sap_stage_batch SET status = 'applying' WHERE batch_id = %s", (b_batch,))
+        conn.commit()
+    key = f"sap:apply:stage_material_plants:{PLANT}"
+    with pg._pool.connection() as holder:                               # B's apply, running in another session
+        with holder.cursor() as hcur:
+            hcur.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+        holder.commit()
+        try:
+            with pytest.raises(st.BatchNotApplicable) as ei:
+                st.apply_batch(a_batch, actor="pytest")
+            assert ei.value.detail["code"] == "apply_in_progress"
+        finally:
+            with holder.cursor() as hcur:
+                hcur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
+            holder.commit()
+
+
+@pytest.mark.pg
+def test_same_instant_batches_have_exactly_one_winner(pg, stg_plant):
+    row = {"matnr": "12345", "werks": PLANT}
+    a = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
+    b = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE sap_stage_batch SET received_at = '2026-10-07 08:00:00+00',"
+                    " ready_at = '2026-10-07 08:00:01+00' WHERE batch_id IN (%s, %s)", (a, b))
+        conn.commit()
+    out = st.poll_once(actor="pytest")
+    winner, loser = (a, b) if str(a) > str(b) else (b, a)
+    assert out["errors"] == []
+    assert _status(pg, loser) == "superseded" and _status(pg, winner) in ("validated", "applied")
+
+
+@pytest.mark.pg
+def test_a_ready_batch_with_an_unknown_object_key_is_rejected_by_the_poll(pg, stg_plant):
+    bid = uuid.uuid4()
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO sap_stage_batch (batch_id, object_key, plant, source, status, row_count_expected,"
+                    " ready_at) VALUES (%s, 'stage_bogus', %s, 'mulesoft', 'ready', 0, now())", (bid, PLANT))
+        conn.commit()
+    st.poll_once(actor="pytest")
+    assert _status(pg, bid) == "rejected"
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT error FROM sap_stage_batch WHERE batch_id = %s", (bid,))
+        assert cur.fetchone()[0] == "unknown_object_key"
+
+
+@pytest.mark.pg
+def test_padded_header_plant_still_validates_against_trimmed_rows(pg, stg_plant):
+    bid = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [{"matnr": "12345", "werks": PLANT}])
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE sap_stage_batch SET plant = %s WHERE batch_id = %s", (f" {PLANT} ", bid))
+        conn.commit()
+    assert st.validate_batch(bid)["counts"]["valid"] == 1
+
+
+@pytest.mark.pg
+def test_a_missing_key_material_row_still_protects_the_live_row_from_the_sweep(pg, stg_plant):
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO materials (material_id) VALUES ('ZZSTGB1'), ('ZZSTGB2')")
+        cur.execute("INSERT INTO material_plants (material_id, plant) VALUES ('ZZSTGB1', %s), ('ZZSTGB2', %s)",
+                    (PLANT, PLANT))
+        conn.commit()
+    rows = [{"matnr": "ZZSTGB1", "werks": ""}, {"matnr": "ZZSTGB2", "werks": PLANT}]      # blank plant on the first
+    bid = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", rows)
+    res = st.validate_batch(bid)
+    assert res["counts"]["by_reason"] == {"missing_key": 1}
+    st.apply_batch(bid, actor="pytest", confirm_held=res["status"] == "held")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT material_id FROM material_plants WHERE plant = %s AND material_id LIKE 'ZZSTGB%%'"
+                    " ORDER BY 1", (PLANT,))
+        assert [r[0] for r in cur.fetchall()] == ["ZZSTGB1", "ZZSTGB2"]
+
+
+@pytest.mark.pg
+def test_a_routing_with_blank_activity_ops_survives_the_snapshot_sweep(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO materials (material_id) VALUES ('ZZSTGR1')")
+        cur.execute("INSERT INTO routing_operation (plant, material_id, task_list_type, routing_group, group_counter,"
+                    " sequence_no, activity) VALUES (%s, 'ZZSTGR1', 'N', 'G1', '01', '000010', '0010')", (PLANT,))
+        conn.commit()
+    bid = _make_batch(pg, "stage_routing_operation", "sap_stage_routing_operation",
+                      [{"plant": PLANT, "material_id": "ZZSTGR1", "task_list_type": "N", "routing_group": "G1",
+                        "group_counter": "01", "sequence_no": "10", "activity": ""}])
+    res = st.validate_batch(bid)
+    assert res["counts"]["by_reason"].get("missing_key") == 1
+    assert res["counts"]["vanish_candidates"] == 0                      # the group is protected at validation
+
+
+def _live_orders(pg, n, start, prefix="FZ"):
+    with _conn(pg) as (conn, cur):
+        for i in range(1, n + 1):
+            cur.execute("INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
+                        " basic_finish_date) VALUES (%s, %s, '777', %s, %s, %s)",
+                        (f"zzstg-{prefix.lower()}{i}", f"{prefix}{i}", PLANT, start, start + timedelta(hours=4)))
+        cur.execute("INSERT INTO routing_operation (plant, material_id, task_list_type, routing_group, group_counter,"
+                    " sequence_no, activity) VALUES (%s, '777', 'N', 'G1', '01', '000010', '0010')"
+                    " ON CONFLICT DO NOTHING", (PLANT,))
+        conn.commit()
+
+
+def _snapshot_row(po, start):
+    return {"plnum": po, "matnr": "777", "plwrk": PLANT, "psttr": start.strftime("%Y%m%d"), "pstti": "060000",
+            "pedtr": start.strftime("%Y%m%d"), "pedti": "100000", "gsmng": 10}
+
+
+@pytest.mark.pg
+def test_orders_created_after_review_are_never_deleted_by_the_apply(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 4, soon)
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("FZ1", soon)])
+    res = st.validate_batch(bid)
+    assert res["status"] == "held" and res["counts"]["vanish_candidates"] == 3
+    _live_orders(pg, 1, soon, prefix="NEW")                              # a planner adds an order after the review
+    out = st.apply_batch(bid, actor="pytest", confirm_held=True)
+    assert out["counts"]["deleted"] == 3
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT production_order FROM orders WHERE plant = %s ORDER BY production_order", (PLANT,))
+        assert [r[0] for r in cur.fetchall()] == ["FZ1", "NEW1"]
+
+
+@pytest.mark.pg
+def test_horizon_set_after_an_unlimited_review_forces_revalidation(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=None)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 4, soon)
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("FZ1", soon)])
+    res = st.validate_batch(bid)
+    assert res["status"] == "validated" and res["counts"]["horizon_end_present"] is False
+    _set_plant(pg, routing=True, horizon_days=30)
+    with pytest.raises(st.BatchNotApplicable) as ei:
+        st.apply_batch(bid, actor="pytest")
+    assert ei.value.detail["code"] == "revalidate_required"
+
+
+@pytest.mark.pg
+def test_zero_open_reset_leaves_a_planners_reslot_alone_on_an_unchanged_batch(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=3)
+    _live_orders(pg, 1, soon, prefix="ZO")
+    row = {**_snapshot_row("ZO1", soon), "gsmng": 10, "abmng": 10}      # open quantity 0
+    first = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [row])
+    st.validate_batch(first)
+    st.apply_batch(first, actor="pytest")
+    with _conn(pg) as (conn, cur):                                       # the planner re-slots the order
+        cur.execute("UPDATE orders SET planning_status = 'scheduled', planning_reason = NULL,"
+                    " scheduled_start = %s, scheduled_end = %s WHERE plant = %s AND production_order = 'ZO1'",
+                    (soon, soon + timedelta(hours=2), PLANT))
+        conn.commit()
+    second = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [row], age_minutes=-1)
+    st.validate_batch(second)
+    st.apply_batch(second, actor="pytest")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT planning_status FROM orders WHERE plant = %s AND production_order = 'ZO1'", (PLANT,))
+        assert cur.fetchone()[0] == "scheduled"                          # unchanged SAP row: not rewritten
+
+
+@pytest.mark.pg
+def test_unbuildable_rows_are_rejected_at_apply_never_stamped_applied(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 1, soon)
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("FZ1", soon)])
+    st.validate_batch(bid)
+    with _conn(pg) as (conn, cur):                                       # passed validation, unbuildable at apply
+        cur.execute("INSERT INTO sap_stage_planned_order (batch_id, plnum, matnr, plwrk, psttr, pstti, pedtr, pedti,"
+                    " gsmng, row_status, production_order, material_id, plant)"
+                    " VALUES (%s, 'FZ2', '777', %s, %s, '060000', %s, '999999', 10, 'valid', 'FZ2', '777', %s)",
+                    (bid, PLANT, soon.strftime("%Y%m%d"), soon.strftime("%Y%m%d"), PLANT))
+        conn.commit()
+    st.apply_batch(bid, actor="pytest", confirm_held=True)
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT row_status, reject_reason FROM sap_stage_planned_order WHERE batch_id = %s"
+                    " AND plnum = 'FZ2'", (bid,))
+        status, reason = cur.fetchone()
+    assert status == "rejected" and reason
+
+
+@pytest.mark.pg
+def test_outbound_error_rows_age_out_with_the_sent_rows(pg, stg_plant):
+    with _conn(pg) as (conn, cur):
+        for status in ("sent", "error", "ready"):
+            cur.execute("INSERT INTO sap_stage_planned_order_out (send_batch_id, plant, matnr, plwrk, plnum, row_status,"
+                        " queued_at) VALUES (%s, %s, '777', %s, %s, %s, now() - interval '40 days')",
+                        (uuid.uuid4(), PLANT, PLANT, f"OLD-{status}", status))
+        conn.commit()
+    try:
+        st.poll_once(actor="pytest")
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT plnum FROM sap_stage_planned_order_out WHERE plant = %s ORDER BY plnum", (PLANT,))
+            assert [r[0] for r in cur.fetchall()] == ["OLD-ready"]
+    finally:
+        with _conn(pg) as (conn, cur):
+            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
+            conn.commit()
+
+
+@pytest.mark.pg
+def test_an_upload_batch_does_not_supersede_a_validated_mulesoft_batch(pg, stg_plant):
+    row = {"matnr": "12345", "werks": PLANT}
+    mule = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=5)
+    st.validate_batch(mule)
+    up = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE sap_stage_batch SET source = 'upload' WHERE batch_id = %s", (up,))
+        st.supersede_older(cur, "stage_material_plants", PLANT, up, source="upload")
+        conn.commit()
+    assert _status(pg, mule) == "validated"
+    st.apply_batch(mule, actor="pytest")                                # not blocked by the newer upload

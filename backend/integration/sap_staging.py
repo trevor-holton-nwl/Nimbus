@@ -69,9 +69,13 @@ FROZEN_SET_TOLERANCE_ROWS = 5               # ... or this many rows, whichever i
 _FROZEN_KEYS_CAP = 5000                     # deletion keys stored in counts at validation
 _AUDIT_KEYS_CAP = 200                       # deleted keys written into one admin_audit row
 LOADING_TIMEOUT_MIN = env_int("NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN", 120, 1)
+# The pool's 30 s statement_timeout (db.py) is far too short for a snapshot validate / sweep of tens of
+# thousands of rows; this module's own connections raise it. (db.upsert_orders / md.bulk_apply run on their
+# own pooled connections and keep the pool default.)
+STATEMENT_TIMEOUT_MS = env_int("NIMBUS_SAP_STAGING_STATEMENT_TIMEOUT_MS", 600000, 1000)
 SAP_SYSTEM_TZ = os.getenv("NIMBUS_SAP_SYSTEM_TZ", "UTC")
 ARCHIVE_RETENTION_DAYS = 30
-SENT_RETENTION_DAYS = 30
+SENT_RETENTION_DAYS = 30                    # outbound `sent` and `error` rows
 DEAD_BATCH_RETENTION_DAYS = 7               # rejected / discarded / superseded batches
 APPLY_ORDER = ("stage_material_plants", "stage_production_version",
                "stage_routing_operation", "stage_planned_orders")
@@ -95,6 +99,7 @@ _RESOLVED_COLS = {
 _HEADER_COLS = ("batch_id", "object_key", "plant", "source", "status", "row_count_expected", "received_at",
                 "ready_at", "validated_at", "applied_at", "applied_by", "created_by", "counts", "warnings", "error")
 _LIVE_STATUSES = ("ready", "validated", "held")        # un-applied, still-actionable batch states
+_REFERENCE_BLOCKED = "is referenced by or references other rows"     # md.bulk_apply's FK-violation ValueError
 _ZERO_OPEN_REASON = {"code": "zero_open_quantity",
                      "message": "Open quantity is zero; nothing left to produce"}
 
@@ -121,7 +126,10 @@ def _log(level: str, msg: str, **ctx) -> None:
         from backend.admin_ops.logbuffer import _log_event
         _log_event(level, "sap_staging", msg, **ctx)
     except Exception:
-        getattr(log, {"warn": "warning"}.get(level, level), log.info)(msg)
+        exc = ctx.get("exc")
+        extra = {k: v for k, v in ctx.items() if k != "exc" and v is not None}
+        getattr(log, {"warn": "warning"}.get(level, level), log.info)(
+            "%s %s" % (msg, extra) if extra else msg, exc_info=exc if isinstance(exc, BaseException) else None)
 
 
 # ---------------------------------------------------------------------------
@@ -280,14 +288,22 @@ def _text(v) -> str | None:
     return s or None
 
 
-def _int_or_none(v, field: str) -> int | None:
+def _int_or_none(v, field: str, *, round_fraction: bool = False) -> int | None:
+    """Blank -> None; a finite whole number -> int. inf / NaN / junk and (unless `round_fraction`) a
+    fractional value raise ValueError ('... is not a valid integer', mapped to `invalid_int`). Goes through
+    `_dec`, so there is no float round trip and no OverflowError."""
     s = _text(v)
     if s is None:
         return None
     try:
-        return int(float(s))
-    except (TypeError, ValueError) as exc:
+        d = _dec(s)
+    except ValueError as exc:
         raise ValueError(f"{field!r} is not a valid integer: {v!r}") from exc
+    if d is None:
+        return None
+    if d != d.to_integral_value() and not round_fraction:
+        raise ValueError(f"{field!r} is not a valid integer: {v!r}")
+    return int(d.to_integral_value())
 
 
 def build_material_plant_rows(stage_rows: list[dict], field_map: list[dict] | None = None,
@@ -313,10 +329,17 @@ def build_material_plant_rows(stage_rows: list[dict], field_map: list[dict] | No
             row["subnetwork"] = truncate_subnetwork(row["subnetwork"])
         for col in ("min_lot_size", "incremental_lot_size"):
             if row.get(col) is not None:
-                val = float(row[col])
-                if val != int(val):
+                # Fractions round (documented `lot_size_rounded` warning); inf / NaN never get here (the
+                # validator rejects them as invalid_int) but are dropped rather than crashing the batch.
+                try:
+                    val = _dec(row[col])
+                    ival = _int_or_none(val, col, round_fraction=True)
+                except ValueError:
+                    row[col] = None
+                    continue
+                if val is not None and val != val.to_integral_value():
                     rounded += 1
-                row[col] = int(round(val))
+                row[col] = ival
         if row.get("status_pl") is not None:
             row["status_pl"] = str(row["status_pl"]).strip()
         out.append({k: v for k, v in row.items() if v is not None or k in ("material_id", "plant")})
@@ -429,7 +452,8 @@ def _finalize(results: list[dict], key_of) -> list[dict]:
 def validate_material_plant_rows(rows: list[dict], header_plant: str, known_plants: set) -> list[dict]:
     """Row verdicts for a material-plant batch: [{id, status, reason, resolved}]. Reasons:
     missing_key, plant_mismatch, unknown_plant, key_too_long, value_too_long:<staging column> (a value
-    longer than the VARCHAR(n) it lands in, `_MATERIAL_PLANT_MAX_LEN`), duplicate_key."""
+    longer than the VARCHAR(n) it lands in, `_MATERIAL_PLANT_MAX_LEN`), invalid_int (a non-finite or
+    non-numeric lot size), duplicate_key."""
     results = []
     for r in rows:
         mat = sap_sync._t_alpha_strip(r.get("matnr"))
@@ -449,6 +473,13 @@ def validate_material_plant_rows(rows: list[dict], header_plant: str, known_plan
                 if v is not None and len(v) > limit:
                     reason = f"value_too_long:{col}"
                     break
+            if reason is None:
+                for col in ("minls", "ltinc"):          # lot sizes: a non-finite / non-numeric value is invalid_int
+                    try:
+                        _int_or_none(r.get(col), col, round_fraction=True)
+                    except ValueError:
+                        reason = "invalid_int"
+                        break
         results.append({"id": r["id"], "reason": reason, "resolved": {"material_id": mat, "plant": pl}})
     return _finalize(results, lambda x: (x["resolved"]["material_id"], x["resolved"]["plant"]))
 
@@ -581,6 +612,7 @@ def _iso(v):
 def _header_dict(row) -> dict:
     d = dict(zip(_HEADER_COLS, row, strict=True))
     d["batch_id"] = str(d["batch_id"])
+    d["plant"] = (d["plant"] or "").strip()       # Mulesoft may pad the header plant; rows are compared trimmed
     for k in ("received_at", "ready_at", "validated_at", "applied_at"):
         d[k] = _iso(d[k])
     # `vanish_keys` (the reviewed deletion keys, up to 5000) stay in the database row for forensics but are
@@ -661,6 +693,15 @@ def _in_horizon_predicate() -> str:
     return "COALESCE(sap_basic_start_date, basic_start_date) <= %s"
 
 
+def _absent_predicate(column: str, values) -> tuple[str, tuple]:
+    """SQL fragment + params for "`column` is not one of `values`". An EMPTY list (a 0-row snapshot) becomes
+    plain TRUE instead of relying on how the driver types an empty array for `<> ALL(%s)`."""
+    values = sorted(values)
+    if not values:
+        return "TRUE", ()
+    return f"{column} <> ALL(%s)", (values,)
+
+
 def _planned_order_gates(cur, plant: str, order_numbers: set) -> tuple[dict, list[dict], list[str], datetime | None]:
     """Batch-level checks for a planned-order batch: (info counts, warnings, held codes, visibility_end).
     `order_numbers` is EVERY order number SAP sent (valid or rejected-but-resolvable)."""
@@ -683,10 +724,12 @@ def _planned_order_gates(cur, plant: str, order_numbers: set) -> tuple[dict, lis
                                 "snapshot are never deleted."})
     else:
         bound = visibility_end + timedelta(days=1)
+        absent_sql, absent_params = _absent_predicate("COALESCE(parent_production_order, production_order)",
+                                                      order_numbers)
         cur.execute(
-            "SELECT count(*), count(*) FILTER (WHERE COALESCE(parent_production_order, production_order)"
-            " <> ALL(%s)) FROM orders WHERE plant = %s AND " + _in_horizon_predicate(),
-            (sorted(order_numbers), plant, bound))
+            f"SELECT count(*), count(*) FILTER (WHERE {absent_sql}) FROM orders WHERE plant = %s AND "
+            + _in_horizon_predicate(),
+            (*absent_params, plant, bound))
         live, cand = (int(x or 0) for x in cur.fetchone())
         is_held, pct = vanish_gate(live, cand)
         if is_held:
@@ -694,7 +737,8 @@ def _planned_order_gates(cur, plant: str, order_numbers: set) -> tuple[dict, lis
             warnings.append({"level": "warn", "code": "vanish_threshold",
                              "msg": (f"{cand} of {live} in-horizon orders ({pct:.0%}) are missing from this "
                                      f"snapshot; more than {VANISH_HOLD_PCT:.0%} needs admin confirmation.")})
-    return ({"in_horizon_live": live, "vanish_candidates": cand, "vanish_pct": round(pct, 4)},
+    return ({"in_horizon_live": live, "vanish_candidates": cand, "vanish_pct": round(pct, 4),
+             "horizon_end_present": visibility_end is not None},
             warnings, held, visibility_end)
 
 
@@ -705,10 +749,12 @@ def _vanish_candidates(cur, plant: str, order_numbers: set, visibility_end: date
     if visibility_end is None:
         return []
     bound = visibility_end + timedelta(days=1)
+    absent_sql, absent_params = _absent_predicate("COALESCE(parent_production_order, production_order)",
+                                                  order_numbers)
     cur.execute(
         "SELECT id, parent_production_order FROM orders WHERE plant = %s AND " + _in_horizon_predicate()
-        + " AND COALESCE(parent_production_order, production_order) <> ALL(%s)",
-        (plant, bound, sorted(order_numbers)))
+        + f" AND {absent_sql}",
+        (plant, bound, *absent_params))
     cand = cur.fetchall()
     ids = {r[0] for r in cand}
     parents = sorted({r[1] for r in cand if r[1]})
@@ -771,11 +817,14 @@ _MASTER_LABEL = {"stage_material_plants": "material-plant rows", "stage_producti
 
 def _sent_material_ids(cur, table: str, bid) -> set:
     """Material ids of EVERY row SAP sent (valid or rejected), the protection set of the material-plant
-    absent sweep. Rows whose key SAP did not really send (missing key, other / unknown plant, over-long
-    key) are not protected -- mirrors `_sent_order_numbers` / `_sent_routing_keys`."""
+    absent sweep. A row is protected whenever its material resolved (`material_id IS NOT NULL`) -- even a
+    `missing_key` row (e.g. a blank plant column): SAP did send that material, and a half-filled row must not
+    make the sweep delete the live row. Rows for another / unknown plant and over-long keys stay unprotected.
+    (Unlike `_sent_order_numbers`, which takes every order number, and `_sent_routing_keys`, which protects
+    the routing group.)"""
     cur.execute(sql.SQL("SELECT DISTINCT material_id FROM {} WHERE batch_id = %s AND material_id IS NOT NULL"
                         " AND row_status IN ('valid','rejected','applied') AND COALESCE(reject_reason, '')"
-                        " NOT IN ('missing_key', 'plant_mismatch', 'unknown_plant', 'key_too_long')").format(
+                        " NOT IN ('plant_mismatch', 'unknown_plant', 'key_too_long')").format(
         sql.Identifier(table)), (str(bid),))
     return {r[0] for r in cur.fetchall()}
 
@@ -827,6 +876,30 @@ def _key_label(key: tuple) -> str:
     return " / ".join(str(p) for p in key)
 
 
+def _frozen_vanish(cur, bid) -> dict:
+    """The deletion set reviewed at validation, read raw (`_header_dict` hides it): {keys: set | None,
+    confirmed: bool}. `keys` is None (= use the live set) for a batch validated before the set was frozen
+    or one whose set exceeded `_FROZEN_KEYS_CAP`."""
+    cur.execute("SELECT counts->'vanish_keys', counts->>'vanish_keys_complete', counts->>'confirmed_held'"
+                " FROM sap_stage_batch WHERE batch_id = %s", (str(bid),))
+    row = cur.fetchone()
+    if not row:
+        return {"keys": None, "confirmed": False}
+    keys, complete, confirmed = row
+    return {"keys": set(keys) if isinstance(keys, list) and complete == "true" else None,
+            "confirmed": confirmed == "true"}
+
+
+def _regate_deletion(live: int, n: int, confirmed: bool, what: str) -> None:
+    """Re-run the 25 % gate on the set about to be deleted; refuse (batch -> error) unless the admin
+    confirmed the hold. Runs right before the delete, after the upserts changed the live data."""
+    held, pct = vanish_gate(live, n)
+    if held and not confirmed:
+        raise BatchNotApplicable(
+            f"deleting {n} of {live} {what} ({pct:.0%}) now exceeds the {VANISH_HOLD_PCT:.0%} threshold; "
+            "re-validate and confirm", code="vanish_threshold")
+
+
 # ---------------------------------------------------------------------------
 # Batch lifecycle -- read side
 # ---------------------------------------------------------------------------
@@ -846,7 +919,8 @@ def list_batches(*, object_key: str | None = None, plant: str | None = None, sta
     if allowed_plants is not None:
         where.append("plant = ANY(%s)")
         params.append(list(allowed_plants))
-    q = _HEADER_SELECT + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY received_at DESC LIMIT %s"
+    q = (_HEADER_SELECT + (" WHERE " + " AND ".join(where) if where else "")
+         + " ORDER BY received_at DESC, COALESCE(ready_at, received_at) DESC, batch_id DESC LIMIT %s")
     params.append(int(limit))
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(q, params)
@@ -937,15 +1011,21 @@ def expire_stale_loading(cur) -> int:
     return len(cur.fetchall())
 
 
-def supersede_older(cur, object_key: str, plant: str, keep_batch_id) -> list[str]:
+_BATCH_ORDER = "(received_at, COALESCE(ready_at, received_at), batch_id)"     # total order: ties never arbitrary
+
+
+def supersede_older(cur, object_key: str, plant: str, keep_batch_id, *, source: str | None = None) -> list[str]:
     """Older un-applied (ready / validated / held) batches of the same object + plant -> superseded,
-    their rows too. Caller commits."""
+    their rows too. "Older" is the total order (received_at, ready_at, batch_id), so two batches landing in
+    the same instant still have exactly one winner. `source` limits it to batches of that source (an Excel
+    upload must not supersede a Mulesoft batch). Caller commits."""
     table = _spec(object_key)["stage_table"]
     cur.execute(
-        "UPDATE sap_stage_batch SET status = 'superseded' WHERE object_key = %s AND plant = %s"
-        " AND batch_id <> %s AND status = ANY(%s)"
-        " AND received_at < (SELECT received_at FROM sap_stage_batch WHERE batch_id = %s) RETURNING batch_id",
-        (object_key, plant, str(keep_batch_id), list(_LIVE_STATUSES), str(keep_batch_id)))
+        "UPDATE sap_stage_batch SET status = 'superseded' WHERE object_key = %s AND btrim(plant) = %s"
+        " AND batch_id <> %s AND status = ANY(%s) AND (%s::text IS NULL OR source = %s::text)"
+        f" AND {_BATCH_ORDER} < (SELECT received_at, COALESCE(ready_at, received_at), batch_id"
+        " FROM sap_stage_batch WHERE batch_id = %s) RETURNING batch_id",
+        (object_key, plant, str(keep_batch_id), list(_LIVE_STATUSES), source, source, str(keep_batch_id)))
     ids = [str(r[0]) for r in cur.fetchall()]
     if ids:
         cur.execute(sql.SQL("UPDATE {} SET row_status = 'superseded' WHERE batch_id = ANY(%s)"
@@ -999,8 +1079,16 @@ def validate_batch(batch_id, *, conn=None) -> dict:
             raise
 
 
+def _set_statement_timeout(cur, *, local: bool) -> None:
+    """Raise this connection's statement_timeout for the staging work (pool default is 30 s). `local` =
+    transaction-scoped (validate); otherwise session-scoped (apply, which commits between steps and resets it)."""
+    cur.execute(sql.SQL("SET LOCAL statement_timeout = {}" if local else "SET statement_timeout = {}")
+                .format(sql.Literal(int(STATEMENT_TIMEOUT_MS))))
+
+
 def _validate(conn, bid) -> dict:
     with conn.cursor() as cur:
+        _set_statement_timeout(cur, local=True)
         hdr = _load_header(cur, bid, lock=True)
         if hdr is None:
             raise KeyError(f"batch {bid} not found")
@@ -1012,6 +1100,15 @@ def _validate(conn, bid) -> dict:
         rows = _fetch_rows(cur, table, bid, ("new", "valid", "rejected"))
         row_plants = {_text(r.get("werks") or r.get("plwrk") or r.get("plant")) for r in rows}
         known = _known_plants(cur, row_plants | {plant})
+        if plant not in known:
+            # B13: a header naming a plant NIMBUS does not have can never apply; reject it visibly.
+            warn = [{"level": "error", "code": "unknown_plant", "msg": f"Unknown plant {plant!r} in the batch header."}]
+            cur.execute("UPDATE sap_stage_batch SET status = 'rejected', error = 'unknown_plant', warnings = %s,"
+                        " validated_at = now() WHERE batch_id = %s", (Jsonb(warn), str(bid)))
+            _log("warn", "SAP staging batch rejected: unknown header plant", batch_id=str(bid),
+                 object_key=object_key, plant=plant)
+            return {"batch_id": str(bid), "object_key": object_key, "plant": plant, "status": "rejected",
+                    "counts": {}, "warnings": warn, "held_reasons": []}
 
         if object_key == "stage_material_plants":
             results = validate_material_plant_rows(rows, plant, known)
@@ -1037,9 +1134,11 @@ def _validate(conn, bid) -> dict:
             info, gate_warnings, held, visibility_end = _planned_order_gates(cur, plant, sent)
             counts.update(info)
             warnings += gate_warnings
-            if info["vanish_candidates"]:
-                # M2: freeze what the admin reviews; a confirmed apply aborts if the set grew past tolerance.
-                counts["vanish_keys"] = _vanish_candidates(cur, plant, sent, visibility_end)[:_FROZEN_KEYS_CAP]
+            # M2 / B2: freeze what the admin reviews. The apply deletes ONLY these ids (intersected with the
+            # live candidates), so an order created between review and apply is never deleted unreviewed.
+            frozen = _vanish_candidates(cur, plant, sent, visibility_end)
+            counts["vanish_keys"] = frozen[:_FROZEN_KEYS_CAP]
+            counts["vanish_keys_complete"] = len(frozen) <= _FROZEN_KEYS_CAP
         else:
             if total == 0:
                 held.append("empty_snapshot")
@@ -1050,8 +1149,8 @@ def _validate(conn, bid) -> dict:
             counts.update(info)
             warnings += gate_warnings
             held += gate_held
-            if absent:
-                counts["vanish_keys"] = [_key_label(k) for k in absent[:_FROZEN_KEYS_CAP]]
+            counts["vanish_keys"] = [_key_label(k) for k in absent[:_FROZEN_KEYS_CAP]]
+            counts["vanish_keys_complete"] = len(absent) <= _FROZEN_KEYS_CAP
 
         if total > 0 and valid == 0:
             status, error = "rejected", "no valid rows in batch"
@@ -1072,6 +1171,17 @@ def _validate(conn, bid) -> dict:
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
+def _discard_connection(conn, what: str, exc: Exception) -> None:
+    """Unlocking failed: the session may still hold the advisory lock (and a raised statement_timeout), so the
+    connection must not go back to the pool. Closing it inside the pool context makes the pool discard it
+    (and the server drops the session lock with the session)."""
+    _log("error", f"SAP staging: could not release {what}; closing the connection", exc=exc)
+    try:
+        conn.close()
+    except Exception:
+        log.exception("could not close the connection after a failed unlock")
+
+
 def apply_batch(batch_id, *, actor: str, confirm_held: bool = False) -> dict:
     """Apply a validated batch (or a held one with `confirm_held`; an `error` / crashed `applying` batch
     resumes). Raises KeyError (unknown), BatchSuperseded (a newer complete batch exists),
@@ -1079,24 +1189,34 @@ def apply_batch(batch_id, *, actor: str, confirm_held: bool = False) -> dict:
     Any failure inside the step ladder sets status `error` (`error` = '<step>: <message>') and re-raises."""
     bid = _as_uuid(batch_id)
     with _pool.connection() as conn:
-        locked = False
+        locked, lock_key = False, None
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (f"sap:apply:{bid}",))
+                hdr = _load_header(cur, bid)
+                if hdr is None:
+                    raise KeyError(f"batch {bid} not found")
+                # B3: one apply per OBJECT + PLANT (not per batch): an older batch's apply must never run
+                # alongside a newer one's, or its absent-row sweep would delete what the newer one wrote.
+                lock_key = f"sap:apply:{hdr['object_key']}:{hdr['plant']}"
+                cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (lock_key,))
                 locked = bool(cur.fetchone()[0])
+                if locked:
+                    _set_statement_timeout(cur, local=False)
             conn.commit()
             if not locked:
-                raise BatchNotApplicable("another apply of this batch is running", {"status": "applying"})
+                raise BatchNotApplicable("another apply for this object and plant is running",
+                                         {"status": "applying"}, code="apply_in_progress")
             return _apply_locked(conn, bid, actor, confirm_held)
         finally:
             if locked:
                 try:
                     conn.rollback()
                     with conn.cursor() as cur:
-                        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (f"sap:apply:{bid}",))
+                        cur.execute("RESET statement_timeout")
+                        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_key,))
                     conn.commit()
-                except Exception:
-                    log.warning("could not release apply lock for batch %s", bid)
+                except Exception as exc:
+                    _discard_connection(conn, f"apply lock for batch {bid}", exc)
 
 
 def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
@@ -1115,11 +1235,17 @@ def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
             raise BatchNotApplicable("batch was held and needs confirmation", {"status": status})
         if status not in ("validated", "held", "error", "applying"):
             raise BatchNotApplicable(f"batch is {status} and cannot be applied", {"status": status})
+        # "Newer" is the total order (received_at, ready_at, batch_id) (B4). A Mulesoft batch is only
+        # overtaken by a newer MULESOFT batch -- an Excel upload never blocks it (B16); an upload is
+        # overtaken by any newer batch.
         cur.execute(
-            "SELECT batch_id, status FROM sap_stage_batch WHERE object_key = %s AND plant = %s AND batch_id <> %s"
-            " AND status = ANY(%s) AND received_at > (SELECT received_at FROM sap_stage_batch WHERE batch_id = %s)"
-            " ORDER BY received_at DESC LIMIT 1",
-            (object_key, plant, str(bid), ["ready", "validated", "held", "applying", "applied"], str(bid)))
+            "SELECT batch_id, status FROM sap_stage_batch WHERE object_key = %s AND btrim(plant) = %s AND batch_id <> %s"
+            " AND status = ANY(%s) AND (%s <> 'mulesoft' OR source = 'mulesoft')"
+            f" AND {_BATCH_ORDER} > (SELECT received_at, COALESCE(ready_at, received_at), batch_id"
+            " FROM sap_stage_batch WHERE batch_id = %s)"
+            " ORDER BY received_at DESC, COALESCE(ready_at, received_at) DESC, batch_id DESC LIMIT 1",
+            (object_key, plant, str(bid), ["ready", "validated", "held", "applying", "applied"],
+             hdr["source"], str(bid)))
         newer = cur.fetchone()
         if newer:
             raise BatchSuperseded("a newer complete batch exists for this object and plant",
@@ -1132,6 +1258,12 @@ def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
         if object_key == "stage_planned_orders":
             sent = _sent_order_numbers(cur, spec["stage_table"], bid)
             info, _w, held_codes, _ve = _planned_order_gates(cur, plant, sent)
+            if counts0.get("horizon_end_present") is False and info.get("horizon_end_present"):
+                # B5: the plant had an unlimited horizon at review (no deletes were shown); one has been set
+                # since, so up to 25 % would now be deleted unreviewed.
+                raise BatchNotApplicable(
+                    "the plant's visibility horizon was set after this batch was reviewed; re-validate",
+                    code="revalidate_required")
         else:
             info, _w, held_codes, _absent = _master_gate(cur, object_key, plant, bid, spec["stage_table"])
         if "routing_required" in held_codes:
@@ -1173,7 +1305,7 @@ def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
             cur.execute(sql.SQL("UPDATE {} SET row_status = 'applied', applied_at = now()"
                                 " WHERE batch_id = %s AND row_status = 'valid'").format(
                 sql.Identifier(spec["stage_table"])), (str(bid),))
-            cur.execute("DELETE FROM sap_stage_batch WHERE object_key = %s AND plant = %s"
+            cur.execute("DELETE FROM sap_stage_batch WHERE object_key = %s AND btrim(plant) = %s"
                         " AND status = 'applied' AND batch_id <> %s", (object_key, plant, str(bid)))
             cur.execute(
                 "UPDATE sap_stage_batch SET status = 'applied', applied_at = now(), applied_by = %s, error = NULL,"
@@ -1198,17 +1330,48 @@ def _apply_locked(conn, bid, actor: str, confirm_held: bool) -> dict:
     return {"batch_id": str(bid), "object_key": object_key, "plant": plant, "status": "applied", "counts": result}
 
 
-def _bulk_delete(table: str, keys: list[dict], actor: str) -> tuple[list[dict], list[dict]]:
-    """Delete rows through md.bulk_apply in chunks; a chunk blocked by a reference (ValueError)
-    is returned as 'blocked' so the caller can flag it instead. Returns (deleted_keys, blocked_keys)."""
+def _mark_rejected_at_apply(conn, table: str, bid, items: list[tuple[int, str]]) -> None:
+    """B7: staging rows that were `valid` at validation but could not be built / were rejected by the live
+    parser at apply time go back to `rejected` with their reason, so the blanket `valid -> applied` update
+    never stamps a row that was not written as `applied`. Logged at warning with the batch id."""
+    if not items:
+        return
+    ids = [int(i) for i, _ in items if i is not None and int(i) >= 0]
+    reasons = [r for i, r in items if i is not None and int(i) >= 0]
+    if ids:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("UPDATE {t} AS s SET row_status = 'rejected', reject_reason = v.rr"
+                        " FROM unnest(%s::bigint[], %s::text[]) AS v(id, rr)"
+                        " WHERE s.id = v.id AND s.batch_id = %s AND s.row_status = 'valid'").format(
+                    t=sql.Identifier(table)), (ids, reasons, str(bid)))
+        conn.commit()
+    sample = {r for _, r in items}
+    _log("warn", "SAP staging apply: rows rejected at apply time", batch_id=str(bid), table=table,
+         count=len(items), reasons=sorted(sample)[:10])
+
+
+def _reject_reason_from_warning(w: dict) -> str:
+    return str(w.get("msg", "")).split(":")[0].strip() or "rejected_by_validator"
+
+
+def _bulk_delete(table: str, keys: list[dict], actor: str, bid=None) -> tuple[list[dict], list[dict]]:
+    """Delete rows through md.bulk_apply in chunks; a chunk blocked by a reference
+    (`md.bulk_apply`'s FK-violation ValueError, recognised by its message) is returned as 'blocked' so the
+    caller can flag it instead and the block is logged with the batch id. Any other ValueError is a real
+    failure and propagates. Returns (deleted_keys, blocked_keys)."""
     deleted, blocked = [], []
     for i in range(0, len(keys), 500):
         chunk = keys[i:i + 500]
         try:
             md.bulk_apply(table, {"upserts": [], "deletes": chunk}, actor)
             deleted += chunk
-        except ValueError:
+        except ValueError as exc:
+            if _REFERENCE_BLOCKED not in str(exc):
+                raise
             blocked += chunk
+            _log("warn", "SAP staging sweep: delete blocked by a reference; rows will be flagged instead",
+                 batch_id=str(bid), table=table, rows=len(chunk), error=str(exc))
     return deleted, blocked
 
 
@@ -1255,6 +1418,13 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
         cur.execute("SELECT material_id FROM material_plants WHERE plant = %s AND material_id <> ALL(%s)",
                     (plant, protect))
         absent = [r[0] for r in cur.fetchall()]
+        # B2: delete / flag only what the admin reviewed (materials that became absent since are left for
+        # the next snapshot); then re-run the 25 % gate on that set.
+        frozen = _frozen_vanish(cur, bid)
+        if frozen["keys"] is not None:
+            absent = [m for m in absent if _key_label((m,)) in frozen["keys"]]
+        cur.execute("SELECT count(*) FROM material_plants WHERE plant = %s", (plant,))
+        _regate_deletion(int(cur.fetchone()[0]), len(absent), frozen["confirmed"], "material-plant rows")
         referenced: set = set()
         if absent:
             cur.execute(
@@ -1267,7 +1437,9 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
             referenced = {r[0] for r in cur.fetchall()}
     conn.commit()
     unreferenced = [m for m in absent if m not in referenced]
-    done, blocked = _bulk_delete("material_plants", [{"material_id": m, "plant": plant} for m in unreferenced], actor)
+    audit_id = _audit_snapshot_vanish_begin(conn, "material_plants", bid, plant, actor, absent)
+    done, blocked = _bulk_delete("material_plants", [{"material_id": m, "plant": plant} for m in unreferenced],
+                                 actor, bid)
     deleted = len(done)
     to_flag = sorted(referenced | {k["material_id"] for k in blocked})
     if to_flag:
@@ -1276,40 +1448,70 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
                         " WHERE plant = %s AND material_id = ANY(%s)", (plant, to_flag))
             flagged = cur.rowcount or 0
         conn.commit()
-    _audit_snapshot_vanish("material_plants", bid, plant, actor, [d["material_id"] for d in done], flagged)
+    _audit_snapshot_vanish_finish(conn, audit_id, [d["material_id"] for d in done], flagged)
     return {"inserted": inserted, "updated": updated, "deleted": deleted, "flagged": flagged,
             "materials_created": created}
 
 
-def _audit_snapshot_vanish(table_name: str, bid, plant: str, actor: str, deleted_keys: list, flagged: int) -> None:
-    """admin_audit row for a snapshot sweep that deleted or flagged master rows (H4); the deleted keys are
-    capped at `_AUDIT_KEYS_CAP`. Its own short transaction -- the deletes already committed."""
-    if not deleted_keys and not flagged:
-        return
-    with _pool.connection() as conn, conn.cursor() as cur:
+def _audit_snapshot_vanish_begin(conn, table_name: str, bid, plant: str, actor: str, planned: list):
+    """admin_audit row for a snapshot sweep that deletes or flags master rows (H4), written BEFORE the deletes
+    (B11): the deletes run on `md.bulk_apply`'s own connections and commit per chunk, so an audit written
+    afterwards would be lost by a crash in between. The planned keys (capped at `_AUDIT_KEYS_CAP`) are the
+    evidence; `_audit_snapshot_vanish_finish` fills in what actually happened. Returns the audit id (None when
+    there is nothing to sweep). Commits."""
+    if not planned:
+        return None
+    with conn.cursor() as cur:
         cur.execute("INSERT INTO admin_audit (table_name, action, details, user_email)"
-                    " VALUES (%s, 'sap_snapshot_vanish', %s, %s)",
-                    (table_name, Jsonb({"batch_id": str(bid), "plant": plant, "deleted_count": len(deleted_keys),
-                                        "deleted": [str(k) for k in deleted_keys[:_AUDIT_KEYS_CAP]],
-                                        "flagged": int(flagged)}), actor))
-        conn.commit()
+                    " VALUES (%s, 'sap_snapshot_vanish', %s, %s) RETURNING id",
+                    (table_name, Jsonb({"batch_id": str(bid), "plant": plant, "phase": "planned",
+                                        "planned_count": len(planned), "deleted_count": 0, "deleted": [],
+                                        "planned": [str(k) for k in planned[:_AUDIT_KEYS_CAP]], "flagged": 0}),
+                    actor))
+        audit_id = cur.fetchone()[0]
+    conn.commit()
+    return audit_id
+
+
+def _audit_snapshot_vanish_finish(conn, audit_id, deleted_keys: list, flagged: int) -> None:
+    """Record the outcome on the row `_audit_snapshot_vanish_begin` wrote (deleted keys capped at
+    `_AUDIT_KEYS_CAP`). Commits."""
+    if audit_id is None:
+        return
+    with conn.cursor() as cur:
+        cur.execute("UPDATE admin_audit SET details = details || %s::jsonb WHERE id = %s",
+                    (Jsonb({"phase": "done", "deleted_count": len(deleted_keys),
+                            "deleted": [str(k) for k in deleted_keys[:_AUDIT_KEYS_CAP]],
+                            "flagged": int(flagged)}), audit_id))
+    conn.commit()
 
 
 def _sent_routing_keys(cur, table: str, bid, object_key: str) -> set:
     """Normalised identities of every routing row SAP sent (valid or rejected, never deleted-flag /
-    missing-key rows) -- the protection set for the absent-row sweeps."""
+    other-plant rows) -- the protection set for the absent-row sweeps.
+
+    A routing row whose full key is incomplete (`missing_key`, e.g. a blank activity or sequence) still
+    protects its routing GROUP -- (material, task list type, routing group, group counter) -- when those four
+    parts are present, as `(plant, material, type, group, counter, None, None)`: SAP did send that routing,
+    and a half-filled operation must not delete the live one. Production-version rows need their whole key."""
     import backend.routing.ingest as ingest
     cur.execute(sql.SQL("SELECT * FROM {} WHERE batch_id = %s AND row_status IN ('valid','rejected','applied')"
-                        " AND COALESCE(reject_reason, '') NOT IN ('deleted_flag', 'missing_key',"
-                        " 'plant_mismatch', 'unknown_plant')").format(
+                        " AND COALESCE(reject_reason, '') NOT IN ('deleted_flag', 'plant_mismatch',"
+                        " 'unknown_plant')").format(
         sql.Identifier(table)), (str(bid),))
     names = [d.name for d in cur.description]
     keys = set()
     for rec in cur.fetchall():
         r = dict(zip(names, rec, strict=True))
-        k = _routing_key(object_key, ingest, sap_sync._t_alpha_strip(r.get("material_id")), r)
+        mat = sap_sync._t_alpha_strip(r.get("material_id"))
+        k = _routing_key(object_key, ingest, mat, r)
         if k:
             keys.add(k)
+        elif object_key == "stage_routing_operation":
+            group = (mat, _text(r.get("task_list_type")), _text(r.get("routing_group")),
+                     ingest._zero_pad(r.get("group_counter"), 2))
+            if all(group):
+                keys.add((_text(r.get("plant")) or "", *group, None, None))
     return keys
 
 
@@ -1326,6 +1528,9 @@ def _apply_production_versions(conn, hdr, actor: str, step) -> dict:
         ops, parse_warnings = ingest.parse_production_versions_rows(parse_rows, conn=conn, first_row=0)
     conn.commit()
     rejected_now = [w for w in parse_warnings if w.get("level") == "reject"]
+    _mark_rejected_at_apply(conn, table, bid, [
+        (stage[w["row"]]["id"], _reject_reason_from_warning(w)) for w in rejected_now
+        if isinstance(w.get("row"), int) and 0 <= w["row"] < len(stage)])
 
     step("write")
     res = routing_routes.write_production_versions(ops, actor) if ops["upserts"] else {"inserted": 0, "updated": 0}
@@ -1345,6 +1550,10 @@ def _apply_production_versions(conn, hdr, actor: str, step) -> dict:
                     " FROM production_version WHERE plant = %s", (plant,))
         live = cur.fetchall()
         absent = [r for r in live if (plant, r[0], r[1]) not in sent]
+        frozen = _frozen_vanish(cur, bid)                       # B2: only the reviewed set, re-gated
+        if frozen["keys"] is not None:
+            absent = [r for r in absent if _key_label((r[0], r[1])) in frozen["keys"]]
+        _regate_deletion(len(live), len(absent), frozen["confirmed"], "production versions")
         order_refs: set = set()
         routing_refs: set = set()
         if absent:
@@ -1361,9 +1570,11 @@ def _apply_production_versions(conn, hdr, actor: str, step) -> dict:
     for r in absent:
         in_use = (r[0], r[1]) in order_refs or (r[2] is not None and (r[0], r[2], r[3], r[4]) in routing_refs)
         (ref if in_use else unref).append(r)
+    audit_id = _audit_snapshot_vanish_begin(conn, "production_version", bid, plant, actor,
+                                            [f"{r[0]}/{r[1]}" for r in absent])
     done, blocked = _bulk_delete(
         "production_version",
-        [{"plant": plant, "material_id": r[0], "production_version": r[1]} for r in unref], actor)
+        [{"plant": plant, "material_id": r[0], "production_version": r[1]} for r in unref], actor, bid)
     deleted = len(done)
     flag = [(r[0], r[1]) for r in ref] + [(k["material_id"], k["production_version"]) for k in blocked]
     if flag:
@@ -1374,8 +1585,8 @@ def _apply_production_versions(conn, hdr, actor: str, step) -> dict:
                         (plant, [f[0] for f in flag], [f[1] for f in flag]))
             flagged = cur.rowcount or 0
         conn.commit()
-    _audit_snapshot_vanish("production_version", bid, plant, actor,
-                           [f"{d['material_id']}/{d['production_version']}" for d in done], flagged)
+    _audit_snapshot_vanish_finish(conn, audit_id,
+                                  [f"{d['material_id']}/{d['production_version']}" for d in done], flagged)
 
     step("recompute")
     resolver.recompute_plants([plant])
@@ -1396,6 +1607,9 @@ def _apply_routing_operations(conn, hdr, actor: str, step) -> dict:
         groups, parse_warnings = ingest.parse_routing_operations_rows(parse_rows, conn=conn, first_row=0)
     conn.commit()
     rejected_now = [w for w in parse_warnings if w.get("level") == "reject"]
+    _mark_rejected_at_apply(conn, table, bid, [
+        (stage[w["row"]]["id"], _reject_reason_from_warning(w)) for w in rejected_now
+        if isinstance(w.get("row"), int) and 0 <= w["row"] < len(stage)])
 
     step("write")
     inserted = routing_routes.write_operation_groups(groups, actor) if groups else 0
@@ -1403,19 +1617,29 @@ def _apply_routing_operations(conn, hdr, actor: str, step) -> dict:
     step("delete_absent")
     # A routing is identified by (material, type, group, counter) within the plant (the PK adds the
     # operation); anything SAP did not send is deleted -- dependent orders go on hold at recompute.
-    keys = sorted({(k[1], k[2], k[3], k[4]) for k in sent})
+    protected = {(k[1], k[2], k[3], k[4]) for k in sent}
     with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM routing_operation ro WHERE ro.plant = %s AND NOT EXISTS ("
-            " SELECT 1 FROM unnest(%s::text[], %s::text[], %s::text[], %s::text[]) AS k(m, t, g, c)"
-            " WHERE k.m = ro.material_id AND k.t = ro.task_list_type AND k.g = ro.routing_group"
-            " AND k.c = ro.group_counter)",
-            (plant, [k[0] for k in keys], [k[1] for k in keys], [k[2] for k in keys], [k[3] for k in keys]))
-        deleted = cur.rowcount or 0
+        # B2: delete only the routings the admin reviewed (those still absent), re-gated on the live count.
+        live = _master_live_keys(cur, "stage_routing_operation", plant)
+        frozen = _frozen_vanish(cur, bid)
+        absent = sorted(k for k in live if k not in protected)
+        if frozen["keys"] is not None:
+            absent = [k for k in absent if _key_label(k) in frozen["keys"]]
+        _regate_deletion(len(live), len(absent), frozen["confirmed"], "routings")
+        deleted = 0
+        if absent:
+            cur.execute(
+                "DELETE FROM routing_operation ro WHERE ro.plant = %s AND (ro.material_id, ro.task_list_type,"
+                " ro.routing_group, ro.group_counter) IN (SELECT * FROM unnest("
+                "%s::text[], %s::text[], %s::text[], %s::text[]))",
+                (plant, [k[0] for k in absent], [k[1] for k in absent], [k[2] for k in absent],
+                 [k[3] for k in absent]))
+            deleted = cur.rowcount or 0
         if deleted:
             cur.execute("INSERT INTO admin_audit (table_name, action, details, user_email)"
                         " VALUES ('routing_operation', 'sap_staging_absent_delete', %s, %s)",
-                        (Jsonb({"plant": plant, "batch_id": bid, "rows_deleted": deleted}), actor))
+                        (Jsonb({"plant": plant, "batch_id": bid, "rows_deleted": deleted,
+                                "routings": [_key_label(k) for k in absent[:_AUDIT_KEYS_CAP]]}), actor))
     conn.commit()
 
     step("recompute")
@@ -1438,6 +1662,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
     conn.commit()
     warnings: list = []
     rows, problems = build_order_rows(stage, tz, None, warnings)
+    _mark_rejected_at_apply(conn, table, bid, problems)         # B7: not built -> rejected, never `applied`
     zero_keys = zero_open_keys(rows)
     for r in rows:
         r.pop("_stage_row_id", None)
@@ -1464,12 +1689,25 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
     flagged = 0
     if zero_keys:
         with conn.cursor() as cur:
+            # B6: only rows THIS upsert wrote (their upload_batch_id is this upsert's batch, or the stage
+            # batch id of the first run of a resumed apply) -- an unchanged re-poll leaves a planner's
+            # re-slot of a zero-open order alone -- and never an order that is running right now.
             cur.execute(
-                "SELECT id FROM orders WHERE plant = %s AND (production_order = ANY(%s)"
-                " OR parent_production_order = ANY(%s)) AND (planning_status IS DISTINCT FROM 'needs_planning'"
-                " OR COALESCE(planning_reason->>'code', '') <> 'zero_open_quantity') ORDER BY id FOR UPDATE",
-                (plant, zero_keys, zero_keys))
-            ids = [r[0] for r in cur.fetchall()]
+                "SELECT o.id, o.plant, o.planning_status, o.scheduled_start, o.scheduled_end,"
+                " o.basic_start_date, o.basic_finish_date, o.run_time, seg.first_start, seg.last_end,"
+                " (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz"
+                " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL +
+                " WHERE o.plant = %s AND (o.production_order = ANY(%s)"
+                " OR o.parent_production_order = ANY(%s)) AND o.upload_batch_id = ANY(%s::uuid[])"
+                " AND (o.planning_status IS DISTINCT FROM 'needs_planning'"
+                " OR COALESCE(o.planning_reason->>'code', '') <> 'zero_open_quantity') ORDER BY o.id FOR UPDATE OF o",
+                (plant, zero_keys, zero_keys, sorted({str(bid), str(upsert_batch)})))
+            names = [d.name for d in cur.description]
+            ids = []
+            for rec in cur.fetchall():
+                b = dict(zip(names, rec, strict=True))
+                if not db._order_is_running(b, db._plant_local_now(b["tz"])):
+                    ids.append(b["id"])
             if ids:
                 cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", (ids,))
                 cur.execute(
@@ -1485,12 +1723,29 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
     with conn.cursor() as cur:
         visibility_end, _frozen = db._horizon_bounds_for_plant(cur, plant)
         ids = _vanish_candidates(cur, plant, sent, visibility_end)
+        # B2: delete only what the admin reviewed. Orders created between validation and now (planner, Excel,
+        # horizon roll, horizon NULL -> value) are candidates in the live set but were never reviewed; they
+        # wait for the next snapshot.
+        frozen = _frozen_vanish(cur, bid)
+        not_reviewed = 0
+        if frozen["keys"] is not None:
+            reviewed = [i for i in ids if i in frozen["keys"]]
+            not_reviewed = len(ids) - len(reviewed)
+            ids = reviewed
         if visibility_end is not None:
             bound = visibility_end + timedelta(days=1)
             cur.execute("SELECT count(*) FROM orders WHERE plant = %s AND " + _in_horizon_predicate(),
                         (plant, bound))
             info["in_horizon_live"] = int(cur.fetchone()[0])
     conn.commit()
+    if not_reviewed:
+        _log("warn", "SAP staging apply: orders became deletion candidates after review and were kept",
+             batch_id=str(bid), plant=plant, kept=not_reviewed)
+        warnings.append({"level": "warn", "code": "vanish_not_reviewed", "count": not_reviewed,
+                         "msg": f"{not_reviewed} order(s) became deletion candidates after the review and were "
+                                "kept; the next snapshot decides."})
+    # Re-run the gate on the set about to be deleted; an unconfirmed trip fails the batch before any delete.
+    _regate_deletion(info["in_horizon_live"], len(ids), frozen["confirmed"], "in-horizon orders")
     if ids:
         pct = round(len(ids) / info["in_horizon_live"], 4) if info["in_horizon_live"] else 0.0
         purge = db.purge_orders_by_ids(
@@ -1525,16 +1780,20 @@ def poll_once(*, actor: str = "sap-staging-poll") -> dict:
                 if not got:
                     out["skipped"].append({"reason": "another poll is running"})
                     return out
+                with conn.cursor() as cur:
+                    _set_statement_timeout(cur, local=False)     # sweeps / archive deletes on this connection
+                conn.commit()
                 _poll_locked(conn, actor, out)
             finally:
                 if got:
                     try:
                         conn.rollback()
                         with conn.cursor() as cur:
+                            cur.execute("RESET statement_timeout")
                             cur.execute("SELECT pg_advisory_unlock(hashtext('sap:staging-poll'))")
                         conn.commit()
-                    except Exception:
-                        log.warning("could not release the staging poll lock")
+                    except Exception as exc:
+                        _discard_connection(conn, "the staging poll lock", exc)
     except Exception as exc:
         out["errors"].append({"error": f"{type(exc).__name__}: {exc}"})
         _log("error", "SAP staging poll failed", exc=exc)
@@ -1550,24 +1809,43 @@ def _poll_locked(conn, actor: str, out: dict) -> None:
             out["processed"].append({"expired_loading": n})
     except Exception as exc:
         conn.rollback()
-        out["errors"].append({"step": "expire_stale_loading", "error": str(exc)})
+        _poll_error(out, exc, step="expire_stale_loading")
+
+    try:
+        # B13: a `ready` batch whose object_key is not a staging object would otherwise sit forever (the
+        # loop below only visits APPLY_ORDER); reject it visibly.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sap_stage_batch SET status = 'rejected', error = 'unknown_object_key', warnings = warnings || %s::jsonb"
+                " WHERE status = 'ready' AND object_key <> ALL(%s) RETURNING batch_id, object_key",
+                (Jsonb([{"level": "error", "code": "unknown_object_key",
+                         "msg": "The batch names an object NIMBUS does not stage."}]), list(APPLY_ORDER)))
+            bad = cur.fetchall()
+        conn.commit()
+        for b_id, b_key in bad:
+            _log("warn", "SAP staging poll: batch rejected, unknown object key", batch_id=str(b_id), object_key=b_key)
+            out["processed"].append({"batch_id": str(b_id), "object_key": b_key, "status": "rejected"})
+    except Exception as exc:
+        conn.rollback()
+        _poll_error(out, exc, step="reject_unknown_object_key")
 
     for object_key in APPLY_ORDER:
         try:
             table = _spec(object_key)["stage_table"]
             with conn.cursor() as cur:
                 cur.execute(
-                    sql.SQL("SELECT b.batch_id, b.plant, b.status, b.source, b.row_count_expected,"
+                    sql.SQL("SELECT b.batch_id, btrim(b.plant), b.status, b.source, b.row_count_expected,"
                             " COALESCE(b.ready_at, b.received_at),"
                             " (SELECT count(*) FROM {t} s WHERE s.batch_id = b.batch_id)"
                             " FROM sap_stage_batch b WHERE b.object_key = %s AND b.status IN ('ready','validated')"
-                            " ORDER BY b.plant, b.received_at DESC").format(t=sql.Identifier(table)),
+                            " ORDER BY btrim(b.plant), b.received_at DESC, COALESCE(b.ready_at, b.received_at) DESC,"
+                            " b.batch_id DESC").format(t=sql.Identifier(table)),
                     (object_key,))
                 candidates = cur.fetchall()
             conn.commit()
         except Exception as exc:
             conn.rollback()
-            out["errors"].append({"object_key": object_key, "error": str(exc)})
+            _poll_error(out, exc, object_key=object_key)
             continue
         seen_plants: set = set()
         for bid, plant, status, source, expected, ready_at, actual in candidates:
@@ -1615,25 +1893,37 @@ def _poll_locked(conn, actor: str, out: dict) -> None:
             except BatchNotApplicable as exc:
                 conn.rollback()
                 out["skipped"].append({"batch_id": str(bid), "object_key": object_key, "reason": str(exc)})
+                _log("info", "SAP staging poll: batch not applicable", batch_id=str(bid),
+                     object_key=object_key, reason=str(exc))
             except Exception as exc:
                 conn.rollback()
-                out["errors"].append({"batch_id": str(bid), "object_key": object_key,
-                                      "error": f"{type(exc).__name__}: {exc}"})
-                _log("error", "SAP staging poll: batch failed", exc=exc, batch_id=str(bid), object_key=object_key)
+                _poll_error(out, exc, batch_id=str(bid), object_key=object_key)
 
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM sap_stage_vanished_order WHERE deleted_at < now() - make_interval(days => %s)",
                         (ARCHIVE_RETENTION_DAYS,))
-            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE (row_status = 'sent'"
-                        " OR (row_status = 'error' AND error_text = 'requeued'))"
-                        " AND sent_at < now() - make_interval(days => %s)", (SENT_RETENTION_DAYS,))
+            # B14: `sent` AND every `error` row (requeued retirements and Mulesoft-reported failures) age out;
+            # queued_at covers rows that never got a sent_at.
+            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE row_status IN ('sent', 'error')"
+                        " AND COALESCE(sent_at, queued_at) < now() - make_interval(days => %s)",
+                        (SENT_RETENTION_DAYS,))
             cur.execute("DELETE FROM sap_stage_batch WHERE status IN ('rejected','discarded','superseded')"
                         " AND received_at < now() - make_interval(days => %s)", (DEAD_BATCH_RETENTION_DAYS,))
         conn.commit()
     except Exception as exc:
         conn.rollback()
-        out["errors"].append({"step": "sweeps", "error": str(exc)})
+        _poll_error(out, exc, step="sweeps")
+
+
+def _poll_error(out: dict, exc: Exception, *, batch_id: str | None = None, **ctx) -> None:
+    """Record a poll failure: the stored string carries the exception class (`Type: message`), and the event
+    is logged with exception info and the batch id when there is one."""
+    entry = {**ctx, "error": f"{type(exc).__name__}: {exc}"}
+    if batch_id:
+        entry["batch_id"] = batch_id
+    out["errors"].append(entry)
+    _log("error", "SAP staging poll error", exc=exc, batch_id=batch_id, **ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -1647,8 +1937,9 @@ def _coerce_for_column(value, data_type: str):
     if s == "" or s.lower() in ("nan", "nat", "none"):
         return None
     if data_type in ("numeric", "integer", "bigint", "smallint", "double precision", "real"):
-        d = _dec(s)
-        return int(d) if data_type in ("integer", "bigint", "smallint") and d is not None else d
+        if data_type in ("integer", "bigint", "smallint"):
+            return _int_or_none(s, "value")          # whole numbers only; inf / NaN / fractions -> ValueError
+        return _dec(s)
     if data_type == "date":
         d = _parse_sap_date(s)
         return d
@@ -1718,7 +2009,8 @@ def stage_rows_from_upload(object_key: str, plant: str, file_bytes: bytes, filen
                 [[bid, *vals] for vals in staged])
             cur.execute("UPDATE sap_stage_batch SET status = 'ready', ready_at = now(), row_count_expected = %s,"
                         " warnings = %s WHERE batch_id = %s", (len(staged), Jsonb(warnings), str(bid)))
-            supersede_older(cur, object_key, plant, bid)
+            # B16: an upload only replaces older UPLOADS; a validated / held Mulesoft batch is left alone.
+            supersede_older(cur, object_key, plant, bid, source="upload")
             conn.commit()
         except Exception:
             conn.rollback()

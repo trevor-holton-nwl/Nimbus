@@ -73,7 +73,9 @@ END $$;
 -- ('loading'), and validated_at / applied_at / applied_by / counts / warnings
 -- stay NIMBUS-owned.
 REVOKE UPDATE ON sap_stage_batch FROM nimbus_mulesoft;
-GRANT INSERT (batch_id, object_key, plant, source, row_count_expected, received_at, ready_at, created_by, error)
+-- received_at / created_by are NOT grantable: received_at is the server's DEFAULT now() (a future-dated header
+-- would otherwise be the "newest" batch forever and supersede every real one); created_by is NIMBUS's.
+GRANT INSERT (batch_id, object_key, plant, source, row_count_expected, error)
     ON sap_stage_batch TO nimbus_mulesoft;
 -- Mulesoft may only flip a batch to 'ready' / 'rejected' (and say how many rows it sent).
 GRANT UPDATE (status, ready_at, row_count_expected, error) ON sap_stage_batch TO nimbus_mulesoft;
@@ -89,9 +91,20 @@ BEGIN
     IF TG_OP = 'INSERT' THEN
       NEW.status := 'loading';
       NEW.source := 'mulesoft';
+      NEW.received_at := now();
+      NEW.ready_at := NULL;
     ELSIF NOT (OLD.status = 'loading' AND NEW.status IN ('loading', 'ready', 'rejected')) THEN
       RAISE EXCEPTION 'nimbus_mulesoft may only move a batch from loading to ready or rejected (batch %, % -> %)',
         OLD.batch_id, OLD.status, NEW.status;
+    ELSE
+      -- Timestamps are server time: the UPDATE grant still lists ready_at (Mulesoft's documented
+      -- `SET ready_at = now()` keeps working) but the value is forced, so a client clock can never reorder batches.
+      NEW.received_at := OLD.received_at;
+      IF NEW.status = 'ready' THEN
+        NEW.ready_at := now();
+      ELSE
+        NEW.ready_at := OLD.ready_at;
+      END IF;
     END IF;
   END IF;
   RETURN NEW;

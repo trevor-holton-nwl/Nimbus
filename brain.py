@@ -271,7 +271,8 @@ async def _run_sap_staging_poll() -> None:
         _log_event("error" if errors else "info", "sap_staging", "Scheduled staging poll finished",
                    processed=len(result.get("processed") or []), applied=len(result.get("applied") or []),
                    held=len(result.get("held") or []), skipped=len(result.get("skipped") or []),
-                   errors=len(errors))
+                   errors=len(errors),
+                   error_samples=[str(e_)[:300] for e_ in errors[:5]])
     except Exception as e:
         _log_event("error", "sap_staging", "Scheduled staging poll raised", exc=e)
 
