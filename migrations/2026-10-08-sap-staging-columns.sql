@@ -5,8 +5,10 @@
 -- Additive ALTERs; trips the deploy runner's -AllowDestructive filter -- verified additive.
 -- Every statement is ADD COLUMN IF NOT EXISTS (nullable or defaulted) plus one
 -- guarded CHECK constraint; nothing is dropped, rewritten or backfilled.
--- Run after 2026-10-08-sap-staging-tables.sql (sap_sync_config already exists
--- from 2026-06-30-sap-interface.sql). Re-running is a no-op.
+-- Independent of 2026-10-08-sap-staging-tables.sql: it only alters tables that
+-- already exist (sap_sync_config from 2026-06-30-sap-interface.sql, material_plants,
+-- production_version), so the runner's name order (columns before tables) is
+-- harmless and either order works. Re-running is a no-op.
 -- ============================================================================
 
 ALTER TABLE sap_sync_config ADD COLUMN IF NOT EXISTS apply_mode TEXT NOT NULL DEFAULT 'manual';
