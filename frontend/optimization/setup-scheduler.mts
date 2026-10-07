@@ -576,6 +576,8 @@ export interface SetupRunContext {
   _policyKeyForTask: Map<string, string>;
   /** T1: per-(effective line, taskId) urgency-sort tuple (see `urgencyKeyFor`). */
   _urgencyKey: Map<string, UrgencyKey>;
+  /** T4: per-taskId static part of `planningDefect` (see `staticPlanningDefect`). */
+  _staticDefect: Map<string, StaticDefectEntry>;
   /** Per-(plant, line) pre-filtered/merged/sorted blackout blocks (ms
    *  timestamps), filled in once per (plant, line) on first use — the
    *  `Calendar._runBlocks` equivalent for this detached evaluator. Keyed by
@@ -659,6 +661,7 @@ export function buildRunContext(
     _rankVector: new Map(),
     _policyKeyForTask: new Map(),
     _urgencyKey: new Map(),
+    _staticDefect: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
     _freeIndex: new Map(),
@@ -6244,9 +6247,38 @@ function completionEnd(bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, e
   return ceiling && ceiling < end ? ceiling : end;
 }
 
-function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): { code: string; message: string } | null {
-  if (allowedPlanningWindow(snapshot, bounds, task).missingDue) return { code: 'missing_due_date', message: 'A SAP due date is required for the configured planning window.' };
-  if (!Number.isFinite(Number(task.RUN_TIME)) || Math.round(Number(task.RUN_TIME) * 60) <= 0) return { code: 'invalid_runtime', message: 'Runtime must be a positive number.' };
+type PlanningDefect = { code: string; message: string };
+
+/** T4: the part of `planningDefect` that depends only on the task and the
+ * plant's configuration (missing SAP due date, run-time validity). The entry is
+ * reused only for the same task object, master-data object and plant, so any
+ * other snapshot or task copy sharing the run context recomputes. */
+interface StaticDefectEntry {
+  task: NimbusTask;
+  masterData: NimbusMasterData | null;
+  plant: string;
+  defect: PlanningDefect | null;
+}
+
+function staticPlanningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): PlanningDefect | null {
+  const compute = (): PlanningDefect | null => {
+    if (allowedPlanningWindow(snapshot, bounds, task).missingDue) return { code: 'missing_due_date', message: 'A SAP due date is required for the configured planning window.' };
+    if (!Number.isFinite(Number(task.RUN_TIME)) || Math.round(Number(task.RUN_TIME) * 60) <= 0) return { code: 'invalid_runtime', message: 'Runtime must be a positive number.' };
+    return null;
+  };
+  const ctx = bounds.runContext;
+  if (!ctx) return compute();
+  const id = taskId(task);
+  const hit = ctx._staticDefect.get(id);
+  if (hit && hit.task === task && hit.masterData === snapshot.masterData && hit.plant === bounds.setup.plant) return hit.defect && { ...hit.defect };
+  const defect = compute();
+  ctx._staticDefect.set(id, { task, masterData: snapshot.masterData, plant: bounds.setup.plant, defect });
+  return defect && { ...defect };
+}
+
+function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): PlanningDefect | null {
+  const staticDefect = staticPlanningDefect(snapshot, bounds, task);
+  if (staticDefect) return staticDefect;
   const ceiling = notAfterFor(bounds, task);
   const floor = notBeforeFor(bounds, task);
   if (ceiling && +ceiling <= Math.max(+bounds.now, floor ? +floor : -Infinity)) return { code: 'expired_window', message: 'The allowed completion window ends before available planning time.' };
