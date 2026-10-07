@@ -6399,6 +6399,66 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .sap-pill.warn { background: var(--warn-soft); color: var(--warn); }
 .sap-pill.neutral { background: var(--bg-strong); color: var(--fg-mute); }
 
+/* ── SAP staging (Admin > Interface > Staging) — tokens only, no new colours ── */
+.sap-rail-group { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-mute); padding: 10px 12px 4px; }
+.sap-rail-row-staging:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sap-kind-staging { background: var(--info-soft); color: var(--info); }
+
+/* batch status pills — one per status; unknown falls back to neutral */
+.sap-batch-pill { display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 10px; font-size: 10.5px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: .04em; background: var(--bg-strong); color: var(--fg-mute); }
+.sap-batch-pill-loading    { background: var(--info-soft); color: var(--info); }
+.sap-batch-pill-ready      { background: var(--info-soft); color: var(--info); }
+.sap-batch-pill-validated  { background: var(--ok-soft);   color: var(--ok); }
+.sap-batch-pill-held       { background: var(--warn-soft); color: var(--warn); }
+.sap-batch-pill-applying   { background: var(--info-soft); color: var(--info); }
+.sap-batch-pill-applied    { background: var(--ok-soft);   color: var(--ok); }
+.sap-batch-pill-error      { background: var(--err-soft);  color: var(--err); }
+.sap-batch-pill-rejected   { background: var(--err-soft);  color: var(--err); }
+.sap-batch-pill-superseded { background: var(--bg-strong); color: var(--fg-mute); }
+.sap-batch-pill-discarded  { background: var(--bg-strong); color: var(--fg-mute); }
+.sap-batch-pill-unknown    { background: var(--bg-strong); color: var(--fg-mute); }
+
+.sap-stage-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 18px; margin-bottom: 16px; }
+.sap-stage-plant { flex: 0 1 260px; margin-bottom: 0; }
+.sap-stage-upload { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.sap-stage-upload input[type="file"] { font-size: 12px; max-width: 240px; }
+.sap-stage-mode { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; max-width: 280px; }
+.sap-stage-mode-label { font-size: 10.5px; font-weight: 600; color: var(--fg-mute); text-transform: uppercase; letter-spacing: .04em; }
+.sap-stage-mode-sel { height: 28px; padding: 3px 8px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12.5px; color: var(--fg); }
+.sap-stage-mode .sap-help { margin-top: 0; }
+
+.sap-batch-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-md); }
+.sap-batch-row { padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.sap-batch-row:last-child { border-bottom: none; }
+.sap-batch-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.sap-batch-plant { font-family: var(--sap-mono); font-size: 12px; font-weight: 600; }
+.sap-batch-src { font-size: 11px; color: var(--fg-faint); }
+.sap-batch-counts { font-size: 11.5px; color: var(--fg-mute); }
+.sap-batch-vanish { font-family: var(--sap-mono); font-size: 11.5px; color: var(--fg-mute); }
+.sap-batch-vanish.is-held { color: var(--err); font-weight: 700; }
+.sap-batch-actions { margin-left: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.sap-batch-times { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 5px; font-family: var(--sap-mono); font-size: 10.5px; color: var(--fg-faint); }
+.sap-batch-held { margin: 9px 0 0; }
+.sap-batch-warn { margin-top: 5px; font-size: 12px; color: var(--warn); line-height: 1.45; }
+.sap-batch-warn.is-err { color: var(--err); }
+.sap-batch-rej { margin-top: 9px; }
+.sap-batch-rej-scroll { overflow-x: auto; max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r-sm); }
+.sap-batch-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.sap-batch-table th { text-align: left; font-weight: 700; color: var(--fg-mute); padding: 6px 9px; border-bottom: 1px solid var(--line); background: var(--bg-subtle); position: sticky; top: 0; }
+.sap-batch-table td { padding: 5px 9px; border-bottom: 1px solid var(--line); font-family: var(--sap-mono); white-space: nowrap; }
+.sap-batch-table tr:last-child td { border-bottom: none; }
+
+/* held-batch confirm modal: the orders that will be deleted */
+.sap-stage-reasons { margin: 0 0 12px; padding-left: 18px; font-size: 12.5px; line-height: 1.5; }
+.sap-stage-deletions { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-sm); }
+
+/* Outbound / Archive panels */
+.sap-stage-panel { margin-top: 24px; padding-top: 16px; border-top: 1px dashed var(--line); }
+.sap-stage-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.sap-stage-kv { margin-bottom: 12px; }
+.sap-stage-panel-actions { display: flex; align-items: center; gap: 8px; }
+
 /* empty / error states */
 .sap-empty { padding: 36px 24px; text-align: center; }
 .sap-empty-ico { font-size: 26px; opacity: .5; }
