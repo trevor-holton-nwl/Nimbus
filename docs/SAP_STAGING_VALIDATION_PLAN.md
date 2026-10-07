@@ -244,6 +244,71 @@ Measure (local DB, app running):
 
 **Pass bar:** apply of 10,000 orders under 2 minutes; no query without an index on `plant`; the UI stays responsive.
 
+### Track 8 results (2026-10-07)
+
+**Verdict: all three bars pass; no code or schema change was needed.** Run on a scratch local database (`nimbus_perf_test`, 204 MB, dropped afterwards) with the app on port 8031 against it; the fake Mulesoft logged in as `nimbus_mulesoft`. Everything below is a local single-process uvicorn on a developer laptop, so read ratios, not absolute numbers.
+
+**Data synthesized** (about 13 s of seeding: master data and the 50 background plants by set-based SQL, the ZP01 orders through the real fake-Mulesoft, validate, apply path, then shaped by SQL):
+
+| What | Volume |
+|---|---|
+| ZP01 (America/Chicago, 30-day horizon, 2-day frozen, routing on, 24x7 calendar) | 70 work centers and machines, 10,000 planned orders spread over 29 days, 2,500 scheduled with slots (25 %), 500 firmed, 400 with firming indicator `X`, 250 scheduled orders with two segments (500 segment rows) |
+| ZP01 master data | 5,000 material plants, 2,000 production versions, 20,000 routing operations (10 per routing, on 10 work centers each) |
+| ZP02-ZP51 | 50 plants x 500 orders (25,000 rows, one in four scheduled), 10 work centers each, 100 material plants / production versions each, 10 operations per routing (all plants: 10,000 material plants, 7,000 production versions, 70,000 routing operations, 35,000 orders, 570 machines) |
+
+The initial load of the 10,000 ZP01 orders through the real path (insert 0.5 s, validate 0.6 s, apply 8.1 s, all 10,000 inserted, all given a routing run time) doubles as the first-ever-apply number.
+
+**Timings** (seconds; median of three cycles for items 1 and 2, three runs for item 3; "first" = the batch changes data, "again" = an identical batch right after):
+
+| Object | Mulesoft insert | Validate | Apply, first | Apply, identical re-apply |
+|---|---|---|---|---|
+| Material plants, 5,000 | 0.29 | 0.12 | 0.43 (5,000 updated) | 0.19 (5,000 `unchanged`) |
+| Production versions, 2,000 | 0.17 | 0.07 | 1.14 | 1.09 (still 2,000 `updated`, the known open Track 4 F3 behaviour) |
+| Routing operations, 20,000 | 0.88 | 1.38 | 4.14 | 4.27 (scoped replace rewrites all 20,000 by design, then a plant recompute) |
+| Planned orders, about 9,700 sent (5 % changed total, 3 % absent, 2 % new) | 0.46 | 0.48 | 8.08 (200 inserted, about 480 updated, about 300 deleted and archived; runs 4.3, 8.9, 8.1) | 7.9 (all `unchanged`) |
+
+Planned-order breakdown of one apply: shared `db.upsert_orders` 7.0 s (6.8 to 7.8, the cost is the chunked `executemany` round trips and per-row comparisons, not any one query), `build_order_rows` 0.5 s, vanish candidates 0.01 to 0.03 s, **vanish delete (`purge_orders_by_ids`, archive then delete 300 orders) 0.07 to 0.13 s**, the gate queries 0.01 to 0.03 s. Validation of a planned-order batch: 0.4 to 0.7 s (python verdicts 0.19 s, set-based write 0.12 to 0.25 s). That cost is inherent to the shared upsert path (item 3 of the plan's rule) and was left alone: apply is about 15 times under the 2-minute bar.
+
+**Apply while the app is in use** (apply and validate through the HTTP routes on 8031; a probe thread called `GET /tasks?plant=ZP01` back to back, which returns the full 10,000-order plant, 14.2 MB, and once a second `GET /sap/staging/batches`, `GET /tasks/horizons?plant=ZP01` and `GET /health`; another thread sampled `pg_stat_activity` every 0.5 s):
+
+| Window | `/tasks` full p50 / p95 / max | `/sap/staging/batches` p95 | `/tasks/horizons` p95 | `/health` p95 | non-200 | DB connections (max total / active / idle in transaction / waiting on a lock) |
+|---|---|---|---|---|---|---|
+| Idle, 30 s | 1.86 / 1.97 / 2.16 s | 0.38 s | 0.37 s | 0.30 s | 0 | 2 / 1 / 1 / 0 |
+| First apply (18.8 s over HTTP) | 2.03 / 2.54 / 2.54 s (9 calls) | 0.66 s | 0.30 s | 0.33 s | 0 | 4 / 3 / 2 / 0 |
+| Identical re-apply (18.4 s over HTTP) | 2.05 / 2.47 / 2.47 s (8 calls) | 0.35 s | 0.30 s | 0.15 s | 0 | 4 / 3 / 2 / 0 |
+
+p99 equals the max at these sample sizes (no request in any window exceeded 2.6 s, and the four light endpoints never exceeded 0.66 s). **No request on a light endpoint took over 1 s during apply**; the full `/tasks` load (itself about 2 s idle) grew about 25 %. The apply itself slowed from about 8 s to about 18.5 s because it shares the one Python process with a continuous 14 MB serialization loop; it never starved the app and never held more than 4 DB connections of the pool's 20. The apply, validate and poll routes all run their work in the thread pool (`run_in_threadpool`), so a long apply does not block the event loop, `/upload` or `/tasks`.
+
+**Plans (`EXPLAIN (ANALYZE, BUFFERS)`, 26 statements, plant volume above plus 5,054 batch headers, 9,605 outbound rows, about 1,200 archive rows):**
+
+| Statement | Execution | Plan |
+|---|---|---|
+| Vanish candidates (main, 5,000 hits) | 2.5 ms | `idx_orders_plant` bitmap scan, then filter (the `<> ALL (array)` filter is cheap at 4,600 sent keys) |
+| Vanish family lookup | 0.03 ms | `idx_orders_parent (plant, parent_production_order)` |
+| Validation gate count / in-horizon live count | 2.8 ms / 2.2 ms | `idx_orders_plant` |
+| `held_deletions` detail with segments (5,000 rows) | 29 ms | `idx_orders_plant` AND primary key bitmap, segments by `idx_order_schedule_segments_order_start` |
+| Outbound candidate rows (9,605) | 52 ms | `idx_orders_plant`, segments lateral by index |
+| Validate set-based UPDATE, planned orders (4,605) / material plants (2,000) | 20 ms / 9 ms | primary key join to `unnest` |
+| Stage row fetch, sent order numbers | 1.3 ms / 2.5 ms | `idx_sap_stage_planned_order_batch` |
+| Sweeps: archive / outbound / dead batches | 0.04 / 5.6 / 1.5 ms | sequential scans of small tables (see note) |
+| `list_batches`: default / status / object+plant / 5-plant scope | 1.3 / 0.7 / 0.08 / 0.7 ms | `idx_sap_stage_batch_lookup` or a top-N sort of the headers |
+| Poll candidates, apply newer-batch check, supersede, previous-applied delete (cascading 4,605 rows) | 0.24 / 0.10 / 0.28 / 5.1 ms | `idx_sap_stage_batch_lookup` |
+| Routing live keys (20,000 rows) / material plant live keys | 3.9 ms / 0.4 ms | plant-prefixed primary keys |
+
+Flags: **no sequential scan on `orders` or `order_schedule_segments` anywhere, and every `orders` statement has `plant` in an index condition**, so no index was added. Four estimate-versus-actual mismatches above 10x, all harmless: the `<> ALL (array)` filter (estimated 1 row, actual 5,000, no choice of plan depends on it), the plant-plus-id-list bitmap AND (estimated 1,391, actual 5,000), and the top-N sort and sweep scans of the small `sap_stage_*` tables (estimated 300 to 9,600, actual 0 to 50). The two sweeps that scan (`sap_stage_planned_order_out` by status and age, `sap_stage_batch` by status and age) are bounded by the 30-day and 7-day retention; at the plan's own scale (a 10,000-order Send twice a day) the outbound table holds about 600,000 rows at steady state, which is a half-second scan once a poll tick, so an index on `queued_at` was not added (reopen if Send volume grows).
+
+**Poll tick, 50 ready batches** (one per plant ZP02-ZP51, material plants, 100 rows each, apply mode `auto`): one tick validated and applied all 50 in **1.9 s** (changed data), 1.7 s (changed again), 1.2 s (unchanged); an empty tick takes 0.003 to 0.12 s; inserting the 50 batches took about 5 s. While the first tick ran, a second `poll_once` in the same process and a `POST /sap/staging/poll` to the app returned in 4 ms and 10 ms with `skipped: another poll is running`, `processed: 0`.
+
+**`GET /sap/staging/batches` with 5,000 synthetic headers added** (4 objects, 51 plants, mixed `applied` / `rejected` / `superseded`, spread over 10 days): default call 8.6 ms and 36 KB (50 headers); `limit=500` 34 ms and 325 KB; `status=applied` 8 ms; object plus plant 5.7 ms; `limit=501` is a 422, so **the endpoint is bounded (default 50, maximum 500)**. Worst case, if the newest 50 headers each carry the full 5,000-key frozen deletion list, the query still reads that JSON from the database (877 KB) before `_header_dict` strips it: 32 ms, same 36 KB response. Retention: one poll tick (0.07 s) deleted the 1,011 rejected / superseded headers older than 7 days; none older remain. Normal operation keeps this table small by design: the latest applied batch per object and plant (at most 4 x 51 = 204 at 50 plants) plus 7 days of dead ones; 5,000 headers only appear if Mulesoft delivers hundreds of failing batches a day.
+
+**Outbound, 10,000-order plant** (9,605 orders at that moment, all with an end): first Send 2.8 s, 9,605 outbound rows queued (1,379 firmed), 9,605 `order_sap_sent` rows, **0 `orders` rows with a moved `xmin`**. Second Send, nothing changed: 4.7 s, 9,605 new rows queued and the 9,605 previous `ready` rows retired as `requeued`, **0 of 9,605 side-table rows rewritten**, 0 `xmin` moves. Third Send after 50 scheduled orders were moved one hour: 4.6 s, **exactly 50 side-table rows rewritten**, 0 `xmin` moves. `outbound_status` and `outbound_rows` answered in under 50 ms at about 29,000 outbound rows.
+
+**Deletions payload.** A held batch that omits 5,000 of 9,605 live orders (52 %, `vanish_threshold`) returns all **5,000 rows in `GET /sap/staging/batches/{id}/deletions`: 1.3 MB (261 bytes a row), 0.25 s median**. The "about 2,000" cap in the plan exists only for master-object batches (`held_deletions`: `absent[:2000]`; measured 3,000 candidates, 2,000 returned, 110 KB). **Planned-order deletions are not capped by the API** (the UI caps display at 200, and the frozen key list stored in the batch is capped at 5,000, `_FROZEN_KEYS_CAP`). The payload is bounded by the in-horizon order count of one plant (about 10,000 rows, 2.6 MB at the plan's scale), so it was left as is and recorded in section 12.
+
+**Also noticed (not a Track 8 bar):** `GET /tasks?plant=ZP01` returns the whole 10,000-order plant (14.2 MB) in about 1.9 s; `limit` / `offset` exist but the UI does not use them. That is the existing scheduling contract, not part of this branch.
+
+**Pass bars:** apply of 10,000 orders under 2 minutes: **pass** (8 s unloaded, 18.5 s with a continuous full-plant `/tasks` loop on the same process). No plant-unindexed hot query: **pass**. App responsive during apply: **pass** (light endpoints p95 and p99 at most 0.66 s, none over 1 s, no errors).
+
 ---
 
 ## 9. Admin UI walk-through (browser)
@@ -309,6 +374,12 @@ Nobody has opened these panels. Walk every control in Admin › Interface as an 
 | 2026-10-07 | 5 (F4) | Low | While a batch waits for its missing rows it shows `ready` with expected / actual row counts but **no warning**; the `incomplete_rows` warning appears only at rejection (the Validate click gives a 409 with the numbers). The plan expected the warning during the wait. | Open, UI could flag expected != actual while `ready`; no code change. |
 | 2026-10-07 | 5 (F10) | Info | The archive copy and delete run on `db.purge_orders_by_ids`' own pool connection, so `NIMBUS_SAP_STAGING_STATEMENT_TIMEOUT_MS` (default 600 s) does not cover them; the pool default (30 s) applies. A very large vanish set could time out and end `error`; the rollback is clean and the resume works. | Accepted; documented here. |
 | 2026-10-07 | 5 (env) | Info | The first full `pytest` run after the Track 5 cleanup stopped at one `psycopg.errors.QueryCanceled` (statement timeout; the failing test was not captured because that run used `-x` and its output was cut). The next complete run was green (`1266 passed, 1 skipped`) and nothing was changed in between. | Not reproduced; if it recurs, suspect stale planner statistics on the test database after the bulk deletes. |
+| 2026-10-07 | 8 | Info | Performance at target scale passes all three bars with no code or schema change: apply of 10,000 planned orders 8 s unloaded and 18.5 s under a continuous 14 MB `/tasks` loop (bar 120 s); every hot query uses the plant index (no Seq Scan on `orders` / `order_schedule_segments`); light endpoints p95 at most 0.66 s during apply, no errors, at most 4 DB connections held. Poll tick with 50 batches 1.2 to 1.9 s; a second poll skips. Full tables in section 8. | Closed. |
+| 2026-10-07 | 8 | Low | `GET /sap/staging/batches/{id}/deletions` returns every deletion of a planned-order batch: 5,000 rows are 1.3 MB / 0.25 s. The "about 2,000" cap exists only for master-object batches; the UI caps display at 200 but the API does not cap planned orders. | Open, accepted at pilot scale (bounded by one plant's in-horizon orders, about 2.6 MB at 10,000). If it ever matters, add `limit` plus a `total` to the route; the UI already shows "+N more". |
+| 2026-10-07 | 8 | Low | `list_batches` reads the whole `counts` JSON of each header, including the up-to-5,000-key frozen deletion list, and strips it in Python: worst case 877 KB read per 50 headers (8 ms becomes 32 ms; response unchanged at 36 KB). | Open, not worth a change at this size; fix would be `counts - 'vanish_keys'` in the list query only. |
+| 2026-10-07 | 8 | Info | Costs inherent to the shared `db.upsert_orders` path, left alone: an identical re-apply of 10,000 orders still costs 7 to 8 s (chunked `executemany` round trips and per-row comparisons, about 6 s of it waiting on Postgres); production versions and routing operations rewrite every row on an identical re-apply (1.1 s and 4.3 s; Track 4 F3 / by-design scoped replace); Send to SAP is 2 statements per order (2.8 to 4.7 s at 9,605 orders). | Reported, no change. |
+| 2026-10-07 | 8 | Info | Retention sweeps for outbound `sent` / `error` rows and dead batches sequentially scan their (small) tables; at a 10,000-order Send twice a day the outbound table settles near 600,000 rows (about a half-second scan once per poll tick). | Accepted; add an index on `queued_at` if Send volume grows. |
+| 2026-10-07 | 8 (env) | Info | Full suite after Track 8 on the small test database, app stopped: `1266 passed, 1 skipped`. | Noted. |
 
 ---
 
