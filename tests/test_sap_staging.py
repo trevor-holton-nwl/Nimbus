@@ -675,9 +675,16 @@ def stg_plant(pg):
     with _conn(pg) as (conn, cur):
         cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (SUB, SUB))
         cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')", (SUB, PLANT))
+        cur.execute("SELECT clock_timestamp()::timestamp")
+        started = cur.fetchone()[0]
         conn.commit()
     yield PLANT
     _cleanup(pg)
+    with _conn(pg) as (conn, cur):
+        # Planned-order applies write an `upload_audit` row (filename 'sap:sap') each; leaving them piles up
+        # and crowds the fixed-size window of test_integration_pg's upload-audit source-filter test.
+        cur.execute("DELETE FROM upload_audit WHERE filename = 'sap:sap' AND uploaded_at >= %s", (started,))
+        conn.commit()
 
 
 def _set_plant(pg, *, routing: bool, horizon_days):
