@@ -334,6 +334,7 @@ async function benchmark() {
       const { searched, tailOnly } = countLinesSearched(searchResult, shapeConfig);
       const { lateCount, lateMinutes } = countLateness(result);
       const setupMinutes = Math.round(result.objective?.setupMinutes || 0);
+      const admitted = result.objective?.scheduledCount ?? 0;
       const candidates = searchResult.diagnostics?.candidateCount ?? 0;
       // Digest of the pre-gap-fill search result (gap fill has its own soft
       // wall-clock budget), for index-on vs index-off identity checks.
@@ -351,6 +352,7 @@ async function benchmark() {
         lateCount,
         lateMinutes,
         setupMinutes,
+        admitted,
         digest,
       });
 
@@ -364,7 +366,7 @@ async function benchmark() {
 
   // Print header
   console.log(
-    'Shape                Mode                 Wall      Termination      Candidates  Lines  Late     Late min  Setup min  Digest'
+    'Shape                Mode                 Wall      Termination      Candidates  Lines  Late     Late min  Setup min  Admitted  Digest'
   );
   console.log(
     '─────────────────────────────────────────────────────────────────────────────────────────────────────────────────'
@@ -381,9 +383,10 @@ async function benchmark() {
     const lateStr = String(r.lateCount).padStart(8);
     const lateMinStr = String(r.lateMinutes).padStart(10);
     const setupStr = String(r.setupMinutes).padStart(10);
+    const admStr = String(r.admitted).padStart(9);
 
     console.log(
-      `${shapeStr} ${modeStr} ${wallStr} ${termStr} ${candStr} ${linesStr} ${lateStr} ${lateMinStr} ${setupStr}  ${r.digest}`
+      `${shapeStr} ${modeStr} ${wallStr} ${termStr} ${candStr} ${linesStr} ${lateStr} ${lateMinStr} ${setupStr} ${admStr}  ${r.digest}`
     );
   }
 }

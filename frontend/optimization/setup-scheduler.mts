@@ -2661,6 +2661,13 @@ function compareDueDateCandidate(left: DueDateCandidate, right: DueDateCandidate
   return ordinalCompare(left.sequenceKey, right.sequenceKey);
 }
 
+function admittedCount(key: string | undefined): number {
+  let count = 0;
+  const text = key ?? '';
+  for (let index = 0; index < text.length; index += 1) if (text.charCodeAt(index) === 48) count += 1;
+  return count;
+}
+
 function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
                           mode: FragmentMode = 'due-date-first'): number {
   // `'due-date'` (2026-09-09) inverts the usual tier order (lateness ahead of
@@ -2668,7 +2675,13 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // rather than folded into the terms below, since it isn't just a
   // reordering of the mode-permuted `terms` list further down.
   if (left.feasible !== right.feasible) return left.feasible ? -1 : 1;
-  const admissionDelta = ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
+  // Min Changeover (D1/D11) compares admission by COUNT, not by which
+  // urgency-ranked orders were admitted ('0' = admitted in the key); more
+  // admitted wins, then the objective terms decide. Other modes keep the
+  // urgency-ordered string compare unchanged.
+  const admissionDelta = mode === 'min-changeover'
+    ? admittedCount(right.admissionKey) - admittedCount(left.admissionKey)
+    : ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
   if (admissionDelta) return admissionDelta;
   if (mode === 'due-date') return compareDueDateCandidate(left, right);
   if (mode === 'min-changeover' || mode === 'spt') {
@@ -5938,9 +5951,11 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
   return { ...result, explanation: [...result.explanation, { code, message }] };
 }
 
-/** Use available slack: run the shared candidate evaluator with setup as the
- * first non-due comparator, then fail closed to Due-date-first if it made an
- * originally on-time order late or increased the line's existing late count.
+/** Min Changeover (D1, D8-D11): least setup inside the date limits. Due date is
+ * not an objective; only the pull-forward floor (hard placement clamp) and the
+ * push-forward limit (over-cap tier, last-resort placed-and-flagged) apply.
+ * One search per run; `finalizeCandidate` keeps the current schedule only when
+ * the new plan would schedule fewer orders (by count).
  */
 export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
@@ -5951,44 +5966,29 @@ export function evaluateMinChangeover(
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const budget = bounds.searchBudget ?? createSearchBudget(bounds);
   bounds = { ...bounds, searchBudget: budget };
-  const baseline = evaluateDueDateFirst(snapshot, { ...bounds, searchBudget: budget });
   const candidate = evaluateDueDateFirst(snapshot, { ...bounds, searchBudget: budget }, 'min-changeover');
-  const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
-  const admission = (result: CandidateResult): string => {
-    const queued = new Set(result.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id));
-    return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join('');
-  };
-  const admissionDelta = ordinalCompare(admission(candidate), admission(baseline));
-  const chooseCandidate = !candidate.validationFindings?.some(f => f.severity === 'error')
-    && (admissionDelta < 0 || (admissionDelta === 0 && compareFinalObjectives(snapshot, { ...bounds, strategy: 'min-changeover' }, candidate, baseline) <= 0));
-  const chosen = chooseCandidate ? candidate : baseline;
-  const incomplete = baseline.searchComplete === false || candidate.searchComplete === false;
-  const deadlineCutoff = baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline';
-  const iterationCutoff = baseline.diagnostics.termination === 'iteration-cap' || candidate.diagnostics.termination === 'iteration-cap';
+  const incomplete = candidate.searchComplete === false;
+  const deadlineCutoff = candidate.diagnostics.termination === 'deadline';
+  const iterationCutoff = candidate.diagnostics.termination === 'iteration-cap';
   const budgetCutoff = deadlineCutoff || iterationCutoff;
   const termination = budgetCutoff
     ? (deadlineCutoff ? 'deadline' : 'iteration-cap')
-    : chosen.diagnostics.termination;
+    : candidate.diagnostics.termination;
   return {
-    ...chosen,
+    ...candidate,
     searchComplete: !incomplete,
     diagnostics: {
-      ...chosen.diagnostics,
+      ...candidate.diagnostics,
       termination,
       limitReached: budgetCutoff,
-      candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount,
       runtimeMs: Math.max(0, bounds.clock() - budget.startedAt),
       budgetMs: budget.budgetMs,
       deadlineAt: budget.deadlineAt,
       iterationsUsed: budget.iterationsUsed,
-      evaluatedCount: (baseline.diagnostics.evaluatedCount ?? baseline.diagnostics.candidateCount)
-        + (candidate.diagnostics.evaluatedCount ?? candidate.diagnostics.candidateCount),
-      seedCount: (baseline.diagnostics.seedCount ?? 0) + (candidate.diagnostics.seedCount ?? 0),
-      localMoveCount: (baseline.diagnostics.localMoveCount ?? 0) + (candidate.diagnostics.localMoveCount ?? 0),
-      exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
-      quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
+      exhaustive: !incomplete && candidate.diagnostics.exhaustive === true,
+      quality: candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
     },
-    explanation: [...chosen.explanation, { code: chooseCandidate ? 'min-changeover-due-safe' : 'min-changeover-incumbent', message: chooseCandidate ? 'Selected the best validated admission and delivery/setup objective.' : 'Retained the better validated incumbent.' }],
+    explanation: [...candidate.explanation, { code: 'min-changeover-selected', message: 'Selected the validated plan with the least setup inside the date limits.' }],
   };
 }
 
@@ -6689,7 +6689,14 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   result = repairCandidate(snapshot, bounds, result);
   const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
   const admitted = (proposal: CandidateResult): string => { const queued = new Set(proposal.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id)); return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join(''); };
-  const preferIncumbent = (admitted(incumbent) < admitted(result) || (admitted(incumbent) === admitted(result) && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !incumbent.validationFindings?.some(f => f.severity === 'error');
+  // Min Changeover (D11) keeps the incumbent only when the new plan schedules
+  // fewer ORDERS; the urgency string would let an earlier-due order outrank
+  // count. Other strategies keep the urgency-ordered comparison.
+  const queuedCount = (proposal: CandidateResult): number => proposal.dispositions?.filter(d => d.status === 'needs_planning').length ?? 0;
+  const admissionDelta = bounds.strategy === 'min-changeover'
+    ? queuedCount(incumbent) - queuedCount(result)
+    : ordinalCompare(admitted(incumbent), admitted(result));
+  const preferIncumbent = (admissionDelta < 0 || (admissionDelta === 0 && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !incumbent.validationFindings?.some(f => f.severity === 'error');
   result = preferIncumbent
     ? retainCompatiblePlacements(snapshot, bounds, incumbent, result)
     : retainCompatiblePlacements(snapshot, bounds, result, incumbent);
@@ -7008,8 +7015,10 @@ export function compareObjectiveFacts(
   };
   const terms: Array<[keyof ObjectiveFacts, boolean]> = mode === 'min-changeover'
     ? [
-      ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false],
-      ['uncoveredEdges', false], ['setupMinutes', false], ['policyKey', false],
+      // D1/D10: Min Changeover minimizes setup inside the date limits. Admission
+      // (by count) is settled before these terms; lateness is a tie-breaker only.
+      ['hardErrors', false], ['overCap', false], ['uncoveredEdges', false], ['setupMinutes', false], ['policyKey', false],
+      ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false],
       ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
     ]
     : mode === 'due-date'
