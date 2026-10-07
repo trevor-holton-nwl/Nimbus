@@ -4,7 +4,7 @@
 
 **Stance.** Improve what is there. No new solver, no new objective, no new UI. Every recommendation below is a change to an existing function, measured against the existing code with a throwaway benchmark harness (described in §3). Nothing in the repo was modified during this sweep; the harness and prototype live in the session scratchpad only.
 
-**Status.** Findings and recommendations. No code changes have been made. **Owner decisions recorded 2026-10-07 and an F1–F4 implementation plan added: see Part 3.** Where Part 3 differs from Parts 1–2 (F3 scope, F4 shape, F6 placement), Part 3 wins.
+**Status.** Findings and recommendations. No code changes have been made. **Owner decisions recorded 2026-10-07 and an F1–F4 implementation plan added: see Part 3.** Where Part 3 differs from Parts 1–2 (F3 scope, F4 shape, F6 placement), Part 3 wins. **Part 4 (research, 2026-10-07) adds the next speed trims, an F10 risk audit and the multi-line outlook.**
 
 ---
 
@@ -489,6 +489,205 @@ Reading it: F1/F2/F4 make every shape except the 70-line large plant converge an
 
 ---
 
+# Part 4 — Next speed work and multi-line risks (research, 2026-10-07)
+
+**Status.** Research only, no code changed. Two read-only investigations: where the time goes now that F1–F4 and Step 4 have shipped (§4.2–4.5), and what it would really take to run lines in parallel (F10) and to let the optimizer one day move orders between lines or production versions (§4.6–4.7). File and line references are to the branch tip `e8b3c89` and will drift.
+
+## 4.1 Summary and recommendation
+
+- **The large plant is still clock-dependent.** On this machine the 70-line, 30-orders-per-line shape finished every line in every mode, but wall time ranged 2.2–4.9 s (Min Changeover), 1.8–4.2 s (SPT) and 2.8–4.3 s (Due Date). The 5 s deadline sits inside that noise, so on a slower laptop the same plant gets a different answer. That explains the 55 of 70 lines in §3.5.
+- **The time is not where we guessed.** The free-window lookup is a quarter of all CPU; sorting orders by urgency inside the search is another 14%. Two hypotheses are rejected by measurement: the nearest-setup ordering (about 1%) and candidate comparison allocations (under 1%).
+- **Five small, behavior-preserving trims (T1–T5) exist.** Together they should cut wall time by roughly 30–40% (an estimate, not measured), not 2×. They do not change what the search decides.
+- **Do T1, T3 and T4 now.** T2 is optional (it mostly overlaps T1 once T1 lands). T5 last, or skip.
+- **F10 (lines on parallel Workers) is bigger than the F10 text in §4 says.** The per-line search is independent, but the "keep the new plan or revert to the old one" judgement covers the whole plant at once. Corrected effort is 5–7 days, not 2–3. Defer it until a 50+-line plant is onboarded, and do F8/F9/F11 first.
+- **F10-lite is cheap and safe:** run the Plan B and Plan C alternates at the same time (1–2 days, no algorithm change, saves up to about 10 s on the comparison table).
+- **Neither the trims nor F10 lock in a future where the optimizer moves orders between lines or production versions.** F10 is compatible with that future if built with the guards in §4.6; the trims have no bearing on it.
+- **Faster is not neutral for planners** (§4.4): on a slow machine the deadline today leaves late-alphabet lines unoptimized; a faster engine reaches them, so results shift toward the no-deadline answer.
+- **Nine owner questions** are in §4.8. Two block F10 (Q1, Q3); none block T1, T3 or T4.
+
+## 4.2 Profile (large shape)
+
+70 lines × 30 orders, seed 42, evaluator only. The benchmark's own `--cpu-prof` is contaminated: about 40% of that process is the benchmark building its starting schedule (`scripts/bench-optimizer.mjs:141`), so the profile was taken around the evaluator call alone. Self time is time spent in the function itself; inclusive time includes what it calls.
+
+| Where the time goes | Self % (Min Changeover / SPT) | Note |
+|---|---|---|
+| `freeIntervalsForPlacement` | 25.0 / 24.1 | Builds every free window for a candidate placement; its only caller is `candidateForSequence` |
+| `candidateForSequence` | 7.3 / 7.7 | Inclusive 75 / 67: the search's inner loop |
+| `timestamp` | 7.1 / 5.6 | About 4 points come from `dueTimestamp` inside the urgency comparator |
+| `policyKeyForTask` | 4.9 / 4.3 | Called from `policyKeyForSequence([a])` inside the same comparator |
+| `joinIndexKey` (setup domain) | 3.9 / 2.6 | Shared setup-matrix code |
+| `place` closure | 3.4 / 2.8 | |
+| `planningDefect` | 3.4 / 1.7 | |
+| Garbage collection | 3.3 / 3.0 | |
+| `urgencyOrder` comparator | 2.8 / 3.4 | Inclusive 14.4 / 13.6 |
+| `placeWithSetup` | 2.5 / 2.2 | |
+| `applyPatchesToSnapshot` lambda | 2.4 / 2.7 | Inclusive 4.9 / 5.4 |
+| `validateCandidate` | 2.2 / 2.8 | |
+| `structuredClone` | 1.3 / 1.7 | |
+
+Inclusive: `admissionKey` (including its urgency sort) 14.0 / 13.3 (Due Date 13.5); `finalizeCandidate` 12.9 / 15.5; setup resolution 7.6 / 7.7.
+
+What this means: the engine spends a quarter of its time rebuilding the list of free calendar windows around every trial placement, and another 14% re-sorting the same orders by due date over and over. Both recompute facts that do not change during a run.
+
+## 4.3 Speed trims T1–T5
+
+All five keep the search's decisions identical; they only avoid redoing work. Gains are the profile's own numbers where the profile measures them, otherwise inferred (marked).
+
+| | Change | Equivalence | Risk | Expected gain | Guard |
+|---|---|---|---|---|---|
+| T1 | Cache each order's sort key (deadline, policy key, due date, start, id) per line on the run context, so the urgency comparator stops recomputing them | Exact: strict total order with id tiebreak, inputs constant within a run | Low | About 8–10%, all modes | Bench digest unchanged; old path kept when there is no run context |
+| T2 | Min Changeover only: count admitted orders without sorting them | Exact for Min Changeover, which compares only the count | Low–medium | 12–13% alone, 3–4% after T1 | Mode passed in without leaking to other modes |
+| T3 | Stop building free windows once one fits, for orders that must run in one piece | Exact if the fit test matches the real placement test | Low–medium | Probably 15–20% (inferred, not measured) | Split-policy and boundary tests (§4.5) |
+| T4 | Remember the unchanging part of the "can this order be planned" check per order | Exact; the expired-window part stays live | Low | About 3–4% Min Changeover, 2% SPT | Bench digest |
+| T5 | Shallow copy instead of a full deep clone when applying patches to a snapshot | Exact only if nothing later edits the shared dates in place | Low–medium | Up to 3–5% | Non-mutation test; ship last or skip |
+
+**T1, urgency sort cache.** Today the comparator in `urgencyOrder` (`setup-scheduler.mts:6219`) recomputes due timestamps and policy keys on every comparison, and it is called from about a dozen places (including 2104, 3228, 3676, 4478, 6442 and `admissionKey` at 6979). The same memo pattern already exists for `_notAfter` and `_policyKeyForTask` on the run context (`setup-scheduler.mts:550–554`, used at ~1253). Example: sorting 30 orders makes about 150 comparisons, each recomputing two due dates and two policy keys; with the cache it is 30 computations. Hazard: callers with no run context must keep the old path. Nothing in the compute-core mirror carries this code.
+
+**T2, count-only admission (optional).** Min Changeover compares only how many orders a candidate admits (`setup-scheduler.mts:2683`); the ordered string is read only there and by SPT's candidate comparison (~3725). So for Min Changeover the sort can be skipped. Hazard: `candidateForSequence` has no knowledge of the mode today, and other modes compare the string ordinally, so the mode must be passed in without changing what they see. Once T1 lands the sort is cheap, which is why this is optional.
+
+**T3, early exit in the free-window builder.** `freeIntervalsForPlacement` (`setup-scheduler.mts:2526`, called at ~2939 and ~4555) builds every window in the horizon even when the first one already fits. For an order that must run continuously (policy "never split", or "split only if overlong" and the order is not overlong, or a run time shorter than the smallest productive segment), stopping at the first fitting window gives the same placement. Example: a 6-hour order on a line free from Monday 06:00 builds 28 days of windows today to use the first. Split paths (partial allowed, or overlong) need all windows and must not be truncated. It must not touch the exported `placeWithSetup` (`setup-scheduler.mts:275`), which the live Gantt uses via `Calendar.placeWithSetup` (`calendar-engine.mts:603–613`). The fit test must match placement exactly: rounded run time, setup minutes, windows measured in whole minutes.
+
+**T4, memoize the static planning check.** `planningDefect` (`setup-scheduler.mts:6210`) re-checks missing due date and run-time validity for the same order many times. Memoize those by order id; keep the expired-window check live, because it depends on `bounds.now` and derived bounds may share a run context with a different "now".
+
+**T5, shallow copy in patch apply.** `applyPatchesToSnapshot` (`setup-scheduler.mts:6102–6106`) deep-clones the task and the change. A shallow copy would let patched tasks share Date objects and nested lists with the originals and the patches, so any later in-place edit (a `setHours`, a `push`) would change both. Whether the store copies on update was not verified. The gain is small; skip it, or ship it last behind a test proving the originals are unchanged.
+
+**Not worth doing.** The nearest-setup ordering (about 1%) and comparison allocations (under 1%). **Deferred:** setup resolution and `joinIndexKey` (shared setup-domain code, higher risk) and `finalizeCandidate` (runs once per line, out of scope here).
+
+**Order:** T1, then T3, then T4, then optionally T2, then optionally T5. Combined estimate 30–40% less wall time. The iteration budget is untouched by all five.
+
+## 4.4 Faster changes what planners see
+
+A faster engine is not a neutral change. Today, when the 5 s deadline hits, the lines later in the alphabet are never searched and are laid out without setup optimization (the line order is set at `setup-scheduler.mts:5593` and 5782). On a slower machine more lines are dropped. Making the code faster moves every machine toward the no-deadline result.
+
+Example: on the large Min Changeover shape, a fast machine today resequences all 70 lines and a slow one resequences 55. After the trims the slow machine also resequences 70. That means more lines resequenced, much less setup time, and, by D1 (due dates are not an objective for Min Changeover), more lateness on those extra lines. Results become more consistent across machines, but a planner used to a given plant's Min Changeover numbers will see them change.
+
+Consequence for testing: the benchmark digest run with `--no-deadline` proves the search is equivalent before and after a trim. It does not prove the result under a deadline is the same, and it cannot, because that result depends on the clock.
+
+## 4.5 Guards before any trim lands
+
+1. **Strengthen the benchmark digest.** It hashes only patches, objective and score. Add explanation, dispositions, validation findings and diagnostics (minus run time) so a trim cannot change reasons without being noticed.
+2. **Baseline digests** (`--no-deadline --seed 42`, taken with the old, weaker digest), Min Changeover / Due Date / SPT. Re-take them with the strengthened digest before T1 and compare after each trim.
+
+| Shape | Min Changeover | Due Date | SPT |
+|---|---|---|---|
+| small | 9cb22ab313 | 621fb3e327 | c8910c5eb8 |
+| medium | 1590d8aedf | 37a492fa40 | 36650cbc20 |
+| wide | 89e22dfc76 | 36ca948014 | f005536786 |
+| large | eb0ebb37f3 | acff0b9cec | 7d0fb45db7 |
+
+3. **Cover what the bench does not.** It has no throughput, due-date-first or Remove Backlog runs, so also run `tests/modules/remove-backlog.test.mjs`, `tests/modules/split-order.test.mjs` and the scoped optimizer suite after each trim.
+4. **T3:** add a test with a split-allowed order that crosses an interval boundary, and one with a continuous order that only fits in the second window.
+5. **T5:** add a test that the original tasks and patches are unchanged after apply.
+
+## 4.6 F10 — line independence audit, risks, minimal safe design
+
+**Bottom line.** The per-line search is genuinely independent. Everything around it is plant-wide. `finalizeCandidate` (`setup-scheduler.mts:6645–6705`) compares the whole new plan against the incumbent for the whole plant and is called inside each evaluator. So F10 is an evaluator refactor plus a two-hop Worker protocol, not "split the lines and merge the patches" as the F10 text in §4 says.
+
+**Line independence audit (condensed).**
+
+| Item | Independent across lines? | Impact under parallel lines |
+|---|---|---|
+| Shared search budget (`setup-scheduler.mts:1009–1033`) | No | Results change only when a limit actually binds |
+| Alphabetical line order (5593, 5782; the F10 text's 5348/5537 have drifted) | Order matters only for budget | Merge in line order |
+| Snapshot between lines | Yes, not mutated | None |
+| Keep-or-revert judgement (`finalizeCandidate`, 6645–6705) | **No, plant-wide** | Main coupling: a per-Worker judgement would keep line A's gain while line B reverts, unlike today |
+| Hidden channel `_setupExclusions` (written 2879, read 6153 and 6658) | Search to finalize | Lost unless merged: orders would report "no fit found" instead of "setup transition unrecorded" |
+| Line scope filtering (`buildTaskScope`, ~6264) | Yes, works | The comment at `engine.mts:2190–2192` saying evaluators have no lines filter is stale |
+| Distribution separation check (6571–6627) | Warning only | Must run once on the merged result |
+| Calendars, blackouts, firmed and frozen boundaries | Yes | None |
+| Labor | Not read by the optimizer at all (`docs/MIGRATION.md:862`) | None |
+| Shared tooling | Only a priority sort field | The cross-line tool-conflict check exists only as an alert (`frontend/nimbus-compute-core.js` ~462–505), so today's optimizer can already create tool double-bookings, serial or parallel alike |
+| Production version, routing | Never reassigned; the rate map is main-thread state, not in the snapshot | None |
+| Gap fill (6813–6970) | Places only on an order's own line | One shared 1 s soft budget stays shared |
+| Validation | Per-line checks | Run once on the merged result |
+| Objective facts | Additive (max for max lateness) | Merge by sum or max |
+| Explanations | Deterministic only if merged in line order | Merge in line order |
+| Termination | Fold is order-insensitive, but quality and "exhaustive" must be recomputed | Recompute after merge |
+| Apply and save path | One bulk update, atomic save with `base_version` | Unchanged |
+
+**F10 risks.**
+
+| Risk | What happens | Mitigation |
+|---|---|---|
+| Result differs from serial | If finalize is split per Worker, a plan can keep line A's gain and revert line B (high risk if done naively) | Split search from finalize; finalize once; bench digest serial == parallel on converged runs |
+| `_setupExclusions` lost | Certain without a merge step; the planner sees the wrong reason | Return and merge it from every partition |
+| Partition determinism | Different splits give different budgets | Partition by sorted line and task-count weight; merge in line order |
+| Deadline determinism | Already timing-dependent today | No worse, but say so |
+| Iteration cap split | Differs from serial when the cap binds | Scale per partition and document |
+| Load imbalance | Speedup is bounded by the heaviest line; a uniform benchmark flatters F10 | Weight by task count; measure on a skewed shape |
+| One Worker fails | A partial merge would silently leave orders queued | Fail the whole run |
+| No synchronous fallback on Worker error | `optimizer-worker-client.mts:64–69` falls back only when Workers are unsupported | Add an explicit failure path |
+| Stale-run guards | One abort must stop N Workers | One abort controller terminates all; run id per partition |
+| Memory and cloning | The 1.2 MB snapshot is cloned per Worker on the main thread; about 0.6 MB each in JS (unverified) | Cache the snapshot per run in a warm pool |
+| Planner hardware unknown | No use of `navigator.hardwareConcurrency` in the repo; a 2-core virtual desktop could be slower than serial | Cap at min(4, cores − 1); serial below a size threshold |
+| Deep search and alternates compete for cores | Contention | Deep uses 1–2 Workers |
+| Observability | Worker timings never reach the main thread (F11) | Per-partition timings |
+| Two code paths drift | Serial and parallel diverge | Keep serial as the permanent reference with a digest contract |
+
+Amdahl note: finalize, gap fill (about 1 s at the large shape) and validation stay serial, and they must run in a Worker, not on the main thread.
+
+**Corrected effort: 5–7 days**, replacing 2–3.
+
+**Minimal safe design.**
+1. Split each evaluator into `searchLines(lines)` returning an aggregate (patches, score, explanation, missing edges, unchanged lines, `_setupExclusions`, counts, termination) and `finalize(aggregate)`.
+2. A warm Worker pool with the snapshot cached per run; deterministic partition.
+3. Merge, then finalize, gap fill and validate once, in one Worker.
+4. Fail the whole run on any partition error.
+5. Feature flag with the serial path kept; CI digest equality across shapes, modes and seeds.
+6. Per-partition timings; Deep search limited to 1–2 Workers.
+
+**F10-lite.** Run the Plan B and Plan C alternates concurrently on two Workers. No algorithmic risk, 1–2 days, saves up to about 10 s on the comparison table. Do this before full F10 if the table's wait time is the complaint.
+
+**Recommendation.** Defer F10. Do F8, F9 and F11 first (no lock-in). Go ahead, with the guards above, when a 50+-line plant is onboarded.
+
+## 4.7 Future multi-line and production-version reassignment
+
+**What is true today.**
+- The optimizer never moves an order's machine or production version (`docs/architecture/optimizer-dispatch.md:96`; `ROUTING_RUNTIME_DESIGN.md:324`), and `validateCandidate` rejects any patch touching anything but the five schedule fields (`business_fields`, `setup-scheduler.mts:6376`).
+- Planners can move machine and production version by hand (Gantt, grid, Inspector, guarded by run-time eligibility), and it persists (`backend/scheduling/models.py` ~252–253; `persistence.mts` ~1422).
+- A SAP re-upload keeps a planner's machine or production-version move until SAP's own value for that field changes, then SAP wins (`backend/integration/CLAUDE.md:67–68`).
+- Distribution sub-orders are machine-locked: the optimizer decides when, never where (`gantt.mts` ~4148).
+- Eligibility data exists only for routing-enabled plants. Production version is already a priority-list sort field (`setup-scheduler.mts` ~1264).
+
+**What breaks if the optimizer starts moving orders across lines or production versions.**
+- Lines are no longer separable for the assignment stage; F10's independence assumption fails there.
+- Run time depends on material, production version and work center, but the optimizer reads a fixed run time, the rate map is not in the snapshot, and the server rejects a changed duration (`runtime_preview_changed`). Patches, apply and save would have to carry machine, production version and run time (the save side already supports multi-machine locking and `machine_unknown`).
+- Fragments, initial setup states and firmed boundaries are keyed by line.
+- Tool double-booking is unguarded; labor is unmodeled.
+- Distribution maximum separation becomes a real constraint, not a warning.
+- Plant-wide admission arbitration must account for moved orders.
+
+Example: moving order 1004 from line A to line B only because B is idle would change its run time if B is slower, which changes its end date; today the save would reject that.
+
+**Does F10 lock this in?** No, if built with the guards. The likely future design is two stages: a serial step assigns orders to lines and production versions, then per-line sequencing runs, which is exactly what F10 parallelizes. Cross-line local search is not separable and would need coordinated search or parallel multi-start instead.
+
+**Choices that keep the door open.**
+- Partition by "component" (a set of lines that must be searched together). Today every line is its own component.
+- Fan out only after an explicit assignment step.
+- One post-merge finalize with a slot for cross-line re-checks (tools, distribution, labor).
+- Keep the serial reference path.
+- Do not hard-code the five-field patch rule into the new Worker protocol.
+
+The cheap trims (T1–T5) have no lock-in effect.
+
+## 4.8 Open owner questions
+
+Each is marked with what it blocks.
+
+1. **Same answer as today, or a better per-line answer? (blocks F10.)** Today, if line A saves 2 hours of changeover but line B admits one fewer order, the whole plan reverts to the old schedule. A parallel version would naturally keep A's gain and revert only B. Do you want the identical answer (slower to build, safest), or accept the per-line judgement?
+2. **Which lines get optimized when time runs out? (informs the trims and F10.)** Today it is alphabetical: A1–A20 are optimized before Z1–Z20. Is that acceptable, or should it be fair across lines, or most-urgent lines first?
+3. **What hardware do planners run on? (blocks F10's core cap.)** A 2-core virtual desktop could run four parallel Workers slower than one. What are typical core counts, and is 4 a fair cap?
+4. **Should a 1-minute Deep search use all cores? (informs Part 2 and F10.)** Example: a planner starts a Deep run and keeps working in the Gantt; using every core could make the browser sluggish.
+5. **If the optimizer ever moves orders between lines, approve each one or apply all? (future, blocks nothing now.)** Example: 30 orders move from line A to line B; does the planner approve per order or accept the plan as a whole?
+6. **Must NIMBUS tell SAP about a move? (future.)** There is no write-back today, so the next SAP change to that order silently wins over the move.
+7. **May a production-version change alter run time or material needs, and who approves it? (future.)** Any quality or bill-of-materials implications?
+8. **Should tooling and labor be hard rules before any cross-line move? (future.)** Today the optimizer can double-book a shared tool and ignores labor.
+9. **Do distribution sub-orders stay locked to their machines in a multi-line optimizer? (future.)** Today the optimizer decides only when, never where, for these.
+
+None of questions 1–9 block T1, T3 or T4.
+
+---
+
 ## Appendix A — Context
 
 **Brief.** "Improve the performance of the optimizer. Comprehensive sweep, findings in `Optimizer_Update_10_06.MD`, senior architect plus OR scientist lens, stay within improving what is there; new functionality allowed but nothing overbaked; faster/better while still good." Follow-up the same day: "Is it worth adding a selection that runs in the background for up to one minute and notifies via an interactive pop-up? Thoughts on effort; if agreed, add comprehensive UI updates in line with the current NIMBUS design." Part 2 answers that; the design choices there (dropdown with hint rather than a checkbox, button-as-state rather than a new notification center, in-memory parking, no browser notifications, one deep run per session, Remove Backlog excluded) are asserted defaults, open to override.
@@ -526,6 +725,11 @@ Reading it: F1/F2/F4 make every shape except the 70-line large plant converge an
 - *(2026-10-07)* `freeIntervalsFor` depends only on calendars and blackout blocks, not on other orders' placements, which is what makes a per-run index safe. Callers can ask for spans outside the run horizon (validation, gap fill), hence the out-of-span fallback in Step 2.
 - *(2026-10-07)* Due urgency enters Min Changeover in four places, not one: the lateness-above-setup ranking (`compareObjectiveFacts`), the urgency-ordered `admissionKey` compared before every tier in `compareCandidate`, the due-date-first baseline search plus its urgency-string arbitration in `evaluateMinChangeover`, and the urgency-string incumbent check in `finalizeCandidate` (shared by all strategies). Step 4 handles all four.
 - *(2026-10-07)* The pull-forward floor is a true hard clamp on placement (`notBeforeFor`). The push-forward limit is a scored tier (`SCORE_OVER_CAP`) ranked just below hard errors: avoided whenever possible, but not absolute. The owner kept that (D9).
+- *(2026-10-07, Part 4 research)* F10 and Part 2 understate the work: finalize (keep-or-revert for the whole plant) is called inside each evaluator, and `_setupExclusions` is a hidden channel from search to finalize; the 2-3 day F10 estimate is really 5-7. The F10 text's line numbers (5348/5537) have drifted to 5593/5782.
+- *(2026-10-07)* `aggregate_to_detail.md` section 9 ("patches committed between lines") and its line ~461 ("cross-machine moves never persist") are stale: planner machine and production-version moves do persist.
+- *(2026-10-07)* `docs/MIGRATION.md:858` ("no material to line eligibility mapping") is stale for routing-enabled plants.
+- *(2026-10-07)* The comment at `engine.mts` ~2190-2192 saying evaluators have no lines filter is stale: `buildTaskScope` (`setup-scheduler.mts` ~6264) already scopes by `bounds.lines`.
+- *(2026-10-07)* The benchmark's `--cpu-prof` is contaminated by its own starting-schedule build (about 40% of process time, `scripts/bench-optimizer.mjs:141`); profile around the evaluator call only.
 - *(2026-10-07)* Many `setup-scheduler.test.mjs` fixtures set `exactSearchThreshold: 6` with `iterationCap: 100000` (around lines 3584–3871) to pin exact-search behavior. An optional `exactSearchLeafCap` lets them keep their intent without being rewritten.
 
 ## Appendix C — Measurements
