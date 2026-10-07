@@ -9,6 +9,8 @@
 
 - **The table browser de-emphasises `sap_stage_*` tables.** `browser.py`'s `_INTERNAL_PREFIXES = ("sap_sync_", "sap_stage_")` marks the SAP staging, outbound and archive tables `internal=True` (still listed, rendered de-emphasised); they are not in `ALLOWED_TABLES` and are written only by `backend/integration/sap_staging.py` and the `nimbus_mulesoft` login.
 
+- **`material_plants.sap_missing_since` and `production_version.sap_missing_since` (nullable `TIMESTAMPTZ`, migration `2026-10-08-sap-staging-columns.sql`) are written only by `backend/integration/sap_staging.py`.** A SAP snapshot that omits a row something still references stamps it (`COALESCE(sap_missing_since, now())`); a snapshot that carries the row clears it. Master-data CRUD, the grids and the Excel ingest never set it; the clear is an explicit `UPDATE` in `sap_staging.py`, not part of the `bulk_apply` upsert, which writes only the columns it is given.
+
 ## Counterpart
 
 Frontend half: `frontend/master-data/admin-ui.mts` (`MasterData` — CRUD grids, plant policy forms, role page-access), `frontend/master-data/material-grids.mts` (`MaterialGrids` — Material / Material Plant grid UI), and `frontend/master-data/admin-tables.mts` (`AdminTables` — the read-only Table Browser UI over `browser.py`).

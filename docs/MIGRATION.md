@@ -831,6 +831,14 @@ Implications for a hosted plant pilot:
   is a second login on that surface (least privilege, TLS required, firewall to its egress IPs, see
   `docs/DEPLOYMENT.md`); private networking, a Key Vault secret for its password and rotating both
   logins close the same gap.
+- **Staging schema additions (migrations dated 2026-10-08).** `migrations/2026-10-08-sap-staging-tables.sql` (the `sap_stage_*` tables, the outbound queue, the archive and the side table `order_sap_sent`) and `migrations/2026-10-08-sap-staging-columns.sql` (`sap_sync_config.apply_mode`, and the nullable `TIMESTAMPTZ` columns `material_plants.sap_missing_since` and `production_version.sap_missing_since`, stamped when a snapshot omits a row that something still references). Both trip the runner's destructive filter and need `-AllowDestructive` (runner-wide; dry run first, see `docs/DEPLOYMENT.md`). Apply them before the image that reads `order_sap_sent` rolls.
+- **Open items from the 2026-10-07 validation (owner decisions; `docs/SAP_STAGING_VALIDATION_PLAN.md` section 12):**
+  - **A killed apply is not resumed by the poll.** A batch left `applying` (or `error`) stays there until an admin presses Apply; the poll visits only `ready` / `validated` batches. Options: let the poll resume when the apply lock is free, or alert when a batch has been `applying` longer than a set time (recommended: alert first, auto-resume later).
+  - **Plant-scoped admins cannot use staging at all.** Every `/sap/staging/*` route needs the `admin` role, which sees all plants, so a per-plant staging admin does not exist. Keep it global-admin only for the pilot (recommended) or add a plant-scoped permission.
+  - **Advisory-lock residual.** Any database login can take advisory locks, so a leaked Mulesoft session could hold `hashtext('sap:staging-poll')` and make the poll skip until it ends. Mitigated by `CONNECTION LIMIT 10` and `pg_terminate_backend`; a code fix is deferred.
+  - **`GET /sap/staging/batches/{id}/deletions` is uncapped for planned orders** (low; bounded by one plant's in-horizon orders, about 2.6 MB at 10,000).
+  - **71 older connector UI keys exist only in English** in de / es / fr / pt (low; a translation pass).
+  - **Blank firming indicator semantics** (open confirmation with the integration team): NIMBUS sends a blank for "not firm" and never un-firms; SAP's import must treat blank as "leave as is".
 - **Known limits from the review round (documented, not fixed):**
   - `POST /sap/staging/poll` is global, not plant-scoped: a plant-restricted admin triggers validation/auto-apply for every plant (it would have run on the timer anyway).
   - The upload route's size check (413) runs after the file body is read, matching the existing `/upload` and `/bom/upload` routes.

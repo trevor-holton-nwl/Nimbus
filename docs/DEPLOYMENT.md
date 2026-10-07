@@ -34,10 +34,17 @@ Apply `migrations/2026-09-09_optimizer_planning_exceptions.sql` through the migr
 
 Design of record `docs/SAP_STAGING_DESIGN.md`; the contract Mulesoft codes against is `docs/NIMBUS_INTERFACE_ARCHITECTURE.md` section 7. Nothing flows until the role exists, Mulesoft has network access and the poll interval is set, so the app can ship first and be switched on later.
 
-### 1. Migrations (through the ledger)
+### 1. Migrations (through the ledger) — apply BEFORE the new image rolls
 
-Apply both new files with the `promote-azure` skill, in this order: `migrations/2026-10-08-sap-staging-tables.sql`, then `migrations/2026-10-08-sap-staging-columns.sql`. **Both need `-AllowDestructive` on `apply-migrations.ps1`:** the runner's filter is a plain word match over the whole file (comments included), so the columns file trips it on `ALTER` and the tables file trips it on `ON DELETE CASCADE` (and a comment). Both were reviewed and are additive only: `CREATE TABLE IF NOT EXISTS`, `INSERT ... ON CONFLICT DO NOTHING` and `ADD COLUMN IF NOT EXISTS` (nullable or defaulted), nothing dropped, rewritten or backfilled; re-running is a no-op. Run `-DryRun` first to see them listed as `DESTRUCTIVE -> blocked`, then pass `-AllowDestructive` as a deliberate decision.
+**Order matters against the image, not between the two files.** The new application reads the side table `order_sap_sent` on every order upload (the shared upsert joins it), so applying the image first would break Excel uploads until the tables exist. Apply the migrations first; the old image keeps working with the new tables (they are additive).
 
+The two files are `migrations/2026-10-08-sap-staging-columns.sql` and `migrations/2026-10-08-sap-staging-tables.sql`. The runner applies files in name order, so the columns file goes first. That is harmless: it only alters tables that already exist (`sap_sync_config`, `material_plants`, `production_version`) and no longer depends on the tables file (the remembered-send values moved from `orders` columns into the side table `order_sap_sent`, which the tables file creates).
+
+**`-AllowDestructive` is runner-wide, not per file.** The runner's filter is a plain word match over each whole file (comments included): the columns file trips it on `ALTER` and the tables file on `ON DELETE CASCADE` (and a comment). Both files were reviewed and are additive only (`CREATE TABLE IF NOT EXISTS`, `INSERT ... ON CONFLICT DO NOTHING`, `ADD COLUMN IF NOT EXISTS` nullable or defaulted; nothing dropped, rewritten or backfilled; re-running is a no-op). But the flag also unblocks every OTHER pending migration that the filter would have stopped. So:
+
+1. From the repo root, **dry run first and read the whole list**: `.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -DryRun` (touches no database; every pending file is listed, destructive ones marked `DESTRUCTIVE -> blocked`). If anything other than the two staging files is pending and marked destructive, review it before continuing.
+2. Apply with `.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -AllowDestructive`. The password is read from `$env:PGPASSWORD` or, if unset, from an interactive hidden prompt (never typed on the command line); the script uses `C:\Program Files\PostgreSQL\18\bin\psql.exe` unless you pass `-PsqlPath`, and connects to `pgdb-nimbus-dev` / `nimbus` as `TempAdmin` with `sslmode=require` by default.
+3. Each file and its ledger row run in one transaction; a failure leaves nothing half-applied.
 ### 2. Environment variables on the Container App
 
 | Variable | Default | Meaning |
@@ -51,6 +58,8 @@ Apply both new files with the `promote-azure` skill, in this order: `migrations/
 az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev `
   --set-env-vars NIMBUS_SAP_STAGING_POLL_SECONDS=60 NIMBUS_SAP_STAGING_LOADING_TIMEOUT_MIN=120 NIMBUS_SAP_SYSTEM_TZ=<IANA name from SAP Development>
 ```
+
+**Recommendation: deploy with `NIMBUS_SAP_STAGING_POLL_SECONDS=0` (the default; simply leave it unset) until Mulesoft is ready.** With the poll off nothing in the staging pipeline runs on its own: the Admin > Interface staging section and the Excel test upload still work, and an admin can press Refresh to run one pass by hand. Set the interval (for example `60`) only when Mulesoft has its login and the first batches are expected.
 
 The poll holds a Postgres advisory lock, but the pilot stays single replica (`min = max = 1`); see `MIGRATION.md` for what is still open before scaling out.
 
@@ -67,7 +76,7 @@ The poll holds a Postgres advisory lock, but the pilot stays single replica (`mi
 The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`, 0.0.0.0) and the app itself connects as the server admin; both are already tracked in `MIGRATION.md`. The Mulesoft login is a second way into that surface, so:
 
 - Require TLS: Mulesoft's JDBC URL must carry `sslmode=require` (`ssl=true` for the PostgreSQL JDBC driver).
-- Add a firewall rule limited to Mulesoft's egress IP addresses: `az postgres flexible-server firewall-rule create -g rg-nimbus-dev --server-name pgdb-nimbus-dev --name MulesoftEgress --start-ip-address <MULESOFT_EGRESS_IP> --end-ip-address <MULESOFT_EGRESS_IP>` (**placeholder: the runtime location and egress IPs are not known yet**, design D31; repeat per address).
+- Add a firewall rule limited to Mulesoft's egress IP addresses: `az postgres flexible-server firewall-rule create -g rg-nimbus-dev --server-name pgdb-nimbus-dev --name MulesoftEgress --start-ip-address <MULESOFT_EGRESS_IP> --end-ip-address <MULESOFT_EGRESS_IP>` (**placeholder: the runtime location and egress IPs are not known yet**, design D31; repeat per address). The flag names (`-g`, `--server-name`, `--name`, `--start-ip-address`, `--end-ip-address`) match the output of `az postgres flexible-server firewall-rule create --help` as checked on 2026-10-07; the same command, with the same flags, is used for the `AllowAzure` rule further down this file. Azure CLI flags do change between versions, so run `az postgres flexible-server firewall-rule create --help` and confirm before running it against the pilot server.
 - Mulesoft's per-row write-back of outbound status is also unconfirmed; without it the Send to SAP tiles stay at `ready`.
 
 ### 5. Operational rules (publish to planners and admins before the first apply)
@@ -76,10 +85,21 @@ The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`
 - **No Excel order uploads on a plant that receives SAP snapshots.** An order that exists only from Excel is absent from the next SAP snapshot and is deleted at apply.
 - **Routing runtime must be on, with routings loaded, before planned orders can apply.** Otherwise the batch is held (`routing_required`). Apply Material Plant and Routing first.
 - **The first SAP apply on a plant resets most scheduled slots** (SAP's dates differ from what NIMBUS holds). Plan it for a quiet moment and tell planners.
+- **Apply the first planned-order batch for a plant at a quiet moment for a second reason (rehearsed, validation Track 4).** On an Excel-loaded plant the first SAP apply writes every order row once (the stored SAP production-version baseline goes from empty to blank), so every order's `xmin` moves. A planner with an unsaved edit open at that moment gets one concurrent-edit notice on their next save (the server version wins). In the rehearsal SAP's dates matched what NIMBUS held and no slot was reset (0 of 26); where SAP's dates differ, slots reset as in the bullet above. The concurrent-edit notice happens once per plant.
 - **Converted orders vanish, even if running.** A planned order converted to a production order leaves the SAP export and is deleted at the next apply. It is recoverable for **30 days** from the Archive panel (Restore) in Admin > Interface.
 - Open planner sessions learn of an apply only on save or reload.
 - Roll back by discarding an un-applied batch (Discard) or restoring archived orders; an applied batch is not undone automatically.
 
+### 6. Verify after deploy
+
+1. **Migrations are in the ledger**: `SELECT filename FROM migration_files_applied WHERE filename LIKE '2026-10-08-sap-staging%';` returns both files (run as an admin login, never paste the password anywhere).
+2. **Excel upload still works** (the shared upsert now reads `order_sap_sent`): upload a small test file through the UI and confirm the result counts.
+3. **Poll state in the log**: if you set `NIMBUS_SAP_STAGING_POLL_SECONDS` above 0, the Admin log (or the container log) shows the line `SAP staging poll started` with the interval; with the default it shows `SAP staging poll disabled`. A line `SAP scheduler failed to start` is an error.
+4. **Mulesoft login works** (once the role exists and the network rule is in place): connect as `nimbus_mulesoft` with `sslmode=require` and insert a header (`INSERT INTO sap_stage_batch (batch_id, object_key, plant, source) VALUES (gen_random_uuid(), 'stage_material_plants', '<a real plant>', 'mulesoft')`). It must succeed, the batch must show as `loading`, and an `UPDATE ... SET status = 'applied'` as that login must fail. Mark the test batch `rejected` afterwards (the only other move this login can make); NIMBUS removes it after 7 days.
+5. **Upload into staging via the UI**: Admin > Interface > a staging object > upload a small Excel file with SAP column headers. The batch appears, validates, and is **not** applied automatically.
+6. **`apply_mode` defaults to `manual`**: each staging object's mode selector reads Manual (`GET /sap/interface/objects` shows `"apply_mode": "manual"` for all four). To switch an object to automatic apply, an admin changes the Manual / Automatic selector on that object in Admin > Interface (it posts `{"apply_mode": "auto"}` to `/sap/interface/config/{object}`); switch back the same way. Leave everything on manual until the first batches have been reviewed by hand.
+7. **Routing is ON and loaded before the first planned-order apply**: the plant has routing runtime switched on and routings loaded (Material Plant and Routing batches applied first). Otherwise the planned-order batch is held with `routing_required` (an admin cannot confirm that away).
+8. **`NIMBUS_SAP_SYSTEM_TZ` is set** to the value SAP Development confirmed. A wrong or invalid value shows as the warning `sap_system_tz_invalid` on every batch and refuses planned-order apply and Send to SAP.
 ## Prerequisites
 
 - Azure CLI (`winget install --exact --id Microsoft.AzureCLI`), `az login`, and **Contributor on `rg-nimbus-dev`**.

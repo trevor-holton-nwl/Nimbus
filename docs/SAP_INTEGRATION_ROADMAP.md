@@ -8,11 +8,11 @@
 |---|---|
 | **Owning app** | NIMBUS (Newell Integrated Batch & Unified Scheduling) — Python / FastAPI + PostgreSQL, hosted on Azure Container Apps |
 | **SAP system of record** | SAP ECC (PP / PP‑PI, MM, classification) |
-| **Direction** | SAP → NIMBUS, **read‑only** from SAP. NIMBUS never writes back to ECC. |
+| **Direction** | SAP → NIMBUS for the pull connectors described below, which stay **read‑only** from SAP. For the four staging objects, NIMBUS also **writes the plant schedule back** through the admin's Send to SAP (an outbound staging table that Mulesoft carries to SAP; see the banner above). The roadmap's own pull design never writes to ECC. |
 | **Cadence** | Scheduled, idempotent upserts (full‑then‑delta) |
 | **Data scope** | Master data (plants, work centers, materials, material‑plant data) + production orders |
 | **Document audience** | SAP Basis, ABAP development, SAP Security/GRC, and the network/infra team |
-| **Status of NIMBUS side** | A non‑live skeleton already exists (Interface admin tab, stub connectors, `sap_sync.py`, three `sap_sync_*` tables, scheduler **disabled by default**). No live SAP call is made until the items in §6 are resolved. |
+| **Status of NIMBUS side** | The pull connectors are a non‑live skeleton (Interface admin tab, stub connectors, `backend/integration/sap_sync.py`, three `sap_sync_*` tables, scheduler **disabled by default**); no live SAP pull is made until the items in §6 are resolved. The staging path (Mulesoft into Postgres, `docs/SAP_STAGING_DESIGN.md`) is implemented and inert until the poll is switched on. |
 
 ---
 
