@@ -286,6 +286,24 @@ function formatTime(ms) {
   return (ms / 1000).toFixed(2) + ' s';
 }
 
+// Wall-clock-derived diagnostics fields: excluded so --no-deadline digests are deterministic.
+const CLOCK_DIAG_KEYS = new Set(['runtimeMs', 'budgetMs', 'deadlineAt']);
+
+// Stable (sorted-key) serialization; drops clock-derived fields at any depth.
+function stableStringify(value) {
+  if (value === undefined) return 'null';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  const keys = Object.keys(value).filter((k) => value[k] !== undefined && !CLOCK_DIAG_KEYS.has(k)).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+}
+
+function digestOf(r) {
+  const payload = [r.patches, r.objective, r.score, r.explanation, r.dispositions, r.validationFindings, r.diagnostics];
+  return createHash('sha1').update(stableStringify(payload)).digest('hex').slice(0, 10);
+}
+
 // Main benchmark
 async function benchmark() {
   const results = [];
@@ -338,7 +356,7 @@ async function benchmark() {
       const candidates = searchResult.diagnostics?.candidateCount ?? 0;
       // Digest of the pre-gap-fill search result (gap fill has its own soft
       // wall-clock budget), for index-on vs index-off identity checks.
-      const digest = createHash('sha1').update(JSON.stringify([searchResult.patches, searchResult.objective, searchResult.score])).digest('hex').slice(0, 10);
+      const digest = digestOf(searchResult);
       const termination = searchResult.diagnostics?.termination ?? 'unknown';
 
       results.push({

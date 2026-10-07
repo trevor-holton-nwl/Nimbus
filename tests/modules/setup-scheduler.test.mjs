@@ -2748,6 +2748,65 @@ test('setup-aware evaluators derive immutable overlong_only eligibility from sna
   }
 });
 
+test('split-policy orders that cross an interval boundary keep their segments and setup (T3 guard)', () => {
+  // Pins placement behavior that any early-exit in free-interval building must
+  // preserve: a split-eligible order must see every window, not just the first
+  // that could hold part of it. Mon is open 08-10 only, other days 08-12; a
+  // 5-hour order (longer than any nominal window, so inherently overlong) after
+  // a 30-minute setup cannot finish on Monday, so it must span Monday and Tuesday.
+  const hours = { ...Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 12]])), 1: [8, 10] };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 30)] });
+  for (const policy of ['partial_allowed', 'overlong_only']) {
+    const blue = scheduledTask('t3-split-' + policy, 5, 'BLUE', '2026-08-05T12:00:00');
+    const snapshot = setupSnapshot([blue]);
+    snapshot.calendars = { L1: { workHours: hours } };
+    snapshot.plants = { P1: { workHours: hours } };
+    snapshot.masterData = {
+      plants: [{ plant: 'P1', split_order_policy: policy }],
+      lines: [{ plant: 'P1', machine: 'L1' }],
+    };
+    for (const [label, evaluate] of [
+      ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+      ['SPT', SetupScheduler.evaluateSptWithSetup],
+    ]) {
+      const result = evaluate(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-05T12:00:00') }));
+      const patch = patchFor(result, blue.id);
+      assert.ok(patch, label + '/' + policy + ' places the split order');
+      assert.deepEqual(patch.changes.scheduleSegments.map(segment => [segment.startDate, segment.endDate]), [
+        [at('2026-08-03T08:30:00'), at('2026-08-03T10:00:00')],
+        [at('2026-08-04T08:00:00'), at('2026-08-04T11:30:00')],
+      ], label + '/' + policy + ' segments');
+      assert.equal(patch.changes.start_date.getTime(), at('2026-08-03T08:30:00').getTime());
+      assert.equal(patch.changes.end_date.getTime(), at('2026-08-04T11:30:00').getTime());
+    }
+  }
+});
+
+test('a continuous order that does not fit the first free interval lands in the second (T3 guard)', () => {
+  // Monday offers only 2 hours; the 3-hour order after a 30-minute setup needs
+  // 3.5 contiguous hours, so it must start at Tuesday 08:00 (setup 08:00-08:30).
+  const hours = { ...Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 14]])), 1: [8, 10] };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 30)] });
+  const blue = scheduledTask('t3-continuous-blue', 3, 'BLUE', '2026-08-05T14:00:00');
+  const snapshot = setupSnapshot([blue]);
+  snapshot.calendars = { L1: { workHours: hours } };
+  snapshot.plants = { P1: { workHours: hours } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1', split_order_policy: 'never' }],
+    lines: [{ plant: 'P1', machine: 'L1' }],
+  };
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-05T14:00:00') }));
+    const patch = patchFor(result, blue.id);
+    assert.ok(patch, label + ' places the continuous order');
+    assert.equal(patch.changes.start_date.getTime(), at('2026-08-04T08:30:00').getTime(), label + ' start');
+    assert.equal(patch.changes.end_date.getTime(), at('2026-08-04T11:30:00').getTime(), label + ' end');
+  }
+});
+
 test('setup-aware evaluators never schedule through a fixed boundary beyond the caller horizon', () => {
   // Production change caught: retaining an out-of-horizon fixed BLUE makes
   // its noon start leak into a caller horizon ending at 10:00. RED cannot fit
