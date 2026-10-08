@@ -2141,6 +2141,19 @@ export const Engine = {
       // fold is run-local only (see effectiveFirmedIdSet).
       const effectiveFirmedIds = effectiveFirmedIdSet(baseSnapshot.tasks, baseSnapshot.firmedIds, runNow, respectFirmed, baseSnapshot.frozenHorizonEnd);
       const snapshot: ScheduleSnapshot = { ...baseSnapshot, firmedIds: effectiveFirmedIds };
+      // F4: Calculate lines in scope for iteration cap scaling. If opts.lines is
+      // provided, use its length (deduplicated); otherwise count distinct lines
+      // in the snapshot's tasks for this plant.
+      const optsLinesSet = Array.isArray(opts.lines) && opts.lines.length
+        ? new Set(opts.lines as string[])
+        : null;
+      // An injected candidate snapshot may be unscoped (evaluateSchedule's
+      // default is snapshotSchedule()), so count only this plant's non-blank
+      // lines, resolved the same way the evaluator groups them.
+      const linesInScope = optsLinesSet?.size ?? new Set(snapshot.tasks
+        .filter(t => resolveTaskPlant(t, snapshot) === plant)
+        .map(t => String(t.MACHINE ?? ''))
+        .filter(Boolean)).size;
       const bounds: DueDateFirstBounds = {
         // Non-null by construction: this branch is only reached when either
         // mode is one of the setup-aware modes, so effectiveSetupSnapshot is
@@ -2148,7 +2161,11 @@ export const Engine = {
         // fallback.
         setup: effectiveSetupSnapshot!,
         exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
-        iterationCap: SETUP_AWARE_ITERATION_CAP,
+        // F4: Scale iteration cap per line. The cap is a stack-safety net; after
+        // F2 a shared 20,000 iterations starved later lines on big plants. With
+        // F1 no exact fragment exceeds ~500 leaves and greedy tops ~165 candidates
+        // per fragment, so per-line scaling keeps the pool usable for every line.
+        iterationCap: SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope),
         clock: () => performance.now(),
         // Phase 2 (Pkg D): an absolute deadline the caller already computed
         // (e.g. the preview's one-shot primary budget, or the deferred Plan B

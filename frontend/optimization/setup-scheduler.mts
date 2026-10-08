@@ -157,6 +157,27 @@ function normalizedIntervals(intervals: ReadonlyArray<PlacementInterval>, earlie
   })).filter(interval => interval.minutes > 0);
 }
 
+/** F2: `normalizedIntervals` minus the alignment/sort/merge work, for arrays
+ * `freeIntervalsForPlacement` already produced in that shape. Only the
+ * `earliestStart` clip remains; unclipped intervals are reused as-is. */
+function clipAlignedIntervals(intervals: ReadonlyArray<MinuteInterval>, earliestStart: Date): MinuteInterval[] {
+  const earliest = ceilMinute(earliestStart);
+  if (!earliest) return [];
+  const earliestMs = earliest.getTime();
+  const result: MinuteInterval[] = [];
+  for (const interval of intervals) {
+    if (interval.start.getTime() >= earliestMs) {
+      result.push(interval);
+    } else if (interval.end.getTime() > earliestMs) {
+      result.push({
+        start: new Date(earliestMs), end: interval.end,
+        minutes: Math.floor((interval.end.getTime() - earliestMs) / (60 * 1000)),
+      });
+    }
+  }
+  return result;
+}
+
 function mergeRanges(ranges: IntegerRange[]): IntegerRange[] {
   const ordered = ranges
     .filter(range => range.lo <= range.hi)
@@ -245,6 +266,38 @@ function capacityFailure(reason: PlacementInfeasibility['reason'] = 'no-feasible
   return { kind: 'infeasible', reason, productiveSegments: [] };
 }
 
+function normalizedMinProductiveSegment(value: number | undefined): number {
+  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+}
+
+/** True when `placeWithSetup` must place the order whole in a single free
+ * interval: `never`, `overlong_only` for an order that is not inherently
+ * overlong, or a runtime under the productive-segment floor. The single source
+ * of truth for that branch, also used to decide when interval building may stop
+ * at the first fit (T3). */
+function placementIsContinuous(
+  policy: SplitOrderPolicy, isInherentlyOverlong: boolean | undefined, runtimeMinutes: number, minProductiveSegmentMinutes: number,
+): boolean {
+  return policy === 'never'
+    || (policy === 'overlong_only' && isInherentlyOverlong !== true)
+    || runtimeMinutes < minProductiveSegmentMinutes;
+}
+
+/** T3: minutes of one free interval that satisfy a continuous placement
+ * (setup + runtime), or undefined when the placement may split, the setup is
+ * unresolved, or the runtime is invalid — in all of which `placeWithSetup`
+ * needs every interval and the builder must not stop early. */
+function continuousFitMinutes(
+  setup: PlaceWithSetupRequest['setup'], runtimeMinutes: number, policy: SplitOrderPolicy,
+  isInherentlyOverlong: boolean | undefined, minProductiveSegmentMinutes: number | undefined,
+): number | undefined {
+  if (!setup || setup.kind !== 'resolved' || !Number.isInteger(setup.minutes) || setup.minutes < 0) return undefined;
+  const runtime = Math.round(Number(runtimeMinutes));
+  if (!Number.isFinite(runtime) || runtime <= 0) return undefined;
+  if (!placementIsContinuous(policy, isInherentlyOverlong, runtime, normalizedMinProductiveSegment(minProductiveSegmentMinutes))) return undefined;
+  return setup.minutes + runtime;
+}
+
 /**
  * Pure setup-aware placement over caller-supplied effective operating
  * intervals. It emits only derived setup capacity plus productive ranges;
@@ -267,12 +320,11 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
 
   const runtimeMinutes = Math.round(Number(request.runtimeMinutes));
   if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return capacityFailure('invalid-runtime');
-  const intervals = normalizedIntervals(request.freeIntervals, request.earliestStart);
+  const intervals = (request.freeIntervals as unknown as Record<symbol, unknown>)[ALIGNED_FREE] === true
+    ? clipAlignedIntervals(request.freeIntervals as ReadonlyArray<MinuteInterval>, request.earliestStart)
+    : normalizedIntervals(request.freeIntervals, request.earliestStart);
   if (!intervals.length) return capacityFailure();
-  const minProductiveSegmentMinutes = Number.isInteger(request.minProductiveSegmentMinutes)
-    && (request.minProductiveSegmentMinutes as number) > 0
-    ? (request.minProductiveSegmentMinutes as number)
-    : MIN_PRODUCTIVE_SEGMENT_MINUTES;
+  const minProductiveSegmentMinutes = normalizedMinProductiveSegment(request.minProductiveSegmentMinutes);
 
   const place = (start: Date, productiveMinutes: number, productiveSegments: PlacementInterval[]): PlacementSuccess => {
     const productiveStart = new Date(start.getTime() + setup.minutes * 60 * 1000);
@@ -287,22 +339,15 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     };
   };
 
-  const requiresContinuous = request.policy === 'never'
-    || (request.policy === 'overlong_only' && request.isInherentlyOverlong !== true);
-  if (requiresContinuous) {
+  // Whole-order placement: policy forbids splitting, or the under-floor
+  // exemption (explicitly complete-and-unsplit; it does not permit a
+  // setup-only tail followed by a tiny continuation). The first interval that
+  // holds setup + runtime wins.
+  if (placementIsContinuous(request.policy, request.isInherentlyOverlong, runtimeMinutes, minProductiveSegmentMinutes)) {
     const requiredMinutes = setup.minutes + runtimeMinutes;
     for (const interval of intervals) {
       if (interval.minutes < requiredMinutes) continue;
       return place(interval.start, runtimeMinutes, []);
-    }
-    return capacityFailure();
-  }
-
-  // The under-floor exemption is explicitly complete-and-unsplit. It does not
-  // permit a setup-only tail followed by a tiny continuation.
-  if (runtimeMinutes < minProductiveSegmentMinutes) {
-    for (const interval of intervals) {
-      if (interval.minutes >= setup.minutes + runtimeMinutes) return place(interval.start, runtimeMinutes, []);
     }
     return capacityFailure();
   }
@@ -429,6 +474,10 @@ export interface DueDateFirstBounds {
   boundaryTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
+  /** Optional ceiling on the number of distinct orderings an exact search may
+   * enumerate (default `EXACT_SEARCH_LEAF_CAP`). Engine leaves it unset; tests
+   * that pin exact traversal pass `Infinity`. */
+  exactSearchLeafCap?: number;
   iterationCap: number;
   clock: () => number;
   deadline: number;
@@ -466,6 +515,22 @@ export interface DueDateFirstBounds {
    * schedule-services.mts sets this explicitly alongside the other
    * `SETUP_AWARE_*` constants; tests may shrink it to make a plateau cheap. */
   convergenceWindow?: number;
+  /** F2 test-only off switch: true makes `buildRunContext` skip the per-line
+   * free-interval index so the plain day-walk serves every request. Not part
+   * of the worker contract. */
+  disableFreeIndex?: boolean;
+}
+
+/** F2: one line's free intervals over the indexed span. `rs/re` hold the
+ * exact day-walk output (raw, possibly adjacent-but-separate at day
+ * boundaries, never minute-aligned); `ms/me` hold the same set minute-aligned
+ * (start ceil, end floor), empties dropped and touching pieces merged — what
+ * `normalizedIntervals` would produce for placement. */
+interface FreeIndexEntry {
+  rs: Float64Array;
+  re: Float64Array;
+  ms: Float64Array;
+  me: Float64Array;
 }
 
 /**
@@ -509,6 +574,10 @@ export interface SetupRunContext {
    *  (mirrors `setup-domain.mts`'s `joinIndexKey` convention). */
   _rankVector: Map<string, number[]>;
   _policyKeyForTask: Map<string, string>;
+  /** T1: per-(effective line, taskId) urgency-sort tuple (see `urgencyKeyFor`). */
+  _urgencyKey: Map<string, UrgencyKey>;
+  /** T4: per-taskId static part of `planningDefect` (see `staticPlanningDefect`). */
+  _staticDefect: Map<string, StaticDefectEntry>;
   /** Per-(plant, line) pre-filtered/merged/sorted blackout blocks (ms
    *  timestamps), filled in once per (plant, line) on first use — the
    *  `Calendar._runBlocks` equivalent for this detached evaluator. Keyed by
@@ -520,12 +589,34 @@ export interface SetupRunContext {
    *  memo — plant is folded into the key for the same reuse-across-plants
    *  reason as `_lineBlocks`. */
   _dayWindow: Map<string, PlacementInterval | null>;
+  /** F2: lazy per-(plant, line) index of the line's free intervals over
+   *  `freeIndexSpan`, built once by running the day-walk over the whole span.
+   *  Null caches "this line's walk output is not sorted/disjoint, never
+   *  index it". Same plant-in-key rationale as `_lineBlocks`. */
+  _freeIndex: Map<string, FreeIndexEntry | null>;
+  /** F2: [ms, ms] span the free index covers (planningStart floored to local
+   *  midnight through horizonEnd); null disables the index entirely
+   *  (`bounds.disableFreeIndex`, or an unusable span). Requests outside it
+   *  use the plain day-walk. */
+  freeIndexSpan: { from: number; through: number } | null;
   /** Lazy per-line pre-filtered active/version-matched overrides consumed by
    *  `inactiveOverrideForTransition` — the per-call residual checks
    *  (successor id, states) still run against this small filtered array. */
   _overridesByLine: Map<string, ReadonlyArray<SetupOccurrenceOverride>>;
   /** Built once, in full, on first use — covers every line at once. */
   _plantByLine: Map<string, string | null> | null;
+}
+
+/** F2: the span a run's free index covers, or null when the index is off or
+ * the bounds carry no usable dates. */
+function freeIndexSpanFor(bounds: Readonly<DueDateFirstBounds>): { from: number; through: number } | null {
+  if (bounds.disableFreeIndex === true) return null;
+  const start = timestamp(bounds.planningStart ?? bounds.now);
+  const end = timestamp(bounds.horizonEnd);
+  if (!start || !end) return null;
+  const from = new Date(start);
+  from.setHours(0, 0, 0, 0);
+  return +end > +from ? { from: +from, through: +end } : null;
 }
 
 /**
@@ -569,8 +660,12 @@ export function buildRunContext(
     _notAfter: new Map(),
     _rankVector: new Map(),
     _policyKeyForTask: new Map(),
+    _urgencyKey: new Map(),
+    _staticDefect: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
+    _freeIndex: new Map(),
+    freeIndexSpan: freeIndexSpanFor(bounds),
     _overridesByLine: new Map(),
     _plantByLine: null,
   };
@@ -1883,6 +1978,38 @@ function orderedByProductiveRuntime(tasks: ReadonlyArray<NimbusTask>): NimbusTas
  * work visible and bounded. Exact fragments still enumerate their declared
  * search space; these limits apply only after a fragment is large enough to
  * use the greedy path. */
+/** Exact search is only chosen when a fragment has at most this many distinct
+ * orderings (multiset permutations). State count alone is not a bound: 12
+ * orders in 4 states is 369,600 leaves and drains the whole plant budget. */
+const EXACT_SEARCH_LEAF_CAP = 500;
+
+/** N! / (k1! * k2! * ...) built as a product of binomials, so every
+ * intermediate is an exact integer. Returns `cap + 1` as soon as the running
+ * value exceeds `cap`, which keeps it from overflowing on large fragments. */
+function multisetLeafCount(groupSizes: ReadonlyArray<number>, cap: number): number {
+  let total = 1;
+  let placed = 0;
+  for (const size of groupSizes) {
+    for (let i = 1; i <= size; i++) {
+      placed++;
+      // total * placed / i is an exact integer at every step (C(placed, i)
+      // accumulated one factor at a time).
+      total = (total * placed) / i;
+      if (total > cap) return cap + 1;
+    }
+  }
+  return total;
+}
+
+function exactSearchEligible(
+  groupSizes: ReadonlyArray<number>,
+  bounds: Readonly<DueDateFirstBounds>,
+): boolean {
+  const cap = bounds.exactSearchLeafCap ?? EXACT_SEARCH_LEAF_CAP;
+  return groupSizes.length <= bounds.exactSearchThreshold
+    && multisetLeafCount(groupSizes, cap) <= cap;
+}
+
 const HEURISTIC_INSERTION_LIMIT = 16;
 const HEURISTIC_SWAP_LIMIT = 16;
 
@@ -2276,10 +2403,10 @@ function jointWindowForDay(
   return result;
 }
 
-/** Derive only the availability present in the supplied immutable snapshot.
- * A missing calendar is unavailable rather than a prompt to synthesize a
- * default calendar into a detached candidate. */
-function freeIntervalsFor(
+/** The original day-walk: the exact free intervals for `[from, through]`
+ * from the snapshot's calendars and blackouts. `freeIntervalsFor` serves from
+ * the F2 index when it can and otherwise lands here. */
+function walkFreeIntervals(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
   ctx?: SetupRunContext,
 ): PlacementInterval[] {
@@ -2291,11 +2418,6 @@ function freeIntervalsFor(
   // while alerts kept computing as though hours existed.
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
-  if (through <= from) return [];
-  if (ctx?.respectCalendar === false) {
-    return [{ start: new Date(from), end: new Date(through) }];
-  }
-
   const result: PlacementInterval[] = [];
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
@@ -2317,6 +2439,145 @@ function freeIntervalsFor(
     }
     day.setDate(day.getDate() + 1);
   }
+  return result;
+}
+
+/** F2: builds (once per plant+line) the index over the run's span, or caches
+ * null when the day-walk output over the span is not strictly sorted and
+ * disjoint (e.g. work hours that overflow midnight), which binary search
+ * could not serve exactly. Returns null whenever this request must use the
+ * plain walk: no span, a different snapshot, or a window outside the span. */
+function freeIndexFor(
+  ctx: SetupRunContext | undefined, snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string,
+  from: Date, through: Date,
+): FreeIndexEntry | null {
+  const span = ctx?.freeIndexSpan;
+  if (!ctx || !span || ctx.snapshot !== snapshot || ctx.respectCalendar === false) return null;
+  if (!(+from >= span.from && +through <= span.through)) return null; // also rejects NaN
+  const key = plant + CTX_KEY_SEP + line;
+  const cached = ctx._freeIndex.get(key);
+  if (cached !== undefined) return cached;
+  // The day-walk only visits days from a request's own midnight, so work
+  // hours that spill past a day's edge (outside 0-24) would make a span-wide
+  // build include pieces a narrower walk omits. Never index such a line.
+  const withinDay = (hours: WorkHours): boolean => Object.values(hours).every(range => (
+    !range || range.length !== 2 || (range[0] >= 0 && range[1] <= 24)
+  ));
+  const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+  if (!withinDay(lineHours) || !withinDay(plantHours)) {
+    ctx._freeIndex.set(key, null);
+    return null;
+  }
+  const raw = walkFreeIntervals(snapshot, line, plant, new Date(span.from), new Date(span.through), ctx);
+  let sorted = true;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (!(+raw[index].end > +raw[index].start) || (index && +raw[index].start < +raw[index - 1].end)) { sorted = false; break; }
+  }
+  if (!sorted) {
+    ctx._freeIndex.set(key, null);
+    return null;
+  }
+  const rs = new Float64Array(raw.length);
+  const re = new Float64Array(raw.length);
+  const alignedStarts: number[] = [];
+  const alignedEnds: number[] = [];
+  const MIN_MS = 60 * 1000;
+  for (let index = 0; index < raw.length; index += 1) {
+    const start = +raw[index].start;
+    const end = +raw[index].end;
+    rs[index] = start;
+    re[index] = end;
+    const alignedStart = start % MIN_MS ? start + MIN_MS - (start % MIN_MS) : start;
+    const alignedEnd = end - (end % MIN_MS);
+    if (alignedStart >= alignedEnd) continue;
+    if (alignedStarts.length && alignedStart <= alignedEnds[alignedEnds.length - 1]) {
+      if (alignedEnd > alignedEnds[alignedEnds.length - 1]) alignedEnds[alignedEnds.length - 1] = alignedEnd;
+    } else {
+      alignedStarts.push(alignedStart);
+      alignedEnds.push(alignedEnd);
+    }
+  }
+  const entry: FreeIndexEntry = { rs, re, ms: Float64Array.from(alignedStarts), me: Float64Array.from(alignedEnds) };
+  ctx._freeIndex.set(key, entry);
+  return entry;
+}
+
+/** First index whose end is strictly after `value`. */
+function firstEndAfter(ends: Float64Array, value: number): number {
+  let lo = 0;
+  let hi = ends.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (ends[mid] > value) hi = mid; else lo = mid + 1;
+  }
+  return lo;
+}
+
+/** Derive only the availability present in the supplied immutable snapshot.
+ * A missing calendar is unavailable rather than a prompt to synthesize a
+ * default calendar into a detached candidate.
+ *
+ * F2: with a run context, requests inside the run's indexed span are served
+ * from the per-line index (binary search + clip) and are exactly what the
+ * day-walk would return — raw, unmerged, unaligned. Everything else walks. */
+function freeIntervalsFor(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
+  ctx?: SetupRunContext,
+): PlacementInterval[] {
+  if (through <= from) return [];
+  if (ctx?.respectCalendar === false) {
+    return [{ start: new Date(from), end: new Date(through) }];
+  }
+  const entry = freeIndexFor(ctx, snapshot, line, plant, from, through);
+  if (!entry) return walkFreeIntervals(snapshot, line, plant, from, through, ctx);
+  const fromMs = +from;
+  const throughMs = +through;
+  const result: PlacementInterval[] = [];
+  for (let index = firstEndAfter(entry.re, fromMs); index < entry.rs.length && entry.rs[index] < throughMs; index += 1) {
+    const start = Math.max(entry.rs[index], fromMs);
+    const end = Math.min(entry.re[index], throughMs);
+    if (end > start) result.push({ start: new Date(start), end: new Date(end) });
+  }
+  return result;
+}
+
+/** Marker on arrays `freeIntervalsForPlacement` returns: every interval is
+ * minute-aligned, sorted, disjoint, merged and non-empty, so `placeWithSetup`
+ * may skip `normalizedIntervals` (it still clips to `earliestStart`). */
+const ALIGNED_FREE = Symbol('nimbus.alignedFreeIntervals');
+
+/** F2: free intervals shaped for `placeWithSetup`. Served from the index's
+ * pre-normalized arrays and marked so the placement skips re-normalizing
+ * them; any request the index cannot serve returns the plain (unmarked)
+ * `freeIntervalsFor` output, which `placeWithSetup` normalizes as before. */
+function freeIntervalsForPlacement(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, through: Date,
+  ctx?: SetupRunContext, stopAfterFitMinutes?: number,
+): PlacementInterval[] {
+  if (through <= from || ctx?.respectCalendar === false) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
+  const entry = freeIndexFor(ctx, snapshot, line, plant, from, through);
+  if (!entry) return freeIntervalsFor(snapshot, line, plant, from, through, ctx);
+  const MIN_MS = 60 * 1000;
+  const fromMs = +from;
+  const throughMs = +through;
+  const lower = fromMs % MIN_MS ? fromMs + MIN_MS - (fromMs % MIN_MS) : fromMs;
+  const upper = throughMs - (throughMs % MIN_MS);
+  const result: MinuteInterval[] = [];
+  for (let index = firstEndAfter(entry.me, lower); index < entry.ms.length && entry.ms[index] < upper; index += 1) {
+    const start = Math.max(entry.ms[index], lower);
+    const end = Math.min(entry.me[index], upper);
+    if (end > start) {
+      const minutes = (end - start) / MIN_MS;
+      result.push({ start: new Date(start), end: new Date(end), minutes });
+      // T3: a continuous placement takes the first interval that fits, so
+      // later windows can never be chosen. `from` is the placement's
+      // earliestStart at both call sites, so the earliestStart clip is already
+      // applied above.
+      if (stopAfterFitMinutes !== undefined && minutes >= stopAfterFitMinutes) break;
+    }
+  }
+  (result as unknown as Record<symbol, unknown>)[ALIGNED_FREE] = true;
   return result;
 }
 
@@ -2436,6 +2697,13 @@ function compareDueDateCandidate(left: DueDateCandidate, right: DueDateCandidate
   return ordinalCompare(left.sequenceKey, right.sequenceKey);
 }
 
+function admittedCount(key: string | undefined): number {
+  let count = 0;
+  const text = key ?? '';
+  for (let index = 0; index < text.length; index += 1) if (text.charCodeAt(index) === 48) count += 1;
+  return count;
+}
+
 function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
                           mode: FragmentMode = 'due-date-first'): number {
   // `'due-date'` (2026-09-09) inverts the usual tier order (lateness ahead of
@@ -2443,7 +2711,13 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // rather than folded into the terms below, since it isn't just a
   // reordering of the mode-permuted `terms` list further down.
   if (left.feasible !== right.feasible) return left.feasible ? -1 : 1;
-  const admissionDelta = ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
+  // Min Changeover (D1/D11) compares admission by COUNT, not by which
+  // urgency-ranked orders were admitted ('0' = admitted in the key); more
+  // admitted wins, then the objective terms decide. Other modes keep the
+  // urgency-ordered string compare unchanged.
+  const admissionDelta = mode === 'min-changeover'
+    ? admittedCount(right.admissionKey) - admittedCount(left.admissionKey)
+    : ordinalCompare(left.admissionKey ?? '', right.admissionKey ?? '');
   if (admissionDelta) return admissionDelta;
   if (mode === 'due-date') return compareDueDateCandidate(left, right);
   if (mode === 'min-changeover' || mode === 'spt') {
@@ -2480,7 +2754,8 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   const coverageDelta = (left.score[SCORE_UNCOVERED] ?? 0) - (right.score[SCORE_UNCOVERED] ?? 0);
   if (coverageDelta) return coverageDelta;
   // All policies retain hard feasibility and configured policy tiers. Only the
-  // lower-order comparison changes: Min Changeover remains due-safe, while
+  // lower-order comparison changes: (Min Changeover and SPT return earlier via
+  // compareObjectiveFacts), while
   // Throughput may prefer setup savings and is constrained by its explicit
   // post-evaluation slip gate below.
   const terms = mode === 'throughput' ? [5, 2, 3, 4] : [2, 3, 4, 5];
@@ -2682,24 +2957,22 @@ function candidateForSequence(
 
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
     const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    const isInherentlyOverlong = splitPolicy === 'overlong_only'
+      ? !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext)
+      : undefined;
+    const minProductiveSegmentMinutes = bounds.runContext?.minProductiveSegmentMinutes
+      ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
       setup: setupRequirement,
       policy: splitPolicy,
-      ...(splitPolicy === 'overlong_only' ? {
-        isInherentlyOverlong: !hasNominalWindow(
-          snapshot,
-          line,
-          bounds.setup.plant,
-          cursor,
-          runtimeMinutes,
-          bounds.runContext,
-        ),
-      } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext),
-      minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
-        ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
+      ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
+      freeIntervals: freeIntervalsForPlacement(
+        snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext,
+        continuousFitMinutes(setupRequirement, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
+      ),
+      minProductiveSegmentMinutes,
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       unadmitted.push(task);
@@ -3197,13 +3470,15 @@ function greedySearch(
       termination = 'deadline';
       return null;
     }
+    // F4: Check for duplicate neighbors before consuming a budget iteration,
+    // so duplicate sequences don't burn budget.
+    const key = sequence.map(taskId).join('\u0000');
+    if (seen.has(key)) return null;
+    seen.add(key);
     if (!consumeSearchIteration(budget)) {
       termination = 'iteration-cap';
       return null;
     }
-    const key = sequence.map(taskId).join('\u0000');
-    if (seen.has(key)) return null;
-    seen.add(key);
     candidateCount += 1;
     const candidate = candidateForSequence(
       snapshot,
@@ -3420,7 +3695,8 @@ function searchFragment(
     // evaluated. Reserve `completed` for an exhaustive exact traversal; a
     // bounded heuristic that found no winner has converged on its explored
     // search space.
-    const heuristic = mode === 'spt' || groupsByState.size > bounds.exactSearchThreshold;
+    const heuristic = mode === 'spt'
+      || !exactSearchEligible([...groupsByState.values()].map((g) => g.tasks.length), bounds);
     return {
       candidateCount: 0,
       method: 'due-date-first-exact',
@@ -3556,7 +3832,7 @@ function searchFragment(
   // can no longer be true (A1 admits uncovered transitions instead of
   // rejecting the candidate), so a single exact/greedy run replaces the
   // former retry-with-demotion loop.
-  const run: SearchRun = groups.length <= bounds.exactSearchThreshold
+  const run: SearchRun = exactSearchEligible(groups.map((g) => g.tasks.length), bounds)
     ? exactSearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode)
     : greedySearch(snapshot, bounds, line, groups, fragment, adjacency, budget, mode);
   return {
@@ -4302,17 +4578,23 @@ export function placeUnknownTail(
     const pullForwardFloor = notBeforeFor(bounds, task);
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+    const tailSetup = { kind: 'resolved' as const, minutes: tailChargeableMinutes };
+    const isInherentlyOverlong = splitPolicy === 'overlong_only'
+      ? !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext)
+      : undefined;
+    const minProductiveSegmentMinutes = bounds.runContext?.minProductiveSegmentMinutes
+      ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
     const placement = placeWithSetup({
       earliestStart: cursor,
       runtimeMinutes,
-      setup: { kind: 'resolved', minutes: tailChargeableMinutes },
+      setup: tailSetup,
       policy: splitPolicy,
-      ...(splitPolicy === 'overlong_only' ? {
-        isInherentlyOverlong: !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext),
-      } : {}),
-      freeIntervals: freeIntervalsFor(snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext),
-      minProductiveSegmentMinutes: bounds.runContext?.minProductiveSegmentMinutes
-        ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant),
+      ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
+      freeIntervals: freeIntervalsForPlacement(
+        snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext,
+        continuousFitMinutes(tailSetup, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
+      ),
+      minProductiveSegmentMinutes,
     });
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       // B2: this order alone doesn't fit at the current cursor — defer it
@@ -5241,6 +5523,9 @@ function requireDueDateBounds(bounds: Readonly<DueDateFirstBounds>): void {
   if (!Number.isInteger(bounds.exactSearchThreshold) || bounds.exactSearchThreshold < 0) {
     throw new TypeError('Due-date-first evaluation requires an exact-search threshold.');
   }
+  if (bounds.exactSearchLeafCap !== undefined && !(bounds.exactSearchLeafCap > 0)) {
+    throw new TypeError('Due-date-first evaluation requires a positive exact-search leaf cap.');
+  }
   if (!Number.isInteger(bounds.iterationCap) || bounds.iterationCap <= 0) {
     throw new TypeError('Due-date-first evaluation requires a positive iteration cap.');
   }
@@ -5686,7 +5971,7 @@ function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
  * due-date push-forward limit ceiling) so a caller can compare before/after
  * over-cap counts the same way it already compares before/after lateness.
  * `selectThroughputCandidate` deliberately calls this WITHOUT `notAfter` —
- * the cap is a min-changeover-only due-safe rule, not a throughput one — so
+ * the cap is a due-date-limit rule, not a throughput one — so
  * every entry's `overCap` there is simply `false`. */
 function lateOrderFacts(
   tasks: ReadonlyArray<NimbusTask>,
@@ -5707,9 +5992,11 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
   return { ...result, explanation: [...result.explanation, { code, message }] };
 }
 
-/** Use available slack: run the shared candidate evaluator with setup as the
- * first non-due comparator, then fail closed to Due-date-first if it made an
- * originally on-time order late or increased the line's existing late count.
+/** Min Changeover (D1, D8-D11): least setup inside the date limits. Due date is
+ * not an objective; only the pull-forward floor (hard placement clamp) and the
+ * push-forward limit (over-cap tier, last-resort placed-and-flagged) apply.
+ * One search per run; `finalizeCandidate` keeps the current schedule only when
+ * the new plan would schedule fewer orders (by count).
  */
 export function evaluateMinChangeover(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
@@ -5720,44 +6007,29 @@ export function evaluateMinChangeover(
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const budget = bounds.searchBudget ?? createSearchBudget(bounds);
   bounds = { ...bounds, searchBudget: budget };
-  const baseline = evaluateDueDateFirst(snapshot, { ...bounds, searchBudget: budget });
   const candidate = evaluateDueDateFirst(snapshot, { ...bounds, searchBudget: budget }, 'min-changeover');
-  const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
-  const admission = (result: CandidateResult): string => {
-    const queued = new Set(result.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id));
-    return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join('');
-  };
-  const admissionDelta = ordinalCompare(admission(candidate), admission(baseline));
-  const chooseCandidate = !candidate.validationFindings?.some(f => f.severity === 'error')
-    && (admissionDelta < 0 || (admissionDelta === 0 && compareFinalObjectives(snapshot, { ...bounds, strategy: 'min-changeover' }, candidate, baseline) <= 0));
-  const chosen = chooseCandidate ? candidate : baseline;
-  const incomplete = baseline.searchComplete === false || candidate.searchComplete === false;
-  const deadlineCutoff = baseline.diagnostics.termination === 'deadline' || candidate.diagnostics.termination === 'deadline';
-  const iterationCutoff = baseline.diagnostics.termination === 'iteration-cap' || candidate.diagnostics.termination === 'iteration-cap';
+  const incomplete = candidate.searchComplete === false;
+  const deadlineCutoff = candidate.diagnostics.termination === 'deadline';
+  const iterationCutoff = candidate.diagnostics.termination === 'iteration-cap';
   const budgetCutoff = deadlineCutoff || iterationCutoff;
   const termination = budgetCutoff
     ? (deadlineCutoff ? 'deadline' : 'iteration-cap')
-    : chosen.diagnostics.termination;
+    : candidate.diagnostics.termination;
   return {
-    ...chosen,
+    ...candidate,
     searchComplete: !incomplete,
     diagnostics: {
-      ...chosen.diagnostics,
+      ...candidate.diagnostics,
       termination,
       limitReached: budgetCutoff,
-      candidateCount: baseline.diagnostics.candidateCount + candidate.diagnostics.candidateCount,
       runtimeMs: Math.max(0, bounds.clock() - budget.startedAt),
       budgetMs: budget.budgetMs,
       deadlineAt: budget.deadlineAt,
       iterationsUsed: budget.iterationsUsed,
-      evaluatedCount: (baseline.diagnostics.evaluatedCount ?? baseline.diagnostics.candidateCount)
-        + (candidate.diagnostics.evaluatedCount ?? candidate.diagnostics.candidateCount),
-      seedCount: (baseline.diagnostics.seedCount ?? 0) + (candidate.diagnostics.seedCount ?? 0),
-      localMoveCount: (baseline.diagnostics.localMoveCount ?? 0) + (candidate.diagnostics.localMoveCount ?? 0),
-      exhaustive: !incomplete && baseline.diagnostics.exhaustive === true && candidate.diagnostics.exhaustive === true,
-      quality: baseline.diagnostics.quality === 'heuristic' || candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
+      exhaustive: !incomplete && candidate.diagnostics.exhaustive === true,
+      quality: candidate.diagnostics.quality === 'heuristic' ? 'heuristic' : 'exact',
     },
-    explanation: [...chosen.explanation, { code: chooseCandidate ? 'min-changeover-due-safe' : 'min-changeover-incumbent', message: chooseCandidate ? 'Selected the best validated admission and delivery/setup objective.' : 'Retained the better validated incumbent.' }],
+    explanation: [...candidate.explanation, { code: 'min-changeover-selected', message: 'Selected the validated plan with the least setup inside the date limits.' }],
   };
 }
 
@@ -5975,22 +6247,90 @@ function completionEnd(bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, e
   return ceiling && ceiling < end ? ceiling : end;
 }
 
-function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): { code: string; message: string } | null {
-  if (allowedPlanningWindow(snapshot, bounds, task).missingDue) return { code: 'missing_due_date', message: 'A SAP due date is required for the configured planning window.' };
-  if (!Number.isFinite(Number(task.RUN_TIME)) || Math.round(Number(task.RUN_TIME) * 60) <= 0) return { code: 'invalid_runtime', message: 'Runtime must be a positive number.' };
+type PlanningDefect = { code: string; message: string };
+
+/** T4: the part of `planningDefect` that depends only on the task and the
+ * plant's configuration (missing SAP due date, run-time validity). The entry is
+ * reused only for the same task object, master-data object and plant, so any
+ * other snapshot or task copy sharing the run context recomputes. */
+interface StaticDefectEntry {
+  task: NimbusTask;
+  masterData: NimbusMasterData | null;
+  plant: string;
+  defect: PlanningDefect | null;
+}
+
+function staticPlanningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): PlanningDefect | null {
+  const compute = (): PlanningDefect | null => {
+    if (allowedPlanningWindow(snapshot, bounds, task).missingDue) return { code: 'missing_due_date', message: 'A SAP due date is required for the configured planning window.' };
+    if (!Number.isFinite(Number(task.RUN_TIME)) || Math.round(Number(task.RUN_TIME) * 60) <= 0) return { code: 'invalid_runtime', message: 'Runtime must be a positive number.' };
+    return null;
+  };
+  const ctx = bounds.runContext;
+  if (!ctx) return compute();
+  const id = taskId(task);
+  const hit = ctx._staticDefect.get(id);
+  if (hit && hit.task === task && hit.masterData === snapshot.masterData && hit.plant === bounds.setup.plant) return hit.defect && { ...hit.defect };
+  const defect = compute();
+  ctx._staticDefect.set(id, { task, masterData: snapshot.masterData, plant: bounds.setup.plant, defect });
+  return defect && { ...defect };
+}
+
+function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): PlanningDefect | null {
+  const staticDefect = staticPlanningDefect(snapshot, bounds, task);
+  if (staticDefect) return staticDefect;
   const ceiling = notAfterFor(bounds, task);
   const floor = notBeforeFor(bounds, task);
   if (ceiling && +ceiling <= Math.max(+bounds.now, floor ? +floor : -Infinity)) return { code: 'expired_window', message: 'The allowed completion window ends before available planning time.' };
   return null;
 }
 
+/** T1: everything the `urgencyOrder` comparator reads about one order. `task`
+ * is the object the tuple was computed from: an entry is reused only for that
+ * same object (a patched copy with the same id recomputes), so a changed
+ * `start_date` can never be served stale. */
+interface UrgencyKey {
+  task: NimbusTask;
+  deadline: number;
+  policy: string;
+  due: number;
+  start: number;
+  id: string;
+}
+
+function urgencyKeyFor(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, task: NimbusTask,
+): UrgencyKey {
+  const effectiveLine = line || String(task.MACHINE);
+  const ctx = bounds.runContext;
+  // Only cache when notAfterFor would itself memoize per id (ctx present and a
+  // notAfter rule supplied); otherwise recompute exactly as the old path did.
+  const cacheKey = ctx && bounds.notAfter ? effectiveLine + CTX_KEY_SEP + taskId(task) : null;
+  if (cacheKey) {
+    const hit = ctx!._urgencyKey.get(cacheKey);
+    if (hit && hit.task === task) return hit;
+  }
+  const key: UrgencyKey = {
+    task,
+    deadline: notAfterFor(bounds, task)?.getTime() ?? Infinity,
+    policy: policyKeyForSequence(snapshot, bounds.setup.plant, effectiveLine, [task], ctx),
+    due: dueTimestamp(task),
+    start: timestamp(task.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER,
+    id: taskId(task),
+  };
+  if (cacheKey) ctx!._urgencyKey.set(cacheKey, key);
+  return key;
+}
+
 function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
-  return [...tasks].sort((a, b) => {
-    const deadline = (notAfterFor(bounds, a)?.getTime() ?? Infinity) - (notAfterFor(bounds, b)?.getTime() ?? Infinity);
+  const keyed = tasks.map(task => ({ task, key: urgencyKeyFor(snapshot, bounds, line, task) }));
+  keyed.sort((a, b) => {
+    const deadline = a.key.deadline - b.key.deadline;
     if (deadline && !Number.isNaN(deadline)) return deadline;
-    const priority = ordinalCompare(policyKeyForSequence(snapshot, bounds.setup.plant, line || String(a.MACHINE), [a], bounds.runContext), policyKeyForSequence(snapshot, bounds.setup.plant, line || String(b.MACHINE), [b], bounds.runContext));
-    return priority || dueTimestamp(a) - dueTimestamp(b) || (timestamp(a.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) - (timestamp(b.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER) || ordinalCompare(taskId(a), taskId(b));
+    const priority = ordinalCompare(a.key.policy, b.key.policy);
+    return priority || a.key.due - b.key.due || a.key.start - b.key.start || ordinalCompare(a.key.id, b.key.id);
   });
+  return keyed.map(entry => entry.task);
 }
 
 interface TaskScope {
@@ -6458,7 +6798,14 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   result = repairCandidate(snapshot, bounds, result);
   const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
   const admitted = (proposal: CandidateResult): string => { const queued = new Set(proposal.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id)); return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join(''); };
-  const preferIncumbent = (admitted(incumbent) < admitted(result) || (admitted(incumbent) === admitted(result) && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !incumbent.validationFindings?.some(f => f.severity === 'error');
+  // Min Changeover (D11) keeps the incumbent only when the new plan schedules
+  // fewer ORDERS; the urgency string would let an earlier-due order outrank
+  // count. Other strategies keep the urgency-ordered comparison.
+  const queuedCount = (proposal: CandidateResult): number => proposal.dispositions?.filter(d => d.status === 'needs_planning').length ?? 0;
+  const admissionDelta = bounds.strategy === 'min-changeover'
+    ? queuedCount(incumbent) - queuedCount(result)
+    : ordinalCompare(admitted(incumbent), admitted(result));
+  const preferIncumbent = (admissionDelta < 0 || (admissionDelta === 0 && compareFinalObjectives(snapshot, bounds, incumbent, result) < 0)) && !incumbent.validationFindings?.some(f => f.severity === 'error');
   result = preferIncumbent
     ? retainCompatiblePlacements(snapshot, bounds, incumbent, result)
     : retainCompatiblePlacements(snapshot, bounds, result, incumbent);
@@ -6777,8 +7124,10 @@ export function compareObjectiveFacts(
   };
   const terms: Array<[keyof ObjectiveFacts, boolean]> = mode === 'min-changeover'
     ? [
-      ['hardErrors', false], ['overCap', false], ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false],
-      ['uncoveredEdges', false], ['setupMinutes', false], ['policyKey', false],
+      // D1/D10: Min Changeover minimizes setup inside the date limits. Admission
+      // (by count) is settled before these terms; lateness is a tie-breaker only.
+      ['hardErrors', false], ['overCap', false], ['uncoveredEdges', false], ['setupMinutes', false], ['policyKey', false],
+      ['lateCount', false], ['latenessMinutes', false], ['maxLatenessMinutes', false],
       ['scheduledCount', true], ['instabilityMinutes', false], ['sequenceKey', false],
     ]
     : mode === 'due-date'
@@ -6958,3 +7307,5 @@ function coversInterval(free: readonly PlacementInterval[], interval: PlacementI
 
 export const fragmentObjectiveFactsForTest = fragmentObjectiveFacts;
 export const checkDistributionSeparationForTest = checkDistributionSeparation;
+export const freeIntervalsForTest = freeIntervalsFor;
+export const freeIntervalsForPlacementTest = freeIntervalsForPlacement;

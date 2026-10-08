@@ -872,7 +872,7 @@ test('Min Changeover stays detached and reports its due-safe setup savings decis
       setupRow('RED', 'BLUE', 60), setupRow('BLUE', 'RED', 60),
     ],
   })));
-  assert.ok(result.explanation.some(reason => reason.code === 'min-changeover-due-safe'));
+  assert.ok(result.explanation.some(reason => reason.code === 'min-changeover-selected'));
   assert.equal(snapshot.tasks[0].start_date, null, 'policy evaluation never mutates the snapshot');
 });
 
@@ -2748,6 +2748,65 @@ test('setup-aware evaluators derive immutable overlong_only eligibility from sna
   }
 });
 
+test('split-policy orders that cross an interval boundary keep their segments and setup (T3 guard)', () => {
+  // Pins placement behavior that any early-exit in free-interval building must
+  // preserve: a split-eligible order must see every window, not just the first
+  // that could hold part of it. Mon is open 08-10 only, other days 08-12; a
+  // 5-hour order (longer than any nominal window, so inherently overlong) after
+  // a 30-minute setup cannot finish on Monday, so it must span Monday and Tuesday.
+  const hours = { ...Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 12]])), 1: [8, 10] };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 30)] });
+  for (const policy of ['partial_allowed', 'overlong_only']) {
+    const blue = scheduledTask('t3-split-' + policy, 5, 'BLUE', '2026-08-05T12:00:00');
+    const snapshot = setupSnapshot([blue]);
+    snapshot.calendars = { L1: { workHours: hours } };
+    snapshot.plants = { P1: { workHours: hours } };
+    snapshot.masterData = {
+      plants: [{ plant: 'P1', split_order_policy: policy }],
+      lines: [{ plant: 'P1', machine: 'L1' }],
+    };
+    for (const [label, evaluate] of [
+      ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+      ['SPT', SetupScheduler.evaluateSptWithSetup],
+    ]) {
+      const result = evaluate(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-05T12:00:00') }));
+      const patch = patchFor(result, blue.id);
+      assert.ok(patch, label + '/' + policy + ' places the split order');
+      assert.deepEqual(patch.changes.scheduleSegments.map(segment => [segment.startDate, segment.endDate]), [
+        [at('2026-08-03T08:30:00'), at('2026-08-03T10:00:00')],
+        [at('2026-08-04T08:00:00'), at('2026-08-04T11:30:00')],
+      ], label + '/' + policy + ' segments');
+      assert.equal(patch.changes.start_date.getTime(), at('2026-08-03T08:30:00').getTime());
+      assert.equal(patch.changes.end_date.getTime(), at('2026-08-04T11:30:00').getTime());
+    }
+  }
+});
+
+test('a continuous order that does not fit the first free interval lands in the second (T3 guard)', () => {
+  // Monday offers only 2 hours; the 3-hour order after a 30-minute setup needs
+  // 3.5 contiguous hours, so it must start at Tuesday 08:00 (setup 08:00-08:30).
+  const hours = { ...Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 14]])), 1: [8, 10] };
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 30)] });
+  const blue = scheduledTask('t3-continuous-blue', 3, 'BLUE', '2026-08-05T14:00:00');
+  const snapshot = setupSnapshot([blue]);
+  snapshot.calendars = { L1: { workHours: hours } };
+  snapshot.plants = { P1: { workHours: hours } };
+  snapshot.masterData = {
+    plants: [{ plant: 'P1', split_order_policy: 'never' }],
+    lines: [{ plant: 'P1', machine: 'L1' }],
+  };
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-05T14:00:00') }));
+    const patch = patchFor(result, blue.id);
+    assert.ok(patch, label + ' places the continuous order');
+    assert.equal(patch.changes.start_date.getTime(), at('2026-08-04T08:30:00').getTime(), label + ' start');
+    assert.equal(patch.changes.end_date.getTime(), at('2026-08-04T11:30:00').getTime(), label + ' end');
+  }
+});
+
 test('setup-aware evaluators never schedule through a fixed boundary beyond the caller horizon', () => {
   // Production change caught: retaining an out-of-horizon fixed BLUE makes
   // its noon start leak into a caller horizon ending at 10:00. RED cannot fit
@@ -3531,7 +3590,7 @@ test('primary SearchBudget is not reset when three lines share one run', () => {
   assert.equal(result.diagnostics.termination, 'iteration-cap');
 });
 
-test('primary search budget is global across lines and Min Changeover passes', () => {
+test('primary search budget is global across lines and the single Min Changeover pass (D11: one search per run)', () => {
   const l1 = scheduledTask('global-budget-l1', 1, 'BLUE', '2026-08-03T10:00:00');
   const l2 = { ...scheduledTask('global-budget-l2', 1, 'RED', '2026-08-03T10:00:00'), MACHINE: 'L2' };
   const snapshot = setupSnapshot([l1, l2]);
@@ -3544,9 +3603,9 @@ test('primary search budget is global across lines and Min Changeover passes', (
   assert.ok(perRun.diagnostics.iterationsUsed <= 1,
     'one primary iteration cap must cover every line in the evaluator run');
 
-  const min = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup, { iterationCap: 2 }));
-  assert.ok(min.diagnostics.iterationsUsed <= 2,
-    'Min Changeover baseline and candidate searches must draw from one cap');
+  const min = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup, { iterationCap: 1 }));
+  assert.ok(min.diagnostics.iterationsUsed <= 1,
+    'Min Changeover now runs one search (no due-date baseline pass), so one cap of 1 must cover every line');
 
   const throughput = SetupScheduler.evaluateThroughput(snapshot, dueDateBounds(setup, { iterationCap: 1 }), {
     throughputMinSavingsMin: 0,
@@ -3556,7 +3615,7 @@ test('primary search budget is global across lines and Min Changeover passes', (
     'Throughput baseline and candidate searches must draw from one cap');
 });
 
-test('evaluateMinChangeover gives the candidate pass everything left after the baseline returns, not a naive half-split', () => {
+test('evaluateMinChangeover runs its single pass against the caller\'s full deadline (D11: no baseline pass to split it with)', () => {
   // Part 2a: the baseline pass is deliberately capped to half of whatever
   // wall-clock remains; the candidate pass keeps the caller's full original
   // deadline. Proven two ways with an injectable `clock`:
@@ -3604,17 +3663,17 @@ test('evaluateMinChangeover gives the candidate pass everything left after the b
   const fullResult = SetupScheduler.evaluateDueDateFirst(snapshot(), searchBounds({ clock: fullClock, deadline }));
   assert.equal(fullResult.diagnostics.termination, 'completed', 'the full amount completes the same search');
 
-  // 3. End-to-end: evaluateMinChangeover with the identical shared clock and
-  // deadline still resolves to a genuine (non-starved) candidate decision.
+  // 3. End-to-end: evaluateMinChangeover (now one search, D11) with the same
+  // clock and deadline resolves to a genuine (non-starved) decision.
   let sharedCalls = 0;
   const sharedClock = () => { sharedCalls += 1; return sharedCalls; };
   const combined = SetupScheduler.evaluateMinChangeover(snapshot(), searchBounds({ clock: sharedClock, deadline }));
   assert.equal(combined.patches.length, 6, 'every order is admitted, not just a partial/starved subset');
   assert.equal(combined.explanation.some(reason => reason.code === 'min-changeover-starved'), false,
-    'the candidate pass was not capped to the same half the baseline used, so no starvation is reported');
+    'the single pass keeps the full deadline, so no starvation is reported');
 });
 
-test('evaluateMinChangeover\'s starvation guard never reverts to an equally-empty baseline', () => {
+test('evaluateMinChangeover on an immediately-expired deadline reports no starvation (single pass, D11)', () => {
   // Part 2a's starvation guard is specifically gated on `baseline.patches.length
   // > 0` — it must never claim to "keep the baseline" when the baseline
   // itself produced nothing (that would not be a meaningful fallback). With
@@ -4376,8 +4435,8 @@ test('hard bounds missing due and invalid runtime do not stop remaining demand',
   assert.equal(outcomePatchFor(result, 'valid').changes.planning_status, 'scheduled');
 });
 
-test('hard bounds urgency admits an earlier deadline before shorter and better grouped work', () => {
-  for (const evaluate of [SetupScheduler.evaluateDueDateFirst, SetupScheduler.evaluateMinChangeover, SetupScheduler.evaluateSptWithSetup]) {
+test('hard bounds urgency admits an earlier deadline before shorter and better grouped work (Min Changeover excluded: D1, setup over lateness)', () => {
+  for (const evaluate of [SetupScheduler.evaluateDueDateFirst, SetupScheduler.evaluateSptWithSetup]) {
     const snapshot = setupSnapshot([
       scheduledTask('short', 4, 'GREEN', '2026-08-04T18:00:00'),
       scheduledTask('urgent', 7, 'RED', '2026-08-03T18:00:00'),
@@ -4470,9 +4529,20 @@ test('hard bounds can resequence an unprotected baseline anchor to admit urgent 
     scheduledTask('current-late', 6, 'GREEN', '2026-08-04T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
     scheduledTask('urgent-new', 6, 'GREEN', '2026-08-03T18:00:00'),
   ]); snapshot.masterData.plants[0].max_push_forward_days = 0;
-  const result = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setupTruth({ current: null })));
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth({ current: null })));
   assert.equal(outcomePatchFor(result, 'urgent-new').changes.planning_status, 'scheduled');
   assert.equal(outcomePatchFor(result, 'current-late').changes.planning_status, 'needs_planning');
+});
+
+test('Min Changeover keeps the incumbent when admission and setup tie, instead of swapping in the more urgent order (D1: due urgency is not an objective)', () => {
+  const snapshot = setupSnapshot([
+    scheduledTask('current-late', 6, 'GREEN', '2026-08-04T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
+    scheduledTask('urgent-new', 6, 'GREEN', '2026-08-03T18:00:00'),
+  ]); snapshot.masterData.plants[0].max_push_forward_days = 0;
+  const result = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setupTruth({ current: null })));
+  assert.equal(result.dispositions.filter(d => d.status === 'scheduled').length, 1, 'only one 6h order fits the 10h window');
+  assert.equal(outcomePatchFor(result, 'urgent-new').changes.planning_status, 'needs_planning');
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
 });
 
 test('hard bounds pull floor includes setup and excluded lines keep every field unchanged', () => {
@@ -4621,7 +4691,8 @@ test('hard bounds admit an urgent order when a later bridge reduces setup into f
 });
 
 test('hard bounds retain a found one-hour Tuesday placement when restoring an urgent Monday incumbent', () => {
-  for (const strategy of ['due-date', 'min-changeover', 'spt']) for (const separateLine of [false, true]) {
+  // Min Changeover is covered by the count-admission test below (D11).
+  for (const strategy of ['due-date', 'spt']) for (const separateLine of [false, true]) {
     const snapshot = setupSnapshot([
       scheduledTask('urgent-monday', 6, 'RED', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
       scheduledTask('other-monday', 6, 'BLUE', '2026-08-03T18:00:00'),
@@ -4647,6 +4718,96 @@ test('hard bounds retain a found one-hour Tuesday placement when restoring an ur
     assert.equal(outcomePatchFor(result, 'tuesday-hour').changes.start_date.getTime(), at('2026-08-04T08:00:00').getTime());
     assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
   }
+});
+
+test('Min Changeover admits by count: two orders beat the one-order incumbent even though the incumbent is the more urgent order (D11)', () => {
+  for (const separateLine of [false, true]) {
+    const snapshot = setupSnapshot([
+      scheduledTask('urgent-monday', 6, 'RED', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T14:00:00'),
+      scheduledTask('other-monday', 6, 'BLUE', '2026-08-03T18:00:00'),
+      scheduledTask('tuesday-hour', 1, 'BLUE', '2026-08-04T18:00:00'),
+    ]);
+    const setup = setupTruth();
+    if (separateLine) {
+      snapshot.tasks[2].MACHINE = 'L2';
+      snapshot.masterData.lines.push({ plant: 'P1', machine: 'L2' });
+      snapshot.calendars.L2 = { workHours: OPEN_HOURS };
+      setup.machine_states.push({ ...setup.machine_states[0], machine: 'L2' });
+    }
+    Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 0, max_push_forward_days: 0 });
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, {
+      iterationCap: 2, horizonEnd: at('2026-08-04T18:00:00'),
+    }), 'min-changeover');
+    const scheduledIds = result.dispositions.filter(d => d.status === 'scheduled').map(d => d.id);
+    assert.equal(scheduledIds.length, 2, JSON.stringify(result.dispositions));
+    assert.ok(scheduledIds.includes('tuesday-hour'));
+    assert.equal(outcomePatchFor(result, 'tuesday-hour').changes.start_date.getTime(), at('2026-08-04T08:00:00').getTime());
+    assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
+  }
+});
+
+test('Min Changeover: with equal admission the lower-setup plan wins even though it serves the later-due order (D1: setup over lateness)', () => {
+  // Only one of the two 6h orders fits the 10h window. RED is due first but
+  // costs 120 min of setup from GREEN; BLUE is due a day later and costs 10.
+  const snapshot = () => setupSnapshot([
+    scheduledTask('early-red', 6, 'RED', '2026-08-03T18:00:00'),
+    scheduledTask('late-blue', 6, 'BLUE', '2026-08-04T18:00:00'),
+  ]);
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 120), setupRow('GREEN', 'BLUE', 10)] });
+
+  const min = SetupScheduler.evaluateMinChangeover(snapshot(), dueDateBounds(setup));
+  assert.equal(outcomePatchFor(min, 'late-blue').changes.planning_status, 'scheduled');
+  assert.equal(outcomePatchFor(min, 'early-red').changes.planning_status, 'needs_planning');
+  assert.equal(min.objective.setupMinutes, 10);
+
+  // Control: Due Date still serves the urgent order first.
+  const due = SetupScheduler.evaluateDueDateFirst(snapshot(), dueDateBounds(setup), 'due-date');
+  assert.equal(outcomePatchFor(due, 'early-red').changes.planning_status, 'scheduled');
+});
+
+test('Min Changeover: a plan admitting one fewer order loses even with far less setup (D11: admission by count first)', () => {
+  // Both 4h orders fit the 10h window only back to back (4h + 90 min + 4h + 5 min of
+  // setup = 9h35). Admitting just one needs a single 5 min setup, but admission
+  // count outranks setup minutes, so both must be admitted.
+  const snapshot = setupSnapshot([
+    scheduledTask('count-blue', 4, 'BLUE', '2026-08-03T18:00:00'),
+    scheduledTask('count-red', 4, 'RED', '2026-08-03T18:00:00'),
+  ]);
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 5), setupRow('GREEN', 'RED', 5),
+    setupRow('BLUE', 'RED', 90), setupRow('RED', 'BLUE', 90),
+  ] });
+  const result = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup));
+  assert.equal(outcomePatchFor(result, 'count-blue').changes.planning_status, 'scheduled');
+  assert.equal(outcomePatchFor(result, 'count-red').changes.planning_status, 'scheduled');
+  assert.equal(result.objective.scheduledCount, 2);
+  assert.equal(result.objective.setupMinutes, 95);
+});
+
+test('Min Changeover never places before the pull-forward floor and respects the push-forward limit whenever an in-window plan exists (D9)', () => {
+  // Grouping by color (RED+RED, BLUE+BLUE) would save setup but is impossible
+  // inside each order's own window, so each order must stay in its day.
+  const snapshot = setupSnapshot([
+    scheduledTask('mon-red', 4, 'RED', '2026-08-03T18:00:00'),
+    scheduledTask('mon-blue', 4, 'BLUE', '2026-08-03T18:00:00'),
+    scheduledTask('wed-red', 4, 'RED', '2026-08-05T18:00:00'),
+    scheduledTask('wed-blue', 4, 'BLUE', '2026-08-05T18:00:00'),
+  ]);
+  Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 0, max_push_forward_days: 0 });
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 5), setupRow('GREEN', 'BLUE', 30),
+    setupRow('RED', 'BLUE', 60), setupRow('BLUE', 'RED', 60),
+  ] });
+  const result = SetupScheduler.evaluateMinChangeover(snapshot, dueDateBounds(setup, { horizonEnd: at('2026-08-06T18:00:00') }));
+  const windows = { 'mon-red': 3, 'mon-blue': 3, 'wed-red': 5, 'wed-blue': 5 };
+  for (const [id, day] of Object.entries(windows)) {
+    const change = outcomePatchFor(result, id).changes;
+    assert.equal(change.planning_status, 'scheduled', id);
+    assert.ok(change.start_date.getTime() >= at(`2026-08-0${day}T00:00:00`).getTime(), `${id} starts at or after its pull-forward floor`);
+    assert.ok(change.end_date.getTime() <= at(`2026-08-0${day + 1}T00:00:00`).getTime(), `${id} ends within its push-forward limit`);
+  }
+  assert.equal(result.objective.overCap, 0);
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false);
 });
 
 test('hard bounds do not retain a donor placement that breaks setup capacity around the incumbent', () => {
@@ -5334,4 +5495,182 @@ test('setup availability without a calendar context falls back to the gap since 
   const obs = deriveSetupObservation(setup, [t('a', 'RED', '2026-08-03T08:00:00', '2026-08-03T09:00:00'), t('b', 'BLUE', '2026-08-03T09:45:00', '2026-08-03T10:45:00')], new Set(['L']));
   assert.equal(obs.intervals.length, 1);
   assert.equal(obs.intervals[0].availableMinutes, 45);
+});
+
+test('F1: exact search is gated on distinct-ordering count, not just state count', () => {
+  const build = (counts) => {
+    const colors = ['RED', 'BLUE', 'YELLOW', 'BLACK'];
+    const tasks = [];
+    counts.forEach((n, ci) => {
+      for (let i = 0; i < n; i++) {
+        tasks.push(scheduledTask(`f1-${colors[ci]}-${i}`, 1, colors[ci], `2026-08-03T${17 - tasks.length % 8}:00`));
+      }
+    });
+    return setupSnapshot(tasks);
+  };
+  const run = (counts, overrides = {}) => SetupScheduler.evaluateDueDateFirst(
+    build(counts),
+    dueDateBounds(setupTruth(), { exactSearchThreshold: 8, iterationCap: 100000, convergenceWindow: 1000, ...overrides }),
+    'due-date',
+  );
+
+  // 12 orders in 4 states = 369,600 orderings: over the leaf cap, so the
+  // bounded heuristic runs even though 4 states is under the threshold of 8.
+  const many = run([3, 3, 3, 3]);
+  assert.equal(many.diagnostics.quality, 'heuristic', '12 orders in 4 states take the heuristic path');
+  assert.ok((many.diagnostics.seedCount ?? 0) > 0, 'the heuristic path reports its seed set');
+
+  // 5 orders in 3 states = 30 orderings: exact.
+  const few = run([2, 2, 1]);
+  assert.equal(few.diagnostics.quality, 'exact', '5 orders in 3 states take the exact path');
+  assert.equal(few.diagnostics.termination, 'completed');
+
+  // multisetLeafCount boundary: 4 singleton states = 4! = 24 orderings.
+  assert.equal(run([1, 1, 1, 1], { exactSearchLeafCap: 24 }).diagnostics.quality, 'exact', 'cap equal to the leaf count stays exact');
+  assert.equal(run([1, 1, 1, 1], { exactSearchLeafCap: 23 }).diagnostics.quality, 'heuristic', 'cap below the leaf count goes heuristic');
+  assert.equal(run([2, 2, 1], { exactSearchLeafCap: 1 }).diagnostics.quality, 'heuristic', 'a tiny cap forces heuristic');
+  assert.throws(() => run([1, 1], { exactSearchLeafCap: 0 }), TypeError, 'a non-positive leaf cap is rejected');
+});
+
+function freeIndexFixture(R, spanStart, spanEnd) {
+  const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+  const hoursFor = () => Object.fromEntries(Array.from({ length: 7 }, (_, day) => {
+    if (R() < 0.2) return [day, null];
+    const open = ri(0, 12) + (R() < 0.3 ? ri(0, 3) * 0.25 : 0);
+    // Some windows run to 24:00 so adjacent days touch at midnight.
+    return [day, [open, R() < 0.3 ? 24 : Math.min(24, open + ri(2, 14))]];
+  }));
+  const MIN = 60000;
+  const blocks = [];
+  const plantBlocks = [];
+  for (let i = 0; i < ri(0, 8); i++) {
+    // Deliberately not minute-aligned: seconds exercise the ceil/floor path.
+    const start = spanStart + ri(0, Math.floor((spanEnd - spanStart) / MIN)) * MIN + ri(0, 59) * 1000;
+    const block = { plant: 'P1', start: new Date(start), end: new Date(start + ri(1, 3000) * MIN + ri(0, 59) * 1000) };
+    if (R() < 0.4) plantBlocks.push(block); else blocks.push({ ...block, line: 'L1' });
+  }
+  return {
+    ...setupSnapshot([]), blocks, plantBlocks,
+    calendars: { L1: { workHours: hoursFor() } }, plants: { P1: { workHours: hoursFor() } },
+  };
+}
+
+function freeIndexEquivalence(tz, spanStartText, spanEndText, seeds) {
+  const previous = process.env.TZ;
+  try {
+    process.env.TZ = tz;
+    const MIN = 60000;
+    const spanStart = new Date(spanStartText).getTime();
+    const spanEnd = new Date(spanEndText).getTime();
+    let compared = 0, outside = 0, multi = 0;
+    for (const seed of seeds) {
+      const R = mulberry32(seed);
+      const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+      for (let c = 0; c < 25; c++) {
+        const snapshot = freeIndexFixture(R, spanStart, spanEnd);
+        const bounds = dueDateBounds(setupTruth(), {
+          now: new Date(spanStart + ri(0, 600) * MIN), planningStart: new Date(spanStart + ri(0, 600) * MIN),
+          horizonEnd: new Date(spanEnd), respectCalendar: true,
+        });
+        const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+        const spanFrom = ctx.freeIndexSpan.from;
+        for (let q = 0; q < 40; q++) {
+          const inside = R() < 0.75;
+          const lo = inside ? spanFrom : spanFrom - 5 * 86400000;
+          const hi = inside ? spanEnd : spanEnd + 5 * 86400000;
+          const from = new Date(lo + Math.floor(R() * (hi - lo - MIN)) + (R() < 0.5 ? 0 : ri(0, 59999)));
+          const through = new Date(+from + ri(1, 10 * 24 * 60) * MIN + (R() < 0.5 ? 0 : ri(0, 59999)));
+          if (+from < spanFrom || +through > spanEnd) outside += 1;
+          // Raw equivalence: indexed output is exactly the day-walk output.
+          const walked = SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through);
+          const indexed = SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx);
+          assert.deepEqual(indexed, walked, `raw intervals differ (seed ${seed}, case ${c}, query ${q})`);
+          // Placement equivalence: marked, pre-normalized intervals place identically.
+          const marked = SetupScheduler.freeIntervalsForPlacementTest(snapshot, 'L1', 'P1', from, through, ctx);
+          const earliest = new Date(+from + ri(0, 3 * 24 * 60) * MIN + (R() < 0.5 ? 0 : ri(0, 59999)));
+          for (const runtimeMinutes of [ri(1, 90), ri(30, 600), ri(600, 3000)]) {
+            for (const policy of ['never', 'overlong_only', 'partial_allowed']) {
+              const request = {
+                earliestStart: earliest, runtimeMinutes, setup: { kind: 'resolved', minutes: ri(0, 90) },
+                policy, isInherentlyOverlong: R() < 0.5, minProductiveSegmentMinutes: [undefined, 30, 45][ri(0, 2)],
+              };
+              const expected = SetupScheduler.placeWithSetup({ ...request, freeIntervals: walked });
+              const actual = SetupScheduler.placeWithSetup({ ...request, freeIntervals: marked });
+              assert.deepEqual(actual, expected, `placement differs (seed ${seed}, case ${c}, query ${q}, ${policy})`);
+              compared += 1;
+              if (expected.productiveSegments.length > 1) multi += 1;
+            }
+          }
+        }
+      }
+    }
+    assert.ok(compared > 1000 && outside > 50 && multi > 20, `weak coverage: ${compared}/${outside}/${multi}`);
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+}
+
+test('F2 free-interval index equals the day-walk on seeded random calendars, blackouts and windows (incl. outside the span)', () => {
+  freeIndexEquivalence('America/New_York', '2026-08-01T00:00:00', '2026-08-31T00:00:00', [3, 17, 2026]);
+});
+
+test('F2 free-interval index equals the day-walk across the DST end and start transitions', () => {
+  freeIndexEquivalence('America/New_York', '2026-10-25T00:00:00', '2026-11-12T00:00:00', [5, 31]);
+  freeIndexEquivalence('America/New_York', '2026-03-01T00:00:00', '2026-03-20T00:00:00', [8, 44]);
+});
+
+test('F2 index is skipped for work hours that overflow the day (walk and index would disagree)', () => {
+  const snapshot = setupSnapshot([]);
+  const overflow = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [20, 30]]));
+  snapshot.calendars.L1.workHours = overflow; snapshot.plants.P1.workHours = overflow;
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-08-03T00:00:00'), horizonEnd: at('2026-08-10T00:00:00') });
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const from = at('2026-08-04T00:00:00'); const through = at('2026-08-07T12:00:00');
+  assert.deepEqual(
+    SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx),
+    SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through),
+  );
+});
+
+test('F2 run-level: candidate count, patches and objective are identical with the free index on and off', () => {
+  const colors = ['RED', 'BLUE', 'GREEN', 'BLACK'];
+  const rows = [];
+  for (const a of colors) for (const b of colors) if (a !== b) rows.push(setupRow(a, b, 20 + 7 * ((a.length + b.length) % 5)));
+  const R = mulberry32(4242);
+  const tasks = [];
+  for (const line of ['L1', 'L2', 'L3']) {
+    for (let i = 0; i < 9; i++) {
+      tasks.push({
+        ...scheduledTask(`f2-${line}-${i}`, 0.5 + Math.floor(R() * 14) / 2, colors[Math.floor(R() * 4)], `2026-08-${String(5 + Math.floor(R() * 12)).padStart(2, '0')}T12:00:00`),
+        MACHINE: line,
+      });
+    }
+  }
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, day === 0 ? null : [6, 22]]));
+  const build = () => ({
+    ...setupSnapshot(tasks.map(t => ({ ...t }))),
+    masterData: { plants: [{ plant: 'P1' }], lines: ['L1', 'L2', 'L3'].map(machine => ({ plant: 'P1', machine })) },
+    calendars: Object.fromEntries(['L1', 'L2', 'L3'].map(l => [l, { workHours: hours }])),
+    plants: { P1: { workHours: hours } },
+    blocks: [{ plant: 'P1', line: 'L2', start: at('2026-08-05T10:00:30'), end: at('2026-08-05T15:00:00') },
+      { plant: 'P1', line: 'L3', start: at('2026-08-06T00:00:00'), end: at('2026-08-07T00:00:00') }],
+  });
+  const bounds = extra => dueDateBounds(setupTruth({ rows }), {
+    exactSearchThreshold: 8, iterationCap: 100000, convergenceWindow: 1000,
+    now: at('2026-08-03T08:00:00'), planningStart: at('2026-08-03T08:00:00'), runNow: at('2026-08-03T08:00:00'),
+    placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-24T00:00:00'), ...extra,
+  });
+  const runs = [
+    ['due-date', b => SetupScheduler.evaluateDueDateFirst(build(), b, 'due-date')],
+    ['spt', b => SetupScheduler.evaluateSptWithSetup(build(), b)],
+    ['min-changeover', b => SetupScheduler.evaluateMinChangeover(build(), b)],
+  ];
+  for (const [mode, run] of runs) {
+    const on = run(bounds({}));
+    const off = run(bounds({ disableFreeIndex: true }));
+    assert.ok(on.diagnostics.candidateCount > 0, `${mode} evaluated candidates`);
+    assert.equal(on.diagnostics.candidateCount, off.diagnostics.candidateCount, `${mode} candidate count`);
+    assert.equal(on.diagnostics.termination, off.diagnostics.termination, `${mode} termination`);
+    assert.deepEqual(on.objective, off.objective, `${mode} objective totals`);
+    assert.deepEqual(on.patches, off.patches, `${mode} winners/patches`);
+    assert.deepEqual(on.score, off.score, `${mode} score`);
+  }
 });
