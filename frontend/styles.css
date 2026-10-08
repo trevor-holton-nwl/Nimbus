@@ -2061,6 +2061,16 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   backdrop-filter: blur(3px);
 }
 .modal-backdrop[hidden] { display: none; }
+/* Optimize preview while the plan and its alternate comparisons compute:
+   no dialog chrome, just a centered spinner on the backdrop. The card is
+   revealed once, fully rendered (OptimizerPreview._endLoadingState). */
+.modal-backdrop.opt-pv-loading > .modal { display: none; }
+.modal-backdrop.opt-pv-loading::after {
+  content: ''; width: 44px; height: 44px; box-sizing: border-box;
+  border: 4px solid rgba(255, 255, 255, 0.35); border-top-color: #fff;
+  border-radius: 50%;
+  animation: cw-rotate 0.7s linear infinite;
+}
 
 .modal {
   background: var(--bg-elev);

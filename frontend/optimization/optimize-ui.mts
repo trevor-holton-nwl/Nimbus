@@ -1056,14 +1056,9 @@ export const OptimizerPreview = {
   _syntheticSetup: false,
   _explanation: null as PreviewExplanation | null,
   /** KPI vectors for the applied plan and one alternate mode — populated in
-   *  runWithPreview (now via a deferred background run, see _finalistsPending),
+   *  runWithPreview BEFORE the single render (spinner-only until done),
    *  wiped in _clear. Patches are never retained. */
   _finalists: null as Array<{ label: string; mode: OptimizerMode; kpis: OptimizerKpis; whyNot: string | null }> | null,
-  /** Phase 2 (Pkg D): true from the moment runWithPreview schedules the
-   *  deferred Plan B comparison run until it lands (or bails/fails) and
-   *  clears it. _render() shows a "Computing comparison…" placeholder while
-   *  this is true. Always false when _finalists is non-null. */
-  _finalistsPending: false,
   stale: false,
   _staleReason: null as string | null,
   _staleMessageKey: null as string | null,
@@ -1101,12 +1096,23 @@ export const OptimizerPreview = {
     }
     const root = document.getElementById('modal-opt-preview');
     if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = true; });
+    // Spinner-only until the primary plan AND the alternate comparisons are
+    // all done: the .modal card is hidden by this class (see styles.css) and
+    // revealed once, after the single full render.
+    root?.classList.add('opt-pv-loading');
     Modal.open('modal-opt-preview');
+  },
+
+  /** Drop the spinner-only state so the .modal card shows. Idempotent. */
+  _endLoadingState() {
+    const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
+    root?.classList.remove('opt-pv-loading');
   },
 
   /** Close the loading dialog without doing any work. For aborts (e.g. user
    *  cancels the no-color-wheel confirm) so the spinner doesn't linger. */
   hideLoading() {
+    OptimizerPreview._endLoadingState();
     Modal.close('modal-opt-preview');
     const root = typeof document === 'undefined' ? null : document.getElementById('modal-opt-preview');
     if (root) root.querySelectorAll<HTMLButtonElement>('.modal-foot .btn-ghost').forEach((b) => { b.disabled = false; });
@@ -1325,11 +1331,10 @@ export const OptimizerPreview = {
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
 
-    // Show the preview dialog with a loading state. If `showLoading()` already
-    // ran from OptimizeDialog.run() the dialog is already up — calling it
-    // again is a no-op cheap refresh, fine.
-    OptimizerPreview.showLoading(mode, plant);
+    // OptimizeDialog.run() already called showLoading(); only open it here if
+    // the dialog is not up, so the body is never rewritten a second time.
     const previewRoot = document.getElementById('modal-opt-preview');
+    if (previewRoot?.hidden) OptimizerPreview.showLoading(mode, plant);
     const footBtns: HTMLButtonElement[] = previewRoot
       ? Array.from(previewRoot.querySelectorAll<HTMLButtonElement>('.modal-foot button'))
       : [];
@@ -1469,17 +1474,12 @@ export const OptimizerPreview = {
         OptimizerPreview._explanation = explanation;
 
         // Alternate-mode KPI vectors — the only data needed for the plan
-        // comparison table. Phase 2 (Pkg D): this run is now DEFERRED until
-        // after the primary preview has painted (see below, after the first
-        // _render() call) instead of running synchronously back-to-back with
-        // the primary evaluation. Until it lands, _finalists stays null and
-        // _finalistsPending tells _render() to show a placeholder.
-        //
-        // Each primary mode can have multiple alternates (e.g. Changeover's
-        // alts are SPT and Due Date) — evaluated one at a time via a chained
-        // yield-per-alt tick (see runNextAlt below), never in one synchronous
-        // pass, so a single alt's up-to-SETUP_AWARE_DEADLINE_MS search can't
-        // compound into a multi-alt main-thread freeze.
+        // comparison table. Each primary mode can have multiple alternates
+        // (e.g. Changeover's alts are SPT and Due Date) — evaluated one at a
+        // time with a yield per alt (see the loop below), never in one
+        // synchronous pass, so a single alt's up-to-SETUP_AWARE_DEADLINE_MS
+        // search can't compound into a multi-alt main-thread freeze. All of
+        // them finish before the preview is rendered or revealed.
         const altModeMap: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
           changeover: ['spt', 'duedate'],
           spt: ['changeover', 'duedate'],
@@ -1487,75 +1487,68 @@ export const OptimizerPreview = {
         };
         const altModes = altModeMap[mode] ?? [];
         OptimizerPreview._finalists = null;
-        OptimizerPreview._finalistsPending = altModes.length > 0;
 
         OptimizerPreview.stale = false;
         OptimizerPreview._staleReason = null;
         OptimizerPreview._staleMessageKey = null;
         OptimizerPreview._startTaskWatch();
 
+        // Compute every alternate BEFORE the first (and only) render, so the
+        // popup opens once, fully populated; spinner-only until then. One alt
+        // per tick: requestAnimationFrame + setTimeout(0) yields to the event
+        // loop (and a paint) so the spinner keeps animating.
+        const finalists: NonNullable<typeof OptimizerPreview['_finalists']> = [
+          { label: 'A', mode, kpis: postKpis, whyNot: null },
+        ];
+        for (let idx = 0; idx < altModes.length; idx++) {
+          await new Promise<void>(resolve => requestAnimationFrame(() => { setTimeout(resolve, 0); }));
+          // Race safety: bail silently unless this preview is still the one
+          // the user is waiting on. `active` catches apply/discard/abandon
+          // (all route through _clear()); `_runSeq` catches a newer
+          // runWithPreview already in flight, so a slow superseded run can
+          // never resurrect stale finalists or issue an orphan render.
+          if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
+          // A Store setup write landing mid-way (markStale) would make further
+          // alts evaluate against setup data Plan A never saw. Stop comparing
+          // and reveal Plan A alone (Apply is blocked by the stale flag anyway).
+          if (OptimizerPreview.stale) { finalists.length = 1; break; }
+          const altMode = altModes[idx];
+          try {
+            const _evalAltT0 = performance.now();
+            const altDeadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+            const altEvaluation = runOptimizerPreview({
+              runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
+              request: previewEvaluationRequest(altMode, opts, plant, altDeadlineAt),
+            }, {
+              signal: workerAbortController?.signal,
+              syncEvaluator: evaluateSchedule,
+            });
+            const altCandidate = altEvaluation instanceof Promise ? await altEvaluation : altEvaluation;
+            PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
+            const _applyPatchesT0b = performance.now();
+            const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
+            PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
+            const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+            finalists.push({
+              label: String.fromCharCode(66 + idx), // 'B', 'C', ...
+              mode: altMode, kpis: altKpis,
+              whyNot: describeFinalistWhyNot(postKpis, altKpis),
+            });
+          } catch (altErr: unknown) {
+            // A cancelled run (newer preview / discard) must not fall through to a render.
+            if (altErr instanceof Error && altErr.name === 'AbortError') throw altErr;
+            /* this alt failed — omit it; other alts (and Plan A) still show */
+          }
+          // The await above may have outlived this preview.
+          if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
+        }
+        OptimizerPreview._finalists = finalists.length > 1 ? finalists : null;
+
         footBtns.forEach((b) => { b.disabled = false; });
         OptimizerPreview._syncApplyButton();
         OptimizerPreview._render();
-
-        if (altModes.length > 0) {
-          const finalists: NonNullable<typeof OptimizerPreview['_finalists']> = [
-            { label: 'A', mode, kpis: postKpis, whyNot: null },
-          ];
-          // Paint first, then compute each alt off the critical path, one at
-          // a time. requestAnimationFrame alone still runs before the browser
-          // paints the just-scheduled frame; the extra setTimeout(0) yields
-          // to the event loop (and therefore a paint) before each alt runs.
-          const runNextAlt = (idx: number): void => {
-            if (idx >= altModes.length) {
-              OptimizerPreview._finalists = finalists.length > 1 ? finalists : null;
-              OptimizerPreview._finalistsPending = false;
-              OptimizerPreview._render();
-              return;
-            }
-            requestAnimationFrame(() => setTimeout(async () => {
-              // Race safety: bail silently — touching neither _finalists nor
-              // _finalistsPending — unless this preview is still the one the
-              // user is looking at. `active` catches apply/discard/abandon
-              // (all route through _clear(), which already resets both
-              // fields); `_runSeq` catches a newer runWithPreview call already
-              // in flight (whose own synchronous block already reset both
-              // fields for itself) so a slow, superseded run can never
-              // resurrect stale finalists or issue an orphan render. Also bail
-              // if `stale` went true between paint and this callback — a Store
-              // setup write landing in that window (see markStale) would make
-              // this alt evaluate against setup data Plan A never saw, so the
-              // comparison would no longer be apples-to-apples. Checked before
-              // EVERY alt (not just once) since real time passes between them.
-              if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq || OptimizerPreview.stale) return;
-              const altMode = altModes[idx];
-              try {
-                const _evalAltT0 = performance.now();
-                const altDeadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
-                const altEvaluation = runOptimizerPreview({
-                  runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
-                  request: previewEvaluationRequest(altMode, opts, plant, altDeadlineAt),
-                }, {
-                  signal: workerAbortController?.signal,
-                  syncEvaluator: evaluateSchedule,
-                });
-                const altCandidate = altEvaluation instanceof Promise ? await altEvaluation : altEvaluation;
-                PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
-                const _applyPatchesT0b = performance.now();
-                const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
-                PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
-                const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
-                finalists.push({
-                  label: String.fromCharCode(66 + idx), // 'B', 'C', ...
-                  mode: altMode, kpis: altKpis,
-                  whyNot: describeFinalistWhyNot(postKpis, altKpis),
-                });
-              } catch { /* this alt failed — omit it; other alts (and Plan A) still show */ }
-              runNextAlt(idx + 1);
-            }, 0));
-          };
-          runNextAlt(0);
-        }
+        OptimizerPreview._endLoadingState();
+        previewRoot?.querySelector<HTMLElement>('.modal-head button')?.focus();
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           // A newer preview or an explicit discard owns the modal now. Do not
@@ -1745,11 +1738,6 @@ export const OptimizerPreview = {
           <tbody>${bodyRows}</tbody>
           <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${Util.escapeHtml(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${Util.escapeHtml(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
         </table></div>`;
-      } else if (OptimizerPreview._finalistsPending) {
-        // Phase 2 (Pkg D): Plan B now computes in a deferred background run
-        // (after the primary preview paints) instead of blocking the initial
-        // render — show a lightweight placeholder until it lands.
-        planTableHtml = `<p class="opt-pv-section-intro">${Util.escapeHtml(Util.t('ui.opt_pv_plan_computing'))}</p>`;
       }
 
       // §4.3 — aggregate prune tally for the whole run. Only rendered when at
@@ -2219,7 +2207,7 @@ export const OptimizerPreview = {
     OptimizerPreview._syntheticSetup = false;
     OptimizerPreview._explanation = null;
     OptimizerPreview._finalists = null;
-    OptimizerPreview._finalistsPending = false;
+    OptimizerPreview._endLoadingState();
     OptimizerPreview.stale = false;
     OptimizerPreview._staleReason = null;
     OptimizerPreview._staleMessageKey = null;

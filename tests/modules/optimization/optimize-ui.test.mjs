@@ -777,6 +777,129 @@ test('OptimizerPreview keeps evaluation failures out of ErrorLog persistence', (
   }
 });
 
+// Single-reveal fixture: a fake #modal-opt-preview / #opt-preview-body that counts
+// every body rewrite and records _finalists at each one, plus a sync rAF.
+function openSingleRevealFixture(plant, tasks) {
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorDocument = globalThis.document;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorObserver = globalThis.MutationObserver;
+  const priorGuard = OptimizerPreview._abandonGuardInstalled;
+  globalThis.MutationObserver = class { observe() {} disconnect() {} };
+  OptimizerPreview._abandonGuardInstalled = false;
+  const root = makeSandboxElement('modal-opt-preview');
+  root.hidden = true;
+  const body = makeSandboxElement('opt-preview-body');
+  const writes = [];
+  let html = '';
+  Object.defineProperty(body, 'innerHTML', {
+    get() { return html; },
+    set(value) { html = value; writes.push({ html: value, finalists: OptimizerPreview._finalists }); },
+  });
+  const elements = new Map([['modal-opt-preview', root], ['opt-preview-body', body]]);
+  globalThis.document = {
+    getElementById(id) { return elements.get(id) || null; },
+    addEventListener() {}, removeEventListener() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    createElement() { return makeSandboxElement('created'); },
+    body: { appendChild() {}, classList: { add() {}, remove() {} } },
+  };
+  globalThis.requestAnimationFrame = callback => { callback(performance.now()); return 1; };
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  Store.setTasks(tasks, 'unit-test');
+  Store.setSelectedPlant(plant, 'unit-test');
+  return {
+    root, body, writes,
+    restore() {
+      OptimizerPreview._clear();
+      Alerts.scheduleRecompute = priorScheduleRecompute;
+      Store.setTasks(priorTasks, 'unit-test');
+      Store.setSelectedPlant(priorPlant, 'unit-test');
+      globalThis.document = priorDocument;
+      globalThis.requestAnimationFrame = priorRaf;
+      globalThis.NIMBUS = priorNimbus;
+      globalThis.MutationObserver = priorObserver;
+      OptimizerPreview._abandonGuardInstalled = priorGuard;
+    },
+  };
+}
+
+const singleRevealTasks = [
+  { id: 'sr-long', PLANT: 'SR', MACHINE: 'L1', RUN_TIME: 5, start_date: null, end_date: null },
+  { id: 'sr-short', PLANT: 'SR', MACHINE: 'L1', RUN_TIME: 1, start_date: null, end_date: null },
+];
+
+test('single reveal: spinner only until alternates finish, then the body is rendered once with _finalists set', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview.showLoading('spt', 'SR');
+    assert.ok(fx.root.classList.contains('opt-pv-loading'), 'showLoading hides the card (spinner only)');
+    assert.equal(fx.writes.length, 1, 'showLoading writes the body once');
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00') });
+
+    assert.equal(fx.writes.length, 1, 'runWithPreview must not rewrite the loading body a second time');
+    assert.ok(fx.root.classList.contains('opt-pv-loading'), 'card stays hidden while alternates compute');
+    assert.equal(OptimizerPreview._finalists, null);
+
+    for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
+
+    assert.ok(!fx.root.classList.contains('opt-pv-loading'), 'card is revealed once everything is done');
+    assert.equal(fx.writes.length, 2, 'exactly one results render after the spinner, none for the comparison');
+    assert.ok(Array.isArray(fx.writes[1].finalists) && fx.writes[1].finalists.length > 1,
+      '_finalists is already populated at the first results render');
+    assert.match(fx.writes[1].html, /opt-pv-plan-table/, 'the first render already contains the plan comparison table');
+    await wait(50);
+    assert.equal(fx.writes.length, 2, 'nothing re-renders the body afterwards');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('single reveal: discarding while alternates compute clears the loading class and never renders', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview.showLoading('spt', 'SR');
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00') });
+    OptimizerPreview.discard();
+
+    assert.ok(!fx.root.classList.contains('opt-pv-loading'), 'discard clears the loading state');
+    await wait(100);
+    assert.equal(fx.writes.length, 1, 'the superseded run never renders into the closed preview');
+    assert.equal(OptimizerPreview._finalists, null);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('single reveal: an evaluation error clears the loading class and shows the error card', () => {
+  const fx = openSingleRevealFixture('SR-FAIL', [
+    { id: 'sr-fail', PLANT: 'SR-FAIL', MACHINE: 'F1', RUN_TIME: 1, start_date: new Date(), end_date: new Date() },
+  ]);
+  const priorSave = ErrorLog._scheduleSave;
+  const priorShip = ErrorLog._scheduleShip;
+  const priorEntries = ErrorLog.entries();
+  ErrorLog._scheduleSave = () => {};
+  ErrorLog._scheduleShip = () => {};
+  try {
+    OptimizerPreview.showLoading('backlog', 'SR-FAIL');
+    assert.ok(fx.root.classList.contains('opt-pv-loading'));
+    OptimizerPreview.runWithPreview('backlog', { plant: 'SR-FAIL', respectCalendar: true });
+
+    assert.ok(!fx.root.classList.contains('opt-pv-loading'), 'error path reveals the card so the message is visible');
+    assert.match(fx.body.innerHTML, /candidate|opt_pv_failed|failed|Unknown error|\w/, 'an error body is written');
+    assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed');
+  } finally {
+    ErrorLog._entries = priorEntries;
+    ErrorLog._scheduleSave = priorSave;
+    ErrorLog._scheduleShip = priorShip;
+    fx.restore();
+  }
+});
+
 test('SandboxAdapter restores optimizer side effects on What-If discard before alert recompute', () => {
   const plant = 'WHAT-IF-DISCARD';
   const baselineLastOptimize = new Date('2026-08-01T10:00:00Z');

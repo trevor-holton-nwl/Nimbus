@@ -34,6 +34,8 @@ No `backend/` counterpart of its own — the optimizer is pure frontend logic. I
 - **Store events**: emits `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` (sandbox.mts); triggers `Alerts.clearDismissed`/`scheduleRecompute`/`scheduleRecomputeLines`/`scheduleAlertsForPatches` on the engine side after a run/patch-apply.
 - **No direct backend endpoints** are called from this domain — `saveAll`/`POST /tasks/update` lives in `scheduling/persistence.mts`, invoked by `SandboxAdapter`/`OptimizerPreview` in `optimize-ui.mts`, not by `engine.mts`/`setup-scheduler.mts` themselves.
 
+- **Preview opens once (single reveal).** `OptimizerPreview.showLoading` adds `opt-pv-loading` to `#modal-opt-preview` (card hidden, spinner only, styled in `styles.css`). `runWithPreview` computes the primary plan AND every alternate plan (one per rAF+`setTimeout(0)` tick) before setting `_finalists`, calling `_render()` exactly once and removing the class (`_endLoadingState`, also called from `_clear`/`hideLoading`). `runWithPreview` no longer calls `showLoading` itself unless the modal is closed. Time to first paint now includes the alternates (each bounded by `SETUP_AWARE_DEADLINE_MS`). `_finalistsPending` and its "Computing comparison" placeholder are gone (locale key `ui.opt_pv_plan_computing` is now unused).
+
 ## Tests
 
 - `tests/modules/optimization/engine.test.mjs` (3,717 lines) — Engine dispatch, auto-reflow, candidate evaluation, synthetic snapshot, backlog frozen-horizon behavior.
