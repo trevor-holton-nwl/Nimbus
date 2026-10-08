@@ -797,9 +797,14 @@ def test_upload_audit_source_filter_applies_before_the_limit():
     from fastapi import HTTPException
 
     ids = {"sap": [], "excel": []}
-    base = dt.datetime(2020, 1, 1, 12, 0)
     with db._pool.connection() as conn, conn.cursor() as cur:
         try:
+            # Hermetic: our SAP rows are timestamped newer than every audit row already present (leftovers from
+            # other tests or ad-hoc runs), so they always sit inside the limit-50 SAP window; the 60 excel rows
+            # are a day newer still, so the unfiltered limit-50 window still excludes the SAP rows.
+            cur.execute("SELECT GREATEST(COALESCE(max(uploaded_at), now()::timestamp), now()::timestamp)"
+                        " + interval '1 day' FROM upload_audit")
+            base = cur.fetchone()[0].replace(microsecond=0)
             for i in range(3):
                 bid = str(uuid.uuid4())
                 ids["sap"].append(bid)

@@ -654,6 +654,8 @@ class TestSapTruthReupload:
         self.base = (dt.datetime.now() + dt.timedelta(days=40)).replace(hour=8, minute=0, second=0, microsecond=0)
         with pg._pool.connection() as conn, conn.cursor() as cur:
             self._cleanup(cur)
+            cur.execute("SELECT clock_timestamp()::timestamp")
+            started = cur.fetchone()[0]
             cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'sap truth test')", (self.SUB,))
             cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')",
                         (self.SUB, self.PLANT))
@@ -670,6 +672,10 @@ class TestSapTruthReupload:
         yield
         with pg._pool.connection() as conn, conn.cursor() as cur:
             self._cleanup(cur)
+            # source="sap" upserts write an upload_audit row (filename 'sap:sap') that the filename-LIKE
+            # cleanup above does not match; remove the ones this test created (by time) so they cannot
+            # crowd test_integration_pg's limit-50 upload-audit window.
+            cur.execute("DELETE FROM upload_audit WHERE filename = 'sap:sap' AND uploaded_at >= %s", (started,))
             conn.commit()
 
     # ---- helpers -------------------------------------------------------
