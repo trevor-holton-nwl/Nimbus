@@ -1813,6 +1813,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.wc_blocked_needs_members':       'Nenhuma máquina foi atribuída a este centro de trabalho ainda, portanto as alterações não podem ser salvas. Atribua máquinas na aba Máquinas primeiro.',
   'ui.wc_member_count_tip':            '{{n}} máquinas atribuídas',
   'ui.wc_default_not_member':          'A máquina padrão não é mais membro deste centro de trabalho – seleccione uma dos membros atuais.',
+  'ui.wc_code_is_member_of_aggregate':          'Este centro de trabalho tem o nome de uma de suas máquinas – as ordens serão alocadas a essa máquina e nunca serão distribuídas. Renomeie a máquina ou o centro de trabalho.',
   'ui.dist_filter_from':               'De',
   'ui.dist_filter_to':                 'Até',
   'ui.dist_bucket_needs_review':       'Precisa de revisão',

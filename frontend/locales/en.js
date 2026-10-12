@@ -493,6 +493,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.wc_blocked_needs_members':        'No machines are assigned to this work center yet, so changes can\'t be saved. Assign machines on the Machines tab first.',
   'ui.wc_member_count_tip':             '{{n}} machines assigned',
   'ui.wc_default_not_member':           'The default machine is no longer a member of this work center — pick one from the current members.',
+  'ui.wc_code_is_member_of_aggregate':           'This work center is named after one of its machines — orders will land on that machine and never distribute. Rename the machine or the work center.',
   'ui.all_colors':                     'All Colors',
   'ui.all_forms':                      'All Forms',
   'ui.all_statuses':                   'All Statuses',

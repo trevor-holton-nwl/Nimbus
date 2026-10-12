@@ -1814,6 +1814,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.wc_blocked_needs_members':       'Aún no hay máquinas asignadas a este centro de trabajo, por lo que los cambios no se pueden guardar. Asigne máquinas en la pestaña Máquinas primero.',
   'ui.wc_member_count_tip':            '{{n}} máquinas asignadas',
   'ui.wc_default_not_member':          'La máquina predeterminada ya no es miembro de este centro de trabajo – seleccione una de los miembros actuales.',
+  'ui.wc_code_is_member_of_aggregate':          'Este centro de trabajo lleva el nombre de una de sus máquinas – los pedidos se asignarán a esa máquina y nunca se distribuirán. Cambie el nombre de la máquina o del centro de trabajo.',
   'ui.dist_filter_from':               'Desde',
   'ui.dist_filter_to':                 'Hasta',
   'ui.dist_bucket_needs_review':       'Necesita revisión',

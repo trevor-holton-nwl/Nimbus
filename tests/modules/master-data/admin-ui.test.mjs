@@ -320,6 +320,42 @@ test('WorkCenters._wcBlockReason covers every gate rule with the exact backend r
   );
 });
 
+// 1:1 case: a machine named exactly the work center code is linked to it.
+// Alone in single mode it is a valid default (no 'single_mode_without_default');
+// once the work center aggregates (2+ members, or distribute mode) orders would
+// land on that machine and never distribute -> 'wc_code_is_member_of_aggregate'.
+test('WorkCenters._wcBlockReason handles a same-named linked member (wc_code_is_member_of_aggregate)', () => {
+  const base = {
+    description: '', distribution_mode: 'single', default_machine: '',
+    max_separation: 'none', review_required: false, distribute_tooled: false, weights: {},
+  };
+
+  // Alone, single mode, no default -> not blocked.
+  assert.equal(WorkCenters._wcBlockReason({ ...base }, ['20STA11'], '20STA11'), null);
+
+  // Distribute mode with the same-named member -> blocked.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base, distribution_mode: 'distribute' }, ['20STA11', 'M2'], '20STA11'),
+    'wc_code_is_member_of_aggregate',
+  );
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base, distribution_mode: 'distribute' }, ['20STA11'], '20STA11'),
+    'wc_code_is_member_of_aggregate',
+  );
+
+  // Two members in single mode -> blocked.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base }, ['20STA11', 'M2'], '20STA11'),
+    'wc_code_is_member_of_aggregate',
+  );
+
+  // No same-named member -> original rules still apply.
+  assert.equal(
+    WorkCenters._wcBlockReason({ ...base }, ['M1', 'M2'], '20STA11'),
+    'single_mode_without_default',
+  );
+});
+
 test('WorkCenters._buildWrite keeps the loaded plant during a selection change', () => {
   const previous = {
     loadedPlant: WorkCenters._loadedPlant, selected: WorkCenters._selected,

@@ -127,14 +127,20 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
     precedent" (own route, own function, not the generic master-data bulk
     path).
 
-    Validates the four §3.1 write-path rules and raises ValueError on any
+    Validates the §3.1 write-path rules and raises ValueError on any
     violation, with the message prefixed `"<rule_code>: <detail>"` so
     routes.py can surface a structured `{"code": ...}` 400 body:
-      - wc_code_shadowed_by_machine -- the code must not already be a
-        machine name in this plant.
+      - wc_code_shadowed_by_machine -- if a machine in this plant is named
+        exactly like the code, it must be linked to it
+        (machine.sap_workcenter = code, a 1:1 work center). Fires only when
+        that machine is unlinked or linked to another work center.
+      - wc_code_is_member_of_aggregate -- a 1:1 machine linked to its own
+        code may not share the work center with a second member or use
+        distribute mode: orders would land on that machine and never
+        distribute.
       - single_mode_without_default -- single mode requires a default
-        machine (the DB CHECK also refuses this; validated here first for a
-        readable 400 instead of an IntegrityError leaking through).
+        machine, except for a 1:1 work center (same-named machine linked),
+        whose default is implied.
       - default_machine_not_member -- a set default_machine must already be
         a member (machine.sap_workcenter = wc) of this work center.
       - distribute_mode_thin -- distribute mode needs at least two current
@@ -167,12 +173,23 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
     clean_weights = _clean_weights(weights)
 
     with _pool.connection() as conn, conn.cursor() as cur:
-        # wc_code_shadowed_by_machine: the code may not equal a machine name
-        # in the same plant (aggregate_to_detail.md §3.1).
-        cur.execute("SELECT 1 FROM machine WHERE plant = %s AND machine = %s", (plant, wc_clean))
-        if cur.fetchone() is not None:
+        # M = the machine named exactly like this code (a 1:1 work center), if any.
+        # wc_code_shadowed_by_machine: M must be linked to this code, or the
+        # orders land on M and the work center is silently inert
+        # (aggregate_to_detail.md §3.1).
+        cur.execute("SELECT sap_workcenter FROM machine WHERE plant = %s AND machine = %s", (plant, wc_clean))
+        m_row = cur.fetchone()
+        m_linked_here = m_row is not None and m_row[0] == wc_clean
+        if m_row is not None and not m_linked_here:
+            if m_row[0] is None:
+                raise ValueError(
+                    f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}; "
+                    f"set that machine's SAP work center to {wc_clean!r} (so it becomes this work center's "
+                    "1:1 member) or rename the machine"
+                )
             raise ValueError(
-                f"wc_code_shadowed_by_machine: {wc_clean!r} is already a machine name in plant {plant!r}"
+                f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}, "
+                f"but machine {wc_clean!r} is linked to work center {m_row[0]!r}"
             )
 
         # Current membership -- machines already linked via machine.sap_workcenter.
@@ -181,7 +198,14 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
         cur.execute("SELECT machine FROM machine WHERE plant = %s AND sap_workcenter = %s", (plant, wc_clean))
         members = {row[0] for row in cur.fetchall()}
 
-        if mode == "single" and not default_machine_clean:
+        if m_linked_here and (len(members) > 1 or mode == "distribute"):
+            raise ValueError(
+                f"wc_code_is_member_of_aggregate: orders for {wc_clean!r} will land on machine {wc_clean!r} "
+                "and never distribute — an aggregate must not be named after one of its machines"
+            )
+
+        # A 1:1 work center (same-named machine linked to it) implies its default.
+        if mode == "single" and not default_machine_clean and not m_linked_here:
             raise ValueError("single_mode_without_default: single mode requires a default machine")
 
         if default_machine_clean and default_machine_clean not in members:
@@ -3617,6 +3641,7 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
               FROM orders o
              WHERE o.plant = %s AND o.parent_production_order IS NULL
                AND o.machine IN (SELECT sap_workcenter FROM sap_workcenter WHERE plant = %s)
+               AND NOT EXISTS (SELECT 1 FROM machine m WHERE m.plant = o.plant AND m.machine = o.machine)
             """,
             (plant, plant),
         )

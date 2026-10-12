@@ -1825,6 +1825,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.wc_blocked_needs_members':        'Diesem Arbeitszentrum sind noch keine Maschinen zugewiesen, daher können Änderungen nicht gespeichert werden. Weisen Sie zuerst Maschinen auf der Registerkarte „Maschinen" zu.',
   'ui.wc_member_count_tip':             '{{n}} Maschinen zugewiesen',
   'ui.wc_default_not_member':           'Die Standardmaschine ist kein Mitglied dieses Arbeitszentrums mehr — wählen Sie eine aus den aktuellen Mitgliedern.',
+  'ui.wc_code_is_member_of_aggregate':           'Dieses Arbeitszentrum trägt den Namen einer seiner Maschinen — Aufträge landen auf dieser Maschine und werden nie verteilt. Benennen Sie die Maschine oder das Arbeitszentrum um.',
 
   // Distribution filters and buckets
   'ui.dist_filter_from':                'Von',

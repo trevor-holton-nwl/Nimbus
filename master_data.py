@@ -1155,6 +1155,10 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                         meta = col_meta_by_name.get(c)
                         if meta and meta["sql_type"] not in _TEXT_LIKE_SQL_TYPES:
                             v = None
+                        elif table == "machine" and c == "sap_workcenter":
+                            # A blank pasted cell means "no work center", not the
+                            # literal '' -- which would trip fk_machine_sap_workcenter.
+                            v = None
                     values.append(v)
                 values_list.append(values)
             try:
@@ -1168,7 +1172,10 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                     cur.nextset()
             except psycopg.errors.ForeignKeyViolation as exc:
                 conn.rollback()
-                raise ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.") from exc
+                err = ValueError(f"Cannot apply change to {table!r}: it is referenced by or references other rows.")
+                # Lets the route say WHICH constraint tripped (see md_bulk).
+                err.constraint_name = getattr(getattr(exc, "diag", None), "constraint_name", None)  # type: ignore[attr-defined]
+                raise err from exc
             except (
                 psycopg.errors.CheckViolation,
                 psycopg.errors.NotNullViolation,

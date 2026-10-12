@@ -4724,12 +4724,13 @@ function _wcStagedBase(row: WorkCenterRow): WorkCenterStaged {
 // Client-side mirror of the three PUT /distribution/{plant}/workcenters/{wc}
 // pre-flight rules (backend/distribution/data.py:161-172) — see
 // WorkCenters._wcBlockReason below for the rules themselves.
-type WcBlockReason = 'single_mode_without_default' | 'default_machine_not_member' | 'distribute_mode_thin' | null;
+type WcBlockReason = 'single_mode_without_default' | 'default_machine_not_member' | 'wc_code_is_member_of_aggregate' | 'distribute_mode_thin' | null;
 
 function _wcNoticeText(reason: Exclude<WcBlockReason, null>, memberCount: number): string {
   switch (reason) {
     case 'single_mode_without_default': return Util.t('ui.wc_single_needs_default');
     case 'default_machine_not_member':  return Util.t('ui.wc_default_not_member');
+    case 'wc_code_is_member_of_aggregate': return Util.t('ui.wc_code_is_member_of_aggregate');
     case 'distribute_mode_thin':
       // Zero members is only fixable from the Machines tab (membership
       // isn't edited here, per WorkCenterStaged's own doc comment) — say so
@@ -4871,7 +4872,7 @@ export const WorkCenters = {
       // Whole-plant machine fetch — bounded by plant (Production Scale
       // Roadmap: ~70+ machines/plant is fine to load in full; never all
       // plants at once). Needed for membership derivation (machine.sap_workcenter),
-      // the default-machine combobox, and the New-form shadowed-code check.
+      // and the default-machine combobox.
       // Only re-fetched on a real reset (plant/search change), not on
       // "Load more" paging through the work-center list — the machine roster
       // doesn't change just because another page of work centers loaded.
@@ -4972,7 +4973,7 @@ export const WorkCenters = {
       const color = Config.COLORS[i % Config.COLORS.length];
       const members = _wcMembers(WorkCenters._machines, r.sap_workcenter).map((m) => m.machine);
       const n = members.length;
-      const reason = WorkCenters._wcBlockReason(_wcStagedBase(r), members);
+      const reason = WorkCenters._wcBlockReason(_wcStagedBase(r), members, r.sap_workcenter);
       return `
       <div class="lines-nav-item${r.sap_workcenter === WorkCenters._selected ? ' active' : ''}" data-code="${Util.escapeHtml(r.sap_workcenter)}">
         <span class="line-dot" style="background:${color};display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;"></span>
@@ -5021,7 +5022,7 @@ export const WorkCenters = {
     const pct = _wcEffectivePercents(members, staged.weights);
     const totalPct = members.reduce((s, m) => s + (pct[m] || 0), 0);
     const evenState = members.every((m) => staged.weights[m] == null);
-    const reason = WorkCenters._wcBlockReason(staged, members);
+    const reason = WorkCenters._wcBlockReason(staged, members, code);
 
     const gi = WorkCenters._rows.findIndex((r) => r.sap_workcenter === code);
     const color = Config.COLORS[(gi >= 0 ? gi : 0) % Config.COLORS.length];
@@ -5186,7 +5187,7 @@ export const WorkCenters = {
     const code = WorkCenters._selected;
     if (!staged || !code) return;
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
-    const reason = WorkCenters._wcBlockReason(staged, members);
+    const reason = WorkCenters._wcBlockReason(staged, members, code);
     const host = document.getElementById('wc-notices');
     if (host) host.innerHTML = _wcNoticesInnerHtml(reason, members.length);
   },
@@ -5202,7 +5203,7 @@ export const WorkCenters = {
     if (!row || !el) return;
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
     const n = members.length;
-    const reason = WorkCenters._wcBlockReason(_wcStagedBase(row), members);
+    const reason = WorkCenters._wcBlockReason(_wcStagedBase(row), members, code);
 
     let countEl = el.querySelector<HTMLElement>('.wc-member-count');
     if (n > 0) {
@@ -5409,7 +5410,7 @@ export const WorkCenters = {
     const code = WorkCenters._selected;
     if (!staged || !baseline || !code || WorkCenters._saving) return;
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
-    if (WorkCenters._wcBlockReason(staged, members)) return;
+    if (WorkCenters._wcBlockReason(staged, members, code)) return;
     if (_wcStagedEqual(staged, baseline)) return;
     WorkCenters._dirty = true;
     void WorkCenters._autosave();
@@ -5424,9 +5425,15 @@ export const WorkCenters = {
   // all — ticking a checkbox on a 1-member distribute work center used to
   // sail straight through Save and surface a raw 400 as a generic toast.
   // Pure and DOM-free by design (also exercised directly by tests).
-  _wcBlockReason(staged: WorkCenterStaged, members: string[]): WcBlockReason {
-    if (staged.distribution_mode === 'single' && !staged.default_machine) return 'single_mode_without_default';
+  // `code` is the work center's own code: a member machine named exactly that
+  // is the 1:1 case (orders land on it directly). It satisfies the single-mode
+  // default, but blocks when the work center also aggregates (2+ members or
+  // distribute mode), since orders would never distribute.
+  _wcBlockReason(staged: WorkCenterStaged, members: string[], code?: string): WcBlockReason {
+    const sameNamedMember = !!code && members.includes(code);
+    if (staged.distribution_mode === 'single' && !staged.default_machine && !sameNamedMember) return 'single_mode_without_default';
     if (staged.default_machine && !members.includes(staged.default_machine)) return 'default_machine_not_member';
+    if (sameNamedMember && (members.length > 1 || staged.distribution_mode === 'distribute')) return 'wc_code_is_member_of_aggregate';
     if (staged.distribution_mode === 'distribute' && members.length < 2) return 'distribute_mode_thin';
     return null;
   },
@@ -5443,7 +5450,7 @@ export const WorkCenters = {
     if (!plant || !code || !staged) return null;
 
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
-    if (WorkCenters._wcBlockReason(staged, members)) return null;
+    if (WorkCenters._wcBlockReason(staged, members, code)) return null;
 
     // Full current-membership weight set, not just the changed cells — the
     // Even button clears every member to NULL, which only takes effect if

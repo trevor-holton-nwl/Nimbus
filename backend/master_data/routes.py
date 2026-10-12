@@ -388,11 +388,15 @@ def _sap_workcenter_bulk_warnings(upserted_rows: list[dict]) -> list[dict]:
     `default_machine` at all; the row's true current state has to come from
     the table itself, post-commit.
 
-    Mirrors the four rules `backend/distribution/data.py.save_workcenter`
+    Mirrors the rules `backend/distribution/data.py.save_workcenter`
     enforces as hard 400s on its own dedicated route, except
-    `distribute_mode_thin` is warning-only here (the generic grid has no
-    equivalent hard gate to enforce it against, per aggregate_to_detail.md
-    §3.1's "warning only, not blocking"). Never raises -- a failure in this
+    `distribute_mode_thin` and `wc_code_is_member_of_aggregate` are
+    warning-only here (the generic grid has no equivalent hard gate to
+    enforce them against, per aggregate_to_detail.md §3.1's "warning only,
+    not blocking"). A work center whose same-named machine is linked to it
+    (a 1:1 work center) is valid and warns about nothing, and its
+    single-mode default is implied; `wc_code_shadowed_by_machine` fires only
+    when that same-named machine is unlinked or linked elsewhere. Never raises -- a failure in this
     check must never be mistaken for the write itself failing, since the
     write already committed before this runs."""
     seen: set[tuple[str, str]] = set()
@@ -423,17 +427,33 @@ def _sap_workcenter_bulk_warnings(upserted_rows: list[dict]) -> list[dict]:
                 continue  # deleted in this same batch, or a delete-only request
             mode, default_machine = row
 
-            cur.execute("SELECT 1 FROM machine WHERE plant = %s AND machine = %s", (plant, code))
-            if cur.fetchone() is not None:
-                warnings.append({
-                    "level": "warn",
-                    "msg": f"wc_code_shadowed_by_machine: {code!r} is also a machine name in plant {plant!r}.",
-                })
+            # M = the machine named exactly like the code (a 1:1 work center), if any.
+            cur.execute("SELECT sap_workcenter FROM machine WHERE plant = %s AND machine = %s", (plant, code))
+            m_row = cur.fetchone()
+            m_exists = m_row is not None
+            m_linked_here = m_exists and m_row[0] == code
 
             cur.execute("SELECT machine FROM machine WHERE plant = %s AND sap_workcenter = %s", (plant, code))
             members = {r[0] for r in cur.fetchall()}
 
-            if mode == "single" and not default_machine:
+            if m_exists and not m_linked_here:
+                if m_row[0] is None:
+                    msg = (f"wc_code_shadowed_by_machine: {code!r} is also a machine name in plant {plant!r}; "
+                           f"set that machine's SAP work center to {code!r} (so it becomes this work center's "
+                           "1:1 member) or rename the machine.")
+                else:
+                    msg = (f"wc_code_shadowed_by_machine: {code!r} is also a machine name in plant {plant!r}, "
+                           f"but machine {code!r} is linked to work center {m_row[0]!r}.")
+                warnings.append({"level": "warn", "msg": msg})
+
+            if m_linked_here and (len(members) > 1 or mode == "distribute"):
+                warnings.append({
+                    "level": "warn",
+                    "msg": (f"wc_code_is_member_of_aggregate: orders for {code!r} will land on machine {code!r} "
+                            "and never distribute — an aggregate must not be named after one of its machines."),
+                })
+
+            if mode == "single" and not default_machine and not m_linked_here:
                 # This is now the ONLY enforcement on the generic-grid path. The
                 # table-level CHECK (distribution_mode = 'distribute' OR
                 # default_machine IS NOT NULL) was dropped on 2026-09-18
@@ -530,6 +550,11 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
                 _recompute_routing_for_plants(flipped_plants)
         return result
     except ValueError as e:
+        if table == "machine" and getattr(e, "constraint_name", None) == "fk_machine_sap_workcenter":
+            raise HTTPException(
+                status_code=400,
+                detail="machine rows reference SAP work centers that don't exist yet — upload the work centers first",
+            ) from e
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 

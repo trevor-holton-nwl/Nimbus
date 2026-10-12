@@ -1814,6 +1814,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.wc_blocked_needs_members':       'Aucune machine n\'est encore assignée à ce centre de travail, les modifications ne peuvent donc pas être enregistrées. Assignez d\'abord les machines dans l\'onglet Machines.',
   'ui.wc_member_count_tip':            '{{n}} machines assignées',
   'ui.wc_default_not_member':          'La machine par défaut n\'est plus membre de ce centre de travail – sélectionnez-en une parmi les membres actuels.',
+  'ui.wc_code_is_member_of_aggregate':          'Ce centre de travail porte le nom de l\'une de ses machines – les ordres seront affectés à cette machine et jamais répartis. Renommez la machine ou le centre de travail.',
   'ui.dist_filter_from':               'De',
   'ui.dist_filter_to':                 'À',
   'ui.dist_bucket_needs_review':       'Nécessite un examen',

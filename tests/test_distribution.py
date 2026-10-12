@@ -158,6 +158,17 @@ class TestClassifyRow:
         assert result["type"] == "distribute"
         assert result["warnings"] == []
 
+    def test_name_collision_machine_wins(self):
+        """Same value in both lookups (a 1:1 work center): machine-first, plain order."""
+        result = classify_row(
+            "P1", "X1",
+            {"P1": {"X1": {}}},
+            {"P1": {"X1": {"distribution_mode": "single", "default_machine": None, "members": ["X1"]}}},
+        )
+        assert result["type"] == "plain"
+        assert result["machine"] == "X1"
+        assert result["warnings"] == []
+
     def test_unknown_code(self):
         """Unknown machine/work-center code."""
         result = classify_row("P1", "UNKNOWN", {"P1": {}}, {"P1": {}})
@@ -3422,6 +3433,108 @@ class TestResolveMachinesWritesAdminAudit(_ReweightFixtureBase):
 
         after = _count_admin_audit(pg, "resolve_machines", self.PLANT)
         assert after == before + 1
+
+
+@pytest.mark.pg
+class TestOneToOneWorkcenterRules(_ReweightFixtureBase):
+    """A work center whose code equals a machine name (a 1:1 work center) is
+    valid only when that machine is explicitly linked to it
+    (machine.sap_workcenter = code); an aggregate may not be named after one
+    of its own members; `resolve` wc_codes never picks orders already on a
+    real machine."""
+    WC = "ZZTEST_WC_ONE2ONE"           # also the name of the 1:1 machine
+    L2 = "ZZTEST_L2_ONE2ONE"
+    OTHER = "ZZTEST_WC_ONE2ONE_OTH"
+    ORD, MAT = "ZZTEST_ORD_ONE2ONE", "ZZT_MAT_ONE2ONE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.plain_id = pg.make_id(self.ORD, self.MAT)
+        self._wipe(pg)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # Unconfigured work center (single + NULL default is reachable since
+            # the 2026-09-18 CHECK drop) and a same-named machine, NOT linked yet.
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES (%s, %s, 'single')",
+                (self.PLANT, self.WC),
+            )
+            cur.execute(
+                "INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES (%s, %s, 'single')",
+                (self.PLANT, self.OTHER),
+            )
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine) VALUES (%s,%s,%s)",
+                (self.SUB, self.PLANT, self.WC),
+            )
+            _seed_distribution_material(cur, self.MAT, self.PLANT)
+            conn.commit()
+        yield
+        self._wipe(pg)
+
+    def _wipe(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.WC, self.L2, self.ORD, self.MAT)
+            cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.OTHER))
+            cur.execute(
+                "DELETE FROM admin_audit WHERE table_name = 'sap_workcenter' AND action = 'save_workcenter'"
+                " AND details->>'sap_workcenter' IN (%s, %s)", (self.WC, self.OTHER),
+            )
+            conn.commit()
+
+    def _link(self, pg, machine, wc):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE machine SET sap_workcenter = %s WHERE plant = %s AND machine = %s",
+                        (wc, self.PLANT, machine))
+            conn.commit()
+
+    def _save(self, mode="single", default=None):
+        return distribution_data.save_workcenter(
+            self.PLANT, self.WC, None, mode, default, "none", True, False, None, user_email="tester")
+
+    def test_linked_one_to_one_saves_single_with_null_default(self, pg):
+        self._link(pg, self.WC, self.WC)
+        result = self._save()
+        assert result["distribution_mode"] == "single"
+        assert result["default_machine"] is None
+
+    def test_unlinked_same_named_machine_is_shadowed(self, pg):
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine") as ei:
+            self._save()
+        assert "set that machine's SAP work center" in str(ei.value)
+
+    def test_same_named_machine_linked_elsewhere_is_shadowed(self, pg):
+        self._link(pg, self.WC, self.OTHER)
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine") as ei:
+            self._save()
+        assert self.OTHER in str(ei.value)
+
+    def test_linked_same_named_machine_plus_second_member_is_refused(self, pg):
+        self._link(pg, self.WC, self.WC)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L2, self.WC),
+            )
+            conn.commit()
+        with pytest.raises(ValueError, match="wc_code_is_member_of_aggregate"):
+            self._save()
+        with pytest.raises(ValueError, match="wc_code_is_member_of_aggregate"):
+            self._save(mode="distribute")
+
+    def test_resolve_wc_codes_ignores_plain_order_on_a_real_machine(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, "
+                "basic_start_date, basic_finish_date, run_time, order_quantity) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.plain_id, self.ORD, self.MAT, self.WC, self.PLANT,
+                 dt.datetime(2026, 10, 1, 8, 0), dt.datetime(2026, 10, 1, 18, 0), 10.0, 100.0),
+            )
+            conn.commit()
+        result = distribution_data.resolve(self.PLANT, "wc_codes", dry_run=True, actor="tester")
+        assert result == {"headers_created": 0, "children_upserted": 0, "single_rewrites": 0,
+                          "repaired": 0, "skipped": 0}
 
 
 @pytest.mark.pg

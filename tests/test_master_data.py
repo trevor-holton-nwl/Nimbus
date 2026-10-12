@@ -450,3 +450,151 @@ def test_labor_plan_rejects_malformed_period(bad):
 def test_labor_plan_line_rejects_malformed_day(bad):
     with pytest.raises(ValueError, match="Invalid day"):
         md.upsert_labor_plan_machine("WTG", "P1", [{"machine": "M1", "day": bad, "avail_hours": 8}])
+
+
+# ---------------------------------------------------------------------------
+# 1:1 work centers (code == machine name): grid warnings, blank-link
+# normalisation, and the FK message on a machine upload that precedes its
+# work center.
+# ---------------------------------------------------------------------------
+class _WcWarnCursor:
+    """Answers the three reads `_sap_workcenter_bulk_warnings` issues, keyed
+    on the SQL text. `machines` maps machine name -> its sap_workcenter."""
+
+    def __init__(self, wc_row, machines):
+        self._wc_row, self._machines = wc_row, machines
+        self._result = None
+
+    def execute(self, statement, params=None):
+        stmt = " ".join(str(statement).split())
+        if stmt.startswith("SELECT distribution_mode, default_machine FROM sap_workcenter"):
+            self._result = [self._wc_row]
+        elif stmt.startswith("SELECT sap_workcenter FROM machine"):
+            _, name = params
+            self._result = [(self._machines[name],)] if name in self._machines else []
+        elif stmt.startswith("SELECT machine FROM machine WHERE plant = %s AND sap_workcenter"):
+            _, code = params
+            self._result = [(m,) for m, wc in self._machines.items() if wc == code]
+        else:
+            raise AssertionError(f"unexpected SQL: {stmt}")
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return list(self._result)
+
+
+def _wc_warnings(monkeypatch, wc_row, machines, code="WC1"):
+    import backend.master_data.routes as md_routes
+
+    monkeypatch.setattr(db, "_pool", _Pool(_WcWarnCursor(wc_row, machines)))
+    return md_routes._sap_workcenter_bulk_warnings([{"plant": "P1", "sap_workcenter": code}])
+
+
+def _codes(warnings):
+    return [w["msg"].split(":", 1)[0] for w in warnings]
+
+
+def test_wc_warnings_linked_one_to_one_has_none(monkeypatch):
+    # 1:1: machine WC1 linked to WC1, single mode, no default -- valid, silent.
+    assert _wc_warnings(monkeypatch, ("single", None), {"WC1": "WC1"}) == []
+
+
+def test_wc_warnings_unlinked_same_named_machine_gets_actionable_shadow(monkeypatch):
+    w = _wc_warnings(monkeypatch, ("single", None), {"WC1": None})
+    assert _codes(w) == ["wc_code_shadowed_by_machine", "single_mode_without_default"]
+    assert "set that machine's SAP work center to 'WC1'" in w[0]["msg"]
+
+
+def test_wc_warnings_same_named_machine_linked_elsewhere_is_shadowed(monkeypatch):
+    w = _wc_warnings(monkeypatch, ("single", "L1"), {"WC1": "OTHER", "L1": "WC1"})
+    assert _codes(w) == ["wc_code_shadowed_by_machine"]
+    assert "linked to work center 'OTHER'" in w[0]["msg"]
+
+
+def test_wc_warnings_aggregate_named_after_member_is_loud(monkeypatch):
+    # Linked same-named machine plus a second member.
+    w = _wc_warnings(monkeypatch, ("single", "WC1"), {"WC1": "WC1", "L2": "WC1"})
+    assert _codes(w) == ["wc_code_is_member_of_aggregate"]
+    assert "never distribute" in w[0]["msg"]
+    # Distribute mode with only the one linked same-named member also fires
+    # (plus the existing thin-distribute warning).
+    w = _wc_warnings(monkeypatch, ("distribute", None), {"WC1": "WC1"})
+    assert _codes(w) == ["wc_code_is_member_of_aggregate", "distribute_mode_thin"]
+
+
+def test_wc_warnings_without_same_named_machine_are_unchanged(monkeypatch):
+    w = _wc_warnings(monkeypatch, ("single", None), {"L1": "WC1"})
+    assert _codes(w) == ["single_mode_without_default"]
+    w = _wc_warnings(monkeypatch, ("single", "L9"), {"L1": "WC1"})
+    assert _codes(w) == ["default_machine_not_member"]
+
+
+def _machine_column_meta():
+    def col(name, label, order, locked=False, nullable=True):
+        return {"column_name": name, "display_label": label, "is_locked": locked,
+                "column_order": order, "sql_type": "TEXT", "is_nullable": nullable,
+                "column_default": None}
+    return [
+        col("subnetwork", "Subnetwork", 1, True, False), col("plant", "Plant", 2, True, False),
+        col("machine", "Machine", 3, True, False), col("sap_workcenter", "SAP Work Center", 4),
+        col("description", "Description", 5),
+    ]
+
+
+def test_bulk_apply_blank_machine_sap_workcenter_becomes_null_but_other_text_stays(monkeypatch):
+    monkeypatch.setattr(md, "_column_meta", lambda cur, table: _machine_column_meta())
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    md.bulk_apply("machine", {"upserts": [
+        {"subnetwork": "SN", "plant": "P1", "machine": "M1", "sap_workcenter": "  ", "description": ""},
+    ]})
+
+    assert _single_row_params(cursor) == ["SN", "P1", "M1", None, ""]
+
+
+def test_bulk_apply_fk_violation_carries_the_constraint_name(monkeypatch):
+    monkeypatch.setattr(md, "_column_meta", lambda cur, table: _machine_column_meta())
+    exc = _pg_error(pg_errors.ForeignKeyViolation, constraint="fk_machine_sap_workcenter")
+    monkeypatch.setattr(md, "_pool", _Pool(_Cursor(raise_exc=exc)))
+
+    with pytest.raises(ValueError) as excinfo:
+        md.bulk_apply("machine", {"upserts": [
+            {"subnetwork": "SN", "plant": "P1", "machine": "M1", "sap_workcenter": "NOPE"},
+        ]})
+
+    assert excinfo.value.constraint_name == "fk_machine_sap_workcenter"
+
+
+def _md_bulk_error(monkeypatch, table, constraint):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    import backend.master_data.routes as md_routes
+
+    def _boom(*a, **k):
+        err = ValueError("Cannot apply change: it is referenced by or references other rows.")
+        err.constraint_name = constraint
+        raise err
+
+    monkeypatch.setattr(md, "bulk_apply", _boom)
+    with pytest.raises(HTTPException) as excinfo:
+        md_routes.md_bulk(table, SimpleNamespace(headers={}), {"upserts": [], "deletes": []})
+    return excinfo.value
+
+
+def test_md_bulk_machine_fk_violation_says_upload_work_centers_first(monkeypatch):
+    e = _md_bulk_error(monkeypatch, "machine", "fk_machine_sap_workcenter")
+    assert e.status_code == 400
+    assert "upload the work centers first" in e.detail
+
+
+def test_md_bulk_other_fk_violations_keep_the_generic_message(monkeypatch):
+    e = _md_bulk_error(monkeypatch, "machine", "some_other_fk")
+    assert e.status_code == 400
+    assert "referenced by or references other rows" in e.detail
+    e = _md_bulk_error(monkeypatch, "sap_workcenter", "fk_machine_sap_workcenter")
+    assert "referenced by or references other rows" in e.detail

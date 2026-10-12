@@ -11,6 +11,8 @@
 
 - **`material_plants.sap_missing_since` and `production_version.sap_missing_since` (nullable `TIMESTAMPTZ`, migration `2026-10-08-sap-staging-columns.sql`) are written only by `backend/integration/sap_staging.py`.** A SAP snapshot that omits a row something still references stamps it (`COALESCE(sap_missing_since, now())`); a snapshot that carries the row clears it. Master-data CRUD, the grids and the Excel ingest never set it; the clear is an explicit `UPDATE` in `sap_staging.py`, not part of the `bulk_apply` upsert, which writes only the columns it is given.
 
+- **`machine.sap_workcenter` is a hard FK (`fk_machine_sap_workcenter`), not a soft ref.** Upload work centers before the machines that link to them; `md_bulk` turns that violation into a readable 400. `bulk_apply` normalises a blank `machine.sap_workcenter` cell to NULL (that table+column only). A 1:1 work center is a same-named machine linked to its own code; see `_sap_workcenter_bulk_warnings`.
+
 ## Counterpart
 
 Frontend half: `frontend/master-data/admin-ui.mts` (`MasterData` — CRUD grids, plant policy forms, role page-access), `frontend/master-data/material-grids.mts` (`MaterialGrids` — Material / Material Plant grid UI), and `frontend/master-data/admin-tables.mts` (`AdminTables` — the read-only Table Browser UI over `browser.py`).
