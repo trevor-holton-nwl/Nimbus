@@ -4113,16 +4113,10 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                 "raw_row_count": raw_row_count, "inserted": 0, "updated": 0,
                 "warnings": [], "batch_id": batch_id}
 
-    df = _date_hygiene_df(df, warnings)
-
-    qcol = "ORDER_QUANTITY_(GMEIN)"
-    if qcol in df.columns:
-        df[qcol] = pd.to_numeric(df[qcol], errors="coerce")
-
     # 9 SAP COOIS extract fields — upload-sourced (unlike prt_01/prt_02/
     # production_version, which are NULL from upload and backfilled by
     # db._stamp_order_attributes). Numeric/integer columns coerced upfront
-    # like qcol above so downstream _num/_int just check pd.notna.
+    # like qcol below so downstream _num/_int just check pd.notna.
     _SAP_NUMERIC_COLS = (
         "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)", "REDUCED_QUANTITY_(GMEIN)",
         "LABOR_HOURS_(MEINH)", "MACHINE_HOURS_(MEINH)", "NO_OF_FTE_(MEINH)",
@@ -4131,6 +4125,31 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     for col in _SAP_NUMERIC_COLS + _SAP_INTEGER_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Manual Excel upload only: Machine Hours (MEINH) wins over RUN_TIME when
+    # present and > 0 (0 is treated as blank, matching resolver._fallback). Done
+    # before date hygiene so finish-date derivation and _RUN_TIME_DEFAULTED
+    # follow the chosen value. Routing-on plants are unaffected because
+    # upsert_orders nulls run_time for them; SAP staging never passes through
+    # this function. Owner decision 2026-10-13.
+    _mh_col = "MACHINE_HOURS_(MEINH)"
+    if _mh_col in df.columns:
+        _mh_mask = df[_mh_col].notna() & (df[_mh_col] > 0)
+        if "RUN_TIME" not in df.columns:
+            df["RUN_TIME"] = pd.Series(float("nan"), index=df.index, dtype="float64")
+        df.loc[_mh_mask, "RUN_TIME"] = df.loc[_mh_mask, _mh_col]
+        _mh_n = int(_mh_mask.sum())
+        if _mh_n > 0:
+            warnings.append({
+                "level": "info",
+                "msg": f"{_mh_n} row(s): run time taken from Machine Hours (MEINH)",
+            })
+
+    df = _date_hygiene_df(df, warnings)
+
+    qcol = "ORDER_QUANTITY_(GMEIN)"
+    if qcol in df.columns:
+        df[qcol] = pd.to_numeric(df[qcol], errors="coerce")
 
     # ---------- Build per-row dicts (keyed by orders columns) ----------
     # The id + cumcount dedup, chunked upsert, plant backfill, ambiguous-plant

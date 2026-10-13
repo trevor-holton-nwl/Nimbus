@@ -377,6 +377,56 @@ def test_ingest_orders_from_excel_normalizes_plant_and_flags_defaulted_run_time(
     assert rows[1]["_run_time_was_defaulted"] is False
 
 
+def test_ingest_orders_from_excel_machine_hours_override_run_time(monkeypatch):
+    """Manual Excel upload only (owner decision 2026-10-13): Machine Hours (MEINH)
+    wins over RUN_TIME when present and > 0; 0/blank falls back to RUN_TIME, then
+    the 1 h default. The swap happens before date hygiene, so the derived finish
+    and the defaulted flag follow the chosen value."""
+    import io
+
+    import pandas as pd
+
+    import db
+
+    captured = {}
+
+    def _fake_upsert_orders(rows, **kwargs):
+        captured["rows"] = rows
+        captured["warnings"] = kwargs.get("warnings")
+        return {"status": "ok", "batch_id": kwargs.get("batch_id"),
+                "inserted": len(rows), "updated": 0, "warnings": [], "lines": []}
+
+    monkeypatch.setattr(db, "upsert_orders", _fake_upsert_orders)
+
+    buf = io.BytesIO()
+    pd.DataFrame({
+        "PRODUCTION_ORDER": ["PO-A", "PO-B", "PO-C", "PO-D"],
+        "MATERIAL_NUMBER": ["M-A", "M-B", "M-C", "M-D"],
+        "BASIC_START_DATE": pd.to_datetime(["2026-01-05 08:00"] * 4),
+        "BASIC_FINISH_DATE": pd.to_datetime(
+            ["2026-01-06 00:00", "2026-01-05 15:45", None, None]),
+        "MACHINE_HOURS_(MEINH)": [2.5, None, 0, 1.75],
+        "RUN_TIME": [4.0, 3.0, None, None],
+    }).to_excel(buf, index=False)
+
+    result = db.ingest_orders_from_excel(buf.getvalue(), "mh.xlsx")
+    assert result["status"] == "ok"
+    rows = captured["rows"]
+    by_po = {r["production_order"]: r for r in rows}
+    a, b, c, d = by_po["PO-A"], by_po["PO-B"], by_po["PO-C"], by_po["PO-D"]
+
+    assert a["run_time"] == 2.5 and a["_run_time_was_defaulted"] is False
+    assert pd.Timestamp(a["basic_finish_date"]) == pd.Timestamp("2026-01-05 10:30")
+    assert a["machine_hours"] == 2.5
+    assert b["run_time"] == 3.0 and b["_run_time_was_defaulted"] is False
+    assert c["run_time"] == 1.0 and c["_run_time_was_defaulted"] is True
+    assert d["run_time"] == 1.75 and d["_run_time_was_defaulted"] is False
+
+    infos = [w for w in captured["warnings"] if w.get("level") == "info"
+             and w["msg"].startswith("2 row(s): run time taken from Machine Hours")]
+    assert len(infos) == 1
+
+
 async def _async_bytes(value):
     return value
 

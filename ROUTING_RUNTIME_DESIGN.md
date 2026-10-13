@@ -12,7 +12,7 @@ NIMBUS schedules an order for `orders.run_time` hours. Today that number is read
 
 This design adds two new NIMBUS master-data tables — **routing operations** and **production versions** — and computes run time from them for repetitive-manufacturing, planned orders. `orders.machine_hours` (already ingested from the order file) exists today and serves as this design's fallback when a routing calculation can't be produced. Both new tables are hand-loaded via Excel, admin-editable, and plant-scoped like every other NIMBUS master-data table; nothing in this design concerns how the underlying values get into that Excel file.
 
-The behavior below only applies once a plant's own switch is turned on (§3.6). Until then, a plant behaves exactly as it does today: the order file's run-time column drives `orders.run_time`, unchanged.
+The behavior below only applies once a plant's own switch is turned on (§3.6). Until then, a plant behaves as it does today, except that a manual Excel upload now takes the file's Machine Hours (MEINH) as the run time when present and > 0, else `RUN_TIME`, else 1 h (owner decision 2026-10-13).
 
 ## 2. Decisions
 
@@ -186,7 +186,7 @@ Turning this on triggers the cutover described in D5/§5.5: scheduled orders in 
 
 ## 4. Ingest changes (`db.ingest_orders_from_excel` / `db.upsert_orders` / `db._stamp_order_attributes`)
 
-Everything below applies only to a plant whose `routing_runtime_enabled` switch is on (§3.6). For a disabled plant, ingest is unchanged: the order file's run-time column still drives `orders.run_time` exactly as today.
+Everything below applies only to a plant whose `routing_runtime_enabled` switch is on (§3.6). For a disabled plant, ingest takes the order file's Machine Hours (MEINH) as `orders.run_time` when present and > 0, else `RUN_TIME`, else 1 h (manual Excel upload only; owner decision 2026-10-13).
 
 1. **Stop sourcing run time from the file** for enabled plants. Inserts leave `run_time NULL`; the conflict-update `SET` no longer copies the file's run-time column. The finish-date repair that used it runs after resolution, using the resolved hours, and leaves `basic_finish_date` untouched when the order ends up held.
 2. **Read `PRODUCTION_VERSION`** into `orders.production_version` (upper/strip). `_stamp_order_attributes` becomes `production_version = COALESCE(NULLIF(o.production_version,''), mp.default_production_version)`, so a planner's NIMBUS edit survives a blank upload but an explicit value in the file wins.
