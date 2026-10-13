@@ -144,6 +144,7 @@ interface TimelineAlertCellInfo {
      • right-click → ContextMenu
      • double-click → open in Inspector
    ========================================================================== */
+const _ZONE_MIN_PX = 0.5;
 export const Timeline = {
   _tl: null as NimbusVendor.VisTimelineInstance | null,
   _items:     null as NimbusVendor.VisDataSet<TimelineVisItem> | null,
@@ -155,7 +156,9 @@ export const Timeline = {
   _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
   _rebuildNow: null as Date | null,         // P2: hoisted clock so every item in one rebuild() pass classifies firming against the same instant
   _frozenBandIds: null as Set<string> | null, // P2: task ids currently inside the frozen horizon band, for live repaint diffing
-  _lastFirmScanTs: 0,                       // P2: throttle for the coarse 30s frozen-band rescan in the 1s ticker
+  _zonePushedMs: 0,                         // epoch ms of the "now" last written into the zone bands; 0 = unknown, next tick pushes
+  _zoneEdgeKey: '',                         // `${hzMinutes}|${frozenEndMs}` the bands were last written with; a change forces a push
+  _lastFirmScanTs: 0,                     // P2: throttle for the coarse 30s frozen-band rescan in the 1s ticker
   _visibilityHorizonMarker: false,          // C1: tracks whether the 'visibility-horizon' custom time bar has been added to _tl (addCustomTime/removeCustomTime throw on a duplicate/missing id)
   _lineColorIdx: {} as Record<string, number>,            // stable line → colour index mapping
   _nextColorIdx: 0,
@@ -354,35 +357,51 @@ export const Timeline = {
      * ----------------------------------------------------------------- */
 
     /* ----- live ticker: advance past-zone, alert-horizon-zone, and the C2
-     * frozen-horizon-zone every second (one interval, shared — never add a
-     * second one for a new band) -- */
+     * frozen-horizon-zone (one interval, shared — never add a second one for
+     * a new band). The bands are pushed only when "now" has moved >= 0.5 px
+     * at the current zoom or an edge input changed, and only while the Gantt
+     * pane is visible: every DataSet update costs a full vis redraw. -- */
     setInterval(() => {
       if (document.hidden) return; // skip ticker work while the tab is backgrounded
       if (!Timeline._items || !Timeline._pastZoneIds.length) return;
+      const _pmT0 = performance.now();
       const now  = new Date();
-      const updates: Array<{ id: string; start?: Date; end?: Date }> = Timeline._pastZoneIds
-        .filter(id => Timeline._items!.get(id))
-        .map(id => ({ id, end: now }));
+      let hz: number | null = null;
       if (Timeline._alertHorizonIds.length) {
         const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
-        const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
+        const hzRaw = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
+        hz = typeof hzRaw === 'number' ? hzRaw : null;
+      }
+      const frozenEnd = (Timeline._frozenHorizonIds.length && Store.frozenHorizonEnd) ? Store.frozenHorizonEnd : null;
+      const edgeKey = `${typeof hz === 'number' ? hz : ''}|${frozenEnd ? frozenEnd.getTime() : ''}`;
+      const zonesVisible = Timeline._ganttActive() && Timeline._vScrollLaidOut();
+      if (zonesVisible && (edgeKey !== Timeline._zoneEdgeKey || tickerShouldPush({
+        nowMs: now.getTime(), lastPushedMs: Timeline._zonePushedMs,
+        windowMs: Timeline._windowSpanMs(), centerPx: Timeline._centerWidthPx(),
+      }))) {
+        const updates: Array<{ id: string; start?: Date; end?: Date }> = Timeline._pastZoneIds
+          .filter(id => Timeline._items!.get(id))
+          .map(id => ({ id, end: now }));
         if (typeof hz === 'number') {
           const hzEnd = new Date(now.getTime() + hz * Config.MS_MIN);
           for (const id of Timeline._alertHorizonIds) {
             if (Timeline._items!.get(id)) updates.push({ id, start: now, end: hzEnd });
           }
         }
-      }
-      // C2: only the near edge tracks "now" — the far edge (Store.frozenHorizonEnd)
-      // is a fixed absolute instant recomputed server-side on the next /tasks
-      // load, not a rolling duration, so it is deliberately left alone here.
-      if (Timeline._frozenHorizonIds.length && Store.frozenHorizonEnd) {
-        const frozenEnd = Store.frozenHorizonEnd;
-        for (const id of Timeline._frozenHorizonIds) {
-          if (Timeline._items!.get(id)) updates.push({ id, start: now, end: frozenEnd });
+        // C2: only the near edge tracks "now" — the far edge (Store.frozenHorizonEnd)
+        // is a fixed absolute instant recomputed server-side on the next /tasks
+        // load, not a rolling duration, so it is deliberately left alone here.
+        if (frozenEnd) {
+          for (const id of Timeline._frozenHorizonIds) {
+            if (Timeline._items!.get(id)) updates.push({ id, start: now, end: frozenEnd });
+          }
+        }
+        if (updates.length) {
+          Timeline._items!.update(updates);
+          Timeline._zonePushedMs = now.getTime();
+          Timeline._zoneEdgeKey = edgeKey;
         }
       }
-      if (updates.length) Timeline._items!.update(updates);
 
       // P2: coarse 30s scan for orders crossing the frozen-horizon band —
       // symmetric diff against the last-known membership set. Orders leave
@@ -403,6 +422,7 @@ export const Timeline = {
         }
         Timeline._frozenBandIds = next;
       }
+      PerfMonitor.record('Timeline.ticker', performance.now() - _pmT0);
     }, 1000);
 
     /* ----- subscribe to store changes ----------------------------------- */
@@ -421,6 +441,13 @@ export const Timeline = {
   _ganttActive(): boolean {
     if (!Timeline._ganttTab) Timeline._ganttTab = document.getElementById('gantt-tab');
     return Timeline._ganttTab ? Timeline._ganttTab.classList.contains('active') : false;
+  },
+
+  _windowSpanMs(): number { if (!Timeline._tl) return 0; const w = Timeline._tl.getWindow(); return w.end.getTime() - w.start.getTime(); },
+  _centerWidthPx(): number {
+    const w = (Timeline._tl as unknown as VisInternalTimeline | null)?.body?.domProps?.center?.width;
+    if (typeof w === 'number' && w > 0) return w;
+    return Timeline._visEl?.querySelector<HTMLElement>('.vis-panel.vis-center')?.clientWidth ?? 0;
   },
 
   /** Self-heal grouped background-item geometry after every vis 'changed'
@@ -1112,6 +1139,8 @@ export const Timeline = {
         Timeline._frozenHorizonIds = [];
       }
     }
+    // Every zone was just rewritten with a fresh "now": the first ticker tick re-establishes the push baseline.
+    Timeline._zonePushedMs = 0; Timeline._zoneEdgeKey = '';
 
     // P2: snapshot which tasks are currently inside the frozen-horizon band so
     // the 1s ticker's coarse 30s scan (below) can diff against a known-good
@@ -1467,10 +1496,12 @@ export const Timeline = {
   // DataViews filter incrementally at add/update time), and force a relayout.
   _refreshViewNow(): void {
     if (!Timeline._tl || !Timeline._visItems) return;
+    const _pmT0 = performance.now();
     const w = Timeline._tl.getWindow();
     Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
     Timeline._visItems.refresh();
     Timeline._tl.redraw();
+    PerfMonitor.record('Timeline.refreshView', performance.now() - _pmT0);
   },
 
   setView(mode: string): void {
@@ -1709,6 +1740,15 @@ export function computeTimelineMinBound(i: TimelineMinBoundInput): number | null
   const bound = _navLocalMidnight(Math.min(i.dataMinMs ?? i.nowMs, i.nowMs));
   if (i.maxMs != null && bound >= i.maxMs) return null;
   return bound;
+}
+
+export interface TickerPushInput { nowMs: number; lastPushedMs: number; windowMs: number; centerPx: number; minPx?: number }
+/** True when the zone bands should be rewritten this tick: never pushed yet, clock stepped back,
+ *  unusable scale (push, i.e. legacy behavior), or "now" has moved >= minPx at the current scale. */
+export function tickerShouldPush(i: TickerPushInput): boolean {
+  if (!(i.lastPushedMs > 0) || i.nowMs < i.lastPushedMs) return true;
+  if (!(i.windowMs > 0) || !(i.centerPx > 0)) return true;
+  return (i.nowMs - i.lastPushedMs) * i.centerPx / i.windowMs >= (i.minPx ?? _ZONE_MIN_PX);
 }
 
 export function navLayout(lineCount: number): NavLayout {
@@ -3232,6 +3272,7 @@ type InteractionDataSetUpdateProps = { items: Array<string | number>; data?: Tim
  *  documents only the real, STABLE public API) since these are internals that
  *  could change on any vis-timeline upgrade without a version bump signal. */
 interface VisInternalTimeline {
+  body?: { domProps?: { center?: { width?: number } } };
   itemSet?: {
     items?: Record<string, {
       dom?: { box?: HTMLElement };

@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -751,6 +751,18 @@ test('computeTimelineMinBound: maxMs at or before the computed bound → null (n
   const dataMinMs = L(2026, 3, 1, 6); // computed bound would be Apr 1 local midnight
   const result = computeTimelineMinBound({ dataMinMs, nowMs, maxMs: L(2026, 2, 25) });
   assert.equal(result, null, 'maxMs earlier than the computed bound must return null');
+});
+
+test('tickerShouldPush: pushes only when "now" moved >= minPx at the current scale', () => {
+  const t0 = 1_000_000_000_000;
+  const base = { nowMs: t0 + 1000, lastPushedMs: t0, windowMs: 259_200_000, centerPx: 1400 };
+  assert.equal(tickerShouldPush(base), false, '3-day window, 1s elapsed: sub-pixel, skip');
+  assert.equal(tickerShouldPush({ ...base, windowMs: 900_000 }), true, '15-min window, 1s: >= 0.5px');
+  assert.equal(tickerShouldPush({ ...base, nowMs: t0 + 300_000, windowMs: 3_600_000 }), true, 'zoom-in after 300s of no push');
+  assert.equal(tickerShouldPush({ ...base, lastPushedMs: 0 }), true, 'never pushed');
+  assert.equal(tickerShouldPush({ ...base, centerPx: 0 }), true, 'unusable scale falls back to push');
+  assert.equal(tickerShouldPush({ ...base, nowMs: t0 - 1000 }), true, 'clock stepped back');
+  assert.equal(tickerShouldPush({ ...base, minPx: 0 }), true, 'minPx override honored');
 });
 
 test('navLayout: rows while they fit, histogram beyond 30 lines', () => {
