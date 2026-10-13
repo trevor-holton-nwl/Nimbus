@@ -91,10 +91,11 @@ while ((Get-Date) -lt $deadline) {
     } catch {}
     Start-Sleep -Seconds 15
 }
-if (-not $healthy) { throw "Health check did not pass within 5 minutes — check /logs/backend, then consider rollback (step 5)" }
+if (-not $healthy) { throw "Health check did not pass within 5 minutes — read the backend log in Admin Cockpit (below), then consider rollback (step 5)" }
 Invoke-RestMethod "https://$fqdn/sap/interface/objects?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }   # 200 (proves new tables + endpoints live, if SAP shipped)
-Invoke-RestMethod "https://$fqdn/logs/backend?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }            # read errors here — `az logs` dies behind the corp proxy
 ```
+Then read backend errors **in the browser, signed in as an admin: Admin Cockpit → Logs** (Ctrl+Alt+L). `GET /logs/backend` is RBAC-gated (`require_api_key` + `require_admin`, `backend/admin_ops/routes.py`) and returns 401 to an anonymous `Invoke-RestMethod` and to a bare session cookie — that 401 is correct, not a deploy failure. `az containerapp logs show` still dies behind the corp proxy, so the Cockpit viewer is the log source.
+
 If the deadline is hit without a healthy response, stop and report — do not fall back to a single lazy check, and do not silently retry the roll.
 
 ### 5. Rollback (if verify fails)
