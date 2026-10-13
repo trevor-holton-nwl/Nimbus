@@ -3835,6 +3835,18 @@ span.flatpickr-weekday {
 .admin-log-ctx { display: none; }
 .admin-log-row.expanded .admin-log-ctx { display: block; }
 .admin-log-row:not(:has(.admin-log-ctx)) { cursor: default; }
+.admin-log-exc { font-family: var(--font-mono, ui-monospace, monospace); max-height: 280px; }
+.admin-log-etype {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--err);
+  background: rgba(177,54,42,0.08);
+  border: 1px solid rgba(177,54,42,0.30);
+  border-radius: var(--r-sm);
+  padding: 0 5px;
+}
+.admin-log-copy { display: none; margin-top: 4px; font-size: 11px; padding: 1px 8px; cursor: pointer; }
+.admin-log-row.expanded .admin-log-copy { display: inline-block; }
 
 /* ── reqId / errorCode affordances — dark-mode tint counterparts ──
    Task 10: the dedicated dark-mode token pass promised by the old comment

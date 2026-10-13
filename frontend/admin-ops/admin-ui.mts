@@ -2336,6 +2336,12 @@ export const AdminCockpit = {
             });
             head.appendChild(ridEl);
           }
+          if (e.error_type) {
+            const typeEl = document.createElement('span');
+            typeEl.className = 'admin-log-etype';
+            typeEl.textContent = e.error_type;
+            head.appendChild(typeEl);
+          }
           row.appendChild(head);
 
           const msg = document.createElement('div');
@@ -2343,11 +2349,35 @@ export const AdminCockpit = {
           msg.textContent = e.msg || '';
           row.appendChild(msg);
 
-          if (e.ctx && Object.keys(e.ctx).length) {
+          const hasCtx = !!(e.ctx && Object.keys(e.ctx).length);
+          if (hasCtx) {
             const pre = document.createElement('pre');
             pre.className = 'admin-log-ctx';
             pre.textContent = JSON.stringify(e.ctx, null, 2);
             row.appendChild(pre);
+          }
+          if (e.exc) {
+            const excPre = document.createElement('pre');
+            excPre.className = 'admin-log-ctx admin-log-exc';
+            excPre.textContent = e.exc;
+            row.appendChild(excPre);
+
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'admin-log-copy';
+            copyBtn.textContent = Util.t('ui.log_copy');
+            copyBtn.title = Util.t('ui.log_copy_title');
+            copyBtn.addEventListener('click', ev => {
+              ev.stopPropagation();
+              const text = [e.rid ? `rid: ${e.rid}` : '', e.msg || '', e.exc].filter(Boolean).join('\n');
+              void navigator.clipboard?.writeText(text).then(() => {
+                copyBtn.textContent = Util.t('ui.log_copied');
+                setTimeout(() => { copyBtn.textContent = Util.t('ui.log_copy'); }, 1500);
+              }, () => { /* clipboard unavailable: leave the button as is */ });
+            });
+            row.appendChild(copyBtn);
+          }
+          if (hasCtx || e.exc) {
             row.style.cursor = 'pointer';
             row.addEventListener('click', () => row.classList.toggle('expanded'));
           }

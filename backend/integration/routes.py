@@ -20,6 +20,7 @@ fix, not a functional change.
 import csv
 import io
 import os
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -50,9 +51,21 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     call reads the new rows straight from Postgres. The blocking parse/upsert is
     offloaded to a worker thread so it doesn't block the event loop.
     """
+    t0 = time.perf_counter()
     raw = await file.read()
     if len(raw) > NIMBUS_MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"Upload exceeds maximum allowed size of {NIMBUS_MAX_UPLOAD_BYTES} bytes")
+    # Diagnostic context for the failure / slow-upload log lines. Filename, size,
+    # timing, stage and counts only; never row contents.
+    diag: dict = {"stage": "plant_peek"}
+    dctx = {"filename": file.filename or "upload.xlsx", "size_bytes": len(raw)}
+
+    def _diag_ctx() -> dict:
+        out = dict(dctx, elapsed_ms=int((time.perf_counter() - t0) * 1000), stage=diag.get("stage"))
+        if "rows" in diag:
+            out["rows"] = diag["rows"]
+        return out
+
     # Stage 0 observation seam: capture only already-completed planned work
     # before ingest can replace its source rows.  This never changes orders,
     # dates, capacity, alerts, or optimizer behavior. Scoped to the plants this
@@ -60,22 +73,36 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
     # before the real parse) so a single-plant upload doesn't scan every
     # plant/machine in the system; falls back to an unscoped capture (plants=None)
     # when the file's plant can't be determined up front — same as before this change.
-    upload_plants = await run_in_threadpool(db.extract_upload_plants, raw)
-    await run_in_threadpool(
-        setup_data.capture_setup_states_before_schedule_mutation,
-        actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement",
-        plants=upload_plants,
-    )
-    result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
-                                     file.filename or "upload.xlsx")
+    try:
+        upload_plants = await run_in_threadpool(db.extract_upload_plants, raw)
+        if upload_plants:
+            dctx["plants"] = ",".join(sorted(str(p) for p in upload_plants))[:200]
+        diag["stage"] = "setup_capture"
+        await run_in_threadpool(
+            setup_data.capture_setup_states_before_schedule_mutation,
+            actor=request.headers.get("x-user-email") or "system", reason="Excel upload replacement",
+            plants=upload_plants,
+        )
+        result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
+                                         file.filename or "upload.xlsx", diag)
+    except Exception as e:
+        _log_event("error", "upload", "Orders upload failed", exc=e, **_diag_ctx())
+        _set_admin_log_details(request, **_diag_ctx())
+        raise
     if result.get("status") != "ok":
         # Bad file / missing columns is a client error.
+        _log_event("warn", "upload", "Orders upload rejected",
+                   reason=str(result.get("message", ""))[:300], **_diag_ctx())
         raise HTTPException(status_code=400, detail=result.get("message", "Upload failed"))
 
     _log_event("info", "upload", "Orders uploaded and ingested",
                filename=file.filename, inserted=result.get("inserted", 0),
                updated=result.get("updated", 0), unchanged=result.get("unchanged", 0),
-               raw=result.get("raw_row_count", 0))
+               raw=result.get("raw_row_count", 0), size_bytes=len(raw),
+               elapsed_ms=int((time.perf_counter() - t0) * 1000),
+               **({"plants": dctx["plants"]} if "plants" in dctx else {}))
+    if time.perf_counter() - t0 > 5:
+        _log_event("warn", "upload", "Slow orders upload", **_diag_ctx())
     _set_admin_log_details(
         request, filename=file.filename or "upload.xlsx",
         rows_received=result.get("raw_row_count", 0), inserted=result.get("inserted", 0),

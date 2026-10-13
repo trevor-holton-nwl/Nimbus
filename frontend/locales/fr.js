@@ -1504,6 +1504,9 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Hardcoded string fixes ───────────────────────────────────────────────── */
   'ui.failed_load_db_diag':            'Échec du chargement des diagnostics BD : {{error}}',
   'ui.failed_load_backend_log':        'Échec du chargement du journal backend : {{error}}',
+  'ui.log_copy':                       'Copier',
+  'ui.log_copied':                     'Copié',
+  'ui.log_copy_title':                 'Copier la trace, l’identifiant de requête et le message',
   'ui.failed_load_upload_history':     'Impossible de charger l\'historique des téléchargements : {{error}}',
   'ui.failed_load_audit_log':          'Impossible de charger le journal d\'audit : {{error}}',
   'ui.time_s_ago':                     'il y a {{n}}s',

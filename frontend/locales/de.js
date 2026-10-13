@@ -1503,6 +1503,9 @@ window.__NIMBUS_LOCALES.de = {
   /* ── Hardcoded string fixes ───────────────────────────────────────────────── */
   'ui.failed_load_db_diag':            'DB-Diagnose konnte nicht geladen werden: {{error}}',
   'ui.failed_load_backend_log':        'Backend-Protokoll konnte nicht geladen werden: {{error}}',
+  'ui.log_copy':                       'Kopieren',
+  'ui.log_copied':                     'Kopiert',
+  'ui.log_copy_title':                 'Traceback, Anfrage-ID und Meldung kopieren',
   'ui.failed_load_upload_history':     'Upload-Verlauf konnte nicht geladen werden: {{error}}',
   'ui.failed_load_audit_log':          'Audit-Protokoll konnte nicht geladen werden: {{error}}',
   'ui.time_s_ago':                     'vor {{n}}s',

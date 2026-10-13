@@ -793,7 +793,14 @@ def sync_object(object_key: str, *, user_email: str | None = None,
         result["status"] = "error"
         result["error"] = msg
         log.error("SAP sync failed for %s", object_key,
-                  extra={"category": "sap_sync", "user": user_email})
+                  extra={"category": "sap_sync", "user": user_email}, exc_info=True)
+        try:
+            # Ring buffer (Admin Cockpit Backend log) carries the traceback too.
+            from backend.admin_ops.logbuffer import _log_event
+            _log_event("error", "sap_sync", f"SAP sync failed for {object_key}", exc=e,
+                       object_key=object_key, user=user_email)
+        except Exception:
+            pass
         if run_id is not None:
             try:
                 _run_finish(run_id, status="error",

@@ -427,6 +427,41 @@ def test_ingest_orders_from_excel_machine_hours_override_run_time(monkeypatch):
     assert len(infos) == 1
 
 
+def test_ingest_orders_from_excel_rederives_finish_when_not_after_start(monkeypatch):
+    """Regression: finish <= start and an exact-midnight finish are re-derived as
+    start + RUN_TIME hours. pandas 3 raised TypeError when the timedelta sum
+    (datetime64[ns]) was assigned into the read_excel datetime64[us] column."""
+    import io
+
+    import pandas as pd
+
+    import db
+
+    captured = {}
+
+    def _fake_upsert_orders(rows, **kwargs):
+        captured["rows"] = rows
+        return {"status": "ok", "batch_id": kwargs.get("batch_id"),
+                "inserted": len(rows), "updated": 0, "warnings": [], "lines": []}
+
+    monkeypatch.setattr(db, "upsert_orders", _fake_upsert_orders)
+
+    buf = io.BytesIO()
+    pd.DataFrame({
+        "PRODUCTION_ORDER": ["PO-A", "PO-B"],
+        "MATERIAL_NUMBER": ["M-A", "M-B"],
+        "BASIC_START_DATE": pd.to_datetime(["2026-01-05 08:00", "2026-01-05 08:00"]),
+        "BASIC_FINISH_DATE": pd.to_datetime(["2026-01-05 06:00", "2026-01-06 00:00"]),
+        "RUN_TIME": [2.5, 4.0],
+    }).to_excel(buf, index=False)
+
+    result = db.ingest_orders_from_excel(buf.getvalue(), "hygiene.xlsx")
+    assert result["status"] == "ok"
+    by_po = {r["production_order"]: r for r in captured["rows"]}
+    assert pd.Timestamp(by_po["PO-A"]["basic_finish_date"]) == pd.Timestamp("2026-01-05 10:30")
+    assert pd.Timestamp(by_po["PO-B"]["basic_finish_date"]) == pd.Timestamp("2026-01-05 12:00")
+
+
 async def _async_bytes(value):
     return value
 

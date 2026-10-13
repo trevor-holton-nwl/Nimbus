@@ -1505,6 +1505,9 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Hardcoded string fixes ───────────────────────────────────────────────── */
   'ui.failed_load_db_diag':            'Error al cargar diagnósticos de BD: {{error}}',
   'ui.failed_load_backend_log':        'Error al cargar el registro del backend: {{error}}',
+  'ui.log_copy':                       'Copiar',
+  'ui.log_copied':                     'Copiado',
+  'ui.log_copy_title':                 'Copiar traza, id de solicitud y mensaje',
   'ui.failed_load_upload_history':     'No se pudo cargar el historial de subidas: {{error}}',
   'ui.failed_load_audit_log':          'No se pudo cargar el registro de auditoría: {{error}}',
   'ui.time_s_ago':                     'hace {{n}}s',

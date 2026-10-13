@@ -98,7 +98,7 @@ def test_upload_orders_captures_uploaded_plants_before_ingest(admin_client, monk
     def fake_capture(**kwargs):
         events.append(("capture", kwargs))
 
-    def fake_ingest(raw, filename):
+    def fake_ingest(raw, filename, diag=None):
         events.append(("ingest", {"raw": raw, "filename": filename}))
         return {
             "status": "ok",
@@ -144,7 +144,7 @@ def test_upload_orders_malformed_file_still_captures_before_ingest_error(admin_c
     def fake_capture(**kwargs):
         events.append(("capture", kwargs))
 
-    def fake_ingest(file_bytes, filename):
+    def fake_ingest(file_bytes, filename, diag=None):
         events.append(("ingest", {"raw": file_bytes, "filename": filename}))
         return {
             "status": "error",
@@ -176,6 +176,28 @@ def test_upload_orders_malformed_file_still_captures_before_ingest_error(admin_c
         "reason": "Excel upload replacement",
         "plants": None,
     }
+
+
+def test_upload_orders_unexpected_failure_logs_traceback_and_stage(admin_client, monkeypatch):
+    """An unexpected ingest crash must leave the exception (traceback) and the
+    diagnostic context (stage, size, rows) on the backend log entry."""
+    def fake_ingest(raw, filename, diag=None):
+        diag["stage"] = "upsert_orders"
+        diag["rows"] = 7
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(int_routes.setup_data, "capture_setup_states_before_schedule_mutation", lambda **kw: None)
+    monkeypatch.setattr(int_routes.db, "ingest_orders_from_excel", fake_ingest)
+    from backend.admin_ops.logbuffer import _BACKEND_LOG
+    _BACKEND_LOG.clear()
+    try:
+        admin_client.post("/upload", files={"file": ("bad.xlsx", b"x")})
+    except RuntimeError:
+        pass  # TestClient re-raises server exceptions by default
+    entry = next(e for e in _BACKEND_LOG if e["msg"] == "Orders upload failed")
+    assert entry["error_type"] == "RuntimeError" and "boom" in entry["exc"]
+    assert entry["ctx"]["stage"] == "upsert_orders" and entry["ctx"]["rows"] == 7
+    assert entry["ctx"]["size_bytes"] == 1 and entry["ctx"]["filename"] == "bad.xlsx"
 
 
 def test_upload_bom_returns_ingest_result_and_actor(admin_client, monkeypatch):

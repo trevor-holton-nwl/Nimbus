@@ -1470,6 +1470,9 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Admin cockpit — previously hardcoded strings now i18n ──────────────── */
   'ui.failed_load_db_diag':            'Failed to load DB diagnostics: {{error}}',
   'ui.failed_load_backend_log':        'Failed to load backend log: {{error}}',
+  'ui.log_copy':                       'Copy',
+  'ui.log_copied':                     'Copied',
+  'ui.log_copy_title':                 'Copy traceback, request id and message',
   'ui.failed_load_upload_history':     'Could not load upload history: {{error}}',
   'ui.failed_load_audit_log':          'Could not load audit log: {{error}}',
   'ui.time_s_ago':                     '{{n}}s ago',

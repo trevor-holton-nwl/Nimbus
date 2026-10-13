@@ -3980,10 +3980,12 @@ def _date_hygiene_df(df, warnings: list):
     df["RUN_TIME"] = _rt.fillna(1.0)
 
     bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
+    # pandas 3 no longer upcasts silently: the sum can be datetime64[ns] while the
+    # column is [us] (read_excel resolution), so cast to the column's own dtype.
     df.loc[bad, "BASIC_FINISH_DATE"] = (
         df.loc[bad, "BASIC_START_DATE"]
         + pd.to_timedelta(df.loc[bad, "RUN_TIME"], unit="h")
-    )
+    ).astype(df["BASIC_FINISH_DATE"].dtype)
 
     bad_start = df["BASIC_START_DATE"].isna()
     if bad_start.any():
@@ -4002,10 +4004,12 @@ def _date_hygiene_df(df, warnings: list):
     # (the old `.dt.hour == 0` test rewrote those as start + RUN_TIME).
     _fin = df["BASIC_FINISH_DATE"]
     mask_notime = _fin.notna() & (_fin == _fin.dt.normalize())
+    # pandas 3 no longer upcasts silently: the sum can be datetime64[ns] while the
+    # column is [us] (read_excel resolution), so cast to the column's own dtype.
     df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
         df.loc[mask_notime, "BASIC_START_DATE"]
         + pd.to_timedelta(df.loc[mask_notime, "RUN_TIME"], unit="h")
-    )
+    ).astype(df["BASIC_FINISH_DATE"].dtype)
 
     return df
 
@@ -4045,13 +4049,19 @@ def apply_order_date_hygiene_rows(rows: list[dict], warnings: list) -> list[dict
     return out
 
 
-def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
+def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None = None) -> dict:
     """
     Parse an uploaded sequence_testing-shaped xlsx, normalize/clean,
     upsert into orders, and write an upload_audit row.
 
     Returns: {status, batch_id, raw_row_count, inserted, updated, warnings}.
+
+    `diag` (optional, caller-owned dict) is filled in as the ingest advances
+    with `stage` and `rows` so a failure can be reported with where it died.
+    No row contents are ever put in it.
     """
+    diag = diag if diag is not None else {}
+    diag["stage"] = "read_excel"
     batch_id = str(uuid.uuid4())
     warnings: list[dict] = []
 
@@ -4084,6 +4094,8 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                 "warnings": [], "batch_id": batch_id}
 
     raw_row_count = len(df)
+    diag["rows"] = raw_row_count
+    diag["stage"] = "clean"
     df = clean(df)
 
     # SAP exports sometimes use "ORDER" instead of "PRODUCTION_ORDER"
@@ -4145,11 +4157,13 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
                 "msg": f"{_mh_n} row(s): run time taken from Machine Hours (MEINH)",
             })
 
+    diag["stage"] = "date_hygiene"
     df = _date_hygiene_df(df, warnings)
 
     qcol = "ORDER_QUANTITY_(GMEIN)"
     if qcol in df.columns:
         df[qcol] = pd.to_numeric(df[qcol], errors="coerce")
+    diag["stage"] = "build_rows"
 
     # ---------- Build per-row dicts (keyed by orders columns) ----------
     # The id + cumcount dedup, chunked upsert, plant backfill, ambiguous-plant
@@ -4231,6 +4245,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str) -> dict:
     import backend.distribution.data as distribution_data
     import backend.routing.resolver as routing_resolver
 
+    diag["stage"] = "upsert_orders"
     result = upsert_orders(
         rows,
         batch_id=batch_id,
