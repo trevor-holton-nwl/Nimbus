@@ -176,6 +176,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-08-sap-staging-tables.sql",
         "2026-10-15-1-orders-original-dates.sql",
         "2026-10-15-2-orders-run-time-bounds-336.sql",
+        "2026-10-16-1-orders-placement-exception.sql",
     }
     all_names = {
         os.path.basename(path)
@@ -807,3 +808,43 @@ def test_run_time_bounds_schema_reapply_raises_an_old_bound_exactly_once(pg):
             assert cur.fetchone()[0] == 1
         finally:
             conn.rollback()
+
+
+# --- Placement-exception marker (backward-scheduling Task 2.3) ---------------------------------------------
+PLACEMENT_EXCEPTION_MIGRATION = "2026-10-16-1-orders-placement-exception.sql"
+
+
+def test_placement_exception_column_in_schema_and_migration_say_destructive():
+    with open(os.path.join(ROOT, "migrations", PLACEMENT_EXCEPTION_MIGRATION), encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    assert "Destructive by text" in migration_text
+    for text in (schema_text, migration_text):
+        assert "ADD COLUMN IF NOT EXISTS placement_exception TEXT NULL" in text
+        assert "CHECK (placement_exception IN ('overtime', 'overlong'))" in text
+
+
+@pytest.mark.pg
+def test_placement_exception_migration_and_schema_apply_twice_and_check_holds(pg):
+    """Replay the migration and schema.sql twice: one column, one CHECK, bad values refused, NULL allowed."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with open(os.path.join(ROOT, "migrations", PLACEMENT_EXCEPTION_MIGRATION), encoding="utf-8") as f:
+        migration_sql = f.read()
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(migration_sql)
+        cur.execute(migration_sql)
+        cur.execute(schema_sql)
+        cur.execute(schema_sql)
+        conn.commit()
+        cur.execute("SELECT count(*) FROM information_schema.columns"
+                    " WHERE table_name = 'orders' AND column_name = 'placement_exception'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM pg_constraint WHERE conname = 'chk_orders_placement_exception'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SAVEPOINT bad")
+        with pytest.raises(Exception):
+            cur.execute("INSERT INTO orders (id, production_order, material_number, placement_exception)"
+                        " VALUES ('pe-bad', 'pe-bad', 'm', 'sideways')")
+        cur.execute("ROLLBACK TO SAVEPOINT bad")
+        conn.rollback()

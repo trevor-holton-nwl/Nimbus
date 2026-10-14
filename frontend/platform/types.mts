@@ -83,6 +83,10 @@ export interface NimbusTask {
   /** Backend-derived diagnostic after a runtime ingest changes a persisted
    *  schedule aggregate; the planner regenerates it from the current parent start. */
   runtime_schedule_mismatch?: boolean;
+  /** Why the planner's bar deliberately differs from its run-time width: 'overtime' (non-working time) or
+   *  'overlong' (wider than the run time). null/absent = a normal bar; the server skips its width check for a
+   *  marked bar. Sent on save (an explicit null clears it). */
+  placement_exception?: 'overtime' | 'overlong' | null;
   /** Server-computed field describing where an order's RUN_TIME value came from (routing runtime feature). */
   run_time_source?: string | null;
   /** Server-computed metadata sidecar for the RUN_TIME source determination. */

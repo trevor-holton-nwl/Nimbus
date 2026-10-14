@@ -35,7 +35,7 @@ def test_atomic_db_validation_writes_nothing(monkeypatch, rejection):
             assert not sql.lstrip().startswith(('UPDATE', 'DELETE', 'INSERT'))
         def fetchall(self):
             return [(i, datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
-                      None, None, None, None, None) for i in ['a','b']]
+                      None, None, None, None, None, None, None) for i in ['a','b']]
     class Connection:
         def cursor(self): return Cursor()
         def rollback(self): pass
@@ -69,7 +69,7 @@ def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkey
             if statements and statements[-1][0].startswith('UPDATE'):
                 return [('q', 43)]
             return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 2, 'p', 'L1', 'scheduled', None, False, None,
-                                      None, None, None, None, None)]
+                                      None, None, None, None, None, None, None)]
         def fetchone(self): return ('q', 43)
     class Connection:
         def cursor(self): return Cursor()
@@ -88,6 +88,38 @@ def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkey
     assert 'scheduled_start = NULL' in update and 'scheduled_end = NULL' in update
     assert 'basic_start_date' not in update and 'basic_finish_date' not in update
     assert any(sql.startswith('DELETE FROM order_schedule_segments') for sql, _ in statements)
+    # A queued order has no bar, so the same write nulls its placement marker (never a parameter).
+    assert 'placement_exception = NULL' in update
+
+
+def test_queue_write_ignores_a_marker_sent_with_it(monkeypatch):
+    """A save that queues a row and also carries a marker writes the NULL, never the marker, and does not
+    assign the column twice (Postgres rejects `SET a = .., a = ..`)."""
+    statements = []
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, sql, params=None): statements.append((sql, params))
+        def fetchall(self):
+            if statements and statements[-1][0].startswith('UPDATE'):
+                return [('q', 43)]
+            return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
+                     None, None, None, None, None, 'overtime', None)]
+        def fetchone(self): return ('q', 43)
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+    class Pool:
+        @contextmanager
+        def connection(self): yield Connection()
+    monkeypatch.setattr(db, '_pool', Pool())
+    monkeypatch.setattr(db, '_min_segment_minutes_by_plant', lambda *a: {})
+    result = db.update_task_dates_bulk([dict(
+        id='q', planning_status='needs_planning', planning_reason=dict(code='no_fit_found', message='Full'),
+        placement_exception='overlong', base_version=42)])
+    assert result['persisted'] == 1
+    update = next(sql for sql, _ in statements if sql.startswith('UPDATE'))
+    assert update.count('placement_exception') == 1 and 'placement_exception = NULL' in update
 
 
 def test_ingest_does_not_overwrite_planning_state():
@@ -176,4 +208,33 @@ def test_atomic_real_write_error_rolls_back_prior_order(pg):
             cur.execute('DROP TRIGGER zztest_reject_atomic_b ON orders')
             cur.execute('DROP FUNCTION zztest_reject_atomic_b()')
             cur.execute('DELETE FROM orders WHERE id = ANY(%s)', (ids,))
+            conn.commit()
+
+
+@pytest.mark.pg
+def test_queued_rows_null_the_placement_marker_and_the_stale_flag(pg):
+    """Every queue write drops the marker: the optimizer's queue save, and (via the same save) a planner's Delete."""
+    oid = 'ZZTEST_PE_QUEUE'
+    start = datetime(2026, 6, 1, 8)
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute('DELETE FROM orders WHERE id=%s', (oid,))
+        cur.execute('INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,'
+                    ' basic_finish_date, scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch,'
+                    ' placement_exception) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,4,TRUE,%s)',
+                    (oid, oid, 'ZZTEST_PE_MAT', 'ZZTEST_PE_LINE', 'ZZTEST_PE_PLANT', start, start + timedelta(hours=7),
+                     start, start + timedelta(hours=7), 'overtime'))
+        conn.commit()
+    try:
+        version = pg.get_task_versions([oid])[0]['row_version']
+        assert pg.get_task_versions([oid])[0]['placement_exception'] == 'overtime'
+        res = pg.update_task_dates_bulk([dict(id=oid, planning_status='needs_planning', base_version=version,
+            planning_reason=dict(code='planner_unscheduled', message='Unscheduled by planner'))])
+        assert res['persisted'] == 1
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute('SELECT planning_status, scheduled_start, scheduled_end, placement_exception,'
+                        ' runtime_schedule_mismatch FROM orders WHERE id=%s', (oid,))
+            assert cur.fetchone() == ('needs_planning', None, None, None, False)
+    finally:
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute('DELETE FROM orders WHERE id=%s', (oid,))
             conn.commit()

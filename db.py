@@ -641,7 +641,8 @@ _ORDERS_SELECT = f"""
         -- xmin's native type (xid) has no direct bigint cast.
         o.xmin::text::bigint  AS "ROW_VERSION",
         seg.schedule_segments AS "SCHEDULE_SEGMENTS",
-        {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS "RUNTIME_SCHEDULE_MISMATCH"
+        {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS "RUNTIME_SCHEDULE_MISMATCH",
+        o.placement_exception AS "PLACEMENT_EXCEPTION"
     FROM orders o
     {_SCHEDULE_SEGMENTS_LATERAL_SQL}
 """
@@ -899,7 +900,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                o.order_quantity, o.material_number,
                COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
                o.manual_firmed,
-               COALESCE(o.original_finish_received, o.basic_finish_date) AS original_end
+               COALESCE(o.original_finish_received, o.basic_finish_date) AS original_end,
+               o.placement_exception
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -930,6 +932,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "original_start_date": r[18].strftime("%Y-%m-%dT%H:%M:%S") if r[18] else None,
             "firmed": bool(r[19]),
             "original_end_date": r[20].strftime("%Y-%m-%dT%H:%M:%S") if r[20] else None,
+            "placement_exception": r[21],
         }
         for r in rows
     ]
@@ -1131,6 +1134,39 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     return conflicts
 
 
+# Width tolerance of the continuous-bar check, in seconds (the stored bar and its run time are both whole
+# minutes; a minute of slack absorbs a browser rounding the finish up to its minute).
+WIDTH_TOLERANCE_SECONDS = 60
+PLACEMENT_EXCEPTIONS = ("overtime", "overlong")
+
+
+def _elapsed_seconds(start: datetime, end: datetime, plant_tz: str | None) -> float:
+    """Real time between two NAIVE plant-local edges. With the plant's zone, each edge is turned into
+    the instant it names in that zone before diffing, so a bar across a daylight-saving change
+    measures what actually elapsed (a 24/7 bar from 00:00 to 06:00 across the spring-forward gap is
+    5 h, not 6). Without a zone (or an unknown one) the plain wall-clock difference is all there is."""
+    if plant_tz:
+        try:
+            zone = ZoneInfo(plant_tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            zone = None
+        if zone is not None:
+            return (end.replace(tzinfo=zone).astimezone(timezone.utc)
+                    - start.replace(tzinfo=zone).astimezone(timezone.utc)).total_seconds()
+    return (end - start).total_seconds()
+
+
+def _validate_continuous_width(start: datetime, end: datetime, run_time, placement_exception: str | None,
+                               plant_tz: str | None) -> bool | None:
+    """Does a continuous (non-segmented) bar's elapsed width equal its run time, within
+    WIDTH_TOLERANCE_SECONDS? Returns None when the check does not apply (the bar carries a
+    placement exception, or its run time is unknown: nothing to compare), else True / False.
+    The server never derives an edge from the other; it only judges the pair it was sent."""
+    if placement_exception is not None or run_time is None or float(run_time) <= 0:
+        return None   # (a zero run time has no width to compare; its bar must still be non-empty)
+    return abs(_elapsed_seconds(start, end, plant_tz) - float(run_time) * 3600.0) <= WIDTH_TOLERANCE_SECONDS
+
+
 _ORDER_ATTR_COLUMNS = {
     "PRT_01": "prt_01",
     "PRT_02": "prt_02",
@@ -1154,7 +1190,11 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
         pars.append(("planning_reason", "jsonb", "{v}"))
         vals.append(Jsonb(row["planning_reason"]) if row["planning_reason"] else None)
     if row["queued"]:
-        lits.extend(["scheduled_start = NULL", "scheduled_end = NULL"])
+        # A queued order has no bar, so it has no marker for one either.
+        lits.extend(["scheduled_start = NULL", "scheduled_end = NULL", "placement_exception = NULL"])
+    elif row["has_exception"]:
+        pars.append(("placement_exception", "text", "{v}"))   # a None value clears the marker
+        vals.append(row["placement_exception"])
     if row["start"] is not None and not row["queued"]:
         pars.append(("scheduled_start", "timestamp", "{v}"))
         vals.append(row["start"])
@@ -1240,9 +1280,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     of that parent's child set; its parent row's xmin is the only concurrency
     token.  Child rows are never addressed independently.
 
-    Inverted ranges are rejected by validating each edit against the row's
-    *effective* current dates (so updating only start still checks against the
-    existing end). Unknown ids are reported, not written.
+    Save contract (backward scheduling, Task 2.3): a non-segment, non-queued save must
+    carry BOTH edges (a single edge is rejected, `single_edge`: the server never completes
+    one edge from the stored other), and a continuous bar's elapsed plant-zone width must
+    equal its run time within `WIDTH_TOLERANCE_SECONDS` (`width_mismatch`) unless it carries
+    a `placement_exception`. Inverted ranges are rejected. Unknown ids are reported, not
+    written.
 
     A MACHINE edit is rejected as invalid whenever the row's PARENT_ORDER
     (parent_production_order) is set — a distribution child order may only move
@@ -1299,7 +1342,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     terminally-rejected rows while still keeping genuinely-unpersisted rows dirty
     for a retry. `rejection_reasons` is a purely additive, sparse {id: reason}
     map -- populated ONLY for the routing-eligibility rejection below
-    (ROUTING_RUNTIME_DESIGN.md §8.5); every other rejection in this function's
+    (ROUTING_RUNTIME_DESIGN.md §8.5), `machine_unknown`, `run_time_over_cap`,
+    `single_edge` and `width_mismatch`; every other rejection in this function's
     validation loop keeps its existing plain-id-only invalid_ids/not_found_ids
     behavior unchanged, so an id absent from this map carries no reason.
     """
@@ -1344,7 +1388,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                    o.material_number,
                    o.order_quantity,
                    COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
-                   o.production_version
+                   o.production_version,
+                   o.placement_exception,
+                   p.timezone
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             LEFT JOIN plants p ON p.plant = o.plant
@@ -1374,6 +1420,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "order_quantity": r[14],
                 "original_start": r[15],
                 "production_version": r[16],
+                "placement_exception": r[17],
+                "timezone": r[18],
             }
             for r in cur.fetchall()
         }
@@ -1402,11 +1450,17 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             has_runtime = "RUN_TIME" in it
             has_firmed = it.get("FIRMED") is not None
             has_planning = "planning_status" in it
+            has_exception = "placement_exception" in it
+            exception_value = it.get("placement_exception")
             planning_status = it.get("planning_status")
             planning_reason = it.get("planning_reason")
             queued = planning_status == "needs_planning"
             if (not tid or tid in seen_ids or
-                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_firmed and not has_planning)):
+                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_firmed and not has_planning
+                     and not has_exception)):
+                invalid_ids.append(tid)
+                continue
+            if has_exception and exception_value is not None and exception_value not in PLACEMENT_EXCEPTIONS:
                 invalid_ids.append(tid)
                 continue
             seen_ids.add(tid)
@@ -1544,9 +1598,11 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     continue
                 manual_runtime_release = True
 
-            cur_start, cur_end = current["start"], current["end"]
-            new_start = start if start is not None else cur_start
-            new_end   = end   if end   is not None else cur_end
+            # Both edges or segments, always (backward scheduling OQ50): a save never completes one
+            # edge from the stored other (the server cannot know which edge the planner meant to hold).
+            # A single-edge write to a non-segment, non-queued row is rejected; the edges the browser
+            # sends are the edges stored.
+            new_start, new_end = start, end
             if has_planning and (planning_status not in ("scheduled", "needs_planning") or
                     (queued and (not isinstance(planning_reason, dict) or
                                  not isinstance(planning_reason.get("code"), str) or
@@ -1574,6 +1630,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     invalid_ids.append(tid)
                     continue
             segment_rows: list[dict] | None = None
+            width_passed = False   # True only when the continuous-width check ran and held
 
             if queued:
                 new_start = new_end = None
@@ -1613,14 +1670,42 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 invalid_ids.append(tid)
                 continue
 
+            # (a save carrying a non-empty aggregate may omit an edge: the aggregate supplies both)
+            if (not queued and not segment_rows and not (has_segments and it.get("schedule_segments"))
+                    and (start is None) != (end is None)):
+                rejection_reasons[tid] = "single_edge"
+                invalid_ids.append(tid)
+                continue
+
             if new_start is not None and new_end is not None and new_end <= new_start:
                 invalid_ids.append(tid)
                 continue
 
-            if (not queued and (has_planning or start is not None or end is not None or has_segments)
+            if (not queued and (start is not None or end is not None or has_segments)
                     and (new_start is None or new_end is None)):
                 invalid_ids.append(tid)
                 continue
+            if not queued and has_planning and not has_segments and start is None and end is None and (
+                    current["start"] is None or current["end"] is None):
+                # A status-only restore to 'scheduled' needs a window already stored (a queued row has none).
+                invalid_ids.append(tid)
+                continue
+
+            # Continuous (non-segment) bar: its elapsed width must equal its run time, unless the planner
+            # marked the placement as a deliberate exception or the run time is unknown. The server only
+            # judges the pair of edges it was sent. A marker sent with this save wins over the stored one
+            # (an explicit null clears it, so the check applies again). Segments (>= 2 pieces) are judged
+            # by _validate_schedule_segments above; a bulk route that must not trust the sent start
+            # (trust_start=False, Task 2.7) will bypass this gate and force the flag instead.
+            if not queued and not segment_rows and new_start is not None and new_end is not None:
+                effective_exception = exception_value if has_exception else current["placement_exception"]
+                width_ok = _validate_continuous_width(
+                    new_start, new_end, requested_runtime, effective_exception, current["timezone"])
+                if width_ok is False:
+                    rejection_reasons[tid] = "width_mismatch"
+                    invalid_ids.append(tid)
+                    continue
+                width_passed = width_ok is True
 
             row_planning_status = planning_status if has_planning else (
                 "scheduled" if start is not None or end is not None or has_segments else None)
@@ -1647,7 +1732,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "manual_runtime_release": manual_runtime_release,
                 "resolved_runtime": resolved_runtime,
                 "segments": segment_rows,
-                "clear_runtime_mismatch": has_segments or start is not None or end is not None,
+                # The stale flag clears only when the stored bar was actually checked against the run time:
+                # a validated segment aggregate, or a continuous bar whose width check ran and held. A bar
+                # with a placement exception (or no known run time) leaves the flag untouched.
+                "clear_runtime_mismatch": queued or bool(segment_rows) or width_passed,
+                "has_exception": has_exception and not queued,
+                "placement_exception": exception_value,
                 # The conflict scan below (_scan_conflicts_for_rows) filters by
                 # this value to find overlaps on the machine the order actually
                 # ends up on — use the NEW machine when this edit moves it,
@@ -2843,13 +2933,16 @@ _UPSERT_SQL = f"""
         -- allowed to set this flag now, and only when the number it writes
         -- actually differs from what's stored.
         runtime_schedule_mismatch = CASE
-            -- Exception (H10/D33): a SCHEDULED distribution child (parent link set)
-            -- whose effective run time actually moves is flagged here, because the
-            -- ingest writes children through THIS statement before distribution's
-            -- own child upsert runs (whose identical CASE would then see no change).
-            WHEN orders.parent_production_order IS NOT NULL
-                 AND {_RUN_TIME_AFTER_UPLOAD_SQL} IS DISTINCT FROM orders.run_time
+            -- Any PLACED order (a stored start, a stored finish, or segments: the _PLACED_SQL
+            -- meaning, written here against the `orders` table name) whose effective run time
+            -- actually moves is flagged: its stored bar no longer matches its run time, and the
+            -- browser, not the server, re-derives the start from the held finish (backward
+            -- scheduling OQ34). This was children-only (H10/D33: the ingest writes children
+            -- through THIS statement before distribution's own child upsert runs, whose identical
+            -- CASE would then see no change); the general rule subsumes that case.
+            WHEN {_RUN_TIME_AFTER_UPLOAD_SQL} IS DISTINCT FROM orders.run_time
                  AND (orders.scheduled_start IS NOT NULL
+                      OR orders.scheduled_end IS NOT NULL
                       OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
             THEN TRUE
             ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
@@ -3777,6 +3870,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         cur.execute(
                             "UPDATE orders SET manual_firmed = FALSE, scheduled_start = NULL,"
                             " scheduled_end = NULL, planning_status = 'scheduled', planning_reason = NULL,"
+                            " runtime_schedule_mismatch = FALSE, placement_exception = NULL,"
                             " updated_at = NOW()"
                             " WHERE id = ANY(%(ids)s) RETURNING id",
                             {"ids": reset_ids},

@@ -1199,6 +1199,10 @@ export const Persistence = {
       ...(Persistence._firmDirtyIds.has(String(t.id)) ? { FIRMED: !!t.firmed } : {}),
       planning_status: t.planning_status ?? 'scheduled',
       planning_reason: t.planning_reason ?? null,
+      // Placement exception (backward scheduling OQ50): the marker the planner's bar carries, sent with every
+      // save of a task that holds the field. An explicit null clears the stored marker; a task that never
+      // carried the field (an older server, a demo row) omits it, so the server leaves the stored one alone.
+      ...(t.placement_exception !== undefined ? { placement_exception: t.placement_exception } : {}),
       start_date: t.start_date ? Util.toLocalSeconds(t.start_date) as NaiveLocalTs : null,
       end_date:   t.end_date ? Util.toLocalSeconds(t.end_date) as NaiveLocalTs : null,
       PRT_01:       t.PRT_01,
@@ -1528,6 +1532,7 @@ export const Persistence = {
           tk.planning_reason = planning.planning_reason ?? null;
           tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
           tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
+          tk.placement_exception = row.placement_exception ?? null;
           // The server's manual firm is authoritative; _normalizeDates re-syncs firmedIds from it.
           const serverFirmed = row.firmed;
           if (typeof serverFirmed === 'boolean') tk.firmed = serverFirmed;

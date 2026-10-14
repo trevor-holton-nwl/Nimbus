@@ -1537,7 +1537,7 @@ def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> Non
         cur.execute(
             """
             UPDATE orders
-               SET scheduled_start = NULL, scheduled_end = NULL,
+               SET scheduled_start = NULL, scheduled_end = NULL, placement_exception = NULL,
                    notes = %(notes)s, planning_status = 'needs_planning',
                    planning_reason = %(reason)s, updated_at = NOW()
              WHERE id = %(id)s

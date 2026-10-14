@@ -673,6 +673,58 @@ class TestRunTimeCap:
 
 
 # ---------------------------------------------------------------------------
+# Backward scheduling OQ34: ANY run-time change on a PLACED order flags it stale; the one-time cutover branch is
+# gone (the plant here is NOT in cutover: _CapCursor reports an existing routing-sourced order).
+# ---------------------------------------------------------------------------
+class TestAnyRunTimeChangeOnAPlacedOrderFlagsIt:
+    PLACED = {"id": "o1", "planning_status": "scheduled", "planning_reason": None,
+              "scheduled_start": dt.datetime(2026, 6, 1, 8), "scheduled_end": dt.datetime(2026, 6, 1, 12),
+              "run_time_source": "routing", "run_time": Decimal("4.0")}
+
+    def _flag(self, monkeypatch, order, hours):
+        _, writes, _ = _run_cap_resolve(monkeypatch, [dict(order)], {"o1": _resolved(hours)})
+        assert len(writes) == 1
+        return writes[0][5]
+
+    def test_a_changed_run_time_on_a_placed_order_sets_the_flag_even_when_the_plant_is_not_in_cutover(self, monkeypatch):
+        assert self._flag(monkeypatch, self.PLACED, 6.0) is True
+
+    def test_an_unchanged_run_time_does_not(self, monkeypatch):
+        order = dict(self.PLACED, run_time_source="legacy")   # a label change still writes the row
+        assert self._flag(monkeypatch, order, 4.0) is False
+
+    def test_a_never_placed_order_is_not_flagged(self, monkeypatch):
+        order = dict(self.PLACED, scheduled_start=None, scheduled_end=None)
+        assert self._flag(monkeypatch, order, 6.0) is False
+
+    def test_an_order_placed_by_a_stored_finish_alone_is_flagged(self, monkeypatch):
+        assert self._flag(monkeypatch, dict(self.PLACED, scheduled_start=None), 6.0) is True
+
+    def test_a_placed_order_that_had_no_run_time_is_flagged_when_one_arrives(self, monkeypatch):
+        assert self._flag(monkeypatch, dict(self.PLACED, run_time=None), 6.0) is True
+
+    def test_the_cutover_branch_is_gone(self):
+        import inspect
+        from backend.routing import resolver as r
+        assert "is_cutover" not in inspect.signature(r._build_write_row).parameters
+        assert "is_cutover" not in inspect.getsource(r._build_write_row)
+
+    def test_a_hold_clears_the_flag_and_the_placement_marker(self):
+        from psycopg.types.json import Jsonb
+        from backend.routing import resolver as r
+
+        class Rec:
+            def __init__(self): self.sql = []
+            def execute(self, stmt, params=None): self.sql.append(str(stmt))
+            def fetchall(self): return []
+
+        cur = Rec()
+        r._write_holds_chunk(cur, [("o1", Jsonb({"code": "runtime_unknown", "message": "x"}))])
+        update = next(q for q in cur.sql if "UPDATE orders" in q)
+        assert "runtime_schedule_mismatch = FALSE" in update and "placement_exception = NULL" in update
+
+
+# ---------------------------------------------------------------------------
 # Backward scheduling OQ26: production-version validity is judged on the SAP start as FIRST received (the
 # locked `original_start_received`), never on `basic_start_date`, which an echo of NIMBUS's own send can move.
 # ---------------------------------------------------------------------------

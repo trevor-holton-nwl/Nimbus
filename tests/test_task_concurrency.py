@@ -204,7 +204,7 @@ class TestUpdateTaskDatesBulkXminConflict:
         the seeded scheduled_end / run_time / prt values -- they must survive."""
         db_ = pg
         sched_start = self.start + dt.timedelta(days=5)
-        sched_end = sched_start + dt.timedelta(hours=3)
+        sched_end = sched_start + dt.timedelta(hours=6)    # the seeded 6 h run time, so a re-saved bar passes the width check
         oids = [db_.make_id(self.ORDER + f"_S{i}", self.MATERIAL) for i in range(3)]
         with db_._pool.connection() as conn, conn.cursor() as cur:
             for i, oid in enumerate(oids):
@@ -235,12 +235,14 @@ class TestUpdateTaskDatesBulkXminConflict:
             assert snap(oids[0]) == (new_start, new_end, 6, "K1", "K2")
             assert snap(oids[1]) == (sched_start, sched_end, 6, "N1", "K2")
             assert snap(oids[2]) == (sched_start, sched_end, 9, "K1", "K2")
-            # End-only / start-only edits must not clear the other boundary either.
+            # A single-edge save is rejected outright (both edges or segments, always): neither stored edge
+            # is completed from the other, so nothing changes.
             early_start = sched_start - dt.timedelta(hours=1)
             res = db_.update_task_dates_bulk([{"id": oids[1], "end": new_end}, {"id": oids[2], "start": early_start}])
-            assert res["persisted"] == 2
-            assert snap(oids[1]) == (sched_start, new_end, 6, "N1", "K2")
-            assert snap(oids[2]) == (early_start, sched_end, 9, "K1", "K2")
+            assert res["persisted"] == 0 and sorted(res["invalid_ids"]) == sorted([oids[1], oids[2]])
+            assert res["rejection_reasons"] == {oids[1]: "single_edge", oids[2]: "single_edge"}
+            assert snap(oids[1]) == (sched_start, sched_end, 6, "N1", "K2")
+            assert snap(oids[2]) == (sched_start, sched_end, 9, "K1", "K2")
         finally:
             with db_._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (oids,))
@@ -704,6 +706,162 @@ class TestBrowserSavePayloadCrossSeam:
             assert cur.fetchone() == (sent["MACHINE"], sent["PRODUCTION_VERSION"], sent["RUN_TIME"])
             cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id = %s", (oid,))
             assert cur.fetchone()[0] == len(sent["schedule_segments"])
+
+
+@pytest.mark.pg
+class TestSaveContractWidthValidator:
+    """Backward scheduling Task 2.3: both edges or segments always, the continuous-width validator, the stale
+    flag that only a passed check clears, and the placement_exception marker."""
+    SUB, PLANT, PLANT_NOTZ = "ZZTEST_SCW_SUB", "ZZTEST_SCW_PLANT", "ZZTEST_SCW_NOTZ"
+    MACHINE = "ZZTEST_SCW_LINE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.pg = pg
+        self.s = dt.datetime(2026, 6, 1, 8, 0)          # a plain Monday morning, no DST change nearby
+        self._cleanup()
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'scw') ON CONFLICT DO NOTHING", (self.SUB,))
+            cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'America/Chicago')",
+                        (self.SUB, self.PLANT))
+            cur.execute("INSERT INTO plants (subnetwork, plant) VALUES (%s, %s)", (self.SUB, self.PLANT_NOTZ))
+            conn.commit()
+        yield
+        self._cleanup()
+
+    def _cleanup(self):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE plant = ANY(%s)", ([self.PLANT, self.PLANT_NOTZ],))
+            cur.execute("DELETE FROM plants WHERE plant = ANY(%s)", ([self.PLANT, self.PLANT_NOTZ],))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+            conn.commit()
+
+    def _order(self, name, *, plant=None, run_time=4, mismatch=True, exception=None, start=None, hours=None):
+        """A placed order (stored start/end) of `run_time` hours, flagged stale by default."""
+        oid = self.pg.make_id("ZZTEST_SCW_" + name, "ZZTEST_SCW_MAT")
+        start = start or self.s
+        end = start + dt.timedelta(hours=hours if hours is not None else (run_time or 4))
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch,"
+                " placement_exception) VALUES (%s,%s,'ZZTEST_SCW_MAT',%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (oid, "ZZTEST_SCW_" + name, self.MACHINE, plant or self.PLANT, start, end, start, end,
+                 run_time, mismatch, exception))
+            conn.commit()
+        return oid
+
+    def _state(self, oid):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT scheduled_start, scheduled_end, runtime_schedule_mismatch, placement_exception"
+                        " FROM orders WHERE id = %s", (oid,))
+            return cur.fetchone()
+
+    def _save(self, oid, **fields):
+        return self.pg.update_task_dates_bulk([{"id": oid, **fields}])
+
+    def test_an_end_only_save_is_rejected_and_writes_nothing(self):
+        oid = self._order("END_ONLY")
+        before = self._state(oid)
+        res = self._save(oid, end=self.s + dt.timedelta(hours=4))
+        assert res["persisted"] == 0 and res["invalid_ids"] == [oid]
+        assert res["rejection_reasons"] == {oid: "single_edge"}
+        assert self._state(oid) == before
+
+    def test_a_start_only_save_is_rejected_too(self):
+        oid = self._order("START_ONLY")
+        res = self._save(oid, start=self.s + dt.timedelta(hours=1))
+        assert res["persisted"] == 0 and res["rejection_reasons"] == {oid: "single_edge"}
+
+    def test_both_edges_with_a_width_that_is_not_the_run_time_are_rejected(self):
+        oid = self._order("WIDE")
+        before = self._state(oid)
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=5))   # 5 h bar, 4 h run time
+        assert res["persisted"] == 0 and res["invalid_ids"] == [oid]
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+        assert self._state(oid) == before, "a rejected save changes nothing, flag included"
+
+    def test_a_width_within_sixty_seconds_is_accepted_and_clears_the_stale_flag(self):
+        oid = self._order("CLOSE")
+        new_start = self.s + dt.timedelta(days=1)
+        res = self._save(oid, start=new_start, end=new_start + dt.timedelta(hours=4, seconds=45))
+        assert res["persisted"] == 1 and res["invalid_ids"] == [] and res["rejection_reasons"] == {}
+        assert self._state(oid) == (new_start, new_start + dt.timedelta(hours=4, seconds=45), False, None)
+
+    def test_a_width_just_over_sixty_seconds_is_rejected(self):
+        oid = self._order("EDGE")
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4, seconds=61))
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+
+    def test_an_overtime_marker_lets_a_mismatched_width_through_and_leaves_the_flag_alone(self):
+        oid = self._order("OT")
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=7), placement_exception="overtime")
+        assert res["persisted"] == 1 and res["rejection_reasons"] == {}
+        assert self._state(oid) == (self.s, self.s + dt.timedelta(hours=7), True, "overtime")
+        row = self.pg.get_task_versions([oid])[0]
+        assert row["placement_exception"] == "overtime"
+
+    def test_a_stored_marker_keeps_standing_the_check_down_on_later_saves(self):
+        oid = self._order("OT_STORED", exception="overlong", hours=9)
+        res = self._save(oid, start=self.s + dt.timedelta(days=1), end=self.s + dt.timedelta(days=1, hours=9))
+        assert res["persisted"] == 1
+        assert self._state(oid)[3] == "overlong"
+
+    def test_an_explicit_null_clears_the_marker_and_the_check_applies_again(self):
+        oid = self._order("CLEAR", exception="overtime", hours=7)
+        bad = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=7), placement_exception=None)
+        assert bad["rejection_reasons"] == {oid: "width_mismatch"}
+        assert self._state(oid)[3] == "overtime", "a rejected save does not clear the marker"
+        good = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4), placement_exception=None)
+        assert good["persisted"] == 1
+        assert self._state(oid) == (self.s, self.s + dt.timedelta(hours=4), False, None)
+
+    def test_a_bad_marker_value_is_rejected(self):
+        oid = self._order("BADMARK")
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4), placement_exception="sideways")
+        assert res["persisted"] == 0 and res["invalid_ids"] == [oid]
+
+    def test_an_unknown_run_time_skips_the_width_check_and_leaves_the_flag_alone(self):
+        oid = self._order("NORT", run_time=None, hours=3)
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=11))
+        assert res["persisted"] == 1
+        assert self._state(oid)[2] is True
+
+    def test_a_24_7_bar_across_the_spring_forward_gap_is_judged_in_elapsed_plant_time(self):
+        # 2026-03-08 02:00 Chicago does not exist: 00:00 -> 06:00 on the wall clock is 5 hours elapsed.
+        start = dt.datetime(2026, 3, 8, 0, 0)
+        end = dt.datetime(2026, 3, 8, 6, 0)
+        oid = self._order("DST", run_time=5, start=start, hours=5)
+        res = self._save(oid, start=start, end=end)
+        assert res["persisted"] == 1 and res["rejection_reasons"] == {}, "naive width is 6 h, elapsed is 5 h"
+        assert self._state(oid) == (start, end, False, None)
+
+    def test_the_same_bar_without_a_plant_zone_is_judged_on_the_wall_clock(self):
+        start = dt.datetime(2026, 3, 8, 0, 0)
+        oid = self._order("NOTZ", plant=self.PLANT_NOTZ, run_time=5, start=start, hours=5)
+        res = self._save(oid, start=start, end=dt.datetime(2026, 3, 8, 6, 0))
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+
+    def test_a_segmented_save_is_judged_by_the_segment_rules_and_clears_the_flag(self):
+        oid = self._order("SEG", run_time=4, hours=10)
+        pieces = [{"sequence": 1, "start": self.s, "end": self.s + dt.timedelta(hours=2)},
+                  {"sequence": 2, "start": self.s + dt.timedelta(hours=8), "end": self.s + dt.timedelta(hours=10)}]
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=10), schedule_segments=pieces)
+        assert res["persisted"] == 1 and res["rejection_reasons"] == {}
+        assert self._state(oid)[2] is False
+
+    def test_a_browser_shaped_continuous_save_carries_an_empty_segment_list_and_is_still_checked(self):
+        oid = self._order("BROWSER")
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=5), schedule_segments=[])
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+        ok = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4), schedule_segments=[])
+        assert ok["persisted"] == 1 and self._state(oid)[2] is False
+
+    def test_a_marker_only_save_is_a_valid_edit(self):
+        oid = self._order("MARKONLY")
+        res = self._save(oid, placement_exception="overlong")
+        assert res["persisted"] == 1
+        assert self._state(oid)[3] == "overlong" and self._state(oid)[2] is True
 
 
 def test_conflict_scan_lookback_is_the_fixed_30_day_cap_and_reads_the_stored_finish():

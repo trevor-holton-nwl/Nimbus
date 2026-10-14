@@ -2011,6 +2011,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.reject_no_operation_at_workcenter': 'machine\'s work center has no routing operation',
   'ui.reject_zero_runtime': 'calculated run time is zero',
   'ui.reject_run_time_over_cap': 'a duração está acima do limite de comprimento',
+  'ui.reject_width_mismatch': 'o comprimento da barra não corresponde à duração',
+  'ui.reject_single_edge': 'início e término devem ser salvos juntos',
   'ui.max_push_forward_help': 'Deixe em branco para não ter limite. O otimizador trata isto como um limite rígido: ele não programa uma ordem com data para terminar mais do que este número de dias corridos após o dia da sua data de entrega. As ordens que não conseguem cumprir o limite são contadas na prévia e em um aviso após a execução. Remover atrasos ignora este limite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',

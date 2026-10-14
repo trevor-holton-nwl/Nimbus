@@ -39,17 +39,12 @@ one's inline comment for the reasoning):
   3. Cutover detection (`resolve_orders`): "this plant has zero orders with
      run_time_source = 'routing' yet" -- there's no explicit "first cutover"
      flag on `plants`, so this is inferred.
-  4. Cutover re-placement for every already-scheduled order (firmed or
-     frozen or not: nothing is kept in place -- a manual firm or a running
-     order protects a SLOT, not a run time) reuses the EXISTING `runtime_schedule_mismatch` flag +
-     `_EFF_END_SQL` mechanism (db.py)
-     rather than computing a new `scheduled_end` directly. No re-place/
-     resequence helper exists anywhere in backend/scheduling/ (only a
-     frontend one, `Engine.manualSchedulePatchFor`) -- and this flag IS the
-     system's already-documented answer to "a schedule's run_time changed,
-     re-place its bar" (ROUTING_RUNTIME_DESIGN.md §4 item 6: "The resolver's
-     write is the only thing allowed to set runtime_schedule_mismatch, and
-     only when the number it writes actually differs from what's stored").
+  4. A run-time change on a PLACED order sets `runtime_schedule_mismatch` (backward scheduling, OQ34):
+     the server never re-places a bar itself (the browser re-derives the start from the held
+     finish), so this flag IS the system's answer to "a schedule's run_time changed, re-place its
+     bar" (ROUTING_RUNTIME_DESIGN.md §4 item 6: the flag is set only when the number written
+     actually differs from what's stored). This replaces the old one-time cutover re-place, which
+     flagged only the first switch-on of a plant; the general rule covers it.
   5. A `fallback_legacy` outcome only WRITES (relabels `run_time_source` to
      'legacy') when the order's CURRENT `run_time_source` is NULL. An order
      that already carries a real label (manual/distributed/sap_order/
@@ -653,7 +648,7 @@ def _build_held_row(order: dict, step: str):
     return (order["id"], Jsonb(reason))
 
 
-def _build_write_row(order: dict, result: dict, is_cutover: bool):
+def _build_write_row(order: dict, result: dict):
     """One row for the non-held outcomes' VALUES-joined UPDATE, or None when
     this outcome must leave the order genuinely untouched (judgment call #5,
     module docstring: an already-labeled fallback_legacy order)."""
@@ -675,19 +670,15 @@ def _build_write_row(order: dict, result: dict, is_cutover: bool):
         and _is_routing_hold(order.get("planning_reason"))
     )
 
-    # Judgment call #4 (module docstring): cutover re-place, only for an
-    # order that was already `scheduled` (pulled in by the cutover-only clause
-    # in _load_orders) -- a previously-held order resolving now is an ordinary
-    # release, not a cutover re-place. No order is kept in place: SAP's firming
-    # indicator, a planner's manual firm and the frozen horizon do not protect
-    # a run time at switch-on.
-    set_mismatch = False
-    if (is_cutover and order.get("planning_status") == "scheduled"
-            and (order.get("scheduled_start") is not None or order.get("scheduled_end") is not None)):
-        # Only a genuinely user-placed order needs a re-place signal --
-        # one that's merely "scheduled" via basic_start_date alone picks
-        # up the new run_time automatically through _EFF_END_SQL.
-        set_mismatch = True
+    # Backward scheduling (OQ34): ANY run-time change on a PLACED order flags its stored bar as
+    # no longer matching the run time (a stored start, a stored finish, or segments: the parent row
+    # of a segmented order carries the envelope). One general rule: the browser, not the server,
+    # re-derives the start from the held finish. It subsumes the one-time cutover re-place that used
+    # to flag only at the first switch-on of a plant. A never-placed order has no bar to be wrong
+    # about, and a held order loses its slot (and the flag) in _write_holds.
+    placed = order.get("scheduled_start") is not None or order.get("scheduled_end") is not None
+    set_mismatch = (placed and db._canonical_runtime_minutes(order.get("run_time"))
+                    != db._canonical_runtime_minutes(run_time))
 
     return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch)
 
@@ -764,6 +755,8 @@ def _write_holds_chunk(cur, rows: list[tuple]) -> None:
         "        OR o.planning_reason IS DISTINCT FROM v.reason"
         "        OR o.scheduled_start IS NOT NULL"
         "        OR o.scheduled_end IS NOT NULL"
+        "        OR o.runtime_schedule_mismatch IS TRUE"
+        "        OR o.placement_exception IS NOT NULL"
         "        OR o.manual_firmed IS TRUE)"
     )
     cur.execute(
@@ -782,6 +775,9 @@ def _write_holds_chunk(cur, rows: list[tuple]) -> None:
         # SAP reset in db.upsert_orders clears): otherwise a stale firm and split slot
         # would resurface as a bar when the hold is released.
         " manual_firmed = FALSE,"
+        # A held order has no bar, so nothing to flag stale and nothing to mark (backward scheduling).
+        " runtime_schedule_mismatch = FALSE,"
+        " placement_exception = NULL,"
         " updated_at = NOW()"
         f" FROM (VALUES {placeholders}) AS v(id, reason)"
         " WHERE o.id = v.id" + changed +
@@ -881,7 +877,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             elif status == "fallback_legacy":
                 report["legacy_retained"] += 1
 
-            write_row = _build_write_row(order, result, is_cutover)
+            write_row = _build_write_row(order, result)
             if result.get("run_time") is not None and float(result["run_time"]) > plant_cap:
                 # Over the cap: the order is queued with reason run_time_over_cap (below), never
                 # released by this outcome. A run time past the database's representation bound

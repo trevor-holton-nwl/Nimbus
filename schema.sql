@@ -254,6 +254,12 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
 ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
 
+-- Placement-exception marker (backward scheduling OQ50): 'overtime' / 'overlong' = the planner placed this bar
+-- off its run-time width on purpose; NULL = a normal bar. Mirrors migrations/2026-10-16-1-orders-placement-exception.sql.
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS placement_exception TEXT NULL
+    CONSTRAINT chk_orders_placement_exception CHECK (placement_exception IN ('overtime', 'overlong'));
+
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a
 -- history of uploads with insert/update counts and any parser warnings.

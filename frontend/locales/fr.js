@@ -2012,6 +2012,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.reject_no_operation_at_workcenter': 'machine\'s work center has no routing operation',
   'ui.reject_zero_runtime': 'calculated run time is zero',
   'ui.reject_run_time_over_cap': 'la durée dépasse la limite de longueur',
+  'ui.reject_width_mismatch': 'la longueur de la barre ne correspond pas à la durée',
+  'ui.reject_single_edge': 'le début et la fin doivent être enregistrés ensemble',
   'ui.max_push_forward_help': 'Laissez vide pour ne pas avoir de limite. L\'optimiseur la traite comme une limite stricte : il ne placera pas un ordre daté de sorte qu\'il se termine plus de ce nombre de jours calendaires après le jour de son échéance. Les ordres qui ne peuvent pas respecter la limite sont comptés dans l\'aperçu et dans un avertissement après l\'exécution. Supprimer le retard ignore cette limite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',

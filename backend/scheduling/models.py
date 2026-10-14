@@ -84,6 +84,10 @@ class TaskDTO(BaseModel):
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
+    # Why the planner's bar deliberately differs from the run time (backward scheduling OQ50):
+    # 'overtime' (placed on non-working time) or 'overlong' (wider than the run time). NULL = a
+    # normal bar; the server's width check is skipped for a marked bar.
+    placement_exception: Literal["overtime", "overlong"] | None = None
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
     # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed
@@ -188,6 +192,10 @@ class TaskVersionRow(BaseModel):
     original_end_date: str | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
+    # Why the planner's bar deliberately differs from the run time (backward scheduling OQ50):
+    # 'overtime' (placed on non-working time) or 'overlong' (wider than the run time). NULL = a
+    # normal bar; the server's width check is skipped for a marked bar.
+    placement_exception: Literal["overtime", "overlong"] | None = None
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
     # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed
@@ -243,6 +251,10 @@ class TaskDateUpdate(BaseModel):
     # Planner's manual firm, sent only for rows whose firm the planner toggled.
     FIRMED: bool | None = None
     schedule_segments: list[ScheduleSegmentInput] | None = None
+    # Marker on a bar the planner placed on purpose off its run-time width. Sent only when the
+    # marker changed; an explicit null clears it (read through model_fields_set, like the
+    # attributes), an omitted field leaves the stored marker alone.
+    placement_exception: Literal["overtime", "overlong"] | None = None
     base_version: int | None = None
     force: bool = False
     planning_status: str | None = None

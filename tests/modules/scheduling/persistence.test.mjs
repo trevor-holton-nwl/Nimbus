@@ -1431,3 +1431,35 @@ test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending ca
     globalThis.localStorage = origLS;
   }
 });
+
+test('backward scheduling: the save payload carries placement_exception, an explicit null clears it, and an unset field stays out', () => {
+  const base = { id: 'pe-1', MACHINE: 'L1', RUN_TIME: 4, row_version: 3, planning_status: 'scheduled',
+    start_date: new Date('2026-10-06T08:00:00'), end_date: new Date('2026-10-06T12:00:00') };
+  const marked = Persistence._taskEditSnapshot({ ...base, placement_exception: 'overtime' });
+  assert.equal(marked.placement_exception, 'overtime');
+  const cleared = Persistence._taskEditSnapshot({ ...base, placement_exception: null });
+  assert.ok(Object.prototype.hasOwnProperty.call(cleared, 'placement_exception'), 'an explicit null is sent');
+  assert.equal(cleared.placement_exception, null);
+  const unset = Persistence._taskEditSnapshot({ ...base });
+  assert.ok(!Object.prototype.hasOwnProperty.call(unset, 'placement_exception'), 'a task that never carried the field omits it');
+  // JSON keeps the explicit null (the server reads it as "clear the marker").
+  assert.match(JSON.stringify(cleared), /"placement_exception":null/);
+});
+
+test('backward scheduling: saveAll sends the marker held on the task', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'pe-2', MACHINE: 'L1', RUN_TIME: 4, row_version: 9, placement_exception: 'overlong',
+    start_date: new Date('2026-10-06T08:00:00'), end_date: new Date('2026-10-06T14:00:00') }], 'unit-test');
+  Persistence._dirtyIds.add('pe-2');
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: JSON.parse(opts.body) });
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'pe-2': 10 } }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls[0].body.tasks[0].placement_exception, 'overlong');
+  } finally { globalThis.fetch = original; Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+});

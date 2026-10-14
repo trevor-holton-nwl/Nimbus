@@ -65,6 +65,7 @@ SAMPLE_TASK_ROW = {
         {"sequence": 2, "start_date": "2026-08-02T07:00:00", "end_date": "2026-08-02T09:00:00"},
     ],
     "runtime_schedule_mismatch": False,
+    "placement_exception": "overtime",
     "planning_status": "scheduled",
     "planning_reason": None,
     "run_time_source": "routing",
@@ -153,6 +154,40 @@ def test_firmed_is_forwarded_only_when_the_planner_sent_it(monkeypatch):
     assert captured["items"][0]["FIRMED"] is False
     brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", PRT_01="X")])
     assert "FIRMED" not in captured["items"][0]
+
+
+def test_placement_exception_is_the_one_new_wire_field_and_only_two_values_are_accepted():
+    from backend.scheduling.models import TaskVersionRow
+    assert brain.TaskDTO(**{**SAMPLE_TASK_ROW, "placement_exception": None}).placement_exception is None
+    assert brain.TaskDTO(**SAMPLE_TASK_ROW).placement_exception == "overtime"
+    assert TaskVersionRow(id="a").placement_exception is None
+    assert TaskVersionRow(id="a", placement_exception="overlong").placement_exception == "overlong"
+    for model in (brain.TaskDTO, TaskVersionRow):
+        base = SAMPLE_TASK_ROW if model is brain.TaskDTO else {"id": "a"}
+        with pytest.raises(ValidationError):
+            model(**{**base, "placement_exception": "sideways"})
+
+
+def test_placement_exception_is_forwarded_only_when_sent_and_an_explicit_null_clears(monkeypatch):
+    captured = {}
+
+    def fake_update(items, allowed_plants=None):
+        captured["items"] = items
+        return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
+                "not_found_ids": [], "stale": [], "versions": {"abc123": 43}}
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    # a marker alone is a valid edit
+    assert brain._apply_task_date_updates(
+        [brain.TaskDateUpdate(id="abc123", placement_exception="overlong", base_version=42)])["persisted"] == 1
+    assert captured["items"][0]["placement_exception"] == "overlong"
+    # an explicit null is forwarded as None (clear); an omitted field stays out
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", placement_exception=None, PRT_01="X")])
+    assert "placement_exception" in captured["items"][0] and captured["items"][0]["placement_exception"] is None
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", PRT_01="X")])
+    assert "placement_exception" not in captured["items"][0]
+    with pytest.raises(ValidationError):
+        brain.TaskDateUpdate(id="abc123", placement_exception="sideways")
 
 
 def test_task_version_row_carries_firmed():
@@ -289,13 +324,16 @@ class _FakeSegmentConnection:
 def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, machine,
              planning_status="scheduled", reason_code=None, routing_runtime_enabled=False,
              parent_order=None, run_time_source=None, material_number=None,
-             order_quantity=None, basic_start_date=None, production_version=None):
+             order_quantity=None, basic_start_date=None, production_version=None,
+             placement_exception=None, timezone=None):
     """One row of update_task_dates_bulk's `FOR UPDATE OF o` eff-lookup SELECT,
-    in its current 17-column order (id, eff_start, eff_end, run_time,
+    in its current 19-column order (id, eff_start, eff_end, run_time,
     row_version, segment_count, plant, machine, planning_status, reason_code,
     routing_runtime_enabled, parent_order, run_time_source, material_number,
-    order_quantity, basic_start_date, production_version -- the last five
-    added for ROUTING_RUNTIME_DESIGN.md §8.5's write-time eligibility gate).
+    order_quantity, basic_start_date, production_version -- those five added
+    for ROUTING_RUNTIME_DESIGN.md §8.5's write-time eligibility gate -- then
+    placement_exception and the plant's timezone, added for the backward-scheduling
+    save contract and both defaulting to None).
     None of these tests exercise the routing-runtime feature itself, so
     routing_runtime_enabled defaults to False/disabled — matching today's
     unconditional pre-routing-runtime behavior — and reason_code defaults to
@@ -308,7 +346,7 @@ def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, 
     return (order_id, start, end, run_time, row_version, segment_count, plant, machine,
             planning_status, reason_code, routing_runtime_enabled, parent_order,
             run_time_source, material_number, order_quantity, basic_start_date,
-            production_version)
+            production_version, placement_exception, timezone)
 
 
 def _segment_batch_item(order_id):

@@ -304,10 +304,12 @@ def test_upsert_sql_no_longer_blanket_flags_runtime_mismatch():
     _UPSERT_SQL; only a plain carry-forward (COALESCE(...,FALSE)) remains, so
     only the resolver's own write (backend/routing/resolver.py, elsewhere) may
     ever set this flag now."""
-    # Review round (H10/D33): the ONLY exception is a scheduled distribution child,
-    # i.e. the flag CASE is gated on a parent link; ordinary orders carry forward.
-    flag = db._UPSERT_SQL.split("runtime_schedule_mismatch = CASE", 1)[1].split("ELSE COALESCE", 1)[0]
-    assert "orders.parent_production_order IS NOT NULL" in flag
+    # Backward scheduling (OQ34): the flag CASE is gated on the order being PLACED (a stored start, a stored
+    # finish or segments), no longer on a parent link; an unplaced order carries the flag forward.
+    flag = db._UPSERT_SQL.split("runtime_schedule_mismatch = CASE", 1)[1].split("ELSE COALESCE(orders.runtime_schedule_mismatch", 1)[0]
+    assert "orders.parent_production_order" not in flag
+    assert "orders.scheduled_start IS NOT NULL" in flag and "orders.scheduled_end IS NOT NULL" in flag
+    assert "order_schedule_segments" in flag
     assert "COALESCE(orders.runtime_schedule_mismatch, FALSE)" in db._UPSERT_SQL
 
 
@@ -772,7 +774,7 @@ def _bulk_eff_row(oid="O1"):
     # run_time_source, material_number, order_quantity, basic_start_date, production_version
     return (oid, _d(2026, 10, 1, 6), _d(2026, 10, 1, 14), 8.0, 7, 0, "P1", "M1",
             "scheduled", None, False, None, None, "MAT", 100,
-            _d(2026, 10, 1, 6), "0001")
+            _d(2026, 10, 1, 6), "0001", None, None)
 
 
 def _run_bulk(monkeypatch, item):
@@ -790,8 +792,10 @@ def test_bulk_save_keeps_sap_sent_when_end_changes(monkeypatch):
 
 def test_bulk_save_keeps_sap_sent_when_end_unchanged(monkeypatch):
     from datetime import datetime as _d
-    # same end as the current row (14:00), only the start moves
-    sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 14)})
+    # same end as the current row (14:00), only the start moves (a 7 h bar for an 8 h run time: a deliberate
+    # placement exception, so the width check stands down)
+    sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 14),
+                                  "placement_exception": "overlong"})
     assert "sap_sent_" not in sql
 
 

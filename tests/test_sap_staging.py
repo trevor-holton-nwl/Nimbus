@@ -1546,6 +1546,29 @@ def test_zero_open_reset_leaves_a_planners_reslot_alone_on_an_unchanged_batch(pg
 
 
 @pytest.mark.pg
+def test_zero_open_sweep_clears_the_stale_flag_and_the_placement_marker(pg, stg_plant):
+    """Backward scheduling: an order swept into Needs Planning has no bar, so it keeps neither the stale-run-time
+    flag nor a placement marker."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=3)
+    _live_orders(pg, 1, soon, prefix="ZO")
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s, run_time = 2, run_time_source = 'manual',"
+                    " runtime_schedule_mismatch = TRUE, placement_exception = 'overtime'"
+                    " WHERE plant = %s AND production_order = 'ZO1'",
+                    (soon, soon + timedelta(hours=5), PLANT))
+        conn.commit()
+    row = {**_snapshot_row("ZO1", soon), "gsmng": 10, "abmng": 10}      # open quantity 0
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [row])
+    st.validate_batch(bid)
+    st.apply_batch(bid, actor="pytest")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT planning_status, scheduled_start, runtime_schedule_mismatch, placement_exception"
+                    " FROM orders WHERE plant = %s AND production_order = 'ZO1'", (PLANT,))
+        assert cur.fetchone() == ("needs_planning", None, False, None)
+
+
+@pytest.mark.pg
 def test_unbuildable_rows_are_rejected_at_apply_never_stamped_applied(pg, stg_plant):
     _set_plant(pg, routing=True, horizon_days=30)
     soon = datetime.utcnow() + timedelta(days=1)

@@ -2051,6 +2051,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.reject_no_operation_at_workcenter': 'machine\'s work center has no routing operation',
   'ui.reject_zero_runtime': 'calculated run time is zero',
   'ui.reject_run_time_over_cap': 'Laufzeit überschreitet die Längengrenze',
+  'ui.reject_width_mismatch': 'die Balkenlänge passt nicht zur Laufzeit',
+  'ui.reject_single_edge': 'Start und Ende müssen zusammen gespeichert werden',
   'ui.max_push_forward_help': 'Leer lassen für keine Begrenzung. Der Optimierer behandelt dies als feste Grenze: Er plant einen terminierten Auftrag nicht so, dass er mehr als diese Anzahl Kalendertage nach dem Tag seines Fälligkeitsdatums endet. Aufträge, die die Grenze nicht einhalten können, werden in der Vorschau und in einer Warnung nach dem Lauf gezählt. Rückstand entfernen ignoriert diese Grenze.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',

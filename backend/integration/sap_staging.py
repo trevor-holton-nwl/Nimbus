@@ -1801,7 +1801,8 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
                 cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", (ids,))
                 cur.execute(
                     "UPDATE orders SET planning_status = 'needs_planning', planning_reason = %s,"
-                    " scheduled_start = NULL, scheduled_end = NULL, manual_firmed = FALSE, updated_at = NOW()"
+                    " scheduled_start = NULL, scheduled_end = NULL, manual_firmed = FALSE,"
+                    " runtime_schedule_mismatch = FALSE, placement_exception = NULL, updated_at = NOW()"
                     " WHERE id = ANY(%s)", (Jsonb(_ZERO_OPEN_REASON), ids))
                 flagged = len(ids)
         conn.commit()

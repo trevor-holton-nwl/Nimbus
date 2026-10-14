@@ -1116,6 +1116,53 @@ class TestSapTruthReupload:
         self._no_sap_reset(res)
         assert row["scheduled_start"] == slot and row["manual_firmed"] is True
 
+    def _flags(self, oid=None):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT runtime_schedule_mismatch, placement_exception, run_time FROM orders WHERE id = %s",
+                        (oid or self._oid(),))
+            return cur.fetchone()
+
+    def test_run_time_change_flags_a_placed_plain_order(self):
+        """Backward scheduling OQ34: ANY placed order whose run time moves on a re-upload is flagged stale
+        (this used to be distribution children only); the planner's slot itself is untouched."""
+        self._up([self._date_only_line(RUN_TIME=4)])
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        assert self._flags()[0] is False
+        self._up([self._date_only_line(RUN_TIME=6)], "zztest_st_2.xlsx")
+        flag, _marker, run_time = self._flags()
+        assert flag is True and float(run_time) == 6
+        assert self._row()["scheduled_start"] == slot
+
+    def test_run_time_change_flags_an_order_placed_by_a_finish_alone(self):
+        self._up([self._date_only_line(RUN_TIME=4)])
+        self._sql("UPDATE orders SET scheduled_end = %s WHERE id = %s",
+                  (self.base + dt.timedelta(days=3), self._oid()))
+        self._up([self._date_only_line(RUN_TIME=6)], "zztest_st_2.xlsx")
+        assert self._flags()[0] is True
+
+    def test_run_time_change_does_not_flag_a_never_placed_order(self):
+        self._up([self._date_only_line(RUN_TIME=4)])
+        self._up([self._date_only_line(RUN_TIME=6)], "zztest_st_2.xlsx")
+        flag, _marker, run_time = self._flags()
+        assert flag is False and float(run_time) == 6
+
+    def test_an_unchanged_run_time_leaves_a_placed_order_unflagged(self):
+        self._up([self._date_only_line(RUN_TIME=4)])
+        self._schedule(self.base + dt.timedelta(days=3))
+        self._up([self._date_only_line(RUN_TIME=4, **{"ORDER_QUANTITY_(GMEIN)": 150})], "zztest_st_2.xlsx")
+        assert self._flags()[0] is False
+
+    def test_an_sap_date_change_resets_the_slot_and_clears_the_flag_and_the_marker(self):
+        self._up()
+        self._schedule(self.base + dt.timedelta(days=3))
+        self._sql("UPDATE orders SET runtime_schedule_mismatch = TRUE, placement_exception = 'overtime' WHERE id = %s",
+                  (self._oid(),))
+        self._up([self._line(BASIC_FINISH_DATE=self.base + dt.timedelta(days=2))], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] is None and row["scheduled_end"] is None
+        assert self._flags()[:2] == (False, None)
+
     def test_run_time_column_dropped_is_not_a_sap_date_change(self):
         self._up([self._date_only_line(RUN_TIME=4)])
         slot = self.base + dt.timedelta(days=3)

@@ -225,6 +225,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
                 "schedule_segments": _schedule_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
                 "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
+                "placement_exception": row.get("PLACEMENT_EXCEPTION") or None,
                 "planning_status": row.get("PLANNING_STATUS") or "scheduled",
                 "planning_reason": row.get("PLANNING_REASON"),
                 "run_time_source": row.get("run_time_source"),
@@ -336,6 +337,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
         has_runtime = "RUN_TIME" in supplied
         has_firmed = "FIRMED" in supplied and it.FIRMED is not None
         has_segments = "schedule_segments" in supplied
+        has_exception = "placement_exception" in supplied
         segments: list[dict] | None = None
         if has_segments:
             # An aggregate replacement is deliberately explicit.  Treating a
@@ -362,7 +364,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 })
             if segments is None:
                 continue
-        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_firmed and not has_segments and not has_planning:
+        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_firmed and not has_segments and not has_planning and not has_exception:
             if atomic_optimizer:
                 invalid += 1
                 invalid_ids.append(it.id)
@@ -379,6 +381,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             item["FIRMED"] = it.FIRMED
         if has_segments:
             item["schedule_segments"] = segments
+        if has_exception:
+            item["placement_exception"] = it.placement_exception   # None = clear the marker
         norm.append(item)
 
     forced_ids = [it["id"] for it in norm if it.get("force")]

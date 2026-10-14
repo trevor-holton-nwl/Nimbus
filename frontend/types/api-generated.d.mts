@@ -3585,6 +3585,8 @@ export interface components {
              * @default false
              */
             runtime_schedule_mismatch: boolean;
+            /** Placement Exception */
+            placement_exception?: ("overtime" | "overlong") | null;
             /**
              * Planning Status
              * @default scheduled
@@ -3632,6 +3634,8 @@ export interface components {
             FIRMED?: boolean | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentInput"][] | null;
+            /** Placement Exception */
+            placement_exception?: ("overtime" | "overlong") | null;
             /** Base Version */
             base_version?: number | null;
             /**
@@ -3724,6 +3728,8 @@ export interface components {
              * @default false
              */
             runtime_schedule_mismatch: boolean;
+            /** Placement Exception */
+            placement_exception?: ("overtime" | "overlong") | null;
             /**
              * Planning Status
              * @default scheduled
