@@ -1720,6 +1720,12 @@ export const Engine = {
         else if (orphaned) issue = { code: 'setup_override_orphaned' };   // an active override no longer names the row before it (recorded only, Task 3.3 alerts)
         else if (Store.isFirmed(task.id) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart }, plantNow)) {
           issue = { code: 'frozen_window_crossed' };   // OQ4: alert only, nothing is un-firmed
+        } else if (placed && !Store.isFirmed(task.id) && task.start_date
+          && !Engine.isFrozenHorizon(task, plantNow) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart }, plantNow)) {
+          // R26 (gate 14): a PLACED, unfirmed row whose start moves from outside to inside the frozen window in
+          // this reconcile becomes frozen, and a frozen start is sent firm (irreversible in SAP). Warn the planner.
+          // Never-placed, display-only and queued rows stay excluded (no flood).
+          issue = { code: 'frozen_window_crossed', from: task.start_date, to: derivedStart };
         } else {
           const pullFloor = Engine.earliestAllowedStart(task, plant, null);
           if (pullFloor && derivedStart < pullFloor) issue = { code: 'pull_floor_crossed', from: derivedStart, to: pullFloor };   // OQ20

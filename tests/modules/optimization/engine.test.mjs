@@ -4174,6 +4174,32 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('R26 (gate 14): an unfirmed PLACED row whose derived start flips into the frozen window records frozen_window_crossed; staying outside, or never placed, records nothing', () => {
+    const fx = recFixture();
+    try {
+      Store.setFrozenHorizonEnd(at(27, 12), 'unit-test');
+      // Run time grew 4 h -> 6 h with the 17:00 finish held: the start moves 13:00 -> 11:00, from outside the window (ends 12:00) to inside it.
+      Store.setTasks([
+        fx.task('flip', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(27, 13), end_date: at(27, 17) }),
+        fx.task('stay', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(28, 13), end_date: at(28, 17) }),
+        fx.task('never', { RUN_TIME: '6', original_end_date: at(26, 17), start_date: at(27, 13), end_date: at(27, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.isFirmed('flip'), false);
+      assert.equal(Store.tasks.flip.derivationIssue?.code, 'frozen_window_crossed');
+      assert.equal(Store.tasks.flip.derivationIssue.from.getTime(), at(27, 13).getTime());
+      assert.equal(Store.tasks.flip.derivationIssue.to.getTime(), at(27, 11).getTime());
+      assert.equal(Store.tasks.stay.derivationIssue ?? null, null, 'start stays outside the window');
+      assert.equal(Store.tasks.never.derivationIssue ?? null, null, 'never-placed rows are excluded');
+      // End to end: the compute core (the worker's function) renders the recorded note as the alert.
+      const { alerts } = globalThis.NimbusComputeCore.computeAlerts({
+        tasks: Store.tasksArr, blocks: [], plantBlocks: [], calendars: Store.calendars, plants: Store.plants,
+        lineSettings: Store.lineSettings, masterData: Store.masterData, dismissed: [], opts: {}, now: { [fx.plant]: Store.plantNow(fx.plant) },
+      });
+      assert.deepEqual(alerts.filter(a => a.type === 'frozen_window_crossed').map(a => a.id), ['derivation-flip-frozen_window_crossed']);
+    } finally { fx.restore(); }
+  });
+
   test('OQ53: three reversing orders on one line land X at now, Y after X, Z in the next window (finish order)', () => {
     const fx = recFixture();
     try {
