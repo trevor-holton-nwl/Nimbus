@@ -5,7 +5,7 @@
 -- Every non-queued order loses its placed start and end (so it reads as never placed and re-derives from
 -- its due date on first load under the new image) and is flagged runtime_schedule_mismatch. A RUNNING row
 -- keeps its start AND its old end. Placement markers are cleared, schedule segments of non-queued orders
--- are removed, and every touched row's updated_at moves. Queued rows are untouched.
+-- of non-queued, non-running orders are removed (a running split order keeps its fragments), and every touched row's updated_at moves. Queued rows are untouched.
 -- Guarded by the schema_migrations ledger id 'backward_scheduling_cutover': a re-run is a no-op.
 -- schema.sql mirrors this block, so a developer database that re-applies schema.sql loses its local
 -- placed finishes once.
@@ -23,8 +23,10 @@ BEGIN
       SELECT o.id, COALESCE(MAX(s.scheduled_end), o.scheduled_start + (o.run_time * INTERVAL '1 hour'), o.scheduled_end) AS old_end
       FROM orders o LEFT JOIN order_schedule_segments s ON s.order_id = o.id GROUP BY o.id
     ), running AS (
-      SELECT o.id, e.old_end FROM orders o JOIN plant_now pn ON pn.plant = o.plant JOIN old_end e ON e.id = o.id
-      WHERE o.scheduled_start IS NOT NULL AND o.scheduled_start <= pn.pnow AND e.old_end > pn.pnow
+      SELECT o.id, e.old_end FROM orders o LEFT JOIN plant_now pn ON pn.plant = o.plant JOIN old_end e ON e.id = o.id
+      WHERE o.scheduled_start IS NOT NULL
+        AND o.scheduled_start <= COALESCE(pn.pnow, now() AT TIME ZONE 'UTC')
+        AND e.old_end > COALESCE(pn.pnow, now() AT TIME ZONE 'UTC')
     )
     UPDATE orders o SET
       -- Task 0 ruling B4 (OQ3/OQ5): a running row keeps BOTH its start and its old forward end so it still
@@ -37,7 +39,11 @@ BEGIN
       updated_at = now()
     FROM (SELECT id FROM orders) a LEFT JOIN running r ON r.id = a.id
     WHERE o.id = a.id AND o.planning_status <> 'needs_planning';
-    DELETE FROM order_schedule_segments s USING orders o WHERE s.order_id = o.id AND o.planning_status <> 'needs_planning';
+    -- Segments are removed for every non-queued row EXCEPT a running one (a running row kept its start above, so
+    -- scheduled_start IS NULL here marks exactly the rows that lost their placement); a running split order keeps
+    -- its fragments and so its closed-hours gaps.
+    DELETE FROM order_schedule_segments s USING orders o
+     WHERE s.order_id = o.id AND o.planning_status <> 'needs_planning' AND o.scheduled_start IS NULL;
     INSERT INTO schema_migrations (id) VALUES ('backward_scheduling_cutover');
   END IF;
 END

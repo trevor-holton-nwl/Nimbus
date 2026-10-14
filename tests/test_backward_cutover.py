@@ -78,6 +78,11 @@ def _seed(cur):
     # No-timezone plant: the SQL falls back to UTC, so a start 1 h before UTC now reads as running.
     add("zzcut-notz-run", NOTZ, base=utcnow, start=utcnow - _h(1), end=utcnow + _h(2), run=3, due_days=1)
     add("zzcut-notz-never", NOTZ, base=utcnow, due_days=1)
+    # I4: a running row whose plant is NULL, or names no plants row, still reads as running (UTC clock).
+    add("zzcut-nullplant-run", None, base=utcnow, start=utcnow - _h(2), end=utcnow + _h(3), run=5, due_days=1)
+    add("zzcut-noplantrow-run", "ZZCUT_NOPLANTROW", base=utcnow, start=utcnow - _h(2), end=utcnow + _h(3), run=5,
+        due_days=1)
+    add("zzcut-nullplant-future", None, base=utcnow, start=utcnow + _d(1), end=utcnow + _d(1, 4), due_days=2)
     for oid, segs in (
         ("zzcut-run-split", [(-3, -1), (4, 8)]),  # last segment ends at pnow + 8 h
         ("zzcut-split-future", [(48, 52), (54, 59)]),
@@ -103,7 +108,8 @@ def _row(cur, oid):
 
 FLEET = ("zzcut-run-pastdue", "zzcut-run-futuredue", "zzcut-run-split", "zzcut-run-noruntime", "zzcut-future",
          "zzcut-never", "zzcut-queued", "zzcut-split-future", "zzcut-firmed", "zzcut-marked", "zzcut-dist-A",
-         "zzcut-dist-B", "zzcut-notz-run", "zzcut-notz-never")
+         "zzcut-dist-B", "zzcut-notz-run", "zzcut-notz-never", "zzcut-nullplant-run", "zzcut-noplantrow-run",
+         "zzcut-nullplant-future")
 
 
 @pytest.mark.pg
@@ -153,10 +159,18 @@ def test_backward_cutover_write_set_and_idempotence(pg):
             cur.execute("SELECT to_jsonb(o) FROM orders o WHERE id = 'zzcut-queued'")
             assert cur.fetchone()[0] == queued_before
             assert r["zzcut-queued"]["mismatch"] is False
-            # Split future -> NULL/NULL; segments of split rows removed (running split keeps its edges).
+            # Split future -> NULL/NULL and its segments are removed; the RUNNING split row keeps its edges AND
+            # both fragments (I3: dropping them would draw it as one bar through closed hours).
             assert (r["zzcut-split-future"]["start"], r["zzcut-split-future"]["end"]) == (None, None)
-            cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id IN ('zzcut-split-future','zzcut-run-split')")
+            cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id = 'zzcut-split-future'")
             assert cur.fetchone()[0] == 0
+            cur.execute("SELECT segment_no, scheduled_start, scheduled_end FROM order_schedule_segments "
+                        "WHERE order_id = 'zzcut-run-split' ORDER BY segment_no")
+            assert cur.fetchall() == [(1, pnow - _h(3), pnow - _h(1)), (2, pnow + _h(4), pnow + _h(8))]
+            # I4: NULL / unknown plant: running rows keep both edges, the future one is cleared.
+            for oid in ("zzcut-nullplant-run", "zzcut-noplantrow-run"):
+                assert (r[oid]["start"], r[oid]["end"]) == (before[oid]["start"], before[oid]["end"]), oid
+            assert (r["zzcut-nullplant-future"]["start"], r["zzcut-nullplant-future"]["end"]) == (None, None)
             # Firmed: flag TRUE, firm kept, sent row kept.
             assert r["zzcut-firmed"]["mismatch"] is True
             assert r["zzcut-firmed"]["firmed"] is True and r["zzcut-firmed"]["fi"] == "X"
@@ -192,3 +206,4 @@ def test_backward_cutover_write_set_and_idempotence(pg):
             assert cur.fetchone() == (before["zzcut-firmed"]["start"], before["zzcut-firmed"]["end"])
         finally:
             conn.rollback()
+
