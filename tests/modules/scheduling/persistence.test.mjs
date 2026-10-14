@@ -1336,6 +1336,25 @@ test('refresh copy-back updates both t.firmed and firmedIds from the server row'
   } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
 });
 
+test('refresh copy-back applies the locked original_end_date (the due date) from the server row', async () => {
+  Store.setTasks([firmTask('od-a', { original_end_date: new Date('2026-09-12T00:00:00') }),
+    firmTask('od-b', { original_end_date: new Date('2026-09-12T00:00:00') })], 'unit-test');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ missing: [], data: [
+    { id: 'od-a', MACHINE: 'L1', row_version: 9, firmed: false, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00',
+      original_start_date: '2026-09-01T08:00:00', original_end_date: '2026-09-20T22:00:00' },
+    { id: 'od-b', MACHINE: 'L1', row_version: 9, firmed: false, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00',
+      original_start_date: '2026-09-01T08:00:00' },   // an older server that does not send the field
+  ] }) });
+  try {
+    Persistence._refreshTasks(['od-a', 'od-b']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['od-a'].original_end_date.getTime(), new Date('2026-09-20T22:00:00').getTime());
+    assert.equal(Store.tasks['od-b'].original_end_date.getTime(), new Date('2026-09-12T00:00:00').getTime(),
+      'a row without the field keeps the due date the client already holds');
+  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
+});
+
 test('a cache holding firmedIds / fixedIds / tasks[].firmed restores no firms, but cached date edits still restore', () => {
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   const cached = firmTask('old-firm', { firmed: true });

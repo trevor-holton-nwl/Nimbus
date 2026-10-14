@@ -174,6 +174,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-06-sap-truth-firming.sql",
         "2026-10-08-sap-staging-columns.sql",
         "2026-10-08-sap-staging-tables.sql",
+        "2026-10-15-1-orders-original-dates.sql",
     }
     all_names = {
         os.path.basename(path)
@@ -706,3 +707,55 @@ def test_sap_staging_migrations_are_idempotent_and_create_every_object(pg):
         for idx in STAGE_INDEXES:
             assert idx in have_idx, f"{idx} missing after the migrations"
         assert any(r[1] == "chk_sap_sync_config_apply_mode" for r in before["constraints"])
+
+
+# --- Locked original SAP dates (backward-scheduling Phase 1, Task 1.1) ---------------------------------------
+ORIGINAL_DATES_MIGRATION = "2026-10-15-1-orders-original-dates.sql"
+ORIGINAL_DATES_COLUMN_STATEMENTS = (
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;",
+    "ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;",
+)
+
+
+def test_original_dates_columns_and_ledger_in_schema_and_migration():
+    """The locked SAP start/finish columns and the ledger-guarded backfill live in BOTH schema.sql (safe to
+    re-apply) and the dated migration deploys actually apply; the migration says it is destructive by text."""
+    with open(os.path.join(ROOT, "migrations", ORIGINAL_DATES_MIGRATION), encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    for stmt in ORIGINAL_DATES_COLUMN_STATEMENTS:
+        assert stmt in schema_text, stmt
+        assert stmt in migration_text, stmt
+    for text in (schema_text, migration_text):
+        assert "WHERE id = 'orders_original_dates_backfill'" in text
+        assert "VALUES ('orders_original_dates_backfill')" in text
+    assert "Destructive by text" in migration_text
+    # The backfill reads order_sap_sent, so schema.sql must create it first.
+    assert schema_text.index("CREATE TABLE IF NOT EXISTS order_sap_sent (") < schema_text.index(
+        "VALUES ('orders_original_dates_backfill')"
+    )
+
+
+@pytest.mark.pg
+def test_original_dates_schema_applies_twice_and_ledger_has_one_row(pg):
+    """Apply schema.sql twice: the three columns exist and the backfill ledger id is recorded exactly once."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(schema_sql)
+        conn.commit()
+        cur.execute(schema_sql)
+        conn.commit()
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns"
+            " WHERE table_schema = 'public' AND column_name IN ('original_start_received', 'original_finish_received')"
+        )
+        have = {tuple(r) for r in cur.fetchall()}
+        assert have == {
+            ("orders", "original_start_received"),
+            ("orders", "original_finish_received"),
+            ("order_distribution", "original_finish_received"),
+        }
+        cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_original_dates_backfill'")
+        assert cur.fetchone()[0] == 1

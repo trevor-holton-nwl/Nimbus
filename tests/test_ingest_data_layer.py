@@ -1146,3 +1146,93 @@ class TestSapTruthReupload:
         assert warn["count"] == 1
         res = self.pg.upsert_orders([row_in(None)], source="sap")
         assert not [w for w in res["warnings"] if w.get("category") == "unparseable_dates"]
+
+
+@pytest.mark.pg
+class TestOriginalDatesBackfill:
+    """Backward-scheduling Task 1.1: the ledger-guarded backfill of the locked SAP dates
+    (migrations/2026-10-15-1-orders-original-dates.sql). Everything runs inside one transaction that
+    is rolled back, so re-running the backfill never touches data another test or a dev DB holds."""
+    SUB, PLANT, WC = "ZZTEST_OD_SUB", "ZZTEST_OD_P", "ZZTEST_OD_WC"
+    D1 = dt.datetime(2026, 11, 2, 8, 0)
+    D2 = dt.datetime(2026, 11, 5, 16, 0)
+    D3 = dt.datetime(2026, 11, 9, 6, 0)
+
+    @staticmethod
+    def _migration_sql() -> str:
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "migrations", "2026-10-15-1-orders-original-dates.sql")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _seed(self, cur):
+        cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'orig dates test')", (self.SUB,))
+        cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')", (self.SUB, self.PLANT))
+        cur.execute("INSERT INTO machine (subnetwork, plant, machine) VALUES (%s, %s, 'ZZTEST_OD_M')",
+                    (self.SUB, self.PLANT))
+        cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode, default_machine)"
+                    " VALUES (%s, %s, 'single', 'ZZTEST_OD_M')", (self.PLANT, self.WC))
+        # (id, basic_start, basic_finish, sap_basic_start, sap_basic_finish)
+        rows = [
+            ("zzod_unsent_sap", self.D1, self.D2, self.D1 - dt.timedelta(days=1), self.D2 - dt.timedelta(days=1)),
+            ("zzod_unsent_nosap", self.D1, self.D2, None, None),
+            ("zzod_sent", self.D1, self.D2, self.D1 - dt.timedelta(days=1), self.D2 - dt.timedelta(days=1)),
+        ]
+        for oid, bs, bf, sbs, sbf in rows:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
+                " basic_finish_date, sap_basic_start_date, sap_basic_finish_date)"
+                " VALUES (%s, %s, 'ZZTEST_OD_MAT', %s, %s, %s, %s, %s)",
+                (oid, oid, self.PLANT, bs, bf, sbs, sbf),
+            )
+        cur.execute("INSERT INTO order_sap_sent (order_id, plant, sent_finish) VALUES ('zzod_sent', %s, %s)",
+                    (self.PLANT, self.D3))
+        cur.execute(
+            "INSERT INTO order_distribution (plant, production_order, material_number, sap_workcenter,"
+            " basic_start_date, basic_finish_date) VALUES (%s, 'zzod_header', 'ZZTEST_OD_MAT', %s, %s, %s)",
+            (self.PLANT, self.WC, self.D1, self.D2),
+        )
+
+    def _orig(self, cur, oid):
+        cur.execute("SELECT original_start_received, original_finish_received FROM orders WHERE id = %s", (oid,))
+        return cur.fetchone()
+
+    def test_backfill_rules_per_sent_state_and_header(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            try:
+                self._seed(cur)
+                cur.execute("DELETE FROM schema_migrations WHERE id = 'orders_original_dates_backfill'")
+                cur.execute("UPDATE orders SET original_start_received = NULL, original_finish_received = NULL"
+                            " WHERE plant = %s", (self.PLANT,))
+                cur.execute("UPDATE order_distribution SET original_finish_received = NULL WHERE plant = %s",
+                            (self.PLANT,))
+                cur.execute(self._migration_sql())
+                # No sent row: SAP-as-received wins when present, else the current basic dates.
+                assert self._orig(cur, "zzod_unsent_sap") == (self.D1 - dt.timedelta(days=1),
+                                                              self.D2 - dt.timedelta(days=1))
+                assert self._orig(cur, "zzod_unsent_nosap") == (self.D1, self.D2)
+                # A sent row means the original was lost: fall back to basic_* (never the sap_* copy).
+                assert self._orig(cur, "zzod_sent") == (self.D1, self.D2)
+                cur.execute("SELECT original_finish_received FROM order_distribution WHERE plant = %s",
+                            (self.PLANT,))
+                assert cur.fetchone()[0] == self.D2
+                cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_original_dates_backfill'")
+                assert cur.fetchone()[0] == 1
+            finally:
+                conn.rollback()
+
+    def test_second_run_is_a_no_op_once_the_ledger_row_exists(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            try:
+                self._seed(cur)
+                cur.execute("INSERT INTO schema_migrations (id) VALUES ('orders_original_dates_backfill')"
+                            " ON CONFLICT DO NOTHING")
+                sentinel = dt.datetime(2030, 1, 1, 0, 0)
+                cur.execute("UPDATE orders SET original_finish_received = %s WHERE id = 'zzod_unsent_nosap'",
+                            (sentinel,))
+                cur.execute(self._migration_sql())
+                assert self._orig(cur, "zzod_unsent_nosap")[1] == sentinel
+            finally:
+                conn.rollback()
+

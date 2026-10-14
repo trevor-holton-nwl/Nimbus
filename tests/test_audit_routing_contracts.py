@@ -68,11 +68,15 @@ def test_refresh_returns_all_writable_attributes_with_version(monkeypatch):
     class Cursor:
         def execute(self, sql, params):
             assert "o.machine" in sql and "o.prt_01" in sql and "o.run_time" in sql
+            # The wire due date is the locked SAP value, not the (overwritable) basic_* dates.
+            assert "COALESCE(o.original_finish_received, o.basic_finish_date)" in sql
+            assert "COALESCE(o.original_start_received, o.basic_start_date)" in sql
 
         def fetchall(self):
             return [("row", None, None, 12, [], False, "P", "needs_planning",
                      {"code": "runtime_unknown", "message": "pending"}, "routing", {"machine": "M2"},
-                     "M2", "TOOL2", None, "0002", 6, 120, "MAT", datetime(2026, 10, 1, 8), True)]
+                     "M2", "TOOL2", None, "0002", 6, 120, "MAT", datetime(2026, 10, 1, 8), True,
+                     datetime(2026, 10, 30, 16))]
 
     monkeypatch.setattr(db, "_pool", _FakeSegmentPool(Cursor()))
     row = db.get_task_versions(["row"])[0]
@@ -83,4 +87,27 @@ def test_refresh_returns_all_writable_attributes_with_version(monkeypatch):
     assert row["ORDER_QUANTITY_(GMEIN)"] == 120
     assert row["MATERIAL_NUMBER"] == "MAT"
     assert row["original_start_date"] == "2026-10-01T08:00:00"
+    assert row["original_end_date"] == "2026-10-30T16:00:00"
     assert row["firmed"] is True
+
+
+def test_distribution_child_read_serves_the_locked_original_dates(monkeypatch):
+    """The child read feeds the Distribution pane's original_* columns: it must emit the locked SAP value
+    (falling back to basic_*) under the existing basic_* keys, not the raw overwritable dates."""
+    import backend.distribution.data as distribution_data
+
+    seen = {}
+
+    class Cursor:
+        description = []
+
+        def execute(self, sql, params):
+            seen["sql"] = sql
+
+        def fetchall(self):
+            return []
+
+    assert distribution_data._read_write_children(Cursor(), ["c1"]) == []
+    assert "COALESCE(o.original_start_received, o.basic_start_date) AS basic_start_date" in seen["sql"]
+    assert "COALESCE(o.original_finish_received, o.basic_finish_date) AS basic_finish_date" in seen["sql"]
+

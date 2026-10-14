@@ -3797,6 +3797,8 @@ export interface components {
             firmed: boolean;
             /** Original Start Date */
             original_start_date?: string | null;
+            /** Original End Date */
+            original_end_date?: string | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentDTO"][];
             /**

@@ -1387,3 +1387,25 @@ resolver's `_round_to_minute`/hours-computation path has the same latent exposur
 rejection/warning — instead of whole-batch/whole-chunk failure — should eventually be added to both
 paths so one bad row doesn't abort an entire upload or resolve batch. Not implemented here; recorded
 as follow-up work for whoever picks up ingest/resolver hardening next.
+
+## Backward scheduling — Phase 1 owner checks
+
+`migrations/2026-10-15-1-orders-original-dates.sql` adds the locked SAP start/finish columns
+(`orders.original_start_received`, `orders.original_finish_received`, `order_distribution.original_finish_received`)
+and backfills them once, guarded by the `schema_migrations` id `orders_original_dates_backfill`. An order that
+NIMBUS has already sent back to SAP (it has an `order_sap_sent` row) had its SAP finish overwritten by that send,
+so its original is lost and the backfill can only copy the current `basic_finish_date`. The owner may want to
+review those orders before relying on their due dates. Read-only query (SELECT only — never run by an agent):
+
+```sql
+SELECT o.id, o.plant, o.production_order, o.basic_finish_date, o.sap_basic_finish_date, s.sent_finish
+FROM orders o
+JOIN order_sap_sent s ON s.order_id = o.id
+WHERE o.basic_finish_date IS DISTINCT FROM o.sap_basic_finish_date
+   OR o.basic_finish_date IS DISTINCT FROM s.sent_finish
+ORDER BY o.plant, o.production_order;
+```
+
+The backfill `UPDATE` touches every `orders` row, which bumps each row's xmin (the `base_version`), so apply it at
+deploy time and never mid-shift.
+

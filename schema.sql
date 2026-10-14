@@ -240,6 +240,13 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_production_version TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_start_date TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_finish_date TIMESTAMP;
 
+-- Locked copies of the SAP start/finish as received (backward scheduling Phase 1, OQ31 b / OQ26).
+-- GET /tasks serves original_start_date/original_end_date as COALESCE(original_*_received, basic_*).
+-- Mirrors migrations/2026-10-15-1-orders-original-dates.sql; the one-time backfill is at the end of this file.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a
 -- history of uploads with insert/update counts and any parser warnings.
@@ -1998,3 +2005,22 @@ BEGIN
         CHECK (run_time_source IS NULL OR run_time_source IN
             ('routing', 'manual', 'legacy', 'distributed', 'sap_order'));
 END $$;
+
+-- Backfill of the locked original SAP dates (mirrors migrations/2026-10-15-1-orders-original-dates.sql).
+-- Placed last because it reads order_sap_sent. Ledger-guarded so a re-apply never re-runs it. The UPDATE
+-- rewrites every orders row (bumps xmin / base_version): apply at deploy time, never mid-shift.
+-- A row with no order_sap_sent row takes the as-received sap_basic_* dates when present, else basic_*;
+-- a row with a sent row had its original overwritten by NIMBUS's own send, so original_* = basic_*.
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_original_dates_backfill') THEN
+    UPDATE orders o SET
+      original_finish_received = CASE WHEN s.order_id IS NULL THEN COALESCE(o.sap_basic_finish_date, o.basic_finish_date) ELSE o.basic_finish_date END,
+      original_start_received  = CASE WHEN s.order_id IS NULL THEN COALESCE(o.sap_basic_start_date,  o.basic_start_date)  ELSE o.basic_start_date  END
+    FROM orders o2 LEFT JOIN order_sap_sent s ON s.order_id = o2.id
+    WHERE o2.id = o.id;
+    UPDATE order_distribution SET original_finish_received = basic_finish_date WHERE original_finish_received IS NULL;
+    INSERT INTO schema_migrations (id) VALUES ('orders_original_dates_backfill');
+  END IF;
+END
+$mig$;

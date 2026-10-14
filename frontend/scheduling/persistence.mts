@@ -1730,6 +1730,8 @@ export const Persistence = {
           tk.PLANT = row.PLANT ?? '';
           tk.original_start_date = Util.parseDate(row.original_start_date);
           tk.BASIC_START_DATE = Util.parseDate(row.original_start_date);
+          // The locked SAP due date. A row from an older server omits the field: keep what the client holds.
+          if (row.original_end_date !== undefined) tk.original_end_date = Util.parseDate(row.original_end_date);
           tk.RUN_TIME = row.RUN_TIME ?? null;
           tk.run_time_source = row.run_time_source;
           tk.run_time_basis = row.run_time_basis;

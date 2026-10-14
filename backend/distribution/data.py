@@ -3012,7 +3012,8 @@ def _read_write_children(cur, child_ids) -> list[dict]:
         f"""
         SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
                o.labor_hours, o.machine_hours, o.scheduled_start, o.scheduled_end,
-               o.basic_start_date, o.basic_finish_date, o.notes,
+               COALESCE(o.original_start_received, o.basic_start_date) AS basic_start_date,
+               COALESCE(o.original_finish_received, o.basic_finish_date) AS basic_finish_date, o.notes,
                o.planning_status, o.planning_reason, o.distribution_letter, o.parent_production_order,
                o.xmin::text::bigint AS base_version,
                o.plant, o.material_number, o.material_description,

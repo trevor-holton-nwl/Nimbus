@@ -184,6 +184,8 @@ class TaskVersionRow(BaseModel):
     PLANT: str | None = None
     firmed: bool = False
     original_start_date: str | None = None
+    # The locked SAP finish (the due date): COALESCE(original_finish_received, basic_finish_date).
+    original_end_date: str | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"

@@ -554,8 +554,10 @@ _ORDERS_SELECT = f"""
         CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS "BASIC_FINISH_DATE",
         o.planning_status AS "PLANNING_STATUS",
         o.planning_reason AS "PLANNING_REASON",
-        basic_start_date      AS "ORIGINAL_START_DATE",
-        basic_finish_date     AS "ORIGINAL_END_DATE",
+        -- The wire "original" dates are the LOCKED SAP values as received; basic_* is the
+        -- fallback for a row with no locked copy yet (backward scheduling, Phase 1).
+        COALESCE(o.original_start_received,  o.basic_start_date)  AS "ORIGINAL_START_DATE",
+        COALESCE(o.original_finish_received, o.basic_finish_date) AS "ORIGINAL_END_DATE",
         (seg.segment_count >= 2 OR scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
         run_time              AS "RUN_TIME",
         -- Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13): server-computed
@@ -846,7 +848,10 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                o.plant, o.planning_status, o.planning_reason,
                o.run_time_source, o.run_time_basis,
                o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time,
-               o.order_quantity, o.material_number, o.basic_start_date, o.manual_firmed
+               o.order_quantity, o.material_number,
+               COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
+               o.manual_firmed,
+               COALESCE(o.original_finish_received, o.basic_finish_date) AS original_end
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -876,6 +881,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "MATERIAL_NUMBER": r[17],
             "original_start_date": r[18].strftime("%Y-%m-%dT%H:%M:%S") if r[18] else None,
             "firmed": bool(r[19]),
+            "original_end_date": r[20].strftime("%Y-%m-%dT%H:%M:%S") if r[20] else None,
         }
         for r in rows
     ]
