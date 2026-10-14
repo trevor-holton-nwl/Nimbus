@@ -4259,6 +4259,33 @@ describe('reconcile (finish-anchored)', () => {
     }
   });
 
+  test('U16 round 2: the never-policy reversal leg picks its slot in plant-zone instants on a Chicago DST night (22:00-06:00 line)', async () => {
+    // A viewer outside the plant zone (UTC): wall-clock windows know nothing of the Chicago jump.
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'UTC';
+    try {
+    const tz = 'America/Chicago';
+    const night = () => ({ 0: [0, 6], 1: null, 2: null, 3: null, 4: null, 5: null, 6: [22, 24] });
+    Store.setCalendar('U16-NIGHT', night(), 'unit-test');
+    const seq = (hours, from) => Engine.placeForwardSequence('U16-NIGHT',
+      [{ task: { id: 't', RUN_TIME: String(hours), MACHINE: 'U16-NIGHT' } }], from, 'never', { plantTz: tz });
+    // Sat 7 Mar 22:00 -> Sun 8 Mar 06:00 is 7 elapsed hours (02:00 does not exist): a 7 h run fits and ends at the close...
+    const fits = seq(7, new Date(2026, 2, 7, 21, 0));
+    assert.equal(fits.placed.length, 1);
+    assert.deepEqual([fits.placed[0].start.getDate(), fits.placed[0].start.getHours()], [7, 22]);
+    assert.deepEqual([fits.placed[0].end.getDate(), fits.placed[0].end.getHours()], [8, 6], 'ends at the 06:00 close, not an hour past it');
+    // ...an 8 h run does not fit the 7 h night (the wall clock reads 8 h): it must not be placed running into closed time.
+    const over = seq(8, new Date(2026, 2, 7, 21, 0));
+    assert.equal(over.placed.length, 1);
+    assert.deepEqual([over.placed[0].start.getDate(), over.placed[0].start.getHours()], [14, 22], 'skips the short night, takes the next Saturday');
+    assert.deepEqual([over.placed[0].end.getDate(), over.placed[0].end.getHours()], [15, 6]);
+    // Fall-back night Sat 31 Oct -> Sun 1 Nov 2026 holds 9 elapsed hours in the same 22:00-06:00 window: a 9 h run fits.
+    const back = seq(9, new Date(2026, 9, 31, 21, 0));
+    assert.equal(back.placed.length, 1, 'the 9 elapsed-hour night holds a 9 h run');
+    assert.deepEqual([back.placed[0].end.getDate(), back.placed[0].end.getHours()], [1, 6]);
+    } finally { process.env.TZ = previousTz ?? LOCAL_TZ; }   // set explicitly: deleting TZ can leave the process on UTC
+  });
+
   test('senior review M1: the never-branch reversal rounds the run time to whole minutes (no fractional-minute finish)', () => {
     const fx = recFixture();
     try {

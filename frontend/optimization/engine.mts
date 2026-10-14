@@ -1867,19 +1867,26 @@ export const Engine = {
         // schedules. A split schedule that is explicitly regenerated under
         // this policy is cleared below as one atomic parent aggregate.
         const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
-        if (!('start' in slot)) {
+        if (slot.kind === 'unavailable' || (!opts.plantTz && !('start' in slot))) {
           out.failure = { item, reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
           break;
         }
-        if (slot.kind === 'overlong') { out.overlong.push(item); continue; }
-        start = slot.start;
-        end = new Date(start.getTime() + runtimeMs);
+        if (slot.kind === 'overlong' && !opts.plantTz) { out.overlong.push(item); continue; }
         if (opts.plantTz) {
-          // The reversal's forward leg measures the run in plant-zone elapsed time (OQ46, U16), not viewer-zone.
-          const core = globalThis.NimbusComputeCore;
-          const startInstant = core?.plantInstantFromWallClock(opts.plantTz, start);
-          const endWall = startInstant ? core?.plantWallClockFromInstant(opts.plantTz, new Date(startInstant.getTime() + runtimeMs)) : null;
-          if (endWall) end = endWall;
+          // The reversal's forward leg picks the slot AND the end in plant-zone instants (OQ46, U16), so a window
+          // whose edge lies on a DST jump is neither overrun nor skipped. Overlong / unavailable were classified above.
+          const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), 'never', opts.plantTz);
+          if (allocation.kind !== 'allocated') {
+            // Wall-clock said overlong and plant-zone time agrees (no window holds it): the continuous-bar exception.
+            if (slot.kind === 'overlong') { out.overlong.push(item); continue; }
+            out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+            break;
+          }
+          start = allocation.start;
+          end = allocation.end;
+        } else {
+          start = (slot as { start: Date }).start;
+          end = new Date(start.getTime() + runtimeMs);
         }
         if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
       } else {
