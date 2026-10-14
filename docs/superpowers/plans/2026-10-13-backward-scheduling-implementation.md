@@ -700,6 +700,93 @@ Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-sch
 
 _(appended at the end of each phase)_
 
+#### Phase 1 gate report (2026-10-14)
+
+**Branch and range.** `feature/backward-scheduling-phase1`, `0317dd8` (main at phase start) to `0c145b6`: 19 commits, 58 code and doc files, +2493 / -823. Nothing was pushed, merged or deployed (owner charter, plan section 0.2a). Gate numbers below were taken at `643b7eb` (the last code commit); `69dffac` and `0c145b6` are docs only.
+
+**Commands run and counts** (from the ledger `Phase 1 gate` lines; the whole-branch reviewer re-ran only focused checks).
+
+| Command | Result | Baseline |
+|---|---|---|
+| `npm test` legacy (`tests/js`) | 46 / 46 pass | 40 / 40 |
+| `npm test` modules (`tests/modules`) | 1214 pass, 0 fail, 3 todo (knownFailure in `calendar-sync-boundaries.test.mjs`) | 1202 pass, 3 fail (optimizer spawn probes `ETIMEDOUT` under load), 3 todo |
+| `npm run lint` | 0 errors, 35 warnings | same 35 warnings |
+| `npm run check:static-assets` | OK | OK |
+| `npm run check:legacy-surface` | no drift (re-run by the reviewer: "matches contract") | n/a |
+| `node --check frontend/locales/{en,de,es,fr,pt}.js` | all five parse (reviewer) | n/a |
+| `pytest tests/` on `nimbus_sdd` | 1685 passed, 2 failed, 1 skipped, 13 xfailed, 145 s | 1626 passed, 2 failed, 1 skipped, 13 xfailed |
+
+The two pytest failures are `tests/test_scale_catalog_paging.py::test_material_grids_traverse_every_material_once_with_constant_query_budget[material_grid]` and `[material_plant_grid]`: identical on the baseline commit (collation ordering of material ids), unrelated to this work. The branch adds 59 passing Python tests and 12 module tests.
+
+**Tests flipped or added, by task.**
+- 1.1 locked columns: new `TestOriginalDatesBackfill` (pg), two schema tests (static text in both files; apply twice, ledger once), refresh-row and `/tasks` wire tests serve `COALESCE(original_*_received, basic_*)`, refresh copy-back test in `persistence.test.mjs`; both new migrations pinned in `test_schema_idempotent.py`.
+- 1.4 hygiene (ran before 1.2): three Hygiene tests flipped (midnight kept, same-date finish before start kept, missing finish dropped with warning and counter), finish-column-absent flipped, `test_sap_staging.py:292` flipped (blank finish is `invalid_date`), `test_setup_data.py` flipped; added earlier-date drop, unparseable finish (Excel path), mixed-format parse; dead counters now incremented and asserted.
+- 1.2 echo rule: 12 pure `finish_echoes` tests (Chicago M1 echo, New York variant is not an echo, timed echo, genuine change, no sent row) and six Postgres tests in `TestSapTruthReupload` (first ingest sets originals; echo keeps both; genuine later finish updates both; start-only change after an echo keeps the stored start).
+- 1.3 distribution: five new tests in `TestSapTruthDistributionReupload` (re-weight then unchanged date-only upload resets no sibling; re-weight never rewrites a child's dates or baseline; new child has no SAP baseline; header original follows the echo rule, in the SAP frame; `_resolve_machines` header due comes from the plain order's locked original); the brief's named test was found vacuous after 1.4 and replaced by a discriminating one (mutation-checked both ways).
+- 1.5 due reading: six `dueDateInstant` cases (compute core), foundation test for `Util.sapDueDate` (open day, Sunday to Friday close, timed as-is, no-calendar line, revision invalidation), setup-scheduler test (Sunday due, N = 0); the two baseline-correct tests and the relay expectations deleted.
+- 1.6 run-time cap: 15 new tests (400 h row queued with reason and NULL dates, 336 h scheduled, horizon-5-days cap of 120 h, Machine Hours 500 queued, row over 8760 rejected by number with the chunk committed, bulk edit rejected with `run_time_over_cap`, resolver hold and release, schema re-apply raises the old bound once); bound tests in `test_task_response_models.py` re-pointed from 168 to 8760.
+- 1.7 Send: `test_send_skips_unfirmed_orders` (pure and Postgres), existing send tests re-seeded with firm; per-locale `vm.Script` syntax test added after the French apostrophe defect.
+- 1.8 purge preview: one request-body test in `admin-ui.test.mjs` (RED then GREEN).
+- 1.9 docs: no test logic changed.
+
+**Review findings per task and their fixes.**
+- 1.1 approved, 0 Critical or Important. 1.2 approved. 1.5, 1.6, 1.8 approved (spec and quality).
+- 1.3: one Important (named test vacuous after 1.4). Fix round: discriminating test, SAP-frame header echo test, replan carries SAP keys and the date-only flag (`4e8eb00`..`5b7bd30`).
+- 1.4: spec miss (row-dict twin instead of the Excel path). Fix round: Excel-path unparseable-finish test, mixed-format parse unit test, wording (`ae99ec8`..`239c502`).
+- 1.7: one Critical. `fr.js:750` had an unescaped apostrophe, so the whole French locale failed to load; the locale tests had not parsed the files. Fixed in `f2a6275` with the escape and a syntax-compile test for all five locales.
+- 1.9 (Haiku, docs): Sonnet review checked 64 statements, corrected 12, added 26 (`0c145b6`).
+
+**Whole-branch review (fresh Sonnet pass, 2026-10-14): NEEDS FIX WAVE. 0 Critical, 2 Important.**
+
+Important findings (details and fixes are in the review message; recorded here verbatim):
+1. Optimizer hot path is 30 to 50 percent slower on real (date-only) due dates. `frontend/optimization/setup-scheduler.mts:1254` `dueTimestamp` calls `dueInstant` (1219) on every comparison and, in `candidateForSequence` (3063) and `urgencyKeyFor` (6381), allocates a fresh `DueScope` per task per candidate. Measured with `scripts/bench-optimizer.mjs` (copy with due dates floored to midnight, `--shape large --no-deadline`, three modes, two runs): 1.7 to 2.1 s with timed dues (the old fast path), 2.3 to 3.8 s with midnight dues; `dueInstant` costs 1.6 to 2.4 microseconds per call with a midnight due against 0.2 with a timed one. A scratch copy with a per-task memo in `dueTimestamp` returned to 1.8 to 2.4 s with identical result digests. Fix: memoise the due instant per task (WeakMap keyed on the task, validated against the raw due and the snapshot), hoist `dueScopeFor` out of per-task loops, and add a midnight-due variant to the bench.
+2. The Phase 1 deploy runbook (`docs/MIGRATION.md`, step 3 of "(b) Owner deploy runbook", line 1418) never rehearses the two migrations on the restored dump. `migrations/2026-10-15-1-orders-original-dates.sql` UPDATEs every `orders` row, and `chk_orders_sched_range` (`schema.sql:94-97`, `NOT VALID`) is still enforced on every updated row, so one pilot row with `scheduled_end` not after `scheduled_start` aborts the whole migration (it rolls back safely, but only at deploy time). Fix: add to step 3 "apply both migration files to the restored copy with psql, read the result, and run `SELECT count(*) FROM orders WHERE scheduled_start IS NOT NULL AND scheduled_end IS NOT NULL AND scheduled_end <= scheduled_start`; the count must be 0 or the rows repaired before the window".
+
+Conformance verdicts (file:line evidence is in the review message): spec section 7.3 items 1 to 7 present, nothing from Phases 2 to 4 leaked (no new wire field on `TaskDTO`; `TaskVersionRow.original_end_date` is the spec-listed refresh addition), `basic_finish_date` is written only by ingest (`db.py:2830`, `backend/distribution/data.py:1230,1419`), the working-hours snap is live (`persistence.mts` loop 1 and `calendar-sync.mts` re-snap), the due date and locked columns have no planner-action writer.
+
+**Deferred-minor triage** (every `minor (deferred)`, `parked`, `concern` and unresolved line of the ledger). MUST = before merge; P2 = fix in the named Phase 2/3 task; ACCEPT = no action.
+
+| Source | Item | Verdict |
+|---|---|---|
+| 1.1 | `persistence.mts` copies locked original start into `BASIC_START_DATE`; server PV validity reads `basic_start_date` | P2, Task 2.2 (OQ26: validity on `original_start_received`) |
+| 1.1 | child read emits locked values under `basic_*` keys (naming trap) | ACCEPT: SQL comment added in 1.3 |
+| 1.1 | refresh guard asymmetry (start unconditional, end guarded) | ACCEPT: harmless |
+| 1.1 | `schema_bootstrap_smoke.py` exits 1 | ACCEPT: pre-existing on `88c2879` (sentinel `run_time_source` fingerprint drift); CI is already red on main; owner to know |
+| 1.2 | echo docs still say minute precision (`docs/SAP_STAGING_DESIGN.md:113`, `docs/MIGRATION.md:847` "deferred" note, `docs/NIMBUS_INTERFACE_ARCHITECTURE.md:672` midnight rewrite reason) | MUST (docs, one line each; ride in the fix wave) |
+| 1.2 | `fold=0` on DST-ambiguous local times; dormant `sap_sync.py:774` stub passes no `sap_tz`; no >500-row chunk test; no child start-only echo test | ACCEPT / P2 Task 2.7 for the tests |
+| 1.2 | Excel path judges the echo in the plant frame (`sap_tz=None`) | ACCEPT: matches the old rule; revisit with the real-SAP echo test (assumption A9) in Task 2.7 |
+| 1.3 | +2 round trips per distribution parent at ingest; f-string child SQL fragile; no mutation-hole test for the planner variant; `MAX(sent_finish)` arbitrary under a partial re-send | ACCEPT (sub-second at pilot scale); batch the queries in Task 2.7 if profiling asks |
+| 1.3 | named test would not catch a planner rewrite of `basic_finish_date` from header facts | ACCEPT: sibling test covers it |
+| 1.4 | staging validator accepts a finish before the start (rejected at apply) | P2, Task 2.7 |
+| 1.4 | `_dropped_rows_label` renders float ids as `1000012345.0` | P2, Task 2.7 (use `_str_id`) |
+| 1.4 | dropped-row counters are process-cumulative; DB Load stays `warn` until restart | ACCEPT |
+| 1.4 | inactive `pedtr` field-map row drops every staged order | ACCEPT: document in Task 2.8 |
+| 1.5 | stale comments (`persistence.mts`, `tests/test_distribution.py`, `cq1-compatibility-inventory.md`) | ACCEPT: 1.9 corrected them; two test-comment leftovers are harmless |
+| 1.5 | `_calendarService.workWindow` seam member unused | P2, Task 2.5 (snap deleted there) |
+| 1.5 | no direct test of `Engine.earliestAllowedStart` / `latestAllowedEnd` with a midnight or Sunday due | P2, Task 3.1 |
+| 1.5 | silent raw fallback if `NimbusComputeCore.dueDateInstant` is absent | ACCEPT: the worker `importScripts` the same file |
+| 1.5 | look-back loop 31 dates; no-calendar line does 31 cheap resolver calls | ACCEPT |
+| 1.5 | optimizer hot-path cost unmeasured (⚠️) | MUST: measured by this review, Important 1 |
+| 1.5 | grid and Inspector show the raw midnight (12 AM) in Original End | P3, Task 3.4 |
+| 1.5 | optimizer floor and ceiling on a closed due day move to the previous open day | ACCEPT: ruled; named in the runbook |
+| 1.6 | cap follows `plants.visibility_horizon_days`; plants with a horizon under 7 days get a cap under 168 h and an existing longer order is queued when next uploaded | ACCEPT with owner check: list pilot plants with `visibility_horizon_days < 14` before the window (runbook (c) already says no sweep) |
+| 1.6 | `_apply_run_time_cap` imports the resolver's private `_write_holds` | P2, Task 2.6 (promote to a shared helper) |
+| 1.6 | migration: ADD plus VALIDATE in one transaction | ACCEPT at pilot size |
+| 1.6 | Excel row check (>= 8760 or negative) runs before plant resolution, so a junk run-time cell on a routing plant now drops the row | ACCEPT: visible as a named error warning; revisit when the Machine Hours unit is confirmed (Task 2.7) |
+| 1.6 | only the grid localises `run_time_over_cap`; other surfaces show the English message | P3, Task 3.4 |
+| 1.6 | no test that an unchanged over-cap run time never blocks a save | P2, Task 2.3 |
+| 1.6 | queued over-cap row re-entering the schedule (⚠️) | ACCEPT: the bulk route checks `queued` on the requested status only (`db.py:1412,1562`), so a planner who releases an over-cap row through the existing Needs Planning path can place it; OQ28 allows planner release by design, and the explicit approve-and-release path is Task 2.5 (cost: a long bar appears before Phase 2 ships, reversible) |
+| 1.6 | Excel row number after index resets (⚠️); runner per-file transaction (⚠️) | ACCEPT / resolved: runner uses `--single-transaction` (read by the reviewer); only a clean 3-row file is tested |
+| 1.7 | toast `(N firm)` redundant; a zero-queued Send gives no hint that unfirmed orders were skipped | P3, Task 3.4 (surface `skipped_unfirmed`) |
+| 1.7 | aggregate whose only firmed child has no end is dropped as unfirmed | ACCEPT: documented in test |
+| 1.9 | runbook commands read, not executed; rollback reasoned, not run; `SAP_STAGING_VALIDATION_PLAN.md` describes the old Send dialog | ACCEPT: reviewer confirmed the runner flags, `-MigrationsDir`, exit code 3 and single transaction match the script; add the rehearsal step (Important 2) |
+
+**Parked pre-existing items (not caused by this branch).**
+- `scripts/schema_bootstrap_smoke.py` exits 1 on `88c2879` and earlier: the sentinel order's `run_time_source` is NULL on a schema.sql-only database and `'legacy'` after the migration replay. The new columns' mirror is covered instead by `test_schema_idempotent.py` and the reviewer's column and ledger check.
+- `tests/test_scale_catalog_paging.py` (two parametrised cases) fails identically on the baseline.
+- `tests/test_distribution.py::test_summary_counts_past_5000_headers` failed once in a 34 s run (timing and scale), passed on rerun and in the whole-file run.
+- One flaky optimizer spawn probe (`engine.test.mjs`) failed three times in the baseline run under load; it did not fail in the gate run. Three `knownFailure` todos in `calendar-sync-boundaries.test.mjs`.
+
 ## Appendix B — Context
 
 **Brief.** Owner (2026-10-13): "I want to implement Backward_Scheduling_Migration. Draw up an implementation plan that has Sonnet do ALL the work except for very low risk changes for Haiku."
