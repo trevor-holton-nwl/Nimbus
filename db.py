@@ -258,11 +258,6 @@ _SCHEDULE_RUNTIME_MISMATCH_SQL = """
          AND seg.productive_minutes <> ROUND(o.run_time * 60)))
 """
 
-# Kept for callers that still name it: the stored finish already wins, so the old "retain the scheduled end
-# while the run-time mismatch flag is set" arm is subsumed by _EFF_END_SQL itself. The COMPUTED mismatch
-# arm (_SCHEDULE_RUNTIME_MISMATCH_SQL above) is unchanged.
-_EFF_END_WITH_RUNTIME_MISMATCH_SQL = _EFF_END_SQL
-
 MIN_SEGMENT_MINUTES = 30
 
 # Run-time length limits (backward-scheduling OQ28). The DATABASE bound is only a representation
@@ -1090,7 +1085,9 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
     # A long order can start well before `lo` and still run into the window, so the start-indexed
     # lookback is widened by the fixed 30-day cap (OQ27 e) -- no longer sized from the machines' run
     # times, because a bar's drawn span is its stored finish, not start + run time -- and the
-    # true-overlap test stays on the effective END (the shared stored-finish fragment). Bounded by the
+    # true-overlap test stays on the effective END (the shared stored-finish fragment). Only PLACED
+    # neighbours are scanned: a never-placed order has no server-side placement (its "window" is the whole
+    # SAP window), so it cannot conflict here; the client overlap alert covers display overlaps. Bounded by the
     # same indexable eff-start range (idx_orders_machine_eff_start): nothing starting more than the cap
     # before `lo` can matter, so the scan never reads a machine's whole history.
     wide_lo = lo - timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS)
@@ -1105,6 +1102,7 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
         WHERE o.machine = ANY(%s)
           AND o.plant = ANY(%s)
           AND o.planning_status <> 'needs_planning'
+          AND {_PLACED_SQL}
           AND COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
           AND {_EFF_END_SQL} > %s
         """,

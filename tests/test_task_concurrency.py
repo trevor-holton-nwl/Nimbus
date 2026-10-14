@@ -345,6 +345,10 @@ class TestUpdateTaskDatesBulkXminConflict:
 
     def test_saving_into_an_occupied_slot_reports_the_conflict_and_strict_atomic_rolls_back(self, pg):
         db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:   # the scan judges PLACED neighbours only
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE id = %s",
+                        (self.start2, self.end2, self.oid2))
+            conn.commit()
         base = self._current_version(db_)
         new_start = self.start + dt.timedelta(hours=7)   # inside oid2's 6h-10h window
         new_end = new_start + dt.timedelta(hours=2)
@@ -423,6 +427,46 @@ class TestUpdateTaskDatesBulkXminConflict:
         finally:
             with db_._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
+                conn.commit()
+
+    def test_conflict_scan_judges_placed_neighbours_only(self, pg):
+        """A never-placed neighbour occupies its whole SAP window server-side, so it is not scanned (no phantom
+        conflicts, no strict-save rejection from an untouched order); a placed neighbour with a stored end is."""
+        db_ = pg
+        never_id = db_.make_id(self.ORDER + "_NEVER", self.MATERIAL)
+        placed_id = db_.make_id(self.ORDER + "_PLACEDN", self.MATERIAL)
+        new_start = self.start + dt.timedelta(hours=7)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            for oid in (never_id, placed_id):
+                cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
+            # never placed: only its SAP window (and a locked finish), spanning the moved row's slot
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " basic_start_date, basic_finish_date, original_finish_received, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,2)",
+                (never_id, self.ORDER + "_NEVER", self.MATERIAL, self.MACHINE, self.PLANT,
+                 self.start - dt.timedelta(hours=2), self.start + dt.timedelta(days=3),
+                 self.start + dt.timedelta(days=3)))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " basic_start_date, basic_finish_date, scheduled_start, scheduled_end, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,2)",
+                (placed_id, self.ORDER + "_PLACEDN", self.MATERIAL, self.MACHINE, self.PLANT,
+                 self.start, self.start + dt.timedelta(hours=2),
+                 self.start + dt.timedelta(hours=8), self.start + dt.timedelta(hours=9)))
+            conn.commit()
+        try:
+            base = self._current_version(db_)
+            result = db_.update_task_dates_bulk([
+                {"id": self.oid, "start": new_start, "end": new_start + dt.timedelta(hours=2), "base_version": base},
+            ])
+            pairs = {frozenset((c["order_a"], c["order_b"])) for c in result["conflicts"]}
+            assert frozenset((self.oid, never_id)) not in pairs
+            assert frozenset((self.oid, placed_id)) in pairs
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                for oid in (never_id, placed_id):
+                    cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
                 conn.commit()
 
     @staticmethod

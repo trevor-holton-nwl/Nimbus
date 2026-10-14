@@ -42,7 +42,7 @@ one's inline comment for the reasoning):
   4. Cutover re-placement for every already-scheduled order (firmed or
      frozen or not: nothing is kept in place -- a manual firm or a running
      order protects a SLOT, not a run time) reuses the EXISTING `runtime_schedule_mismatch` flag +
-     `_EFF_END_SQL`/`_EFF_END_WITH_RUNTIME_MISMATCH_SQL` mechanism (db.py)
+     `_EFF_END_SQL` mechanism (db.py)
      rather than computing a new `scheduled_end` directly. No re-place/
      resequence helper exists anywhere in backend/scheduling/ (only a
      frontend one, `Engine.manualSchedulePatchFor`) -- and this flag IS the
