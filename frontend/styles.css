@@ -4998,34 +4998,28 @@ tr:last-child .md-td { border-bottom: none; }
   color: var(--err, #c0392b);
 }
 
-/* Bill of Materials — plant+material scope gate (shown before the grid loads,
-   since bom_items is expected to be far larger than any other MasterData table) */
-.md-bom-gate {
-  max-width: 420px;
-  padding: 24px;
-  border-radius: var(--r-lg);
-  border: 1px solid var(--line);
-  background: var(--bg-elev);
-  box-shadow: var(--shadow-sm);
+/* Manage Data — scope filter bar above the grid of every plant-scoped table
+   (a filter, not a gate: the grid underneath is always rendered) */
+.md-scope-filter-bar {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
 }
-.md-bom-gate-hint {
-  margin: 0 0 16px;
-  font-size: 13px;
-  color: var(--fg-mute);
-}
-.md-bom-gate-row {
+.md-scope-field {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-bottom: 14px;
 }
-.md-bom-gate-row label {
+.md-scope-field label {
   font-size: 11.5px;
   font-weight: 600;
   color: var(--fg-mute);
   text-transform: uppercase;
   letter-spacing: .04em;
 }
+.md-scope-field-host { min-width: 220px; }
 .md-bom-combobox { width: 100%; }
 .md-bom-combobox .hps-input {
   width: 100% !important;
@@ -5038,22 +5032,6 @@ tr:last-child .md-td { border-bottom: none; }
   font-size: 12.5px;
   color: var(--fg-mute);
 }
-
-/* Bill of Materials — scope breadcrumb shown above the grid once loaded */
-.md-bom-scope-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  border-radius: var(--r-sm);
-  background: var(--bg-subtle);
-  border: 1px solid var(--line);
-  font-size: 12.5px;
-  color: var(--fg-mute);
-}
-.md-bom-scope-bar strong { color: var(--fg); }
 
 /* =============================================================================
    WORK CENTERS TAB (§4.3) — reuses .lines-split/.lines-nav/.lines-nav-item/

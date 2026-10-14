@@ -1373,7 +1373,6 @@ window.__NIMBUS_LOCALES.es = {
   'ui.excl_optimizer_full':            'Excluir del optimizador',
   'ui.select_placeholder':             '— seleccionar —',
   'ui.no_options':                     'No hay datos disponibles',
-  'hint.bom_pick_scope':               'Seleccione una planta y un material para explorar su Lista de Materiales.',
   'hint.scope_pick_plant':             'Seleccione una planta para cargar esta tabla',
   'err.load_materials_failed':         'No se pudieron cargar los materiales de esta planta',
 

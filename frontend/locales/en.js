@@ -1406,7 +1406,6 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Master data ─────────────────────────────────────────────────────────── */
   'ui.select_placeholder':             '— select —',
   'ui.no_options':                     'No data available',
-  'hint.bom_pick_scope':               'Pick a plant and material to browse its Bill of Materials.',
   'hint.scope_pick_plant':             'Select a plant to load this table',
   'err.load_materials_failed':         'Failed to load materials for this plant',
 

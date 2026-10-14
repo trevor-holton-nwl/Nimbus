@@ -25,14 +25,23 @@ class El {
   get lastElementChild() { return this.children[this.children.length - 1]; }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   setAttribute() {} getAttribute() { return null; } remove() {}
-  querySelector() { return null; } querySelectorAll() { return []; } closest() { return null; }
+  // _mkCombobox builds its DOM from an innerHTML string and then queries it; the fake DOM does not
+  // parse HTML, so a container holding combobox markup answers with cached stub nodes that carry
+  // the same marker (their listeners stay inspectable, e.g. the combobox's clear button).
+  querySelector(sel) {
+    if (!this._html.includes('hps-')) return null;
+    this._stubs ||= {};
+    if (!this._stubs[sel]) { this._stubs[sel] = new El('stub'); this._stubs[sel]._html = 'hps-'; }
+    return this._stubs[sel];
+  }
+  querySelectorAll() { return []; } closest() { return null; }
   focus() {} setSelectionRange() {} contains() { return false; }
   get options() { return this.children; }
   walk(fn) { fn(this); this.children.forEach((c) => c.walk(fn)); }
 }
 
 const host = new El('div'); host.id = 'md-host';
-const tabs = ['subnetworks', 'plants', 'machine', 'materials', 'material_plants'].map((t) => { const b = new El('button'); b.dataset.mdTab = t; return b; });
+const tabs = ['subnetworks', 'plants', 'machine', 'materials', 'material_plants', 'production_version', 'routing_operation', 'bom_items'].map((t) => { const b = new El('button'); b.dataset.mdTab = t; return b; });
 const findNode = (pred) => { let f = null; host.walk((n) => { if (pred(n)) f = n; }); return f; };
 globalThis.document = {
   getElementById: (id) => (id === 'md-host' ? host : null),
@@ -207,4 +216,120 @@ test('post-save refresh keeps the existing lines when the machine fetch fails', 
   for (const r of open('/master-data/plants')) fire(r, { rows: [{ plant: 'KEEP' }] }); // may be served from fetchTraced's GET cache
   fire(lastOpen('/master-data/machine?plant=A'), {}, false); await tick();
   assert.deepEqual(Store.masterData.lines.map((l) => l.machine), ['L1'], 'lines not blanked by a failed machine fetch');
+});
+
+// ---- Non-gating scope filters: scoped tabs always render their grid ----------------------------
+const pvCols = [{ column_name: 'plant', display_label: 'Plant', is_locked: true }, { column_name: 'material_id', display_label: 'Material', is_locked: true }, { column_name: 'production_version', display_label: 'Version', is_locked: true }, { column_name: 'descr', display_label: 'Desc', is_locked: false }];
+const gridPage = (columns, rows) => ({ columns, rows, meta: { total: rows.length } });
+const fetchesSince = (mark, sub) => pending.slice(mark).filter((p) => p.url.includes(sub));
+const thLabels = () => { const out = []; host.walk((n) => { if (n.tag === 'th' && n._cls.has('md-th')) out.push(n.children[0].textContent); }); return out; };
+const filterBar = () => findNode((n) => n._cls.has('md-scope-filter-bar'));
+// The combobox hosts of the filter bar (plant first, material second on bom_items).
+const barHosts = () => { const hosts = []; filterBar()?.walk((n) => { if (n._cls.has('md-scope-field-host')) hosts.push(n); }); return hosts; };
+const clearCombo = (comboHost) => comboHost.querySelector('.hps-combobox').querySelector('.hps-clear').listeners.click[0]();
+
+test('G1: production_version with a plant opens in one plant-scoped, unpaged fetch and enables Paste + Upload', async () => {
+  const prior = Store.selectedPlant;
+  Store.setSelectedPlant('G1P', 't');
+  try {
+    const mark = pending.length;
+    clickTab('production_version'); await tick();
+    const reqs = fetchesSince(mark, '/master-data/production_version');
+    assert.equal(reqs.length, 1, 'exactly one production_version fetch');
+    assert.ok(reqs[0].url.endsWith('/master-data/production_version?plant=G1P'), reqs[0].url);
+    assert.doesNotMatch(reqs[0].url, /limit/, 'not paged');
+    fire(reqs[0], gridPage(pvCols, [{ plant: 'G1P', material_id: 'M1', production_version: '0001' }])); await tick();
+    assert.ok(filterBar(), 'filter bar renders above the grid');
+    const paste = findBtn('btn.paste_rows', '⎘ Paste Rows');
+    const upload = findBtn('btn.upload_production_version', 'Upload Production Versions');
+    assert.ok(paste && upload, 'Paste Rows and Upload are in the toolbar');
+    assert.equal(paste.disabled, false);
+    assert.equal(upload.disabled, false);
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('G2: routing_operation with no plant shows its columns from a limit=1 fetch, a hint row, and disabled row actions', async () => {
+  const prior = Store.selectedPlant;
+  Store.setSelectedPlant(null, 't');
+  try {
+    const mark = pending.length;
+    clickTab('routing_operation'); await tick();
+    const reqs = fetchesSince(mark, '/master-data/routing_operation');
+    assert.equal(reqs.length, 1, 'exactly one fetch');
+    assert.match(reqs[0].url, /limit=1(&|$)/);
+    assert.doesNotMatch(reqs[0].url, /plant=/, 'no plant to send');
+    // The route may return a row even for limit=1 — it must be discarded.
+    fire(reqs[0], gridPage(pvCols, [{ plant: 'X', material_id: 'M9', production_version: '0009' }])); await tick();
+    assert.deepEqual(thLabels(), ['Plant', 'Material', 'Version', 'Desc'], 'column headers render without a plant');
+    assert.deepEqual(tbodyKeys(), [], 'no data rows');
+    const empties = []; host.walk((n) => { if (n._cls.has('md-empty')) empties.push(n); });
+    assert.equal(empties.length, 1, 'one hint row');
+    assert.equal(empties[0].textContent, 'hint.scope_pick_plant');
+    for (const [key, english] of [['btn.paste_rows', '⎘ Paste Rows'], ['btn.add_row', '+ Add Row'],
+      ['btn.upload_routing_operation', 'Upload Routing Operations'], ['btn.delete_filtered', 'Delete Filtered Rows…']]) {
+      const b = findBtn(key, english);
+      assert.ok(b, `${key} rendered`);
+      assert.equal(b.disabled, true, `${key} disabled`);
+      assert.equal(b.title, 'hint.scope_pick_plant', `${key} explains why`);
+    }
+    assert.equal(searchBox().disabled, false, 'search stays enabled');
+    assert.equal(findBtn('btn.add_column', '+ Add Column')?.disabled, false, 'Add Column stays enabled');
+    assert.ok(filterBar(), 'the filter bar is how a plant gets chosen');
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('G3: bom_items with a plant and no material is server-paged and sends no material_id', async () => {
+  const prior = Store.selectedPlant;
+  Store.setSelectedPlant('G3P', 't');
+  try {
+    const mark = pending.length;
+    clickTab('bom_items'); await tick();
+    const reqs = fetchesSince(mark, '/master-data/bom_items');
+    assert.equal(reqs.length, 1);
+    assert.match(reqs[0].url, /plant=G3P/);
+    assert.match(reqs[0].url, /limit=200/);
+    assert.doesNotMatch(reqs[0].url, /material_id/);
+    fire(reqs[0], gridPage(pvCols, [])); await tick();
+    // The material picker is populated from the plant's material_plants rows.
+    const mats = fetchesSince(mark, '/master-data/material_plants');
+    assert.equal(mats.length, 1);
+    fire(mats[0], { rows: [{ material_id: 'MB' }, { material_id: 'MA' }] }); await tick();
+    assert.equal(barHosts().length, 2, 'plant and material comboboxes');
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('G4: clearing the plant filter on a clean grid drops back to the columns-only view', async () => {
+  const prior = Store.selectedPlant;
+  Store.setSelectedPlant('G4P', 't');
+  try {
+    const mark = pending.length;
+    clickTab('production_version'); await tick();
+    fire(fetchesSince(mark, '/master-data/production_version')[0], gridPage(pvCols, [{ plant: 'G4P', material_id: 'M1', production_version: '0001' }])); await tick();
+    assert.equal(tbodyKeys().length, 1);
+    const mark2 = pending.length;
+    clearCombo(barHosts()[0]); await tick();
+    const reqs = fetchesSince(mark2, '/master-data/production_version');
+    assert.equal(reqs.length, 1);
+    assert.match(reqs[0].url, /limit=1(&|$)/);
+    fire(reqs[0], gridPage(pvCols, [])); await tick();
+    assert.deepEqual(tbodyKeys(), []);
+    assert.equal(findBtn('btn.paste_rows', '⎘ Paste Rows').disabled, true);
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('G5: changing the plant filter with unsaved edits is refused with a warning and nothing reloads', async () => {
+  const prior = Store.selectedPlant;
+  Store.setSelectedPlant('G5P', 't');
+  try {
+    const mark = pending.length;
+    clickTab('production_version'); await tick();
+    fire(fetchesSince(mark, '/master-data/production_version')[0], gridPage(pvCols, [{ plant: 'G5P', material_id: 'M1', production_version: '0001' }])); await tick();
+    const c = cellFor('G5P|M1|0001'); c.textContent = 'EDIT'; c.oninput();
+    toasts.length = 0;
+    const mark2 = pending.length;
+    clearCombo(barHosts()[0]); await tick();
+    assert.ok(toasts.some((t) => t.endsWith('|warn')), 'user is told about the unsaved edits');
+    assert.equal(fetchesSince(mark2, '/master-data/').length, 0, 'no reload');
+    assert.equal(saveBtn().disabled, false, 'edits kept');
+  } finally { Store.setSelectedPlant(prior, 't'); }
 });

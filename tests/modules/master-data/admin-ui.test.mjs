@@ -763,6 +763,14 @@ test('machine / material_plants load plant-scoped and materials/material_plants 
   const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   assert.match(source, /machine:\s+'plant',\s*\n\s*material_plants:\s+'plant',/, 'machine + material_plants are SCOPED_TABLES');
   assert.match(source, /PAGED_TABLES[^\n]*new Set\(\['materials', 'material_plants'\]\)/);
+  assert.match(source, /function _isPaged\(table: MasterDataTable\): boolean \{\s*return PAGED_TABLES\.has\(table\) \|\| \(table === 'bom_items' && !_scopeFilter\('bom_items'\)\.material_id\);/,
+    'bom_items pages only while no material filter narrows it');
+  assert.equal((source.match(/PAGED_TABLES\.has\(/g) || []).length, 1, 'every other paging check goes through _isPaged');
+  const autoScope = source.slice(source.indexOf('const AUTO_SCOPE_FROM_SELECTED_PLANT'), source.indexOf(']);', source.indexOf('const AUTO_SCOPE_FROM_SELECTED_PLANT')));
+  for (const t of ['machine', 'material_plants', 'bom_items', 'production_version', 'routing_operation']) {
+    assert.match(autoScope, new RegExp(`'${t}'`), `${t} follows the top-bar plant`);
+  }
+  assert.doesNotMatch(source, /_renderScopeGate|md-bom-gate|btn\.change_scope/, 'the plant/material gate card is gone');
   const load = source.slice(source.indexOf('async function _loadAndRender'), source.indexOf('function _renderTable'));
   assert.match(load, /params\.set\('limit'/, 'paged tables send a limit');
   assert.match(load, /params\.set\('search'/, 'paged tables search server-side');

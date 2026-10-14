@@ -2527,6 +2527,10 @@ interface MasterDataTableState<T extends MasterDataRow = MasterDataRow> {
   /** PAGED_TABLES: the search the loaded `rows` page was fetched with. "Load more" is only
    *  valid for the same search — otherwise it would append another query's rows. */
   searchKey?: string;
+  /** SCOPED_TABLES with no plant chosen: the grid was loaded columns-only (`?limit=1`, rows
+   *  discarded) so the headers/toolbar render, but rows, Paste, Add, Upload and Delete are
+   *  held off until a plant is picked in the filter bar. */
+  unscoped?: boolean;
 }
 
 /** `machine` row — the one table `MasterData.syncLineSettings`
@@ -2653,7 +2657,7 @@ interface MasterDataBulkResult {
   warnings?: MasterDataBulkWarning[];
 }
 
-/** A SCOPED_TABLES entry's scope filter (`_renderScopeGate`/`_scopeFilter`).
+/** A SCOPED_TABLES entry's scope filter (`_buildScopeFilterBar`/`_scopeFilter`).
  *  Originally bom_items-only (hence the name); `material_id` stays null and
  *  unused for a table scoped by plant alone. */
 interface BomFilter {
@@ -2748,7 +2752,7 @@ interface ComboboxOpts {
 // Minimal self-contained searchable combobox — reuses the topbar
 // PlantSelector's markup/CSS classes (hps-*) for visual consistency and
 // the same type-to-filter/keyboard-nav interaction, but works off a plain
-// options array with no Store dependency, so it fits BOM's plant AND
+// options array with no Store dependency, so it fits the scope filter bar's plant AND
 // material pickers (PlantSelector itself is wired one-to-one to
 // Store.selectedPlant and the global topbar DOM), as well as Plant's
 // priority-list line-override picker (`_renderOptimization` above) — moved
@@ -2757,8 +2761,8 @@ interface ComboboxOpts {
 // D48 (part 2) — one AbortController per LIVE container for _mkCombobox's
 // document-level click listener, keyed by the container element. A single
 // shared module-level controller was a plan defect: this file mounts TWO
-// comboboxes at once on the same gate in at least two places — BOM's plant
-// picker (~3119 below) then its material picker (~3143), and the
+// comboboxes at once in at least two places — the scope filter bar's plant
+// picker then its material picker (`_buildScopeFilterBar` below), and the
 // plant-settings line-override pickers (~960) — so a single shared
 // controller would abort the FIRST combobox's still-live listener the
 // moment the second one renders. Re-rendering into the SAME container still
@@ -2969,11 +2973,13 @@ export const MasterData = (() => {
   // accidentally also trigger this refresh.
   const ROUTING_TABLES: ReadonlySet<MasterDataTable> = new Set(['production_version', 'routing_operation', 'routing_rules', 'machine']);
 
-  // Tables whose grid must not load unscoped because the table is expected
-  // to be large (one row per component/operation per plant/material).
-  // 'plant+material' is bom_items' original two-field gate; 'plant' needs
-  // only a plant pick before loading. routing_rules is deliberately NOT
-  // here — small enough to load without a gate (§7.1).
+  // Tables whose ROWS must not load unscoped because the table is expected
+  // to be large (one row per component/operation per plant/material). The
+  // grid itself (headers, toolbar, search) always renders; a filter bar above
+  // it carries the scope. 'plant' = a plant is required before any rows load;
+  // 'plant+material' = a plant is required and the material is an OPTIONAL
+  // narrowing filter (bom_items). routing_rules is deliberately NOT here —
+  // small enough to load without a scope (§7.1).
   const SCOPED_TABLES: Partial<Record<MasterDataTable, 'plant' | 'plant+material'>> = {
     bom_items:          'plant+material',
     production_version: 'plant',
@@ -2984,13 +2990,19 @@ export const MasterData = (() => {
     material_plants:    'plant',
   };
 
-  // Scoped tables whose gate is skipped when the app-wide plant is already
-  // selected (the common case) — the grid opens straight on that plant.
-  const AUTO_SCOPE_FROM_SELECTED_PLANT: ReadonlySet<MasterDataTable> = new Set(['machine', 'material_plants']);
+  // Scoped tables that open straight on the app-wide plant when one is
+  // selected (the common case) and follow it when it changes — every scoped
+  // table, so the top-bar plant and the filter bars never disagree.
+  const AUTO_SCOPE_FROM_SELECTED_PLANT: ReadonlySet<MasterDataTable> = new Set([
+    'machine', 'material_plants', 'bom_items', 'production_version', 'routing_operation',
+  ]);
 
   // Tables that load a server-side page (search + limit/offset + "Load more")
   // instead of the whole (scoped) table: `materials` is not per-plant, so it
   // is paged unscoped; `material_plants` is paged within its plant.
+  // `bom_items` is paged only while no material filter narrows it (`_isPaged`).
+  // production_version / routing_operation are deliberately NOT paged: they load
+  // their whole plant and keep the instant any-cell `_applyFilter` search.
   const PAGED_TABLES: ReadonlySet<MasterDataTable> = new Set(['materials', 'material_plants']);
   const PAGE_SIZE = 200;
   interface PageState { search: string; total: number }
@@ -3006,9 +3018,13 @@ export const MasterData = (() => {
   function _scopeFilter(table: MasterDataTable): BomFilter {
     return _scopeFilters[table] ?? (_scopeFilters[table] = { plant: null, material_id: null });
   }
-  function _scopeReady(table: MasterDataTable, mode: 'plant' | 'plant+material'): boolean {
-    const f = _scopeFilter(table);
-    return mode === 'plant+material' ? !!(f.plant && f.material_id) : !!f.plant;
+  // Rows may load only once a plant is chosen — for BOTH scope modes; the
+  // 'plant+material' mode's material is an optional narrowing filter.
+  function _scopeReady(table: MasterDataTable): boolean {
+    return !!_scopeFilter(table).plant;
+  }
+  function _isPaged(table: MasterDataTable): boolean {
+    return PAGED_TABLES.has(table) || (table === 'bom_items' && !_scopeFilter('bom_items').material_id);
   }
 
   function _rowKey(table: MasterDataTable, row: MasterDataRow): string {
@@ -3106,83 +3122,126 @@ export const MasterData = (() => {
       b.classList.toggle('active', b.dataset.mdTab === _activeTable));
   }
 
-  // SCOPED_TABLES tables never load unscoped (their tables are expected to
-  // be huge) — show the plant(+material) picker gate until the mode's
-  // required field(s) are chosen, same as every other tab shows its grid
-  // immediately.
+  // Every tab renders its grid immediately. A SCOPED_TABLES tab with no plant
+  // chosen loads columns-only (headers + toolbar, no rows) instead of gating the
+  // whole tab behind a picker; the filter bar built by `_buildScopeFilterBar`
+  // carries the scope.
   function _renderActiveTable(): void {
     const mode = SCOPED_TABLES[_activeTable];
-    // Only before the user has ever touched this tab's scope: "Change" leaves a
-    // defined (empty) filter behind so the gate shows instead of re-auto-scoping.
+    // Only before the user has ever touched this tab's scope: clearing the filter bar
+    // leaves a defined (empty) filter behind so the grid stays unscoped instead of
+    // re-auto-scoping to the app-wide plant.
     if (mode && !_scopeFilters[_activeTable]
         && AUTO_SCOPE_FROM_SELECTED_PLANT.has(_activeTable) && Store.selectedPlant) {
       _scopeFilters[_activeTable] = { plant: Store.selectedPlant, material_id: null };
     }
-    if (mode && !_scopeReady(_activeTable, mode)) {
-      _renderScopeGate(_activeTable, mode);
+    _bomMaterialOptions.clear();
+    if (mode && !_scopeReady(_activeTable)) {
+      _loadAndRender(_activeTable, { columnsOnly: true });
     } else {
       _loadAndRender(_activeTable);
     }
   }
 
   // -----------------------------------------------------------------------
-  // Plant(+material) scope gate — generalized from bom_items' original
-  // plant+material-only gate. 'plant' mode renders just the plant picker and
-  // is ready to load as soon as that one field is chosen; 'plant+material'
-  // keeps bom_items' exact original behavior (both fields shown/required).
+  // Scope filter bar — a Plant combobox (plus an optional Material combobox on
+  // bom_items) above the toolbar of every SCOPED_TABLES grid. A filter, not a
+  // gate: the grid underneath is always rendered.
   // -----------------------------------------------------------------------
-  function _renderScopeGate(table: MasterDataTable, mode: 'plant' | 'plant+material'): void {
-    const host = document.getElementById('md-host');
-    if (!host) return;
-    const scope = _scopeFilter(table);
-    host.innerHTML = `
-      <div class="md-bom-gate">
-        <p class="md-bom-gate-hint">${Util.t(mode === 'plant+material' ? 'hint.bom_pick_scope' : 'hint.scope_pick_plant')}</p>
-        <div class="md-bom-gate-row">
-          <label>${Util.t('ui.plant_label')}</label>
-          <div id="md-bom-plant-picker"></div>
-        </div>
-        ${mode === 'plant+material' ? `
-        <div class="md-bom-gate-row">
-          <label>${Util.t('col.material')}</label>
-          <div id="md-bom-material-picker"></div>
-        </div>` : ''}
-      </div>`;
+  // The combobox containers of the bar currently on screen. `_mkCombobox` leaks a
+  // `document` click listener per construction unless its container's controller is
+  // aborted, and the bar is rebuilt on every grid re-render.
+  let _filterBarHosts: HTMLElement[] = [];
+  function _disposeFilterBar(): void {
+    for (const el of _filterBarHosts) _comboAborts.get(el)?.abort();
+    _filterBarHosts = [];
+  }
+  function _unsavedCount(table: MasterDataTable): number {
+    const st = _cache[table];
+    return st ? st.dirty.size + st.deleted.size + st.added.length : 0;
+  }
+  // A scope change reloads the grid and would drop pending edits: refuse it and say why.
+  function _blockScopeChange(table: MasterDataTable): boolean {
+    const n = _unsavedCount(table);
+    if (!n) return false;
+    Toast.show(Util.t('ui.n_unsaved', { count: n }), 'warn');
+    return true;
+  }
+  // Material options per plant for the BOM filter. The bar is rebuilt on every grid
+  // re-render (add/paste/delete), so the list is kept here and only refetched after a
+  // fresh navigation (`_renderActiveTable` clears it).
+  const _bomMaterialOptions = new Map<string, string[]>();
+
+  function _buildScopeFilterBar(table: MasterDataTable, mode: 'plant' | 'plant+material'): HTMLElement {
+    const bar = document.createElement('div');
+    bar.className = 'md-scope-filter-bar';
+    _disposeFilterBar();
+    const addField = (labelKey: string): HTMLElement => {
+      const field = document.createElement('div');
+      field.className = 'md-scope-field';
+      const label = document.createElement('label');
+      label.textContent = Util.t(labelKey);
+      const comboHost = document.createElement('div');
+      comboHost.className = 'md-scope-field-host';
+      field.appendChild(label);
+      field.appendChild(comboHost);
+      bar.appendChild(field);
+      _filterBarHosts.push(comboHost);
+      return comboHost;
+    };
+
+    const plantHost = addField('ui.plant_label');
     const plants = Store.knownPlants ? Store.knownPlants() : [];
-    _mkCombobox(document.getElementById('md-bom-plant-picker'), plants, {
-      value: scope.plant || '',
+    // Mounting reads the CURRENT filter value, so re-mounting after a refused
+    // change snaps the combobox back to the kept plant.
+    const mountPlant = (): void => _mkCombobox(plantHost, plants, {
+      value: _scopeFilter(table).plant || '',
       placeholder: Util.t('ph.select_plant'),
       onSelect: (p) => {
+        if ((p || null) === _scopeFilter(table).plant) return;
+        if (_blockScopeChange(table)) { mountPlant(); return; }
         _scopeFilters[table] = { plant: p || null, material_id: null };
-        if (p && mode === 'plant') {
-          _loadAndRender(table);
-        } else {
-          _renderScopeGate(table, mode);
-        }
+        delete _cache[table];
+        delete _pageState[table];
+        _renderActiveTable();
       },
     });
-    if (mode === 'plant+material' && scope.plant) _loadBomMaterialsForPlant(scope.plant);
+    mountPlant();
+
+    if (mode === 'plant+material') {
+      const matHost = addField('col.material');
+      const plant = _scopeFilter(table).plant;
+      if (plant) void _loadBomMaterialsForPlant(table, matHost, plant);
+      else _mkCombobox(matHost, [], { placeholder: Util.t('ph.select_material') });
+    }
+    return bar;
   }
 
-  async function _loadBomMaterialsForPlant(plant: string): Promise<void> {
-    const matHost = document.getElementById('md-bom-material-picker');
-    if (matHost) matHost.innerHTML = `<div class="md-loading-inline">${Util.t('ui.loading')}</div>`;
+  async function _loadBomMaterialsForPlant(table: MasterDataTable, matHost: HTMLElement, plant: string): Promise<void> {
+    const mountMaterial = (materials: string[]): void => _mkCombobox(matHost, materials, {
+      value: _scopeFilter(table).material_id || '',
+      placeholder: Util.t('ph.select_material'),
+      onSelect: (m) => {
+        if ((m || null) === _scopeFilter(table).material_id) return;
+        if (_blockScopeChange(table)) { mountMaterial(materials); return; }
+        _scopeFilter(table).material_id = m || null;
+        delete _cache[table];
+        delete _pageState[table];
+        _loadAndRender(table);
+      },
+    });
+    const known = _bomMaterialOptions.get(plant);
+    if (known) { mountMaterial(known); return; }
+    matHost.innerHTML = `<div class="md-loading-inline">${Util.t('ui.loading')}</div>`;
     try {
       const data = await Util.fetchTraced(`${API}/master-data/material_plants?${new URLSearchParams({ plant }).toString()}`)
         .then((r) => r.json()) as MasterDataResponse<MaterialPlantRow>;
       const materials = (data.rows || []).map((r) => r.material_id).sort();
-      const host2 = document.getElementById('md-bom-material-picker');
-      if (!host2) return; // tab/plant changed again while this was in flight
-      _mkCombobox(host2, materials, {
-        value: _scopeFilter('bom_items').material_id || '',
-        placeholder: Util.t('ph.select_material'),
-        onSelect: (m) => {
-          _scopeFilter('bom_items').material_id = m || null;
-          if (m) _loadAndRender('bom_items');
-        },
-      });
+      _bomMaterialOptions.set(plant, materials);
+      if (!matHost.isConnected) return; // tab/plant changed again while this was in flight
+      mountMaterial(materials);
     } catch (e) {
-      if (matHost) matHost.innerHTML = `<div class="md-empty">${Util.t('err.load_materials_failed')}</div>`;
+      if (matHost.isConnected) matHost.innerHTML = `<div class="md-empty">${Util.t('err.load_materials_failed')}</div>`;
       ErrorLog.error('master-data', `Failed to load materials for plant ${plant}: ${(e as Error).message}`);
     }
   }
@@ -3193,16 +3252,23 @@ export const MasterData = (() => {
   // opts.more: PAGED_TABLES "Load more" — fetch the next page and append.
   // opts.keepEdits: PAGED_TABLES server-side search — swap the baseline rows
   // but keep pending edits, and don't blank the grid (the search box keeps focus).
-  async function _loadAndRender(table: MasterDataTable, opts: { more?: boolean; keepEdits?: boolean } = {}): Promise<void> {
+  // opts.columnsOnly: a SCOPED_TABLES tab with no plant — fetch one row just to learn the
+  // columns (the route refuses limit=0), discard it, and render an empty "pick a plant" grid.
+  async function _loadAndRender(table: MasterDataTable, opts: { more?: boolean; keepEdits?: boolean; columnsOnly?: boolean } = {}): Promise<void> {
     const host = document.getElementById('md-host');
     if (!host) return;
     const prior = _cache[table];
+    const _scopeMode = SCOPED_TABLES[table];
+    // A scoped table never fetches rows without a plant, whichever caller got us here
+    // (reload after a column change, discard, ...): degrade to the columns-only fetch.
+    const columnsOnly = !!opts.columnsOnly || (!!_scopeMode && !_scopeReady(table));
     // "Load more" belongs to the search its page was fetched with. A search that has since
     // replaced the query (in flight or applied) makes this stale button a no-op; appending
     // would mix two queries' rows (and use the wrong offset).
-    if (opts.more && PAGED_TABLES.has(table)
+    if (opts.more && _isPaged(table)
         && (!prior || (prior.searchKey ?? '') !== (_pageState[table]?.search ?? '').trim())) return;
     if (!opts.more && !opts.keepEdits) {
+      _disposeFilterBar();
       host.innerHTML = `<div class="md-loading">${Util.t('ui.loading')}</div>`;
     }
     // Stale-response guard: capture the generation before the async fetch,
@@ -3214,25 +3280,22 @@ export const MasterData = (() => {
     const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-    // SCOPED_TABLES tables must never load in full — always scope the
-    // request to the field(s) the user picked via the gate. Non-null
-    // assertions: only reached via _renderActiveTable, which already gated
-    // on the mode's required field(s) being set before calling
-    // _loadAndRender for a scoped table.
-    const _scopeMode = SCOPED_TABLES[table];
+    // SCOPED_TABLES tables must never load in full — rows are always scoped to the
+    // plant picked in the filter bar (`columnsOnly` above guarantees one is set when
+    // we get here), plus the material on bom_items when one is chosen.
     const _scope = _scopeMode ? _scopeFilter(table) : null;
     const params = new URLSearchParams();
-    if (_scopeMode === 'plant+material') {
-      params.set('plant', _scope!.plant!);
-      params.set('material_id', _scope!.material_id!);
-    } else if (_scopeMode === 'plant') {
-      params.set('plant', _scope!.plant!);
-    }
-    if (PAGED_TABLES.has(table)) {
-      const search = (_pageState[table]?.search ?? '').trim();
-      if (search) params.set('search', search);
-      params.set('limit', String(PAGE_SIZE));
-      if (opts.more && prior) params.set('offset', String(prior.rows.length));
+    if (columnsOnly) {
+      params.set('limit', '1');
+    } else {
+      if (_scope) params.set('plant', _scope.plant!);
+      if (_scopeMode === 'plant+material' && _scope!.material_id) params.set('material_id', _scope!.material_id);
+      if (_isPaged(table)) {
+        const search = (_pageState[table]?.search ?? '').trim();
+        if (search) params.set('search', search);
+        params.set('limit', String(PAGE_SIZE));
+        if (opts.more && prior) params.set('offset', String(prior.rows.length));
+      }
     }
     const qs = params.toString() ? `?${params.toString()}` : '';
     try {
@@ -3249,11 +3312,17 @@ export const MasterData = (() => {
       if (generation !== _loadGeneration) return; // a newer table switch has since started
       if (_activeTable !== table) return; // tab changed while this was in flight
       if (opts.more && prior && prior !== _cache[table]) return; // the page being extended was replaced
-      if (PAGED_TABLES.has(table)) {
+      const paged = !columnsOnly && _isPaged(table);
+      if (paged) {
         _pageState[table] = { search: _pageState[table]?.search ?? '', total: Number(data.meta?.total ?? data.rows.length) };
       }
-      const searchKey = PAGED_TABLES.has(table) ? (_pageState[table]?.search ?? '').trim() : undefined;
-      if (opts.more && prior) {
+      const searchKey = paged ? (_pageState[table]?.search ?? '').trim() : undefined;
+      if (columnsOnly) {
+        // Columns only: the one row the route returned is discarded; the grid is the
+        // headers plus a "pick a plant" hint (see `_renderTable`).
+        delete _pageState[table];
+        _cache[table] = { columns: data.columns, rows: [], dirty: new Map(), deleted: new Map(), added: [], unscoped: true };
+      } else if (opts.more && prior) {
         prior.rows = [...prior.rows, ...data.rows];
       } else if (opts.keepEdits && prior) {
         prior.columns = data.columns;
@@ -3307,26 +3376,12 @@ export const MasterData = (() => {
 
     host.innerHTML = '';
 
+    // No plant chosen on a SCOPED_TABLES tab: the grid is columns-only (see _loadAndRender).
+    const unscoped = !!state.unscoped;
+    const unscopedHint = Util.t('hint.scope_pick_plant');
     const scopeMode = SCOPED_TABLES[table];
-    if (scopeMode) {
-      const scope = _scopeFilter(table);
-      const scopeBar = document.createElement('div');
-      scopeBar.className = 'md-bom-scope-bar';
-      scopeBar.innerHTML = scopeMode === 'plant+material'
-        ? `<span>${Util.t('ui.plant_label')}: <strong>${scope.plant}</strong> &middot; ${Util.t('col.material')}: <strong>${scope.material_id}</strong></span>`
-        : `<span>${Util.t('ui.plant_label')}: <strong>${scope.plant}</strong></span>`;
-      const changeBtn = document.createElement('button');
-      changeBtn.className = 'btn btn-ghost sm';
-      changeBtn.textContent = Util.t('btn.change_scope');
-      changeBtn.onclick = () => {
-        _scopeFilters[table] = { plant: null, material_id: null };
-        delete _cache[table];
-        delete _pageState[table];
-        _renderActiveTable();
-      };
-      scopeBar.appendChild(changeBtn);
-      host.appendChild(scopeBar);
-    }
+    if (scopeMode) host.appendChild(_buildScopeFilterBar(table, scopeMode));
+    else _disposeFilterBar();
 
     // -- Toolbar --
     const toolbar = document.createElement('div');
@@ -3336,7 +3391,7 @@ export const MasterData = (() => {
     searchInput.type = 'search';
     searchInput.className = 'input md-search';
     searchInput.placeholder = Util.t('ph.search_table', { table: TABLE_LABELS[table] });
-    if (PAGED_TABLES.has(table)) {
+    if (_isPaged(table) && !unscoped) {
       // Server-side search (debounced) — the grid only ever holds one page.
       searchInput.value = _pageState[table]?.search ?? '';
       searchInput.oninput = () => {
@@ -3369,12 +3424,14 @@ export const MasterData = (() => {
     addRowBtn.className = 'btn btn-ghost sm';
     addRowBtn.textContent = Util.t('btn.add_row');
     addRowBtn.onclick = () => _addRow(table);
+    if (unscoped) { addRowBtn.disabled = true; addRowBtn.title = unscopedHint; }
     toolbar.appendChild(addRowBtn);
 
     const pasteBtn = document.createElement('button');
     pasteBtn.className = 'btn btn-ghost sm';
     pasteBtn.textContent = Util.t('btn.paste_rows');
-    pasteBtn.title = Util.t('tip.paste_rows');
+    pasteBtn.title = unscoped ? unscopedHint : Util.t('tip.paste_rows');
+    pasteBtn.disabled = unscoped;
     pasteBtn.onclick = () => _pasteRows(table);
     toolbar.appendChild(pasteBtn);
 
@@ -3382,7 +3439,8 @@ export const MasterData = (() => {
       const delFilteredBtn = document.createElement('button');
       delFilteredBtn.className = 'btn btn-ghost sm';
       delFilteredBtn.textContent = Util.t('btn.delete_filtered');
-      delFilteredBtn.title = Util.t('tip.delete_filtered');
+      delFilteredBtn.title = unscoped ? unscopedHint : Util.t('tip.delete_filtered');
+      delFilteredBtn.disabled = unscoped;
       delFilteredBtn.onclick = () => _deleteFiltered(table);
       toolbar.appendChild(delFilteredBtn);
     }
@@ -3393,7 +3451,8 @@ export const MasterData = (() => {
       // bom_items keeps its original, already-translated keys; the two new
       // upload tables get a per-table key (locale strings added separately).
       uploadBtn.textContent = Util.t(table === 'bom_items' ? 'btn.upload_bom' : `btn.upload_${table}`);
-      uploadBtn.title = Util.t(table === 'bom_items' ? 'tip.upload_bom' : `tip.upload_${table}`);
+      uploadBtn.title = unscoped ? unscopedHint : Util.t(table === 'bom_items' ? 'tip.upload_bom' : `tip.upload_${table}`);
+      uploadBtn.disabled = unscoped;
       uploadBtn.onclick = () => _uploadFile(table);
       toolbar.appendChild(uploadBtn);
     }
@@ -3473,7 +3532,9 @@ export const MasterData = (() => {
       const td = document.createElement('td');
       td.colSpan = columns.length + 1;
       td.className = 'md-empty';
-      td.textContent = Util.t('empty.table_no_rows', { table: TABLE_LABELS[table] });
+      td.textContent = unscoped ? unscopedHint : Util.t('empty.table_no_rows', { table: TABLE_LABELS[table] });
+      // The hint explains the whole grid, so a search must never hide it (see _applyFilter).
+      if (unscoped) tr.dataset.keepVisible = '1';
       tr.appendChild(td);
       tbody.appendChild(tr);
     } else {
@@ -3483,7 +3544,7 @@ export const MasterData = (() => {
     wrap.appendChild(tbl);
     host.appendChild(wrap);
 
-    if (PAGED_TABLES.has(table)) {
+    if (_isPaged(table) && !unscoped) {
       const total = _pageState[table]?.total ?? rows.length;
       const pager = document.createElement('div');
       pager.className = 'md-toolbar md-pager';
@@ -3794,7 +3855,7 @@ export const MasterData = (() => {
       // pre-fill so the user isn't retyping the scope on every row.
       const scope = _scopeFilter(table);
       newRow.plant = scope.plant || '';
-      if (scopeMode === 'plant+material') newRow.material_id = scope.material_id || '';
+      if (scopeMode === 'plant+material' && scope.material_id) newRow.material_id = scope.material_id;
     }
     state.added.push(newRow);
     // Re-render to show the new row (simpler than appending).
@@ -4360,6 +4421,7 @@ export const MasterData = (() => {
     const tbody = document.getElementById(`md-tbody-${table}`);
     if (!tbody) return;
     tbody.querySelectorAll('tr').forEach((tr) => {
+      if ((tr as HTMLElement).dataset.keepVisible) return;
       const text = (tr.textContent || '').toLowerCase();
       tr.hidden = query ? !text.includes(query) : false;
     });
