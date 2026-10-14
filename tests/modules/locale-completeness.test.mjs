@@ -536,3 +536,44 @@ test('G3: ui.firm_reason_running says running orders are protected from Optimize
   }
   assert.doesNotMatch(val('en'), /locked/i);
 });
+
+// Backward scheduling Task 3.4 (group 32): the finish-anchored vocabulary. Each key below was reworded (or renamed
+// from an "Original/Updated" key) and must exist in all five files; en.js must carry the pinned English text. The
+// four translations are written separately, so this pins presence and the English source, not the translation.
+const REWORDED_KEYS = {
+  'col.due_date': 'Due Date',
+  'col.planned_start': 'Planned Start',
+  'col.planned_finish': 'Planned Finish',
+  'ui.insp_due_date': 'Due Date',
+  'ui.insp_planned_start': 'Planned Start',
+  'ui.insp_planned_finish': 'Planned Finish',
+  'ui.insp_variance_shifted': 'Planned finish compared with the due date',
+  'ui.diff_kind_start': 'Planned start',
+  'ui.diff_kind_finish': 'Planned finish',
+  'toast.order_moved': 'Moved "{{name}}" so it now finishes {{date}}',
+  'toast.commit_failed': 'Could not hold the finish there. The order stays where it was.',
+  'toast.sap_sent_queued': 'Queued {{queued}} orders for SAP',
+};
+const RETIRED_KEYS = ['col.orig_start', 'col.orig_end', 'col.updated_start', 'col.updated_end',
+  'ui.insp_orig_start', 'ui.insp_orig_end', 'ui.insp_updated_start', 'ui.insp_updated_end'];
+const enDict = (() => {
+  const sandbox = { window: {} };
+  vm.runInNewContext(readFileSync(join(LOCALES_DIR, 'en.js'), 'utf8'), sandbox);
+  return sandbox.window.__NIMBUS_LOCALES.en;
+})();
+const enValue = key => enDict[key];
+
+test('group 32: every reworded scheduling key exists in all five locales and en.js carries the finish-anchored text', () => {
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const [key, text] of Object.entries(REWORDED_KEYS)) {
+    assert.equal(enValue(key), text, `en.js text for "${key}"`);
+    for (const locale of LOCALES) assert.ok(perLocale[locale].has(key), `${locale}.js is missing reworded key "${key}"`);
+  }
+});
+
+test('group 32: the retired Original/Updated keys are gone from every locale', () => {
+  for (const locale of LOCALES) {
+    const have = keysOf(locale);
+    for (const key of RETIRED_KEYS) assert.ok(!have.has(key), `${locale}.js still carries retired key "${key}"`);
+  }
+});

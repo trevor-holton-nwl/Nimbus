@@ -2319,12 +2319,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="modal-backdrop" id="modal-override" hidden>
   <div class="modal">
     <header class="modal-head">
-      <h3>Override order date</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')" aria-label="Close">✕</button>
+      <h3 data-i18n="modal.override_title">Override planned finish</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')" aria-label="Close" data-i18n-title="btn.close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row">
-        <label>Order</label>
+        <label data-i18n="ui.insp_order">Order</label>
         <div class="readonly" id="ovr-order"></div>
       </div>
       <div class="form-row">
@@ -2332,7 +2332,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <input type="text" id="ovr-finish" readonly>
       </div>
       <div class="form-row">
-        <label>New production line</label>
+        <label data-i18n="modal.override_line_label">Production line</label>
         <select id="ovr-line" data-autofocus></select>
       </div>
       <div class="form-row chk-row">
@@ -2346,8 +2346,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
     </div>
     <footer class="modal-foot">
-      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-override')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.Table.applyOverride()">Apply override</button>
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-override')" data-i18n="btn.cancel">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.Table.applyOverride()" data-i18n="modal.override_apply">Apply override</button>
     </footer>
   </div>
 </div>

@@ -271,11 +271,18 @@ export const Table = {
     if (!layout || !Table._api) return;
     Table._applyingLayout = true;
     try {
+      // A layout saved before a column was retired (Original Start, backward scheduling OQ16) still names it:
+      // unknown column ids are dropped rather than handed to the grid.
+      const known = (id: unknown): boolean => {
+        const api = Table._api as { getColumn?: (id: string) => unknown } | null;
+        return typeof api?.getColumn !== 'function' || !!api.getColumn(String(id));
+      };
       if (Array.isArray(layout.columnState)) {
-        Table._api.applyColumnState({ state: layout.columnState, applyOrder: true });
+        Table._api.applyColumnState({ state: layout.columnState.filter(c => known(c.colId)), applyOrder: true });
       }
       if (layout.filterModel && typeof layout.filterModel === 'object') {
-        Table._api.setFilterModel(layout.filterModel);
+        const filterModel = Object.fromEntries(Object.entries(layout.filterModel).filter(([id]) => known(id)));
+        Table._api.setFilterModel(filterModel);
       }
     } catch (e: unknown) {
       ErrorLog.warn('table', `Apply saved grid layout failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -362,16 +369,23 @@ export const Table = {
     return true;
   },
 
-  /** Updated Start / Updated End columns (backward scheduling OQ1). The FINISH is the input and the start is
-   *  derived from it, so Updated Start is read-only and Updated End takes the typed value. Extracted (like
-   *  `_runTimeEditable`) so it is testable without a live AG Grid instance. */
+  /** Due Date / Planned Start / Planned Finish columns (backward scheduling OQ1, OQ16). The FINISH is the input
+   *  and the start is derived from it, so Planned Start and Due Date are read-only and Planned Finish takes the
+   *  typed value. Due Date shows the due instant (a date-only SAP finish reads as the close of that day), not the
+   *  raw midnight. `field` stays alongside `valueGetter` so AG Grid's date inference still drives the column's sort
+   *  and agDateColumnFilter. Extracted (like `_runTimeEditable`) so it is testable without a live AG Grid. */
   _scheduleDateColumns(): TableColDef[] {
     return [
-      { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
+      { headerName: Util.t('col.due_date'), field: 'original_end_date', minWidth: 160,
+        editable: false, hide: Table._fieldHidden('original_end_date'),
+        valueGetter: (p: { data: NimbusTask }) => Util.dueInstant(p.data),
+        valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
+        cellClass: 'cell-date cell-date-original' },
+      { headerName: Util.t('col.planned_start'), field: 'start_date', minWidth: 160,
         editable: false,
         valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
         cellClass: 'cell-date' },
-      { headerName: Util.t('col.updated_end'), field: 'end_date', minWidth: 160,
+      { headerName: Util.t('col.planned_finish'), field: 'end_date', minWidth: 160,
         editable: true,
         valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
         cellEditor: Table._DateTimeEditor,
@@ -405,7 +419,7 @@ export const Table = {
    *  no-column catalog entry doesn't need a matching hand-written columnDef. */
   _catalogOnlyColumns(): TableColDef[] {
     const handwritten = new Set(['MATERIAL_DESCRIPTION', 'ORDER_QUANTITY_(GMEIN)', 'COLOR', 'RUN_TIME',
-      'original_start_date', 'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'run_time_basis']);
+      'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'run_time_basis']);
     return ORDER_FIELD_CATALOG.filter(f => !handwritten.has(f.key)).map(f => ({
       headerName: Util.t(f.i18nGridKey),
       field: f.key,
@@ -555,22 +569,6 @@ export const Table = {
             if (!p.data) return '';
             return Util.escapeHtml(Inspector._formatRuntimeBasis(p.data));
           } },
-        { headerName: Util.t('col.orig_start'), field: 'original_start_date', minWidth: 160,
-          editable: false, hide: Table._fieldHidden('original_start_date'),
-          // Display-only derived value (due date minus RUN_TIME — see
-          // Util.impliedOriginalStart) instead of the raw midnight SAP
-          // date. `field` is kept alongside `valueGetter` (same precedent
-          // as the PRODUCTION_ORDER column above) purely so AG Grid's
-          // date-type inference off the raw field still drives this
-          // column's sort + agDateColumnFilter; dropping `field` entirely
-          // would degrade the filter to generic/text.
-          valueGetter: (p: { data: NimbusTask }) => Util.impliedOriginalStart(p.data),
-          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
-          cellClass: 'cell-date cell-date-original' },
-        { headerName: Util.t('col.orig_end'), field: 'original_end_date', minWidth: 160,
-          editable: false, hide: Table._fieldHidden('original_end_date'),
-          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
-          cellClass: 'cell-date cell-date-original' },
         ...Table._scheduleDateColumns(),
         { headerName: Util.t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
           cellRenderer: (p: { value: unknown }) => {
@@ -581,7 +579,7 @@ export const Table = {
             // DOM node (not an HTML string) so the task id never reaches an inline handler.
             const taskId = String(p.value);
             const btn = document.createElement('button');
-            btn.title = 'Click to view alerts';
+            btn.title = Util.t('tip.click_view_alerts');
             btn.style.cssText = `background:none;border:none;padding:0;cursor:pointer;color:${color};font-weight:600;font-size:inherit;font-family:inherit`;
             btn.textContent = `⚐ ${rel.length}`;
             btn.addEventListener('click', () => Table._showAlertPopup(taskId));
@@ -1521,7 +1519,7 @@ export const Table = {
     if (!orderEl || !lineEl || !firmEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     Table._selectedId = id;
-    orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.MACHINE || '—'}`;
+    orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  ${Util.t('ui.insp_line')}: ${t.MACHINE || '—'}`;
     // The dialog takes the FINISH (backward scheduling OQ1): the start is worked out from it.
     if (!Table._fpOvrFinish) {
       Table._fpOvrFinish = Util.fpDatetime('#ovr-finish');
@@ -2169,10 +2167,9 @@ export const Inspector = {
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
       ? task.scheduleSegments : [];
-    // Display-only derived Orig Start (due date minus RUN_TIME) — see
-    // Util.impliedOriginalStart. Never reads/writes the raw
-    // original_start_date field directly for display.
-    const impliedOrigStart = Util.impliedOriginalStart(task);
+    // Due Date shows the due instant (Util.dueInstant), never the raw midnight SAP date.
+    const dueInstant = Util.dueInstant(task);
+    const systemMoveLine = Inspector._systemMoveLine(task);
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
     const missingSetupPlaceholder = '—';
@@ -2260,19 +2257,15 @@ export const Inspector = {
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_schedule_section')}</h4>
-        ${Inspector._fieldVisible('original_start_date') ? `
-        <div class="insp-row"><label>${Util.t('ui.insp_orig_start')}</label>
-          <div class="insp-val">${impliedOrigStart ? Util.fmtDTReadable(impliedOrigStart) : '—'}</div></div>` : ''}
         ${Inspector._fieldVisible('original_end_date') ? `
-        <div class="insp-row"><label>${Util.t('ui.insp_orig_end')}</label>
-          <div class="insp-val">${task.original_end_date ? Util.fmtDTReadable(task.original_end_date) : '—'}</div></div>` : ''}
-        <div class="insp-row"><label>${Util.t('ui.insp_updated_start')}</label>
-          <div class="insp-val">
-            ${Util.fmtDTReadable(task.start_date)}
-            ${Inspector._varianceBadge(task)}
-          </div></div>
-        <div class="insp-row"><label>${Util.t('ui.insp_updated_end')}</label>
-          <div class="insp-val"><input type="text" data-field="end_date" value="${Util.toLocalInput(task.end_date)}"></div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_due_date')}</label>
+          <div class="insp-val">${dueInstant ? Util.fmtDTReadable(dueInstant) : '—'}</div></div>` : ''}
+        <div class="insp-row"><label>${Util.t('ui.insp_planned_start')}</label>
+          <div class="insp-val">${task.start_date ? Util.fmtDTReadable(task.start_date) : '—'}</div></div>
+        <div class="insp-row"><label>${Util.t('ui.insp_planned_finish')}</label>
+          <div class="insp-val"><input type="text" data-field="end_date" value="${Util.toLocalInput(task.end_date)}">
+            ${Inspector._varianceBadge(task)}</div></div>
+        ${systemMoveLine ? `<div class="insp-split-summary-note">${Util.escapeHtml(systemMoveLine)}</div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
           <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>
         ${task.run_time_source && Inspector._fieldVisible('run_time_basis') ? `
@@ -2440,22 +2433,33 @@ export const Inspector = {
     });
   },
 
+  /** Planned finish minus the due instant, in hours with one decimal (positive = late). Empty when either is unknown. */
   _varianceBadge(t: NimbusTask): string {
-    // Compares against the derived Orig Start (due date minus RUN_TIME —
-    // see Util.impliedOriginalStart), not the raw original_start_date, so
-    // the badge stays consistent with what the Orig Start row now shows.
-    const orig = Util.impliedOriginalStart(t);
-    if (!orig || !t.start_date) return '';
-    const curr = t.start_date instanceof Date ? t.start_date : Util.parseDate(t.start_date);
-    if (!curr) return '';
-    const deltaMs = curr.getTime() - orig.getTime();
-    if (Math.abs(deltaMs) < 60 * 1000) return '';
-    const days = deltaMs / (24 * 3600 * 1000);
-    const txt = Math.abs(days) >= 1
-      ? `${days >= 0 ? '+' : ''}${days.toFixed(1)}d`
-      : `${days >= 0 ? '+' : ''}${(deltaMs / Config.MS_HOUR).toFixed(1)}h`;
-    const cls = deltaMs > 0 ? 'insp-var-late' : 'insp-var-early';
-    return `<span class="insp-var ${cls}" title="${Util.t('ui.insp_variance_shifted')}">${txt}</span>`;
+    const due = Util.dueInstant(t);
+    if (!due || !t.end_date) return '';
+    const fin = t.end_date instanceof Date ? t.end_date : Util.parseDate(t.end_date);
+    if (!fin) return '';
+    const hours = (fin.getTime() - due.getTime()) / Config.MS_HOUR;
+    const rounded = Math.round(hours * 10) / 10;
+    const txt = `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)}h`.replace('-0.0h', '0.0h');
+    const cls = rounded > 0 ? 'insp-var-late' : 'insp-var-early';
+    return `<span class="insp-var ${cls}" title="${Util.escapeHtml(Util.t('ui.insp_variance_shifted'))}">${txt}</span>`;
+  },
+
+  /** The "explain the move" line: from the engine's session-only notes, derivationIssue first, then systemMove.
+   *  Empty when neither describes a move (a note such as a missing time zone is not a move). */
+  _systemMoveLine(t: NimbusTask): string {
+    const MOVE_REASONS = ['finish_moved_earlier', 'reversal_forward', 'pull_floor_crossed',
+      'run_time_changed', 'due_date_derivation', 'cutover'];
+    const reasonKey = (code: string | undefined): string | null =>
+      code && MOVE_REASONS.includes(code) ? `ui.insp_move_reason_${code}` : null;
+    const issue = t.derivationIssue ?? null;
+    const move = t.systemMove ?? null;
+    const key = reasonKey(issue?.code) ?? reasonKey(move?.reason);
+    const from = issue?.from ?? move?.from;
+    const to = issue?.to ?? move?.to;
+    if (!key || !from || !to) return '';
+    return Util.t('ui.insp_system_move', { from: Util.fmtDTReadable(from), to: Util.fmtDTReadable(to), reason: Util.t(key) });
   },
 
   _onFieldChange(field: string, value: string, opts: ManualPlacementOptions = {}): void {
@@ -2692,6 +2696,15 @@ export const Printer = {
     Printer.preview();
   },
 
+  /** OQ43 a: an order is in the print range when its bar overlaps it (a split order is tested piece by piece). */
+  _rowsInRange(tasks: NimbusTask[], rangeStart: Date, rangeEnd: Date): NimbusTask[] {
+    return tasks.filter(t => {
+      const pieces = Util.scheduleIntervals(t);
+      if (pieces.length) return pieces.some(i => i.start <= rangeEnd && i.end >= rangeStart);
+      return !!t.start_date && t.start_date <= rangeEnd && !!t.end_date && t.end_date >= rangeStart;
+    });
+  },
+
   preview() {
     const startVal = (document.getElementById('print-start') as HTMLInputElement | null)?.value;
     const endVal   = (document.getElementById('print-end') as HTMLInputElement | null)?.value;
@@ -2699,15 +2712,14 @@ export const Printer = {
     if (!host) return;
 
     if (!startVal || !endVal) {
-      host.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">Pick a date range above.</p>';
+      host.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">${Util.t('empty.pick_date_range')}</p>`;
       return;
     }
 
     const rangeStart = new Date(startVal + 'T00:00:00');
     const rangeEnd   = new Date(endVal   + 'T23:59:59');
 
-    const rows = Store.tasksArr
-      .filter(t => t.start_date && t.start_date >= rangeStart && t.start_date <= rangeEnd)
+    const rows = Printer._rowsInRange(Store.tasksArr, rangeStart, rangeEnd)
       .sort((a, b) => {
         const la = (a.MACHINE || 'Unknown'), lb = (b.MACHINE || 'Unknown');
         if (la !== lb) return la.localeCompare(lb);
@@ -2780,8 +2792,8 @@ export const Printer = {
     const countEl = document.createElement('p');
     countEl.style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 8px;';
     countEl.textContent = rows.length > MAX_PRINT_ROWS
-      ? `Showing first ${MAX_PRINT_ROWS} of ${rows.length} orders — narrow the date range for a complete export (CSV exports all rows).`
-      : `${rows.length} order${rows.length === 1 ? '' : 's'} in range`;
+      ? Util.t('empty.no_orders_printer', { max: MAX_PRINT_ROWS, total: rows.length })
+      : Util.t('ui.orders_in_range', { count: rows.length, plural: rows.length === 1 ? '' : 's' });
     host.appendChild(countEl);
     host.appendChild(tbl);
   },

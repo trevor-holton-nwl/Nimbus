@@ -466,7 +466,7 @@ export const Alerts = {
       try { Engine.autoReflow(task.id); } catch {}
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap), [task.id]);
       Alerts.dismiss(alertId);
-      Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(newStart) }), 'success');
+      Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(changes.end_date ?? newStart) }), 'success');
 
     } else if (a.type === 'overload') {
       // Scope the changeover optimizer to just this line+day so the optimize and the

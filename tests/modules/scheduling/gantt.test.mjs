@@ -2114,3 +2114,106 @@ test('Interaction._onDataSetUpdate: an echo (or a vetoed left-edge drag) on a ba
     assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
   } finally { fx.restore(); }
 });
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 3.4 (A.3 #18, gate group 3): resize edges and the keyboard path.
+// ---------------------------------------------------------------------------
+
+test('a right-edge resize is a finish move and pushes exactly one undo entry (A.3 #18)', () => {
+  const id = 'fx-resize-undo-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  UndoStack._entries = [];
+  const before = 0;
+  Timeline._items = { get: (i) => (i === id ? { start, end: new Date('2026-08-05T14:00:00'), group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].end_date.getTime(), new Date('2026-08-05T14:00:00').getTime());
+    assert.equal(UndoStack._entries.length, before + 1);
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('a resize that derives the bar it already was creates no undo entry, no Store write, and springs back (A.3 #18)', () => {
+  const id = 'fx-resize-noop-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const priorUpdate = Store.updateTask;
+  const writes = [];
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  UndoStack._entries = [];
+  const before = 0;
+  Timeline._items = { get: (i) => (i === id ? { start, end: new Date('2026-08-05T14:00:00'), group: 'L1' } : undefined) };
+  // The engine answers with the very bar the order already is (the dragged finish resolves back onto it).
+  Engine.manualRoutingSchedulePatchFor = () => ({ start_date: start, end_date: end, MACHINE: 'L1', scheduleSegments: [] });
+  Store.updateTask = (...args) => { writes.push(args); return priorUpdate.apply(Store, args); };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(UndoStack._entries.length, before, 'no undo entry');
+    assert.equal(writes.length, 0, 'nothing written, so nothing dirtied');
+    assert.equal(fx.rebuilds, 1, 'the bar springs back to where it was');
+    assert.equal(fx.toasts.length, 0, 'not an error');
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Store.updateTask = priorUpdate;
+    fx.restore(); restoreClock();
+  }
+});
+
+test('G3: the Gantt keyboard handler selects but writes no dates; date edits stay on the finish-anchored grid/Inspector path', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const priorUpdate = Store.updateTask;
+  const priorUpdateMany = Store.updateMany;
+  const calls = [];
+  Store.setTasks([
+    { id: 'kb-a', MACHINE: 'L1', PLANT: '5512', start_date: new Date('2026-08-05T08:00:00'), end_date: new Date('2026-08-05T12:00:00'), RUN_TIME: 4 },
+    { id: 'kb-b', MACHINE: 'L1', PLANT: '5512', start_date: new Date('2026-08-05T13:00:00'), end_date: new Date('2026-08-05T15:00:00'), RUN_TIME: 2 },
+  ], 'test');
+  Selection.set(['kb-a']);
+  Engine.manualRoutingSchedulePatchFor = (...a) => { calls.push('patch'); return priorPatch.apply(Engine, a); };
+  Store.updateTask = (...a) => { calls.push('update'); return priorUpdate.apply(Store, a); };
+  Store.updateMany = (...a) => { calls.push('updateMany'); return priorUpdateMany.apply(Store, a); };
+  try {
+    for (const key of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown']) {
+      Interaction._onKeyDown({ key, target: { tagName: 'DIV' }, metaKey: false, ctrlKey: false, shiftKey: false, preventDefault() {} });
+    }
+    assert.deepEqual(calls, [], 'arrows move the selection only');
+    assert.equal(Store.tasks['kb-a'].end_date.getTime(), new Date('2026-08-05T12:00:00').getTime());
+    assert.equal(Store.tasks['kb-b'].end_date.getTime(), new Date('2026-08-05T15:00:00').getTime());
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Store.updateTask = priorUpdate; Store.updateMany = priorUpdateMany;
+    fx.restore(); restoreClock();
+  }
+});
+
+test('a drag asks the engine for the FINISH (third argument is the dropped right edge), the same call the grid and Inspector make', () => {
+  const id = 'fx-drag-finish-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const seen = [];
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start: new Date('2026-08-05T10:00:00'), end: new Date('2026-08-05T14:00:00'), group: 'L1' } : undefined) };
+  Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => { seen.push(finish); return priorPatch.call(Engine, task, line, finish, opts); };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].getTime(), new Date('2026-08-05T14:00:00').getTime());
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    fx.restore(); restoreClock();
+  }
+});

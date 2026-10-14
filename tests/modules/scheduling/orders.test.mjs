@@ -8,7 +8,8 @@ import { createRequire } from 'node:module';
 import { Table, Inspector, ContextMenu, Printer } from '../../../frontend/scheduling/orders.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
+import { ORDER_FIELD_CATALOG } from '../../../frontend/scheduling/order-field-catalog.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
@@ -1338,8 +1339,13 @@ function placementFixture(plant, nowNaive = '2026-08-03T06:00:00', plantExtras =
   };
 }
 
-test('Updated Start is read-only and Updated End takes the typed finish (OQ1)', () => {
-  const [start, end] = Table._scheduleDateColumns();
+test('Planned Start is read-only and Planned Finish takes the typed finish (OQ1, OQ16)', () => {
+  const [due, start, end] = Table._scheduleDateColumns();
+  assert.equal(due.field, 'original_end_date');
+  assert.equal(due.headerName, Util.t('col.due_date'));
+  assert.equal(due.editable, false, 'the due date is the SAP finish as received and is never typed');
+  assert.equal(start.headerName, Util.t('col.planned_start'));
+  assert.equal(end.headerName, Util.t('col.planned_finish'));
   assert.equal(start.field, 'start_date');
   assert.equal(start.editable, false, 'the start is derived, so it cannot be typed');
   assert.equal(start.cellEditor, undefined);
@@ -1529,5 +1535,189 @@ test('OQ42: the date-chip Today/Tomorrow presets are the plant\'s days, not the 
     globalThis.document.getElementById = priorGet;
     Store.serverOffsetMs = priorOffset;
     Store.setSelectedPlant(priorSelected, 'unit-test');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 3.4: Due Date and Planned Start are read-only, Planned Finish is the editable date.
+// ---------------------------------------------------------------------------
+
+test('the Due Date column shows the due instant (a date-only SAP finish reads as the close of that day), not the raw midnight', () => {
+  const [due] = Table._scheduleDateColumns();
+  const task = { id: 'due-col', MACHINE: 'L1', original_end_date: new Date('2026-08-04T09:00:00') };
+  assert.equal(due.valueGetter({ data: task }).getTime(), Util.dueInstant(task).getTime());
+  assert.equal(due.valueGetter({ data: { id: 'x', MACHINE: 'L1' } }), null, 'no SAP finish, no value');
+});
+
+test('the retired Original Start column is gone from the grid and the field catalog; the wire field stays on the task', () => {
+  assert.ok(!ORDER_FIELD_CATALOG.some(f => f.key === 'original_start_date'), 'catalog entry removed');
+  assert.ok(!Table._catalogOnlyColumns().some(c => c.field === 'original_start_date'));
+  assert.ok(!Table._scheduleDateColumns().some(c => c.field === 'original_start_date'));
+  assert.equal(ORDER_FIELD_CATALOG.find(f => f.key === 'original_end_date').i18nGridKey, 'col.due_date');
+});
+
+test('G-0.27: an admin visibility choice naming the retired column is ignored, not an error', () => {
+  const priorVisibility = structuredClone(Store.orderFieldVisibility);
+  const priorApi = Table._api;
+  const calls = [];
+  try {
+    Store.setOrderFieldVisibility({ ...priorVisibility, original_start_date: { grid: false, inspector: false } }, 'unit-test');
+    assert.equal(Table._fieldHidden('original_start_date'), false, 'an unknown id is never hidden');
+    assert.equal(Table._fieldHidden('no_such_column'), false);
+    Table._api = { setColumnsVisible: (ids, visible) => calls.push({ ids, visible }) };
+    Table._applyFieldVisibility();
+    assert.ok(calls.every(c => !c.ids.includes('original_start_date')), 'the retired id never reaches the grid');
+  } finally {
+    Table._api = priorApi;
+    Store.setOrderFieldVisibility(priorVisibility, 'unit-test');
+  }
+});
+
+test('G-0.27: a saved layout naming the retired Original Start column loads; the unknown column is dropped', () => {
+  const priorApi = Table._api;
+  const priorPref = Store.pref;
+  let applied = null, filter = null;
+  const known = new Set(['PRODUCTION_ORDER', 'end_date']);
+  Store.pref = key => key === 'gridLayout' ? {
+    columnState: [{ colId: 'PRODUCTION_ORDER' }, { colId: 'original_start_date', hide: true }, { colId: 'end_date', sort: 'asc' }],
+    sortModel: null,
+    filterModel: { original_start_date: { type: 'equals' }, end_date: { type: 'equals' } },
+  } : priorPref.call(Store, key);
+  Table._api = {
+    getColumn: id => known.has(id) ? { id } : null,
+    applyColumnState: arg => { applied = arg; },
+    setFilterModel: model => { filter = model; },
+  };
+  try {
+    Table._applySavedLayout();
+    assert.deepEqual(applied.state.map(c => c.colId), ['PRODUCTION_ORDER', 'end_date']);
+    assert.deepEqual(Object.keys(filter), ['end_date']);
+  } finally {
+    Table._api = priorApi;
+    Store.pref = priorPref;
+  }
+});
+
+test('the variance badge is planned finish minus the due instant, in hours with one decimal (due Tue 09:00, 6 h, finish Tue 09:00 -> 0.0h)', () => {
+  const task = { id: 'var-1', MACHINE: 'L1', RUN_TIME: 6,
+    original_end_date: new Date('2026-08-04T09:00:00'),
+    start_date: new Date('2026-08-04T03:00:00'), end_date: new Date('2026-08-04T09:00:00') };
+  const text = badge => badge.replace(/<[^>]+>/g, '');
+  assert.equal(text(Inspector._varianceBadge(task)), '0.0h');
+  assert.equal(text(Inspector._varianceBadge({ ...task, end_date: new Date('2026-08-04T11:00:00') })), '+2.0h');
+  assert.equal(text(Inspector._varianceBadge({ ...task, end_date: new Date('2026-08-04T07:30:00') })), '-1.5h');
+  assert.match(Inspector._varianceBadge({ ...task, end_date: new Date('2026-08-04T11:00:00') }), /insp-var-late/);
+  assert.match(Inspector._varianceBadge({ ...task, end_date: new Date('2026-08-04T07:30:00') }), /insp-var-early/);
+  assert.equal(text(Inspector._varianceBadge({ ...task, end_date: new Date('2026-08-07T09:00:00') })), '+72.0h', 'hours, never days');
+  assert.equal(Inspector._varianceBadge({ ...task, end_date: null }), '', 'unplaced: nothing to compare');
+  assert.equal(Inspector._varianceBadge({ ...task, original_end_date: null }), '', 'no due date: nothing to compare');
+  assert.match(Inspector._varianceBadge(task), /title="[^"]+"/);
+});
+
+test('the Inspector shows Planned Finish as the one editable date; Due Date and Planned Start are read-only text', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render({
+      id: 'insp-dates', ORDER: '100020', MACHINE: 'L1', RUN_TIME: 6,
+      original_end_date: new Date('2026-08-04T09:00:00'),
+      start_date: new Date('2026-08-04T03:00:00'), end_date: new Date('2026-08-04T09:00:00'),
+    });
+    const html = body.innerHTML;
+    assert.match(html, /ui\.insp_due_date/);
+    assert.match(html, /ui\.insp_planned_start/);
+    assert.match(html, /ui\.insp_planned_finish/);
+    assert.doesNotMatch(html, /ui\.insp_orig_|ui\.insp_updated_/, 'the old labels are gone');
+    assert.doesNotMatch(html, /data-field="start_date"/, 'the start is not an input');
+    assert.match(html, /<input type="text" data-field="end_date"/);
+    assert.equal((html.match(/data-field="end_date"/g) || []).length, 1);
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Inspector._fpEnd = null;
+  }
+});
+
+test('the Inspector explains a system move from derivationIssue first, then systemMove; nothing when neither exists', () => {
+  const from = new Date('2026-08-04T09:00:00'), to = new Date('2026-08-04T07:00:00');
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'ui.insp_system_move': 'moved|{{reason}}',
+    'ui.insp_move_reason_finish_moved_earlier': 'REASON-ISSUE',
+    'ui.insp_move_reason_run_time_changed': 'REASON-MOVE',
+    'ui.insp_move_reason_cutover': 'REASON-CUTOVER',
+  } };
+  try {
+    assert.equal(Inspector._systemMoveLine({ id: 'm0' }), '');
+    assert.equal(Inspector._systemMoveLine({ id: 'm0', derivationIssue: { code: 'plant_no_timezone' } }), '', 'a note that is not a move says nothing here');
+    const issue = Inspector._systemMoveLine({ id: 'm1', derivationIssue: { code: 'finish_moved_earlier', from, to },
+      systemMove: { from: new Date('2026-08-01T00:00:00'), to: new Date('2026-08-02T00:00:00'), reason: 'cutover' } });
+    assert.equal(issue, 'moved|REASON-ISSUE', 'the issue wins over the move record');
+    const moved = Inspector._systemMoveLine({ id: 'm2', systemMove: { from, to, reason: 'run_time_changed' } });
+    assert.equal(moved, 'moved|REASON-MOVE');
+  } finally { globalThis.window.__NIMBUS_LOCALES = priorLocales; }
+});
+
+test('G3: every keyboard-reachable date edit reaches the same finish-anchored patch as a drag (the third argument is the finish)', () => {
+  const fx = placementFixture('P-KEYBOARD');
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const calls = [];
+  Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => {
+    calls.push({ line, finish });
+    return priorPatch.call(Engine, task, line, finish, opts);
+  };
+  try {
+    Store.setTasks([{ id: 'kb', PLANT: 'P-KEYBOARD', MACHINE: 'L1', RUN_TIME: 4,
+      start_date: new Date('2026-08-05T08:00:00'), end_date: new Date('2026-08-05T12:00:00') }], 'unit-test');
+    // Grid cell editor (Tab / F2 / Enter reach it from the keyboard).
+    fx.edit('end_date', new Date('2026-08-05T16:00:00'), 'kb');
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].finish instanceof Date);
+    assert.equal(calls[0].finish.getTime(), new Date('2026-08-05T16:00:00').getTime());
+    // Inspector Planned Finish input.
+    Inspector._currentId = 'kb';
+    Inspector._onFieldChange('end_date', '2026-08-05 18:00');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].finish.getTime(), new Date('2026-08-05T18:00:00').getTime());
+    assert.equal(Store.tasks.kb.start_date.getTime(), new Date('2026-08-05T14:00:00').getTime(), 'both edges come back from the one derivation');
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Inspector._currentId = null;
+    fx.restore();
+  }
+});
+
+test('Printer range = overlap: an order that started before the range and ends inside it is listed (OQ43 a)', () => {
+  const rows = Printer._rowsInRange([
+    { id: 'before', start_date: new Date('2026-08-01T08:00:00'), end_date: new Date('2026-08-01T12:00:00') },
+    { id: 'spans-in', start_date: new Date('2026-08-02T22:00:00'), end_date: new Date('2026-08-03T02:00:00') },
+    { id: 'inside', start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T12:00:00') },
+    { id: 'spans-out', start_date: new Date('2026-08-03T22:00:00'), end_date: new Date('2026-08-04T04:00:00') },
+    { id: 'after', start_date: new Date('2026-08-04T08:00:00'), end_date: new Date('2026-08-04T12:00:00') },
+    { id: 'queued', start_date: null, end_date: null },
+  ], new Date('2026-08-03T00:00:00'), new Date('2026-08-03T23:59:59'));
+  assert.deepEqual(rows.map(r => r.id), ['spans-in', 'inside', 'spans-out']);
+});
+
+test('the override dialog takes its "Line" label from the locale layer, not hardcoded English', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const els = { 'ovr-order': { textContent: '' }, 'ovr-line': { innerHTML: '', value: '' }, 'ovr-firm': { checked: false } };
+  const priorFp = Util.fpDatetime;
+  const priorOpen = Modal.open;
+  const priorFpInst = Table._fpOvrFinish;
+  Util.fpDatetime = () => ({ setDate() {}, destroy() {} });
+  Modal.open = () => {};
+  Table._fpOvrFinish = null;
+  globalThis.document.getElementById = id => els[id] || null;
+  try {
+    Store.setTasks([{ id: 'ovr-copy', ORDER: '9001', MACHINE: 'L1', PLANT: 'P-COPY', RUN_TIME: 1,
+      start_date: new Date('2026-08-05T08:00:00'), end_date: new Date('2026-08-05T09:00:00') }], 'unit-test');
+    Table._openOverrideModalForId('ovr-copy');
+    assert.ok(els['ovr-order'].textContent.includes(Util.t('ui.insp_line')), 'the "Line" label comes from the locale layer');
+    assert.doesNotMatch(els['ovr-order'].textContent, /Line:/);
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Util.fpDatetime = priorFp; Modal.open = priorOpen; Table._fpOvrFinish = priorFpInst;
+    Store.setTasks([], 'unit-test');
   }
 });

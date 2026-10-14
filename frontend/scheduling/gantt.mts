@@ -3807,7 +3807,7 @@ export const Interaction = {
       const matDesc  = t.MATERIAL_DESCRIPTION || t.text || '';
       const rel = Store.alertsByTask().get(String(id)) || [];
       const alertsHtml = rel.length
-        ? `<div class="hov-alerts">⚐ ${rel.length} alert${rel.length === 1 ? '' : 's'}: ${
+        ? `<div class="hov-alerts">${Util.escapeHtml(Util.t('ui.insp_alerts_title', { count: rel.length }))}: ${
             rel.slice(0, 3).map(a => (a.type || a.sev || '')).filter(Boolean).join(', ')
           }${rel.length > 3 ? '…' : ''}</div>`
         : '';
@@ -3832,11 +3832,11 @@ export const Interaction = {
         <div class="hov-title">${Util.escapeHtml(orderNo)} ${firmedBadge}</div>
         <div class="hov-mat">${Util.escapeHtml(matDesc)}</div>
         <div class="hov-grid">
-          <span>Qty</span><span>${Util.escapeHtml(qty)}</span>
-          <span>Run</span><span>${run.toFixed(2)} h</span>
-          <span>Line</span><span>${Util.escapeHtml(line)}</span>
-          <span>Color</span><span>${Util.escapeHtml(color)}</span>
-          <span>Form</span><span>${Util.escapeHtml(form)}</span>
+          <span>${Util.t('col.qty')}</span><span>${Util.escapeHtml(qty)}</span>
+          <span>${Util.t('ui.hov_run')}</span><span>${run.toFixed(2)} h</span>
+          <span>${Util.t('ui.insp_line')}</span><span>${Util.escapeHtml(line)}</span>
+          <span>${Util.t('col.color')}</span><span>${Util.escapeHtml(color)}</span>
+          <span>${Util.t('col.form')}</span><span>${Util.escapeHtml(form)}</span>
         </div>
         <div class="hov-dates">${startStr} → ${endStr}</div>
         ${suborderHtml}
@@ -4547,6 +4547,16 @@ export const Interaction = {
       const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, opts);
       if (!patch?.start_date || !patch.end_date) {
         Interaction._rejectManualPlacement(t, itemId);
+        continue;
+      }
+      // A resize or drop that resolves back onto the bar the order already is changes nothing: no Store write
+      // (so nothing is dirtied), no undo entry. The bar springs back to its stored place.
+      if (patch.start_date.getTime() === t.start_date.getTime() && patch.end_date.getTime() === t.end_date.getTime()
+        && (patch.MACHINE ?? t.MACHINE) === t.MACHINE
+        && (patch.placement_exception ?? null) === (t.placement_exception ?? null)
+        && (patch.planning_status ?? t.planning_status) === t.planning_status) {
+        this._log('update:ignored', { id, reason: 'derived bar unchanged' });
+        Timeline._scheduleRebuild();
         continue;
       }
       Store.updateTask(id, patch, 'timeline');
