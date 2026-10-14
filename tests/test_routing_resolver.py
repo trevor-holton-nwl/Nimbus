@@ -760,6 +760,16 @@ class TestValidityIsJudgedOnTheLockedSapStart:
         assert self._step(basic_start_date=dt.datetime(2026, 6, 1, 8)) == "no_machine"
         assert self._step(basic_start_date=dt.datetime(2027, 3, 1, 8)) == "pv_expired"
 
+    def test_a_startless_order_is_judged_on_its_finish_never_on_none(self):
+        # U13: no start of any kind -> the locked finish, then the planning finish, then today
+        assert self._step(original_finish_received=dt.datetime(2027, 3, 1)) == "pv_expired"
+        assert self._step(basic_finish_date=dt.datetime(2027, 3, 1)) == "pv_expired"
+        assert self._step(original_finish_received=dt.datetime(2026, 6, 1)) == "no_machine"
+        from backend.routing.resolver import _resolve_steps
+        expired = {("P", "M", "0001"): {"valid_from": dt.date(2019, 1, 1), "valid_to": dt.date(2020, 12, 31)}}
+        order = {"plant": "P", "material_number": "M", "production_version": "0001"}
+        assert _resolve_steps(order, pv_lookup=expired, op_lookup={}, machine_workcenter={}, rules={})["step"]             == "pv_expired", "no date at all reads as today, never as valid"
+
     def test_check_eligibility_judges_the_start_it_is_given_as_the_locked_start(self):
         case = _ELIGIBILITY_CASES["pv_expired_before_valid_from_falls_to_sap_order_fallback"]
         order = case["order"]

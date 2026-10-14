@@ -272,9 +272,13 @@ def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
     # Validity is judged on the SAP start as first received (locked; backward scheduling OQ26), never on
     # `basic_start_date`, which an echo of NIMBUS's own send can move. A row dict without the locked value
     # (a caller that predates it) falls back to `basic_start_date`.
-    validity_start = order.get("original_start_received")
+    # U13: an order with no start at all (an Excel upload without BASIC_START_DATE) is judged on its locked
+    # finish, then the planning finish, then today -- never on None, which `_within_validity` reads as valid.
+    validity_start = next((order.get(k) for k in ("original_start_received", "basic_start_date",
+                                                  "original_finish_received", "basic_finish_date")
+                           if order.get(k) is not None), None)
     if validity_start is None:
-        validity_start = order.get("basic_start_date")
+        validity_start = datetime.now().date()
     if not _within_validity(validity_start, pv_row.get("valid_from"), pv_row.get("valid_to")):
         return {"ok": False, "step": "pv_expired"}
 
@@ -555,7 +559,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
     if full:
         cur.execute(
             "SELECT id, plant, material_number, production_version, machine, order_quantity,"
-            " basic_start_date, original_start_received, run_time, run_time_source, run_time_basis,"
+            " basic_start_date, original_start_received, original_finish_received, basic_finish_date,"
+            " run_time, run_time_source, run_time_basis,"
             " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
             " FROM orders WHERE plant = %s AND run_time_source IS DISTINCT FROM 'manual'",
             (plant,),
@@ -564,7 +569,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
     cur.execute(
         "SELECT id, plant, material_number, production_version, machine, order_quantity,"
-        " basic_start_date, original_start_received, run_time, run_time_source, run_time_basis,"
+        " basic_start_date, original_start_received, original_finish_received, basic_finish_date,"
+            " run_time, run_time_source, run_time_basis,"
         " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
         " FROM orders"
         " WHERE plant = %s"
