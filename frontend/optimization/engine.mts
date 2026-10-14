@@ -579,6 +579,7 @@ function parseDateOnlyAsWallClock(value: string): Date | null {
  * are already wall-clock values and are handled without this projection. */
 function plantWallClockFromInstant(timezone: string | null | undefined, instant: Date): Date | null {
   // The implementation lives in the compute core (shared with Store.plantNow and the worker).
+  // Reads the global at call time: Node tests must set globalThis.NimbusComputeCore (see engine.test.mjs).
   return globalThis.NimbusComputeCore!.plantWallClockFromInstant(timezone, instant);
 }
 

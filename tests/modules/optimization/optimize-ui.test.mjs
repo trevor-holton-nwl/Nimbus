@@ -16,6 +16,8 @@ import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 const require = createRequire(import.meta.url);
+// engine.mts reads the compute-core global at call time (plantWallClockFromInstant), so Node tests must bootstrap it.
+globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
 test('preview separates scheduled demand, new queue, protected exceptions and incomplete search', () => {
   const candidate = { dispositions: [
