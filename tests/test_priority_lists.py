@@ -266,20 +266,23 @@ def test_schema_reapply_is_a_no_op_for_priority_list_migration(pg):
     redeploy would, must record both ledger rows and must not duplicate
     priority_list rows on a second pass."""
     schema_sql = _schema_text()
+    # Rolled back: schema.sql ends with the ledger-guarded backward-scheduling cutover, which a committed apply
+    # on a developer DB lacking its ledger id would run once (senior review I14). Nothing here may commit.
     with pg._pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(schema_sql)
-        conn.commit()
-        cur.execute("SELECT COUNT(*) FROM priority_list")
-        count_after_first = cur.fetchone()[0]
+        try:
+            cur.execute(schema_sql)
+            cur.execute("SELECT COUNT(*) FROM priority_list")
+            count_after_first = cur.fetchone()[0]
 
-        cur.execute(schema_sql)
-        conn.commit()
-        cur.execute("SELECT COUNT(*) FROM priority_list")
-        count_after_second = cur.fetchone()[0]
+            cur.execute(schema_sql)
+            cur.execute("SELECT COUNT(*) FROM priority_list")
+            count_after_second = cur.fetchone()[0]
 
-        for ledger_id in ("priority_list_from_color_wheel", "orders_mp_attrs_backfill"):
-            cur.execute("SELECT 1 FROM schema_migrations WHERE id = %s", (ledger_id,))
-            assert cur.fetchone() is not None, f"{ledger_id} missing from schema_migrations"
+            for ledger_id in ("priority_list_from_color_wheel", "orders_mp_attrs_backfill"):
+                cur.execute("SELECT 1 FROM schema_migrations WHERE id = %s", (ledger_id,))
+                assert cur.fetchone() is not None, f"{ledger_id} missing from schema_migrations"
+        finally:
+            conn.rollback()
 
     assert count_after_second == count_after_first, (
         "Re-applying schema.sql changed priority_list's row count — the "
