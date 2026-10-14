@@ -1386,6 +1386,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.diag_date_range_min':            'Datumsbereich min',
   'ui.diag_date_range_max':            'Datumsbereich max',
   'ui.diag_dropped_no_start':          'Verworfen (kein Start)',
+  'ui.diag_dropped_no_finish':         'Verworfen (kein Ende)',
   'ui.diag_load_time':                 'Ladezeit',
   'ui.diag_scope':                     'Bereich',
   'ui.diag_rows_entering_merge':       'Zeilen bei Zusammenführung',

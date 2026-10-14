@@ -67,6 +67,7 @@ class TestIngestOrdersFromExcelRealDb:
             "WERKS": self.PLANT,
             "MACHINE": self.MACHINE,
             "BASIC_START_DATE": start_1,
+            "BASIC_FINISH_DATE": "2026-09-10 12:00",
         }])
 
         result_1 = db_.ingest_orders_from_excel(workbook_1, "zztest_ingest_1.xlsx")
@@ -89,6 +90,7 @@ class TestIngestOrdersFromExcelRealDb:
             "WERKS": self.PLANT,
             "MACHINE": self.MACHINE,
             "BASIC_START_DATE": start_2,
+            "BASIC_FINISH_DATE": "2026-09-11 13:00",
         }])
         result_2 = db_.ingest_orders_from_excel(workbook_2, "zztest_ingest_2.xlsx")
         assert result_2["status"] == "ok"
@@ -310,7 +312,7 @@ class TestPurgeOrdersByDateRealDb:
                 got = {r[0]: r for r in cur.fetchall()}
             assert got[self.ORDER][1] == "4001"
             assert got[self.ORDER][2] == dt.datetime(2026, 9, 11, 0, 30)
-            assert got[order_b][2] == dt.datetime(2026, 9, 10, 10, 0)  # date-only -> start + 2h
+            assert got[order_b][2] == dt.datetime(2026, 9, 11)  # date-only finish stored as received
         finally:
             with db_._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute("DELETE FROM orders WHERE production_order = %s", (order_b,))
@@ -329,9 +331,11 @@ class TestPurgeOrdersByDateRealDb:
         try:
             workbook = _xlsx([
                 {"PRODUCTION_ORDER": self.ORDER, "MATERIAL_NUMBER": self.MATERIAL,
-                 "WERKS": self.PLANT, "MACHINE": 101.0, "BASIC_START_DATE": "2026-09-10 08:00"},
+                 "WERKS": self.PLANT, "MACHINE": 101.0, "BASIC_START_DATE": "2026-09-10 08:00",
+                 "BASIC_FINISH_DATE": "2026-09-10 12:00"},
                 {"PRODUCTION_ORDER": order_b, "MATERIAL_NUMBER": self.MATERIAL,
-                 "WERKS": self.PLANT, "MACHINE": 101.5, "BASIC_START_DATE": "2026-09-10 08:00"},
+                 "WERKS": self.PLANT, "MACHINE": 101.5, "BASIC_START_DATE": "2026-09-10 08:00",
+                 "BASIC_FINISH_DATE": "2026-09-10 12:00"},
             ])
             assert pd.read_excel(io.BytesIO(workbook))["MACHINE"].dtype.kind == "f"
             assert db_.ingest_orders_from_excel(workbook, "zztest_ingest_floatmach.xlsx")["status"] == "ok"
@@ -565,28 +569,52 @@ class TestApplyOrderDateHygieneRows:
         warnings: list = []
         return db_.apply_order_date_hygiene_rows(rows, warnings), warnings
 
-    def test_midnight_finish_becomes_start_plus_run_time(self):
-        out, _ = self._run([{"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 11),
-                             "run_time": 2}])
-        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 10, 0)
+    def test_midnight_finish_is_stored_as_received(self):
+        out, warnings = self._run([{"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 11),
+                                    "run_time": 2}])
+        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 11)
         assert out[0]["sap_basic_finish_date"] == dt.datetime(2026, 9, 11)
+        assert warnings == []
 
-    def test_finish_before_start_becomes_start_plus_run_time(self):
-        out, _ = self._run([{"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 6, 30),
-                             "run_time": 3}])
-        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 11, 0)
+    def test_finish_before_start_same_date_is_stored_as_received(self):
+        out, warnings = self._run([{"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 6, 30),
+                                    "run_time": 3}])
+        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 6, 30)
+        assert warnings == []
 
-    def test_missing_finish_defaults_to_start_then_run_time_default(self):
-        out, _ = self._run([{"basic_start_date": self.S, "basic_finish_date": None, "run_time": None}])
-        # finish := start, then start-equal finish is "bad" -> start + default 1.0h
-        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 9, 0)
-        assert out[0]["sap_basic_finish_date"] is None
-        assert out[0]["run_time"] == 1.0 and out[0]["_run_time_was_defaulted"] is True
+    def test_finish_on_an_earlier_date_than_start_is_dropped_with_warning(self):
+        import backend.admin_ops.diagnostics_state as ds
+        before = ds.DIAGNOSTICS.get("dropped_no_finish_date", 0)
+        out, warnings = self._run([{"production_order": "PO-EARLY", "basic_start_date": self.S,
+                                    "basic_finish_date": dt.datetime(2026, 9, 9, 23, 0), "run_time": 3}])
+        assert out == []
+        assert [w["level"] for w in warnings] == ["error"]
+        assert "PO-EARLY" in warnings[0]["msg"] and "earlier" in warnings[0]["msg"]
+        assert ds.DIAGNOSTICS["dropped_no_finish_date"] == before + 1
+
+    def test_missing_finish_is_dropped_with_warning_and_counter(self):
+        import backend.admin_ops.diagnostics_state as ds
+        before = ds.DIAGNOSTICS.get("dropped_no_finish_date", 0)
+        good = {"production_order": "PO-OK", "basic_start_date": self.S,
+                "basic_finish_date": dt.datetime(2026, 9, 10, 15, 45), "run_time": 1}
+        bad = {"production_order": "PO-NOFIN", "basic_start_date": self.S, "basic_finish_date": None,
+               "run_time": None}
+        out, warnings = self._run([bad, good])
+        assert [r["production_order"] for r in out] == ["PO-OK"]
+        assert len(warnings) == 1 and warnings[0]["level"] == "error"
+        assert "PO-NOFIN" in warnings[0]["msg"] and "BASIC_FINISH_DATE" in warnings[0]["msg"]
+        assert ds.DIAGNOSTICS["dropped_no_finish_date"] == before + 1
+        assert "dropped_no_finish_date_filled" not in ds.DIAGNOSTICS
+
+    def test_unparseable_finish_is_dropped_with_warning(self):
+        out, warnings = self._run([{"basic_start_date": self.S, "basic_finish_date": "not-a-date", "run_time": 1}])
+        assert out == []
+        assert warnings and warnings[0]["level"] == "error" and "BASIC_FINISH_DATE" in warnings[0]["msg"]
 
     def test_real_time_of_day_finish_kept_and_bad_start_dropped_with_warning(self):
         good = {"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 15, 45),
                 "run_time": 1, "tag": "keep"}
-        bad = {"basic_start_date": "not-a-date", "basic_finish_date": None, "run_time": 1}
+        bad = {"basic_start_date": "not-a-date", "basic_finish_date": dt.datetime(2026, 9, 10, 9, 0), "run_time": 1}
         out, warnings = self._run([bad, good])
         assert [r["tag"] for r in out] == ["keep"]
         assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 15, 45)
@@ -594,12 +622,13 @@ class TestApplyOrderDateHygieneRows:
 
     # One shared fixture set: (start, finish, run_time) as the Excel frame and the SAP row dicts carry them.
     PARITY_CASES = [
-        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 11), 2),                  # exact-midnight finish
-        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 6, 30), 3),           # finish before start
-        (dt.datetime(2026, 9, 10, 8, 0), None, None),                                   # no finish, no run time
-        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 8, 0), 4),            # finish == start
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 11), 2),                  # exact-midnight finish: kept as received
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 6, 30), 3),           # finish before start, same date: kept
+        (dt.datetime(2026, 9, 10, 8, 0), None, None),                                   # no finish: dropped
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 8, 0), 4),            # finish == start: kept
         (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 15, 45), 1),          # real finish kept
-        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 0, 30), "x"),         # junk run time
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 0, 30), "x"),         # junk run time; same-date early finish kept
+        (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 9, 12, 0), 1),            # finish on an earlier date: dropped
         ("not-a-date", dt.datetime(2026, 9, 10, 12, 0), 1),                             # unparseable start: dropped
     ]
 
@@ -616,7 +645,7 @@ class TestApplyOrderDateHygieneRows:
         rows = db_.apply_order_date_hygiene_rows(
             [{"basic_start_date": s, "basic_finish_date": f, "run_time": r} for s, f, r in self.PARITY_CASES],
             sap_warn)
-        assert sap_warn == ex_warn and len(rows) == len(df) == len(self.PARITY_CASES) - 1
+        assert sap_warn == ex_warn and len(rows) == len(df) == len(self.PARITY_CASES) - 3
         for (_, h), r in zip(df.iterrows(), rows, strict=True):
             assert r["basic_start_date"] == h["BASIC_START_DATE"].to_pydatetime()
             assert r["basic_finish_date"] == h["BASIC_FINISH_DATE"].to_pydatetime()
@@ -838,11 +867,12 @@ class TestSapTruthReupload:
         assert res["inserted"] == 0 and res["updated"] == 0 and res["unchanged"] == 1
 
     def test_baseline_correct_then_same_file_resets_nothing(self):
-        # No finish in the file: the finish is derived (start + RUN_TIME) on every
-        # upload, and the stored baseline is that same derived value.
+        # The finish is stored as received, so the "raw shape" the baseline correction
+        # accepts (finish == start) is put in place directly; the SAP baseline (not
+        # basic_finish_date) is what a re-upload of the same file is compared against.
         line = self._line()
-        del line["BASIC_FINISH_DATE"]
         self._up([line])
+        self._sql("UPDATE orders SET basic_finish_date = basic_start_date WHERE id = %s", (self._oid(),))
         self._schedule(self.base + dt.timedelta(days=3))
         row = self._row()
         corrected = row["basic_start_date"] + dt.timedelta(days=5)
@@ -997,16 +1027,16 @@ class TestSapTruthReupload:
         self._no_sap_reset(res)
         assert self._row()["scheduled_start"] == slot and self._row()["manual_firmed"] is True
 
-    def test_finish_column_absent_run_time_change_is_not_a_date_change(self):
-        line4, line6 = self._line(RUN_TIME=4), self._line(RUN_TIME=6)
-        del line4["BASIC_FINISH_DATE"], line6["BASIC_FINISH_DATE"]
-        self._up([line4])
-        assert self._row()["sap_basic_finish_date"] is None, "SAP sent no finish: nothing to baseline"
-        slot = self.base + dt.timedelta(days=3)
-        self._schedule(slot)
-        res = self._up([line6], "zztest_st_2.xlsx")
-        self._no_sap_reset(res)
-        assert self._row()["scheduled_start"] == slot
+    def test_finish_column_absent_drops_every_row_with_a_warning(self):
+        line = self._line()
+        del line["BASIC_FINISH_DATE"]
+        res = self.pg.ingest_orders_from_excel(_xlsx([line]), "zztest_st_1.xlsx")
+        assert res["status"] == "ok" and res["inserted"] == 0 and res["updated"] == 0, res
+        errs = [w for w in res["warnings"] if w.get("level") == "error" and "BASIC_FINISH_DATE" in w.get("msg", "")]
+        assert errs and "1 row(s) dropped" in errs[0]["msg"], res["warnings"]
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self._oid(),))
+            assert cur.fetchone()[0] == 0
 
     def test_run_time_change_on_routing_plant_is_not_a_sap_date_change(self):
         self._sql("UPDATE plants SET routing_runtime_enabled = TRUE WHERE plant=%s", (self.PLANT,))

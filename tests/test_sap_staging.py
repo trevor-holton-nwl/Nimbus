@@ -289,7 +289,7 @@ def test_validate_planned_order_rows_reasons():
         {**ok, "id": 7, "plnum": "700", "gsmng": None},             # invalid_number
         {**ok, "id": 8, "plnum": "800", "abmng": Decimal("-1")},    # invalid_number
         {**ok, "id": 9, "plnum": "900", "stalt": "x"},              # invalid_int
-        {**ok, "id": 10, "plnum": "1000", "pedtr": "00000000"},     # no finish: fine (hygiene fills it)
+        {**ok, "id": 10, "plnum": "1000", "pedtr": "00000000"},     # no finish: rejected, the finish is required
         {**ok, "id": 11, "plnum": "0000001100"},                    # duplicate order+material ...
         {**ok, "id": 12, "plnum": "1100"},                          # ... after strip_zeros
     ]
@@ -302,7 +302,7 @@ def test_validate_planned_order_rows_reasons():
     assert res[6]["reason"] == "invalid_time"
     assert res[7]["reason"] == "invalid_number" and res[8]["reason"] == "invalid_number"
     assert res[9]["reason"] == "invalid_int"
-    assert res[10]["status"] == "valid"
+    assert res[10]["reason"] == "invalid_date"
     assert res[11]["reason"] == res[12]["reason"] == "duplicate_key"
     # A rejected row still resolves its order number (the vanish guard protects it).
     assert res[4]["resolved"]["production_order"] == "400"
@@ -765,7 +765,7 @@ def test_planned_order_batch_is_held_when_routing_is_off(pg, stg_plant):
     _set_plant(pg, routing=False, horizon_days=30)
     start = (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%d")
     bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
-                      [{"plnum": "000000001", "matnr": "777", "plwrk": PLANT, "psttr": start, "gsmng": 10}])
+                      [{"plnum": "000000001", "matnr": "777", "plwrk": PLANT, "psttr": start, "pedtr": start, "gsmng": 10}])
     res = st.validate_batch(bid)
     assert res["status"] == "held" and "routing_required" in res["held_reasons"]
     assert any(w.get("code") == "routing_required" for w in res["warnings"])

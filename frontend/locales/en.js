@@ -1293,6 +1293,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.diag_date_range_min':            'Date range min',
   'ui.diag_date_range_max':            'Date range max',
   'ui.diag_dropped_no_start':          'Dropped (no start)',
+  'ui.diag_dropped_no_finish':         'Dropped (no finish)',
   'ui.diag_load_time':                 'Load time',
   'ui.diag_scope':                     'Scope',
   'ui.diag_rows_entering_merge':       'Rows entering merge',

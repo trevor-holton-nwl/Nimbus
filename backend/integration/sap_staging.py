@@ -501,7 +501,7 @@ def validate_material_plant_rows(rows: list[dict], header_plant: str, known_plan
 
 def validate_planned_order_rows(rows: list[dict], header_plant: str, known_plants: set) -> list[dict]:
     """Row verdicts for a planned-order batch. Reasons: missing_key (incl. an all-zero order number),
-    plant_mismatch, unknown_plant, invalid_date (also a missing start), invalid_time, invalid_number,
+    plant_mismatch, unknown_plant, invalid_date (also a missing start or finish), invalid_time, invalid_number,
     invalid_int, duplicate_key. `resolved` always carries what could be resolved, even for a rejected
     row, so the vanish guard can still protect an order SAP did send."""
     results = []
@@ -520,9 +520,8 @@ def validate_planned_order_rows(rows: list[dict], header_plant: str, known_plant
             reason = "key_too_long"         # `orders.material_number` is TEXT, but no master row can ever match it
         if reason is None:
             try:
-                if _parse_sap_date(r.get("psttr")) is None:
-                    reason = "invalid_date"
-                _parse_sap_date(r.get("pedtr"))
+                if _parse_sap_date(r.get("psttr")) is None or _parse_sap_date(r.get("pedtr")) is None:
+                    reason = "invalid_date"     # a missing start or finish (the finish is stored as received)
             except ValueError:
                 reason = "invalid_date"
         if reason is None:

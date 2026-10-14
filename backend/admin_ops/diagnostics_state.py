@@ -28,7 +28,7 @@ DIAGNOSTICS: dict = {
     "source_file": None,
     "raw_row_count": 0,
     "dropped_no_start_date": 0,
-    "dropped_no_finish_date_filled": 0,
+    "dropped_no_finish_date": 0,
     "duplicate_ids_suffixed": 0,
     "color_merge_misses": 0,
     "color_merge_ms": None,

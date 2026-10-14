@@ -1388,6 +1388,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.diag_date_range_min':            'Rango de fechas mín.',
   'ui.diag_date_range_max':            'Rango de fechas máx.',
   'ui.diag_dropped_no_start':          'Descartados (sin inicio)',
+  'ui.diag_dropped_no_finish':         'Descartados (sin fin)',
   'ui.diag_load_time':                 'Tiempo de carga',
   'ui.diag_scope':                     'Alcance',
   'ui.diag_rows_entering_merge':       'Filas que entran en la fusión',

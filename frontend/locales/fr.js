@@ -1387,6 +1387,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.diag_date_range_min':            'Plage de dates min',
   'ui.diag_date_range_max':            'Plage de dates max',
   'ui.diag_dropped_no_start':          'Supprimés (sans début)',
+  'ui.diag_dropped_no_finish':         'Supprimés (sans fin)',
   'ui.diag_load_time':                 'Temps de chargement',
   'ui.diag_scope':                     'Périmètre',
   'ui.diag_rows_entering_merge':       'Lignes entrant dans la fusion',

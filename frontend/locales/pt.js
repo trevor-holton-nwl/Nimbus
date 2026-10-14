@@ -1386,6 +1386,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.diag_date_range_min':            'Intervalo de datas mín.',
   'ui.diag_date_range_max':            'Intervalo de datas máx.',
   'ui.diag_dropped_no_start':          'Descartados (sem início)',
+  'ui.diag_dropped_no_finish':         'Descartados (sem fim)',
   'ui.diag_load_time':                 'Tempo de carregamento',
   'ui.diag_scope':                     'Escopo',
   'ui.diag_rows_entering_merge':       'Linhas entrando na mesclagem',
