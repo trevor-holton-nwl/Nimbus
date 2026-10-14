@@ -5066,3 +5066,26 @@ There are 18 follow-ups. They come from the coverage builder's ranked list (item
 16. **The no-calendar line count (new).** Run the profile query that counts plants and lines with no calendar row (section 8.12), so the number of lines that would derive starts on the default Monday to Friday 07:00 to 19:00 shift is known before cutover.
 17. **Overlap resolution under a held finish (OI-1).** Who resolves the overlaps that finish-held growth and reversal create: the planner, a predecessor-side cascade or the optimizer on its next run; whether the strict optimizer save should reject a pair the planner did not create (`db.py:1631-1638`); the alert-only response is today's behaviour (4.3). Not yet an owner question; raise one if overlaps are to be resolved rather than alerted.
 18. **The held-finish cascade (OI-2).** Trigger, direction, stop rule (`engine.mts:2670`), reporting of moved peers whose own finish may already have been sent, and a second plant (`engine.mts:2650` reads the selected plant only); and whether anything should reclaim idle time after a shrink under Reading A (4.3, 4.9).
+
+---
+
+## Implementation log and gap decisions (2026-10)
+
+Execution of `docs/superpowers/plans/2026-10-13-backward-scheduling-implementation.md` under its §0.2a autonomy charter (owner, 2026-10-13: run Phases 1–4 without stopping; deploy nothing; branches only; Sonnet for code). Every routine gap the plan did not spell out is logged here as it is decided; the same entries live in the plan's Appendix C, which carries the full table (gap, ruling, why, where it shows). This section is the spec-side mirror.
+
+### Task 0 — plan audit (2026-10-13)
+
+A fresh Sonnet audit of the plan against §1.6/§12/§7 found 11 half-covered decisions, 5 contradictions, ~25 drifted anchors and 12 implementability defects. Rulings G-0.1 … G-0.34 (plan Appendix C) were folded into the plan text before any code. The ones that change what this spec says or assumes:
+
+- **Column facts.** The queue column is `orders.planning_status = 'needs_planning'` (not `planning_state`/`'queued'`), and its CHECK forces NULL scheduled dates; `plants` has no `id` (PK `(subnetwork, plant)`); segments end in `order_schedule_segments.scheduled_end`. §8's cutover SQL is corrected in the plan (Task 4.1).
+- **OQ3/OQ5 at cutover.** A running order keeps **both** its start and its old forward end in the cutover migration so that it still reads as running when its due date is already past (G-0.29).
+- **OQ26/OQ31.** On an echo both locked columns stay as stored; a start-only SAP change refreshes `original_start_received` only when the finish is not an echo (G-0.8).
+- **OQ28.** No plant "planning-horizon setting" exists; the cap is `min(336 h, visibility_horizon_days × 24)` when that nullable column is positive, else 336 h, and the same cap rejects planner run-time edits and queues resolver recomputes, not only ingest (G-0.5, G-0.6).
+- **OQ37.** The collapse carry is R2 as the owner accepted it: stored end = kept start + full run time, start kept, row flagged stale (G-0.28).
+- **OQ63 / OQ50 c.** Every optimizer entry point treats a `placement_exception` row as fixed; a forward `'overlong'` result on a `never` plant goes to Needs Planning (G-0.25).
+- **OQ4 a / OQ13 / OQ56 a.** New engine finding codes `frozen_window_crossed`, `run_time_zero`, and `reversal_forward.detail ∈ {run_time_grew, due_date_past, cutover}` (G-0.23).
+- **OQ33 A steady state.** A never-placed row that is not stale-flagged is derived for display only (not dirty, not persisted by Save); stale-flagged rows — and every row after the cutover flag — are dirty and persist on the next Save (G-0.22).
+- **§7.3 Phase 1 "no bar moves".** The load-time working-hours snap stays live through Phase 1 and is retired with the cutover image (Task 2.5), not with the due-date relay (G-0.12).
+- **§8.6a.** `SCHEMA_VERSION` is bumped at cutover; the planner notice names the one-time loss of a pre-cutover offline cache (G-0.31).
+- **§7.8 #9 / runner.** The three Phase 4 migration files ship in three separate runs; the cutover is gated on zero plants without a time zone (G-0.32).
+- **Mechanics.** `finish_echoes` lives in `db.py` (re-exported by `sap_staging.py`) to avoid a circular import; the compute core is an uncompiled UMD (helpers on its return object, `.d.ts` hand-mirrored); every new migration file is added to the pinned list in `tests/test_schema_idempotent.py` (G-0.1, G-0.2, G-0.3).
