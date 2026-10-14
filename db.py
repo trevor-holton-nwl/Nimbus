@@ -1390,7 +1390,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                    COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
                    o.production_version,
                    o.placement_exception,
-                   p.timezone
+                   p.timezone,
+                   o.scheduled_start,
+                   o.scheduled_end
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             LEFT JOIN plants p ON p.plant = o.plant
@@ -1422,6 +1424,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "production_version": r[16],
                 "placement_exception": r[17],
                 "timezone": r[18],
+                # The RAW stored columns (never the effective edges, which fall back to the SAP window):
+                # "unmoved" below means equal to what a planner stored.
+                "stored_start": r[19],
+                "stored_end": r[20],
             }
             for r in cur.fetchall()
         }
@@ -1687,7 +1693,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 continue
             if not queued and has_planning and not has_segments and start is None and end is None and (
                     current["start"] is None or current["end"] is None):
-                # A status-only restore to 'scheduled' needs a window already stored (a queued row has none).
+                # A status-only save to 'scheduled' (no edges sent) needs a readable window: a queued row has none.
+                # (The effective edges fall back to the SAP window, so this cannot fire for an unplaced row.)
                 invalid_ids.append(tid)
                 continue
 
@@ -1697,7 +1704,15 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # (an explicit null clears it, so the check applies again). Segments (>= 2 pieces) are judged
             # by _validate_schedule_segments above; a bulk route that must not trust the sent start
             # (trust_start=False, Task 2.7) will bypass this gate and force the flag instead.
-            if not queued and not segment_rows and new_start is not None and new_end is not None:
+            # A save that does not move the bar (both sent edges equal the stored RAW placement, run time
+            # unchanged) is not judged: the browser resends the full snapshot on an attribute-only edit, and a
+            # stale bar the engine could not re-derive must stay savable. The flag is then left untouched
+            # (width_passed stays False). A never-placed order has NULL stored edges, so it is always judged.
+            unmoved = (new_start is not None and new_end is not None
+                       and current["stored_start"] is not None and current["stored_end"] is not None
+                       and new_start == current["stored_start"] and new_end == current["stored_end"]
+                       and not runtime_changed)
+            if not queued and not segment_rows and new_start is not None and new_end is not None and not unmoved:
                 effective_exception = exception_value if has_exception else current["placement_exception"]
                 width_ok = _validate_continuous_width(
                     new_start, new_end, requested_runtime, effective_exception, current["timezone"])

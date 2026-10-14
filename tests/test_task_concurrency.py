@@ -809,7 +809,7 @@ class TestSaveContractWidthValidator:
 
     def test_an_explicit_null_clears_the_marker_and_the_check_applies_again(self):
         oid = self._order("CLEAR", exception="overtime", hours=7)
-        bad = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=7), placement_exception=None)
+        bad = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=7, minutes=1), placement_exception=None)
         assert bad["rejection_reasons"] == {oid: "width_mismatch"}
         assert self._state(oid)[3] == "overtime", "a rejected save does not clear the marker"
         good = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4), placement_exception=None)
@@ -854,8 +854,48 @@ class TestSaveContractWidthValidator:
         oid = self._order("BROWSER")
         res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=5), schedule_segments=[])
         assert res["rejection_reasons"] == {oid: "width_mismatch"}
-        ok = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4), schedule_segments=[])
+        moved = self.s + dt.timedelta(days=1)       # a moved bar (an unmoved one is not judged)
+        ok = self._save(oid, start=moved, end=moved + dt.timedelta(hours=4), schedule_segments=[])
         assert ok["persisted"] == 1 and self._state(oid)[2] is False
+
+    def test_an_unmoved_bar_resaved_with_an_attribute_edit_is_accepted_and_the_flag_stays(self):
+        """The browser resends the full snapshot on a PRT/machine-only edit: a stale bar (width != run time,
+        flag set) whose edges are unchanged is not judged, and the flag is left alone."""
+        oid = self._order("UNMOVED", run_time=4, hours=6)
+        res = self.pg.update_task_dates_bulk([{"id": oid, "start": self.s, "end": self.s + dt.timedelta(hours=6),
+                                              "PRT_01": "P9", "schedule_segments": []}])
+        assert res["persisted"] == 1 and res["rejection_reasons"] == {}
+        assert self._state(oid) == (self.s, self.s + dt.timedelta(hours=6), True, None)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT prt_01 FROM orders WHERE id = %s", (oid,))
+            assert cur.fetchone()[0] == "P9"
+
+    def test_the_same_stale_bar_with_its_end_moved_a_minute_is_judged_again(self):
+        oid = self._order("MOVED1", run_time=4, hours=6)
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=6, minutes=1))
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+        assert self._state(oid)[1] == self.s + dt.timedelta(hours=6)
+
+    def test_an_unmoved_bar_whose_run_time_changes_in_the_same_save_is_still_judged(self):
+        oid = self._order("RTCHG", run_time=4, hours=4)
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4), RUN_TIME=9)
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+
+    def test_an_unplaced_row_sent_with_its_sap_window_is_still_gated_not_stamped(self):
+        oid = self.pg.make_id("ZZTEST_SCW_UNPLACED", "ZZTEST_SCW_MAT")
+        sap_end = self.s + dt.timedelta(hours=9)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, original_start_received, original_finish_received, run_time)"
+                " VALUES (%s,%s,'ZZTEST_SCW_MAT',%s,%s,%s,%s,%s,%s,4)",
+                (oid, "ZZTEST_SCW_UNPLACED", self.MACHINE, self.PLANT, self.s, sap_end, self.s, sap_end))
+            conn.commit()
+        res = self._save(oid, start=self.s, end=sap_end)          # a 9 h window for a 4 h run time
+        assert res["rejection_reasons"] == {oid: "width_mismatch"}
+        assert self._state(oid)[:2] == (None, None), "never stamped as a placement"
+        ok = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=4))
+        assert ok["persisted"] == 1
 
     def test_a_marker_only_save_is_a_valid_edit(self):
         oid = self._order("MARKONLY")

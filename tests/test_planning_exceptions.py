@@ -35,7 +35,7 @@ def test_atomic_db_validation_writes_nothing(monkeypatch, rejection):
             assert not sql.lstrip().startswith(('UPDATE', 'DELETE', 'INSERT'))
         def fetchall(self):
             return [(i, datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
-                      None, None, None, None, None, None, None) for i in ['a','b']]
+                      None, None, None, None, None, None, None, None, None) for i in ['a','b']]
     class Connection:
         def cursor(self): return Cursor()
         def rollback(self): pass
@@ -44,8 +44,8 @@ def test_atomic_db_validation_writes_nothing(monkeypatch, rejection):
         def connection(self): yield Connection()
     monkeypatch.setattr(db, '_pool', Pool())
     monkeypatch.setattr(db, '_min_segment_minutes_by_plant', lambda *a: {})
-    good = dict(id='a', start=datetime(2026,9,9,9), base_version=42)
-    bad = dict(id='b', start=datetime(2026,9,9,9), base_version=42, force=True)
+    good = dict(id='a', start=datetime(2026,9,9,9), end=datetime(2026,9,9,13), base_version=42)
+    bad = dict(id='b', start=datetime(2026,9,9,9), end=datetime(2026,9,9,13), base_version=42, force=True)
     if rejection == 'stale':
         bad['base_version'] = 41
     if rejection == 'missing_version':
@@ -58,6 +58,7 @@ def test_atomic_db_validation_writes_nothing(monkeypatch, rejection):
     assert result['persisted'] == 0
     assert result['versions'] == {}
     assert result['stale'] or result['invalid_ids'] or result['not_found_ids']
+    assert 'a' not in result['invalid_ids'], 'the good row is rejected only by the atomic batch, never on its own'
 
 def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkeypatch):
     statements = []
@@ -69,7 +70,7 @@ def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkey
             if statements and statements[-1][0].startswith('UPDATE'):
                 return [('q', 43)]
             return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 2, 'p', 'L1', 'scheduled', None, False, None,
-                                      None, None, None, None, None, None, None)]
+                                      None, None, None, None, None, None, None, None, None)]
         def fetchone(self): return ('q', 43)
     class Connection:
         def cursor(self): return Cursor()
@@ -104,7 +105,7 @@ def test_queue_write_ignores_a_marker_sent_with_it(monkeypatch):
             if statements and statements[-1][0].startswith('UPDATE'):
                 return [('q', 43)]
             return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
-                     None, None, None, None, None, 'overtime', None)]
+                     None, None, None, None, None, 'overtime', None, None, None)]
         def fetchone(self): return ('q', 43)
     class Connection:
         def cursor(self): return Cursor()

@@ -325,15 +325,15 @@ def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, 
              planning_status="scheduled", reason_code=None, routing_runtime_enabled=False,
              parent_order=None, run_time_source=None, material_number=None,
              order_quantity=None, basic_start_date=None, production_version=None,
-             placement_exception=None, timezone=None):
+             placement_exception=None, timezone=None, stored_start=None, stored_end=None):
     """One row of update_task_dates_bulk's `FOR UPDATE OF o` eff-lookup SELECT,
-    in its current 19-column order (id, eff_start, eff_end, run_time,
+    in its current 21-column order (id, eff_start, eff_end, run_time,
     row_version, segment_count, plant, machine, planning_status, reason_code,
     routing_runtime_enabled, parent_order, run_time_source, material_number,
     order_quantity, basic_start_date, production_version -- those five added
     for ROUTING_RUNTIME_DESIGN.md §8.5's write-time eligibility gate -- then
     placement_exception and the plant's timezone, added for the backward-scheduling
-    save contract and both defaulting to None).
+    save contract, then the raw stored scheduled_start/scheduled_end; all four default to None).
     None of these tests exercise the routing-runtime feature itself, so
     routing_runtime_enabled defaults to False/disabled — matching today's
     unconditional pre-routing-runtime behavior — and reason_code defaults to
@@ -346,7 +346,7 @@ def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, 
     return (order_id, start, end, run_time, row_version, segment_count, plant, machine,
             planning_status, reason_code, routing_runtime_enabled, parent_order,
             run_time_source, material_number, order_quantity, basic_start_date,
-            production_version, placement_exception, timezone)
+            production_version, placement_exception, timezone, stored_start, stored_end)
 
 
 def _segment_batch_item(order_id):
