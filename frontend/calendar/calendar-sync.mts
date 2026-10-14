@@ -110,6 +110,20 @@ export const CalendarSync = {
     this._hydration[plant] = { state, lines: lines ? new Set(lines) : (prior?.lines ?? new Set<string>()) };
   },
 
+  /** A successful line-hours POST made these lines server rows (R-I7): add them to the hydration's server-line
+   *  set so `hasServerLineCalendar` is true and the reconcile unblocks without a reload. Emits `calendar:change`
+   *  only when a line was newly added. A skipped POST (hydrating / Sandbox) wrote nothing and adds nothing. */
+  _noteServerLines(plant: string, machines: Iterable<string>, result: CalendarSyncResult): CalendarSyncResult {
+    const entry = this._hydration[plant];
+    if (!result?.ok || result.skipped || !entry) return result;
+    let added = false;
+    for (const machine of machines) {
+      if (!entry.lines.has(machine)) { entry.lines.add(machine); added = true; }
+    }
+    if (added) Store.emit({ type: 'calendar:change', source: 'calendar-sync', plant });
+    return result;
+  },
+
   /* ----- load / hydration ----------------------------------------------- */
   fetchPlantConfig(plant: string | null): Promise<void> {
     if (!plant) return Promise.resolve();
@@ -282,7 +296,10 @@ export const CalendarSync = {
         .filter(l => Store.getPlantForLine(l) === plant
                   && !CalendarSync._isDefaultWorkHours(Store.calendars[l].workHours))  // F11
         .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
-      if (lines.length) jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours'));
+      if (lines.length) {
+        jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours')
+          .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r)));
+      }
     }
     if (!has.lineBlackouts) {
       // Migrate this plant's own blocks: already-stamped for it, or line-mapped to it.
@@ -374,7 +391,8 @@ export const CalendarSync = {
     if (!pending || !Object.keys(pending).length) return;
     delete this._pendingLineHours[plant];
     const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
-    return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours');
+    return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours')
+      .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r));
   },
 
   saveLineBlackoutUpsert(block: NimbusBlock): Promise<CalendarSyncResult> {

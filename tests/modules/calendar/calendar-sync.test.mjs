@@ -236,3 +236,52 @@ test('fetchPlantConfig replays pending deletes BEFORE applying the config and fi
     env.restore(); Store.replaceBlocks(priorBlocks, 'test-restore'); Store.setMasterData(priorMasterData, 'test-restore');
   }
 });
+
+test('a successful line-hours POST adds the line to the server-line set so the reconcile unblocks without a reload (R-I7)', async () => {
+  const { Toast } = await import('../../../frontend/platform/foundation.mjs');
+  const priorFetch = globalThis.fetch, priorToast = Toast.show;
+  Toast.show = () => {};
+  globalThis.window = globalThis.window || {};
+  CalendarSync._setHydration('P-I7', 'hydrated', ['OTHER']);
+  assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'LINE-X'), false, 'no server row yet: orders are blocked');
+  const events = [];
+  const off = Store.subscribe ? Store.subscribe(ev => { if (ev?.type === 'calendar:change') events.push(ev); }) : null;
+  try {
+    // A failed POST must not unblock the line.
+    globalThis.fetch = () => Promise.resolve({ ok: false, status: 503 });
+    CalendarSync._pendingLineHours['P-I7'] = { 'LINE-X': { 1: [8, 16] } };
+    await CalendarSync._flushLineHours('P-I7');
+    assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'LINE-X'), false, 'failed save leaves the line blocked');
+    // The successful one does.
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    CalendarSync._pendingLineHours['P-I7'] = { 'LINE-X': { 1: [8, 16] } };
+    await CalendarSync._flushLineHours('P-I7');
+    assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'LINE-X'), true, 'saved hours make the line a server row');
+    assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'OTHER'), true, 'existing lines are kept');
+    if (off) assert.ok(events.some(e => e.plant === 'P-I7'), 'calendar:change re-runs the reconcile');
+  } finally {
+    globalThis.fetch = priorFetch; Toast.show = priorToast;
+    if (typeof off === 'function') off();
+    delete CalendarSync._hydration['P-I7'];
+  }
+});
+
+test('_migrateMissingSlices marks the lines it uploaded as server rows (R-I7)', async () => {
+  const { Toast } = await import('../../../frontend/platform/foundation.mjs');
+  const priorFetch = globalThis.fetch, priorToast = Toast.show;
+  Toast.show = () => {};
+  globalThis.window = globalThis.window || {};
+  CalendarSync._setHydration('P-I7M', 'hydrated', []);
+  const priorGet = Store.getPlantForLine;
+  try {
+    Store.calendars['LINE-M'] = { workHours: { 1: [6, 14] } };
+    Store.getPlantForLine = l => (l === 'LINE-M' ? 'P-I7M' : null);
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    CalendarSync._migrateMissingSlices('P-I7M', { plantHours: true, lineHours: false, lineBlackouts: true, plantBlackouts: true });
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(CalendarSync.hasServerLineCalendar('P-I7M', 'LINE-M'), true);
+  } finally {
+    globalThis.fetch = priorFetch; Toast.show = priorToast; delete Store.calendars['LINE-M']; Store.getPlantForLine = priorGet;
+    delete CalendarSync._hydration['P-I7M'];
+  }
+});
