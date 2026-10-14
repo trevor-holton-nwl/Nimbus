@@ -2222,7 +2222,11 @@ def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
     cur.execute(
         "SELECT o.id, o.production_order, o.parent_production_order, o.material_number, o.manual_firmed,"
         " o.firming_indicator, o.production_version, o.planning_status,"
-        " " + db._EFF_START_SQL + ","          # first segment, else the stored start, else the SAP start
+        # The frozen-horizon half of the firm rule reads the LOCKED start (OQ26/OQ27): first segment, else the stored
+        # start, else the SAP start as first received. `basic_start_date` is echo-movable for a never-placed order, so
+        # an SAP echo must not be able to flip the firm flag (db._EFF_START_SQL would fall back to it).
+        " CASE WHEN o.planning_status = 'needs_planning' THEN NULL"
+        " ELSE COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date) END,"
         " " + db._EFF_END_SQL +                # the stored finish: what Send transmits (backward scheduling)
         " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE o.plant = %s ORDER BY o.id", (plant,))
     names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",

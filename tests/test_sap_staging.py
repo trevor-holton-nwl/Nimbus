@@ -588,7 +588,10 @@ def test_outbound_candidate_rows_read_the_shared_stored_finish_not_start_plus_ru
     cur = _RecCursor()
     st._outbound_candidate_rows(cur, "ZZP1")
     sql = cur.executed[0][0]
-    assert st.db._EFF_END_SQL in sql and st.db._EFF_START_SQL in sql
+    assert st.db._EFF_END_SQL in sql
+    # F15: the firm rule's start is the LOCKED start (never the echo-movable basic start ahead of the received one)
+    assert "COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date)" in sql
+    assert st.db._EFF_START_SQL not in sql
     assert "INTERVAL" not in sql and "run_time" not in sql
 
 
