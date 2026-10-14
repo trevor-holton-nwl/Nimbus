@@ -2137,6 +2137,46 @@ test('a right-edge resize is a finish move and pushes exactly one undo entry (A.
   } finally { fx.restore(); restoreClock(); }
 });
 
+test('G4 / gate 30: the multi-drag ghost preview takes the FINISH delta, so a right-edge resize moves the ghosts of the companions by the delta the commit applies', () => {
+  const anchorId = 'ghost-anchor', companionId = 'ghost-companion';
+  const aStart = new Date('2026-08-05T08:00:00'), aEnd = new Date('2026-08-05T12:00:00');
+  const cStart = new Date('2026-08-06T08:00:00'), cEnd = new Date('2026-08-06T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorItems = Timeline._items, priorTl = Timeline._tl;
+  Store.setTasks([
+    { id: anchorId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: aStart, end_date: aEnd },
+    { id: companionId, MACHINE: 'L2', PLANT: '5512', RUN_TIME: 4, start_date: cStart, end_date: cEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  const updates = [];
+  const priorRaf = globalThis.requestAnimationFrame, priorCaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;      // the edge-scroll loop is not under test
+  globalThis.cancelAnimationFrame = () => {};
+  Timeline._items = {
+    get: (i) => (i === companionId ? { id: i, className: '' } : undefined),
+    update: (list) => updates.push(...list),
+  };
+  try {
+    // Resize: vis keeps the start (props.time is the start) and moves the end 2 h later on its live item data.
+    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: aStart, end: new Date('2026-08-05T14:00:00') } } } } };
+    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
+    assert.equal(updates.length, 1, 'the companion gets a ghost');
+    assert.equal(updates[0].start.getTime(), cStart.getTime() + 2 * 3600000, 'ghost start shifted by the finish delta');
+    assert.equal(updates[0].end.getTime(), cEnd.getTime() + 2 * 3600000);
+    // Body drag: both edges move together, the same delta on either basis.
+    updates.length = 0;
+    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: new Date('2026-08-05T09:00:00'), end: new Date('2026-08-05T13:00:00') } } } } };
+    Interaction._onTimeChange({ id: anchorId, time: new Date('2026-08-05T09:00:00'), group: 'L1' });
+    assert.equal(updates[0].start.getTime(), cStart.getTime() + 3600000);
+  } finally {
+    Interaction._clearGhosts();
+    globalThis.requestAnimationFrame = priorRaf; globalThis.cancelAnimationFrame = priorCaf;
+    Timeline._items = priorItems; Timeline._tl = priorTl;
+    fx.restore(); restoreClock(); Selection.clear();
+  }
+});
+
 test('a resize that derives the bar it already was creates no undo entry, no Store write, and springs back (A.3 #18)', () => {
   const id = 'fx-resize-noop-1';
   const start = new Date('2026-08-05T08:00:00');

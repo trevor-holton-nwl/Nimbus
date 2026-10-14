@@ -4631,8 +4631,17 @@ export const Interaction = {
 
     const t = Store.tasks[dragId];
     if (!t || !t.start_date) return;
+    // The commit translates companions by the dragged piece's FINISH delta (OQ1/OQ17 b), so the preview takes
+    // the same basis: vis keeps the live edges of the item being dragged on its internal item data (a body drag
+    // moves both edges, a right-edge resize moves only the end). `props.time` is the item's start, so without
+    // the live end it can only describe a body drag: start plus the stored width.
     const dragMs = (props.time instanceof Date ? props.time : new Date(props.time)).getTime();
-    const deltaMs = dragMs - t.start_date.getTime();
+    const liveEnd = (Timeline._tl as unknown as VisInternalTimeline | null)?.itemSet?.items?.[dragItemId]?.data?.end;
+    const liveEndMs = liveEnd instanceof Date ? liveEnd.getTime() : Number(liveEnd);
+    const dragEndMs = Number.isFinite(liveEndMs)
+      ? liveEndMs
+      : dragMs + (t.end_date ? t.end_date.getTime() - t.start_date.getTime() : 0);
+    const deltaMs = dragEndMs - (t.end_date ? t.end_date.getTime() : t.start_date.getTime());
 
     this._ghostDragId = dragId;
     const updates: Array<Partial<TimelineVisItem> & { id: string }> = [];
