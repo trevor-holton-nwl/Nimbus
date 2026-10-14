@@ -97,12 +97,25 @@ export const EditCalendar = (() => {
       const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
       if (tog) tog.checked = enabled;
       _setRowEnabled(d, enabled);
-      if (enabled && _fp.length === 14) {
-        _fp[d * 2]?.setDate(Util.hoursToTimeString(wh[d]![0]), false);
-        _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(wh[d]![1]), false);
+      if (_fp.length === 14) {
+        if (enabled) {
+          _fp[d * 2]?.setDate(Util.hoursToTimeString(wh[d]![0]), false);
+          _fp[d * 2 + 1]?.setDate(Util.hoursToTimeString(wh[d]![1]), false);
+        } else {
+          // Clear a closed day's pickers so a later toggle-on falls back to the
+          // 08:00/17:00 defaults in onToggle, not the last-opened calendar's times.
+          _fp[d * 2]?.clear();
+          _fp[d * 2 + 1]?.clear();
+        }
       }
       _refreshBadge(d);
     }
+  }
+
+  /** 00:00 as an end time means end of day (24:00); the picker cannot express 24. */
+  function _endHours(t: string): number {
+    const h = Util.timeStringToHours(t);
+    return h === 0 ? 24 : h;
   }
 
   function _initPickers() {
@@ -139,7 +152,7 @@ export const EditCalendar = (() => {
     const s = _fp[d * 2]?.element?.value;
     const e = _fp[d * 2 + 1]?.element?.value;
     if (s && e) {
-      const hrs = Util.timeStringToHours(e) - Util.timeStringToHours(s);
+      const hrs = _endHours(e) - Util.timeStringToHours(s);
       badge.textContent = hrs > 0
         ? `${hrs % 1 === 0 ? hrs : hrs.toFixed(1)}h`
         : '—';
@@ -209,7 +222,7 @@ export const EditCalendar = (() => {
       const s = _fp[d * 2]?.element?.value;
       const e = _fp[d * 2 + 1]?.element?.value;
       if (s && e) {
-        const sh = Util.timeStringToHours(s), eh = Util.timeStringToHours(e);
+        const sh = Util.timeStringToHours(s), eh = _endHours(e);
         // Reject degenerate/inverted days client-side so we never diverge from the
         // backend (_clean_work_hours rejects end <= start with a 400).
         if (eh <= sh) { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }

@@ -1703,7 +1703,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="cal-container">
           <div class="plant-two-col">
             <div class="panel" id="plant-hours-panel">
-              <header class="panel-head"><h3 data-i18n="ui.plant_working_hours">Plant Working Hours</h3></header>
+              <header class="panel-head">
+                <h3 data-i18n="ui.plant_working_hours">Plant Working Hours</h3>
+                <button id="plant-edit-calendar-btn" class="btn btn-ghost sm" data-i18n="btn.edit_calendar">Edit Calendar</button>
+              </header>
               <div class="panel-body panel-body-hours" id="plant-hours-body"></div>
             </div>
             <div class="panel" id="plant-blackouts-panel">

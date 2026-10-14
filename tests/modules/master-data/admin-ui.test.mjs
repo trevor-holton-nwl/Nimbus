@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Plant, ProdLines, MasterData, WorkCenters } from '../../../frontend/master-data/admin-ui.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Modal, Toast, Util } from '../../../frontend/platform/foundation.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
@@ -17,6 +18,40 @@ test('Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof Plant.gotoTab, 'function');
   assert.equal(typeof Plant._renderSettingsPane, 'function', 'App._renderSettingsPane was relocated bodily onto Plant in Task 1 — must land here');
   assert.equal(typeof ProdLines.render, 'function');
+});
+
+test('Plant working-hours pills open the plant Edit Calendar modal; _fmtHour renders midnight', () => {
+  const priorWindow = globalThis.window;
+  const priorDocument = globalThis.document;
+  const priorPlant = Store.selectedPlant;
+  const originalOpenPlant = EditCalendar.openPlant;
+  const calls = [];
+  EditCalendar.openPlant = name => { calls.push(name); };
+  globalThis.window = {};
+  globalThis.document = { getElementById: () => null };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Plant._pillClick(1);   // an open day
+    Plant._pillClick(0);   // a day that may be closed: same single-click behavior
+    assert.deepEqual(calls, ['1006', '1006']);
+
+    calls.length = 0;
+    Store.setSelectedPlant(null, 'test');
+    Plant._pillClick(1);
+    assert.deepEqual(calls, [], 'no plant selected: openPlant must not be called');
+
+    assert.equal(ProdLines._fmtHour(24), '12am', 'a stored 24 (end of day) reads as midnight');
+    assert.equal(ProdLines._fmtHour(17), '5pm');
+    assert.equal(ProdLines._fmtHour(12), '12pm');
+    assert.equal(ProdLines._fmtHour(0), '12am');
+  } finally {
+    EditCalendar.openPlant = originalOpenPlant;
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
 });
 
 test('MasterData exposes its documented public API', () => {

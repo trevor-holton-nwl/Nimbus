@@ -861,11 +861,6 @@ textarea { min-height: 60px; padding: 7px 10px; }
 #plant-hours-body .line-hours-pill:first-child { border-left: 1px solid var(--line); }
 #plant-hours-body .line-hours-pill:last-child  { border-right: none; }
 #plant-hours-body .line-hours-pill:hover       { background: var(--accent-wash); }
-#plant-hours-body .line-hours-pill.editing {
-  background: var(--accent-wash);
-  box-shadow: inset 0 0 0 2px var(--accent);
-  z-index: 2;
-}
 #plant-hours-body .lhp-day  { font-size: 10px; }
 #plant-hours-body .lhp-time { font-size: 12px; margin-top: 4px; white-space: nowrap; }
 .lhp-hrs {
@@ -874,11 +869,6 @@ textarea { min-height: 60px; padding: 7px 10px; }
   font-family: 'JetBrains Mono', monospace;
 }
 #plant-hours-body .line-hours-pill.on .lhp-hrs { color: var(--ok); }
-.phwi-anchor {
-  position: absolute; width: 0; height: 0;
-  opacity: 0; pointer-events: none;
-  top: 50%; left: 50%;
-}
 /* Pill right-click context menu */
 .pill-ctx-menu {
   position: fixed;

@@ -170,11 +170,10 @@ declare global {
        *  start date is chosen) as the real flatpickr v4.6.13 API surface that
        *  module uses. */
       set(option: string, value: unknown): void;
-      /** Opens the calendar/time-picker UI programmatically — added by the
-       *  TypeScript migration's plant-and-administration.mts conversion
-       *  (Plant._pillClick opens the start-time picker on a click of an
-       *  already-configured working-hours pill) as the real flatpickr
-       *  v4.6.13 API surface that call site uses. */
+      /** Opens the calendar/time-picker UI programmatically — part of the real
+       *  flatpickr v4.6.13 API surface. No `.mts` caller remains (the plant
+       *  working-hours pills now open the EditCalendar modal instead); kept so
+       *  the typing still matches the vendor library. */
       open(): void;
       selectedDates: Date[];
       /** The original `<input>` flatpickr was attached to — added by CQ-1 Phase 6

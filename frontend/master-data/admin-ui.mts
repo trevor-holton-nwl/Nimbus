@@ -65,13 +65,6 @@ const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
 /* =============================================================================
    PLANT — plant-level calendar UI (working hours, blackouts, lines roster).
    ========================================================================== */
-/** One `Plant._pillFps` entry — the two Flatpickr instances backing a single
- *  day's start/end time inputs in the plant working-hours pill row. */
-interface PillFpPair {
-  start: NimbusVendor.FlatpickrInstance | null;
-  end: NimbusVendor.FlatpickrInstance | null;
-}
-
 // `interface ConstraintState` lived here until Stage 3 (docs/scheduling_priority.md)
 // rebuilt `Plant._renderSettingsPane`'s flat constraint list into a nested
 // priority tree. Its working copy is now a `ConstraintConfig[]` (frontend/types.mts)
@@ -136,7 +129,6 @@ export const Plant = {
   // dropdown settings are what a visitor sees first, not the Setup Matrix
   // console.
   _currentSettingsSubTab: 'rules' as 'rules' | 'setup',
-  _pillFps: null as PillFpPair[] | null,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
 
@@ -176,6 +168,10 @@ export const Plant = {
       btn.addEventListener('click', () => Plant.gotoTab(btn.dataset.plantTab));
     });
     document.getElementById('plant-add-block-btn')?.addEventListener('click', () => Plant.openBlockModal());
+    // The guard matters: EditCalendar.openPlant('') would crash in _populate.
+    document.getElementById('plant-edit-calendar-btn')?.addEventListener('click', () => {
+      if (Store.selectedPlant) EditCalendar.openPlant(Store.selectedPlant);
+    });
     document.getElementById('plant-roster-toggle')?.addEventListener('click', () => Plant.toggleRosterList());
     document.getElementById('modal-block-save-btn')?.addEventListener('click', () => CalendarUI.saveBlockFromModal());
     document.getElementById('modal-plant-block-save-btn')?.addEventListener('click', () => Plant.savePlantBlockFromModal());
@@ -290,10 +286,6 @@ export const Plant = {
     Store.ensurePlant(plantName);
     const plant = Store.plants[plantName];
 
-    if (Plant._pillFps) {
-      Plant._pillFps.forEach(p => { p.start?.destroy(); p.end?.destroy(); });
-    }
-    Plant._pillFps = Array(7).fill(null).map(() => ({ start: null, end: null })) as PillFpPair[];
     const dayLabels = ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => Util.t(k));
 
     const pillsHtml = [0,1,2,3,4,5,6].map(d => {
@@ -304,8 +296,6 @@ export const Plant = {
         <span class="lhp-day">${dayLabels[d]}</span>
         <span class="lhp-time">${time}</span>
         <span class="lhp-hrs">${hrs}</span>
-        <input id="plant-pill-start-${d}" class="phwi-anchor" readonly>
-        <input id="plant-pill-end-${d}"   class="phwi-anchor" readonly>
       </div>`;
     }).join('');
 
@@ -316,65 +306,16 @@ export const Plant = {
       pill.addEventListener('contextmenu', (ev) => Plant._pillRightClick(d, ev));
     });
 
-    requestAnimationFrame(() => {
-      const p = Store.plants[Store.selectedPlant!];
-      for (let d = 0; d < 7; d++) {
-        const wh = p.workHours[d];
-        const onClose = () => Plant._pillSave(d);
-        Plant._pillFps![d].start = flatpickr(`#plant-pill-start-${d}`, {
-          enableTime: true, noCalendar: true, dateFormat: 'H:i',
-          minuteIncrement: 30,
-          defaultDate: wh ? Util.hoursToTimeString(wh[0]) : '08:00',
-          onClose,
-        });
-        Plant._pillFps![d].end = flatpickr(`#plant-pill-end-${d}`, {
-          enableTime: true, noCalendar: true, dateFormat: 'H:i',
-          minuteIncrement: 30,
-          defaultDate: wh ? Util.hoursToTimeString(wh[1]) : '17:00',
-          onClose,
-        });
-      }
-    });
   },
 
-  _pillClick(d: number): void {
+  /** Any single click on a day pill opens the plant-mode Edit Calendar modal
+   *  (start and end pickers, midnight = 24, validation). Right-click keeps the
+   *  quick on/off menu (`_pillRightClick`). `_d` is unused by design: the modal
+   *  edits all seven days at once. */
+  _pillClick(_d: number): void {
     const pName = Store.selectedPlant;
     if (!pName) return;
-    const plant = Store.plants[pName];
-    const wh = plant.workHours[d];
-    if (!wh) {
-      Store.setPlantWorkHours(pName, d, [8, 17], 'pill');
-      const changed = new Set<string>();
-      for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(pName, i)) changed.add(l);
-      Plant._persistPlantHours(pName, changed);
-      Plant._renderHours();
-      Toast.show(Util.t('day.sun_enabled', { day: ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => Util.t(k))[d] }), 'success');
-      return;
-    }
-    const pill = document.querySelector(`.line-hours-pill[data-day="${d}"]`);
-    if (pill) pill.classList.add('editing');
-    Plant._pillFps?.[d]?.start?.open();
-  },
-
-  _pillSave(d: number): void {
-    const pName = Store.selectedPlant;
-    if (!pName) return;
-    const pair = Plant._pillFps?.[d];
-    if (!pair?.start || !pair?.end) return;
-    const sv = pair.start.element.value;
-    const ev = pair.end.element.value;
-    if (!sv || !ev) {
-      Store.setPlantWorkHours(pName, d, null, 'pill');
-    } else {
-      const sh = Util.timeStringToHours(sv), eh = Util.timeStringToHours(ev);
-      if (eh <= sh) { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
-      Store.setPlantWorkHours(pName, d, [sh, eh], 'pill');
-    }
-    const changed = new Set<string>();
-    for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(pName, i)) changed.add(l);
-    Plant._persistPlantHours(pName, changed);
-    Plant._renderHours();
-    Toast.show(Util.t('toast.plant_hours_updated'), 'success');
+    EditCalendar.openPlant(pName);
   },
 
   /** Persist a plant's working hours + only the line hours the clamp actually rewrote
@@ -2463,7 +2404,7 @@ export const ProdLines = {
   _fmtHour(h: number): string {
     const hh = Math.floor(h);
     const mm = Math.round((h - hh) * 60);
-    const ampm = hh < 12 ? 'am' : 'pm';
+    const ampm = (hh % 24) < 12 ? 'am' : 'pm';
     const h12  = hh % 12 || 12;
     return mm === 0 ? `${h12}${ampm}` : `${h12}:${String(mm).padStart(2, '0')}${ampm}`;
   },
