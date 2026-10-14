@@ -366,6 +366,19 @@ export const OptimizeDialog = (() => {
     if (sb && _start) sb.textContent = _displayDate(_start);
     if (eb && _end) eb.textContent = _displayDate(_end);
     _updateSummary();
+    _updateBacklogRuntimeNote(tasks);
+  }
+
+  /** OQ56 a: tell the planner how many orders are backlog only because their run time grew (the reconcile
+   *  tags those `reversal_forward` / `run_time_grew`). Shown under the strategy hint in Remove Backlog mode. */
+  function _backlogRuntimeGrewCount(tasks: ReadonlyArray<NimbusTask>): number {
+    return tasks.filter(t => t.derivationIssue?.code === 'reversal_forward' && t.derivationIssue.detail === 'run_time_grew').length;
+  }
+  function _updateBacklogRuntimeNote(tasks: ReadonlyArray<NimbusTask>) {
+    const hint = document.getElementById('opt-strategy-hint');
+    if (!hint || _mode !== 'backlog') return;
+    const grew = _backlogRuntimeGrewCount(tasks);
+    hint.textContent = Util.t('tip.backlog_mode') + (grew ? ' ' + Util.t('ui.opt_backlog_runtime_grew', { count: grew }) : '');
   }
 
   function _applyModeOptions() {
@@ -1258,6 +1271,16 @@ export const OptimizerPreview = {
     OptimizerPreview._taskWatchUnsubscribe = Store.subscribe(event => {
       if (!OptimizerPreview.active || !OptimizerPreview._taskBaseline
         || !PREVIEW_TASK_CHANGE_EVENTS.has(event.type)) return;
+      // Group 26: the engine re-deriving starts (run time changed, calendar landed) under an open preview makes
+      // its numbers stale whatever the field-level comparison says; Apply is disabled with its own banner.
+      if (event.source === 'engine-runtime-reconcile') {
+        const rawIds = (event as unknown as { ids?: unknown }).ids;
+        const ids = Array.isArray(rawIds) ? rawIds.map(String) : null;
+        if (!ids || ids.some(id => OptimizerPreview._taskBaseline!.has(id))) {
+          OptimizerPreview._markTaskStale('engine re-derived starts while the preview was open', 'ui.preview_stale');
+          return;
+        }
+      }
       if (OptimizerPreview._applying && event.source === 'engine') return;
       OptimizerPreview._revalidateTaskBaseline();
     }, 'OptimizerPreview.tasks');
@@ -1268,11 +1291,11 @@ export const OptimizerPreview = {
     OptimizerPreview._taskWatchUnsubscribe = null;
   },
 
-  _markTaskStale(reason: string): void {
+  _markTaskStale(reason: string, messageKey = 'ui.opt_preview_task_stale'): void {
     if (OptimizerPreview.stale) return;
     OptimizerPreview.stale = true;
     OptimizerPreview._staleReason = reason;
-    OptimizerPreview._staleMessageKey = 'ui.opt_preview_task_stale';
+    OptimizerPreview._staleMessageKey = messageKey;
     OptimizerPreview._syncApplyButton();
     if (typeof document !== 'undefined') OptimizerPreview._render();
   },

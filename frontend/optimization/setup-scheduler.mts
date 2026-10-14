@@ -3088,8 +3088,10 @@ function candidateForSequence(
           : [],
       },
     });
-    const priorStart = timestamp(task.start_date);
-    if (priorStart) instabilityMinutes += Math.abs(first.start.getTime() - priorStart.getTime()) / 60000;
+    // Instability is keyed on the finish (Reading A): the placed finish is the anchor, so a task whose
+    // finish held but whose start moved because its run time changed is not unstable.
+    const priorFinish = timestamp(task.end_date);
+    if (priorFinish) instabilityMinutes += Math.abs(last.end.getTime() - priorFinish.getTime()) / 60000;
     setupMinutes += effectiveSetupMinutes;
     const due = dueTimestamp(task, dueScope);
     if (Number.isFinite(due) && last.end.getTime() > due) {
@@ -7297,7 +7299,7 @@ export function objectiveFactsForCandidate(
     }
     const ceiling = notAfterFor(bounds, task);
     if (end && ceiling && +end > +ceiling) overCap++;
-    const before = timestamp(original.get(taskId(task))?.start_date); const after = timestamp(task.start_date);
+    const before = timestamp(original.get(taskId(task))?.end_date); const after = timestamp(task.end_date);
     if (before && after) instability += Math.abs(+after - +before) / 60000;
   }
   const definition = bounds.setup.definition;

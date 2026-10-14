@@ -1434,16 +1434,20 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!snap) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
       const beforeSnap = UndoStack.snapshotTasks(Store.tasksArr.map(t => t.id));
       UndoStack._entries.push({ label: 'Before Time Machine restore', undoFn: () => UndoStack.restoreTasks(beforeSnap), at: Date.now() });
+      // OQ21 (group 15): a restore brings back the FINISH; the stored start is a placeholder, so each row is flagged
+      // stale and the engine re-derives the start from the finish under the current run time.
       const patches = snap.tasks
         .filter(s => Store.tasks[s.id])
         .map(s => ({
           id: s.id,
           changes: {
             start_date: s.start_date ? new Date(s.start_date) : null,
-            end_date:   s.end_date   ? new Date(s.end_date)   : null
+            end_date:   s.end_date   ? new Date(s.end_date)   : null,
+            runtime_schedule_mismatch: true
           }
         }));
       Store.updateMany(patches, 'time-machine');
+      NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id));
       Alerts.scheduleRecompute();
       Toast.show(t('toast.restored', { label: snap.label, time: TimeMachine._relTime(ts) }), 'success', 3000);
       if (TimeMachine._panel) TimeMachine._panel.hidden = true;

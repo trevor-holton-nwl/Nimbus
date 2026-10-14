@@ -1073,6 +1073,9 @@ export const UndoStack = {
       return t ? structuredClone(t) : null;
     }).filter(Boolean) as NimbusTask[];
   },
+  /** Registered by the engine (platform cannot import it): re-derive the start of just-restored rows from their
+   *  restored finish and the CURRENT run time (OQ21). Receives the restored ids. */
+  afterRestore: null as null | ((ids: string[]) => void),
   restoreTasks(snapshot: NimbusTask[]): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
@@ -1081,8 +1084,12 @@ export const UndoStack = {
     // flipped a firm without a marker, so the save sent no FIRMED and the UI diverged from the server.
     const patches = snapshot.map(s => {
       const { firmed: _firmed, ...rest } = s;
-      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
+      // OQ21: undo restores the FINISH. The restored start is only a placeholder, so the row is flagged stale and
+      // the engine re-derives the start from the finish under the current run time (afterRestore below).
+      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, runtime_schedule_mismatch: true,
+        row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
     });
     Store.updateMany(patches, 'undo');
+    if (patches.length) UndoStack.afterRestore?.(patches.map(p => String(p.id)));
   },
 };

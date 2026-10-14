@@ -467,6 +467,23 @@ test('Task 1: server task refresh events invalidate row-version and full-reload 
   }
 });
 
+test('Group 26: an engine re-derivation of the preview plant stales the open preview with its own banner; another plant does not', () => {
+  const plant = 'TASK-PREVIEW-RECONCILE';
+  const fixture = openTaskBaselinePreview(plant, [previewTask('task-rec', plant)]);
+  try {
+    Store.emit({ type: 'tasks:bulkUpdate', ids: ['task-not-in-preview'], source: 'engine-runtime-reconcile' });
+    assert.equal(OptimizerPreview.stale, false, 'a reconcile of rows outside the preview plant is not a reason to stale it');
+    // No field of the previewed row changes: the field-level baseline comparison alone would not catch this.
+    Store.emit({ type: 'tasks:bulkUpdate', ids: ['task-rec'], source: 'engine-runtime-reconcile' });
+    assert.equal(OptimizerPreview.stale, true, 'the reconcile marks the preview stale');
+    assert.equal(OptimizerPreview.canApply(), false, 'Apply is disabled');
+    assert.equal(OptimizerPreview._staleMessageKey, 'ui.preview_stale');
+    assert.equal(OptimizerPreview._staleMessage(), Util.t('ui.preview_stale'), 'the banner carries the new key');
+  } finally {
+    fixture.restore();
+  }
+});
+
 test('Task 1: edits in an unrelated plant do not stale the active preview', () => {
   const previewPlant = 'TASK-BASELINE-A';
   const otherPlant = 'TASK-BASELINE-B';

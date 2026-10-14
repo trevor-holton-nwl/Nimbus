@@ -418,7 +418,8 @@ export const Alerts = {
       // Firmed orders are immovable. firmingStatus is the EFFECTIVE set — frozen horizon,
       // the manual flag and running (in progress), all on this parent-level task — not just
       // Store.isFirmed. SAP's firm flag is display-only and does not block a fix. Optimizer runs and autoReflow already honor the same union.
-      if (Engine.firmingStatus(task).firmed) { Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
+      // G-0.25: a row carrying an approved placement exception ('overtime' / 'overlong') is fixed the same way.
+      if (task.placement_exception || Engine.firmingStatus(task).firmed) { Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
       const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;

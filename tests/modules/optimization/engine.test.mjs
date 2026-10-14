@@ -32,7 +32,7 @@ import {
   MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
 } from '../../../frontend/optimization/engine.mjs';
 import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
@@ -961,44 +961,7 @@ test('Engine.evaluateSchedule keeps planningStart separate from runNow and place
   }
 });
 
-test('legacy optimizer never lands an inherently overlong order inside a blackout (nextAvailable null fallback)', () => {
-  const plant = 'LEGACY-OVERLONG';
-  const line = 'LEGACY-OVERLONG-L1';
-  const priorPlant = Store.selectedPlant;
-  const priorTasks = structuredClone(Store.tasksArr);
-  const priorMasterData = structuredClone(Store.masterData);
-  const priorSetup = Store.setupSnapshot;
-  const priorCalendar = Store.calendars[line];
-  const priorBlocks = structuredClone(Store.blocks);
-  try {
-    Store.setSelectedPlant(plant, 'unit-test');
-    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
-    Store.setCalendar(line, { 1: [8, 18] }, 'unit-test'); // 10h window; the 12h order can never fit one window
-    Store.addBlock({ id: 'legacy-overlong-blackout', plant, line, start: new Date('2035-08-06T08:00:00'), end: new Date('2035-08-06T10:00:00') }, 'unit-test');
-    Store.replaceSetupSnapshot(null, 'unit-test');
-    Store.setTasks([{ id: 'legacy-overlong-order', PLANT: plant, MACHINE: line, RUN_TIME: 12, start_date: null, end_date: null }], 'unit-test');
-    // Only a non-public mode string with no active setup snapshot reaches the compatibility walk.
-    const result = Engine.evaluateSchedule('legacy-compat', {
-      plant, respectFirmed: true, respectCalendar: true,
-      planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'),
-      endDate: new Date('2035-08-08T00:00:00'),
-    });
-    const patch = result.patches.find(item => item.id === 'legacy-overlong-order');
-    assert.ok(patch?.changes.start_date, 'the overlong order is placed (continuous-bar exception)');
-    assert.ok(patch.changes.start_date.getTime() >= new Date('2035-08-06T10:00:00').getTime(),
-      'it must start at the first operating instant after the blackout, never inside it');
-  } finally {
-    Store.setTasks(priorTasks, 'unit-test');
-    Store.setMasterData(priorMasterData, 'unit-test');
-    Store.setSelectedPlant(priorPlant, 'unit-test');
-    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
-    Store.replaceBlocks(priorBlocks, 'unit-test');
-    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
-    else delete Store.calendars[line];
-  }
-});
-
-test('running orders never move: legacy walk, changeover and autoReflow leave an in-progress order in place, even with respectFirmed off', () => {
+test('running orders never move: changeover and autoReflow leave an in-progress order in place, even with respectFirmed off', () => {
   const plant = 'RUN-LOCK-PLANT';
   const line = 'RUN-LOCK-LINE';
   const priorPlant = Store.selectedPlant;
@@ -1022,11 +985,6 @@ test('running orders never move: legacy walk, changeover and autoReflow leave an
       { id: 'run-free', PLANT: plant, MACHINE: line, RUN_TIME: 1, start_date: new Date('2035-08-06T08:30:00'), end_date: new Date('2035-08-06T09:30:00') },
     ]);
     const runOpts = { plant, respectFirmed: false, respectCalendar: true, planningStart: runNow, runNow, endDate: new Date('2035-08-10T00:00:00') };
-
-    // Legacy compatibility walk (non-public mode string, no setup snapshot).
-    Store.setTasks(base(), 'unit-test');
-    const legacy = Engine.evaluateSchedule('legacy-compat', runOpts);
-    assert.equal(legacy.patches.find(p => p.id === 'run-sap'), undefined, 'legacy walk must not patch a running order');
 
     // Setup-aware changeover path.
     Store.setTasks(base(), 'unit-test');
@@ -1190,7 +1148,7 @@ test('Engine rejects invalid date inputs, parses date-only bounds as local wall 
   }
 });
 
-test('legacy optimizer scopes malformed historical intervals before repair eligibility', () => {
+test('optimizer scopes malformed historical intervals before repair eligibility', () => {
   const plant = 'LEGACY-HORIZON-SCOPE';
   const line = 'LEGACY-HORIZON-L1';
   const priorPlant = Store.selectedPlant;
@@ -1214,7 +1172,7 @@ test('legacy optimizer scopes malformed historical intervals before repair eligi
       endDate: new Date('2035-08-07T00:00:00'),
     });
     assert.equal(result.patches.some(patch => patch.id === historical.id), false,
-      'a malformed interval before the half-open planning scope must remain immutable on the legacy route');
+      'a malformed interval before the half-open planning scope must remain immutable');
   } finally {
     Store.setTasks(priorTasks, 'unit-test');
     Store.setMasterData(priorMasterData, 'unit-test');
@@ -3916,7 +3874,7 @@ function _runDeletedOrderThrough(mode) {
   }
 }
 
-test('Delete -> Needs Planning order is re-placed by a following Due Date optimizer run (setup-aware path; Due Date has no legacy path — only Remove Backlog reaches the legacy walk)', () => {
+test('Delete -> Needs Planning order is re-placed by a following Due Date optimizer run (setup-aware path)', () => {
   const patch = _runDeletedOrderThrough('duedate');
   assert.ok(patch, 'the planner-unscheduled order must receive a placement');
   assert.ok(patch.changes.start_date instanceof Date && patch.changes.end_date instanceof Date);
@@ -4420,6 +4378,124 @@ describe('reconcile (finish-anchored)', () => {
       Store.updateMany([{ id: 'cl', changes: { start_date: at(26, 9), end_date: at(26, 13) } }], 'unit-test');
       assert.equal(Store.tasks.cl.derivationIssue ?? null, null);
       assert.equal(Store.tasks.cl.systemMove ?? null, null);
+    } finally { fx.restore(); }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 3.1 (OQ21, OQ20, G-0.25, OQ50 c, OQ56 a, group 21)
+  // -------------------------------------------------------------------------
+  test('OQ21: an undo restores the finish and re-derives the start from the current run time, quietly, even for a dirty row', () => {
+    const fx = recFixture();
+    try {
+      // The recorded start (10:00) does not belong to the 4 h run time; the finish (17:00) does.
+      Store.setTasks([fx.task('u', { user_scheduled: true, start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false })], 'unit-test');
+      const snap = UndoStack.snapshotTasks(['u']);
+      snap[0].start_date = at(26, 10);
+      Persistence._dirtyIds.add('u');   // restored rows are dirty by construction; the reconcile must not skip them
+      UndoStack.restoreTasks(snap);
+      const t = Store.tasks.u;
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime(), 'the restored finish holds');
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'the start follows the current run time (17:00 minus 4 h)');
+      assert.equal(t.runtime_schedule_mismatch, false, 'derived, so the stale flag is cleared');
+      assert.equal(fx.toasts.length, 0, 'an undo announces itself; the re-derivation adds no "N moved" toast');
+      assert.ok(fx.writes.some(w => w.source === REC_SOURCE && w.ids.includes('u')));
+    } finally { Persistence._dirtyIds.delete('u'); fx.restore(); }
+  });
+
+  test('OQ21: restoreTasks flags every restored row stale before the engine derives', () => {
+    const fx = recFixture({ state: 'pending' });   // nothing is derived, so the flag is still visible
+    try {
+      Store.setTasks([fx.task('u2', { user_scheduled: true, start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false })], 'unit-test');
+      UndoStack.restoreTasks(UndoStack.snapshotTasks(['u2']));
+      assert.equal(Store.tasks.u2.runtime_schedule_mismatch, true);
+    } finally { fx.restore(); }
+  });
+
+  test('OQ20 (verified): a derived start below the pull floor records pull_floor_crossed', () => {
+    const fx = recFixture();
+    try {
+      Store.setMasterData({ plants: [{ plant: fx.plant, split_order_policy: 'never', timezone: LOCAL_TZ, max_pull_forward_days: 0 }],
+        lines: [{ machine: fx.line, plant: fx.plant }] }, 'unit-test');
+      // Due 26 Aug with a pull limit of 0 days: the floor is 26 Aug 00:00. A 4 h run held to an 11:00 finish on
+      // the 25th starts at 07:00 on the 25th, below that floor.
+      Store.setTasks([fx.task('pf', { RUN_TIME: '4', user_scheduled: true, runtime_schedule_mismatch: true,
+        original_end_date: at(26, 17), start_date: at(25, 8), end_date: at(25, 11) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.pf.derivationIssue?.code, 'pull_floor_crossed');
+    } finally { fx.restore(); }
+  });
+
+  test('G-0.25: a marked, unfirmed row keeps its edges through runAndApply with respectFirmed off; Remove Backlog leaves it too', () => {
+    const fx = recFixture();
+    try {
+      const marked = fx.task('mk', { RUN_TIME: '2', user_scheduled: true, placement_exception: 'overtime',
+        start_date: at(20, 6), end_date: at(20, 8), original_end_date: at(20, 8) });
+      const free = fx.task('fr', { RUN_TIME: '2', user_scheduled: true, start_date: at(20, 9), end_date: at(20, 11), original_end_date: at(21, 17) });
+      Store.setTasks([marked, free], 'unit-test');
+      const before = [Store.tasks.mk.start_date.getTime(), Store.tasks.mk.end_date.getTime()];
+      Engine.runAndApply('changeover', { plant: fx.plant, respectFirmed: false, respectCalendar: true,
+        planningStart: at(20, 0), runNow: at(20, 9), endDate: at(27, 0) });
+      assert.deepEqual([Store.tasks.mk.start_date.getTime(), Store.tasks.mk.end_date.getTime()], before, 'the marked row is fixed whatever the toggle says');
+      assert.equal(Store.tasks.mk.placement_exception, 'overtime');
+      const backlog = Engine.removeBacklog({ plant: fx.plant, startDate: at(19, 0), endDate: at(27, 0), runAt: at(20, 9) });
+      assert.equal(backlog.patches.some(p => p.id === 'mk'), false, 'Remove Backlog does not move a marked row');
+      const detached = Engine.evaluateSchedule('changeover', { plant: fx.plant, respectFirmed: false, respectCalendar: true,
+        planningStart: at(20, 0), runNow: at(20, 9), endDate: at(27, 0) });
+      assert.equal(detached.patches.some(p => p.id === 'mk'), false, 'the detached candidate leaves it alone too');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ50 c: Remove Backlog queues a never-policy overlong order as overlong_never; overlongIds still reports it; the cursor does not advance', () => {
+    const fx = recFixture();
+    try {
+      // 07:00-19:00 line: a 14 h order cannot be one bar. It is backlog (started in the past).
+      Store.setTasks([
+        fx.task('ol', { RUN_TIME: '14', user_scheduled: true, start_date: at(19, 7), end_date: at(19, 21) }),
+        fx.task('ok', { RUN_TIME: '2', user_scheduled: true, start_date: at(19, 22), end_date: at(20, 0) }),
+      ], 'unit-test');
+      const result = Engine.removeBacklog({ plant: fx.plant, startDate: at(19, 0), endDate: at(27, 0), runAt: at(20, 9) });
+      assert.deepEqual(result.diagnostics.overlongIds, ['ol']);
+      const queued = result.patches.find(p => p.id === 'ol').changes;
+      assert.equal(queued.planning_status, 'needs_planning');
+      assert.equal(queued.planning_reason.code, 'overlong_never');
+      assert.equal(queued.start_date, null);
+      assert.deepEqual(queued.scheduleSegments, []);
+      const next = result.patches.find(p => p.id === 'ok').changes;
+      assert.equal(next.start_date.getTime(), at(20, 9).getTime(), 'the refused order took no time from the compressing cursor');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ56 a: the Remove Backlog count is the rows tagged reversal_forward / run_time_grew', () => {
+    const fx = recFixture();
+    try {
+      const stale = id => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(19, 10), end_date: at(19, 14) });
+      Store.setTasks([stale('g1'), stale('g2'), fx.task('d', { original_end_date: at(19, 17) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const grew = Store.tasksByPlant(fx.plant).filter(t => t.derivationIssue?.code === 'reversal_forward' && t.derivationIssue.detail === 'run_time_grew');
+      assert.deepEqual(grew.map(t => t.id).sort(), ['g1', 'g2'], 'due_date_past reversals are not counted');
+    } finally { fx.restore(); }
+  });
+
+  test('group 21: the optimizer places a reversal at the same floored minute as the reconcile and the manual path, never after now', () => {
+    const fx = recFixture();
+    try {
+      // Plant now 09:00:30; every path floors it to 09:00 so the start is at or before now.
+      const restore = pinPlantClock('2026-08-20T09:00:30');
+      try {
+        const now = Store.plantNow(fx.plant);
+        assert.ok(now.getSeconds() === 30, 'the pinned clock carries seconds');
+        const floored = Calendar._floorMinute(now).getTime();
+        Store.setTasks([fx.task('rv', { RUN_TIME: '2', original_end_date: at(19, 12), start_date: at(10, 6), end_date: at(10, 8) })], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const reconcileStart = Store.tasks.rv.start_date.getTime();
+        Store.setTasks([fx.task('rv', { RUN_TIME: '2', original_end_date: at(19, 12) })], 'unit-test');
+        const result = Engine.evaluateSchedule('duedate', { plant: fx.plant, respectFirmed: true, respectCalendar: true,
+          planningStart: at(20, 0), endDate: at(27, 0) });
+        const optimizerStart = result.patches.find(p => p.id === 'rv')?.changes.start_date?.getTime();
+        assert.equal(reconcileStart, floored, 'reconcile reversal starts at the floored minute');
+        assert.equal(optimizerStart, floored, 'optimizer reversal starts at the same floored minute');
+        assert.ok(optimizerStart <= now.getTime(), 'the order is running the instant it is placed');
+      } finally { restore(); }
     } finally { fx.restore(); }
   });
 });

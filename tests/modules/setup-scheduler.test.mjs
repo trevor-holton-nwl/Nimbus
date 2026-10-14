@@ -5130,6 +5130,27 @@ test('fragment search charges instability for moved starts instead of a hardcode
     'fragmentObjectiveFacts falls back to 0 when instabilityMinutes is absent');
 });
 
+test('instability is keyed on the placed finish: a held finish with a moved start is stable, a moved finish is not (Reading A)', () => {
+  const synthetic = setupTruth({ current: null, definition: null });
+  const run = (priorStart, priorEnd) => {
+    const snapshot = setupSnapshot([scheduledTask('fin-a', 1, 'RED', '2026-08-03T18:00:00', priorStart, priorEnd)]);
+    const bounds = dueDateBounds(synthetic, { placementStart: at('2026-08-03T08:00:00') });
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+    result.instabilityMinutes = SetupScheduler.objectiveFactsForCandidate(snapshot, bounds, result).instabilityMinutes;
+    return result;
+  };
+  // The optimizer places the one-hour order at 08:00-09:00. The prior bar ended at 09:00 too (its start
+  // differs because the run time changed since): finish unchanged, so zero instability.
+  const held = run('2026-08-03T07:00:00', '2026-08-03T09:00:00');
+  assert.equal(patchFor(held, 'fin-a').changes.end_date.getTime(), at('2026-08-03T09:00:00').getTime());
+  assert.equal(held.instabilityMinutes ?? 0, 0, 'a task whose finish is unchanged is not unstable even though its start moved');
+  // A prior bar that started where the new one does but ended 30 minutes earlier: the start is
+  // unchanged, the finish moved, so the task is unstable by exactly the finish delta.
+  const moved = run('2026-08-03T08:00:00', '2026-08-03T08:30:00');
+  assert.equal(patchFor(moved, 'fin-a').changes.end_date.getTime(), at('2026-08-03T09:00:00').getTime());
+  assert.equal(moved.instabilityMinutes, 30);
+});
+
 // ── P3a: distribution separation (checkDistributionSeparation / finalizeCandidate) ──
 
 // Three siblings of one SAP-distributed order (shared PARENT_ORDER + MATERIAL_NUMBER)

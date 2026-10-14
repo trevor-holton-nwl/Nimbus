@@ -1871,6 +1871,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_pv_card_util_open':           'Peak machine utilization (Outside Frozen Horizon)',
   'ui.opt_pv_card_util_open_tip':       'Highest single-machine single-day utilization among days outside the plant\'s Frozen Horizon window — the region the optimizer is free to adjust. Over 100% here means the run left a real overload the optimizer could have addressed.',
   'ui.opt_pv_backlog_found':           'Backlogged orders found',
+  'ui.preview_stale':                  'The schedule changed while this preview was open, so these numbers may no longer be right. Run the optimization again before applying.',
+  'ui.opt_backlog_runtime_grew':       '{{count}} order(s) are backlog because their run time grew.',
   'ui.opt_pv_backlog_moved':           'Orders moved',
   'ui.opt_pv_backlog_firmed_moved':    'Firmed orders moved',
   'ui.opt_pv_backlog_frozen_moved':    'Frozen-window orders shifted',

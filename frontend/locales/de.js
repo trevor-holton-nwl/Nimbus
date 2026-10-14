@@ -1688,6 +1688,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.opt_pv_scheduled_without_setup': '{{orders}} Auftrag(e) auf {{lines}} Maschine(n) wurden ohne lösbaren Rüstübergang eingeplant — für sie wurde kein Rüstbalken platziert.',
   'ui.opt_pv_diag_rate':               'Iterationen/Sek.',
   'ui.opt_pv_backlog_found':           'Nachgelagerte Aufträge gefunden',
+  'ui.preview_stale':                  'Der Plan hat sich geändert, während diese Vorschau geöffnet war, daher stimmen die Zahlen möglicherweise nicht mehr. Führen Sie die Optimierung vor dem Anwenden erneut aus.',
+  'ui.opt_backlog_runtime_grew':       '{{count}} Auftrag/Aufträge sind im Rückstand, weil ihre Laufzeit gewachsen ist.',
   'ui.opt_pv_backlog_moved':           'Aufträge verschoben',
   'ui.opt_pv_backlog_firmed_moved':    'Festgeschriebene Aufträge verschoben',
   'ui.opt_pv_backlog_frozen_moved':    'Aufträge in Sperrfenster verschoben',

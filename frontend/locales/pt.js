@@ -1685,6 +1685,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.opt_pv_scheduled_without_setup': '{{orders}} pedido(s) em {{lines}} máquina(s) foram agendados sem uma transição de preparação resolúvel — nenhuma barra de troca foi colocada para eles.',
   'ui.opt_pv_diag_rate':               'Iterações/s',
   'ui.opt_pv_backlog_found':           'Pedidos em atraso encontrados',
+  'ui.preview_stale':                  'O plano mudou enquanto esta pré-visualização estava aberta, então estes números podem não estar mais corretos. Execute a otimização novamente antes de aplicar.',
+  'ui.opt_backlog_runtime_grew':       '{{count}} pedido(s) estão em atraso porque o tempo de execução aumentou.',
   'ui.opt_pv_backlog_moved':           'Pedidos movidos',
   'ui.opt_pv_backlog_firmed_moved':    'Pedidos firmados movidos',
   'ui.opt_pv_backlog_frozen_moved':    'Pedidos de janela congelada deslocados',

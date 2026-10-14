@@ -1686,6 +1686,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.opt_pv_scheduled_without_setup': '{{orders}} commande(s) sur {{lines}} machine(s) ont été planifiées sans transition de réglage résoluble — aucune barre de changement n\'a été placée pour elles.',
   'ui.opt_pv_diag_rate':               'Itérations/s',
   'ui.opt_pv_backlog_found':           'Commandes retardées trouvées',
+  'ui.preview_stale':                  'Le planning a changé pendant que cet aperçu était ouvert ; ces chiffres peuvent ne plus être exacts. Relancez l\'optimisation avant d\'appliquer.',
+  'ui.opt_backlog_runtime_grew':       '{{count}} commande(s) sont en retard parce que leur durée d\'exécution a augmenté.',
   'ui.opt_pv_backlog_moved':           'Commandes déplacées',
   'ui.opt_pv_backlog_firmed_moved':    'Commandes fermes déplacées',
   'ui.opt_pv_backlog_frozen_moved':    'Commandes de fenêtre gelée décalées',
