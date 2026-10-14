@@ -4709,16 +4709,30 @@ describe('reconcile (finish-anchored)', () => {
   });
 });
 
-test('Task 2.5 carry-in: only a releasable queue code takes the release-reversal path', () => {
-  const fx = manualFixture();
+test('F1: a planner placement whose backward start falls before now reverses forward from now (reversal_forward), for any queue code; only a finish that would move EARLIER is refused', () => {
+  const fx = manualFixture();   // plant clock: Thu 2026-08-20 09:00
   try {
     const queued = { id: 'g-guard', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4',
       planning_status: 'needs_planning', planning_reason: { code: 'planner_unscheduled', message: 'x' },
       start_date: null, end_date: null, scheduleSegments: [] };
-    // A finish in the past forces a reversal; a planner-unscheduled row is not a release, so the normal rule applies.
+    // 10:00 finish, 4 h run: the backward start (06:00) is before now. Reversal: placed 09:00-13:00 from now, late.
     const patch = Engine.manualSchedulePatchFor(queued, fx.line, new Date('2026-08-20T10:00:00'), 'never');
-    assert.equal(patch, null);
+    assert.ok(patch, 'not refused');
+    assert.equal(patch.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime());
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-20T13:00:00').getTime());
+    assert.deepEqual(patch.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' }, 'the finish is still ahead of now: the run time is what pushed the start back');
+    assert.equal(patch.planning_status, undefined, 'a non-releasable queue code is not released by the engine');
+    assert.equal(Engine.lastManualRefusal, null);
+    assert.equal(fx.toasts.length, 0);
+    // A due date already in the past: the due_date_past detail.
+    const past = Engine.manualSchedulePatchFor(queued, fx.line, new Date('2026-08-18T17:00:00'), 'never');
+    assert.deepEqual(past.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+    // The other side of the ruling: a future finish on a closed day that the walk would have to move earlier
+    // is still refused and toasted.
+    const closed = Engine.manualSchedulePatchFor({ ...queued, id: 'g-guard2' }, fx.line, new Date('2026-08-24T08:00:00'), 'never');
+    assert.equal(closed, null);
     assert.equal(Engine.lastManualRefusal, 'finish_cannot_hold');
+    assert.equal(fx.toasts.length, 1);
   } finally { fx.restore(); }
 });
 

@@ -1273,6 +1273,18 @@ export const Engine = {
       : null;
   },
 
+  /** OQ3: a started order keeps its real start and only the finish follows the run time. The allocator may move
+   * the start (`never` snaps it to the 15-minute step; any policy skips closed time), and a running order never
+   * loses its start, so in that case the bar is the held start plus the run time as one continuous piece. Shared
+   * by the reconcile's running branch and the manual (grid/Inspector) edit. Null when no window is found. */
+  heldStartPatchFor(task: NimbusTask, line: string, policy: SplitOrderPolicy): Partial<NimbusTask> | null {
+    if (!task.start_date) return null;
+    const held = Engine.schedulePatchFor(task, line, task.start_date, policy);
+    if (!held?.start_date || !held.end_date) return null;
+    if (held.start_date.getTime() === task.start_date.getTime()) return held;
+    return { start_date: task.start_date, end_date: new Date(task.start_date.getTime() + Math.round(Util.runHours(task) * 60) * Config.MS_MIN), scheduleSegments: [] };
+  },
+
   /** Finish-anchored placement (backward scheduling OQ1/OQ7/OQ13): lay the order's run time so it ENDS at
    * `finish`, walking the line's working time backward (Calendar.allocateRuntimeBackward), and derive the
    * start. Pure: no Store writes. Both edges are always in `changes` (a continuous bar has empty segments).
@@ -1380,8 +1392,9 @@ export const Engine = {
    * - An order that already has two or more schedule segments of the right total is translated rigidly by the
    *   finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived and never calendar-checked;
    *   a changed total (rate or version edit) is re-derived from the held finish under the plant's policy.
-   * - Otherwise `finishAnchoredPatchFor(snap(finish))`. A manual drop whose finish cannot be held (it would
-   *   have to move) returns null with `toast.finish_cannot_hold` and the caller reverts (OQ13 b). A FIRMED order
+   * - Otherwise `finishAnchoredPatchFor(snap(finish))`. A backward start before the plant's now reverses forward
+   *   from now with a `reversal_forward` note (O2, OQ3, OQ7 a, OQ19 c), never a refusal. A manual drop whose finish
+   *   cannot be held (it would have to move EARLIER) returns null with `toast.finish_cannot_hold` and the caller reverts (OQ13 b). A FIRMED order
    *   in that situation asks for confirmation first (`lastManualRefusal === 'needs_overtime_confirm'`); with
    *   `opts.confirmedOvertime` it is placed raw (start = finish minus run time, calendar ignored) and marked
    *   `placement_exception = 'overtime'` (OQ63).
@@ -1405,7 +1418,7 @@ export const Engine = {
 
     if (opts.holdStartIfRunning && task.start_date && Engine.isInProgress(task)) {
       // OQ3: it is already producing, so its start cannot move; the finish follows from the new run time.
-      const held = Engine.schedulePatchFor(task, line, task.start_date, policy ?? Engine.splitOrderPolicyFor(plant));
+      const held = Engine.heldStartPatchFor(task, line, policy ?? Engine.splitOrderPolicyFor(plant));
       return held ? { ...held, MACHINE: line } : refuse('no_operating_window');
     }
 
@@ -1454,10 +1467,13 @@ export const Engine = {
     }
     if (result.kind === 'reached_now') return refuse('no_operating_window');   // unreachable: reversal is not deferred
     if (result.finishMoved) {
-      if (result.reversed && releasable) {
-        // Releasing a late over-cap row: nothing was held, so the forward reversal from now is the answer.
+      if (result.reversed) {
+        // OQ3 / OQ7(a) / OQ19(c) / O2: the backward start would be before now, so the order places forward from
+        // the plant's now (late) instead of being refused. Only a finish that would have to move EARLIER is refused.
+        const nowForDetail = Store.plantNow(plant);
+        const detail = nowForDetail && finish.getTime() <= Calendar._floorMinute(nowForDetail).getTime() ? 'due_date_past' : 'run_time_grew';
         return { ...result.changes, MACHINE: line, ...released,
-          derivationIssue: { code: 'reversal_forward', detail: 'due_date_past' } };
+          derivationIssue: { code: 'reversal_forward', detail } };
       }
       if (result.moveReason && !result.reversed && Store.isFirmed(task.id)) {
         if (!opts.confirmedOvertime) return refuse('needs_overtime_confirm');
@@ -1661,19 +1677,13 @@ export const Engine = {
 
         if (placed && task.start_date && task.end_date && Engine.isInProgress(task, plantNow)) {
           // OQ3: it is already producing. The start holds and the finish follows the run time (no reversal).
-          const held = Engine.schedulePatchFor(task, line, task.start_date, policy);
-          if (!held?.start_date || !held.end_date) {
+          const changes = Engine.heldStartPatchFor(task, line, policy);
+          if (!changes) {
             ErrorLog.warn('engine',
               `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the 90-day calendar search.`,
               { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
             noteOnly(task, { code: 'no_operating_window' });
             continue;
-          }
-          let changes: Partial<NimbusTask> = held;
-          if (held.start_date.getTime() !== task.start_date.getTime()) {
-            // It started outside working time, so the allocator moved the start; a running order never loses its
-            // start, so the bar is the held start plus the run time as one continuous piece.
-            changes = { start_date: task.start_date, end_date: new Date(task.start_date.getTime() + Math.round(Util.runHours(task) * 60) * Config.MS_MIN), scheduleSegments: [] };
           }
           schedulePatch(task, stale, changes, null, moveReason(stale), 'end');
           continue;

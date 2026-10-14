@@ -1403,6 +1403,50 @@ test('S6: a run-time edit holds the finish; on a RUNNING order it holds the star
   } finally { fx.restore(); }
 });
 
+test('F1 (gate 4a, OQ7 a GAP06): RUN_TIME typed on a runtime_unknown hold with a past due date places forward from now, late, with a reversal note; a finish that cannot be held is still refused', () => {
+  const fx = placementFixture('P-GAP06', '2026-08-05T10:00:00');   // Wednesday 10:00
+  try {
+    Store.setTasks([
+      { id: 'gap06', PLANT: 'P-GAP06', MACHINE: 'L1', RUN_TIME: null, original_end_date: new Date('2026-08-03T18:00:00'),
+        start_date: null, end_date: null, scheduleSegments: [],
+        planning_status: 'needs_planning', planning_reason: { code: 'runtime_unknown', message: 'x' } },
+    ], 'unit-test');
+    const placed = fx.edit('RUN_TIME', 6, 'gap06');
+    assert.equal(placed.start_date.getTime(), new Date('2026-08-05T10:00:00').getTime(), 'starts at the plant now');
+    assert.equal(placed.end_date.getTime(), new Date('2026-08-05T16:00:00').getTime(), 'now + 6 h, 46 h after the due instant');
+    assert.deepEqual(placed.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+    assert.equal(placed.planning_status, 'scheduled', 'the hold is released');
+    assert.equal(fx.toasts.filter(t => /finish_cannot_hold/.test(t.msg)).length, 0, 'not refused');
+    // Other side: a not-started order whose finish sits on a closed stretch is refused, not reversed.
+    Store.setTasks([
+      { id: 'closed', PLANT: 'P-GAP06', MACHINE: 'L1', RUN_TIME: 2,
+        start_date: new Date('2026-08-07T09:00:00'), end_date: new Date('2026-08-07T11:00:00') },
+    ], 'unit-test');
+    const before = Store.tasks.closed.end_date.getTime();
+    const refused = fx.edit('end_date', new Date('2026-08-08T08:00:00'), 'closed', new Date('2026-08-07T11:00:00'));
+    assert.equal(refused.end_date.getTime(), before, 'the cell is restored');
+    assert.equal(fx.toasts.filter(t => /finish_cannot_hold/.test(t.msg)).length, 1);
+  } finally { fx.restore(); }
+});
+
+test('F2 (OQ3): a run-time edit on a RUNNING order started off the 15-minute grid keeps the real start under the never policy', () => {
+  const fx = placementFixture('P-RUN-OFFGRID', '2026-08-03T10:12:00');
+  try {
+    Store.setTasks([
+      { id: 'running', PLANT: 'P-RUN-OFFGRID', MACHINE: 'L1', RUN_TIME: 4,
+        start_date: new Date('2026-08-03T10:08:00'), end_date: new Date('2026-08-03T14:08:00') },
+    ], 'unit-test');
+    // The store snaps incoming starts to the grid; a derived start is off-grid, so set the real one directly.
+    Store.tasks.running.start_date = new Date('2026-08-03T10:08:00');
+    Store.tasks.running.end_date = new Date('2026-08-03T14:08:00');
+    assert.equal(Engine.isInProgress(Store.tasks.running), true, 'sanity: 10:12 is inside the bar');
+    const running = fx.edit('RUN_TIME', 6, 'running');
+    assert.equal(running.start_date.getTime(), new Date('2026-08-03T10:08:00').getTime(), 'the real start is kept, not snapped to 10:15');
+    assert.equal(running.end_date.getTime(), new Date('2026-08-03T16:08:00').getTime());
+    assert.equal(Engine.isInProgress(Store.tasks.running), true, 'it is still running');
+  } finally { fx.restore(); }
+});
+
 test('S7: a machine edit on a queued overlong order releases ONE continuous elapsed bar ending at the due instant, marked overlong; a later run-time shrink leaves the bar (OQ50, Review Focus 5)', () => {
   const fx = placementFixture('P-OVERLONG');
   try {
