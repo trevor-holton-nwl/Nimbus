@@ -658,6 +658,17 @@ class TestStoredFinishReadRule:
         assert self.db.preview_purge_orders(self.PLANT, self.T0, self.T0 + dt.timedelta(hours=5))["total"] == 1
         assert placed and never
 
+    def test_purge_preview_counts_a_finish_only_placement_as_planner_overridden(self):
+        """U10: a planner placement is `scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL`."""
+        both = self._seed("O_BOTH", start=self.T0, end=self.T0 + dt.timedelta(hours=4), run_time=2)
+        fin_only = self._seed("O_FINONLY", run_time=2)
+        self._seed("O_NEVER", run_time=2)
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_end = %s WHERE id = %s", (self.T0 + dt.timedelta(hours=3), fin_only))
+            conn.commit()
+        preview = self.db.preview_purge_orders(self.PLANT, self.T0 - dt.timedelta(days=1), self.T0 + dt.timedelta(days=30))
+        assert preview["planner_overridden"] == 2 and both
+
 
 # ---------------------------------------------------------------------------
 # Bundle 0 #2 (Code_Review_Consolidated_10_05.md): cross-seam save contract.

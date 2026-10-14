@@ -1902,11 +1902,12 @@ def preview_purge_orders(plant, start, end, machines=None) -> dict:
     fully-seeded, stable-shape dict (the md.cascade_preview discipline) so the
     caller never has to distinguish "0" from "absent". `total` is the count the
     real DELETE will remove; `planner_overridden` counts orders with a
-    scheduled_start (a planner-set schedule the ingest upsert never restores on
+    stored start or finish (a planner-set schedule the ingest upsert never restores on
     re-upload — see schema.sql's orders comment), which is the number that
     matters most for an honest confirmation prompt."""
     where, params = _purge_scope_sql_params(plant, start, end, machines)
-    sql = (f"SELECT COUNT(*), COUNT(scheduled_start) FROM orders WHERE {where}")
+    sql = (f"SELECT COUNT(*), COUNT(*) FILTER (WHERE scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL)"
+           f" FROM orders WHERE {where}")
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         total, planner_overridden = cur.fetchone()
