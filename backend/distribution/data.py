@@ -1326,6 +1326,11 @@ def _lock_one_header(cur, plant: str, production_order: str, material_number: st
     }
 
 
+# What `_plan_one_parent` copies from the ingest row onto every child, and `_replan_from_current_header` re-copies.
+_CHILD_SAP_CARRY_KEYS = ("sap_workcenter", "sap_production_version", "sap_basic_start_date",
+                         "sap_basic_finish_date", "_finish_date_only")
+
+
 def _replan_from_current_header(cur, parent: dict, current: dict | None) -> dict:
     """§5.4 step 3: re-plan ONE parent from the header's CURRENT shares and
     facts -- used both for a genuine xmin mismatch (a planner re-weighted
@@ -1355,6 +1360,19 @@ def _replan_from_current_header(cur, parent: dict, current: dict | None) -> dict
     child_rows, child_ids, zero_qty = _build_child_rows(
         plant, po, mat, parent["parent_facts"], live_shares, live_letters, mat_attrs,
     )
+    # The rebuilt children carry what the plan-time children did (they all carry the same SAP values):
+    # the raw work center / production version, the SAP baselines and the date-only flag (the flag also falls
+    # back to the ingest facts when the plan-time set was empty). Only keys the plan-time children actually
+    # carried are copied, so a standalone plan()+apply() stays idempotent. Without them a timed 00:00:00
+    # finish would be midnight-inferred after a replan.
+    carry = next(iter(parent.get("child_rows") or []), {})
+    facts = parent["parent_facts"]
+    for child in child_rows:
+        for key in _CHILD_SAP_CARRY_KEYS:
+            if key in carry:
+                child[key] = carry[key]
+        if facts.get("_finish_date_only") is not None:
+            child.setdefault("_finish_date_only", facts["_finish_date_only"])
 
     new_parent = dict(parent)
     # D06: the upload's normal chunks already wrote the PLAN-TIME child rows
