@@ -1342,7 +1342,7 @@ export const Engine = {
     if (result.kind === 'overlong') return { kind: 'refuse', reason: 'overlong_never' };
     if (result.kind === 'unavailable') return { kind: 'refuse', reason: 'no_operating_window' };
     if (opts.deferReversal) return { kind: 'reached_now' };
-    const forward = Calendar.allocateRuntime(line, floor, runtimeMinutes, effectivePolicy);
+    const forward = Calendar.allocateRuntime(line, floor, runtimeMinutes, effectivePolicy, plantTz);
     if (forward.kind !== 'allocated') return { kind: 'refuse', reason: 'no_operating_window' };
     return {
       kind: 'placed', finishMoved: true, reversed: true,

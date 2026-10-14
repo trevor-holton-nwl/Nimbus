@@ -1045,3 +1045,14 @@ test('the alert horizon reads the payload per-plant clock: an order that ended b
   const stale = Core.computeAlerts(alertBase([yesterday, { ...yesterday, id: 'y2', end_date: D(13, 20), original_end_date: D(13, 12) }])).alerts;
   assert.equal(stale.filter(a => a.type === 'late').length, 0, 'finished before today on the plant clock: past the horizon');
 });
+
+test('U16: the plant-zone conversion pair the forward and backward legs share keeps Chicago spring-forward elapsed time exact', () => {
+  const tz = 'America/Chicago';
+  // Sun 8 Mar 2026: wall 00:00 -> 06:00 is 5 elapsed hours (02:00-03:00 does not exist).
+  const a = Core.plantInstantFromWallClock(tz, new Date(2026, 2, 8, 0, 0));
+  const b = Core.plantInstantFromWallClock(tz, new Date(2026, 2, 8, 6, 0));
+  assert.equal((b - a) / 3600000, 5);
+  // And 5 h after 00:00 reads back as wall 06:00 (what the forward allocator returns for a 5 h bar).
+  const back = Core.plantWallClockFromInstant(tz, new Date(+a + 5 * 3600000));
+  assert.deepEqual([back.getHours(), back.getMinutes(), back.getDate()], [6, 0, 8]);
+});

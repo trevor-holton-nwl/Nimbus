@@ -714,13 +714,16 @@ export const Calendar = {
    * is deliberately task-store pure: callers receive a complete parent patch
    * or a bounded failure and decide when to mutate/preview/persist it. */
   allocateRuntime(line: string, earliestStart: Date, runtimeMinutes: number,
-                  policy: SplitOrderPolicy = 'never'): RuntimeAllocation {
+                  policy: SplitOrderPolicy = 'never', plantTz: string | null = null): RuntimeAllocation {
     const totalMinutes = Math.round(Number(runtimeMinutes));
     if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return { kind: 'exhausted' };
     const durationMs = totalMinutes * Config.MS_MIN;
     const from = Calendar._ceilMinute(new Date(earliestStart));
     const normalizedPolicy: SplitOrderPolicy =
       policy === 'overlong_only' || policy === 'partial_allowed' ? policy : 'never';
+    // With a plant zone (the reversal's forward leg, OQ46) all elapsed arithmetic runs on plant-zone instants
+    // like the backward walk, so a bar crossing the plant's DST change is the same length in both directions.
+    if (plantTz) return Calendar._allocateForwardInPlantZone(line, from, totalMinutes, normalizedPolicy, plantTz);
 
     if (normalizedPolicy === 'never') {
       const slot = Calendar.findContiguousSlot(line, from, durationMs);
@@ -779,6 +782,72 @@ export const Calendar = {
         ? merged.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
         : [],
     };
+  },
+
+  /** The plant-zone twin of the forward allocator (U16): the same free intervals and policy rules as
+   * `allocateRuntime`, but run time is measured in elapsed plant-zone time (touching intervals merge across midnight,
+   * OQ47, like the backward walk) and results come back as naive wall-clock Dates. */
+  _allocateForwardInPlantZone(line: string, from: Date, totalMinutes: number, policy: SplitOrderPolicy,
+                              plantTz: string): RuntimeAllocation {
+    const core = globalThis.NimbusComputeCore!;
+    let failed = false;
+    const toMs = (wall: Date): number => {
+      const inst = core.plantInstantFromWallClock(plantTz, wall);
+      if (!inst || !Number.isFinite(inst.getTime())) { failed = true; return NaN; }
+      return inst.getTime();
+    };
+    const toWall = (ms: number): Date | null => core.plantWallClockFromInstant(plantTz, new Date(ms));
+    const spans: MsSpan[] = [];
+    for (const free of Calendar._freeIntervals(line, from)) {
+      const span = { s: toMs(free.start), e: toMs(free.end) };
+      const prior = spans[spans.length - 1];
+      if (prior && span.s <= prior.e) { if (span.e > prior.e) prior.e = span.e; } else spans.push(span);
+    }
+    if (failed) return { kind: 'unavailable' };
+    if (!spans.length) return { kind: 'unavailable' };
+    const runMs = totalMinutes * Config.MS_MIN;
+    const done = (pieces: MsSpan[]): RuntimeAllocation => {
+      const walls = pieces.map(piece => ({ start: toWall(piece.s), end: toWall(piece.e) }));
+      if (walls.some(piece => !piece.start || !piece.end)) return { kind: 'unavailable' };
+      const out = walls as Array<{ start: Date; end: Date }>;
+      return {
+        kind: 'allocated', start: out[0].start, end: out[out.length - 1].end,
+        scheduleSegments: out.length >= 2
+          ? out.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
+          : [],
+      };
+    };
+    const contiguous = policy === 'never'
+      || (policy === 'overlong_only' && Calendar.hasNominalWindow(line, from, runMs));
+    if (contiguous) {
+      const hit = spans.find(span => span.e - span.s >= runMs);
+      return hit ? done([{ s: hit.s, e: hit.s + runMs }]) : { kind: 'exhausted' };
+    }
+    const minSegmentMinutes = Engine.minProductiveSegmentMinutesFor(sourceGetPlantForLine(line));
+    const pieces: MsSpan[] = [];
+    let remaining = totalMinutes;
+    for (const free of spans) {
+      const capacity = Math.floor((free.e - free.s) / Config.MS_MIN);
+      if (capacity <= 0) continue;
+      let take = Math.min(remaining, capacity);
+      if (remaining > take && remaining - take < minSegmentMinutes) take = remaining - minSegmentMinutes;
+      if (take < minSegmentMinutes
+          && !(pieces.length === 0 && remaining === totalMinutes
+               && totalMinutes < minSegmentMinutes && take === totalMinutes)) {
+        continue;
+      }
+      pieces.push({ s: free.s, e: free.s + take * Config.MS_MIN });
+      remaining -= take;
+      if (remaining === 0) break;
+    }
+    if (remaining !== 0 || !pieces.length) return { kind: 'exhausted' };
+    const merged: MsSpan[] = [];
+    for (const piece of pieces) {
+      const prior = merged[merged.length - 1];
+      if (prior && prior.e === piece.s) prior.e = piece.e;
+      else merged.push({ ...piece });
+    }
+    return done(merged);
   },
 
   /** Finish-anchored allocation: place `runtimeMinutes` of production so it ENDS at `finish`, walking

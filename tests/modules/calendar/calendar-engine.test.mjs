@@ -390,6 +390,27 @@ describe('backward calendar primitives', () => {
       });
     }
 
+    for (const zone of ['UTC', 'America/Chicago', 'Asia/Tokyo']) {
+      it(`U16: the reversal forward leg under plantTz Chicago spans the spring-forward night in plant-zone elapsed time (5 h bar from Sun 00:00 ends 06:00), viewer zone ${zone}`, async () => {
+        await withZone(zone, () => {
+          const line = plain('BW-U16', everyDay([0, 24]));
+          const core = globalThis.NimbusComputeCore;
+          const tz = 'America/Chicago';
+          const floor = new Date(2026, 2, 8, 0, 0, 0);
+          for (const policy of ['never', 'partial_allowed']) {
+            const r = Calendar.allocateRuntime(line, floor, 300, policy, tz);
+            assert.equal(r.kind, 'allocated', policy);
+            assert.equal(fmt(r.start), '2026-03-08 00:00', policy);
+            assert.equal(fmt(r.end), '2026-03-08 06:00', `${policy}: wall clock spans 6 h across the 02:00 jump`);
+            assert.equal((+core.plantInstantFromWallClock(tz, r.end) - +core.plantInstantFromWallClock(tz, r.start)) / 3600000, 5, 'elapsed is 5 h');
+          }
+          // Same elapsed length as the backward leg for the same run time.
+          const back = Calendar.allocateRuntimeBackward(line, new Date(2026, 2, 8, 6, 0), 300, 'never', bopts({ plantTz: tz, floor: new Date(2026, 1, 1) }));
+          assert.equal(summary(back), '2026-03-08 00:00 -> 2026-03-08 06:00', 'both legs agree');
+        });
+      });
+    }
+
     it('merges a Sunday-night window with Monday-morning hours into one contiguous window (week wrap)', () => {
       const line = plain('BW-E4', { 0: [22, 24], 1: [0, 6], 2: null, 3: null, 4: null, 5: null, 6: null });
       const r = Calendar.allocateRuntimeBackward(line, at(D.mon, '04:00'), 360, 'never', bopts());
