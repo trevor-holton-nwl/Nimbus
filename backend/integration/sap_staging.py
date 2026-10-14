@@ -43,6 +43,7 @@ import db
 import master_data as md
 from backend.integration import sap_sync
 from db import _pool
+from db import finish_echoes  # noqa: F401 -- the one echo rule lives in db.py beside sap_changed_fields
 
 log = logging.getLogger("nimbus.sap")
 
@@ -393,8 +394,11 @@ def build_order_rows(stage_rows: list[dict], plant_tz: str | None, field_map: li
                 row["basic_start_date"] = sap_to_plant_local(
                     sr.get("psttr"), sr.get("pstti") if "pstti" in amap else None, plant_tz)
             if "pedtr" in amap:
-                row["basic_finish_date"] = sap_to_plant_local(
-                    sr.get("pedtr"), sr.get("pedti") if "pedti" in amap else None, plant_tz)
+                finish_time = sr.get("pedti") if "pedti" in amap else None
+                row["basic_finish_date"] = sap_to_plant_local(sr.get("pedtr"), finish_time, plant_tz)
+                # SAP sent no time (date only): the echo rule compares dates, not minutes. Transient row
+                # attribute: never an orders column, never reaches the INSERT.
+                row["_finish_date_only"] = _parse_sap_time(finish_time) is None
             zero_open = False
             if "gsmng" in amap:
                 total = _dec(sr.get("gsmng"))
@@ -1762,7 +1766,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         result = db.upsert_orders(rows, source="sap", batch_id=upsert_batch, raw_row_count=len(stage),
                                   warnings=warnings,
                                   plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
-                                  resolve_fn=routing_resolver.resolve_orders)
+                                  resolve_fn=routing_resolver.resolve_orders, sap_tz=SAP_SYSTEM_TZ)
     else:
         result = {"status": "ok", "inserted": 0, "updated": 0, "unchanged": 0}
     if result.get("status") not in (None, "ok"):

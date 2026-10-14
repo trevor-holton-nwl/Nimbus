@@ -651,6 +651,87 @@ class Test_sap_changed_fields:
 
 
 # ---------------------------------------------------------------------------
+# finish_echoes -- the one echo rule, judged in the SAP frame (DB-free)
+# ---------------------------------------------------------------------------
+class Test_finish_echoes:
+    """Backward-scheduling Task 1.2. SAP's own zone is `UTC`; Chicago is UTC-5 in October (CDT) and New York
+    UTC-4 (EDT), so the SAME wall-clock finish lands on different SAP-frame calendar dates."""
+    from datetime import datetime as _dt
+    SENT = _dt(2026, 10, 22, 19, 0)         # Thu 22 Oct 19:00 plant-local
+    FRI = _dt(2026, 10, 23, 0, 0)           # SAP's date-only echo of the finish: Fri 23 Oct
+    SAT = _dt(2026, 10, 24, 0, 0)
+
+    def test_m1_chicago_date_only_next_day_is_an_echo(self):
+        # 19:00 CDT = 00:00 UTC Friday: SAP reads our Thursday evening finish as Friday
+        assert db.finish_echoes(self.FRI, True, self.SENT, "UTC", "America/Chicago") is True
+
+    def test_m1_chicago_sap_changed_fields_reports_no_dates(self):
+        before = {"sap_basic_start_date": Test_sap_changed_fields.S0, "sap_basic_finish_date": Test_sap_changed_fields.F0,
+                  "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+                  "production_version": "0001", "scheduled_start": None, "scheduled_end": None,
+                  "sap_sent_finish": self.SENT, "sap_sent_version": "0001", "tz": "America/Chicago"}
+        inc = {"basic_start_date": Test_sap_changed_fields.S1, "basic_finish_date": self.FRI,
+               "_finish_date_only": True, "sap_workcenter": "WC1", "order_quantity": 100,
+               "sap_production_version": "0001", "parent_production_order": None}
+        assert db.sap_changed_fields(before, inc, "M1", sap_tz="UTC") == set()
+
+    def test_genuine_change_date_only_two_days_later_is_not_an_echo(self):
+        assert db.finish_echoes(self.SAT, True, self.SENT, "UTC", "America/Chicago") is False
+
+    def test_genuine_change_sap_changed_fields_reports_dates(self):
+        before = {"sap_basic_start_date": Test_sap_changed_fields.S0, "sap_basic_finish_date": Test_sap_changed_fields.F0,
+                  "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+                  "production_version": "0001", "scheduled_start": None, "scheduled_end": None,
+                  "sap_sent_finish": self.SENT, "sap_sent_version": "0001", "tz": "America/Chicago"}
+        inc = {"basic_start_date": Test_sap_changed_fields.S1, "basic_finish_date": self.SAT,
+               "_finish_date_only": True, "sap_workcenter": "WC1", "order_quantity": 100,
+               "sap_production_version": "0001", "parent_production_order": None}
+        assert db.sap_changed_fields(before, inc, "M1", sap_tz="UTC") == {"dates"}
+
+    def test_timed_echo_to_the_minute(self):
+        from datetime import timedelta
+        # the incoming timed value is plant-local (already converted from the SAP zone by the staging parser)
+        assert db.finish_echoes(self.SENT + timedelta(seconds=40), False, self.SENT, "UTC", "America/Chicago") is True
+        assert db.finish_echoes(self.SENT + timedelta(minutes=1), False, self.SENT, "UTC", "America/Chicago") is False
+
+    def test_no_sent_finish_is_never_an_echo(self):
+        assert db.finish_echoes(self.FRI, True, None, "UTC", "America/Chicago") is False
+        assert db.finish_echoes(self.SENT, False, None, "UTC", "America/Chicago") is False
+
+    def test_no_incoming_finish_is_never_an_echo(self):
+        assert db.finish_echoes(None, True, self.SENT, "UTC", "America/Chicago") is False
+
+    def test_new_york_variant_is_not_an_echo(self):
+        # 19:00 EDT = 23:00 UTC Thursday: the SAP-frame date is still Thu 22, so Friday is NOT an echo
+        assert db.finish_echoes(self.FRI, True, self.SENT, "UTC", "America/New_York") is False
+        assert db.finish_echoes(self._dt(2026, 10, 22), True, self.SENT, "UTC", "America/New_York") is True
+
+    def test_unknown_sap_zone_uses_the_plant_frame(self):
+        # Excel path: no SAP zone of its own, so SAP's frame is the plant's frame
+        assert db.finish_echoes(self._dt(2026, 10, 22), True, self.SENT, None, "America/Chicago") is True
+        assert db.finish_echoes(self.FRI, True, self.SENT, None, "America/Chicago") is False
+
+    def test_plant_without_timezone_compares_naively(self):
+        assert db.finish_echoes(self._dt(2026, 10, 22), True, self.SENT, "UTC", None) is True
+        assert db.finish_echoes(self.FRI, True, self.SENT, "UTC", None) is False
+
+    def test_date_only_defaults_to_midnight_inference_in_sap_changed_fields(self):
+        # no `_finish_date_only` key (Excel path / old callers): time 00:00:00 means date only
+        before = {"sap_basic_start_date": Test_sap_changed_fields.S0, "sap_basic_finish_date": Test_sap_changed_fields.F0,
+                  "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+                  "production_version": "0001", "scheduled_start": None, "scheduled_end": None,
+                  "sap_sent_finish": self._dt(2026, 11, 1, 19, 0), "sap_sent_version": "0001"}
+        inc = {"basic_start_date": Test_sap_changed_fields.S1, "basic_finish_date": self._dt(2026, 11, 1),
+               "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+               "parent_production_order": None}
+        assert db.sap_changed_fields(before, inc, "M1") == set()
+
+    def test_staging_reexport_is_the_same_function(self):
+        import backend.integration.sap_staging as st
+        assert st.finish_echoes is db.finish_echoes
+
+
+# ---------------------------------------------------------------------------
 # D20 (refined): a planner's end/version change does NOT clear what was remembered as sent to SAP.
 # ---------------------------------------------------------------------------
 class _BulkCursor:

@@ -921,6 +921,87 @@ class TestSapTruthReupload:
         after = self._row()
         assert after == before and res["unchanged"] == 1 and res["updated"] == 0
 
+    # ---- locked original_*_received (backward-scheduling Task 1.2) ------
+    def _orig(self, oid=None):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT original_start_received, original_finish_received, basic_start_date,"
+                        " basic_finish_date FROM orders WHERE id = %s", (oid or self._oid(),))
+            return dict(zip([c.name for c in cur.description], cur.fetchone(), strict=True))
+
+    def _remember_sent(self, finish, oid=None):
+        self._sql("INSERT INTO order_sap_sent (order_id, plant, sent_finish) VALUES (%s, %s, %s)"
+                  " ON CONFLICT (order_id) DO UPDATE SET sent_finish = EXCLUDED.sent_finish",
+                  (oid or self._oid(), self.PLANT, finish))
+
+    def test_first_ingest_sets_the_locked_original_dates(self):
+        self._up()
+        o = self._orig()
+        assert o["original_start_received"] == self.base
+        assert o["original_finish_received"] == self.base + dt.timedelta(days=1)
+
+    def test_sent_then_echo_upload_keeps_the_original_dates_while_basic_moves(self):
+        self._up()
+        sent = self.base + dt.timedelta(days=3)
+        self._remember_sent(sent)
+        # SAP echoes the finish NIMBUS sent and back-schedules its start
+        self._up([self._line(BASIC_START_DATE=self.base + dt.timedelta(days=2), BASIC_FINISH_DATE=sent)],
+                 "zztest_st_2.xlsx")
+        o = self._orig()
+        assert o["basic_finish_date"] == sent and o["basic_start_date"] == self.base + dt.timedelta(days=2)
+        assert o["original_finish_received"] == self.base + dt.timedelta(days=1)
+        assert o["original_start_received"] == self.base, "a start-only change after an echo must not refresh it"
+
+    def test_sent_then_genuinely_later_sap_finish_updates_the_original_dates(self):
+        self._up()
+        self._remember_sent(self.base + dt.timedelta(days=3))
+        later_s, later_f = self.base + dt.timedelta(days=4), self.base + dt.timedelta(days=5)
+        self._up([self._line(BASIC_START_DATE=later_s, BASIC_FINISH_DATE=later_f)], "zztest_st_2.xlsx")
+        o = self._orig()
+        assert o["original_finish_received"] == later_f and o["original_start_received"] == later_s
+
+    def test_never_sent_sap_change_refreshes_the_original_dates(self):
+        self._up()
+        later_s, later_f = self.base + dt.timedelta(days=2), self.base + dt.timedelta(days=4)
+        self._up([self._line(BASIC_START_DATE=later_s, BASIC_FINISH_DATE=later_f)], "zztest_st_2.xlsx")
+        o = self._orig()
+        assert o["original_finish_received"] == later_f and o["original_start_received"] == later_s
+
+    def test_echo_with_null_stored_originals_still_populates_them(self):
+        self._up()
+        sent = self.base + dt.timedelta(days=3)
+        self._remember_sent(sent)
+        self._sql("UPDATE orders SET original_start_received = NULL, original_finish_received = NULL WHERE id = %s",
+                  (self._oid(),))
+        self._up([self._line(BASIC_START_DATE=self.base + dt.timedelta(days=2), BASIC_FINISH_DATE=sent)],
+                 "zztest_st_2.xlsx")
+        o = self._orig()
+        assert o["original_finish_received"] == sent and o["original_start_received"] == self.base + dt.timedelta(days=2)
+
+    def test_cross_zone_date_only_echo_via_sap_path_keeps_the_original_dates(self):
+        """M1 at the database: a Chicago plant, SAP in UTC. NIMBUS sent Thu 19:00 CDT (= 00:00 UTC Fri);
+        SAP echoes the finish as the date-only Fri, back-scheduling the start."""
+        self._sql("UPDATE plants SET timezone = 'America/Chicago' WHERE plant = %s", (self.PLANT,))
+        thu = dt.datetime(2026, 10, 22, 19, 0)            # Thu 22 Oct 2026, CDT (UTC-5): 19:00 = 00:00 UTC Fri 23
+        first_s, first_f = dt.datetime(2026, 10, 19, 8, 0), dt.datetime(2026, 10, 20, 8, 0)
+
+        def row(start, finish, date_only):
+            return {"production_order": self.ORDER, "material_number": self.MATERIAL, "machine": self.M1,
+                    "plant": self.PLANT, "basic_start_date": start, "basic_finish_date": finish,
+                    "_finish_date_only": date_only, "order_quantity": 100, "run_time": 4.0}
+        self.pg.upsert_orders([row(first_s, first_f, False)], source="sap", sap_tz="UTC")
+        self._remember_sent(thu)
+        fri = dt.datetime(2026, 10, 23, 0, 0)
+        res = self.pg.upsert_orders([row(dt.datetime(2026, 10, 21, 8, 0), fri, True)], source="sap", sap_tz="UTC")
+        assert res["updated"] == 1
+        o = self._orig()
+        assert o["basic_finish_date"] == fri
+        assert o["original_finish_received"] == first_f and o["original_start_received"] == first_s
+        # Saturday is a genuine change: both locked dates move
+        sat = dt.datetime(2026, 10, 24, 0, 0)
+        self.pg.upsert_orders([row(dt.datetime(2026, 10, 22, 8, 0), sat, True)], source="sap", sap_tz="UTC")
+        o = self._orig()
+        assert o["original_finish_received"] == sat and o["original_start_received"] == dt.datetime(2026, 10, 22, 8, 0)
+
     def test_first_upload_after_migration_resets_nothing(self):
         self._up()
         slot = self.base + dt.timedelta(days=3)

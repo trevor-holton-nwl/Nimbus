@@ -2605,7 +2605,53 @@ def _naive_dt(value):
     return value
 
 
-def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None) -> set[str]:
+def _frame_zone(name: str | None):
+    """IANA name -> ZoneInfo, or None when blank/unknown (no conversion)."""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+
+
+def finish_echoes(incoming_finish_plant_local: datetime | None, incoming_date_only: bool,
+                  sent_finish_plant_local: datetime | None, sap_tz: str | None,
+                  plant_tz: str | None) -> bool:
+    """True when SAP's incoming finish is the finish NIMBUS last sent, judged in the SAP frame.
+
+    The one echo rule (backward-scheduling Task 1.2); `sap_changed_fields` and the locked
+    `original_*_received` columns both use it, and `backend/integration/sap_staging.py` re-exports it.
+    Both finishes are naive plant-local values; the SAP frame is `sap_tz`.
+      - date_only (SAP sent no time, which the staging parser keeps at plant-local midnight WITHOUT zone
+        conversion): the incoming date already IS the SAP date, so compare it with the SAP-frame calendar
+        date of the sent value (19:00 Chicago = 00:00 UTC the next day, so a date-only echo of that send
+        carries the next day's date).
+      - timed: convert both to the SAP frame and compare to the minute.
+    An unknown or blank `sap_tz` (the Excel path has no SAP zone of its own) means the SAP frame is the
+    plant's frame; an unknown `plant_tz` means no conversion (both values are read as the same frame).
+    A missing incoming or sent finish never echoes.
+    """
+    inc, sent = _naive_dt(incoming_finish_plant_local), _naive_dt(sent_finish_plant_local)
+    if not isinstance(inc, datetime) or not isinstance(sent, datetime):
+        return False
+    plant_zone = _frame_zone(plant_tz)
+    sap_zone = _frame_zone(sap_tz) or plant_zone
+
+    def to_sap(v: datetime) -> datetime:
+        if plant_zone is None or sap_zone is None:
+            return v
+        return v.replace(tzinfo=plant_zone).astimezone(sap_zone).replace(tzinfo=None)
+
+    sent_sap = to_sap(sent)
+    if incoming_date_only:
+        return inc.date() == sent_sap.date()
+    return (to_sap(inc).replace(second=0, microsecond=0)
+            == sent_sap.replace(second=0, microsecond=0))
+
+
+def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None, *,
+                       sap_tz: str | None = None) -> set[str]:
     """Which SAP-owned fields did this upload change vs SAP's previous upload?
 
     Pure (no DB). `before` is the stored orders row (SAP baselines
@@ -2625,12 +2671,17 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     shrinks the open quantity is not a change.
 
     Echo suppression (D20): when `before["sap_sent_finish"]` is set and the
-    incoming finish equals it at minute precision, "dates" is not reported; the
+    incoming finish is an echo of it (`finish_echoes`, judged in the SAP frame:
+    `sap_tz` is the SAP system zone, `before["tz"]` the plant zone; a date-only
+    finish compares the SAP-frame date of the sent value, a timed one compares
+    to the minute), "dates" is not reported; the
     version is likewise not a change when `sap_sent_version` is unset or equals
     the incoming version. A different version than was sent still reports
     "production_version" (dates stay suppressed by the matching finish).
-    A finish SAP returned as a date only (time 000000, kept at plant-local midnight)
-    also echoes when its date equals the sent finish's date (L1).
+    `incoming["_finish_date_only"]` says SAP sent no time (the staging parser
+    sets it); when absent, a finish at exactly 00:00:00 is treated as date only
+    (the Excel path cannot tell the two apart). `sap_tz=None` means the SAP frame
+    is the plant's frame.
     The sent values are NOT cleared by a planner edit (D20 refinement); only the
     next Send to SAP overwrites them, so an old echo cannot wipe a newer planner edit
     unless the planner's edit happens to produce the very finish that was sent.
@@ -2652,17 +2703,14 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     # even when SAP back-scheduled the start; the new SAP baselines are still
     # written by the upsert. Only a finish, version or work center that differs
     # from what was sent re-plans the order.
-    def _minute(v):
-        v = _naive_dt(v)
-        return v.replace(second=0, microsecond=0) if isinstance(v, datetime) else v
     sent_f, sent_v = before.get("sap_sent_finish"), before.get("sap_sent_version")
-    finish_echo = sent_f is not None and in_f is not None and _minute(in_f) == _minute(sent_f)
-    in_n, sent_n = _naive_dt(in_f), _naive_dt(sent_f)
-    if (not finish_echo and isinstance(in_n, datetime) and isinstance(sent_n, datetime)
-            and in_n.time() == dt_time.min and in_n.date() == sent_n.date()):
-        # L1: a finish SAP returned as a date only (time 000000) is kept at midnight, not
-        # zone-converted; it echoes our sent finish when the dates agree.
-        finish_echo = True
+    in_date_only = incoming.get("_finish_date_only")
+    if in_date_only is None:
+        # No explicit flag (the Excel path cannot tell a date-only cell from an exact midnight): midnight
+        # means date only.
+        in_n = _naive_dt(in_f)
+        in_date_only = isinstance(in_n, datetime) and in_n.time() == dt_time.min
+    finish_echo = sent_f is not None and finish_echoes(in_f, bool(in_date_only), sent_f, sap_tz, before.get("tz"))
     in_pv_raw = incoming.get("sap_production_version")
     # An incoming version of None means "column not sent": it cannot contradict.
     version_echo = finish_echo and (sent_v is None or in_pv_raw is None
@@ -2804,9 +2852,9 @@ _UPSERT_SQL = f"""
         bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
         parent_production_order, distribution_letter,
         sap_workcenter, sap_production_version, sap_basic_start_date, sap_basic_finish_date,
-        upload_batch_id, updated_at
+        upload_batch_id, original_start_received, original_finish_received, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
@@ -2840,6 +2888,12 @@ _UPSERT_SQL = f"""
         sap_production_version = COALESCE(EXCLUDED.sap_production_version, orders.sap_production_version),
         sap_basic_start_date  = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),
         sap_basic_finish_date = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),
+        -- Locked "as SAP first sent it" dates (never moved by a planner, a drag or baseline-correct).
+        -- The row tuple already carries the STORED values on an echo of NIMBUS's own sent finish and the
+        -- incoming SAP dates otherwise (upsert_orders decides, one rule: finish_echoes), so this SET never
+        -- reads EXCLUDED.basic_*: a NULL (not decided) keeps what is stored.
+        original_start_received  = COALESCE(EXCLUDED.original_start_received, orders.original_start_received),
+        original_finish_received = COALESCE(EXCLUDED.original_finish_received, orders.original_finish_received),
         -- Ingest itself no longer flags this on every re-upload regardless of
         -- whether the value moved (ROUTING_RUNTIME_DESIGN.md §4 item 6) — plain
         -- carry-forward. Only the resolver (backend/routing/resolver.py) is
@@ -2954,7 +3008,8 @@ _UPSERT_SQL_SAP = _sap_source_sql(_UPSERT_SQL)
 # planned_order_initial_quantity, reduced_quantity, order_category, order_type,
 # bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
 # parent_production_order, distribution_letter, sap_workcenter,
-# sap_production_version, sap_basic_start_date, sap_basic_finish_date, upload_batch_id.
+# sap_production_version, sap_basic_start_date, sap_basic_finish_date, upload_batch_id,
+# original_start_received, original_finish_received (the last two are patched per chunk).
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
     "machine", "plant", "basic_start_date", "basic_finish_date",
@@ -3169,7 +3224,7 @@ _CHUNK_READ_COLS = (
     "sap_production_version", "production_version", "scheduled_start", "scheduled_end",
     "basic_start_date", "basic_finish_date", "run_time", "planning_status",
     "machine_wc", "first_start", "last_end", "tz", "sap_sent_finish", "sap_sent_version",
-    "planned_order_initial_quantity",
+    "planned_order_initial_quantity", "original_start_received", "original_finish_received",
 )
 _CHUNK_READ_SQL = f"""
     SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
@@ -3181,7 +3236,7 @@ _CHUNK_READ_SQL = f"""
            seg.first_start, seg.last_end,
            (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz,
            ss.sent_finish AS sap_sent_finish, ss.sent_version AS sap_sent_version,
-           o.planned_order_initial_quantity
+           o.planned_order_initial_quantity, o.original_start_received, o.original_finish_received
       FROM orders o
       LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
@@ -3324,12 +3379,53 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
     return result
 
 
+def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
+                            sap_tz: str | None) -> list[tuple]:
+    """Fill the trailing (original_start_received, original_finish_received) of each upsert tuple.
+
+    Per incoming row: `echo = sent_finish is not None and finish_echoes(...)`. On an echo of the finish
+    NIMBUS last sent, BOTH locked columns keep their STORED values (a start-only SAP change whose finish
+    echoes must not refresh `original_start_received`); a column that has no stored value yet takes the
+    incoming one, so a first write still populates it. Not an echo (never-sent order, or a genuine finish
+    change): both carry the incoming SAP start / finish. Only the finish decides (OQ31). The upsert SETs
+    `COALESCE(EXCLUDED.original_*, orders.original_*)`, never from `EXCLUDED.basic_*`."""
+    out: list[tuple] = []
+    for t in chunk:
+        row, b = row_by_id.get(t[0]), before.get(t[0])
+        if row is None:
+            out.append(t)
+            continue
+        in_s, in_f = row.get("basic_start_date"), row.get("basic_finish_date")
+        sent = b.get("sap_sent_finish") if b else None
+        echo = False
+        if sent is not None:
+            in_echo_f = row.get("sap_basic_finish_date") or in_f
+            date_only = row.get("_finish_date_only")
+            if date_only is None:     # Excel path: an exact-midnight finish means date only
+                n = _naive_dt(in_echo_f)
+                date_only = isinstance(n, datetime) and n.time() == dt_time.min
+            echo = finish_echoes(in_echo_f, bool(date_only), sent, sap_tz, b.get("tz"))
+        if echo:
+            orig_s = b.get("original_start_received") if b.get("original_start_received") is not None else in_s
+            orig_f = b.get("original_finish_received") if b.get("original_finish_received") is not None else in_f
+        else:
+            orig_s, orig_f = in_s, in_f
+        out.append((*t[:-2], orig_s, orig_f))
+    return out
+
+
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None,
                   plan_fn: Callable | None = None, apply_fn: Callable | None = None,
-                  resolve_fn: Callable | None = None) -> dict:
+                  resolve_fn: Callable | None = None, sap_tz: str | None = None) -> dict:
     """Shared orders upsert for both the Excel and SAP ingest paths.
+
+    `sap_tz` is the SAP system zone the finish echo rule (`finish_echoes`) judges in; the SAP staging
+    apply passes it. None (the Excel path, which has no SAP zone of its own) means the plant's own zone.
+    The echo rule also decides the locked `original_start_received` / `original_finish_received` columns:
+    the per-row tuple carries the STORED values for both on an echo, the incoming dates otherwise, and the
+    upsert only ever writes them as COALESCE(EXCLUDED.original_*, orders.original_*).
 
     `rows` is a list of dicts keyed by orders columns (production_order,
     material_number, material_description, machine, plant,
@@ -3542,11 +3638,15 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
 
     # ---------- Build row tuples in _UPSERT_SQL column order ----------
     tuples = []
+    # The trailing two slots are the locked original_start_received / original_finish_received: they
+    # depend on the stored originals and the sent finish, which are only known once a chunk's
+    # before-image is read, so `_patch_locked_originals` fills them per chunk right before the execute.
     for row in rows:
         tuples.append((
             row["id"],
             *(row.get(col) for col in _UPSERT_ROW_COLS),
             batch_id,
+            None, None,
         ))
     row_by_id = {row["id"]: row for row in rows}
     all_ids = [row["id"] for row in rows]
@@ -3597,6 +3697,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # (a) lock first (rows to be written + every sibling of a distribution child)
                 cur.execute(_CHUNK_READ_SQL, {"ids": chunk_ids})
                 before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
+                # (a') the locked original_*_received per row, from the stored originals + the sent finish
+                chunk = _patch_locked_originals(chunk, before, row_by_id, sap_tz)
                 # (b) upsert (rows SAP did not change return nothing)
                 cur.executemany(_UPSERT_SQL_SAP if source == "sap" else _UPSERT_SQL,
                                 chunk, returning=True)
@@ -3630,6 +3732,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "planned_order_initial_quantity": r.get("planned_order_initial_quantity"),
                         "sap_production_version": r.get("sap_production_version"),
                         "parent_production_order": r.get("parent_production_order"),
+                        # SAP sent no time on the finish (staging parser); None = infer from midnight
+                        "_finish_date_only": r.get("_finish_date_only"),
                     }
                     pkey = (b["plant"], b["parent_production_order"], b["material_number"])
                     # Judged on the parent's quantity when the header knows it; a child with no
@@ -3637,7 +3741,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                     is_child = bool(b["parent_production_order"]) and pkey in parent_quantity_judged
                     if is_child:
                         incoming["order_quantity"] = None
-                    fields = sap_changed_fields(b, incoming, b["machine_wc"])
+                    fields = sap_changed_fields(b, incoming, b["machine_wc"], sap_tz=sap_tz)
                     if is_child and pkey in parent_quantity_changed:
                         fields.add("quantity")
                     if fields:
