@@ -5527,3 +5527,81 @@ One module test (`changeover advances to a future order pull-forward floor ...`,
 - Browser checks still owed (not run by this session): the Phase 2 list (left-handle veto through vis `onMoving`, the derive-paused banner, the overtime confirm for a firmed order, display-only never-placed rows), and for Phase 3 and the fix wave the multi-drag ghost on a right-edge resize, the reversal toast and alert on a planner run-time edit of a late order, the alert cards and glossary in all five locales, and the distribution separation wording.
 
 **Not released.** Rollback = the branch is not merged.
+
+### Phase 4 — gap decisions (2026-10-14)
+
+Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`, Phase 4 lines extracted to `phase4-ledger-extract.md`): every line that starts with `Task 4.N: gap filled:` or is a `Ruling:` for a Phase 4 task (Tasks 4.1 and 4.2), one row each, in ledger order. For a Ruling, Gap is the review finding label, Choice is what was ruled, and Why is the cost line copied from the ledger. Task 4.3 (the runbook text) logged no gap line.
+
+| Task | Gap | Choice | Why |
+|---|---|---|---|
+| 4.1 | snapshot omits original_*_received | omitted | existing test_original_dates_schema_applies_twice pins which tables carry those columns and cutover never writes them |
+| 4.1 | test isolation | single rolled-back transaction | now() is txn-stable so plant-local now is exact, no residue |
+| 4.2 | who triggers the cutover pass (nobody passed reason 'cutover') | first-load pass with stale*2 > non-queued rows (queued excluded) is the cutover pass; explicit reason wins; undo never (narrowed by the I1 ruling below: the data signature, not the ratio alone) | keeps the brief's >50 % rule without a new call site; reversals then carry detail 'cutover' |
+| 4.2 | count sources | stale rows only: re-anchored = backward-placed, reversed = forward-from-now placed, kept running = held-start patches, blocked = plant_no_timezone/line_no_calendar/no_anchor; toast only if counts sum > 0 | matches the brief's list; other refusals are in no bucket |
+| 4.2 | F10 never-placed predicate | !task.user_scheduled after restore (the reconcile's own display-only test); reconcileRestored clears stale flag via display source and drops ids from _dirtyIds/_forceIds | so Save cannot persist a placement the row never had |
+| 4.2 | placeholder syntax | {{n}}/{{m}}/{{k}}/{{j}} | the repo's Util.t only interpolates double braces |
+| 4.2 (Ruling) | I1 | the cutover pass is detected by the data signature the cutover SQL leaves, not by a stale ratio alone: a first-load pass counts as the cutover pass when the stale rows that are never-placed (both edges NULL, !user_scheduled) plus the running rows that kept start and end exceed 50% of the plant non-queued rows; stale rows that still carry a placement (an ordinary SAP/routing re-upload) never count, so such a load keeps the per-row Toasts and detail run_time_grew; an explicit reason:cutover still wins | cost if wrong: a plant whose cutover rows were somehow placed before first load shows per-row Toasts instead of the summary (cosmetic). |
+| 4.2 (Ruling) | I2 | the F10 fix must drop only the placement from what Save persists: on undo / Time Machine restore of a never-placed row, the row stays dirty if it carried an unsaved non-date edit before the Apply (the undo entry records per-id pre-Apply dirtiness, or the restore compares non-date fields against the server copy), and only the derived dates/segments are excluded from the save payload; the placement side of the existing F10 test stands | cost if wrong: an unsaved attribute edit on a never-placed row is silently lost on undo (the current behaviour the reviewer found). |
+| 4.2 | I2 mechanism | record pre-edit dirtiness on the undo snapshot and omit dates/segments from a never-placed row's save payload | keeps unsaved attribute edits while dropping only the placement |
+
+**Concerns recorded in Phase 4** (verbatim from the ledger, one per concern line):
+
+- Task 4.1: schema_bootstrap_smoke still exits 1 (pre-existing routing_runtime_legacy_backfill ledger drift), nothing new from this task.
+- Task 4.1: nimbus_sdd holds no orders, so the migrations were hand-applied to an empty table; data effect proven only by the rolled-back test fleet.
+- Task 4.2: four existing reconcile tests had 1-2 stale rows of 3 and tripped the new >50 % threshold; each got one placed non-stale row (no behaviour assertion changed). A tiny plant with one stale row will show the cutover toast. (Superseded by fix round 1: the signature rule reverted those fixture rows.)
+- Task 4.2: de/es/fr/pt toast copy is machine-quality, not native-reviewed.
+- Task 4.2: F10 drops dirtiness of a never-placed row that had an unrelated unsaved non-date edit before the undo. (Fixed by the I2 ruling.)
+- Task 4.2: any dirty never-placed row (not only undone ones) now saves without dates; server treats omitted dates as leave-alone (read in routes.py), not exercised against Postgres.
+- Task 4.2: a snapshot not taken via snapshotTasks (Time Machine restore of stored snapshots) has no dirtiness record, so its never-placed rows are made clean as in round 0.
+
+**Deferred minors from Phase 4 reviews** (verbatim from the ledger):
+
+- Task 4.1: minor (deferred): test run-futuredue row cannot discriminate old_end arms, plus a stray `- _h(0)` in the assertion
+- Task 4.1: minor (deferred): no boundary rows (start == now, old_end == now) pin the `<=` / `>` semantics
+- Task 4.1: minor (deferred): updated_at compared via str() > OLD in the test; use datetime compare
+- Task 4.1: minor (deferred): running rows with run_time and no segments get end = start + run_time, replacing a differing stored scheduled_end; mention in Task 4.3 runbook
+- Task 4.2: minor (deferred): no once-per-plant guard; blocked-heavy plants re-fire the summary toast on each later pass.
+- Task 4.2: minor (deferred): runbook G-6 SQL timestamp is database-session time, say so.
+- Task 4.2: minor (deferred): rehearsal step 3 should say to apply the 2026-10-15 files to the copy if the pilot lacks them.
+- Task 4.2: minor (deferred): Time Machine stored-snapshot restore has no dirtiness record, so a never-placed row's earlier unsaved attribute edit is not re-saved.
+- Phase 4: minor (deferred): two eslint warnings in engine.test.mjs (unused `hours`, shadowed `fresh`) added by the Phase 3 fix wave; 0 errors so the gate holds. (Cleared by the fix round: the final lint run has 34 warnings, down from 36.)
+
+**Unverified in Phase 4** (verbatim from the ledger, one per cannot-verify line, plus the unverified list of the Task 4.3 review):
+
+- Task 4.1: ⚠️ cannot verify: did not run tests or the smoke script (read-only); test evidence taken from the implementer report
+- Task 4.2: ⚠️ cannot verify: runbook gates (sslmode locally, proxy cache, revision on env change, Excel freeze, PITR) are platform facts the repo does not answer.
+- Task 4.3 (runbook): review — 19 commands audited, 1 corrected (4c3df45); unverified left: local server accepting sslmode=require, proxy caching index.html, env-var change creating a revision, Excel upload freeze switch, platform PITR window, previous image's handling of flagged never-placed rows
+- Task 4.3 (implementer report): the G-6 SQL and the Q15 SQL were not run against any database.
+
+### Phase 4 — gate report
+
+**Branch and range.** `feature/backward-scheduling` (Phase 3 complete at `96018a6`; Phase 1 tip `5fbdfb7`). Phase 4 itself is commits `96018a6..0b45e85` (Tasks 4.1 to 4.3: `41c8f0f`, `157f7da`, `b9ea599`, the review correction `4c3df45`, the fix round `0b45e85`). Range `5fbdfb7..0b45e85`: 46 commits, 116 files, +10237 / -2602. Whole-run range `0317dd8..0b45e85` (main at the start of the run to the branch tip): 68 commits, of which 22 are Phase 1 on `feature/backward-scheduling-phase1` (up to `5fbdfb7`) and 46 are on this branch. Nothing was pushed, merged or deployed (owner charter, plan section 0.2a).
+
+**Tasks.**
+- Task 4.1 (cutover migrations and the group 9 test; commits `96018a6..41c8f0f`): two migration files (`2026-10-20-0-orders-precutover-snapshot.sql`, `2026-10-20-1-backward-cutover.sql`), mirrored into `schema.sql`, pinned in `tests/test_schema_idempotent.py`, and `tests/test_backward_cutover.py` (one rolled-back transaction, both files run twice, the second run proven a no-op). Review: spec pass, quality Approved, 0 Critical, 0 Important (clean, no fix round). Both files were hand-applied to `nimbus_sdd`, which holds 0 orders.
+- Task 4.2 (cutover image client bits; commits `41c8f0f..0b45e85`): `SCHEMA_VERSION` 7, `toast.cutover_summary` in five locales, the cutover pass and its four counts in the reconcile, the F10 fix (undo of a never-placed row stays display-only). Review: spec pass, quality Needs work, 0 Critical, 2 Important (I1 cutover pass inferred from a ratio, I2 F10 dropped the dirtiness of unrelated unsaved edits). One fix round (`0b45e85`) addressed both; the scoped re-review found no new Critical or Important. Complete after 1 fix round.
+- Task 4.3 (cutover runbook, text only): written into `docs/DEPLOYMENT.md` ("Backward-scheduling cutover", 17 steps) in `b9ea599`. Never executed. The reviewer audited 19 commands and corrected one claim (`4c3df45`).
+
+**Commands run and counts.**
+
+| Command | At `b9ea599` (last code commit `157f7da`) | Final, at `0b45e85` |
+|---|---|---|
+| `npm test` legacy (`tests/js`) | 68 / 68 pass | 68 / 68 pass (implementer full run after the fix round) |
+| `npm test` modules (`tests/modules`) | 1408 tests: 1403 pass, 2 fail, 3 todo; both fails are the known load-flaky optimizer spawn probe (`spawnSync ETIMEDOUT`, 8 lines; the Task 4.2 reviewer was running concurrently); `engine.test.mjs` rerun alone 162 / 162, 0 `ETIMEDOUT` | 1408 pass, 0 fail, 3 todo (implementer full run; the total test count is not recorded); `engine.test.mjs` rerun 162 / 162 |
+| `python -m pytest tests/ -q` | 1780 passed, 2 failed (baseline `test_scale_catalog_paging` x2), 1 skipped, 13 xfailed | 1780 passed, 2 failed (same baseline pair), 1 skipped, 13 xfailed (re-run by the orchestrator at `0b45e85`) |
+| `npm run lint` | 0 errors, 36 warnings (two new in `tests/modules/optimization/engine.test.mjs`: unused `hours`, shadowed `fresh`, from the Phase 3 fix wave) | 0 errors, 34 warnings (both cleared by the fix round; re-run by the orchestrator) |
+| `npm run typecheck`, `check:static-assets`, `check:legacy-surface` | clean | clean at `b9ea599` and unchanged by `0b45e85` (the implementer ran them) |
+
+Phase 3 gate for comparison: legacy 68 / 68; modules 1400 pass, 0 fail, 3 todo; pytest 1779 passed; lint 0 errors, 35 warnings.
+
+**Baseline noise (pre-existing, not chased).** `tests/test_scale_catalog_paging.py` x2 (material-grid paging; local collation ordering, identical on the baseline commit); the three `knownFailure` todos in `calendar-sync-boundaries.test.mjs`; one load-flaky optimizer spawn probe in `engine.test.mjs` (`spawnSync ETIMEDOUT` when other work runs at the same time); one load-flaky `test_distribution.py::test_summary_counts_past_5000_headers` (passes alone); `scripts/schema_bootstrap_smoke.py` exits 1 on `main` already (ledger drift: `routing_runtime_legacy_backfill` is in the migrations-replay database and not in the `schema.sql`-only one; this branch adds nothing to it).
+
+**Profile gates and the data effect.** The runbook makes Q13 (lines with no server hours row, which the reconcile skips) and Q15 (plants with no timezone, which the cutover and the reconcile cannot place) zero-count gates on the restored pilot copy before cutover. `nimbus_sdd` has 0 orders, so the cutover's data effect (placed finishes nulled, running rows keep start and end, every non-queued row flagged stale) is proven only by the rolled-back test fleet in `tests/test_backward_cutover.py`; it has not run against order data of any size.
+
+**What was NOT done (owner charter: deploy nothing).** No `az` command, no `psql` against the pilot, no `/promote-azure`, no push, no merge to `main`, no browser run (every UI item is code and unit tests only), and the Task 4.3 runbook was written and audited but never executed, so the commands in it (including the Q15 and G-6 SQL) have not been run against any database.
+
+**Open owner items carried forward.** Appendix A questions 1 to 5; Phase 0 item g (`trust_start` default); Q13 and Q15 = 0 before cutover; the Phase 1 hard-bound shift; plants with `visibility_horizon_days` below 14 (cap below 336 h); the Task 3.5 manual run time carried into the collapse finish; the Phase 3 findings left per triage (F9, F11, F14, F17, F18, F19 and the F12 and F16 remainders; F10 was fixed in Task 4.2); the unverified runbook items above; the browser checks owed (Phase 2 and Phase 3 lists, plus the cutover summary toast and the G-10 rehearsal on a restored copy). The final owner report (`docs/superpowers/plans/2026-10-14-backward-scheduling-final-report.md`) lists them all.
+
+**Not released.** Rollback = the branch is not merged.
+
+Final owner report (every gap table above verbatim, the 30 rulings, open owner questions, browser checks owed, how to take it live): `docs/superpowers/plans/2026-10-14-backward-scheduling-final-report.md`.
