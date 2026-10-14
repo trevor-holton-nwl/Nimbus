@@ -407,6 +407,18 @@ export const Store = {
   /** The session-only derivation notes (`derivationIssue`, `systemMove`) describe the engine's last derivation of
    *  a row. The next edit of its dates, machine or run time makes them stale, so a change-set that touches
    *  those fields and does not itself carry a note clears them (the reconcile always carries both). */
+  /** `user_scheduled` is the server's "a planner placed this row" wire flag and nothing else updates it on the
+   *  client. A client write that gives the row both edges (a drop, a grid/Inspector edit, Override, an optimizer
+   *  apply, a release, Push +1 hour, a dirty reconcile patch) is a placement, so the row is placed locally from
+   *  then on; display-only derivations, server refreshes, undo/What-If restores and distribution's own saves are
+   *  not. Without this a dirty, planner-placed row would read as never-placed and be re-derived from its due date. */
+  _markPlaced(task: NimbusTask, changes: Partial<NimbusTask>, source?: string): void {
+    if (!changes.start_date || !changes.end_date || task.user_scheduled) return;
+    if (source === 'refresh' || source === 'engine-runtime-reconcile-display' || source === 'undo'
+      || source === 'sandbox' || source === 'distribution' || source === 'note') return;
+    task.user_scheduled = true;
+  },
+
   _clearStaleNotes(task: NimbusTask, changes: Partial<NimbusTask>): void {
     if (!('start_date' in changes || 'end_date' in changes || 'MACHINE' in changes || 'RUN_TIME' in changes)) return;
     if (!('derivationIssue' in changes) && task.derivationIssue) task.derivationIssue = null;
@@ -427,6 +439,7 @@ export const Store = {
       next.planning_reason = null;
     }
     Store._clearStaleNotes(next, changes);
+    Store._markPlaced(next, changes, source);
     Store._normalizeDates(next);
     this._state.tasks[id] = next;
     // Keep the _tasksByPlant index coherent with this reference swap. That index caches
@@ -483,6 +496,7 @@ export const Store = {
       if (!task) continue;
       Object.assign(task, p.changes);
       Store._clearStaleNotes(task, p.changes);
+      Store._markPlaced(task, p.changes, source);
       if (p.changes.planning_status === undefined && p.changes.start_date && p.changes.end_date) {
         task.planning_status = 'scheduled';
         task.planning_reason = null;

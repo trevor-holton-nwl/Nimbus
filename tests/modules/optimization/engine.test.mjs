@@ -35,6 +35,7 @@ import { capAwareSequence } from '../../../frontend/optimization/scheduler-contr
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
 
 const require = createRequire(import.meta.url);
@@ -4350,6 +4351,40 @@ describe('reconcile (finish-anchored)', () => {
       assert.equal(t.derivationIssue.code, 'finish_moved_earlier');
       assert.equal(t.derivationIssue.from.getTime(), at(26, 20).getTime());
       assert.equal(t.derivationIssue.to.getTime(), at(26, 19).getTime());
+    } finally { fx.restore(); }
+  });
+
+  test('a planner-placed never-placed row is marked scheduled, survives a second reconcile untouched (dirty), and keeps its placement once saved', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('dr', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      // The planner drops it on Fri 21 Aug 15:00-19:00 (any non-display client write is a placement).
+      Store.updateMany([{ id: 'dr', changes: { start_date: at(21, 15), end_date: at(21, 19) } }], 'engine');
+      Persistence._dirtyIds.add('dr');
+      assert.equal(Store.tasks.dr.user_scheduled, true, 'the client marks a placed row as scheduled');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.dr.start_date.getTime(), at(21, 15).getTime(), 'a dirty placement is never re-derived');
+      assert.equal(Store.tasks.dr.end_date.getTime(), at(21, 19).getTime());
+      assert.deepEqual(fx.writes, [], 'and is absent from the display writes');
+      // Saved: no longer dirty. A hydration event must still leave it where the planner put it.
+      Persistence._dirtyIds.delete('dr');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.dr.start_date.getTime(), at(21, 15).getTime());
+      assert.deepEqual(fx.writes, []);
+      // A display derivation never claims placement.
+      Store.setTasks([fx.task('dp', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.notEqual(Store.tasks.dp.user_scheduled, true);
+    } finally { Persistence._dirtyIds.delete('dr'); fx.restore(); }
+  });
+
+  test('a candidate with no finish to hold carries no_anchor and is left as it is', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('na', { start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.na.start_date.getTime(), at(18, 6).getTime());
+      assert.equal(Store.tasks.na.derivationIssue.code, 'no_anchor');
     } finally { fx.restore(); }
   });
 

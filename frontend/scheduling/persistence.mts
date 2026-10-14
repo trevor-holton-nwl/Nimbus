@@ -1707,7 +1707,7 @@ Store.subscribe(evt => {
     if (evt.source === 'persistence') Persistence._conflictedIds.clear();
     return;
   }
-  if (evt.source === 'refresh') return;
+  if (evt.source === 'refresh' || evt.source === 'engine-runtime-reconcile-display') return;
   const ids = evt.type === 'task:update' ? [String(evt.id)]
     : (evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change') ? ((evt.ids ?? []) as Array<string | number>).map(String) : [];
   for (const id of ids) taskEditGenerations.set(id, (taskEditGenerations.get(id) ?? 0) + 1);

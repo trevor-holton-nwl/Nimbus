@@ -68,6 +68,7 @@ import { Store, UndoStack } from '../platform/store.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
 import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
@@ -1515,7 +1516,9 @@ export const Engine = {
     if (!plant) return;
     const candidates = Store.tasksByPlant(plant).filter(task =>
       (task.runtime_schedule_mismatch || !task.user_scheduled)
-      && task.planning_status !== 'needs_planning' && !task.placement_exception && !!task.MACHINE);
+      && task.planning_status !== 'needs_planning' && !task.placement_exception && !!task.MACHINE
+      // A row with unsaved local edits is the planner's own work in progress: never re-derive it.
+      && !Persistence._dirtyIds.has(String(task.id)));
     if (!candidates.length) { Engine._setDerivePaused(plant, false); return; }
     // OQ51: only an authoritative (server) calendar may derive a start; otherwise wait for it.
     if (CalendarSync.calendarState(plant) !== 'hydrated') { Engine._setDerivePaused(plant, true); return; }
@@ -1602,7 +1605,7 @@ export const Engine = {
         }
 
         const anchor = placed ? task.end_date : Util.dueInstant(task);
-        if (!anchor) continue;   // no finish to hold: nothing can be derived (the server queues rows with no usable finish)
+        if (!anchor) { noteOnly(task, { code: 'no_anchor' }); continue; }   // no finish to hold, so nothing can be derived
         const result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: 0 });
         if (result.kind === 'reached_now') {
           (reversals.get(line) ?? reversals.set(line, []).get(line)!).push({ task, anchor, stale });

@@ -2116,7 +2116,7 @@ const App = {
 
     /* Autosave on store mutations. Skip 'refresh' — those rows came FROM the server
        during conflict reconciliation, so writing them back would be a pointless echo. */
-    Store.subscribe(evt => { if (evt.source !== 'refresh') Persistence._autosave(); }, 'Persistence.autosave');
+    Store.subscribe(evt => { if (evt.source !== 'refresh' && evt.source !== 'engine-runtime-reconcile-display') Persistence._autosave(); }, 'Persistence.autosave');
 
     /* Optimizer and undo edits are dependent: mark them for atomic version-checked save.
        'refresh' is ignored because those rows have already been reconciled. */
