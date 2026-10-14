@@ -4183,8 +4183,8 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
 
     # Manual Excel upload only: Machine Hours (MEINH) wins over RUN_TIME when
     # present and > 0 (0 is treated as blank, matching resolver._fallback). Done
-    # before date hygiene so finish-date derivation and _RUN_TIME_DEFAULTED
-    # follow the chosen value. Routing-on plants are unaffected because
+    # before date hygiene so _RUN_TIME_DEFAULTED follows the chosen value (the
+    # finish itself is stored as received and never derived). Routing-on plants are unaffected because
     # upsert_orders nulls run_time for them; SAP staging never passes through
     # this function. Owner decision 2026-10-13.
     _mh_col = "MACHINE_HOURS_(MEINH)"

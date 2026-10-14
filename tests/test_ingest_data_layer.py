@@ -611,6 +611,42 @@ class TestApplyOrderDateHygieneRows:
         assert out == []
         assert warnings and warnings[0]["level"] == "error" and "BASIC_FINISH_DATE" in warnings[0]["msg"]
 
+    def test_excel_unparseable_finish_is_dropped_with_warning(self, monkeypatch):
+        """Excel path: a text finish that cannot be read drops the row (never filled),
+        with an error warning naming the order and the finish counter incremented."""
+        import db as db_
+        import backend.admin_ops.diagnostics_state as ds
+        captured = {}
+
+        def _fake_upsert_orders(rows, **kwargs):
+            captured["rows"] = rows
+            captured["warnings"] = kwargs.get("warnings")
+            return {"status": "ok", "batch_id": kwargs.get("batch_id"),
+                    "inserted": len(rows), "updated": 0, "warnings": [], "lines": []}
+
+        monkeypatch.setattr(db_, "upsert_orders", _fake_upsert_orders)
+        before = ds.DIAGNOSTICS.get("dropped_no_finish_date", 0)
+        res = db_.ingest_orders_from_excel(_xlsx([
+            {"PRODUCTION_ORDER": "PO-OK", "MATERIAL_NUMBER": "M-1",
+             "BASIC_START_DATE": "2026-09-10 08:00", "BASIC_FINISH_DATE": "2026-09-10 12:00"},
+            {"PRODUCTION_ORDER": "PO-JUNK", "MATERIAL_NUMBER": "M-2",
+             "BASIC_START_DATE": "2026-09-10 08:00", "BASIC_FINISH_DATE": "not-a-date"},
+        ]), "unparseable_finish.xlsx")
+        assert res["status"] == "ok"
+        assert [r["production_order"] for r in captured["rows"]] == ["PO-OK"]
+        errors = [w["msg"] for w in captured["warnings"] if w.get("level") == "error"]
+        assert len(errors) == 1 and "BASIC_FINISH_DATE" in errors[0] and "PO-JUNK" in errors[0], errors
+        assert ds.DIAGNOSTICS["dropped_no_finish_date"] == before + 1
+
+    def test_parse_finish_dates_retries_mixed_formats_per_value(self):
+        import db as db_
+        import pandas as pd
+        col = pd.Series(["2026-09-11 00:30", "2026-09-11", "garbage", None])
+        out = db_._parse_finish_dates(col)
+        assert out.iloc[0] == pd.Timestamp("2026-09-11 00:30")
+        assert out.iloc[1] == pd.Timestamp("2026-09-11")
+        assert pd.isna(out.iloc[2]) and pd.isna(out.iloc[3])
+
     def test_real_time_of_day_finish_kept_and_bad_start_dropped_with_warning(self):
         good = {"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 15, 45),
                 "run_time": 1, "tag": "keep"}
