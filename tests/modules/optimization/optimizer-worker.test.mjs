@@ -319,8 +319,10 @@ test('optimizer worker runs in a real worker_threads realm with clone round-trip
     masterData: { plants: [{ plant: 'P' }], lines: [{ plant: 'P', machine: 'L1' }] },
   };
   const workerPath = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
+  const corePath = resolve('frontend/nimbus-compute-core.js');
   const bridge = `
     import { parentPort } from 'node:worker_threads';
+    import { createRequire } from 'node:module';
     globalThis.postMessage = value => parentPort.postMessage(value);
     Object.defineProperty(globalThis, 'onmessage', {
       configurable: true,
@@ -329,6 +331,7 @@ test('optimizer worker runs in a real worker_threads realm with clone round-trip
         handler({ data });
       }); },
     });
+    globalThis.NimbusComputeCore = createRequire(${JSON.stringify(corePath)})(${JSON.stringify(corePath)});
     await import(${JSON.stringify(workerPath)});
   `;
   const worker = new Worker(bridge, { eval: true, type: 'module' });
@@ -374,8 +377,10 @@ test('real optimizer worker can be cancelled before returning a response', async
   // covered by the fake-worker test above. This boundary test instead proves
   // that a dedicated worker can be stopped after it has begun this request.
   const workerPath = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
+  const corePath = resolve('frontend/nimbus-compute-core.js');
   const bridge = `
     import { parentPort } from 'node:worker_threads';
+    import { createRequire } from 'node:module';
     globalThis.postMessage = value => parentPort.postMessage(value);
     Object.defineProperty(globalThis, 'onmessage', {
       configurable: true,
@@ -386,6 +391,7 @@ test('real optimizer worker can be cancelled before returning a response', async
         });
       }); },
     });
+    globalThis.NimbusComputeCore = createRequire(${JSON.stringify(corePath)})(${JSON.stringify(corePath)});
     await import(${JSON.stringify(workerPath)});
   `;
   const worker = new Worker(bridge, { eval: true, type: 'module' });
