@@ -104,7 +104,7 @@ SAP is the source of truth; a re-upload only disturbs an order SAP actually chan
 | `POST /sap/staging/upload/{object}` | api key + admin | Excel/CSV with SAP headers -> a `source='upload'` batch, validated, never applied; multipart `file` + `plant` |
 | `GET /sap/staging/archive/{plant}` | admin | Orders deleted by a snapshot apply in the last 30 days |
 | `POST /sap/staging/archive/{archive_id}/restore` | api key + admin | Restore one archived order with its schedule segments |
-| `POST /sap/staging/send/{plant}` | api key + admin | Send to SAP: queue the plant's schedule into the outbound table |
+| `POST /sap/staging/send/{plant}` | api key + admin | Send to SAP: queue the plant's firmed orders into the outbound table |
 | `GET /sap/staging/send/{plant}/status` | admin | Outbound tiles: ready/sent/error counts, last queued/sent time |
 | `GET /sap/staging/send/{plant}/rows` | admin | Outbound rows (`status` = ready/sent/error); `?format=csv` |
 

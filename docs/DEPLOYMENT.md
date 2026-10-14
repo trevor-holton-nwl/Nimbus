@@ -104,7 +104,7 @@ The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`
 
 `migrations/2026-10-15-1-orders-original-dates.sql` and `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` are destructive by text (`ALTER`, `UPDATE`, `DROP`, comments included). The runner blocks each one unless `-AllowDestructive` is passed, and that flag releases every pending destructive file in the folder the runner reads, so each file needs its own `-AllowDestructive` run. Before each run, read `migration_files_applied` and every pending file, and point the runner at a folder that holds only that run's file (`-MigrationsDir`). The owner runbook is in `docs/MIGRATION.md`, section "Backward scheduling — Phase 1 shipped / Phases 2–4 pending".
 
-The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps each row's xmin (the optimistic-concurrency `base_version`). Apply it at deploy time, never mid-shift, Planners must save before the run (an unsaved edit goes stale on its next save) and reload afterwards.
+The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps each row's xmin (the optimistic-concurrency `base_version`). Apply it at deploy time, never mid-shift. Planners must save before the run (an unsaved edit goes stale on its next save) and reload afterwards. The `2026-10-15-1` file also reads `order_sap_sent`, so `2026-10-08-sap-staging-tables.sql` must already be in the ledger.
 
 ## Prerequisites
 

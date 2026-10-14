@@ -1327,6 +1327,8 @@ turning it on for a real plant is a product decision, not an engineering one.
 
 ## `orders.run_time` bound constraint — pre-deploy data check needed (2026-09-25, H8)
 
+> **Superseded for the bound itself (2026-10-14).** `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` replaces the 168-hour limit below with a pure representation bound (`< 8760` hours); the 336-hour scheduling limit now lives in the application (`db.cap_hours`). The text below is the history of the original constraint.
+
 `migrations/2026-09-25-orders-run-time-bounds.sql` adds a `NOT VALID` CHECK constraint bounding
 `orders.run_time` to `[0, 168)` hours and rejecting `NaN`/`Infinity`. The constraint exists
 specifically because an unvalidated `RUN_TIME` was reaching SQL interval arithmetic as `NaN`/
@@ -1394,7 +1396,7 @@ Phase 1 of the backward-scheduling migration is built and committed on `feature/
 
 ### (a) Owner list: sent orders whose SAP original may be lost
 
-`migrations/2026-10-15-1-orders-original-dates.sql` adds the locked SAP start and finish columns (`orders.original_start_received`, `orders.original_finish_received`, `order_distribution.original_finish_received`) and backfills them once, guarded by the `schema_migrations` id `orders_original_dates_backfill`. An order that NIMBUS has already sent to SAP (it has an `order_sap_sent` row) has no recoverable SAP original: the backfill copies its current `basic_start_date` and `basic_finish_date`. Review those orders before relying on their due dates. The query below is read-only (SELECT only; agents never run it). It lists the sent orders whose basic finish differs from the SAP baseline or from the finish NIMBUS sent:
+`migrations/2026-10-15-1-orders-original-dates.sql` adds the locked SAP start and finish columns (`orders.original_start_received`, `orders.original_finish_received`, `order_distribution.original_finish_received`) and backfills them once, guarded by the `schema_migrations` id `orders_original_dates_backfill`. An order that was never sent still holds what SAP last sent, so the backfill copies its SAP baseline (`sap_basic_start_date` and `sap_basic_finish_date`) when there is one, else its `basic_*` date. An order that NIMBUS has already sent to SAP (it has an `order_sap_sent` row) has no recoverable SAP original: the backfill copies its current `basic_start_date` and `basic_finish_date`. A distribution header copies its `basic_finish_date`. The backfill rewrites no `basic_*` or `sap_basic_*` column. Review the sent orders before relying on their due dates. The query below is read-only (SELECT only; agents never run it). It lists the sent orders whose basic finish differs from the SAP baseline or from the finish NIMBUS sent:
 
 ```sql
 SELECT o.id, o.plant, o.production_order, o.basic_finish_date, o.sap_basic_finish_date, s.sent_finish
@@ -1413,7 +1415,7 @@ Every step is run by the owner. Agents run none of them. Stop at any step whose 
 
 1. Item a: identify the live image. Run `az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.template.containers[0].image" -o tsv`, check the `NIMBUS_BUILD_ID` in the served page, and confirm whether any Send to SAP has already happened on the pilot. Record the image tag: it is the rollback target.
 2. Item b: snapshot `basic_finish_date`, `sap_basic_start_date`, `sap_basic_finish_date` and `order_sap_sent` before the backfill runs on the pilot. The snapshot must be restorable.
-3. Item c: take a pilot `pg_dump`, restore it locally, run the profile queries Q0 to Q17 (spec §8.12) on the copy, and review Q1 and Q8. Q1 and Q8 gate the Phase 1 deploy.
+3. Item c: take a pilot `pg_dump`, restore it locally, run the profile queries Q0 to Q17 (spec §8.12) on the copy, and review Q1, Q8, Q13, Q15, Q16 and Q17. Only Q1 (orders with no run time and no stored end) and Q8 (the repairable set, joined to the sent table) gate the Phase 1 deploy; the rest gate the cutover.
 
 **Merge:**
 
@@ -1421,17 +1423,21 @@ Every step is run by the owner. Agents run none of them. Stop at any step whose 
 
 **Planner notice (send before the window):**
 
-5. Tell planners to save and close their NIMBUS tabs before the migration, because the backfill rewrites every order row and an unsaved edit goes stale. Tell them lateness figures will change. Tell them no bar moves, except rows with no run time and no stored end, whose right edge can move.
+5. Pick a quiet window from profile Q12 (plant time). Tell planners to save and close their NIMBUS tabs before the migration, because the backfill rewrites every order row and an unsaved edit goes stale. Tell them lateness figures will change. Tell them no bar moves, except rows with no run time and no stored end, whose right edge can move.
 
 **Migrations (two destructive runs, one file each):**
 
 6. Both files are destructive by text. The runner blocks each one unless `-AllowDestructive` is passed, and that flag releases every pending destructive file in the folder the runner reads. So each file gets its own run, and each run points the runner at a folder that holds only that run's file (`-MigrationsDir`). Before each run, read the ledger: `SELECT filename FROM migration_files_applied ORDER BY filename;` (admin login, SELECT only). Neither Phase 1 file should be listed yet.
-   - Run 1: copy `2026-10-15-1-orders-original-dates.sql` alone into an empty scratch folder. Run the runner from the `promote-azure` skill (step 1) with `-MigrationsDir <that folder> -DryRun`, read the output and the file, then run it for real with `-MigrationsDir <that folder> -AllowDestructive`. The backfill `UPDATE` bumps xmin on every `orders` row.
-   - Run 2: after run 1, the ledger lists the file from run 1. Run the runner against `migrations/` with `-DryRun`, then check the ledger again. The only pending file must be `2026-10-15-2-orders-run-time-bounds-336.sql`. Then run it for real with `-AllowDestructive`.
+   - The runner has no per-file selector, and `-DryRun` never connects to the database: it lists every file in the folder, pending or not. The ledger query is the only way to see what is pending. Both runs below use the runner from the `promote-azure` skill (step 1; it prompts for the database password). Its defaults point at the live pilot host and user. Copy each file under its own name into a scratch folder (the ledger is keyed by file name), because the folder is what limits what `-AllowDestructive` can release.
+   - Check first: `2026-10-08-sap-staging-tables.sql` (creates `order_sap_sent`, which the backfill reads) must already be in the ledger.
+   - Run 1: a scratch folder holding only `2026-10-15-1-orders-original-dates.sql`. Run the runner with `-MigrationsDir <that folder> -DryRun`, read the file and the output, then run it for real with `-MigrationsDir <that folder> -AllowDestructive`. The backfill `UPDATE` bumps xmin on every `orders` row.
+   - Run 2: after run 1, read the ledger again: it must now list the run 1 file and still not list `2026-10-15-2-orders-run-time-bounds-336.sql`. Then repeat with a second scratch folder holding only that file (`-MigrationsDir <that folder> -DryRun`, read the file, then `-MigrationsDir <that folder> -AllowDestructive`).
+   - A runner exit code of 3 means a file was blocked: stop and read the output.
+   - If the ledger shows other pending files in `migrations/` (anything merged to `main` since the last deploy), apply them with the ordinary `promote-azure` step 1 run (no `-AllowDestructive`, so additive files apply and destructive ones are blocked) and sequence any blocked file as its own deliberate run, before the image roll.
 
 **Image:**
 
-7. After both runs, build and roll the image with the `promote-azure` skill (steps 2 to 4; the step 1b CI gate applies). Once the roll is verified, tell planners to reload NIMBUS.
+7. After both runs, build and roll the image with the `promote-azure` skill (steps 2 to 4, after its step 1b gate). The migrations go first so the new code never serves against missing columns. Once the roll is verified, tell planners to reload NIMBUS.
 
 **Send to SAP (not started by this release):**
 
@@ -1439,7 +1445,7 @@ Every step is run by the owner. Agents run none of them. Stop at any step whose 
 
 **Rollback:**
 
-9. Roll back to the previous image: `az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`. This is safe for the schema: the locked columns are nullable and old code neither reads nor writes them, the widened run-time CHECK (`< 8760`) is looser than the old `< 168`, and Phase 1 removes the NIMBUS-side rewrites of `basic_finish_date` (the client due-date rewrite, the finish fill, and the distribution re-weight and reset baseline writes); an upload still writes it from SAP. Caveat: once any Send has happened, a rollback brings back the old due-date overwrite (spec §7.3), so re-check §7.1.2 before rolling back.
+9. Roll back to the previous image: `az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`. This is safe for the schema: the locked columns are nullable and old code neither reads nor writes them, and the widened run-time CHECK (`< 8760`) is looser than the old `< 168`. The old image does bring the old behaviour back: it fills or rewrites a finish at upload, re-runs the client due-date rewrite, and overwrites the due date on an SAP echo. Rows written under the new image keep their locked originals, which the old image ignores. Caveat: once any Send has happened, a rollback makes the old due-date overwrite apply to those orders again (spec §7.3), so re-check §7.1.2 before rolling back.
 
 ### (c) What planners and admins will notice
 
@@ -1447,5 +1453,5 @@ Every step is run by the owner. Agents run none of them. Stop at any step whose 
 - **Optimizer bounds on a closed due day move back to the previous open day.** For example, a Sunday due date with zero pull-forward days now sets the earliest start at Friday 00:00 instead of Sunday 00:00.
 - **Orders over the run-time cap go to Needs Planning** with reason `run_time_over_cap`. The cap is 336 hours, or the plant's visibility horizon in hours when that is shorter. A planner edit that sets a run time over the cap is rejected for that order. Lowering a plant's horizon does not re-check existing orders; each order is re-checked when its run time is next written.
 - **Send to SAP transmits firmed orders only.** An unfirmed order is skipped and counted as `skipped_unfirmed` in the Send result and the audit log. The screen does not show that count yet, so a Send with nothing firmed sends nothing.
-- **Rows with no usable finish are not loaded.** An upload drops such a row with an error warning that names the order, and the count appears in the Admin Cockpit's DB Load step as "Dropped (no finish)".
+- **Rows with no usable finish are not loaded.** A blank or unreadable finish, or a finish on an earlier calendar date than the start, is no longer filled in or rewritten; the finish is stored exactly as SAP sent it. An upload drops such a row with an error warning that names the order (the SAP staging check marks it `invalid_date`), and the count appears in the Admin Cockpit's DB Load step as "Dropped (no finish)".
 - **Admins:** the purge preview now counts the whole last day of the chosen range.

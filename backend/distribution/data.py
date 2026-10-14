@@ -1425,7 +1425,7 @@ def _child_upsert_sql(*, ingest: bool) -> str:
             "        original_finish_received = COALESCE(EXCLUDED.original_finish_received, orders.original_finish_received),\n")
         where_sap = (
             "       -- SAP's dates are compared against the stored SAP baseline, never basic_*\n"
-            "       -- (a planner move changes basic_finish_date).\n"
+            "       -- (basic_* is the planning copy NIMBUS reads, not SAP's own record).\n"
             "       OR (EXCLUDED.sap_basic_start_date IS NOT NULL\n"
             "           AND orders.sap_basic_start_date IS DISTINCT FROM EXCLUDED.sap_basic_start_date)\n"
             "       OR (EXCLUDED.sap_basic_finish_date IS NOT NULL\n"

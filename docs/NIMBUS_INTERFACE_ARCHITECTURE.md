@@ -597,7 +597,7 @@ Planned-order apply also reports the shared order-upsert warnings (the same ones
 
 ### 7.7 Outbound contract (NIMBUS to SAP)
 
-An admin's **Send to SAP** click queues one row per planned order of the plant (distribution sub-orders roll up to their parent with the latest end) into `sap_stage_planned_order_out` with `row_status = 'ready'`, `pedtr`/`pedti` converted to the SAP system zone, and `auffx = 'X'` when the order is firmed (planner-firmed, already firmed in SAP, or inside the frozen horizon; **add-only**, NIMBUS never clears an SAP firm). Materials and order numbers are sent as NIMBUS stores them (no leading zeros); pad them on the Mulesoft side if SAP requires fixed width. Mulesoft then:
+An admin's **Send to SAP** click queues one row per firmed planned order of the plant (an order that is not firmed is skipped; distribution sub-orders roll up to their parent with the latest end, and an aggregate is sent when any of its sub-orders is firmed) into `sap_stage_planned_order_out` with `row_status = 'ready'`, `pedtr`/`pedti` converted to the SAP system zone, and `auffx = 'X'` when the order is firmed (planner-firmed, already firmed in SAP, or inside the frozen horizon; **add-only**, NIMBUS never clears an SAP firm). Materials and order numbers are sent as NIMBUS stores them (no leading zeros); pad them on the Mulesoft side if SAP requires fixed width. Mulesoft then:
 
 ```sql
 BEGIN;
@@ -668,7 +668,7 @@ Encoding is **UTF-8** (the database encoding). A value that a typed column canno
 
 | Table | Column(s) | Accepted values | Otherwise |
 |---|---|---|---|
-| `sap_stage_planned_order` | `psttr`, `pedtr` (dates, `TEXT`) | `YYYYMMDD` or `YYYY-MM-DD` (a trailing time part after a space or `T` is ignored). `00000000`, `0000-00-00` or blank = not sent | Any other shape: `invalid_date`. A missing start date is `invalid_date`; a missing finish date is accepted (NIMBUS derives it) |
+| `sap_stage_planned_order` | `psttr`, `pedtr` (dates, `TEXT`) | `YYYYMMDD` or `YYYY-MM-DD` (a trailing time part after a space or `T` is ignored). `00000000`, `0000-00-00` or blank = not sent | Any other shape: `invalid_date`. A missing start date is `invalid_date`; a missing or unreadable finish date is also `invalid_date`, because NIMBUS no longer derives a finish and stores the one SAP sends exactly as received |
 | `sap_stage_planned_order` | `pstti`, `pedti` (times, `TEXT`) | `HHMMSS` (always send all six digits: a shorter digit string is left-padded with zeros, so `1530` would read as 00:15:30), `HH:MM:SS` or `HH:MM`. Blank or `000000` = date only (no time-zone conversion for a date-only value) | `240000` and any hour past 23 is `invalid_time`. For an end-of-day finish send `235959`: do **not** send the next day with `000000`, because a midnight finish is treated as "no real time" and replaced by the start plus the run time |
 | `sap_stage_planned_order` | `gsmng`, `abmng`, `vfmng` (`NUMERIC(13,3)`) | A number with `.` as the decimal separator and no thousands separator, at most 10 integer digits and 3 decimals | A non-number (for example `1,234.5`) fails your insert. `gsmng` blank or negative, or `abmng` negative: `invalid_number`. `abmng` blank = 0 |
 | `sap_stage_planned_order` | `stlan`, `stalt` | Whole numbers (as text); blank is fine | A fractional or non-numeric value: `invalid_int` |

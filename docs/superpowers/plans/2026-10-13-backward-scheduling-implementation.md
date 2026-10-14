@@ -649,10 +649,33 @@ Audit: Sonnet, report at `.superpowers/sdd/2026-10-13-backward-scheduling-implem
 
 ### Phase 1 — gap decisions (2026-10-14)
 
-Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`): every line that starts with `Task 1.N: gap filled:` or is a `Ruling:` for a Phase 1 task.
+Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`): every line that starts with `Task 1.N: gap filled:` or is a `Ruling:` for a Phase 1 task. The Task 1.1 to 1.4 rows come from the composite ledger lines and the task reports' gap sections, because those tasks logged their gaps inside one line or in the report.
 
 | Task | Gap | Choice | Why |
 |---|---|---|---|
+| 1.1 | `TaskVersionRow.original_end_date` type (the brief said a datetime or None) | a string or None, like `original_start_date` and every other date on that model | the DB layer already emits strftime strings; a `datetime` field would serialise differently and give an inconsistent generated type |
+| 1.1 | brief named only the finish for the distribution child read | both `basic_start_date` and `basic_finish_date` output keys now read the locked columns (key names kept) | the pane maps both keys to `original_*`; `orders` has both locked columns |
+| 1.1 | refresh row's `original_start_date` | also reads `COALESCE(original_start_received, basic_start_date)` | the brief says every projection that emits an original start or end follows the wire rule |
+| 1.1 | owner list query wording ("sent rows that differ") | lists sent orders where `basic_finish_date` differs from the SAP baseline or from the sent finish | the reading that surfaces rows whose due date NIMBUS may have overwritten |
+| 1.1 | backfill block placement in `schema.sql` | at the end of the file; the three column statements sit with the `sap_basic_*` columns | the backfill reads `order_sap_sent`, created late in the file |
+| 1.1 | `scripts/schema_bootstrap_smoke.py` exits 1 (the brief asked it to pass) | parked as pre-existing: it fails identically on the commit before Task 1.1 | a fingerprint drift on `run_time_source` unrelated to this work; the CI gate was already red on `main` |
+| 1.2 | the SAP zone inside `sap_changed_fields` and `upsert_orders` | optional `sap_tz` argument; `None` means the plant's frame (Excel); the staging apply passes `SAP_SYSTEM_TZ` | the Excel path has no SAP zone of its own; `db.py` does not import `sap_staging` |
+| 1.2 | the Excel path cannot say a finish is date-only | inferred from an exact 00:00:00 when the row carries no date-only flag | one place (`_row_finish_echo`) both consumers read, so they cannot drift |
+| 1.2 | an echo whose stored original is NULL | carry the incoming value, per column | nothing stored to keep; the backfill makes this rare |
+| 1.3 | the brief's "siblings reset" RED no longer reproduces after Task 1.4 | kept the brief's test and added tests whose RED is real (header original finish missing; re-weight rewriting a child's baselines) | after 1.4 the header finish equals the received finish, so the green is not proof of a reproduced reset |
+| 1.3 | the echo judgement needs the SAP zone inside `apply()` | `apply(..., sap_tz=None)`, passed by `upsert_orders` on the SAP path only | a plan-dict key broke a contract test that pins the plan structure |
+| 1.3 | planner writes versus ingest writes in `_apply_children` | `parent["_ingest"]` mark set by `apply()` instead of a new parameter | tests that patch `_apply_children(cur, parent)` keep their signature |
+| 1.3 | `order_distribution` has no start column | a planner-created child inherits the earliest locked start of its living siblings, else the header's `basic_start_date` | no header original start exists to inherit |
+| 1.3 | `_resolve_wc_codes` was not in the brief's line list | its synthetic rows carry the plain order's locked dates and baselines | otherwise a client-rewritten `basic_finish_date` would be locked as the due date |
+| 1.3 | standalone `plan()` + `apply()` used to default `sap_basic_*` from `basic_*` | NULL unless the row carries them; the next upload fills the baseline without counting as a change | real ingest through `upsert_orders` always carries them |
+| 1.3 | `_row_finish_echo` signature | extra `finish_key` argument | the ingest row and the before-image name the finish differently |
+| 1.3 | header echo across a distribution family | judged by any member child's sent finish (`_header_finish_echo`, one extra query per parent) | `order_sap_sent` is per child; the one-cycle gap after collapse or 1-to-N is the accepted OQ29 gap |
+| 1.4 | `dropped_no_*` counters were never incremented | both start and finish counters bumped inside `_date_hygiene_df`; the finish counter also on a finish dated before the start | one place covers the Excel and SAP staging paths |
+| 1.4 | the finish counter was never shown | new cockpit row "Dropped (no finish)", DB Load turns `warn` on either counter, key `ui.diag_dropped_no_finish` in all five locales | there was no prior key to rename |
+| 1.4 | pandas infers one format and turns the rest to NaT | `_parse_finish_dates` retries missed values with `format="mixed"` | a row is now dropped on NaT, so a mixed-format column would otherwise lose rows silently |
+| 1.4 | naming the dropped rows | the warning lists up to five order numbers plus "+N more" when an order column exists | the start warning text is pinned by a test and left unchanged |
+| 1.4 | a test relied on the derived finish shape | re-seeded through SQL (the test was deleted in Task 1.5) | preserves what it checked until the relay it covered was retired |
+| 1.4 | the unparseable-date warnings in `upsert_orders` | left untouched | only the non-live SAP sync stub can still reach them |
 | 1.5 | platform cannot import Store/Calendar | new DI seam Util.setDueCalendarResolver wired in app.js (rows from Store, rev = Store.rev()) | same pattern as the other four seams, no legacy-surface growth |
 | 1.5 | per-batch caching of the day window | per line+date cache invalidated on Store revision change | per-row callers stay O(1) with no staleness |
 | 1.5 | missing plant hours | use the line window alone (no default 7-19) | brief only defined the missing line calendar case (raw + 23:59:59) |
