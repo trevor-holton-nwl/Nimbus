@@ -7,7 +7,7 @@
 // real cross-package dependencies below predate this phase (Phase 2
 // research, schedule-data.mts's original split from app.js) and are
 // preserved exactly as they were:
-//   - Persistence._snapToWorkingHours/_dueEndOfShift call Calendar via an
+//   - Persistence._snapToWorkingHours calls Calendar via an
 //     injected seam, `Persistence.setCalendarService({...})`, wired once
 //     from app.js boot glue after calendar/calendar-engine.mjs's Calendar is
 //     available (see app.js's bridge destructure) — never a direct import.
@@ -18,7 +18,7 @@
 // `CalendarSync` (calendar/calendar-sync.mjs) is a real cross-file import
 // forming a two-way ESM cycle with that module — CalendarSync's flush path
 // calls back into this file's `_dirtyIds`/`_forceIds`/`_snapToWorkingHours`/
-// `_saveCache`/`_relayDueDateCorrections` (see calendar/calendar-sync.mjs's
+// `_saveCache` (see calendar/calendar-sync.mjs's
 // header comment). Safe under the same rule used throughout this split:
 // every cross-reference is inside a method body invoked after both modules
 // finish loading, never at top-level evaluation. This dependency predates
@@ -1268,7 +1268,7 @@ export const Persistence = {
     // toLocalSeconds, not a raw Date: JSON.stringify would call Date.toISOString()
     // (UTC), but the orders read path emits bare naive strftime (no Z) which new
     // Date() parses as LOCAL — so a raw Date here round-trips shifted by the
-    // client's UTC offset for any non-UTC user. Mirrors _relayDueDateCorrections;
+    // client's UTC offset for any non-UTC user. The same rule covers every date-carrying field;
     // see Util.toLocalSeconds and _taskEditSnapshot above.
     const taskPayload = dirtyTasks.map(t => ({
       id: t.id,

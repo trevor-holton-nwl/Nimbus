@@ -647,6 +647,32 @@ Audit: Sonnet, report at `.superpowers/sdd/2026-10-13-backward-scheduling-implem
 | G-0.33 | App. A | "reversal leg is plant-zone" was wrong | only the backward walk is; forward leg naive, DST drift accepted | forward helpers untouched by design | none |
 | G-0.34 | 1.4 | OQ45 a per-upload counts (derived starts, repaired finishes, reversals) | Phase 1 shows the dropped-row counters only; derived/repaired counts are moot (no server derivation); reversal counts live in the 2.6/4.2 toast | nothing to count server-side | admin diagnostics |
 
+### Phase 1 — gap decisions (2026-10-14)
+
+Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`): every line that starts with `Task 1.N: gap filled:` or is a `Ruling:` for a Phase 1 task.
+
+| Task | Gap | Choice | Why |
+|---|---|---|---|
+| 1.5 | platform cannot import Store/Calendar | new DI seam Util.setDueCalendarResolver wired in app.js (rows from Store, rev = Store.rev()) | same pattern as the other four seams, no legacy-surface growth |
+| 1.5 | per-batch caching of the day window | per line+date cache invalidated on Store revision change | per-row callers stay O(1) with no staleness |
+| 1.5 | missing plant hours | use the line window alone (no default 7-19) | brief only defined the missing line calendar case (raw + 23:59:59) |
+| 1.5 | worker jointWindowForDay defaults missing calendars to 7-19 | separate ctx._dueWindow memo returning null for a missing line row | keeps worker and main thread consistent with ruling (b) |
+| 1.5 | dueTimestamp had no snapshot access | required DueScope {snapshot, plant?, ctx?} param at all 12 call sites | compiler-enforced, no module-level mutable state |
+| 1.5 | Engine.earliestAllowedStart/latestAllowedEnd | routed through the same dueInstant (sourceDueInstant) | otherwise Engine and worker bounds disagree and the tighter silently wins |
+| 1.5 | brief's "pristineOriginalStart cache restore (890-891)" is actually the cached original_end_date restore in _overlayUserMoves (pristineOriginalStart is the capture in the snap) | removed both | a stale cached due must not override the server's locked SAP finish |
+| 1.5 (Ruling) | optimizer pull-forward floor / push ceiling on a closed due day now follow the OQ23 window rule (Sunday due, N=0 → floor Fri 00:00, ceiling Sat 00:00) | accepted as the spec's consequence, optimizer-only, to be named in the Phase 1 gate report and the owner report | cost if wrong: optimizer places some orders one weekend earlier than before Phase 1 |
+| 1.6 | brief's "422-style" bulk rejection | reused the existing per-id envelope (invalid_ids + rejection_reasons[id]='run_time_over_cap', HTTP 200) | a 422 would reject the whole batch and the save path already renders rejection_reasons per id (toast needs no new key; ui.reject_run_time_over_cap added) |
+| 1.6 | migration split across two files in the 2026-09 pair | one file/one transaction (DROP + ADD NOT VALID + VALIDATE + ledger row) | widening cannot fail validation and a split would leave a window with no constraint |
+| 1.6 | releasing a queued over-cap order | added run_time_over_cap to the resolver's _is_routing_hold vocabulary and a symmetric release in the ingest queue step (never releases/overwrites another hold reason) | each run-time owner releases only its own reason |
+| 1.6 | row number for >=8760 rejection | check runs before date hygiene resets the index (row = index+2); also rejects negative/non-finite values | matches the Excel row the planner sees and those values would fail the chunk at the CHECK too |
+| 1.6 | running order over the cap | not queued (only when it holds a slot), counted as running_kept in the upload warning | honours the SAP-truth rule that an upload never un-schedules a running order |
+| 1.6 | localised reason label | reason JSON carries run_time/cap_hours and orders.mts renders planning_reason.run_time_over_cap via the locale for this code (server English message remains fallback) | same pattern as planner_unscheduled |
+| 1.6 | plant cap lookup in update_task_dates_bulk | lazy per-plant query (_plant_caps) instead of widening the locked eff-row SELECT | keeps fake-cursor tests that pin that row shape untouched |
+| 1.6 (Ruling, flagged) | whether a queued run_time_over_cap row can re-enter the schedule via a date-only edit/optimizer | owned by Phase 2 Task 2.5 (Needs Planning release path: run_time_over_cap releases through finishAnchoredPatchFor; queued rows are excluded from reconcile/optimizer intake); no Phase 1 action | cost if wrong: an over-cap row could be dragged back onto the Gantt before Phase 2 ships (planner-visible, reversible) |
+| 1.6 (Ruling) | migration header wording ('the brief for this task asked for exactly this') | reworded by Task 1.9 (docs/Haiku) together with the other durable-text nits | cost if wrong: none |
+| 1.7 | summary shape for skipped_unfirmed | build_outbound_groups now returns a 3-tuple (groups, skipped_no_end, skipped_unfirmed) and callers/tests updated | the pure function is the only place that knows which groups were dropped |
+| 1.7 | unit of skipped_unfirmed | counted per planned order (group), not per child row | matches "queued" semantics; firmed-but-no-end counts only in skipped_no_end |
+
 ### Phase gate reports
 
 _(appended at the end of each phase)_

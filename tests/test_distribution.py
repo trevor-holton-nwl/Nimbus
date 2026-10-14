@@ -4725,7 +4725,7 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
 
     def test_reweight_then_unchanged_dateonly_upload_resets_no_sibling(self, pg):
         """Date-only SAP finish Fri 23 Oct; NIMBUS then sent Wed 28 Oct and the stored header/child
-        basic_finish_date drifted (a client baseline-correct) so they differ from the SAP baseline. A planner
+        basic_finish_date drifted (a client due-date rewrite) so they differ from the SAP baseline. A planner
         re-weight must leave EVERY stored date and baseline alone (a planner SET of sap_basic_* from header
         facts would show here), and the next upload, SAP echoing the sent Wed 28 Oct date-only, must neither
         reset a sibling slot (it would without the echo rule: 28 Oct differs from the 23 Oct baseline) nor
@@ -4811,7 +4811,7 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         fri = dt.datetime(2026, 10, 23)
         start = dt.datetime(2026, 10, 21, 8, 0)
         self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
-        moved = dt.datetime(2026, 10, 27, 12, 0)     # what a client baseline-correct would leave behind
+        moved = dt.datetime(2026, 10, 27, 12, 0)     # what a client due-date rewrite would leave behind
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("UPDATE orders SET basic_finish_date = %s WHERE plant=%s AND parent_production_order=%s",
                         (moved, self.PLANT, self.ORD))

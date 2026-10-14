@@ -979,7 +979,7 @@ static import:
 - **`Persistence.setCalendarService({ beginRun, endRun, nextAvailable,
   workWindow })`** — an injected-callback seam replacing 5 direct
   `Calendar._beginRun`/`_endRun`/`nextAvailable`/`workWindow` calls inside
-  `Persistence._snapToWorkingHours`/`_dueEndOfShift`. Wired once in `app.js`
+  `Persistence._snapToWorkingHours` (its second caller, a due-end helper, was removed in Phase 1 of the backward-scheduling migration). Wired once in `app.js`
   boot glue immediately after the `schedule-services.mjs` bridge destructure
   resolves `Calendar`, using arrow-function wrappers (not bare method
   references) since `Calendar`'s methods read `this._runCache`/`_runBlocks`

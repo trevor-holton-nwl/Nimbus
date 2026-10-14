@@ -11,7 +11,8 @@
 --
 -- Widening a bound can never fail validation, so (unlike the 2026-09-25/26 pair) the NOT VALID add and
 -- the VALIDATE share this one file/transaction on purpose: splitting them would leave a window with
--- no constraint at all between the DROP and the ADD. The brief for this task asked for exactly this.
+-- no constraint at all between the DROP and the ADD. If `orders` grows large enough for the VALIDATE scan
+-- under that lock to matter, split the ADD and the VALIDATE into two files, as the 2026-09-25/26 pair does.
 --
 -- Mirrored by schema.sql under the ledger id 'orders_run_time_bounds_8760' so re-applying schema.sql
 -- to an already-initialised database raises the bound exactly once. The ledger row is also written

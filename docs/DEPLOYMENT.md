@@ -100,6 +100,12 @@ The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`
 6. **`apply_mode` defaults to `manual`**: each staging object's mode selector reads Manual (`GET /sap/interface/objects` shows `"apply_mode": "manual"` for all four). To switch an object to automatic apply, an admin changes the Manual / Automatic selector on that object in Admin > Interface (it posts `{"apply_mode": "auto"}` to `/sap/interface/config/{object}`); switch back the same way. Leave everything on manual until the first batches have been reviewed by hand.
 7. **Routing is ON and loaded before the first planned-order apply**: the plant has routing runtime switched on and routings loaded (Material Plant and Routing batches applied first). Otherwise the planned-order batch is held with `routing_required` (an admin cannot confirm that away).
 8. **`NIMBUS_SAP_SYSTEM_TZ` is set** to the value SAP Development confirmed. A wrong or invalid value shows as the warning `sap_system_tz_invalid` on every batch and refuses planned-order apply and Send to SAP.
+## Backward scheduling Phase 1 migrations (2026-10-15)
+
+`migrations/2026-10-15-1-orders-original-dates.sql` and `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` are destructive by text (`ALTER`, `UPDATE`, `DROP`, comments included). The runner blocks each one unless `-AllowDestructive` is passed, and that flag releases every pending destructive file in the folder the runner reads, so each file needs its own `-AllowDestructive` run. Before each run, read `migration_files_applied` and every pending file, and point the runner at a folder that holds only that run's file (`-MigrationsDir`). The owner runbook is in `docs/MIGRATION.md`, section "Backward scheduling — Phase 1 shipped / Phases 2–4 pending".
+
+The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps each row's xmin (the optimistic-concurrency `base_version`). Apply it at deploy time, never mid-shift, Planners must save before the run (an unsaved edit goes stale on its next save) and reload afterwards.
+
 ## Prerequisites
 
 - Azure CLI (`winget install --exact --id Microsoft.AzureCLI`), `az login`, and **Contributor on `rg-nimbus-dev`**.
