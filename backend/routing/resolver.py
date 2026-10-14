@@ -274,7 +274,13 @@ def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
     if pv_row is None:
         return {"ok": False, "step": "pv_not_found"}
 
-    if not _within_validity(order.get("basic_start_date"), pv_row.get("valid_from"), pv_row.get("valid_to")):
+    # Validity is judged on the SAP start as first received (locked; backward scheduling OQ26), never on
+    # `basic_start_date`, which an echo of NIMBUS's own send can move. A row dict without the locked value
+    # (a caller that predates it) falls back to `basic_start_date`.
+    validity_start = order.get("original_start_received")
+    if validity_start is None:
+        validity_start = order.get("basic_start_date")
+    if not _within_validity(validity_start, pv_row.get("valid_from"), pv_row.get("valid_to")):
         return {"ok": False, "step": "pv_expired"}
 
     machine = order.get("machine")
@@ -396,7 +402,7 @@ def resolve_one(order: dict, *, pv_lookup: dict, op_lookup: dict,
 # run_time to fall back to -- it either resolves via routing or it doesn't).
 # ===========================================================================
 def _check_eligibility_on_conn(plant: str, material_id: str, production_version,
-                               machine, order_quantity, sap_basic_start_date, conn,
+                               machine, order_quantity, original_start_date, conn,
                                cache: dict | None = None) -> dict:
     """Does the real work of `check_eligibility` on an already-open
     connection -- a pure read (reuses the SAME plant-reference-data loaders
@@ -420,7 +426,7 @@ def _check_eligibility_on_conn(plant: str, material_id: str, production_version,
         "production_version": production_version,
         "machine": machine,
         "order_quantity": order_quantity,
-        "basic_start_date": sap_basic_start_date,
+        "original_start_received": original_start_date,
     }
     steps = _resolve_steps(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
                            machine_workcenter=machine_workcenter, rules=rules)
@@ -430,7 +436,7 @@ def _check_eligibility_on_conn(plant: str, material_id: str, production_version,
 
 
 def check_eligibility(plant: str, material_id: str, production_version, machine,
-                      order_quantity, sap_basic_start_date, *, conn=None,
+                      order_quantity, original_start_date, *, conn=None,
                       cache: dict | None = None) -> dict:
     """§8.5's server-side eligibility check for a MACHINE/PRODUCTION_VERSION
     edit: runs the exact same §5.2 steps 1-8 `resolve_one` uses (via the
@@ -453,11 +459,11 @@ def check_eligibility(plant: str, material_id: str, production_version, machine,
     """
     if conn is not None:
         return _check_eligibility_on_conn(plant, material_id, production_version,
-                                          machine, order_quantity, sap_basic_start_date, conn,
+                                          machine, order_quantity, original_start_date, conn,
                                           cache)
     with _pool.connection() as new_conn:
         return _check_eligibility_on_conn(plant, material_id, production_version,
-                                          machine, order_quantity, sap_basic_start_date, new_conn)
+                                          machine, order_quantity, original_start_date, new_conn)
 
 
 # ===========================================================================
@@ -554,8 +560,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
     if full:
         cur.execute(
             "SELECT id, plant, material_number, production_version, machine, order_quantity,"
-            " basic_start_date, run_time, run_time_source, run_time_basis, machine_hours,"
-            " planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+            " basic_start_date, original_start_received, run_time, run_time_source, run_time_basis,"
+            " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
             " FROM orders WHERE plant = %s AND run_time_source IS DISTINCT FROM 'manual'",
             (plant,),
         )
@@ -563,8 +569,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
     cur.execute(
         "SELECT id, plant, material_number, production_version, machine, order_quantity,"
-        " basic_start_date, run_time, run_time_source, run_time_basis, machine_hours,"
-        " planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+        " basic_start_date, original_start_received, run_time, run_time_source, run_time_basis,"
+        " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
         " FROM orders"
         " WHERE plant = %s"
         "   AND run_time_source IS DISTINCT FROM 'manual'"

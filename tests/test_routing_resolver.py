@@ -670,3 +670,50 @@ class TestRunTimeCap:
                     planning_reason={"code": "planner_unscheduled", "message": "x"})
         report, _, holds = _run_cap_resolve(monkeypatch, [held], {"o1": _resolved(400.0)})
         assert holds == [] and "over_cap" not in report
+
+
+# ---------------------------------------------------------------------------
+# Backward scheduling OQ26: production-version validity is judged on the SAP start as FIRST received (the
+# locked `original_start_received`), never on `basic_start_date`, which an echo of NIMBUS's own send can move.
+# ---------------------------------------------------------------------------
+class TestValidityIsJudgedOnTheLockedSapStart:
+    PV = {("P", "M", "0001"): {"valid_from": dt.date(2026, 1, 1), "valid_to": dt.date(2026, 12, 31)}}
+
+    def _step(self, **dates):
+        from backend.routing.resolver import _resolve_steps
+        order = {"plant": "P", "material_number": "M", "production_version": "0001", **dates}   # no machine
+        result = _resolve_steps(order, pv_lookup=self.PV, op_lookup={}, machine_workcenter={}, rules={})
+        return result["step"]
+
+    def test_an_echo_that_moves_basic_start_date_does_not_change_validity(self):
+        inside, outside = dt.datetime(2026, 6, 1, 8), dt.datetime(2027, 3, 1, 8)
+        assert self._step(original_start_received=inside, basic_start_date=outside) == "no_machine"   # still valid
+        assert self._step(original_start_received=outside, basic_start_date=inside) == "pv_expired"
+
+    def test_a_row_without_the_locked_start_falls_back_to_basic_start_date(self):
+        assert self._step(basic_start_date=dt.datetime(2026, 6, 1, 8)) == "no_machine"
+        assert self._step(basic_start_date=dt.datetime(2027, 3, 1, 8)) == "pv_expired"
+
+    def test_check_eligibility_judges_the_start_it_is_given_as_the_locked_start(self):
+        case = _ELIGIBILITY_CASES["pv_expired_before_valid_from_falls_to_sap_order_fallback"]
+        order = case["order"]
+        pv = case["production_versions"][0]
+        inside = _parse_date(pv["valid_from"]) + dt.timedelta(days=1)
+        result = check_eligibility(order["plant"], order["material_number"], order["production_version"],
+                                   order["machine"], order["order_quantity"], inside,
+                                   conn=_FakeEligibilityConnection(case))
+        assert result.get("step") != "pv_expired"
+
+    def test_the_order_loaders_select_the_locked_start(self):
+        from backend.routing.resolver import _load_orders
+
+        class Cur:
+            def __init__(self): self.sql = []
+            description = [("id",)]
+            def execute(self, sql, params=None): self.sql.append(sql)
+            def fetchall(self): return []
+
+        for kwargs in ({"full": True}, {}):
+            cur = Cur()
+            _load_orders(cur, "P", False, **kwargs)
+            assert "original_start_received" in cur.sql[0]

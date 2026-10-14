@@ -2280,13 +2280,38 @@ class TestDistributionReadRoutes:
         assert row["child_count"] == 2
         assert row["sum_child_quantity"] == pytest.approx(100.0)
         assert len(row["children"]) == 2
-        # Child runtimes are 6/4 hours; the header runtime is 10. Alias
-        # qualification must retain child timing, never the header's finish.
+        # Backward scheduling: nobody has placed either child, so each reads the SAP finish it carries (the
+        # shared fragment's last arm), never start + its own run time (6 h / 4 h) and never the header's
+        # columns (the unqualified header-vs-orders rewrite of old broke on columns both tables have).
         assert row["start"] == "2026-10-01T08:00:00"
-        assert row["finish"] == "2026-10-01T14:00:00"
+        assert row["finish"] == "2026-10-01T18:00:00"
         assert {child["machine"]: child["end"] for child in row["children"]} == {
-            self.L1: "2026-10-01T14:00:00", self.L2: "2026-10-01T12:00:00",
+            self.L1: "2026-10-01T18:00:00", self.L2: "2026-10-01T18:00:00",
         }
+
+    def test_aggregate_reads_a_placed_childs_stored_finish_and_last_segment(self, client, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s"
+                        " WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                        (dt.datetime(2026, 10, 1, 9, 0), dt.datetime(2026, 10, 1, 17, 30),
+                         self.PLANT, self.ORD, self.L2))               # 4 h of work drawn over 8.5 h
+            conn.commit()
+        rows = client.get(f"/distribution/{self.PLANT}/aggregate", params={"workcenter": self.WC}).json()["data"]
+        ends = {child["machine"]: child["end"] for child in rows[0]["children"]}
+        assert ends[self.L2] == "2026-10-01T17:30:00" and ends[self.L1] == "2026-10-01T18:00:00"
+        assert rows[0]["finish"] == "2026-10-01T18:00:00"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM orders WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                        (self.PLANT, self.ORD, self.L2))
+            oid = cur.fetchone()[0]
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                        " VALUES (%s, 1, %s, %s), (%s, 2, %s, %s)",
+                        (oid, dt.datetime(2026, 10, 1, 9, 0), dt.datetime(2026, 10, 1, 11, 0),
+                         oid, dt.datetime(2026, 10, 2, 9, 0), dt.datetime(2026, 10, 2, 11, 0)))
+            conn.commit()
+        rows = client.get(f"/distribution/{self.PLANT}/aggregate", params={"workcenter": self.WC}).json()["data"]
+        ends = {child["machine"]: child["end"] for child in rows[0]["children"]}
+        assert ends[self.L2] == "2026-10-02T11:00:00" and rows[0]["finish"] == "2026-10-02T11:00:00"
 
     def test_aggregate_csv_export(self, client):
         response = client.get(f"/distribution/{self.PLANT}/aggregate",

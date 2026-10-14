@@ -395,6 +395,36 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
                 conn.commit()
 
+    def test_conflict_scan_judges_overlap_on_the_stored_finish_not_start_plus_run_time(self, pg):
+        """Backward scheduling: a placed order whose stored finish is far past start + run time (a short
+        run time drawn over a long window) is found, because the scan reads the stored finish."""
+        db_ = pg
+        long_id = db_.make_id(self.ORDER + "_STORED", self.MATERIAL)
+        long_start = self.start - dt.timedelta(days=2)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " basic_start_date, basic_finish_date, scheduled_start, scheduled_end, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,2)",
+                (long_id, self.ORDER + "_STORED", self.MATERIAL, self.MACHINE, self.PLANT,
+                 long_start, long_start + dt.timedelta(hours=2),
+                 long_start, long_start + dt.timedelta(days=3)),       # stored finish reaches into the window
+            )
+            conn.commit()
+        try:
+            base = self._current_version(db_)
+            new_start = self.start + dt.timedelta(hours=7)
+            result = db_.update_task_dates_bulk([
+                {"id": self.oid, "start": new_start, "end": new_start + dt.timedelta(hours=2), "base_version": base},
+            ])
+            pairs = {frozenset((c["order_a"], c["order_b"])) for c in result["conflicts"]}
+            assert frozenset((self.oid, long_id)) in pairs
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
+                conn.commit()
+
     @staticmethod
     def _wait_for_advisory_wait(db_, timeout=10.0):
         """Poll pg_locks until a backend is blocked on an advisory lock."""
@@ -441,6 +471,106 @@ class TestUpdateTaskDatesBulkXminConflict:
         t.join(10)
         assert done.is_set()
         assert not errors, errors
+
+
+# ---------------------------------------------------------------------------
+# Backward scheduling Task 2.2: the stored finish is the order's finish on every read path.
+# ---------------------------------------------------------------------------
+@pytest.mark.pg
+class TestStoredFinishReadRule:
+    PLANT = "ZZTEST_RR_PLANT"
+    MACHINE = "ZZTEST_RR_LINE"
+    T0 = dt.datetime(2031, 3, 3, 6, 0)
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, pg):
+        self.db = pg
+        self._wipe()
+        yield
+        self._wipe()
+
+    def _wipe(self):
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
+            conn.commit()
+
+    def _seed(self, name, *, start=None, end=None, run_time=None, due=None, sap_start=None, status="scheduled",
+              segments=()):
+        sap_start = sap_start or self.T0
+        due = due or self.T0 + dt.timedelta(hours=60)
+        oid = self.db.make_id("ZZTEST_RR_" + name, "ZZTEST_RR_MAT")
+        reason = '{"code": "t", "message": "t"}' if status == "needs_planning" else None
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, original_start_received, original_finish_received, scheduled_start,"
+                " scheduled_end, run_time, planning_status, planning_reason)"
+                " VALUES (%s,%s,'ZZTEST_RR_MAT',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                (oid, "ZZTEST_RR_" + name, self.MACHINE, self.PLANT, sap_start, due, sap_start, due,
+                 start, end, run_time, status, reason))
+            for n, (s0, e0) in enumerate(segments, 1):
+                cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start,"
+                            " scheduled_end) VALUES (%s,%s,%s,%s)", (oid, n, s0, e0))
+            conn.commit()
+        return oid
+
+    def _read(self, oid):
+        df, _h, _f = self.db.query_orders(plant=self.PLANT)
+        row = df[df["id"] == oid].iloc[0]
+        ver = self.db.get_task_versions([oid])[0]
+        return row, ver
+
+    @staticmethod
+    def _iso(t):
+        return t.strftime("%Y-%m-%dT%H:%M:%S")
+
+    def test_a_placed_orders_finish_is_its_stored_scheduled_end_whatever_the_run_time(self):
+        start, end = self.T0 + dt.timedelta(days=1), self.T0 + dt.timedelta(days=1, hours=30)
+        oid = self._seed("PLACED", start=start, end=end, run_time=2)         # 2 h of work drawn over 30 h
+        row, ver = self._read(oid)
+        assert row["BASIC_START_DATE"] == start and row["BASIC_FINISH_DATE"] == end
+        assert ver["start_date"] == self._iso(start) and ver["end_date"] == self._iso(end)
+        with self.db._pool.connection() as conn, conn.cursor() as cur:       # a run-time change cannot move it
+            cur.execute("UPDATE orders SET run_time = 20 WHERE id = %s", (oid,))
+            conn.commit()
+        row, ver = self._read(oid)
+        assert row["BASIC_FINISH_DATE"] == end and ver["end_date"] == self._iso(end)
+
+    def test_a_never_placed_orders_finish_is_its_original_end_date(self):
+        due = self.T0 + dt.timedelta(hours=60)
+        oid = self._seed("NEVER", run_time=5, due=due)
+        row, ver = self._read(oid)
+        assert row["BASIC_FINISH_DATE"] == row["ORIGINAL_END_DATE"] == due
+        assert ver["end_date"] == ver["original_end_date"] == self._iso(due)
+        assert row["BASIC_START_DATE"] == self.T0 and bool(row["USER_SCHEDULED"]) is False
+
+    def test_the_last_segment_end_wins_over_the_parent_columns(self):
+        a0, a1 = self.T0 + dt.timedelta(days=2), self.T0 + dt.timedelta(days=2, hours=3)
+        b0, b1 = self.T0 + dt.timedelta(days=3), self.T0 + dt.timedelta(days=3, hours=4)
+        oid = self._seed("SEG", start=a0, end=a1, run_time=7, segments=[(a0, a1), (b0, b1)])
+        row, ver = self._read(oid)
+        assert row["BASIC_START_DATE"] == a0 and row["BASIC_FINISH_DATE"] == b1
+        assert ver["end_date"] == self._iso(b1)
+
+    def test_a_queued_order_has_no_start_or_finish(self):
+        oid = self._seed("QUEUED", run_time=4, status="needs_planning")
+        row, ver = self._read(oid)
+        assert row["BASIC_START_DATE"] is None or str(row["BASIC_START_DATE"]) == "NaT"
+        assert ver["start_date"] is None and ver["end_date"] is None
+
+    def test_diagnostics_range_and_purge_selector_read_the_locked_finish(self):
+        """The purge selector and its preview count read the stored finish, then the locked SAP finish
+        (segments are not joined there), then basic_finish_date."""
+        placed = self._seed("P_PLACED", start=self.T0, end=self.T0 + dt.timedelta(hours=4), run_time=2)
+        never = self._seed("P_NEVER", run_time=2)                            # finish = original_finish_received
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET basic_finish_date = %s WHERE id = %s",
+                        (self.T0 + dt.timedelta(days=400), never))            # an echo moved the planning copy
+            conn.commit()
+        window = (self.T0 + dt.timedelta(hours=50), self.T0 + dt.timedelta(hours=70))   # holds only the due date
+        assert self.db.preview_purge_orders(self.PLANT, *window)["total"] == 1
+        assert self.db.preview_purge_orders(self.PLANT, self.T0, self.T0 + dt.timedelta(hours=5))["total"] == 1
+        assert placed and never
 
 
 # ---------------------------------------------------------------------------
@@ -532,8 +662,10 @@ class TestBrowserSavePayloadCrossSeam:
             assert cur.fetchone()[0] == len(sent["schedule_segments"])
 
 
-def test_conflict_scan_lookback_query_is_bounded_by_eff_start_range():
-    """Review round: the MAX(run_time) lookback must not scan a machine's whole history."""
+def test_conflict_scan_lookback_is_the_fixed_30_day_cap_and_reads_the_stored_finish():
+    """Backward scheduling OQ27 (e): the start-indexed lookback is the fixed 30-day cap (no MAX(run_time)
+    sizing query any more: a bar's drawn span is no longer start + run time), still bounded by the eff-start
+    range (idx_orders_machine_eff_start), and the overlap test reads the shared end fragment."""
     import datetime as _dt
     import db as db_
 
@@ -547,7 +679,10 @@ def test_conflict_scan_lookback_query_is_bounded_by_eff_start_range():
     t0 = _dt.datetime(2026, 10, 1, 8)
     rows = [{"id": "A", "moved": True, "queued": False, "machine": "M1", "start": t0, "end": t0 + _dt.timedelta(hours=2)}]
     db_._scan_conflicts_for_rows(cur, rows, {"A": {"plant": "1006", "start": t0, "end": t0}})
+    assert len(cur.q) == 1, "one scan query, no run-time lookback sizing query"
     sql, params = cur.q[0]
-    assert "MAX(run_time)" in sql and "BETWEEN" in sql and "COALESCE(scheduled_start, basic_start_date)" in sql
+    assert "MAX(run_time)" not in sql and "INTERVAL" not in sql
+    assert "BETWEEN" in sql and "COALESCE(o.scheduled_start, o.basic_start_date)" in sql
+    assert db_._EFF_END_SQL in sql and "seg.last_end" in sql
     lo, hi = params[2], params[3]
     assert lo == t0 - _dt.timedelta(days=1) - _dt.timedelta(days=30) and hi == t0 + _dt.timedelta(hours=2) + _dt.timedelta(days=1)

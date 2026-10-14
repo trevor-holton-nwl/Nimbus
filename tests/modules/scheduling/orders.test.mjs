@@ -54,6 +54,25 @@ test('Needs Planning filter retains queued demand within selected machines and e
   } finally { Table._chipFilters = prior; }
 });
 
+test('the visibility-horizon row filter reads the SAP start as first received, never the placed start', () => {
+  const priorHorizon = Store.visibilityHorizonEnd;
+  const priorFilters = Table._chipFilters;
+  try {
+    Store.setVisibilityHorizonEnd(new Date('2026-10-01T00:00:00'), 'unit-test');
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() };
+    const base = { id: 'h', MACHINE: 'L1', planning_status: 'scheduled' };
+    // placed far beyond the horizon, but SAP starts inside it: still shown
+    assert.equal(Table._taskPassesChipFilters({ ...base, start_date: new Date('2026-12-01T08:00:00'),
+      BASIC_START_DATE: new Date('2026-09-20T00:00:00') }), true);
+    // placed inside the horizon, but SAP's start is beyond it: hidden (the server hides it too)
+    assert.equal(Table._taskPassesChipFilters({ ...base, start_date: new Date('2026-09-20T08:00:00'),
+      BASIC_START_DATE: new Date('2026-12-01T00:00:00') }), false);
+    // no raw copy: the wire original_start_date is the key
+    assert.equal(Table._taskPassesChipFilters({ ...base, start_date: new Date('2026-09-20T08:00:00'),
+      original_start_date: new Date('2026-12-01T00:00:00') }), false);
+  } finally { Store.setVisibilityHorizonEnd(priorHorizon, 'unit-test'); Table._chipFilters = priorFilters; }
+});
+
 test('queued demand has no scheduled finish and overdue queue remains in delivery lateness', () => {
   const due = new Date(Date.now() - 48 * 3600000);
   const queued = { id: 'q', planning_status: 'needs_planning', start_date: null, end_date: null, original_end_date: due };

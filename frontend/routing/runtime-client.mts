@@ -189,6 +189,10 @@ export const Runtime = {
     const pvRow = map.pv[`${material}|${pvValue}`];
     if (!pvRow) return { ok: false, step: 'pv_not_found' };
 
+    // Validity is judged on the SAP start as first received (backward scheduling OQ26), the same
+    // date the server's check reads: BASIC_START_DATE is the raw, un-snapped copy of the wire
+    // `original_start_date` (the locked value), never the placed `start_date` and never the
+    // calendar-snapped `original_start_date` display baseline.
     const startDate = _asDate(task.BASIC_START_DATE === undefined ? task.original_start_date : task.BASIC_START_DATE);
     if (startDate && !_withinValidity(startDate, pvRow.valid_from, pvRow.valid_to)) {
       return { ok: false, step: 'pv_expired' };

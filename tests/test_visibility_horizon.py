@@ -85,6 +85,7 @@ class TestQueryAndCountAgreeUnderHorizonBound:
     ORD_INSIDE, MAT_INSIDE = "ZZTEST_ORD_C1_IN", "ZZTEST_MAT_C1_IN"
     ORD_OUTSIDE, MAT_OUTSIDE = "ZZTEST_ORD_C1_OUT", "ZZTEST_MAT_C1_OUT"
     ORD_SEG, MAT_SEG = "ZZTEST_ORD_C1_SEG", "ZZTEST_MAT_C1_SEG"
+    ORD_LOCK, MAT_LOCK = "ZZTEST_ORD_C1_LOCK", "ZZTEST_MAT_C1_LOCK"
 
     @pytest.fixture(autouse=True)
     def _seed(self, pg):
@@ -93,6 +94,7 @@ class TestQueryAndCountAgreeUnderHorizonBound:
         oid_in = db_.make_id(self.ORD_INSIDE, self.MAT_INSIDE)
         oid_out = db_.make_id(self.ORD_OUTSIDE, self.MAT_OUTSIDE)
         oid_seg = db_.make_id(self.ORD_SEG, self.MAT_SEG)
+        oid_lock = db_.make_id(self.ORD_LOCK, self.MAT_LOCK)
 
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
@@ -103,7 +105,7 @@ class TestQueryAndCountAgreeUnderHorizonBound:
                 "horizon_roll_hour_utc = EXCLUDED.horizon_roll_hour_utc",
                 (self.SUBNETWORK, self.PLANT, self.HORIZON_DAYS, self.ROLL_HOUR),
             )
-            for oid in (oid_in, oid_out, oid_seg):
+            for oid in (oid_in, oid_out, oid_seg, oid_lock):
                 cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
             # Clearly inside the (today+1)..(today+1+HORIZON_DAYS) window.
             cur.execute(
@@ -119,10 +121,9 @@ class TestQueryAndCountAgreeUnderHorizonBound:
                 (oid_out, self.ORD_OUTSIDE, self.MAT_OUTSIDE, self.MACHINE, self.PLANT,
                  now + dt.timedelta(days=10)),
             )
-            # basic_start_date alone LOOKS inside the horizon (same as oid_in), but
-            # its only schedule segment starts well beyond it -- this order must be
-            # excluded via the segments-aware three-way coalesce, not the two-way
-            # COALESCE(scheduled_start, basic_start_date) shortcut (OD-C1b).
+            # Visibility is judged on SAP's start as received (OQ27), never on where a planner
+            # placed the order: this one's only schedule segment starts well beyond the horizon, but
+            # its SAP start is inside, so it stays visible.
             cur.execute(
                 "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date) "
                 "VALUES (%s,%s,%s,%s,%s,%s)",
@@ -134,10 +135,18 @@ class TestQueryAndCountAgreeUnderHorizonBound:
                 "VALUES (%s, 1, %s, %s)",
                 (oid_seg, now + dt.timedelta(days=10), now + dt.timedelta(days=10, hours=4)),
             )
+            # An echo moved basic_start_date inside the horizon, but the LOCKED SAP start (what SAP first
+            # sent) is beyond it: the locked value decides, so the order is hidden.
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " original_start_received) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (oid_lock, self.ORD_LOCK, self.MAT_LOCK, self.MACHINE, self.PLANT,
+                 now + dt.timedelta(days=1), now + dt.timedelta(days=10)),
+            )
             conn.commit()
         yield
         with db_._pool.connection() as conn, conn.cursor() as cur:
-            for oid in (oid_in, oid_out, oid_seg):
+            for oid in (oid_in, oid_out, oid_seg, oid_lock):
                 cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
             cur.execute("DELETE FROM plants WHERE subnetwork = %s AND plant = %s",
                         (self.SUBNETWORK, self.PLANT))
@@ -163,7 +172,9 @@ class TestQueryAndCountAgreeUnderHorizonBound:
         oid_in = db_.make_id(self.ORD_INSIDE, self.MAT_INSIDE)
         oid_out = db_.make_id(self.ORD_OUTSIDE, self.MAT_OUTSIDE)
         oid_seg = db_.make_id(self.ORD_SEG, self.MAT_SEG)
+        oid_lock = db_.make_id(self.ORD_LOCK, self.MAT_LOCK)
         assert oid_in in ids
         assert oid_out not in ids
-        assert oid_seg not in ids  # excluded via seg.first_start, not basic_start_date
-        assert db_.count_orders(plant=self.PLANT) == 1  # exactly oid_in survives
+        assert oid_seg in ids      # a placement beyond the horizon never hides an order SAP starts inside it
+        assert oid_lock not in ids  # judged on the locked SAP start, not the echoed basic_start_date
+        assert db_.count_orders(plant=self.PLANT) == 2  # oid_in and oid_seg survive

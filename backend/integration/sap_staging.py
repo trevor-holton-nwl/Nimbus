@@ -710,7 +710,9 @@ def _write_row_results(cur, table: str, results: list[dict], resolved_cols: tupl
 
 
 def _in_horizon_predicate() -> str:
-    return "COALESCE(sap_basic_start_date, basic_start_date) <= %s"
+    """The vanish key (backward scheduling OQ26/OQ27): the SAP start as first received, locked against
+    echoes. Callers alias `orders` as `o`."""
+    return db._SAP_START_RECEIVED_SQL + " <= %s"
 
 
 def _absent_predicate(column: str, values) -> tuple[str, tuple]:
@@ -747,7 +749,7 @@ def _planned_order_gates(cur, plant: str, order_numbers: set) -> tuple[dict, lis
         absent_sql, absent_params = _absent_predicate("COALESCE(parent_production_order, production_order)",
                                                       order_numbers)
         cur.execute(
-            f"SELECT count(*), count(*) FILTER (WHERE {absent_sql}) FROM orders WHERE plant = %s AND "
+            f"SELECT count(*), count(*) FILTER (WHERE {absent_sql}) FROM orders o WHERE plant = %s AND "
             + _in_horizon_predicate(),
             (*absent_params, plant, bound))
         live, cand = (int(x or 0) for x in cur.fetchone())
@@ -772,7 +774,7 @@ def _vanish_candidates(cur, plant: str, order_numbers: set, visibility_end: date
     absent_sql, absent_params = _absent_predicate("COALESCE(parent_production_order, production_order)",
                                                   order_numbers)
     cur.execute(
-        "SELECT id, parent_production_order FROM orders WHERE plant = %s AND " + _in_horizon_predicate()
+        "SELECT id, parent_production_order FROM orders o WHERE plant = %s AND " + _in_horizon_predicate()
         + f" AND {absent_sql}",
         (plant, bound, *absent_params))
     cand = cur.fetchall()
@@ -1821,7 +1823,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
             ids = reviewed
         if visibility_end is not None:
             bound = visibility_end + timedelta(days=1)
-            cur.execute("SELECT count(*) FROM orders WHERE plant = %s AND " + _in_horizon_predicate(),
+            cur.execute("SELECT count(*) FROM orders o WHERE plant = %s AND " + _in_horizon_predicate(),
                         (plant, bound))
             info["in_horizon_live"] = int(cur.fetchone()[0])
     conn.commit()
@@ -2215,11 +2217,11 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
 
 def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
     cur.execute(
-        "SELECT id, production_order, parent_production_order, material_number, manual_firmed,"
-        " firming_indicator, production_version, planning_status,"
-        " COALESCE(seg.first_start, scheduled_start, basic_start_date),"
-        " COALESCE(seg.last_end, " + db._EFF_END_WITH_RUNTIME_MISMATCH_SQL + ")"      # the Gantt's effective end (M3)
-        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE plant = %s ORDER BY id", (plant,))
+        "SELECT o.id, o.production_order, o.parent_production_order, o.material_number, o.manual_firmed,"
+        " o.firming_indicator, o.production_version, o.planning_status,"
+        " " + db._EFF_START_SQL + ","          # first segment, else the stored start, else the SAP start
+        " " + db._EFF_END_SQL +                # the stored finish: what Send transmits (backward scheduling)
+        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE o.plant = %s ORDER BY o.id", (plant,))
     names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",
              "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end")
     return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]

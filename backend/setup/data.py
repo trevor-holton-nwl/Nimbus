@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg.types.json import Jsonb
 
-from db import _pool
+from db import _pool, _EFF_END_SQL, _EFF_START_SQL, _SCHEDULE_SEGMENTS_LATERAL_SQL
 from master_data import CONFIGURABLE_PRIORITY_FIELDS, RANKABLE_FIELDS
 
 
@@ -493,22 +493,16 @@ def derive_machine_state_before_replacement(plant, machine, *, captured_at: date
             conn.commit()
             return {"plant": plant, "machine": machine, "accepted": False, "reason": "no_definition"}
         captured_local = _plant_local_capture(cur, plant, captured_at)
+        # The finish is the shared stored-finish fragment (last segment, stored end, locked SAP finish);
+        # never start + run time. A Needs Planning order has no window, so it never "completed".
         cur.execute(
-            """SELECT o.id, o.color, o.prt_01, o.prt_02, o.production_version,
-                      COALESCE(seg.last_end,
-                        COALESCE(o.scheduled_start, o.basic_start_date)
-                          + (o.run_time * INTERVAL '1 hour'),
-                        o.scheduled_end, o.basic_finish_date) AS completed_at
+            f"""SELECT o.id, o.color, o.prt_01, o.prt_02, o.production_version,
+                      {_EFF_END_SQL} AS completed_at
                  FROM orders o
-                 LEFT JOIN LATERAL (
-                    SELECT MAX(scheduled_end) AS last_end FROM order_schedule_segments
-                    WHERE order_id = o.id
-                 ) seg ON TRUE
+                 {_SCHEDULE_SEGMENTS_LATERAL_SQL}
                 WHERE o.plant = %s AND o.machine = %s
-                  AND COALESCE(seg.last_end,
-                        COALESCE(o.scheduled_start, o.basic_start_date)
-                          + (o.run_time * INTERVAL '1 hour'),
-                        o.scheduled_end, o.basic_finish_date) <= %s
+                  AND o.planning_status <> 'needs_planning'
+                  AND {_EFF_END_SQL} <= %s
                 ORDER BY completed_at DESC, o.id DESC LIMIT 1""",
             (plant, machine, captured_local),
         )
@@ -990,11 +984,12 @@ def _load_setup_coverage(cur, plant: str) -> dict:
     columns = [RANKABLE_FIELDS[field]["orders_column"] for field in definition["fields"]]
     select_attributes = ", ".join(columns)
     cur.execute(
-        f"""SELECT machine, COALESCE(scheduled_start, basic_start_date),
+        f"""SELECT o.machine, {_EFF_START_SQL},
                    {select_attributes}
-              FROM orders
-             WHERE plant = %s AND machine IS NOT NULL
-             ORDER BY machine, COALESCE(scheduled_start, basic_start_date), id""",
+              FROM orders o
+              {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+             WHERE o.plant = %s AND o.machine IS NOT NULL
+             ORDER BY o.machine, {_EFF_START_SQL}, o.id""",
         (plant,),
     )
     by_machine: dict[str, list[list[dict[str, str]]]] = {}

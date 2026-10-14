@@ -763,8 +763,12 @@ export const Table = {
     // suspenders — db.query_orders already excludes these rows from the
     // /tasks payload server-side, so this only matters if a cached/stale
     // payload briefly disagrees; it must never be the ONLY thing hiding them.
+    // Backward scheduling (OQ27): the key is the SAP start as first received (the locked
+    // wire `original_start_date`, kept un-snapped in BASIC_START_DATE), never where a planner
+    // placed the order, so it matches the server's key exactly.
     const horizonEnd = Store.visibilityHorizonEnd;
-    if (horizonEnd && data.start_date && data.start_date.getTime() > horizonEnd.getTime()) return false;
+    const sapStart = data.BASIC_START_DATE ?? data.original_start_date;
+    if (horizonEnd && sapStart && sapStart.getTime() > horizonEnd.getTime()) return false;
     if (f.status) {
       if (f.status === 'needs_planning' && data.planning_status !== 'needs_planning') return false;
       if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;

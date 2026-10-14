@@ -16,7 +16,7 @@ import os
 import sys
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -573,10 +573,14 @@ def test_header_dict_hides_the_stored_deletion_key_list():
     assert d["counts"] == {"vanish_candidates": 2}
 
 
-def test_outbound_candidate_rows_use_the_gantt_effective_end():
+def test_outbound_candidate_rows_read_the_shared_stored_finish_not_start_plus_run_time():
+    """Backward scheduling: what Send transmits is the order's stored finish (last segment, stored end, locked
+    SAP finish), the same fragment the Gantt reads; the start is the first segment, else the stored start."""
     cur = _RecCursor()
     st._outbound_candidate_rows(cur, "ZZP1")
-    assert "runtime_schedule_mismatch" in cur.executed[0][0]
+    sql = cur.executed[0][0]
+    assert st.db._EFF_END_SQL in sql and st.db._EFF_START_SQL in sql
+    assert "INTERVAL" not in sql and "run_time" not in sql
 
 
 # ===========================================================================
@@ -833,6 +837,28 @@ def test_planned_order_apply_holds_at_over_25_percent_then_confirm_archives_and_
 
 
 @pytest.mark.pg
+def test_vanish_key_is_the_locked_sap_start_not_the_echoed_planning_copy(pg, stg_plant):
+    """Backward scheduling OQ26/OQ27: the in-horizon (vanish) key reads the start SAP first sent, so an echo that
+    moved `basic_start_date` or `sap_basic_start_date` never moves an order across the horizon."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    soon, far = now + timedelta(days=1), now + timedelta(days=200)
+    with _conn(pg) as (conn, cur):
+        for oid, basic, sap_basic, locked in (
+                ("zzstg-vk-in", soon, soon, soon),            # locked start inside -> a vanish candidate
+                ("zzstg-vk-echo-out", soon, soon, far),       # echo pulled the planning copy in; locked start is out
+                ("zzstg-vk-echo-in", far, far, soon)):        # echo pushed the planning copy out; locked start is in
+            cur.execute("INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
+                        " basic_finish_date, sap_basic_start_date, original_start_received)"
+                        " VALUES (%s, %s, '777', %s, %s, %s, %s, %s)",
+                        (oid, oid.upper(), PLANT, basic, basic + timedelta(hours=4), sap_basic, locked))
+        conn.commit()
+    with _conn(pg) as (_c, cur):
+        visibility_end, _frozen = pg._horizon_bounds_for_plant(cur, PLANT)
+        assert sorted(st._vanish_candidates(cur, PLANT, set(), visibility_end)) == ["zzstg-vk-echo-in", "zzstg-vk-in"]
+
+
+@pytest.mark.pg
 def test_poll_once_supersedes_older_ready_batches(pg, stg_plant):
     row = {"matnr": "12345", "werks": PLANT}
     old = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=30)
@@ -856,10 +882,12 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         queued = status == "needs_planning"          # orders_planning_state_check: queued = no slot + an object reason
         cur.execute(
             "INSERT INTO orders (id, production_order, material_number, plant, parent_production_order,"
-            " basic_start_date, basic_finish_date, scheduled_start, run_time, planning_status, planning_reason,"
-            " production_version) VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, %s, 'V1')",
+            " basic_start_date, basic_finish_date, scheduled_start, scheduled_end, run_time, planning_status,"
+            " planning_reason, production_version) VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, %s, %s, 'V1')",
+            # the STORED finish (start + 3 h) differs from start + run_time (2 h): Send reads the stored one
             (oid, po, PLANT, parent, start if with_dates else None, start + timedelta(hours=2) if with_dates else None,
-             start if with_dates and not queued else None, run_time if with_dates else None, status,
+             start if with_dates and not queued else None, start + timedelta(hours=3) if with_dates and not queued else None,
+             run_time if with_dates else None, status,
              Jsonb({"code": "test", "message": "test"}) if queued else None))
 
     with _conn(pg) as (conn, cur):
@@ -885,7 +913,7 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         rows = {r["plnum"]: r for r in st.outbound_rows(PLANT)}
         assert sorted(rows) == ["P1", "PAR1"] and all(r["row_status"] == "ready" for r in rows.values())
         assert rows["PAR1"]["auffx"] == "X" and rows["P1"]["auffx"] == "X"
-        child_end = t0 + timedelta(days=1, hours=2)
+        child_end = t0 + timedelta(days=1, hours=3)
         d, t = st.plant_local_to_sap(child_end, "UTC")
         assert rows["PAR1"]["pedtr"] == d.isoformat() and rows["PAR1"]["pedti"] == t.isoformat()
         assert st.outbound_status(PLANT)["ready"] == 2
@@ -897,7 +925,7 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
             sent = {r[0]: r[1:] for r in cur.fetchall()}
         assert sent["zzstg-c1"] == (child_end, "V1", True, True)         # children remember the rolled-up end
         assert sent["zzstg-c2"] == (child_end, "V1", True, True)
-        assert sent["zzstg-p1"] == (t0 + timedelta(hours=2), "V1", True, True)
+        assert sent["zzstg-p1"] == (t0 + timedelta(hours=3), "V1", True, True)
         assert sent["zzstg-np"][0] is None and sent["zzstg-nd"][0] is None
         assert sent["zzstg-uf"][0] is None                                # the unfirmed order was not sent, so nothing is remembered
 
@@ -1050,20 +1078,21 @@ def test_resume_of_an_errored_planned_order_batch_reruns_the_gates(pg, stg_plant
 
 
 @pytest.mark.pg
-def test_send_uses_the_runtime_mismatch_effective_end(pg, stg_plant):
+@pytest.mark.parametrize("mismatch", [True, False])
+def test_send_transmits_the_stored_finish_whatever_the_run_time_or_mismatch_flag(pg, stg_plant, mismatch):
     _set_plant(pg, routing=False, horizon_days=None)
     t0 = datetime(2030, 1, 10, 6, 0)
     with _conn(pg) as (conn, cur):
         cur.execute(
             "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date, basic_finish_date,"
             " scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch, planning_status, manual_firmed)"
-            " VALUES ('zzstg-rm', 'RM1', '777', %s, %s, %s, %s, %s, 2, TRUE, 'scheduled', TRUE)",
-            (PLANT, t0, t0 + timedelta(hours=9), t0, t0 + timedelta(hours=9)))
+            " VALUES ('zzstg-rm', 'RM1', '777', %s, %s, %s, %s, %s, 2, %s, 'scheduled', TRUE)",
+            (PLANT, t0, t0 + timedelta(hours=9), t0, t0 + timedelta(hours=9), mismatch))
         conn.commit()
     try:
         st.queue_send_to_sap(PLANT, actor="pytest")
         row = st.outbound_rows(PLANT)[0]
-        d, t = st.plant_local_to_sap(t0 + timedelta(hours=9), "UTC")       # the retained scheduled end, not start+run_time
+        d, t = st.plant_local_to_sap(t0 + timedelta(hours=9), "UTC")       # the stored finish, not start+run_time
         assert (row["pedtr"], row["pedti"]) == (d.isoformat(), t.isoformat())
     finally:
         with _conn(pg) as (conn, cur):

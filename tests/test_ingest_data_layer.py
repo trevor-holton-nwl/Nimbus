@@ -1512,3 +1512,64 @@ class TestRunTimeCapIngestRealDb:
         msgs = [w["msg"] for w in res["warnings"] if w.get("level") == "error"]
         # H2 is the second data row = spreadsheet row 3 (the header is row 1).
         assert any(m.startswith("Row 3") and "H2" in m and "8,760" in m for m in msgs), msgs
+
+
+class TestOrderIsRunningOnStoredEdges:
+    """Backward scheduling (Task 2.2): "running" is judged on STORED edges only -- the first and last segment,
+    else the stored start and end -- never on the SAP dates or start + run time. A never-placed order is never
+    running, even when its SAP window covers now."""
+    NOW = dt.datetime(2026, 10, 20, 12, 0)
+    H = dt.timedelta(hours=1)
+
+    def _running(self, **b):
+        import db
+        return db._order_is_running({"planning_status": "scheduled", **b}, self.NOW)
+
+    def test_a_never_placed_order_is_never_running_even_when_the_sap_window_covers_now(self):
+        assert self._running(basic_start_date=self.NOW - 2 * self.H, basic_finish_date=self.NOW + 6 * self.H,
+                             run_time=8) is False
+
+    def test_stored_start_and_end_that_bracket_now_is_running(self):
+        assert self._running(scheduled_start=self.NOW - self.H, scheduled_end=self.NOW + self.H) is True
+
+    def test_the_stored_end_decides_not_start_plus_run_time(self):
+        # start + run_time (1 h) is long past, but the stored finish is still ahead: running.
+        assert self._running(scheduled_start=self.NOW - 3 * self.H, scheduled_end=self.NOW + 2 * self.H,
+                             run_time=1) is True
+        # start + run_time (10 h) reaches past now, but the stored finish is behind: finished.
+        assert self._running(scheduled_start=self.NOW - 3 * self.H, scheduled_end=self.NOW - self.H,
+                             run_time=10) is False
+
+    def test_first_and_last_segment_win_over_the_parent_columns(self):
+        assert self._running(first_start=self.NOW - self.H, last_end=self.NOW + self.H,
+                             scheduled_start=self.NOW + 5 * self.H, scheduled_end=self.NOW + 9 * self.H) is True
+
+    def test_one_stored_edge_alone_is_not_running(self):
+        assert self._running(scheduled_start=self.NOW - self.H, basic_finish_date=self.NOW + self.H) is False
+        assert self._running(scheduled_end=self.NOW + self.H, basic_start_date=self.NOW - self.H) is False
+
+    def test_needs_planning_is_never_running(self):
+        import db
+        assert db._order_is_running({"planning_status": "needs_planning", "scheduled_start": self.NOW - self.H,
+                                     "scheduled_end": self.NOW + self.H}, self.NOW) is False
+
+
+class TestDuplicateIdSortKeyFinishFallback:
+    """Rows sharing one ORDER|MATERIAL id are ordered by (start, quantity, machine); a row with no usable start
+    orders by its finish (the shared end rule) instead of tying with every other startless row."""
+
+    def _ordered(self, rows):
+        import db
+        return sorted(range(len(rows)), key=lambda i: db._duplicate_id_sort_key(rows[i]))
+
+    def test_rows_with_a_start_sort_exactly_as_before(self):
+        a = {"basic_start_date": dt.datetime(2026, 10, 2), "order_quantity": 5, "machine": "B"}
+        b = {"basic_start_date": dt.datetime(2026, 10, 1), "order_quantity": 9, "machine": "A",
+             "basic_finish_date": dt.datetime(2026, 12, 1)}       # a later finish never reorders rows that have a start
+        assert self._ordered([a, b]) == [1, 0]
+
+    def test_startless_rows_follow_started_rows_and_order_by_finish(self):
+        started = {"basic_start_date": dt.datetime(2026, 10, 1), "order_quantity": 1}
+        late = {"basic_start_date": None, "basic_finish_date": dt.datetime(2026, 10, 9), "order_quantity": 1}
+        early = {"basic_start_date": None, "original_finish_received": dt.datetime(2026, 10, 5), "order_quantity": 1}
+        assert self._ordered([late, early, started]) == [2, 1, 0]

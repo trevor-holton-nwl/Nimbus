@@ -996,3 +996,32 @@ def test_metadata_only_stale_replace_is_rejected(pg):
             cur.execute("DELETE FROM setup_matrix WHERE plant = %s", (plant,))
             cur.execute("DELETE FROM setup_definition WHERE plant = %s", (plant,))
             conn.commit()
+
+
+class _ObserverCursor(_DefinitionCursor):
+    """Scripts the pre-replacement observer's reads; the completed-order lookup finds nothing."""
+
+    def fetchone(self):
+        query = self.executed[-1][0]
+        if "SELECT 1 FROM machine" in query:
+            return (1,)
+        if "FROM setup_definition" in query:
+            return (["colorWheel"], 1, True, True)
+        return None
+
+
+def test_pre_replacement_observer_reads_the_shared_end_fragment_and_skips_queued_orders(monkeypatch):
+    """Backward scheduling: a completed order is judged on the same effective end every other reader uses
+    (last segment, stored finish, locked SAP finish) -- never start + run time -- and a Needs Planning
+    order has no window, so it never counts as the last completed one."""
+    import db
+    cursor = _ObserverCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.derive_machine_state_before_replacement(
+        "5512", "LINE-1", captured_at=datetime(2026, 8, 13, 10, 0))
+    assert result["accepted"] is False and result["reason"] == "no_completed_order"
+    orders_sql = next(sql for sql, _p in cursor.executed if "completed_at" in sql)
+    assert db._EFF_END_SQL in orders_sql
+    assert db._SCHEDULE_SEGMENTS_LATERAL_SQL in orders_sql
+    assert "INTERVAL" not in orders_sql
+    assert "o.planning_status <> 'needs_planning'" in orders_sql

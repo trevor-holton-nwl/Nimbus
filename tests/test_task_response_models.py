@@ -234,8 +234,6 @@ class _FakeSegmentCursor:
             self._pending = ("all", list(self.eff_rows))
         elif "FROM plants WHERE plant = ANY" in sql:
             self._pending = ("all", list(self.plant_rows))
-        elif "MAX(run_time)" in sql:
-            self._pending = ("all", [(0,)])   # conflict-scan lookback widening
         elif "SELECT machine FROM machine WHERE plant" in sql:
             self._pending = ("all", [("M1",), ("M2",)])   # known machines for the MACHINE-edit check
         elif sql.strip().startswith("UPDATE orders o SET") and "RETURNING" in sql:
@@ -555,6 +553,10 @@ def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch
     assert result["invalid_ids"] == ["r-bad"]
     assert result["persisted"] == 0
     assert captured["args"] == ("PLANT-R", "MAT1", "0001", "M2", 1000, datetime(2026, 6, 1))
+    # Backward scheduling OQ26: the start handed to the eligibility check is the LOCKED SAP start, read in
+    # the same statement that locks the row (an echo that moved basic_start_date must not change validity).
+    prefetch = next(sql for sql, _p in cursor.executed if "FOR UPDATE OF o" in sql)
+    assert "COALESCE(o.original_start_received, o.basic_start_date) AS original_start" in prefetch
     # The eligibility check must read within THIS function's own open
     # connection -- never a second, independently-opened one.
     assert captured["conn"] is pool.last_connection

@@ -41,7 +41,6 @@ shape as master_data.py's other narrow single-purpose admin writers.
 """
 import logging
 import math
-import re
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
 from datetime import datetime, timedelta, timezone
@@ -2573,14 +2572,13 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
     start, finish, child_count, queued_children, all_scheduled,
     firming_indicator, reviewed, children}`.
 
-    Built from `db._EFF_END_SQL` / `db._SCHEDULE_SEGMENTS_LATERAL_SQL` -- the
-    SAME SQL fragments the `/tasks` read path uses for effective end
-    considering segments -- and the matching effective-*start* expression
-    `db.py` repeats inline in several places (`COALESCE(seg.first_start,
-    scheduled_start, basic_start_date)`, gated by `planning_status <>
-    'needs_planning'`), reused here verbatim rather than re-derived, so this
-    roll-up can never silently drift from how the Gantt/task read path
-    computes effective start/end.
+    Built from `db._EFF_START_SQL` / `db._EFF_END_UNLESS_QUEUED_SQL` /
+    `db._SCHEDULE_SEGMENTS_LATERAL_SQL` -- the SAME shared fragments the `/tasks`
+    read path uses (the stored finish wins; a queued child has no window) --
+    imported rather than re-derived or regex-rewritten, so this roll-up can never
+    silently drift from how the Gantt/task read path computes effective start/end.
+    The fragments are `o.`/`seg.`-qualified, so the header table's identically
+    named columns (`original_finish_received`, `basic_*`) can never be picked up.
     """
     where = ["hd.plant = %s"]
     params: list = [plant]
@@ -2595,20 +2593,8 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
         params.append(date_to)
     where_sql = " AND ".join(where)
 
-    eff_start_sql = (
-        "CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
-        "ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END"
-    )
-    # Headers share the runtime/date names with orders. Qualify only bare
-    # operands of the shared expression, preserving its fallback precedence.
-    order_end_sql = re.sub(
-        r"(?<![\w.])(scheduled_start|basic_start_date|run_time|scheduled_end|basic_finish_date)\b",
-        r"o.\1", db._EFF_END_SQL,
-    )
-    eff_end_sql = (
-        f"CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
-        f"ELSE COALESCE(seg.last_end, {order_end_sql}) END"
-    )
+    eff_start_sql = db._EFF_START_SQL
+    eff_end_sql = db._EFF_END_UNLESS_QUEUED_SQL
 
     query = f"""
         SELECT hd.production_order, hd.material_number, hd.sap_workcenter,
@@ -3189,10 +3175,8 @@ def _read_write_children(cur, child_ids) -> list[dict]:
                CASE WHEN o.planning_status = 'needs_planning' THEN '[]'::jsonb
                     ELSE seg.schedule_segments END AS schedule_segments,
                {db._SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
-               CASE WHEN o.planning_status = 'needs_planning' THEN NULL
-                    ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END AS start_date,
-               CASE WHEN o.planning_status = 'needs_planning' THEN NULL
-                    ELSE COALESCE(seg.last_end, {db._EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS end_date
+               {db._EFF_START_SQL} AS start_date,
+               {db._EFF_END_UNLESS_QUEUED_SQL} AS end_date
           FROM orders o
           {db._SCHEDULE_SEGMENTS_LATERAL_SQL}
          WHERE o.id = ANY(%s)
