@@ -198,7 +198,8 @@ def translate_db_error(exc) -> dict:
 # QUERIES — read
 # =========================
 # One start and one end for an order, as shared SQL fragments, so every read path agrees (backward
-# scheduling, Task 2.2). The server NEVER computes a finish from `start + run_time`: it only reads what
+# scheduling, Task 2.2). The server NEVER computes a finish from `start + run_time` (the one exception is the
+# distribution collapse carry, backend/distribution/data.py `_collapse_to_survivor`, G-0.28): it only reads what
 # was stored, in this order.
 #   Finish (_EFF_END_SQL):   the last segment end, else the stored `scheduled_end` (the planner's placed
 #                            finish), else the locked SAP finish as received, else `basic_finish_date`.
