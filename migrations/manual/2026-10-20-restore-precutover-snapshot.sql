@@ -13,6 +13,9 @@
 --     fragments re-inserted.
 --   * order_sap_sent is not touched: the cutover never writes it, so it needs no restore.
 -- Orders created after the snapshot are left exactly as they are.
+--   * ledger: deletes the schema_migrations rows 'backward_cutover_snapshot' and 'backward_scheduling_cutover' and
+--     drops the three snapshot tables, so after a restore the window can be re-run (snapshot retaken, cutover
+--     re-applied). Do not run the previous image's recovery from the snapshot tables after this: they are gone.
 -- WARNING: anything a planner saved after the cutover (placements, firm flags, segments) on the restored
 -- columns is OVERWRITTEN. Restore only inside the rollback window, before planners start saving, and with the
 -- previous image rolled back first (the old image is forward-scheduling and needs these columns as they were).
@@ -40,5 +43,10 @@ BEGIN
   INSERT INTO order_schedule_segments
     SELECT (jsonb_populate_record(NULL::order_schedule_segments, to_jsonb(g))).*
     FROM order_schedule_segments_precutover_snapshot g;
+
+  DELETE FROM schema_migrations WHERE id IN ('backward_cutover_snapshot', 'backward_scheduling_cutover');
+  DROP TABLE orders_precutover_snapshot;
+  DROP TABLE order_schedule_segments_precutover_snapshot;
+  DROP TABLE IF EXISTS order_sap_sent_precutover_snapshot;
 END
 $mig$;
