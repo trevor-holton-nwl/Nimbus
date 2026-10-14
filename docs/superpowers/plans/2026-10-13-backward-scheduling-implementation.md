@@ -971,6 +971,10 @@ Post-fix-wave addendum: fix wave 2ca9ea4 + 5fbdfb7 (optimizer due-instant memo; 
 
 **Not released.** Rollback = the branch is not merged.
 
+### Resume point — start of Phase 3 (2026-10-14)
+
+Phase 2 is complete at `e86a8b1` on `feature/backward-scheduling` (Phase 1 tip `5fbdfb7` on `feature/backward-scheduling-phase1`; `main` untouched; nothing pushed, merged or deployed). The run was paused here by the owner to clear context. To resume: read `.superpowers/sdd/2026-10-13-backward-scheduling-implementation/RESUME-PHASE-3.md` (operational brief: environment facts, the per-task dispatch/review loop and ledger contract, the Phase 3 order with every carry-in from the Phase 2 reviews, the Phase 3 gate, Phase 4 and the final-report contents), then the ledger `progress.md` in the same folder as needed. The Phase 3–4 task briefs are already extracted there (`task-3.1-brief.md` … `task-4.3-brief.md`) with the shared context `phase2-3-shared-context.md`. First dispatch on resume: Task 3.1 with BASE `e86a8b1`. The Postgres password is supplied by the owner at session start and is never written down.
+
 ## Appendix B — Context
 
 **Brief.** Owner (2026-10-13): "I want to implement Backward_Scheduling_Migration. Draw up an implementation plan that has Sonnet do ALL the work except for very low risk changes for Haiku."
