@@ -3491,7 +3491,21 @@ def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
         if row is None:
             out.append(t)
             continue
-        out.append((*t[:-2], *_locked_originals(before.get(t[0]), row, sap_tz)))
+        b = before.get(t[0])
+        if b is not None and b.get("sap_sent_finish") is None and b.get("parent_production_order"):
+            # U11: a distribution child with no sent row of its own (a re-weight / collapse replaced the one that
+            # had it) inherits the family's echo decision: when any live member's sent finish matches the
+            # incoming finish, this child keeps its locked originals as well.
+            fam_sent = max((m["sap_sent_finish"] for m in before.values()
+                            if m.get("sap_sent_finish") is not None
+                            and m.get("plant") == b.get("plant")
+                            and m.get("parent_production_order") == b.get("parent_production_order")
+                            and m.get("material_number") == b.get("material_number")
+                            and _row_finish_echo(m, row, sap_tz, finish_key="sap_basic_finish_date")),
+                           default=None)
+            if fam_sent is not None:
+                b = {**b, "sap_sent_finish": fam_sent}
+        out.append((*t[:-2], *_locked_originals(b, row, sap_tz)))
     return out
 
 

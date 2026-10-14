@@ -1649,8 +1649,20 @@ def _apply_children(cur, parent: dict) -> int:
             # that never set `sap_basic_finish_date` is judged on its `basic_finish_date`)
             judged = {**params, "sap_basic_finish_date": params.get(
                 "sap_basic_finish_date", params.get("basic_finish_date"))}
+            b = before.get(child_id)
+            if b is not None and b.get("sap_sent_finish") is None:
+                # U11: a child with no sent row of its own (a re-weight / collapse replaced the one that had it)
+                # inherits the family's echo decision: if any live member's sent finish matches the incoming
+                # finish, this child keeps its locked originals too instead of taking NIMBUS's own sent finish.
+                fam_sent = max((m["sap_sent_finish"] for m in before.values()
+                                if m.get("sap_sent_finish") is not None
+                                and db._row_finish_echo(m, judged, parent.get("_sap_tz"),
+                                                        finish_key="sap_basic_finish_date")),
+                               default=None)
+                if fam_sent is not None:
+                    b = {**b, "sap_sent_finish": fam_sent}
             params["original_start_received"], params["original_finish_received"] = db._locked_originals(
-                before.get(child_id), judged, parent.get("_sap_tz"))
+                b, judged, parent.get("_sap_tz"))
             params.setdefault("sap_basic_start_date", None)
             params.setdefault("sap_basic_finish_date", None)
         else:

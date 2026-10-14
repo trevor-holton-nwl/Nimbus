@@ -5150,6 +5150,41 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         for r in rows:
             assert r == (start, moved, start, fri, start, fri)
 
+    def test_new_child_without_a_sent_row_inherits_the_family_echo_decision(self, pg):
+        """U11: send -> re-weight (a new child with no order_sap_sent row) -> SAP echoes the sent finish. The
+        header and the old children keep their locked original finish; the new child must too (it used to take
+        NIMBUS's own sent finish as its locked SAP due date)."""
+        fri = dt.datetime(2026, 10, 23)
+        wed = dt.datetime(2026, 10, 28)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        self._mark_sent(pg, self.MAT, wed + dt.timedelta(hours=14))
+        L3 = "ZZTEST_L3_STR"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                        " VALUES (%s,%s,%s,%s,0)", (self.SUB, self.PLANT, L3, self.WC))
+            conn.commit()
+        try:
+            header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT,
+                [{"machine": self.L1, "weight": 40}, {"machine": self.L2, "weight": 40}, {"machine": L3, "weight": 20}],
+                base_version=header["xmin"], actor="tester")
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM orders o JOIN order_sap_sent s ON s.order_id = o.id"
+                            " WHERE o.plant=%s AND o.parent_production_order=%s", (self.PLANT, self.ORD))
+                assert cur.fetchone()[0] == 2, "the new child has no sent row of its own"
+            self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=wed)])
+            header_orig, kids = self._originals(pg, self.MAT)
+            assert header_orig == fri
+            assert len(kids) == 3 and all(k[1] == fri for k in kids.values()), kids
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+                cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+                conn.commit()
+
     def test_header_original_finish_follows_the_echo_rule(self, pg):
         """The header's locked due date: set by the first ingest, kept when the next upload echoes the roll-up
         finish NIMBUS sent (judged on ANY member child's sent row), replaced by a genuine SAP change."""
