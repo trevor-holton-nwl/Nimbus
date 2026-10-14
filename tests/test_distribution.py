@@ -2996,6 +2996,70 @@ class TestFinishOnlyPlacedChildCountsAsScheduled(_ReweightFixtureBase):
 
 
 @pytest.mark.pg
+class TestPlannerWriteRunTimeCap(_ReweightFixtureBase):
+    """R-I12: a planner share edit passes each child through the run-time cap; an over-cap child is queued
+    `run_time_over_cap` with dates cleared (never written as `scheduled`), an under-cap sibling is untouched,
+    ."""
+    WC = "ZZTEST_WC_RWCAP"
+    L1, L2 = "ZZTEST_L1_RWCAP", "ZZTEST_L2_RWCAP"
+    ORD, MAT = "ZZTEST_ORD_RWCAP", "ZZTEST_MAT_RWCAP"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _state(self, pg, machine):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT planning_status, planning_reason->>'code', run_time, scheduled_start, scheduled_end"
+                        " FROM orders WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                        (self.PLANT, self.ORD, machine))
+            return cur.fetchone()
+
+    def test_share_edit_that_pushes_a_child_over_the_cap_queues_it(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE order_distribution SET run_time = 800 WHERE plant = %s AND production_order = %s",
+                        (self.PLANT, self.ORD))
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s"
+                        " WHERE plant = %s AND parent_production_order = %s",
+                        (dt.datetime(2026, 11, 2, 8), dt.datetime(2026, 11, 2, 12), self.PLANT, self.ORD))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}],
+            base_version=header["xmin"], actor="tester")
+        status, code, rt, start, end = self._state(pg, self.L1)      # 560 h > 336 h
+        assert float(rt) == pytest.approx(560.0)
+        assert (status, code, start, end) == ("needs_planning", "run_time_over_cap", None, None)
+        status, code, rt, start, end = self._state(pg, self.L2)      # 240 h, within the cap: stays placed
+        assert float(rt) == pytest.approx(240.0) and status == "scheduled" and start is not None
+
+    def test_collapse_survivor_over_the_cap_is_queued(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE order_distribution SET run_time = 400 WHERE plant = %s AND production_order = %s",
+                        (self.PLANT, self.ORD))
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s"
+                        " WHERE plant = %s AND parent_production_order = %s",
+                        (dt.datetime(2026, 11, 2, 8), dt.datetime(2026, 11, 2, 12), self.PLANT, self.ORD))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester")
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT planning_status, planning_reason->>'code', run_time, scheduled_start, scheduled_end"
+                        " FROM orders WHERE plant = %s AND production_order = %s", (self.PLANT, self.ORD))
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        status, code, rt, start, end = rows[0]
+        assert float(rt) == pytest.approx(400.0)
+        assert (status, code, start, end) == ("needs_planning", "run_time_over_cap", None, None)
+
+
+@pytest.mark.pg
 class TestReweightSharesDryRunParity(_ReweightFixtureBase):
     """A dry-run's `plan` must match what the following real call then
     writes -- an actual two-call test, diffing the results, per SS5.5 step 8's

@@ -3369,9 +3369,24 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     }
     touched_child_ids: list[str] = []
     parent_stub["_touched_ids"] = touched_child_ids
+    # R-I12: the stored run time of every child this write may change, read BEFORE the upsert, so the
+    # run-time cap below can tell a changed (or brand-new) child from an unchanged released one.
+    prior_run_times: dict[str, object] = {cid: None for cid in intended_child_ids}
+    if previous_child_ids or collapse:
+        cur.execute("SELECT id, run_time FROM orders WHERE id = ANY(%s)",
+                    (sorted(previous_child_ids | ({collapse["old_child_id"]} if collapse else set())),))
+        stored_rt = dict(cur.fetchall())
+        prior_run_times.update({cid: stored_rt[cid] for cid in intended_child_ids if cid in stored_rt})
+        if collapse and collapse["old_child_id"] in stored_rt and collapse["new_child_id"] not in stored_rt:
+            prior_run_times[collapse["new_child_id"]] = stored_rt[collapse["old_child_id"]]
     touched = _apply_children(cur, parent_stub)
     if collapse:
         _collapse_to_survivor(cur, collapse["old_child_id"], collapse["new_child_id"])
+    # R-I12: a planner write passes every child through the same run-time cap as ingest: an over-cap child
+    # is queued `run_time_over_cap` (dates, firm and segments cleared), never left `scheduled`; a queued
+    # child brought back under the cap is released. Inside this transaction (commit=False).
+    db._apply_run_time_cap(cur, cur.connection, sorted(intended_child_ids),
+                           prior_run_times=prior_run_times, commit=False)
     superseded = previous_child_ids - intended_child_ids
     deleted = _delete_superseded_children(cur, superseded)
     _write_reweight_shares(cur, plant, order, material, letters, desired_weights)
