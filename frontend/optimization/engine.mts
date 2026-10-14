@@ -2839,7 +2839,7 @@ export const Engine = {
       const requiredSetupMinutes = setupMinutes(predecessor, p);
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFirmed(p.id) || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+      if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
         // Firmed, frozen-window, or aged orders don't move — if there's a
         // conflict, an alert will fire — but later unfirmed peers must still
         // be de-overlapped, and the immovable order becomes the setup

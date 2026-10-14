@@ -4445,6 +4445,19 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('G-0.25: autoReflow on a never-split plant leaves a marked peer where it is', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('drag', { RUN_TIME: '3', user_scheduled: true, start_date: at(20, 9), end_date: at(20, 12) }),
+        fx.task('mkp', { RUN_TIME: '14', user_scheduled: true, placement_exception: 'overlong', start_date: at(20, 10), end_date: at(21, 0) }),
+      ], 'unit-test');
+      const before = [Store.tasks.mkp.start_date.getTime(), Store.tasks.mkp.end_date.getTime()];
+      Engine.autoReflow('drag');
+      assert.deepEqual([Store.tasks.mkp.start_date.getTime(), Store.tasks.mkp.end_date.getTime()], before);
+    } finally { fx.restore(); }
+  });
+
   test('OQ50 c: Remove Backlog queues a never-policy overlong order as overlong_never; overlongIds still reports it; the cursor does not advance', () => {
     const fx = recFixture();
     try {
@@ -4476,7 +4489,7 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
-  test('group 21: the optimizer places a reversal at the same floored minute as the reconcile and the manual path, never after now', () => {
+  test('group 21: the optimizer, the reconcile and the manual path place a reversal at the same floored minute, never after now', () => {
     const fx = recFixture();
     try {
       // Plant now 09:00:30; every path floors it to 09:00 so the start is at or before now.
@@ -4492,8 +4505,15 @@ describe('reconcile (finish-anchored)', () => {
         const result = Engine.evaluateSchedule('duedate', { plant: fx.plant, respectFirmed: true, respectCalendar: true,
           planningStart: at(20, 0), endDate: at(27, 0) });
         const optimizerStart = result.patches.find(p => p.id === 'rv')?.changes.start_date?.getTime();
+        // The manual path: a release whose finish is already past reverses forward from the same floored now.
+        const queued = { id: 'rv-manual', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2', start_date: null, end_date: null,
+          scheduleSegments: [], planning_status: 'needs_planning', planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+        const manual = Engine.manualSchedulePatchFor(queued, fx.line, at(19, 12));
+        assert.ok(manual, 'the manual release is not refused');
+        assert.equal(manual.start_date.getTime(), floored, 'manual reversal starts at the floored minute (no 15-minute snap)');
         assert.equal(reconcileStart, floored, 'reconcile reversal starts at the floored minute');
         assert.equal(optimizerStart, floored, 'optimizer reversal starts at the same floored minute');
+        assert.equal(optimizerStart, manual.start_date.getTime(), 'optimizer and manual snap agree to the minute');
         assert.ok(optimizerStart <= now.getTime(), 'the order is running the instant it is placed');
       } finally { restore(); }
     } finally { fx.restore(); }

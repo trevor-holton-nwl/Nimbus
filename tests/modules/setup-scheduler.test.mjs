@@ -5105,7 +5105,7 @@ test('unknownSetupPolicy plantDefaultMinutes is inert on a synthetic zero-cost s
   assert.deepEqual(b.explanation.map(r => r.code), a.explanation.map(r => r.code));
 });
 
-test('fragment search charges instability for moved starts instead of a hardcoded zero', () => {
+test('fragment search charges instability for moved finishes instead of a hardcoded zero', () => {
   // sequenceKey is deliberately the OPPOSITE of what a pre-fix (hardcoded-0)
   // tie-break would already prefer: with both fragments reporting
   // instabilityMinutes 0, the sequenceKey term alone would pick `shuffled`
@@ -5128,6 +5128,25 @@ test('fragment search charges instability for moved starts instead of a hardcode
     'fragmentObjectiveFacts must surface a non-zero instabilityMinutes from the candidate');
   assert.equal(SetupScheduler.fragmentObjectiveFactsForTest(candidateShape).instabilityMinutes, 0,
     'fragmentObjectiveFacts falls back to 0 when instabilityMinutes is absent');
+});
+
+test('OQ50 c: a never-policy order longer than every operating window queues as overlong_never; no window at all or a plain no-fit keeps its reason', () => {
+  const synthetic = setupTruth({ current: null, definition: null });
+  const run = (hoursByDay, runHours) => {
+    const snapshot = setupSnapshot([scheduledTask('ol-a', runHours, 'RED', '2026-08-03T18:00:00')]);
+    snapshot.calendars = { L1: { workHours: hoursByDay } };
+    snapshot.plants = { P1: { workHours: hoursByDay } };
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(synthetic, { placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-10T18:00:00') }), 'due-date');
+    return result.dispositions.find(d => d.id === 'ol-a');
+  };
+  const overlong = run(OPEN_HOURS, 12);   // windows are 10 h
+  assert.equal(overlong.status, 'needs_planning');
+  assert.equal(overlong.reason.code, 'overlong_never');
+  const closed = run(Object.fromEntries(Array.from({ length: 7 }, (_, d) => [d, null])), 12);   // no window at all
+  assert.equal(closed.status, 'needs_planning');
+  assert.notEqual(closed.reason.code, 'overlong_never');
+  const fits = run(OPEN_HOURS, 4);
+  assert.equal(fits.status, 'scheduled');
 });
 
 test('instability is keyed on the placed finish: a held finish with a moved start is stable, a moved finish is not (Reading A)', () => {

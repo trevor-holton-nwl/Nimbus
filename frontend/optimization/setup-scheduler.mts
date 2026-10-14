@@ -1016,6 +1016,26 @@ function noFitReason(
   return { code: 'no_fit_found', message: completeMessage };
 }
 
+/** OQ50 c: under the `never` split policy an order whose run time exceeds every contiguous operating window on its
+ * line (while the line does have windows) is queued as `overlong_never`, the code the planner's release path keys
+ * on. A line with no window at all, or an order that merely failed to find room, keeps its existing reason. */
+function neverOverlongReason(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
+): { code: string; message: string } | null {
+  const plant = bounds.setup.plant;
+  if (splitOrderPolicyForSnapshot(snapshot, plant) !== 'never') return null;
+  const minutes = Math.round(Number(task.RUN_TIME) * 60);
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  const line = String(task.MACHINE);
+  const from = bounds.placementStart ?? bounds.now;
+  if (hasNominalWindow(snapshot, line, plant, from, minutes, bounds.runContext)) return null;
+  if (!hasNominalWindow(snapshot, line, plant, from, 1, bounds.runContext)) return null;
+  return {
+    code: 'overlong_never',
+    message: 'Longer than any single working period on this machine, and this plant does not split orders.',
+  };
+}
+
 /** Severity ranking used to aggregate multiple line/fragment `SearchRun`
  * terminations into one overall value: the WORST (most severe) one wins,
  * never simply "the last one seen". Without this, a later line/fragment that
@@ -6862,7 +6882,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
       dispositions.push({ id, line, status: 'scheduled' });
     } else {
-      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? noFitReason(candidate);
+      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? neverOverlongReason(snapshot, bounds, task) ?? noFitReason(candidate);
       patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
@@ -6882,7 +6902,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     if (baselineWithinWindow(snapshot, bounds, original)) {
       return { id: patch.id, changes: { start_date: original.start_date, end_date: original.end_date, scheduleSegments: original.scheduleSegments ?? [], planning_status: 'scheduled', planning_reason: null } };
     }
-    const reason = planningDefect(snapshot, bounds, original) ?? noFitReason(candidate);
+    const reason = planningDefect(snapshot, bounds, original) ?? neverOverlongReason(snapshot, bounds, original) ?? noFitReason(candidate);
     return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
   });
   const baselineById = new Map(baselinePatches.map(patch => [patch.id, patch.changes]));
@@ -7161,11 +7181,12 @@ export function fillPlanningGaps(
     // the primary search refused because its setup transition is unrecorded (N8
     // excludeFromSearch) — keep that actionable reason instead of the generic "No slot found".
     const prior = dispositions.get(id)?.reason;
+    const overlong = complete && prior?.code !== 'setup_transition_unrecorded' ? neverOverlongReason(snapshot, bounds, task) : null;
     const reason = complete && prior?.code === 'setup_transition_unrecorded'
       ? prior
-      : complete
+      : overlong ?? (complete
       ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
-      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' };
+      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' });
     patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
     dispositions.set(id, { id, line, status: 'needs_planning', reason });
   }
