@@ -77,6 +77,87 @@
     return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
   }
 
+  // Previous local calendar midnight, the backward twin of nextCalendarDay: calendar-date
+  // arithmetic, never `- MS_DAY` (a local day is 23 or 25 hours across a DST change).
+  function prevCalendarDay(d) {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1);
+  }
+
+  // One Intl.DateTimeFormat per zone: constructing it dominates the cost of a conversion and a
+  // backward walk converts every free interval it touches.
+  const _tzFormatters = new Map();
+  function _tzFormatter(timezone) {
+    let fmt = _tzFormatters.get(timezone);
+    if (!fmt) {
+      fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
+        second: 'numeric', hourCycle: 'h23',
+      });
+      _tzFormatters.set(timezone, fmt);
+    }
+    return fmt;
+  }
+
+  // The plant-zone wall-clock components of an instant, as a UTC-epoch number
+  // (Date.UTC of y/m/d/h/mi/s). Null when the zone is invalid or a part is missing.
+  function _wallAsUtcMs(timezone, instantMs) {
+    try {
+      const values = {};
+      for (const part of _tzFormatter(timezone).formatToParts(new Date(instantMs))) {
+        if (part.type !== 'literal') values[part.type] = Number(part.value);
+      }
+      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
+      return Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute, values.second);
+    } catch {
+      return null;
+    }
+  }
+
+  // Project an absolute instant into the naive wall-clock Date convention used by Calendar and
+  // the persisted schedule (the plant zone's y/m/d/h/mi/s read through the local constructor).
+  // No timezone: the instant is returned as-is. Invalid zone: null.
+  function plantWallClockFromInstant(timezone, instant) {
+    if (!timezone) return new Date(instant);
+    try {
+      const parts = _tzFormatter(timezone).formatToParts(instant);
+      const values = {};
+      for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
+      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
+      return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, values.second, instant.getMilliseconds());
+    } catch {
+      return null;
+    }
+  }
+
+  // The inverse of plantWallClockFromInstant: read a naive wall-clock Date's local y/m/d/h/mi/s
+  // as plant-zone wall time and return the absolute instant. Disambiguation follows the usual
+  // "compatible" rule: a wall time that does not exist (spring-forward gap) resolves to the
+  // instant after the gap; an ambiguous one (fall-back hour) to the earlier occurrence.
+  // No timezone: the Date itself. Invalid zone: null.
+  function plantInstantFromWallClock(timezone, wall) {
+    if (!timezone) return new Date(wall);
+    const asUtc = Date.UTC(wall.getFullYear(), wall.getMonth(), wall.getDate(), wall.getHours(),
+      wall.getMinutes(), wall.getSeconds(), wall.getMilliseconds());
+    if (!Number.isFinite(asUtc)) return null;
+    // Zone offset (ms) in force at an instant; the wall reading drops sub-second precision.
+    const offsetAt = ms => {
+      const w = _wallAsUtcMs(timezone, ms);
+      return w === null ? null : w - Math.floor(ms / 1000) * 1000;
+    };
+    const before = offsetAt(asUtc - MS_DAY);
+    const after = offsetAt(asUtc + MS_DAY);
+    if (before === null || after === null) return null;
+    if (before === after) return new Date(asUtc - before);   // no transition within a day either side
+    const candBefore = asUtc - before, candAfter = asUtc - after;
+    const okBefore = offsetAt(candBefore) === before;
+    const okAfter = offsetAt(candAfter) === after;
+    if (okBefore && okAfter) return new Date(Math.min(candBefore, candAfter));   // fall-back: earlier
+    if (okBefore) return new Date(candBefore);
+    if (okAfter) return new Date(candAfter);
+    return new Date(Math.max(candBefore, candAfter));                            // spring-forward gap: after it
+  }
+
   // Buckets a date into a separation-window key at the given granularity
   // ('hour' | 'day' | 'week'); 'none' (or anything unrecognized) returns null,
   // meaning no bucket constraint applies. Local wall-clock components throughout —
@@ -1098,7 +1179,7 @@
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
-    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, workWindow, dueDateInstant,
+    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization,

@@ -39,7 +39,7 @@ import {
   reportSchedulerDiagnostic,
 } from '../optimization/engine.mjs';
 import type { PlaceWithSetupRequest, PlacementResult, RuntimeAllocation } from '../optimization/engine.mjs';
-import type { WorkHours, SplitOrderPolicy } from '../platform/types.mjs';
+import type { WorkHours, SplitOrderPolicy, OrderScheduleSegment } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 // Note: unlike optimization/engine.mts, insights/services.mts, and
@@ -81,6 +81,59 @@ type BacklogSlot =
   | { kind: 'slot'; start: Date }
   | { kind: 'overlong'; start: Date }
   | { kind: 'unavailable' | 'exhausted' };
+
+/** One schedule piece of a placed order (the same shape the forward allocator returns). */
+export type ScheduleSegmentLike = OrderScheduleSegment;
+
+/** Result of a finish-anchored (backward) placement. `placed` carries the new start/end as naive
+ * wall-clock Dates; `end` is the finish actually achieved, which differs from the requested finish
+ * exactly when `finishMoved` is true. `reached_now` means the walk hit `floor` before placing every
+ * minute (the caller reverses forward from now); `overlong` means a contiguous policy and a run
+ * time longer than the longest merged window; `unavailable` means no operating window at all
+ * inside the lookback (or an unusable run time / timezone). */
+export type BackwardResult =
+  | { kind: 'placed'; start: Date; end: Date; scheduleSegments: ScheduleSegmentLike[];
+      finishMoved: boolean; moveReason?: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout' }
+  | { kind: 'reached_now' }
+  | { kind: 'overlong' }
+  | { kind: 'unavailable' };
+
+/** Lookup options shared by the backward primitives. `floor` is the earliest minute the walk may use
+ * (normally the plant's "now"); `plantTz`, when given, makes all elapsed arithmetic run on plant-zone
+ * instants while inputs and results stay naive wall-clock Dates (OQ46). */
+export interface BackwardLookupOptions {
+  floor?: Date | null;
+  plantTz?: string | null;
+  lookbackDays?: number;
+}
+
+export interface BackwardAllocationOptions extends BackwardLookupOptions {
+  floor: Date;
+  minSegmentMinutes: number;
+  plantTz: string | null;
+}
+
+interface MsSpan { s: number; e: number }
+
+type BackwardFrame =
+  | { kind: 'unavailable' }
+  | {
+    kind: 'ok';
+    /** The requested finish (minute-floored) as an instant. */
+    finishMs: number;
+    /** Free intervals (instants, chronological, touching ones merged), right-clipped at the finish, left-bounded by the floor. */
+    spans: MsSpan[];
+    /** Longest nominal (blackout-free) merged operating window inside the lookback, in ms. */
+    longestMs: number;
+    /** Why a finish that is earlier than requested was clamped: the working day itself, or a blackout inside an open window. */
+    clampReason: 'closed_finish' | 'blackout';
+    toWall: (ms: number) => Date | null;
+  };
+
+/** Default look-back for a backward walk, measured from the finish (the forward walk's 90-day bound mirrored). */
+const BACKWARD_LOOKBACK_DAYS = 90;
+/** Hard cap on the days a single _freeIntervalsBackward call walks, whatever floor it is given. */
+const BACKWARD_MAX_DAYS = 400;
 
 /** B6: exported so setup-scheduler.mts's freeIntervalsFor can fall back to the
  * same default work hours as the alerts path (optimization/engine.mjs's
@@ -332,6 +385,28 @@ export const Calendar = {
     return null;
   },
 
+  /** The contiguous twin of `nextAvailable`: the latest interval of `durationMs` that ends at or before
+   *  `finish`, lies wholly inside one merged operating interval (touching windows merge across midnight,
+   *  OQ47) and clears every blackout, bounded on the left by `opts.floor` and the look-back
+   *  (`opts.lookbackDays`, default 90, measured back from the finish). Returns `{start, end}` as naive
+   *  wall-clock Dates, or `null` when the line has no window, the duration is longer than the longest
+   *  merged window, or nothing fits between the floor and the finish. Pure: no Store writes, no
+   *  diagnostics. Never applies the minimum-piece rule and never snaps to the drag grid (a second snap
+   *  would break start + run time = finish). */
+  latestAvailable(line: string, finish: Date, durationMs: number, opts: BackwardLookupOptions = {}): { start: Date; end: Date } | null {
+    const runMs = Math.ceil(Number(durationMs) / Config.MS_MIN) * Config.MS_MIN;
+    if (!Number.isFinite(runMs) || runMs <= 0) return null;
+    const frame = Calendar._backwardFrame(line, finish, opts);
+    if (frame.kind !== 'ok' || runMs > frame.longestMs) return null;
+    for (let i = frame.spans.length - 1; i >= 0; i--) {
+      const span = frame.spans[i];
+      if (span.e - span.s < runMs) continue;
+      const start = frame.toWall(span.e - runMs), end = frame.toWall(span.e);
+      return start && end ? { start, end } : null;
+    }
+    return null;
+  },
+
   /** True when a proposed range is entirely inside one effective operating
    * interval and clear of both line and plant blackout blocks. */
   fitsContinuous(line: string, start: Date, durationMs: number): boolean {
@@ -515,6 +590,112 @@ export const Calendar = {
     return out;
   },
 
+  /** Operating fragments of `line` inside [lo, hi] as naive wall-clock Dates, chronological, with
+   * touching fragments merged across midnight (OQ47). `withBlackouts` subtracts line and plant blackouts
+   * (a blackout START rounds DOWN to the minute so the finish clears it, the END rounds up: the same
+   * symmetric rounding as _freeIntervals); without it the spans are the nominal hours only. Days are
+   * visited by calendar date (never minus 24 h). */
+  _operatingSpansBackward(line: string, hi: Date, lo: Date, withBlackouts: boolean): Array<{ start: Date; end: Date }> {
+    const hiMin = Calendar._floorMinute(hi);
+    const loMin = Calendar._ceilMinute(lo);
+    if (!(hiMin > loMin)) return [];
+    const core = globalThis.NimbusComputeCore!;
+    const loDay = new Date(loMin.getFullYear(), loMin.getMonth(), loMin.getDate());
+    const chunks: Array<Array<{ start: Date; end: Date }>> = [];
+    let day = new Date(hiMin.getFullYear(), hiMin.getMonth(), hiMin.getDate());
+    for (let guard = 0; guard <= BACKWARD_MAX_DAYS + 3 && day >= loDay; guard++, day = core.prevCalendarDay(day)) {
+      const win = Calendar.workWindow(line, day);
+      if (!win) continue;
+      let cursor = Calendar._ceilMinute(new Date(Math.max(win[0].getTime(), loMin.getTime())));
+      const windowEnd = new Date(Math.min(Calendar._floorMinute(win[1]).getTime(), hiMin.getTime()));
+      if (cursor >= windowEnd) continue;
+      const dayOut: Array<{ start: Date; end: Date }> = [];
+      if (withBlackouts) {
+        for (const block of Calendar._blockingIntervals(line, cursor, windowEnd)) {
+          const freeEnd = Calendar._floorMinute(block.start);
+          if (freeEnd > cursor) dayOut.push({ start: new Date(cursor), end: freeEnd });
+          const next = Calendar._ceilMinute(block.end);
+          if (next > cursor) cursor = next;
+          if (cursor >= windowEnd) break;
+        }
+      }
+      if (cursor < windowEnd) dayOut.push({ start: new Date(cursor), end: windowEnd });
+      if (dayOut.length) chunks.push(dayOut);
+    }
+    const out: Array<{ start: Date; end: Date }> = [];
+    for (let i = chunks.length - 1; i >= 0; i--) {
+      for (const span of chunks[i]) {
+        const prior = out[out.length - 1];
+        if (prior && prior.end.getTime() === span.start.getTime()) prior.end = span.end;
+        else out.push({ start: new Date(span.start), end: new Date(span.end) });
+      }
+    }
+    return out;
+  },
+
+  /** The backward twin of `_freeIntervals`: effective operating fragments, chronological, right-clipped at
+   * `finish` (floored to the minute) and left-bounded by `floor`, with touching fragments merged across
+   * midnight (OQ47). Naive wall-clock in, naive wall-clock out. The walk never goes more than 400 days
+   * before the finish, whatever floor is passed. */
+  _freeIntervalsBackward(line: string, finish: Date, floor: Date): Array<{ start: Date; end: Date }> {
+    const hi = Calendar._floorMinute(finish);
+    const cap = new Date(hi.getFullYear(), hi.getMonth(), hi.getDate() - BACKWARD_MAX_DAYS);
+    const lo = floor.getTime() > cap.getTime() ? floor : cap;
+    return Calendar._operatingSpansBackward(line, hi, lo, true);
+  },
+
+  /** Shared set-up of the backward primitives: the free intervals and the nominal-window facts, converted
+   * to plant-zone instants when `opts.plantTz` is given (OQ46) so elapsed arithmetic is exact across a
+   * DST change. `unavailable` when the line has no operating window inside the look-back before the
+   * finish, or the zone / finish is unusable. */
+  _backwardFrame(line: string, finish: Date, opts: BackwardLookupOptions): BackwardFrame {
+    const core = globalThis.NimbusComputeCore!;
+    const tz = opts.plantTz || null;
+    const finishWall = Calendar._floorMinute(finish);
+    if (!Number.isFinite(finishWall.getTime())) return { kind: 'unavailable' };
+    const days = Number.isFinite(opts.lookbackDays) ? Math.max(0, Math.floor(opts.lookbackDays as number)) : BACKWARD_LOOKBACK_DAYS;
+    const y = finishWall.getFullYear(), m = finishWall.getMonth(), d = finishWall.getDate();
+    const lookbackStart = new Date(y, m, d - Math.min(days, BACKWARD_MAX_DAYS), finishWall.getHours(), finishWall.getMinutes());
+
+    let failed = false;
+    const toMs = (wall: Date): number => {
+      const inst = tz ? core.plantInstantFromWallClock(tz, wall) : wall;
+      if (!inst || !Number.isFinite(inst.getTime())) { failed = true; return NaN; }
+      return inst.getTime();
+    };
+    const toSpans = (list: Array<{ start: Date; end: Date }>): MsSpan[] => {
+      const out: MsSpan[] = [];
+      for (const item of list) {
+        const span = { s: toMs(item.start), e: toMs(item.end) };
+        const prior = out[out.length - 1];
+        if (prior && span.s <= prior.e) { if (span.e > prior.e) prior.e = span.e; } else out.push(span);
+      }
+      return out;
+    };
+
+    // Nominal windows: blackouts ignored (a blackout never makes an order "inherently overlong"), and the
+    // right edge pushed two calendar days past the finish so the window that holds the finish is measured whole.
+    const nominalWall = Calendar._operatingSpansBackward(line, new Date(y, m, d + 2), lookbackStart, false);
+    if (!nominalWall.some(span => span.start < finishWall)) return { kind: 'unavailable' };
+    const nominal = toSpans(nominalWall);
+    const longestMs = nominal.reduce((max, span) => Math.max(max, span.e - span.s), 0);
+
+    const bound = opts.floor && opts.floor.getTime() > lookbackStart.getTime() ? opts.floor : lookbackStart;
+    const spans = toSpans(Calendar._freeIntervalsBackward(line, finishWall, bound));
+    const finishMs = toMs(finishWall);
+    if (failed || !Number.isFinite(finishMs)) return { kind: 'unavailable' };
+
+    // Why a finish that cannot be honoured as given moves: it is held by the working day itself (closed day,
+    // at or before the window open, after the close) or by a blackout inside an open window.
+    const win = Calendar.workWindow(line, new Date(y, m, d));
+    const clampReason: 'closed_finish' | 'blackout' =
+      !win || finishWall <= win[0] || finishWall > win[1] ? 'closed_finish' : 'blackout';
+    return {
+      kind: 'ok', finishMs, spans, longestMs, clampReason,
+      toWall: ms => core.plantWallClockFromInstant(tz, new Date(ms)),
+    };
+  },
+
   _hasNominalOperatingWindow(line: string, from: Date): boolean {
     const day = new Date(from); day.setHours(0, 0, 0, 0);
     for (let offset = 0; offset < 90; offset++) {
@@ -593,6 +774,85 @@ export const Calendar = {
       scheduleSegments: merged.length >= 2
         ? merged.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
         : [],
+    };
+  },
+
+  /** Finish-anchored allocation: place `runtimeMinutes` of production so it ENDS at `finish`, walking
+   * backward through the line's operating time. Pure (no Store writes, no diagnostics); the forward helpers
+   * are untouched. A finish that cannot be honoured as given moves to the latest operating instant before
+   * it and reports `finishMoved` with the reason: `closed_finish` (after close, on a closed day, at a
+   * window's opening minute), `blackout` (inside one), `no_slot_at_finish` (a contiguous policy found no
+   * merged window of the run time ending there, OQ13) or `min_piece` (the piece that would end at the
+   * finish is below the minimum, OQ55). When several apply, the last one reached names the move.
+   * `never` / `overlong_only` take the latest merged free interval of at least the run time; run time
+   * above the longest merged nominal window is `overlong` (OQ50). `partial_allowed` fills fragments from
+   * the latest backward, each piece anchored at its fragment's end, mirroring the forward minimum-piece
+   * rule. Reaching `opts.floor` with minutes left is `reached_now` (the caller reverses forward); no
+   * operating window at all inside the look-back is `unavailable`. Touching intervals merge across
+   * midnight (OQ47). With `opts.plantTz` the elapsed arithmetic runs on plant-zone instants and results
+   * are returned as naive wall-clock Dates (OQ46). */
+  allocateRuntimeBackward(line: string, finish: Date, runtimeMinutes: number,
+                          policy: SplitOrderPolicy, opts: BackwardAllocationOptions): BackwardResult {
+    const totalMinutes = Math.round(Number(runtimeMinutes));
+    if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return { kind: 'unavailable' };
+    const frame = Calendar._backwardFrame(line, finish, opts);
+    if (frame.kind !== 'ok') return { kind: 'unavailable' };
+    const splitting = policy === 'partial_allowed';
+    const runMs = totalMinutes * Config.MS_MIN;
+    if (!splitting && runMs > frame.longestMs) return { kind: 'overlong' };
+    const { spans, finishMs } = frame;
+    if (!spans.length) return { kind: 'reached_now' };
+    const latestEnd = spans[spans.length - 1].e;   // the finish clamped to operating time
+
+    const picked: MsSpan[] = [];   // latest first
+    let moveReason: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout' | undefined;
+    if (!splitting) {
+      for (let i = spans.length - 1; i >= 0; i--) {
+        if (spans[i].e - spans[i].s >= runMs) { picked.push({ s: spans[i].e - runMs, e: spans[i].e }); break; }
+      }
+      if (!picked.length) return { kind: 'reached_now' };
+      if (picked[0].e !== latestEnd) moveReason = 'no_slot_at_finish';
+    } else {
+      const minSegment = Number.isFinite(opts.minSegmentMinutes) ? Math.max(0, Math.round(opts.minSegmentMinutes)) : 0;
+      let remaining = totalMinutes;
+      for (let i = spans.length - 1; i >= 0 && remaining > 0; i--) {
+        const capacity = Math.floor((spans[i].e - spans[i].s) / Config.MS_MIN);
+        if (capacity <= 0) continue;
+        let take = Math.min(remaining, capacity);
+        // Leave at least a minimum piece for the fragments still to come.
+        if (remaining > take && remaining - take < minSegment) take = remaining - minSegment;
+        // A partial piece is never below the minimum (a whole order shorter than it is the one exception);
+        // skip the fragment and keep walking back.
+        if (take <= 0 || (take < minSegment
+            && !(picked.length === 0 && remaining === totalMinutes && totalMinutes < minSegment && take === totalMinutes))) {
+          continue;
+        }
+        picked.push({ s: spans[i].e - take * Config.MS_MIN, e: spans[i].e });
+        remaining -= take;
+      }
+      if (remaining !== 0) return { kind: 'reached_now' };
+      if (picked[0].e !== latestEnd) moveReason = 'min_piece';
+    }
+    if (!moveReason && latestEnd < finishMs) moveReason = frame.clampReason;
+
+    const merged: MsSpan[] = [];
+    for (let i = picked.length - 1; i >= 0; i--) {
+      const prior = merged[merged.length - 1];
+      if (prior && prior.e === picked[i].s) prior.e = picked[i].e;
+      else merged.push({ s: picked[i].s, e: picked[i].e });
+    }
+    const walls = merged.map(piece => ({ start: frame.toWall(piece.s), end: frame.toWall(piece.e) }));
+    if (walls.some(piece => !piece.start || !piece.end)) return { kind: 'unavailable' };
+    const pieces = walls as Array<{ start: Date; end: Date }>;
+    return {
+      kind: 'placed',
+      start: pieces[0].start,
+      end: pieces[pieces.length - 1].end,
+      scheduleSegments: pieces.length >= 2
+        ? pieces.map((piece, index) => ({ sequence: index + 1, startDate: piece.start, endDate: piece.end }))
+        : [],
+      finishMoved: moveReason !== undefined,
+      ...(moveReason ? { moveReason } : {}),
     };
   },
 

@@ -219,6 +219,15 @@ declare global {
     ensurePlant(name: string | null, plants: Record<string, NimbusCalendarEntry>): void;
     _dayWindow(workHours: NimbusWorkHours, date: unknown): [Date, Date] | null;
     _nextCalendarDay(d: Date): Date;
+    /** Previous local calendar midnight (calendar-date arithmetic, never minus 24 h): the backward twin of `_nextCalendarDay`. */
+    prevCalendarDay(d: Date): Date;
+    /** Project an absolute instant into the naive wall-clock Date convention of the plant zone.
+     *  No timezone returns a copy of the instant; an invalid zone returns null. */
+    plantWallClockFromInstant(timezone: string | null | undefined, instant: Date): Date | null;
+    /** Inverse of `plantWallClockFromInstant`: read a naive wall-clock Date as plant-zone wall time and
+     *  return the absolute instant (gap resolves after it, fall-back hour to the earlier occurrence).
+     *  No timezone returns a copy of the Date; an invalid zone returns null. */
+    plantInstantFromWallClock(timezone: string | null | undefined, wall: Date): Date | null;
     workWindow(
       line: string, date: unknown,
       calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusCalendarEntry>,

@@ -578,20 +578,8 @@ function parseDateOnlyAsWallClock(value: string): Date | null {
  * by Calendar and the persisted schedule. Date-only/naive date-time inputs
  * are already wall-clock values and are handled without this projection. */
 function plantWallClockFromInstant(timezone: string | null | undefined, instant: Date): Date | null {
-  if (!timezone) return new Date(instant);
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
-      second: 'numeric', hourCycle: 'h23',
-    }).formatToParts(instant);
-    const values: Record<string, number> = {};
-    for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
-    if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
-    return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, values.second, instant.getMilliseconds());
-  } catch {
-    return null;
-  }
+  // The implementation lives in the compute core (shared with Store.plantNow and the worker).
+  return globalThis.NimbusComputeCore!.plantWallClockFromInstant(timezone, instant);
 }
 
 function hasExplicitDate(value: unknown): boolean {
