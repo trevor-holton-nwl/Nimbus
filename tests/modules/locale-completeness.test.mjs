@@ -7,10 +7,21 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import vm from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOCALES_DIR = join(__dirname, '..', '..', 'frontend', 'locales');
 const LOCALES = ['en', 'de', 'es', 'fr', 'pt'];
+
+// A locale file with a syntax error (e.g. an unescaped apostrophe in a single-quoted string) fails to load in the
+// browser and takes the whole language with it; the key regex below would never notice, so compile each file.
+for (const locale of LOCALES) {
+  test(`${locale}.js is syntactically valid JavaScript`, () => {
+    const file = join(LOCALES_DIR, `${locale}.js`);
+    assert.doesNotThrow(() => new vm.Script(readFileSync(file, 'utf8'), { filename: file }));
+  });
+}
+
 // Locale entries are usually one per line, but valid object literals may keep
 // several short translations together; key discovery must not mistake that
 // formatting choice for a missing translation.
