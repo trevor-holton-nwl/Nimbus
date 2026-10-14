@@ -3002,9 +3002,9 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
     (no calendar). `runtime_schedule_mismatch` is set so the browser re-derives
     the start backward from that finish through the calendar. The partial-share
     segments are deleted (their hours no longer add up to the whole order). A
-    survivor with no run time carries `scheduled_end = scheduled_start` (the
-    engine's `run_time_zero` issue surfaces it); one with no kept start (finish-only
-    placement) keeps its stored finish; an unplaced one carries nothing."""
+    survivor with no positive run time carries `scheduled_end = scheduled_start + 1 minute` (the schema's
+    strict `scheduled_end > scheduled_start` check) and stays flagged for the engine's `run_time_zero` issue;
+    one with no kept start (finish-only placement) keeps its stored finish; an unplaced one carries nothing."""
     cur.execute(
         """
         UPDATE orders AS new_o
@@ -3013,7 +3013,9 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
                    WHEN old_o.scheduled_start IS NULL THEN old_o.scheduled_end
                    WHEN COALESCE(@RT@, 0) > 0
                         THEN old_o.scheduled_start + (@RT@) * INTERVAL '1 hour'
-                   ELSE old_o.scheduled_start END,
+                   -- no usable run time: one minute keeps chk_orders_sched_range (strict >); the flag below
+                   -- makes the browser re-derive the real width
+                   ELSE old_o.scheduled_start + INTERVAL '1 minute' END,
                runtime_schedule_mismatch = CASE
                    WHEN old_o.scheduled_start IS NOT NULL OR old_o.scheduled_end IS NOT NULL THEN TRUE
                    ELSE new_o.runtime_schedule_mismatch END,

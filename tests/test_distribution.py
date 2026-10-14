@@ -3141,7 +3141,7 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
             self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
             conn.commit()
 
-    def test_collapse_copies_schedule_and_repoints_segments(self, pg):
+    def test_collapse_carries_start_notes_and_firm_and_drops_partial_segments(self, pg):
         children = _snapshot_children(pg, self.PLANT, self.ORD)
         l1_child = next(c for c in children if c["machine"] == self.L1)
         assert l1_child["distribution_letter"] is not None, "L1 must start lettered (2 positive shares)"
@@ -3220,6 +3220,26 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
             assert cur.fetchone() == (start, dt.datetime(2026, 10, 7, 16, 0), True)
             cur.execute("SELECT COUNT(*) FROM order_schedule_segments WHERE order_id=%s", (new_id,))
             assert cur.fetchone()[0] == 0
+
+    @pytest.mark.parametrize("run_time", [None, 0])
+    def test_collapse_with_no_positive_run_time_keeps_the_schedule_range_check(self, pg, run_time):
+        """F3: a placed survivor with a NULL or 0 manual run time carries end = start + 1 minute (the strict
+        chk_orders_sched_range holds), the mismatch flag is set, and the whole re-weight write succeeds."""
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        start, partial_end = dt.datetime(2026, 10, 6, 18, 0), dt.datetime(2026, 10, 7, 12, 0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time=%s, run_time_source='manual',"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (start, partial_end, run_time, old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester")
+        new_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT scheduled_start, scheduled_end, runtime_schedule_mismatch FROM orders WHERE id=%s",
+                        (new_id,))
+            assert cur.fetchone() == (start, start + dt.timedelta(minutes=1), True)
 
     def test_collapse_of_a_firmed_survivor_is_listed_in_the_dry_run_and_needs_the_confirm(self, pg):
         old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
