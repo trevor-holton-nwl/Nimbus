@@ -4144,6 +4144,29 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('a dirty stale row (unsaved local edits) is left untouched; once saved the same row is re-derived', () => {
+    const fx = recFixture();
+    try {
+      // Identical to the stale-row case above, which IS re-derived: only the dirty mark differs.
+      Store.setTasks([fx.task('dt', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      Persistence._dirtyIds.add('dt');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.dt;
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'a dirty row keeps the planner\'s unsaved start');
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime());
+      assert.equal(t.runtime_schedule_mismatch, true, 'the stale flag is not cleared');
+      assert.equal(t.systemMove ?? null, null);
+      assert.deepEqual(fx.writes, [], 'no display write for a dirty row');
+      Persistence._dirtyIds.delete('dt');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.dt.start_date.getTime(), at(26, 11).getTime(), 'saved: re-derived from the held finish');
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['dt'] }]);
+    } finally { Persistence._dirtyIds.delete('dt'); fx.restore(); }
+  });
+
   test('Review Focus 3: a running stale row keeps its start and moves its finish later', () => {
     const fx = recFixture();
     try {
