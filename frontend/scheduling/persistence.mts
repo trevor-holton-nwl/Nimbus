@@ -785,9 +785,10 @@ export const Persistence = {
   },
 
   _prepTask(raw: Record<string, unknown>): NimbusTask {
-    // /tasks exposes the SAP baseline as original_start_date. Keep a raw copy
-    // before calendar hydration adjusts the display baseline. Existing cached
-    // raw dates remain authoritative on subsequent cache decoding.
+    // /tasks exposes the SAP baseline as original_start_date. Keep a raw copy as
+    // BASIC_START_DATE (nothing snaps original_start_date any more; the client's
+    // SAP-start checks read this copy). Existing cached raw dates remain
+    // authoritative on subsequent cache decoding.
     if (!Object.prototype.hasOwnProperty.call(raw, 'BASIC_START_DATE')) {
       raw.BASIC_START_DATE = raw.original_start_date ?? null;
     }

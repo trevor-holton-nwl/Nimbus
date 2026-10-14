@@ -32,7 +32,7 @@ with a single clear owner, bridged into the classic-script world via
 
 `web/app.js` is now 731 lines and contains **no module bodies of its own** —
 only the `NimbusComputeCore` guard, the seven-bridge destructure, the DI-seam
-wiring (`Persistence.setCalendarService`, `setActiveTabResolvers`,
+wiring (`Persistence.setCalendarService` [since removed, backward scheduling Task 2.5], `setActiveTabResolvers`,
 `Util`/`ErrorLog`/`Store` resolver injections), `_bootMain()`/
 `_domReadyGate()` boot orchestration, and the final compatibility `return
 {...}` namespace `index.html`'s inline handlers and `nimbus-intelligence.js`
@@ -96,7 +96,7 @@ Compute, Alerts computation, Utilization, Engine) and `schedule-data.mjs`
 code stays in app.js as `CalendarUI`, `AlertsUIAdapter`, and
 `SessionUIAdapter`, following the Phase 1 `SandboxAdapter` precedent. The
 `schedule:hydrated` and `session:changed` events and the
-`Persistence.setCalendarService` seam resolve the two real
+`Persistence.setCalendarService` seam (removed in backward scheduling Task 2.5) resolve the two real
 data→services dependencies found during Phase 2 research. **Update (Phase 3
 Task 7):** `AlertsUIAdapter` has since moved into `schedule-workbench.mjs`
 (a deliberate, documented scope decision — see its §1 row below); `CalendarUI`

@@ -885,15 +885,13 @@ here because they are at-scale/multi-user hardening or product decisions, not pi
   persistence silently disabled for it). Full fix: send `subnetwork` on the write path (the frontend
   already knows it from `Store.masterData`) and scope `_resolve_subnetwork` / the UPDATE by it, instead
   of relying on global plant uniqueness.
-- **Gantt bar-width vs. explicit resize (F12 — product decision).** `db.py._EFF_END_SQL` derives the
-  Gantt bar width as `scheduled_start + run_time` (intentional: bar width must always represent
-  run-time, since stored SAP `scheduled_end` durations rarely match). A user's **edge-resize** (drag
-  the right edge to a duration ≠ run_time) persists `scheduled_end` but silently reverts to a
-  run-time-wide bar on reload. Decide one of: (a) honor an explicit user resize (distinguish a
-  user-set `scheduled_end` from the SAP window and prefer it in the read), or (b) lock the timeline to
-  move-only so the UI never lets the user create a width the reload discards. Left intact pending the
-  ruling — do **not** silently change `_EFF_END_SQL` (it would revert the deliberate run-time
-  normalization for SAP orders).
+- **Gantt bar-width vs. explicit resize (F12 — resolved by backward scheduling, 2026-10-14).** The
+  read no longer derives the bar width from `scheduled_start + run_time`: `db.py._EFF_END_SQL` is
+  the STORED finish (last segment end, else `scheduled_end`, else the locked SAP finish), so a saved bar
+  reloads as saved. A right-edge resize sets the finish; the start is re-derived backward from it. The
+  server's width check (`width_mismatch`, 60 s tolerance, skipped for a bar carrying a
+  `placement_exception` or one that was not moved) is what keeps a stored bar and its run time in
+  step. See `backend/scheduling/CLAUDE.md` (Task 2.2 and 2.3 bullets).
 
 ## Optimizer — deferred enhancements (post-review, 2026-07-03)
 

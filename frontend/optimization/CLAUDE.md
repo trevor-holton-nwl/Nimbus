@@ -33,7 +33,7 @@ No `backend/` counterpart of its own — the optimizer is pure frontend logic. I
 
 ## Integration points
 
-- **Imports in** (from other domains): `engine.mts` imports `{Config, Util, ErrorLog, PerfMonitor, Toast}` from `platform/foundation.mjs`, `{Store}` from `platform/store.mjs`, `{Calendar, candidateDefaultWorkHours}` from `calendar/calendar-engine.mjs`, `{Alerts, scheduleAlertsForPatches}` from `insights/services.mjs`, the 4 pure evaluators + types from `./setup-scheduler.mjs`, `{resolveSetup, stateForOrder}` from `setup/setup-domain.mjs`, plus `platform/types.mjs`. `setup-scheduler.mts` imports `{candidateDefaultWorkHours}` from `calendar/calendar-engine.mjs` and `{buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder}` from `setup/setup-domain.mjs`. `sandbox.mts` imports `{Store, UndoStack}` from `platform/store.mjs` and `{Util}` from `platform/foundation.mjs`.
+- **Imports in** (from other domains): `engine.mts` imports `{Config, Util, ErrorLog, PerfMonitor, Toast}` from `platform/foundation.mjs`, `{Store, UndoStack}` from `platform/store.mjs`, `{Runtime}` from `routing/runtime-client.mjs`, `{Calendar, candidateDefaultWorkHours}` from `calendar/calendar-engine.mjs`, `{CalendarSync}` from `calendar/calendar-sync.mjs` (the reconcile reads the hydration state), `{Persistence}` from `scheduling/persistence.mjs` (the reconcile skips dirty ids), `{Alerts, scheduleAlertsForPatches}` from `insights/services.mjs`, the 4 pure evaluators + types from `./setup-scheduler.mjs`, `{resolveSetup, stateForOrder}` from `setup/setup-domain.mjs`, plus `platform/types.mjs`. `setup-scheduler.mts` imports `{candidateDefaultWorkHours}` from `calendar/calendar-engine.mjs` and `{buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder}` from `setup/setup-domain.mjs`. `sandbox.mts` imports `{Store, UndoStack}` from `platform/store.mjs` and `{Util}` from `platform/foundation.mjs`.
 - **Imported by** (outside this domain): `frontend/app-entry.mjs`, `frontend/calendar/calendar-engine.mts`, `frontend/calendar/calendar-sync.mts`, `frontend/insights/insights-ui.mts`, `frontend/insights/services.mts`, `frontend/master-data/admin-ui.mts`, `frontend/platform/store.mts` (the sandbox cycle), `frontend/scheduling/gantt.mts`, `frontend/scheduling/orders.mts`, `frontend/scheduling/persistence.mts`, `frontend/shell/application-shell.mts`.
 - **Store events**: emits `sandbox:entered`/`sandbox:exited`/`sandbox:reverted` (sandbox.mts); triggers `Alerts.clearDismissed`/`scheduleRecompute`/`scheduleRecomputeLines`/`scheduleAlertsForPatches` on the engine side after a run/patch-apply.
 - **No direct backend endpoints** are called from this domain — `saveAll`/`POST /tasks/update` lives in `scheduling/persistence.mts`, invoked by `SandboxAdapter`/`OptimizerPreview` in `optimize-ui.mts`, not by `engine.mts`/`setup-scheduler.mts` themselves.
@@ -42,11 +42,11 @@ No `backend/` counterpart of its own — the optimizer is pure frontend logic. I
 
 ## Tests
 
-- `tests/modules/optimization/engine.test.mjs` (3,717 lines) — Engine dispatch, auto-reflow, candidate evaluation, synthetic snapshot, backlog frozen-horizon behavior.
+- `tests/modules/optimization/engine.test.mjs` (4,438 lines) — Engine dispatch, auto-reflow, candidate evaluation, synthetic snapshot, backlog frozen-horizon behavior.
 - `tests/modules/optimization/sandbox.test.mjs` (146 lines) — enter/exit, replace-event pairing, undo-on-apply.
-- `tests/modules/optimization/optimize-ui.test.mjs` (1,532 lines) — OptimizeDialog/OptimizerPreview/SandboxAdapter.
-- `tests/modules/optimization/optimizer-worker.test.mjs` (424 lines) — worker contract/client.
-- `tests/modules/setup-scheduler.test.mjs` (5,337 lines) — the detached evaluators, imports `evaluateSchedule` from `engine.mjs` and `* as SetupScheduler` from `setup-scheduler.mjs` directly.
+- `tests/modules/optimization/optimize-ui.test.mjs` (1,657 lines) — OptimizeDialog/OptimizerPreview/SandboxAdapter.
+- `tests/modules/optimization/optimizer-worker.test.mjs` (430 lines) — worker contract/client.
+- `tests/modules/setup-scheduler.test.mjs` (5,728 lines) — the detached evaluators, imports `evaluateSchedule` from `engine.mjs` and `* as SetupScheduler` from `setup-scheduler.mjs` directly.
 - `tests/modules/remove-backlog.test.mjs`, `tests/modules/split-order.test.mjs` — backlog mode and split-order interaction with the scheduler.
 
 Scoped run: `node --test tests/modules/optimization/engine.test.mjs tests/modules/optimization/sandbox.test.mjs tests/modules/optimization/optimize-ui.test.mjs tests/modules/setup-scheduler.test.mjs`
