@@ -253,7 +253,7 @@ The abort decision belongs to the decider, who must know what an abort costs (st
 
 | Situation | What restores | What is lost |
 |---|---|---|
-| The image fails **before any planner saves** under the new rule | Roll the previous image tag only (the recorded rollback target: `az containerapp update ... --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`) | No planner edit is lost. The cutover has already emptied the placed starts and ends, so old code reads those orders as never placed and shows them from their due dates; the old placements are in the run-2 snapshot tables |
+| The image fails **before any planner saves** under the new rule | Roll the previous image tag only (the recorded rollback target: `az containerapp update ... --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`) | No planner edit is lost. The cutover has already emptied the placed starts and ends, so old code reads those orders as never placed and shows them wherever it shows a never-placed order **[unverified: what the previous image does with orders that are flagged for a re-derive and have no placement; check it in the rehearsal by running the previous image against the migrated copy]**; the old placements are in the run-2 snapshot tables |
 | Planners **have saved**, then the image rolls back | Nothing in the database restores the old placed finishes; recovery is the run-2 snapshot tables or the platform's point-in-time restore, run by the operator | Every edit made after the snapshot; the restore is itself an update and bumps every row's version |
 | Finishes already sent to SAP | Cannot be recalled | n/a |
 
