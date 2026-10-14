@@ -4518,6 +4518,18 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
     if "RUN_TIME" in df.columns:
         _rt_num = pd.to_numeric(df["RUN_TIME"], errors="coerce")
         _rt_bad = _rt_num.notna() & ~((_rt_num >= 0) & (_rt_num < RUN_TIME_REPRESENTATION_BOUND_HOURS))
+        # U12: a routing-enabled plant ignores the file's RUN_TIME (upsert_orders nulls it; the resolver prices
+        # the order), so a junk value there must not drop the row: it loads and the resolver prices it.
+        if _rt_bad.any() and "PLANT" in df.columns:
+            _bad_plants = sorted({_str_id(p) for p in df.loc[_rt_bad, "PLANT"].dropna().unique() if _str_id(p)})
+            if _bad_plants:
+                with _pool.connection() as _conn, _conn.cursor() as _cur:
+                    _cur.execute("SELECT plant FROM plants WHERE plant = ANY(%s) AND routing_runtime_enabled = TRUE",
+                                 (_bad_plants,))
+                    _routing_plants = {r[0] for r in _cur.fetchall()}
+                if _routing_plants:
+                    _on_routing = df["PLANT"].map(lambda v: _str_id(v) in _routing_plants if pd.notna(v) else False)
+                    _rt_bad = _rt_bad & ~_on_routing
         if _rt_bad.any():
             _bad_rows = df.index[_rt_bad].tolist()
             for _i in _bad_rows[:25]:

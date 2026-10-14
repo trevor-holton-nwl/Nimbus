@@ -1675,6 +1675,20 @@ class TestRunTimeCapIngestRealDb:
         self._up([self._line("G", 500)], "zztest_cap_5.xlsx")          # over the cap: a planner hold keeps its reason
         assert self._row("G")["reason"]["code"] == "planner_unscheduled"
 
+    def test_representation_overflow_row_on_a_routing_plant_loads_and_the_value_is_ignored(self):
+        # U12: RUN_TIME is ignored on a routing-enabled plant (the resolver prices the order), so a junk
+        # value there must not drop the row; a non-routing plant still rejects it by row number.
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE plants SET routing_runtime_enabled = TRUE WHERE plant = %s", (self.SHORT_PLANT,))
+            conn.commit()
+        res = self._up([self._line("J1", 9000, plant=self.SHORT_PLANT), self._line("J2", 9000)])
+        row = self._row("J1")
+        assert row is not None, "the routing-plant row loaded"
+        assert row["run_time"] is None or float(row["run_time"]) < 8760.0, "the junk value was never stored"
+        assert self._row("J2") is None, "a non-routing plant still rejects it"
+        msgs = [w["msg"] for w in res["warnings"] if w.get("level") == "error"]
+        assert not any("J1" in m for m in msgs) and any("J2" in m for m in msgs), msgs
+
     def test_representation_overflow_rejects_the_row_by_number_and_commits_the_rest(self):
         res = self._up([self._line("H1", 10), self._line("H2", 9000), self._line("H3", 20)])
         assert res["inserted"] == 2 and self._row("H2") is None
