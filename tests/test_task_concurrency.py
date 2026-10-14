@@ -431,6 +431,33 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
                 conn.commit()
 
+    def test_conflict_scan_sees_a_finish_only_neighbour(self, pg):
+        """U2: a placed neighbour with a stored finish and no stored start (a distribution carry) is found
+        through its stored end; before, only its start key was consulted, so it escaped the scan."""
+        db_ = pg
+        fin_id = db_.make_id(self.ORDER + "_FINONLY", self.MATERIAL)
+        new_start = self.start + dt.timedelta(hours=7)
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (fin_id,))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant,"
+                " basic_start_date, basic_finish_date, scheduled_start, scheduled_end, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,NULL,%s,NULL,%s,4)",
+                (fin_id, self.ORDER + "_FINONLY", self.MATERIAL, self.MACHINE, self.PLANT,
+                 self.start + dt.timedelta(hours=9), self.start + dt.timedelta(hours=9)))
+            conn.commit()
+        try:
+            base = self._current_version(db_)
+            result = db_.update_task_dates_bulk([
+                {"id": self.oid, "start": new_start, "end": new_start + dt.timedelta(hours=2), "base_version": base},
+            ])
+            pairs = {frozenset((c["order_a"], c["order_b"])) for c in result["conflicts"]}
+            assert frozenset((self.oid, fin_id)) in pairs
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = %s", (fin_id,))
+                conn.commit()
+
     def test_conflict_scan_judges_placed_neighbours_only(self, pg):
         """A never-placed neighbour occupies its whole SAP window server-side, so it is not scanned (no phantom
         conflicts, no strict-save rejection from an untouched order); a placed neighbour with a stored end is."""

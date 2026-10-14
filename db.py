@@ -1087,7 +1087,10 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
         f"""
         SELECT o.machine, o.plant, o.id,
                COALESCE(seg.schedule_segments, '[]'::jsonb) AS segments,
-               COALESCE(o.scheduled_start, o.basic_start_date) AS eff_start,
+               COALESCE(o.scheduled_start,
+                        CASE WHEN o.scheduled_end IS NOT NULL
+                             THEN o.scheduled_end - make_interval(secs => COALESCE(o.run_time, 0) * 3600) END,
+                        o.basic_start_date) AS eff_start,
                {_EFF_END_SQL} AS eff_end
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
@@ -1095,10 +1098,13 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
           AND o.plant = ANY(%s)
           AND o.planning_status <> 'needs_planning'
           AND {_PLACED_SQL}
-          AND COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
+          AND (COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
+               -- a finish-only placement (a distribution carry: stored end, no stored start) matches on its
+               -- stored end too (U2); its start is derived as end - run time for the overlap test
+               OR o.scheduled_end BETWEEN %s AND %s)
           AND {_EFF_END_SQL} > %s
         """,
-        (machines, plants, wide_lo, hi, lo),
+        (machines, plants, wide_lo, hi, lo, hi + timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS), lo),
     )
     # Plant-qualified key so _detect_interval_conflicts (grouped by its
     # `machine` field only) never pools two different plants' same-named
