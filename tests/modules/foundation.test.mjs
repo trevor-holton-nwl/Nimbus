@@ -614,6 +614,12 @@ test('sapDueDate reads a date-only (exact-midnight) due date as the end of that 
     assert.equal(Util.sapDueDate(task(timed)), timed, 'timed due returned as-is');
     assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5), 'NOCAL')), +new Date(2026, 7, 5, 23, 59, 59), 'line without calendar rows');
     assert.equal(Util.sapDueDate({ id: 'n', MACHINE: 'L1', original_end_date: null }), null);
+    // R-I6: a line closing at 24:00 reads a date-only due as the close of that day (Thu 00:00), not 23:59:59.
+    weekdays[3] = [6, 24];
+    rev = 3;
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 6, 0, 0, 0), '06:00-24:00 line -> next-day 00:00');
+    weekdays[3] = [6, 22];
+    rev = 1;
     // The per-line+date window cache stays valid until the Store revision moves.
     rev = 2;
     weekdays[3] = [8, 12];

@@ -436,7 +436,9 @@
   // calendar date. A timed raw is returned unchanged. For exact midnight: the close of that
   // date's window; a date with no window (closed day) resolves to the close of the latest open
   // date before it (looking back at most 30 days); no window at all -> raw + 23:59:59. A window
-  // that closes at/after the next midnight (a 24/7 line) is clamped to 23:59:59 of that date.
+  // that closes at/after the next midnight (a 24:00 close, a 24/7 line) resolves to that exclusive
+  // next-day 00:00 instant, i.e. the close of the day itself (R-I6): a bar ending exactly at the
+  // close is on time (`end > due` is the lateness rule) and the backward anchor is the close.
   function dueDateInstant(raw, dayWindowFor) {
     if (!(raw instanceof Date) || isNaN(raw)) return raw;
     if (raw.getHours() !== 0 || raw.getMinutes() !== 0 || raw.getSeconds() !== 0 || raw.getMilliseconds() !== 0) return raw;
@@ -445,7 +447,7 @@
       const day = new Date(raw.getFullYear(), raw.getMonth(), raw.getDate() - back);
       const win = dayWindowFor(day);
       if (!win || !win.close) continue;
-      const cap = endOfDay(day);
+      const cap = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1, 0, 0, 0, 0);
       return win.close > cap ? cap : new Date(+win.close);
     }
     return endOfDay(raw);

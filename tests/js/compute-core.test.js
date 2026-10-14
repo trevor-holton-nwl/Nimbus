@@ -722,12 +722,15 @@ test('dueDateInstant reads midnight on a closed Sunday as the previous Friday cl
   assert.ok(out > new Date(2026, 6, 10), 'not the Friday-midnight or Sunday-midnight raw value');
 });
 
-test('dueDateInstant on a 24/7 line is 23:59:59 of that date (window close = end of day)', () => {
+test('dueDateInstant on a 24/7 / 24:00-close line is the close of that day: next-day 00:00 (R-I6)', () => {
   const allDay = (date) => ({ open: new Date(date), close: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1) });
   const out = Core.dueDateInstant(new Date(2026, 6, 12), allDay);                 // Sunday, but open 24h
-  assert.equal(+out, +new Date(2026, 6, 12, 23, 59, 59));
+  assert.equal(+out, +new Date(2026, 6, 13, 0, 0, 0));
   const clamped = (date) => ({ open: new Date(date), close: new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59) });
-  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 12), clamped), +new Date(2026, 6, 12, 23, 59, 59));
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 12), clamped), +new Date(2026, 6, 12, 23, 59, 59), 'a close before midnight is kept as is');
+  // The real window builder: a 06:00-24:00 line (Edit Calendar stores 00:00 end as 24).
+  const win0624 = (date) => { const w = Core._dayWindow(allDays([6, 24]), date); return w ? { open: w[0], close: w[1] } : null; };
+  assert.equal(+Core.dueDateInstant(new Date(2026, 9, 21), win0624), +new Date(2026, 9, 22, 0, 0, 0), 'Wed 21 Oct reads Thu 00:00, not 23:59:59');
 });
 
 test('dueDateInstant with no calendar at all is raw + 23:59:59', () => {
@@ -867,6 +870,16 @@ test('late alert: a finish after the due instant is a warning; on or before it t
   assert.equal(late[0].msgVars.hours, '2.0');
   assert.equal(late[0].taskId, 'late1');
   assert.equal(late[0].line, 'L');
+});
+
+test('late alert (R-I6): on a 06:00-24:00 line a bar ending exactly at the close is on time, one minute later is late', () => {
+  const cal = { L: { workHours: allDays([6, 24]) } };
+  const mk = (end) => dueFri({ original_end_date: D(16, 0), start_date: D(16, 10), end_date: end });
+  const lateOf = (task) => Core.computeAlerts(alertBase([task], { calendars: cal, plants: { P: { workHours: allDays([0, 24]) } } })).alerts.filter(a => a.type === 'late');
+  assert.equal(lateOf(mk(D(17, 0))).length, 0, 'ends exactly at the 24:00 close of its due day: on time');
+  const late = lateOf(mk(D(17, 0, 1)));
+  assert.equal(late.length, 1, 'one minute past the close is late');
+  assert.equal(late[0].sev, 'warn');
 });
 
 test('late alert: a timed due date compares exactly, and a line with no calendar row reads a date-only due as 23:59:59', () => {
