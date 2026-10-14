@@ -2645,8 +2645,18 @@ interface MasterDataCascadePreview {
  *  (`frontend/admin-ops/admin-ui.mts`'s `AdminPipelineWarning`), copied here
  *  rather than imported to avoid a new cross-domain edge (§4.1). */
 interface MasterDataBulkWarning {
-  level?: 'info' | 'warn' | 'error';
+  level?: 'info' | 'warn' | 'error' | 'reject';
   msg?: string;
+  /** 1-based source row of a row-scoped finding (routing upload/validate warnings). */
+  row?: number | null;
+}
+
+/** `POST /routing/validate/{table}` response (backend/routing/routes.py): the rows the Excel
+ *  upload would keep, keyed by column name, plus its warnings. */
+interface RoutingValidateResponse {
+  rows: MasterDataRow[];
+  rejected: number;
+  warnings: MasterDataBulkWarning[];
 }
 
 /** `POST /master-data/{table}/bulk` response (master_data.py bulk_apply). */
@@ -3036,15 +3046,19 @@ export const MasterData = (() => {
     if (!lines.length) return { rows: [] };
     const colNames  = columns.map((c) => c.column_name.toLowerCase());
     const colLabels = columns.map((c) => (c.display_label || c.column_name).toLowerCase());
-    const first     = lines[0].split('\t').map((h) => h.trim().toLowerCase());
+    const firstRaw  = lines[0].split('\t').map((h) => h.trim());
+    const first     = firstRaw.map((h) => h.toLowerCase());
     const hasHeader = first.some((h) => colNames.includes(h) || colLabels.includes(h));
     let headers: string[], dataLines: string[];
     if (hasHeader) {
-      headers   = first.map((h) => {
+      // Matched headers map to the column name; an unmatched one is kept exactly as pasted
+      // (not lower-cased) so the routing validator can recognise an upload-sheet header
+      // such as ALTERNATE_BOM. Every other table's bulk_apply drops unknown keys.
+      headers   = first.map((h, i) => {
         const ni = colNames.indexOf(h);
         if (ni >= 0) return columns[ni].column_name;
         const li = colLabels.indexOf(h);
-        return li >= 0 ? columns[li].column_name : h;
+        return li >= 0 ? columns[li].column_name : firstRaw[i];
       });
       dataLines = lines.slice(1);
     } else {
@@ -3877,6 +3891,18 @@ export const MasterData = (() => {
   async function _uploadFile(table: MasterDataTable): Promise<void> {
     const endpoint = UPLOAD_ENDPOINT[table];
     if (!endpoint) return;
+    // The operations upload REPLACES every operation of each routing in the file
+    // (a scoped delete + insert), so ask before the picker opens.
+    if (table === 'routing_operation') {
+      const ok = await Modal.confirm({
+        title:        Util.t('ui.upload_replace_confirm_title'),
+        message:      Util.t('ui.upload_replace_confirm_message'),
+        detail:       Util.t('ui.upload_replace_confirm_detail'),
+        confirmLabel: Util.t('btn.upload_replace_confirm'),
+        tone:         'warn',
+      });
+      if (!ok) return;
+    }
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.xlsx';
@@ -3889,27 +3915,40 @@ export const MasterData = (() => {
         const resp = await Util.fetchTraced(`${API}${endpoint}`, { method: 'POST', body: fd });
         const result = await resp.json();
         if (!resp.ok) throw new Error(result.detail || result.message || Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_failed`));
+        // The plants the file touched (routing uploads only; the BOM result has none).
+        const plants: string[] = result.plants ?? [];
         Toast.show(
           Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_done`, {
             inserted: result.inserted || 0, updated: result.updated || 0, rejected: result.rejected || 0,
+            plants: plants.length ? plants.join(', ') : '—',
           }),
           result.rejected ? 'warn' : 'success',
         );
         if (result.warnings && result.warnings.length) {
           result.warnings.slice(0, 10).forEach((w: { msg: string }) => ErrorLog.warn('master-data', w.msg));
         }
+        // A file for a plant other than the filtered one would otherwise upload "into the
+        // void": follow it when it is one plant, say so when it is several.
+        if (plants.length === 1 && plants[0] !== _scopeFilter(table).plant) {
+          _scopeFilter(table).plant = plants[0];
+        } else if (plants.length > 1) {
+          Toast.show(Util.t('toast.upload_plants_differ', { plants: plants.join(', ') }), 'warn');
+        }
         // Refresh the currently-scoped view so newly uploaded rows show up
-        // immediately.
+        // immediately, then show the upload's warnings under the grid toolbar.
         delete _cache[table];
-        if (_activeTable === table) _renderActiveTable();
+        if (_activeTable === table) {
+          await _loadAndRender(table);
+          _renderBulkWarnings(result.warnings || []);
+        }
         // Keep Runtime's per-plant rate-map mirror in sync with what just
         // changed (mirrors the loadPriorityRankMaps refresh pattern below).
         // Both routing upload tables (production_version, routing_operation)
         // are SCOPED_TABLES in 'plant' mode, so _scopeFilter always has the
-        // plant this upload targeted.
+        // plant this upload targeted when the result names none.
         if (ROUTING_TABLES.has(table)) {
-          const plant = _scopeFilter(table).plant;
-          if (plant) Runtime.load(plant);
+          const toLoad = plants.length ? plants : [_scopeFilter(table).plant].filter((p): p is string => !!p);
+          toLoad.forEach((p) => Runtime.load(p));
         }
       } catch (e) {
         Toast.show(`${Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_failed`)}: ${(e as Error).message}`, 'error');
@@ -3919,21 +3958,81 @@ export const MasterData = (() => {
     input.click();
   }
 
+  // The paste box: the clipboard API is unavailable or denied (plain http, a browser policy),
+  // so the admin pastes into a textarea instead. Resolves the typed text on Paste, null on
+  // Cancel/close. Handlers are assigned on every open, so a stale closure never survives.
+  function _askPasteText(): Promise<string | null> {
+    return new Promise((resolve) => {
+      const box = document.getElementById('md-paste-box') as HTMLTextAreaElement | null;
+      if (!box) { Toast.show(Util.t('toast.clipboard_denied'), 'error'); resolve(null); return; }
+      box.value = '';
+      const finish = (text: string | null): void => { Modal.close('md-paste-modal'); resolve(text); };
+      (document.getElementById('md-paste-ok-btn') as HTMLElement).onclick = () => finish(box.value);
+      for (const id of ['md-paste-cancel-btn', 'md-paste-close-btn']) {
+        (document.getElementById(id) as HTMLElement).onclick = () => finish(null);
+      }
+      Modal.open('md-paste-modal');
+    });
+  }
+
+  // Add vs update below is classified against the rows loaded in this grid only (a paged or
+  // plant-scoped view); the server's upsert on Save is the authority on what already exists.
   async function _pasteRows(table: MasterDataTable): Promise<void> {
-    let raw: string;
+    let raw: string | null;
     try {
       raw = await navigator.clipboard.readText();
     } catch {
-      Toast.show(Util.t('toast.clipboard_denied'), 'error');
-      return;
+      raw = await _askPasteText();
+      if (raw === null) return;
     }
     if (!raw.trim()) { Toast.show(Util.t('toast.clipboard_empty'), 'error'); return; }
 
     const state = _cache[table];
     if (!state) return;
 
-    const { rows } = _parsePaste(raw, state.columns);
+    let { rows } = _parsePaste(raw, state.columns);
     if (!rows.length) { Toast.show(Util.t('toast.no_rows_paste'), 'error'); return; }
+
+    // A pasted block rarely repeats the plant (or, on a one-material BOM view, the material)
+    // the grid is already filtered to: fill what the paste left blank from the filter.
+    const scopeMode = SCOPED_TABLES[table];
+    if (scopeMode) {
+      const scope = _scopeFilter(table);
+      rows.forEach((row) => {
+        if (!row.plant && scope.plant) row.plant = scope.plant;
+        if (table === 'bom_items' && !row.material_id && scope.material_id) row.material_id = scope.material_id;
+      });
+    }
+
+    // Routing tables: the server cleans the rows exactly as the Excel upload would
+    // (zero-padding, booleans, numbers) and rejects the ones the upload would reject, so the
+    // admin sees them in the confirm below before anything is staged.
+    let rejectsHtml = '';
+    let validated: RoutingValidateResponse | null = null;
+    if (table === 'production_version' || table === 'routing_operation') {
+      try {
+        const resp = await Util.fetchTraced(`${API}/routing/validate/${table}`, {
+          method:  'POST',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ rows }),
+        });
+        if (!resp.ok) throw new Error((await Util.parseBackendError(resp)).message);
+        validated = await resp.json() as RoutingValidateResponse;
+      } catch (e) {
+        Toast.show(Util.t('toast.paste_validate_failed', { msg: (e as Error).message }), 'error');
+        ErrorLog.error('master-data', `Paste validation failed for ${table}: ${(e as Error).message}`);
+        return;
+      }
+      rows = validated.rows;
+      const rejects = (validated.warnings || []).filter((w) => w.level === 'reject');
+      if (rejects.length) {
+        const items = rejects.slice(0, 20).map((w) =>
+          `<li>${w.row != null ? `row ${w.row}: ` : ''}${Util.escapeHtml(w.msg || '')}</li>`);
+        if (rejects.length > 20) items.push(`<li>${Util.t('ui.paste_rejects_more', { count: rejects.length - 20 })}</li>`);
+        rejectsHtml = `<div class="md-paste-rejects"><strong>${Util.t('ui.paste_rejects_heading', { count: rejects.length })}</strong>` +
+                      `<ul>${items.join('')}</ul></div>`;
+      }
+    }
 
     const keys    = KEY_COLS[table];
     const toAdd: MasterDataRow[]    = [];
@@ -3954,6 +4053,9 @@ export const MasterData = (() => {
     });
 
     if (!toAdd.length && !toUpdate.length) {
+      // Nothing left to confirm, so there is no dialog to list the server's rejections in:
+      // show them under the toolbar instead.
+      if (validated) _renderBulkWarnings(validated.warnings || []);
       Toast.show(invalid.length
         ? Util.t('toast.missing_key_rows', { count: invalid.length, keys: keys.join(', ') })
         : Util.t('toast.no_valid_rows'), 'error');
@@ -3974,7 +4076,8 @@ export const MasterData = (() => {
       title:   'Paste Rows',
       message: `This will ${parts.join(', ')} row(s).`,
       detail:  `Changes appear in the table but won't be saved until you click Save.` +
-               (invalid.length ? ` Skipped rows are missing key column(s): ${keys.join(', ')}.` : ''),
+               (invalid.length ? ` Skipped rows are missing key column(s): ${keys.join(', ')}.` : '') +
+               rejectsHtml,
     });
     if (!ok) return;
 

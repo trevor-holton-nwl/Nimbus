@@ -3051,6 +3051,27 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     PASTE BOX MODAL — Master Data "Paste Rows" when the clipboard
+     cannot be read directly; handlers are wired in admin-ui.mts
+     ========================================================= -->
+<div class="modal-backdrop" id="md-paste-modal" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3 data-i18n="modal.paste_box_title">Paste rows</h3>
+      <button class="icon-btn" id="md-paste-close-btn" data-i18n-title="btn.close" title="Close" aria-label="Close">✕</button>
+    </header>
+    <div class="modal-body">
+      <p class="form-hint" data-i18n="hint.paste_box">Copy the rows in your spreadsheet (include the header row if you have one), then paste them here.</p>
+      <textarea id="md-paste-box" class="input md-paste-box" rows="10" spellcheck="false" data-autofocus></textarea>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" id="md-paste-cancel-btn" data-i18n="btn.cancel">Cancel</button>
+      <button class="btn btn-primary" id="md-paste-ok-btn" data-i18n="btn.paste_box">Paste</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
      RENAME LABEL MODAL
      ========================================================= -->
 <div class="modal-backdrop" id="md-renamelabel-modal" hidden>

@@ -68,7 +68,8 @@ const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms));
 const { MasterData } = await import('../../../frontend/master-data/admin-ui.mjs');
 const { Store } = await import('../../../frontend/platform/store.mjs');
 const { Modal, Toast } = await import('../../../frontend/platform/foundation.mjs');
-Modal.confirm = async () => true;
+const confirmCalls = [];
+Modal.confirm = async (opts) => { confirmCalls.push(opts); return true; };
 const toasts = [];
 Toast.show = (m, t) => toasts.push(`${m}|${t}`);
 
@@ -332,4 +333,166 @@ test('G5: changing the plant filter with unsaved edits is refused with a warning
     assert.equal(fetchesSince(mark2, '/master-data/').length, 0, 'no reload');
     assert.equal(saveBtn().disabled, false, 'edits kept');
   } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+// ---- Paste Rows validates routing rows through the server; the routing-operations upload confirms ---
+const pvColsGc = [...pvCols.slice(0, 3), { column_name: 'group_counter', display_label: 'Group Counter', is_locked: false }];
+const useClipboard = (impl) => Object.defineProperty(globalThis, 'navigator', { value: { clipboard: { readText: impl } }, configurable: true, writable: true });
+const postBody = (p) => JSON.parse(p.init.body);
+const pasteBtn = () => findBtn('btn.paste_rows', '⎘ Paste Rows');
+async function openScoped(tab, plant, columns, rows = []) {
+  Store.setSelectedPlant(plant, 't');
+  const mark = pending.length;
+  clickTab(tab); await tick();
+  fire(fetchesSince(mark, `/master-data/${tab}`)[0], gridPage(columns, rows)); await tick();
+}
+
+test('P1: pasting production versions posts the rows to /routing/validate and stages only what the server returns', async () => {
+  const prior = Store.selectedPlant;
+  try {
+    await openScoped('production_version', 'P1P', pvColsGc);
+    useClipboard(async () => 'PLANT\tMATERIAL_ID\tPRODUCTION_VERSION\tGROUP_COUNTER\nP1P\tM1\t1\t1\nP1P\tBAD\t2\t1');
+    confirmCalls.length = 0;
+    const mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    const reqs = fetchesSince(mark, '/routing/validate/production_version');
+    assert.equal(reqs.length, 1, 'one validate POST');
+    assert.equal(reqs[0].init.method, 'POST');
+    assert.deepEqual(postBody(reqs[0]).rows[0], { plant: 'P1P', material_id: 'M1', production_version: '1', group_counter: '1' });
+    fire(reqs[0], { rows: [{ plant: 'P1P', material_id: 'M1', production_version: '0001', group_counter: '01' }], rejected: 1,
+      warnings: [{ level: 'reject', msg: 'unknown_material', row: 2 }] }); await tick();
+    assert.equal(confirmCalls.length, 1);
+    assert.match(confirmCalls[0].detail, /row 2: unknown_material/, 'rejects are listed in the confirm');
+    assert.deepEqual(tbodyKeys(), ['P1P|M1|0001'], 'only the server-returned row is staged');
+    assert.equal(findNode((n) => n.dataset.col === 'group_counter' && n.dataset.rowKey === 'P1P|M1|0001').textContent, '01');
+  } finally {
+    // Discard the staged row so the next test's plant switch is not refused as "unsaved edits".
+    const mark = pending.length;
+    findBtn('btn.discard', 'Discard').onclick(); await tick();
+    fire(fetchesSince(mark, '/master-data/production_version')[0], gridPage(pvColsGc, [])); await tick();
+    Store.setSelectedPlant(prior, 't');
+  }
+});
+
+test('P2: a pasted block without a Plant column takes the filter plant before it is validated', async () => {
+  const prior = Store.selectedPlant;
+  try {
+    await openScoped('production_version', 'P2P', pvColsGc);
+    useClipboard(async () => 'MATERIAL_ID\tPRODUCTION_VERSION\nM2\t0001');
+    const mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    const reqs = fetchesSince(mark, '/routing/validate/production_version');
+    assert.equal(reqs.length, 1);
+    assert.equal(postBody(reqs[0]).rows[0].plant, 'P2P');
+    fire(reqs[0], { rows: [], rejected: 0, warnings: [] }); await tick();
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('P3: header names the grid does not know travel to the server as pasted', async () => {
+  const prior = Store.selectedPlant;
+  try {
+    await openScoped('production_version', 'P3P', pvCols);
+    useClipboard(async () => 'PLANT\tMATERIAL_ID\tPRODUCTION_VERSION\tGROUP_COUNTER\nP3P\tM3\t0001\t1');
+    const mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    const reqs = fetchesSince(mark, '/routing/validate/production_version');
+    assert.deepEqual(postBody(reqs[0]).rows[0], { plant: 'P3P', material_id: 'M3', production_version: '0001', GROUP_COUNTER: '1' });
+    fire(reqs[0], { rows: [], rejected: 0, warnings: [] }); await tick();
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('P4: a failed validation toasts the backend detail and stages nothing', async () => {
+  const prior = Store.selectedPlant;
+  const savedLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.paste_validate_failed': 'Could not check the pasted rows: {{msg}}' } };
+  try {
+    await openScoped('routing_operation', 'P4P', pvCols);
+    useClipboard(async () => 'MATERIAL_ID\tPRODUCTION_VERSION\nM4\t0001');
+    toasts.length = 0; confirmCalls.length = 0;
+    const mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    const reqs = fetchesSince(mark, '/routing/validate/routing_operation');
+    assert.equal(reqs.length, 1);
+    fire(reqs[0], { detail: 'Validate accepts at most 20000 rows' }, false); await tick();
+    assert.ok(toasts.some((t) => t.endsWith('|error') && t.includes('20000')), toasts.join(' / '));
+    assert.equal(confirmCalls.length, 0);
+    assert.deepEqual(tbodyKeys(), []);
+  } finally { globalThis.window.__NIMBUS_LOCALES = savedLocales; Store.setSelectedPlant(prior, 't'); }
+});
+
+test('P5: when the clipboard cannot be read the paste box opens and its text goes through the same flow', async () => {
+  const prior = Store.selectedPlant;
+  const realGet = globalThis.document.getElementById;
+  const els = Object.fromEntries(['md-paste-modal', 'md-paste-box', 'md-paste-ok-btn', 'md-paste-cancel-btn', 'md-paste-close-btn'].map((id) => [id, new El('div')]));
+  els['md-paste-modal'].hidden = true;
+  try {
+    await openScoped('production_version', 'P5P', pvColsGc);
+    globalThis.document.getElementById = (id) => els[id] ?? realGet(id);
+    useClipboard(async () => { throw new Error('denied'); });
+    let mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    assert.equal(els['md-paste-modal'].hidden, false, 'paste box is open');
+    assert.equal(fetchesSince(mark, '/routing/validate').length, 0, 'nothing validated yet');
+    els['md-paste-box'].value = 'MATERIAL_ID\tPRODUCTION_VERSION\nM5\t0001';
+    els['md-paste-ok-btn'].onclick(); await tick();
+    assert.equal(els['md-paste-modal'].hidden, true, 'paste box closes on Paste');
+    const reqs = fetchesSince(mark, '/routing/validate/production_version');
+    assert.equal(reqs.length, 1);
+    assert.equal(postBody(reqs[0]).rows[0].plant, 'P5P');
+    fire(reqs[0], { rows: [], rejected: 0, warnings: [] }); await tick();
+    // Cancel: no request, box closes.
+    mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    assert.equal(els['md-paste-modal'].hidden, false);
+    els['md-paste-box'].value = 'MATERIAL_ID\nX';
+    els['md-paste-cancel-btn'].onclick(); await tick();
+    assert.equal(els['md-paste-modal'].hidden, true);
+    assert.equal(fetchesSince(mark, '/routing/validate').length, 0);
+  } finally { globalThis.document.getElementById = realGet; Store.setSelectedPlant(prior, 't'); }
+});
+
+test('U1: the routing-operations upload confirms before the picker opens; a file for another plant moves the filter and names the plant', async () => {
+  const prior = Store.selectedPlant;
+  const realCreate = globalThis.document.createElement, realConfirm = Modal.confirm;
+  const savedLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.routing_operation_upload_done': '{{inserted}} inserted, {{updated}} updated, {{rejected}} rejected · {{plants}}' } };
+  const inputs = [];
+  globalThis.document.createElement = (tag) => { const e = new El(tag); if (tag === 'input') { e.click = () => {}; inputs.push(e); } return e; };
+  const pickers = () => inputs.filter((i) => i.type === 'file');
+  const realGet = globalThis.document.getElementById, bulkHost = new El('div');
+  globalThis.document.getElementById = (id) => (id === 'md-bulk-warnings' ? bulkHost : realGet(id));
+  try {
+    await openScoped('routing_operation', 'UA', pvCols);
+    let inputsAtConfirm = -1, confirmOpts = null;
+    Modal.confirm = async (o) => { confirmOpts = o; inputsAtConfirm = pickers().length; return true; };
+    const uploadBtn = findBtn('btn.upload_routing_operation', 'Upload Routing Operations');
+    await uploadBtn.onclick(); await tick();
+    assert.ok(confirmOpts, 'confirm shown');
+    assert.equal(confirmOpts.tone, 'warn');
+    assert.equal(inputsAtConfirm, 0, 'confirm comes before any file input exists');
+    assert.equal(pickers().length, 1, 'picker opens after a yes');
+    // A declined confirm never opens the picker.
+    Modal.confirm = async () => false;
+    await uploadBtn.onclick(); await tick();
+    assert.equal(pickers().length, 1, 'declined: no second picker');
+
+    toasts.length = 0;
+    pickers()[0].files = [{ name: 'ops.xlsx' }];
+    const mark = pending.length;
+    const changed = pickers()[0].onchange(); await tick();
+    const up = fetchesSince(mark, '/routing/upload/operations');
+    assert.equal(up.length, 1);
+    fire(up[0], { inserted: 3, updated: 1, rejected: 0, warnings: [{ level: 'warn', msg: 'heads up' }], plants: ['UB'] }); await tick();
+    const reload = fetchesSince(mark, '/master-data/routing_operation');
+    assert.equal(reload.length, 1, 'one reload');
+    assert.match(reload[0].url, /plant=UB/, 'filter follows the file\'s plant');
+    fire(reload[0], gridPage(pvCols, [])); await changed; await tick();
+    assert.ok(toasts.some((t) => t.includes('3 inserted') && t.includes('UB')), toasts.join(' / '));
+    let shown = ''; bulkHost.walk((n) => { shown += n.textContent; });
+    assert.match(shown, /heads up/, 'upload warnings render inline after the reload');
+  } finally {
+    globalThis.document.getElementById = realGet;
+    globalThis.document.createElement = realCreate; Modal.confirm = realConfirm; globalThis.window.__NIMBUS_LOCALES = savedLocales;
+    Store.setSelectedPlant(prior, 't');
+  }
 });

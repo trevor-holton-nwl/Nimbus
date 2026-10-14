@@ -3766,7 +3766,8 @@ span.flatpickr-weekday {
   border-bottom: 1px solid var(--line);
   border-left: 3px solid transparent;
 }
-.admin-bwarn-row.admin-bwarn-error { border-left-color: #c0392b; background: rgba(192,57,43,0.04); }
+.admin-bwarn-row.admin-bwarn-error,
+.admin-bwarn-row.admin-bwarn-reject { border-left-color: #c0392b; background: rgba(192,57,43,0.04); }
 .admin-bwarn-row.admin-bwarn-warn  { border-left-color: var(--warn-vivid); background: rgba(243,156,18,0.04); }
 .admin-bwarn-row.admin-bwarn-info  { border-left-color: var(--info,#3498db); }
 .admin-bwarn-meta { display: flex; align-items: center; gap: 8px; }
@@ -3776,7 +3777,8 @@ span.flatpickr-weekday {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
-.admin-bwarn-row.admin-bwarn-error .admin-bwarn-lvl { color: #c0392b; }
+.admin-bwarn-row.admin-bwarn-error .admin-bwarn-lvl,
+.admin-bwarn-row.admin-bwarn-reject .admin-bwarn-lvl { color: #c0392b; }
 .admin-bwarn-row.admin-bwarn-warn  .admin-bwarn-lvl { color: var(--warn); }
 .admin-bwarn-ts { font-size: 10.5px; color: var(--fg-mute); font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
 .admin-bwarn-msg { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
@@ -5146,6 +5148,10 @@ tr:last-child .md-td { border-bottom: none; }
   color: #a04000;
   line-height: 1.5;
 }
+/* Paste Rows — the clipboard-fallback box and the rejects list in its confirm */
+.md-paste-box { width: 100%; min-height: 180px; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; resize: vertical; white-space: pre; }
+.md-paste-rejects { margin-top: 10px; }
+.md-paste-rejects ul { margin: 4px 0 0; padding-left: 18px; max-height: 180px; overflow: auto; font-size: 12px; }
 .form-check-label {
   display: flex;
   align-items: center;
