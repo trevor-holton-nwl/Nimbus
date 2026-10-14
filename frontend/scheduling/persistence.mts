@@ -1079,6 +1079,10 @@ export const Persistence = {
    *  compare in saveAll()'s success handler — keeping both call sites on this one
    *  function guarantees the two snapshots are comparable. */
   _taskEditSnapshot(t: NimbusTask): Record<string, unknown> {
+    // F10: a row that was never placed server-side (and is not queued) holds only DISPLAY-derived dates. A save for it
+    // carries its attribute edits and leaves the dates and segments out, so Save cannot store a placement the planner
+    // never made. A planner placement marks the row placed (Store._markPlaced) and sends them as usual.
+    const displayOnly = !t.user_scheduled && t.planning_status !== 'needs_planning';
     return {
       // Manual firm: sent only for rows whose firm the planner changed (see _firmDirtyIds).
       ...(Persistence._firmDirtyIds.has(String(t.id)) ? { FIRMED: !!t.firmed } : {}),
@@ -1088,18 +1092,20 @@ export const Persistence = {
       // save of a task that holds the field. An explicit null clears the stored marker; a task that never
       // carried the field (an older server, a demo row) omits it, so the server leaves the stored one alone.
       ...(t.placement_exception !== undefined ? { placement_exception: t.placement_exception } : {}),
-      start_date: t.start_date ? Util.toLocalSeconds(t.start_date) as NaiveLocalTs : null,
-      end_date:   t.end_date ? Util.toLocalSeconds(t.end_date) as NaiveLocalTs : null,
+      ...(displayOnly ? {} : {
+        start_date: t.start_date ? Util.toLocalSeconds(t.start_date) as NaiveLocalTs : null,
+        end_date:   t.end_date ? Util.toLocalSeconds(t.end_date) as NaiveLocalTs : null,
+      }),
       PRT_01:       t.PRT_01,
       PRT_02:       t.PRT_02,
       PRODUCTION_VERSION: t.PRODUCTION_VERSION,
       RUN_TIME:      t.RUN_TIME,
       MACHINE:       t.MACHINE,
-      schedule_segments: (t.scheduleSegments || []).map(segment => ({
+      ...(displayOnly ? {} : { schedule_segments: (t.scheduleSegments || []).map(segment => ({
         sequence: segment.sequence,
         start_date: Util.toLocalSeconds(segment.startDate) as NaiveLocalTs,
         end_date: Util.toLocalSeconds(segment.endDate) as NaiveLocalTs,
-      })),
+      })) }),
       // Note: PARENT_ORDER and DISTRIBUTION_LETTER are intentionally excluded (read-only)
     };
   },

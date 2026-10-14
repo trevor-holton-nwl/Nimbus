@@ -1071,12 +1071,19 @@ export const UndoStack = {
   snapshotTasks(ids: string[]): NimbusTask[] {
     return ids.map(id => {
       const t = Store.tasks[id];
-      return t ? structuredClone(t) : null;
+      if (!t) return null;
+      const clone = structuredClone(t);
+      // F10: remember whether the row already carried unsaved edits before the edit this snapshot guards.
+      if (UndoStack.dirtyProbe?.(String(id))) UndoStack._wasDirty.add(clone);
+      return clone;
     }).filter(Boolean) as NimbusTask[];
   },
+  /** Registered by the engine (platform cannot import persistence): true when the row has unsaved edits. */
+  dirtyProbe: null as null | ((id: string) => boolean),
+  _wasDirty: new WeakSet<NimbusTask>(),
   /** Registered by the engine (platform cannot import it): re-derive the start of just-restored rows from their
    *  restored finish and the CURRENT run time (OQ21). Receives the restored ids. */
-  afterRestore: null as null | ((ids: string[]) => void),
+  afterRestore: null as null | ((ids: string[], wasDirty: ReadonlySet<string>) => void),
   restoreTasks(snapshot: NimbusTask[]): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
@@ -1091,6 +1098,9 @@ export const UndoStack = {
         row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
     });
     Store.updateMany(patches, 'undo');
-    if (patches.length) UndoStack.afterRestore?.(patches.map(p => String(p.id)));
+    if (patches.length) {
+      const wasDirty = new Set(snapshot.filter(s => UndoStack._wasDirty.has(s)).map(s => String(s.id)));
+      UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty);
+    }
   },
 };

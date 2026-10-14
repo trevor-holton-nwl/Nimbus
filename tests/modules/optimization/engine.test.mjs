@@ -2401,7 +2401,6 @@ test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list'
 test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast for a live setup-aware run', () => {
   const plant = 'SETUP-LIVE-PLANT';
   const line = 'SETUP-LIVE-LINE';
-  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
   const state = value => [{ fieldKey: 'colorWheel', value }];
   const priorPlant = Store.selectedPlant;
   const priorTasks = structuredClone(Store.tasksArr);
@@ -4071,8 +4070,6 @@ describe('reconcile (finish-anchored)', () => {
     };
   }
   const at = (day, hour) => new Date(2026, 7, day, hour);
-  // A placed, current row: it keeps a small stale fixture at or below the 50 % cutover threshold (Task 4.2, OQ53).
-  const fresh = (fx, id) => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(31, 7), end_date: at(31, 11) });
 
   test('a never-placed row derives backward from its due instant and is a display-only (non-dirty) write', () => {
     const fx = recFixture();
@@ -4099,7 +4096,7 @@ describe('reconcile (finish-anchored)', () => {
       Store.setTasks([fx.task('st', {
         RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
         start_date: at(26, 13), end_date: at(26, 17),
-      }), fresh(fx, 'fr')], 'unit-test');
+      })], 'unit-test');
       const sawMismatch = [];
       const stop = Store.subscribe(evt => { if (String(evt.source) === REC_SOURCE) sawMismatch.push(Store.tasks.st.runtime_schedule_mismatch); }, 'rec-flag');
       Engine.reconcileRuntimeSchedules(fx.plant);
@@ -4249,13 +4246,13 @@ describe('reconcile (finish-anchored)', () => {
       const stale = (id) => fx.task(id, {
         user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(19, 10), end_date: at(19, 14),
       });
-      Store.setTasks([stale('g1'), fresh(fx, 'fr')], 'unit-test');
+      Store.setTasks([stale('g1')], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);
       assert.deepEqual(Store.tasks.g1.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' });
       assert.equal(Store.tasks.g1.start_date.getTime(), at(20, 9).getTime());
       assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['g1'] }], 'a stale row is a dirty write');
 
-      Store.setTasks([stale('g2'), fresh(fx, 'fr')], 'unit-test');
+      Store.setTasks([stale('g2')], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant, { reason: 'cutover' });
       assert.deepEqual(Store.tasks.g2.derivationIssue, { code: 'reversal_forward', detail: 'cutover' });
       assert.equal(Store.tasks.g2.systemMove.reason, 'cutover');
@@ -4354,7 +4351,6 @@ describe('reconcile (finish-anchored)', () => {
         fx.task('d1', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
         fx.task('d2', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(27, 13), end_date: at(27, 17) }),
         fx.task('np', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
-        fresh(fx, 'fr'),
       ], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);
       const dirtyCount = fx.writes.filter(w => w.source === REC_SOURCE).reduce((n, w) => n + w.ids.length, 0);
@@ -4392,16 +4388,28 @@ describe('reconcile (finish-anchored)', () => {
     } finally { unstub(); fx.restore(); }
   });
 
-  test('OQ53: exactly half stale is not a cutover; the per-row batch Toast and ordinary tags stand', () => {
+  test('OQ53: an ordinary re-upload (most of the plant stale but still PLACED) is not a cutover; per-row Toast and run_time_grew stand', () => {
     const fx = recFixture();
     const unstub = cutoverToastStub();
     try {
-      const stale = (id, day) => fx.task(id, { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(day, 13), end_date: at(day, 17) });
-      const fresh = (id, day) => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(day, 7), end_date: at(day, 11) });
-      Store.setTasks([stale('s1', 26), stale('s2', 27), stale('s3', 28), fresh('f1', 24), fresh('f2', 25), fresh('f3', 31)], 'unit-test');
+      // Three of four rows flagged stale after a re-upload, each still carrying its placement; two have a finish already past.
+      const stale = (id, day, h) => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(day, h), end_date: at(day, h + 4) });
+      const current = id => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(31, 7), end_date: at(31, 11) });
+      Store.setTasks([stale('r1', 19, 10), stale('r2', 18, 10), stale('r3', 26, 13), current('c1')], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);
-      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.system_moved_n:3']);
-      assert.equal(Store.tasks.s1.systemMove.reason, 'run_time_changed', 'below the threshold the ordinary reason stands');
+      assert.deepEqual(fx.toasts.map(x => x.msg), ['toast.system_moved_n:3']);
+      assert.deepEqual(Store.tasks.r1.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' });
+      assert.equal(Store.tasks.r3.systemMove.reason, 'run_time_changed');
+    } finally { unstub(); fx.restore(); }
+  });
+
+  test('OQ53: a one-order plant whose single row is stale and placed is not a cutover either', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    try {
+      Store.setTasks([fx.task('only', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.toasts.map(x => x.msg), ['toast.system_moved_n:1']);
     } finally { unstub(); fx.restore(); }
   });
 
@@ -4409,10 +4417,9 @@ describe('reconcile (finish-anchored)', () => {
     const fx = recFixture();
     const unstub = cutoverToastStub();
     try {
-      const stale = (id, day) => fx.task(id, { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(day, 13), end_date: at(day, 17) });
       const queued = id => fx.task(id, { planning_status: 'needs_planning', start_date: null, end_date: null, user_scheduled: false });
-      Store.setTasks([stale('s1', 26), queued('q1'), queued('q2'), queued('q3')], 'unit-test');
-      Engine.reconcileRuntimeSchedules(fx.plant);   // 1 of 1 non-queued row is stale
+      Store.setTasks([fx.task('s1', { original_end_date: at(26, 17), runtime_schedule_mismatch: true }), queued('q1'), queued('q2'), queued('q3')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);   // the one non-queued row has the cutover signature
       assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:1,0,0,0']);
     } finally { unstub(); fx.restore(); }
   });
@@ -4445,6 +4452,38 @@ describe('reconcile (finish-anchored)', () => {
       }
       assert.equal(Store.tasks.pl.user_scheduled, true);
       assert.equal(Persistence._dirtyIds.has('pl'), true, 'a placed row\'s undo is still a saveable edit');
+    } finally {
+      unsubscribe();
+      Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+      priorDirty.forEach(id => Persistence._dirtyIds.add(id)); priorForce.forEach(id => Persistence._forceIds.add(id));
+      fx.restore();
+    }
+  });
+
+  test('F10 (I2): undo of an Apply on a never-placed row keeps its earlier unsaved attribute edit dirty and sends no dates', () => {
+    const fx = recFixture();
+    const unsubscribe = Store.subscribe(evt => App._trackDirty(evt), 'f10-dirty2');
+    const priorDirty = new Set(Persistence._dirtyIds), priorForce = new Set(Persistence._forceIds);
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    try {
+      Store.setTasks([
+        fx.task('ed', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('cl', { original_end_date: at(27, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      // The planner edits the run time of 'ed' (unsaved, no dates written), then an Apply touches both rows.
+      Store.updateMany([{ id: 'ed', changes: { RUN_TIME: '3' } }], 'engine');
+      assert.ok(Persistence._dirtyIds.has('ed') && !Persistence._dirtyIds.has('cl'), 'precondition');
+      const snapshot = UndoStack.snapshotTasks(['ed', 'cl']);
+      Store.updateMany(['ed', 'cl'].map(id => ({ id, changes: { start_date: at(21, 7), end_date: at(21, 10) } })), 'engine');
+      UndoStack.restoreTasks(snapshot);
+      assert.equal(Persistence._dirtyIds.has('ed'), true, 'the earlier unsaved RUN_TIME edit stays saveable');
+      assert.equal(Persistence._dirtyIds.has('cl'), false, 'a row with no earlier edit is not dirty');
+      assert.equal(Store.tasks.ed.user_scheduled, false);
+      assert.equal(Store.tasks.ed.RUN_TIME, '3');
+      const sent = Persistence._taskEditSnapshot(Store.tasks.ed);
+      assert.equal(sent.RUN_TIME, '3');
+      for (const key of ['start_date', 'end_date', 'schedule_segments']) assert.equal(key in sent, false, `Save sends no ${key}`);
     } finally {
       unsubscribe();
       Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
@@ -4649,7 +4688,7 @@ describe('reconcile (finish-anchored)', () => {
     const fx = recFixture();
     try {
       const stale = id => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(19, 10), end_date: at(19, 14) });
-      Store.setTasks([stale('g1'), stale('g2'), fx.task('d', { original_end_date: at(19, 17) }), fresh(fx, 'fr')], 'unit-test');
+      Store.setTasks([stale('g1'), stale('g2'), fx.task('d', { original_end_date: at(19, 17) })], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);
       const grew = Store.tasksByPlant(fx.plant).filter(t => t.derivationIssue?.code === 'reversal_forward' && t.derivationIssue.detail === 'run_time_grew');
       assert.deepEqual(grew.map(t => t.id).sort(), ['g1', 'g2'], 'due_date_past reversals are not counted');

@@ -363,7 +363,7 @@ test('the load-time re-snap of ingested orders is gone: no _snapToWorkingHours, 
 
 test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', async () => {
   Store.setTasks([{
-    id: 'pd1', MACHINE: 'L1', RUN_TIME: '1',
+    id: 'pd1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true,
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
     row_version: '5', PRT_01: 'MOLD-A', PRT_02: 'MOLD-B', PRODUCTION_VERSION: '0001',
   }], 'unit-test');
@@ -406,7 +406,7 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
 
 test('Persistence.saveAll sends the full split aggregate in naive-local form', async () => {
   Store.setTasks([{
-    id: 'split-save', MACHINE: 'L1', RUN_TIME: '10',
+    id: 'split-save', MACHINE: 'L1', RUN_TIME: '10', user_scheduled: true,
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-04T10:00:00'),
     row_version: '5',
     scheduleSegments: [
@@ -787,6 +787,20 @@ test('Backward-scheduling cutover (OQ36 / 8.6a a): the cache schema version is 7
   } finally {
     globalThis.localStorage.removeItem(Config.LS_KEY);
   }
+});
+
+test('F10: a never-placed row saves its attribute edits without dates or segments; a placed row still sends them', () => {
+  const when = new Date(2026, 7, 26, 9);
+  Store.setTasks([
+    { id: 'np', MACHINE: 'L1', RUN_TIME: '5', user_scheduled: false, start_date: when, end_date: new Date(2026, 7, 26, 14) },
+    { id: 'pl', MACHINE: 'L1', RUN_TIME: '5', user_scheduled: true, start_date: when, end_date: new Date(2026, 7, 26, 14) },
+  ], 'unit-test');
+  const display = Persistence._taskEditSnapshot(Store.tasks.np);
+  assert.equal(display.RUN_TIME, '5', 'the attribute edit is sent');
+  for (const key of ['start_date', 'end_date', 'schedule_segments']) assert.equal(key in display, false, `${key} is display-derived and left out`);
+  const placed = Persistence._taskEditSnapshot(Store.tasks.pl);
+  assert.ok(placed.start_date && placed.end_date && Array.isArray(placed.schedule_segments));
+  Store.setTasks([], 'unit-test');
 });
 
 test('Persistence._loadCache clears the rank cache — the offline restore hydrates without ever loading rank maps', () => {

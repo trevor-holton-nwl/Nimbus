@@ -93,7 +93,7 @@ test('Persistence.saveAll posts to /tasks/update with expected payload shape', a
     start_date: new Date('2026-07-02T06:00:00'),
     end_date:   new Date('2026-07-02T14:00:00'),
     RUN_TIME: 8, COLOR: 'GREEN', FORM_SIZE: 'S',
-    row_version: 12345,
+    row_version: 12345, user_scheduled: true,
   };
   Store.setTasks([task], 'test');
   Store.setSelectedPlant('5512', 'test');

@@ -1577,14 +1577,21 @@ export const Engine = {
       if (sameIssue(task.derivationIssue, issue)) return;
       patches.push({ id: task.id, changes: { derivationIssue: issue }, dirty: false });
     };
-    // OQ53 (Task 4.2): the first load after the backward-scheduling cutover finds most of a plant stale. When more
-    // than half of the plant's non-queued rows are stale (queued rows count on neither side) the pass is the cutover
-    // pass: its reversals are tagged 'cutover' and one summary Toast, counted over the STALE rows only, replaces the
-    // per-row "N moved" Toast. An undo pass (opts.ids) never is one; an explicit reason wins.
+    const plantNow = Store.plantNow(plant);
+    // OQ53 (Task 4.2): the first load after the backward-scheduling cutover is recognised by the data signature the
+    // cutover SQL leaves: every non-queued row is flagged stale and NEVER PLACED (`!user_scheduled`), except the
+    // running rows, which keep both edges. When those two kinds of stale row are more than half of the plant's
+    // non-queued rows (queued rows count on neither side) the pass is the cutover pass: its reversals are tagged
+    // 'cutover' and one summary Toast, counted over the STALE rows only, replaces the per-row "N moved" Toast.
+    // A stale row that still carries a placement (an ordinary SAP or routing re-upload flagging placed orders) never
+    // counts, so such a load keeps its per-row Toasts and 'run_time_grew'. An undo pass (opts.ids) never is a cutover
+    // pass; an explicit reason wins.
     const nonQueuedCount = Store.tasksByPlant(plant).filter(task => task.planning_status !== 'needs_planning').length;
-    const staleCount = candidates.filter(task => task.runtime_schedule_mismatch).length;
+    const signatureCount = candidates.filter(task => task.runtime_schedule_mismatch
+      && (!task.user_scheduled
+        || (!!plantNow && !!task.start_date && !!task.end_date && Engine.isInProgress(task, plantNow)))).length;
     const cutover = opts.reason === 'cutover'
-      || (opts.reason === undefined && !opts.ids && nonQueuedCount > 0 && staleCount * 2 > nonQueuedCount);
+      || (opts.reason === undefined && !opts.ids && nonQueuedCount > 0 && signatureCount * 2 > nonQueuedCount);
     const cutoverCounts = { anchored: 0, reversed: 0, running: 0, blocked: 0 };
     const tally = (stale: boolean, kind: keyof typeof cutoverCounts): void => { if (stale) cutoverCounts[kind]++; };
     const commit = (): void => {
@@ -1602,7 +1609,6 @@ export const Engine = {
       } else if (dirty.length) Toast.show(Util.t('toast.system_moved_n', { count: dirty.length }), 'info', 6000);
     };
 
-    const plantNow = Store.plantNow(plant);
     if (!plantNow) {
       // OQ52: a plant with no zone has no clock, so nothing is derived (Store.plantNow already announced it once).
       for (const task of candidates) { noteOnly(task, { code: 'plant_no_timezone' }); tally(!!task.runtime_schedule_mismatch, 'blocked'); }
@@ -1794,7 +1800,7 @@ export const Engine = {
 
   /** After rows were restored (undo, Time Machine) their stored start is a placeholder: re-derive each plant's
    *  restored rows from their restored finish under the current run time (OQ21). */
-  reconcileRestored(ids: Iterable<string>): void {
+  reconcileRestored(ids: Iterable<string>, wasDirty: ReadonlySet<string> = new Set()): void {
     const byPlant = new Map<string, Set<string>>();
     const neverPlaced: string[] = [];
     for (const raw of ids) {
@@ -1808,10 +1814,16 @@ export const Engine = {
     // A row that was never placed server-side stays display-only after an undo / Time Machine restore: restoreTasks
     // flagged it stale and the undo write dirtied it, and either would route it through the dirty reconcile patch
     // (`_markPlaced`) so the next Save persisted a placement it never had. Clear both; the pass below derives it
-    // from its due date through the display source, which the dirty tracker skips.
+    // from its due date through the display source, which the dirty tracker skips. A row that was ALREADY dirty
+    // before the undone edit (`wasDirty`, recorded by UndoStack.snapshotTasks) carries an unsaved attribute edit of
+    // its own (run time, text, priority) and stays dirty; Save leaves its derived dates and segments out of the
+    // payload (Persistence._taskEditSnapshot, never-placed rows), so only the placement is dropped.
     if (neverPlaced.length) {
       Store.updateMany(neverPlaced.map(id => ({ id, changes: { runtime_schedule_mismatch: false } })), 'engine-runtime-reconcile-display');
-      for (const id of neverPlaced) { Persistence._dirtyIds.delete(id); Persistence._forceIds.delete(id); }
+      for (const id of neverPlaced) {
+        if (wasDirty.has(id)) continue;
+        Persistence._dirtyIds.delete(id); Persistence._forceIds.delete(id);
+      }
     }
     for (const [plant, restored] of byPlant) Engine.reconcileRuntimeSchedules(plant, { reason: 'undo', ids: restored });
   },
@@ -3033,7 +3045,9 @@ Store.subscribe(evt => {
 
 // OQ21: an undo restores the finish, so the start is re-derived under the run time as it is now. The Store cannot
 // import the engine (platform sits below it); the engine registers this hook once at load.
-UndoStack.afterRestore = (ids: string[]): void => Engine.reconcileRestored(ids);
+UndoStack.afterRestore = (ids: string[], wasDirty: ReadonlySet<string>): void => Engine.reconcileRestored(ids, wasDirty);
+// F10: the snapshot records which rows already carried unsaved edits (the platform cannot see Persistence).
+UndoStack.dirtyProbe = (id: string): boolean => Persistence._dirtyIds.has(id);
 
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound
