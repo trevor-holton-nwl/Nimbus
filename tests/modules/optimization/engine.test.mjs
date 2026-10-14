@@ -4243,11 +4243,33 @@ describe('reconcile (finish-anchored)', () => {
       ].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);
       // Plant now is Thu 09:00: the first reversal starts exactly now, so it is running; the others start later.
-      assert.equal(Engine.isInProgress(Store.tasks.x), true, 'X starts at now and is running');
-      assert.deepEqual(Engine.firmingStatus(Store.tasks.x).reasons, ['running']);
+      // Senior review I10: a never-placed (display-derived) reversal is NOT running even though its bar straddles now.
+      assert.equal(Engine.isInProgress(Store.tasks.x), false, 'X is display-derived, never placed: not running');
+      assert.equal(Engine.isInProgress({ ...Store.tasks.x, user_scheduled: true }), true, 'the same bar on a placed row is running');
+      assert.deepEqual(Engine.firmingStatus(Store.tasks.x).reasons, []);
       assert.equal(Engine.isInProgress(Store.tasks.y), false, 'Y starts after X ends');
       assert.equal(Engine.isInProgress(Store.tasks.z), false, 'Z starts in the next window');
       assert.equal(Engine.firmingStatus(Store.tasks.z).firmed, false);
+    } finally { fx.restore(); }
+  });
+
+  test('senior review I10: running / frozen / the effective-firmed set apply only to rows with a persisted placement', () => {
+    const fx = recFixture();
+    try {
+      const now = at(20, 15);
+      const frozenEnd = at(23, 0);
+      const derived = fx.task('np', { start_date: at(20, 14), end_date: at(20, 18), systemMove: { from: at(20, 14), to: at(20, 14), reason: 'due_date_derivation' } });
+      const placed = fx.task('pl', { user_scheduled: true, start_date: at(20, 14), end_date: at(20, 18) });
+      const stored = fx.task('st', { start_date: at(20, 14), end_date: at(20, 18) });   // a stored start that is not display-derived
+      const derivedFuture = fx.task('nf', { start_date: at(21, 8), end_date: at(21, 12), systemMove: { from: at(21, 8), to: at(21, 8), reason: 'due_date_derivation' } });
+      const placedFuture = fx.task('pf', { user_scheduled: true, start_date: at(21, 8), end_date: at(21, 12) });
+      assert.equal(Engine.isInProgress(derived, now), false);
+      assert.equal(Engine.isInProgress(placed, now), true);
+      assert.equal(Engine.isInProgress(stored, now), true);
+      assert.equal(Engine.isFrozenHorizon(derivedFuture, now, frozenEnd), false);
+      assert.equal(Engine.isFrozenHorizon(placedFuture, now, frozenEnd), true);
+      const ids = effectiveFirmedIdSet([derived, placed, stored, derivedFuture, placedFuture], new Set(), now, false, frozenEnd);
+      assert.deepEqual([...ids].sort(), ['pf', 'pl', 'st']);
     } finally { fx.restore(); }
   });
 

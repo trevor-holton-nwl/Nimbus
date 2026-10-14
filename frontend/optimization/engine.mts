@@ -1093,17 +1093,24 @@ export const Engine = {
    *  (OD-C2c): only optimizer/auto-reflow placement code does. */
   isFrozenHorizon(task: NimbusTask, now?: Date, frozenHorizonEnd?: Date | null): boolean {
     const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
-    if (!end || !task.start_date) return false;
+    if (!end || !task.start_date || !Engine.hasPersistedPlacement(task)) return false;
     const at = now ?? Engine._clockFor(task);
     // A plant with no valid timezone has no clock (OQ52): not frozen, never a throw.
     return !!at && task.start_date >= at && task.start_date < end;
+  },
+
+  /** Senior review I10 (OQ3): running/frozen arithmetic applies only to a row that carries a real placement: a planner
+   *  placement (`user_scheduled`), or a stored start the reconcile did not derive for display (a display derivation
+   *  stamps `systemMove` and leaves `user_scheduled` false). A never-placed row's derived bar is neither running nor frozen. */
+  hasPersistedPlacement(task: NimbusTask): boolean {
+    return task.user_scheduled === true || (!!task.start_date && !task.systemMove);
   },
 
   /** True while the order is in progress: start_date <= now < end_date (both set).
    *  Running orders never move (optimizer, autoReflow, alert fixes); Remove Backlog
    *  is the one exemption. Not gated by "Respect firmed". */
   isInProgress(task: NimbusTask, now?: Date): boolean {
-    if (!task.start_date || !task.end_date) return false;
+    if (!task.start_date || !task.end_date || !Engine.hasPersistedPlacement(task)) return false;
     const at = now ?? Engine._clockFor(task);
     // A plant with no valid timezone has no clock (OQ52): not running, never a throw.
     return !!at && task.start_date <= at && at < task.end_date;
@@ -1753,10 +1760,10 @@ export const Engine = {
         const orphaned = setupLive && setupBefore(task, line, derivedStart).orphaned;
         if (result.finishMoved) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
         else if (orphaned) issue = { code: 'setup_override_orphaned' };   // an active override no longer names the row before it (recorded only, Task 3.3 alerts)
-        else if (Store.isFirmed(task.id) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart }, plantNow)) {
+        else if (Store.isFirmed(task.id) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart, user_scheduled: true }, plantNow)) {
           issue = { code: 'frozen_window_crossed' };   // OQ4: alert only, nothing is un-firmed
         } else if (placed && !Store.isFirmed(task.id) && task.start_date
-          && !Engine.isFrozenHorizon(task, plantNow) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart }, plantNow)) {
+          && !Engine.isFrozenHorizon(task, plantNow) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart, user_scheduled: true }, plantNow)) {
           // R26 (gate 14): a PLACED, unfirmed row whose start moves from outside to inside the frozen window in
           // this reconcile becomes frozen, and a frozen start is sent firm (irreversible in SAP). Warn the planner.
           // Never-placed, display-only and queued rows stay excluded (no flood).
