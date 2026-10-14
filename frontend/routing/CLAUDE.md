@@ -13,7 +13,7 @@ Depends on: `GET /routing/{plant}/rate-map` (`backend/routing/routes.py`), `Nimb
 
 Wired from:
 - `frontend/scheduling/persistence.mts`'s `Persistence.load()` — calls `Runtime.load(plant)` at the same point/condition it already calls `loadPriorityRankMaps` (plant switch, inside the same `Promise.all` after `/tasks` resolves).
-- `frontend/master-data/admin-ui.mts`'s routing-table (`production_version`/`routing_operation`/`routing_rules`) upload and delete-filtered handlers — refreshes the cache after a write that could change the plant's rate map, mirroring the existing `Persistence.loadPriorityRankMaps(plantName)` call sites' placement.
+- `frontend/master-data/admin-ui.mts`'s routing-table (`production_version`/`routing_operation`/`routing_rules`) upload and delete-filtered handlers — refreshes the cache after a write that could change the plant's rate map (the upload handler refreshes `Runtime` for every plant in the upload result, falling back to the filtered plant when the result names none), mirroring the existing `Persistence.loadPriorityRankMaps(plantName)` call sites' placement.
 
 ## Consumers (§8.2/§8.3, shipped)
 
