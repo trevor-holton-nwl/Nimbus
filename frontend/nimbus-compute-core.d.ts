@@ -224,6 +224,10 @@ declare global {
       calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusCalendarEntry>,
       lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData
     ): [Date, Date] | null;
+    /** A date-only SAP finish arrives as an exact-midnight Date; read it as the end of that date's
+     *  working window. Timed values pass through; a closed date resolves to the previous open
+     *  date's close (30-day look-back), no window at all gives raw + 23:59:59. */
+    dueDateInstant(raw: Date, dayWindowFor: (date: Date) => { open: Date; close: Date } | null): Date;
     _indexCapacityBlocks(blocks: NimbusBlock[], plantBlocks: NimbusPlantBlock[]): unknown;
     dailyCapacityHours(
       line: string, date: unknown,

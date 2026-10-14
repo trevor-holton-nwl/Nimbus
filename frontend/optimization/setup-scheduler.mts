@@ -589,6 +589,10 @@ export interface SetupRunContext {
    *  memo — plant is folded into the key for the same reuse-across-plants
    *  reason as `_lineBlocks`. */
   _dayWindow: Map<string, PlacementInterval | null>;
+  /** Lazy per-(plant, line, dayStartMs) work-window memo for reading a date-only SAP due date
+   *  (see `dueWindowForDay`); distinct from `_dayWindow` because a missing calendar row means
+   *  "no calendar" here, not default hours. */
+  _dueWindow: Map<string, PlacementInterval | null>;
   /** F2: lazy per-(plant, line) index of the line's free intervals over
    *  `freeIndexSpan`, built once by running the day-walk over the whole span.
    *  Null caches "this line's walk output is not sorted/disjoint, never
@@ -664,6 +668,7 @@ export function buildRunContext(
     _staticDefect: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
+    _dueWindow: new Map(),
     _freeIndex: new Map(),
     freeIndexSpan: freeIndexSpanFor(bounds),
     _overridesByLine: new Map(),
@@ -1193,9 +1198,61 @@ function timestamp(value: unknown): Date | null {
   return null;
 }
 
-function dueTimestamp(task: NimbusTask): number {
-  return (timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE))?.getTime()
-    ?? Number.MAX_SAFE_INTEGER;
+/** What a due-date read needs beyond the task: the snapshot's calendars (a date-only SAP
+ * finish arrives as exact midnight and reads as the end of that date's working window), the
+ * run's plant when known (else resolved per task), and the run context for memoization. */
+export interface DueScope {
+  snapshot: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'>;
+  plant?: string | null;
+  ctx?: SetupRunContext;
+}
+
+function dueScopeFor(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): DueScope {
+  return { snapshot, plant: bounds.setup.plant, ctx: bounds.runContext };
+}
+
+/** The order's SAP due as an instant: a timed value as received; an exact-midnight (date-only)
+ * value as the close of that date's (line ∩ plant) working window via the compute core's
+ * `dueDateInstant`. A line with no calendar row in the snapshot reads as "no calendar"
+ * (raw + 23:59:59), matching `Util.sapDueDate` on the main thread. Null when the order has no
+ * SAP due date. */
+export function dueInstant(task: NimbusTask, scope: DueScope): Date | null {
+  const raw = timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE);
+  if (!raw) return null;
+  const core = globalThis.NimbusComputeCore;
+  if (!core?.dueDateInstant) return raw;
+  const line = task.MACHINE ? String(task.MACHINE) : '';
+  const plant = scope.plant ?? resolveTaskPlant(task, scope.snapshot, scope.ctx);
+  return core.dueDateInstant(raw, day => {
+    const win = line ? dueWindowForDay(scope, line, plant, day) : null;
+    return win ? { open: win.start, close: win.end } : null;
+  });
+}
+
+/** (line ∩ plant) work window of one calendar day for due-date reading, or null when closed or
+ * when the snapshot holds no calendar row for the line. Memoized per (plant, line, day) on the
+ * run context (a separate memo from `_dayWindow`: that one falls back to default hours). */
+function dueWindowForDay(scope: DueScope, line: string, plant: string | null, day: Date): PlacementInterval | null {
+  const dayStart = new Date(day);
+  dayStart.setHours(0, 0, 0, 0);
+  const key = `${plant ?? ''}${CTX_KEY_SEP}${line}|${dayStart.getTime()}`;
+  const memo = scope.ctx?._dueWindow;
+  if (memo?.has(key)) return memo.get(key)!;
+  const lineRow = scope.snapshot.calendars[line];
+  let result: PlacementInterval | null = null;
+  if (lineRow) {
+    const lineWin = localWindow(lineRow.workHours, dayStart);
+    const plantRow = plant ? scope.snapshot.plants[plant] : undefined;
+    const plantWin = plantRow ? localWindow(plantRow.workHours, dayStart) : lineWin;
+    result = lineWin && plantWin ? intersectWindows(lineWin, plantWin) : null;
+    if (result && result.start >= result.end) result = null;
+  }
+  memo?.set(key, result);
+  return result;
+}
+
+function dueTimestamp(task: NimbusTask, scope: DueScope): number {
+  return dueInstant(task, scope)?.getTime() ?? Number.MAX_SAFE_INTEGER;
 }
 
 function taskId(task: NimbusTask): string {
@@ -1424,10 +1481,11 @@ function orderedByPolicyThenDue(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
   ctx?: SetupRunContext,
 ): NimbusTask[] {
+  const scope: DueScope = { snapshot, plant, ctx };
   const decorated = tasks.map(task => ({ task, key: policyKeyForTask(snapshot, plant, line, task, ctx) }));
   decorated.sort((left, right) => (
     ordinalCompare(left.key, right.key)
-    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || dueTimestamp(left.task, scope) - dueTimestamp(right.task, scope)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   return decorated.map(entry => entry.task);
@@ -1443,9 +1501,10 @@ function orderedByDueThenPolicy(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
   ctx?: SetupRunContext,
 ): NimbusTask[] {
+  const scope: DueScope = { snapshot, plant, ctx };
   const decorated = tasks.map(task => ({ task, key: policyKeyForTask(snapshot, plant, line, task, ctx) }));
   decorated.sort((left, right) => (
-    dueTimestamp(left.task) - dueTimestamp(right.task)
+    dueTimestamp(left.task, scope) - dueTimestamp(right.task, scope)
     || ordinalCompare(left.key, right.key)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
@@ -2041,8 +2100,9 @@ function orderedBySlack(
   line: string,
   tasks: ReadonlyArray<NimbusTask>,
 ): NimbusTask[] {
+  const scope = dueScopeFor(snapshot, bounds);
   const decorated = tasks.map(task => {
-    const deadline = notAfterFor(bounds, task)?.getTime() ?? dueTimestamp(task);
+    const deadline = notAfterFor(bounds, task)?.getTime() ?? dueTimestamp(task, scope);
     const slack = Number.isFinite(deadline)
       ? deadline - productiveRuntimeMinutes(task) * 60 * 1000
       : Number.MAX_SAFE_INTEGER;
@@ -2051,7 +2111,7 @@ function orderedBySlack(
   decorated.sort((left, right) => (
     left.slack - right.slack
     || ordinalCompare(left.policy, right.policy)
-    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || dueTimestamp(left.task, scope) - dueTimestamp(right.task, scope)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   return decorated.map(entry => entry.task);
@@ -2071,6 +2131,7 @@ function orderedBySetupNearest(
   const definition = bounds.setup.definition;
   if (!definition) return [...tasks];
   const remaining = [...tasks];
+  const dueScope = dueScopeFor(snapshot, bounds);
   const result: NimbusTask[] = [];
   let predecessorState = fragment.predecessorState;
   let predecessorOrderId = fragment.predecessorOrderId;
@@ -2102,7 +2163,7 @@ function orderedBySetupNearest(
       left.covered - right.covered
       || left.minutes - right.minutes
       || ordinalCompare(left.policy, right.policy)
-      || dueTimestamp(left.task) - dueTimestamp(right.task)
+      || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
       || taskId(left.task).localeCompare(taskId(right.task))
     ));
     const next = ranked[0].task;
@@ -2999,7 +3060,7 @@ function candidateForSequence(
     const priorStart = timestamp(task.start_date);
     if (priorStart) instabilityMinutes += Math.abs(first.start.getTime() - priorStart.getTime()) / 60000;
     setupMinutes += effectiveSetupMinutes;
-    const due = dueTimestamp(task);
+    const due = dueTimestamp(task, dueScopeFor(snapshot, bounds));
     if (Number.isFinite(due) && last.end.getTime() > due) {
       const lateMinutes = Math.ceil((last.end.getTime() - due) / (60 * 1000));
       lateCount += 1;
@@ -3439,12 +3500,13 @@ function greedySearch(
   // once rather than up to twice per comparator call, and compare it
   // ordinally (see `ordinalCompare` — identical order to `localeCompare` for
   // this zero-padded-digit alphabet, without the ICU collation cost).
+  const dueScope = dueScopeFor(snapshot, bounds);
   const decoratedTasks = groups.flatMap(group => group.tasks).map(task => (
     { task, key: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext) }
   ));
   decoratedTasks.sort((left, right) => (
     ordinalCompare(left.key, right.key)
-    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   const orderedTasks = decoratedTasks.map(entry => entry.task);
@@ -4154,8 +4216,8 @@ function inactiveOutOfHorizonFirmedOverrideReasons(
   }));
 }
 
-function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary, mode: FragmentMode): boolean {
-  if (mode === 'due-date-first' || mode === 'due-date') return dueTimestamp(task) <= boundary.start.getTime();
+function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary, mode: FragmentMode, scope: DueScope): boolean {
+  if (mode === 'due-date-first' || mode === 'due-date') return dueTimestamp(task, scope) <= boundary.start.getTime();
   // Pure SPT is ordered only by productive runtime. A stale or null planned
   // date must not pre-partition work behind the next firmed order; bounded
   // fragment placement decides what capacity can actually be admitted first.
@@ -5097,7 +5159,7 @@ function evaluateLineWithFirmedBoundaries(
         }
         if (needsThisFragment) return true;
         if (reservedForFutureFragment) return false;
-        return members.some(member => belongsBeforeFirmedBoundary(freeById.get(member)!, boundary, mode));
+        return members.some(member => belongsBeforeFirmedBoundary(freeById.get(member)!, boundary, mode, dueScopeFor(snapshot, bounds)));
       });
     if (componentConflict) {
       return unchangedLineResult(
@@ -5975,12 +6037,13 @@ function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
  * every entry's `overCap` there is simply `false`. */
 function lateOrderFacts(
   tasks: ReadonlyArray<NimbusTask>,
+  scope: DueScope,
   notAfter?: (task: NimbusTask) => Date | null,
 ): Map<string, { late: boolean; end: number | null; overCap: boolean }> {
   const facts = new Map<string, { late: boolean; end: number | null; overCap: boolean }>();
   for (const task of tasks) {
     const end = scheduledEndMinutes(task);
-    const due = dueTimestamp(task);
+    const due = dueTimestamp(task, scope);
     const ceiling = notAfter ? notAfter(task) ?? null : null;
     const overCap = end !== null && ceiling !== null && end * 60 * 1000 > ceiling.getTime();
     facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end, overCap });
@@ -6042,9 +6105,10 @@ export function selectThroughputCandidate(
   candidate: Readonly<CandidateResult>,
   thresholds: Readonly<SetupPolicyThresholds>,
 ): CandidateResult {
-  const before = lateOrderFacts(snapshot.tasks);
+  const dueScope: DueScope = { snapshot };
+  const before = lateOrderFacts(snapshot.tasks, dueScope);
   const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
-  const after = lateOrderFacts(afterTasks);
+  const after = lateOrderFacts(afterTasks, dueScope);
   const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
   const slips = [...after.entries()].flatMap(([id, fact]) => {
     const prior = before.get(id)?.end;
@@ -6220,7 +6284,7 @@ export function allowedPlanningWindow(snapshot: Readonly<ScheduleSnapshot>, boun
   const push = plant?.max_push_forward_days;
   const hasPull = Number.isInteger(pull) && Number(pull) >= 0;
   const hasPush = Number.isInteger(push) && Number(push) >= 0;
-  const due = timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE);
+  const due = dueInstant(task, dueScopeFor(snapshot, bounds));
   const day = (offset: number): Date | null => {
     if (!due) return null;
     const value = new Date(due); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + offset); return value;
@@ -6314,7 +6378,7 @@ function urgencyKeyFor(
     task,
     deadline: notAfterFor(bounds, task)?.getTime() ?? Infinity,
     policy: policyKeyForSequence(snapshot, bounds.setup.plant, effectiveLine, [task], ctx),
-    due: dueTimestamp(task),
+    due: dueTimestamp(task, dueScopeFor(snapshot, bounds)),
     start: timestamp(task.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER,
     id: taskId(task),
   };
@@ -7181,9 +7245,10 @@ export function objectiveFactsForCandidate(
   const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
   let lateCount = 0; let lateness = 0; let maxLateness = 0; let setupMinutes = 0; let instability = 0;
   let overCap = 0;
+  const dueScope = dueScopeFor(snapshot, bounds);
   const original = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   for (const task of tasks) {
-    const end = timestamp(task.end_date); const due = dueTimestamp(task);
+    const end = timestamp(task.end_date); const due = dueTimestamp(task, dueScope);
     if (task.planning_status === 'needs_planning') {
       lateCount++;
       if (Number.isFinite(due)) {

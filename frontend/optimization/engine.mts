@@ -78,6 +78,7 @@ import {
   attachDetachedValidationContext,
   SETUP_AWARE_CONVERGENCE_WINDOW,
   resolveTaskPlant,
+  dueInstant,
 } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type {
@@ -781,6 +782,17 @@ export function sourceLineWorkHours(line: string): WorkHours {
   return _candidateSnapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
 }
 
+/** The order's SAP due as an instant for the date-window bounds below: a date-only (exact
+ *  midnight) value reads as the end of that date's working window, exactly as the detached
+ *  scheduler's own `allowedPlanningWindow` reads it (same `dueInstant`), so the two bounds
+ *  agree. Reads calendar rows without creating defaults. Null when the order has no SAP due. */
+function sourceDueInstant(task: NimbusTask, plant: string | null): Date | null {
+  const view = _candidateSnapshot ?? {
+    calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings, masterData: Store.masterData,
+  };
+  return dueInstant(task, { snapshot: view, plant });
+}
+
 export function sourcePlantWorkHours(plant: string): WorkHours {
   if (!_candidateSnapshot) {
     Store.ensurePlant(plant);
@@ -1089,9 +1101,7 @@ export const Engine = {
     const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
     const value = masterData?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
     if (Number.isInteger(value) && (value as number) >= 0) {
-      const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
-      const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
-      const due = parsedDue && Number.isFinite(+parsedDue) ? parsedDue : null;
+      const due = sourceDueInstant(task, plant);
       if (due) {
         floor = new Date(due);
         floor.setHours(0, 0, 0, 0);
@@ -1115,9 +1125,7 @@ export const Engine = {
     const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
     const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
     if (!Number.isInteger(value) || (value as number) < 0) return null;
-    const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
-      const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
-      const due = parsedDue && Number.isFinite(+parsedDue) ? parsedDue : null;
+    const due = sourceDueInstant(task, plant);
     if (!due) return null;
     const ceiling = new Date(due);
     ceiling.setHours(0, 0, 0, 0);

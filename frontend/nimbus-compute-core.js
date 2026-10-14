@@ -301,6 +301,27 @@
     return result;
   }
 
+  // A date-only SAP finish reaches the browser as an exact-midnight timestamp (the server no
+  // longer rewrites it). Read such a value as the end of that date's working window (OQ23).
+  // `raw`: Date (naive plant wall-clock). `dayWindowFor(date)` -> {open, close} | null for that
+  // calendar date. A timed raw is returned unchanged. For exact midnight: the close of that
+  // date's window; a date with no window (closed day) resolves to the close of the latest open
+  // date before it (looking back at most 30 days); no window at all -> raw + 23:59:59. A window
+  // that closes at/after the next midnight (a 24/7 line) is clamped to 23:59:59 of that date.
+  function dueDateInstant(raw, dayWindowFor) {
+    if (!(raw instanceof Date) || isNaN(raw)) return raw;
+    if (raw.getHours() !== 0 || raw.getMinutes() !== 0 || raw.getSeconds() !== 0 || raw.getMilliseconds() !== 0) return raw;
+    const endOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 0);
+    for (let back = 0; back <= 30; back++) {
+      const day = new Date(raw.getFullYear(), raw.getMonth(), raw.getDate() - back);
+      const win = dayWindowFor(day);
+      if (!win || !win.close) continue;
+      const cap = endOfDay(day);
+      return win.close > cap ? cap : new Date(+win.close);
+    }
+    return endOfDay(raw);
+  }
+
   // Pre-parse + bucket blocks once so a tight (line × day) loop reuses parsed Date
   // objects instead of re-parsing each cell. Line-block recs carry `plant` so line:null
   // (globalLine) blocks and reused line codes are scoped to the line's own plant.
@@ -1077,7 +1098,7 @@
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
-    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, workWindow,
+    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, workWindow, dueDateInstant,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization,

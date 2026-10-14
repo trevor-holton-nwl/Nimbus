@@ -310,6 +310,15 @@ const NIMBUS = (function () {
   // plant IS Store.selectedPlant, and the KPI is always about the run in front
   // of the user.
   Util.setChangeoverFieldsResolver(() => Engine.changeoverTaskFields(Store.selectedPlant));
+  // A date-only SAP due date (exact midnight) reads as the end of that date's working window;
+  // the window comes from the line's calendar rows in Store (platform may not import Store).
+  // A line with no calendar row resolves to null -> "no calendar" (raw + 23:59:59).
+  Util.setDueCalendarResolver(line => {
+    const row = Store.calendars[line];
+    if (!row) return null;
+    const plant = Store.getPlantForLine(line);
+    return { lineHours: row.workHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plant, rev: Store.rev() };
+  });
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
   ErrorLog.setAdminGate(() => Session.isAdmin());

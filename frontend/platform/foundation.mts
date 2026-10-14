@@ -21,6 +21,17 @@ declare global {
 type PreferenceResolver = (key: string) => string | undefined;
 type ActorResolver = () => string | undefined;
 
+/** One line's calendar rows as held in Store, handed to Util.sapDueDate through a DI seam
+ *  (platform sits below Calendar/Store, so it can import neither). `rev` is the Store
+ *  revision, used only to invalidate the per-line+date window cache. */
+export interface DueCalendarSource {
+  lineHours: Record<number, [number, number] | null> | null;
+  plantHours: Record<number, [number, number] | null> | null;
+  plant: string | null;
+  rev: number;
+}
+type DueCalendarResolver = (line: string) => DueCalendarSource | null;
+
 // The full per-line/day utilization matrix type is Phase 3's domain
 // (schedule-services.mts, not yet converted). This resolver only ever reads
 // `.pct` off a matrix cell (see Util.scheduleKpis below), so it's typed to
@@ -171,6 +182,11 @@ let _prefResolver: PreferenceResolver = () => undefined;
 let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
 let _changeoverFieldsResolver: (() => string[]) | null = null;
+let _dueCalendarResolver: DueCalendarResolver | null = null;
+// Day window per (line, calendar date), valid for one Store revision: latenessHours runs per row
+// in grid filters and tile loops, so a midnight due date must not rebuild its window each call.
+let _dueWindowRev = NaN;
+const _dueWindowCache = new Map<string, { open: Date; close: Date } | null>();
 let _locale: string = (typeof localStorage !== 'undefined' && localStorage.getItem('nimbus.locale')) || 'en';
 if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = _locale;
 // The NIMBUS_API_KEY deployment-config stopgap (see backend/security/CLAUDE.md),
@@ -192,6 +208,10 @@ export const Util = {
   setActorResolver(fn: ActorResolver): void { _actorResolver = typeof fn === 'function' ? fn : () => undefined; },
   setUtilizationResolver(fn: UtilizationResolverFn | null): void { _utilizationResolver = typeof fn === 'function' ? fn : null; },
   setChangeoverFieldsResolver(fn: (() => string[]) | null): void { _changeoverFieldsResolver = typeof fn === 'function' ? fn : null; },
+  setDueCalendarResolver(fn: DueCalendarResolver | null): void {
+    _dueCalendarResolver = typeof fn === 'function' ? fn : null;
+    _dueWindowCache.clear(); _dueWindowRev = NaN;
+  },
   setApiKey(key: string): void { _apiKey = key || ''; },
 
   /** The task fields whose change between adjacent orders is a changeover, for
@@ -606,10 +626,42 @@ export const Util = {
     }));
   },
 
-  // SAP planning baseline finish. NIMBUS keeps this in `original_end_date`
-  // (set once from ORIGINAL_END_DATE; what the variance badge compares against).
+  // SAP planning baseline finish. NIMBUS keeps this in `original_end_date` (the locked SAP
+  // finish as received; what the variance badge compares against). A date-only SAP finish
+  // arrives as an exact-midnight timestamp; it reads as the END of that date's working window
+  // (OQ23) via NimbusComputeCore.dueDateInstant, with the window built from the line's calendar
+  // rows in Store (DI seam). A line with no calendar rows reads as raw + 23:59:59. A timed value
+  // is returned unchanged.
   sapDueDate(t: NimbusTask): Date | null {
-    return t?.original_end_date || null;
+    const raw = t?.original_end_date || null;
+    if (!raw) return null;
+    const core = globalThis.NimbusComputeCore;
+    if (!core?.dueDateInstant) return raw;
+    const line = t.MACHINE || '';
+    return core.dueDateInstant(raw, date => Util._dueWindowForLine(line, date));
+  },
+
+  /** Working window of `line` on one calendar date (line hours intersected with its plant's), or
+   *  null when closed or when Store holds no calendar rows for the line. Cached per line+date for
+   *  the current Store revision, so per-row callers stay O(1). Internal to sapDueDate. */
+  _dueWindowForLine(line: string, date: Date): { open: Date; close: Date } | null {
+    const src = _dueCalendarResolver && line ? _dueCalendarResolver(line) : null;
+    if (!src || !src.lineHours) return null;
+    if (src.rev !== _dueWindowRev) { _dueWindowCache.clear(); _dueWindowRev = src.rev; }
+    const key = `${line}|${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+    const hit = _dueWindowCache.get(key);
+    if (hit !== undefined) return hit;
+    const core = globalThis.NimbusComputeCore!;
+    const lineWin = core._dayWindow(src.lineHours, date);
+    const plantWin = src.plantHours ? core._dayWindow(src.plantHours, date) : lineWin;
+    let result: { open: Date; close: Date } | null = null;
+    if (lineWin && plantWin) {
+      const open = new Date(Math.max(+lineWin[0], +plantWin[0]));
+      const close = new Date(Math.min(+lineWin[1], +plantWin[1]));
+      if (open < close) result = { open, close };
+    }
+    _dueWindowCache.set(key, result);
+    return result;
   },
 
   // Scheduled finish for a task — user override `end_date` if present, otherwise the SAP baseline.
@@ -621,7 +673,8 @@ export const Util = {
   // Display-only derived "Original Start": due date minus RUN_TIME, so
   // Orig Start and Orig End always form a runtime-consistent pair (e.g.
   // RUN_TIME 1h, due 7:00 PM -> Orig Start 6:00 PM) instead of the raw
-  // midnight SAP date. Falls back to the raw original_start_date (coerced
+  // midnight SAP date (sapDueDate already reads a date-only finish as the
+  // end of that day's working window). Falls back to the raw original_start_date (coerced
   // to a Date) when there's no due date to anchor on. Pure/cheap — no
   // Calendar lookup, no persistence — and never writes back to the task:
   // original_start_date itself stays untouched because it's load-bearing

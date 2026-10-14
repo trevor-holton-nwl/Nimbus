@@ -667,3 +667,56 @@ test('nextCalendarDay always returns a later day, in zones where local midnight 
   const out = execFileSync(process.execPath, ['-e', code], { env: { ...process.env, TZ: 'America/Sao_Paulo' } }).toString().trim();
   assert.deepEqual(JSON.parse(out), [[4, 1], [5, 0], [6, 0], [7, 0]], 'one calendar day per call, landing on midnight (01:00 only on the day midnight is skipped)');
 });
+
+// --- dueDateInstant: a date-only SAP finish arrives as an exact-midnight timestamp (OQ23) ---
+const weekdayWindows = (open, close) => (date) => {
+  const dow = date.getDay();
+  if (dow === 0 || dow === 6) return null;
+  const s = new Date(date); s.setHours(open, 0, 0, 0);
+  const e = new Date(date); e.setHours(close, 0, 0, 0);
+  return { open: s, close: e };
+};
+
+test('dueDateInstant returns a timed due date as-is', () => {
+  const raw = new Date(2026, 6, 8, 15, 30, 0);   // Wed 15:30
+  assert.equal(Core.dueDateInstant(raw, weekdayWindows(6, 22)), raw);
+  const secs = new Date(2026, 6, 8, 0, 0, 1);    // 00:00:01 is not exactly midnight
+  assert.equal(Core.dueDateInstant(secs, weekdayWindows(6, 22)), secs);
+});
+
+test('dueDateInstant reads midnight on an open day as that day\'s window close', () => {
+  const out = Core.dueDateInstant(new Date(2026, 6, 8), weekdayWindows(6, 22));   // Wed
+  assert.equal(+out, +new Date(2026, 6, 8, 22, 0, 0));
+});
+
+test('dueDateInstant reads midnight on a closed Sunday as the previous Friday close, never midnight', () => {
+  const out = Core.dueDateInstant(new Date(2026, 6, 12), weekdayWindows(6, 22));  // Sun 12 Jul
+  assert.equal(+out, +new Date(2026, 6, 10, 22, 0, 0), 'Friday 10 Jul 22:00');
+  assert.ok(out > new Date(2026, 6, 10), 'not the Friday-midnight or Sunday-midnight raw value');
+});
+
+test('dueDateInstant on a 24/7 line is 23:59:59 of that date (window close = end of day)', () => {
+  const allDay = (date) => ({ open: new Date(date), close: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1) });
+  const out = Core.dueDateInstant(new Date(2026, 6, 12), allDay);                 // Sunday, but open 24h
+  assert.equal(+out, +new Date(2026, 6, 12, 23, 59, 59));
+  const clamped = (date) => ({ open: new Date(date), close: new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59) });
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 12), clamped), +new Date(2026, 6, 12, 23, 59, 59));
+});
+
+test('dueDateInstant with no calendar at all is raw + 23:59:59', () => {
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), () => null), +new Date(2026, 6, 8, 23, 59, 59));
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 12), () => null), +new Date(2026, 6, 12, 23, 59, 59));
+});
+
+test('dueDateInstant looks back at most 30 days for an open day, then falls to raw + 23:59:59', () => {
+  const only30Back = (date) => {
+    const back = Math.round((new Date(2026, 6, 8) - date) / 86400000);
+    return back === 30 ? { open: new Date(2026, 5, 8, 6), close: new Date(2026, 5, 8, 20) } : null;
+  };
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), only30Back), +new Date(2026, 5, 8, 20));
+  const only31Back = (date) => {
+    const back = Math.round((new Date(2026, 6, 8) - date) / 86400000);
+    return back === 31 ? { open: new Date(2026, 5, 7, 6), close: new Date(2026, 5, 7, 20) } : null;
+  };
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), only31Back), +new Date(2026, 6, 8, 23, 59, 59));
+});

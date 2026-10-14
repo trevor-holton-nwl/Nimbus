@@ -590,3 +590,32 @@ test('Modal: Tab stays trapped (including focus on <body> and dialogs with no fo
     globalThis.document = prevDoc;
   }
 });
+
+test('sapDueDate reads a date-only (exact-midnight) due date as the end of that date\'s working window', async () => {
+  const { createRequire } = await import('node:module');
+  const prevCore = globalThis.NimbusComputeCore;
+  globalThis.NimbusComputeCore = createRequire(import.meta.url)('../../frontend/nimbus-compute-core.js');
+  const weekdays = { 0: null, 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: null };
+  let rev = 1;
+  try {
+    const task = (due, machine = 'L1') => ({ id: 't', MACHINE: machine, original_end_date: due });
+    // Not wired: no calendar rows -> raw + 23:59:59.
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 23, 59, 59));
+    Util.setDueCalendarResolver(line => {
+      return line === 'L1' ? { lineHours: weekdays, plantHours: weekdays, plant: 'P1', rev } : null;
+    });
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 22, 0, 0), 'open Wednesday -> window close');
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 9))), +new Date(2026, 7, 7, 22, 0, 0), 'closed Sunday -> previous Friday close');
+    const timed = new Date(2026, 7, 5, 9, 30);
+    assert.equal(Util.sapDueDate(task(timed)), timed, 'timed due returned as-is');
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5), 'NOCAL')), +new Date(2026, 7, 5, 23, 59, 59), 'line without calendar rows');
+    assert.equal(Util.sapDueDate({ id: 'n', MACHINE: 'L1', original_end_date: null }), null);
+    // The per-line+date window cache stays valid until the Store revision moves.
+    rev = 2;
+    weekdays[3] = [8, 12];
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 12, 0, 0), 'revision bump invalidates the window cache');
+  } finally {
+    Util.setDueCalendarResolver(null);
+    globalThis.NimbusComputeCore = prevCore;
+  }
+});

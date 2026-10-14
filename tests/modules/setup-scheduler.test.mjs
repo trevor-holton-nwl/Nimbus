@@ -4604,6 +4604,30 @@ test('hard bounds calendar-day arithmetic uses local setDate across DST', () => 
   } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
 });
 
+test('hard bounds read a date-only SAP due (exact midnight) as the end of its working window; a closed Sunday reads as the previous Friday', () => {
+  const weekdays = { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null };
+  const build = due => {
+    const snapshot = setupSnapshot([scheduledTask('d', 1, 'GREEN', due)]);
+    snapshot.calendars.L1.workHours = weekdays; snapshot.plants.P1.workHours = weekdays;
+    Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 0, max_push_forward_days: 0 });
+    return snapshot;
+  };
+  // Wednesday 5 Aug 2026, midnight: same calendar day as before (floor Wed 00:00, ceiling Thu 00:00).
+  let snapshot = build('2026-08-05T00:00:00');
+  let window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-05T00:00:00').getTime());
+  assert.equal(window.ceiling.getTime(), at('2026-08-06T00:00:00').getTime());
+  // Sunday 9 Aug 2026, midnight (closed day): the due reads as Friday 7 Aug's close, never Sunday midnight.
+  snapshot = build('2026-08-09T00:00:00');
+  window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-07T00:00:00').getTime());
+  assert.equal(window.ceiling.getTime(), at('2026-08-08T00:00:00').getTime());
+  // A timed due is untouched.
+  snapshot = build('2026-08-09T09:00:00');
+  window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-09T00:00:00').getTime());
+});
+
 test('hard bounds retry valid work after a fixed boundary instead of queueing an outgoing setup conflict', () => {
   const snapshot = setupSnapshot([
     scheduledTask('retry', 1, 'RED', '2026-08-03T18:00:00'),
