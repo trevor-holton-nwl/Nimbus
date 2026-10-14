@@ -212,9 +212,17 @@ def test_build_order_rows_inactive_map_rows_do_not_flow():
     assert "bom_usage" not in r
 
 
-def test_build_order_rows_unparseable_start_is_dropped_and_reported():
+def test_build_order_rows_missing_start_is_kept_with_a_null_start():
+    """Backward scheduling Task 2.7: the start is optional, the finish is not."""
     rows, problems = st.build_order_rows([_planned_stage(id=7, psttr="00000000")], None, _fmap(_PLANNED_MAP))
-    assert rows == [] and problems == [(7, "invalid_date")]
+    assert problems == [] and len(rows) == 1
+    assert rows[0]["basic_start_date"] is None and rows[0]["basic_finish_date"] is not None
+    assert rows[0]["sap_basic_finish_date"] == rows[0]["basic_finish_date"]
+
+
+def test_build_order_rows_missing_finish_is_dropped_and_reported():
+    rows, problems = st.build_order_rows([_planned_stage(id=8, pedtr="00000000")], None, _fmap(_PLANNED_MAP))
+    assert rows == [] and problems == [(8, "invalid_date")]
 
 
 def test_build_order_rows_int_cast_failure_is_a_problem_not_a_crash():
@@ -284,7 +292,7 @@ def test_validate_planned_order_rows_reasons():
         {**ok, "id": 2, "plnum": "000000000"},                      # all-zero order number -> missing_key
         {**ok, "id": 3, "plnum": "300", "plwrk": "OTHER"},          # plant_mismatch
         {**ok, "id": 4, "plnum": "400", "psttr": "20269999"},       # invalid_date
-        {**ok, "id": 5, "plnum": "500", "psttr": "00000000"},       # missing start -> invalid_date
+        {**ok, "id": 5, "plnum": "500", "psttr": "00000000"},       # missing start: valid, the start is optional
         {**ok, "id": 6, "plnum": "600", "pstti": "250000"},         # invalid_time
         {**ok, "id": 7, "plnum": "700", "gsmng": None},             # invalid_number
         {**ok, "id": 8, "plnum": "800", "abmng": Decimal("-1")},    # invalid_number
@@ -298,7 +306,8 @@ def test_validate_planned_order_rows_reasons():
     assert res[1]["resolved"] == {"production_order": "123", "material_id": "12345", "plant": "ZZP1"}
     assert res[2]["reason"] == "missing_key"
     assert res[3]["reason"] == "plant_mismatch"
-    assert res[4]["reason"] == "invalid_date" and res[5]["reason"] == "invalid_date"
+    assert res[4]["reason"] == "invalid_date"                               # a malformed start is not a missing one
+    assert res[5]["status"] == "valid" and res[5]["reason"] is None         # no start at all is fine
     assert res[6]["reason"] == "invalid_time"
     assert res[7]["reason"] == "invalid_number" and res[8]["reason"] == "invalid_number"
     assert res[9]["reason"] == "invalid_int"
@@ -945,6 +954,45 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
             cur.execute("SELECT count(*) FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
                         " AND action = 'send_to_sap' AND details->>'plant' = %s", (PLANT,))
             assert cur.fetchone()[0] == 2
+    finally:
+        with _conn(pg) as (conn, cur):
+            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
+            cur.execute("DELETE FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
+                        " AND details->>'plant' = %s", (PLANT,))
+            conn.commit()
+
+
+@pytest.mark.pg
+def test_a_firmed_never_placed_order_is_sent_with_its_sap_finish_and_the_echo_of_it_matches(pg, stg_plant):
+    """Review Focus 2 (backward scheduling Task 2.7): a firmed order nobody placed has no stored placement, so
+    Send transmits the finish SAP gave it (`original_finish_received`), remembers exactly that value, and SAP
+    sending it straight back is an echo (`finish_echoes`) -- it must not read as an SAP change."""
+    _set_plant(pg, routing=False, horizon_days=None)
+    due = datetime(2030, 2, 5, 14, 30)
+    with _conn(pg) as (conn, cur):
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date, basic_finish_date,"
+            " original_start_received, original_finish_received, run_time, firming_indicator)"
+            " VALUES ('zzstg-fnp', 'FNP', '777', %s, NULL, %s, NULL, %s, 3, 'X')", (PLANT, due, due))
+        conn.commit()
+    try:
+        res = st.queue_send_to_sap(PLANT, actor="pytest")
+        assert res["queued"] == 1 and res["firmed"] == 1 and res["skipped_no_end"] == 0
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(due, "UTC")
+        assert row["plnum"] == "FNP" and row["auffx"] == "X"
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT sent_finish FROM order_sap_sent WHERE order_id = 'zzstg-fnp'")
+            assert cur.fetchone()[0] == due
+        # SAP echoes the finish it was sent (date + time in the SAP frame, which is UTC here)
+        assert st.finish_echoes(due, False, due, "UTC", "UTC") is True
+        assert st.finish_echoes(due.replace(minute=45), False, due, "UTC", "UTC") is False
+        before = {"sap_basic_start_date": None, "sap_basic_finish_date": due - timedelta(days=1),
+                  "sap_sent_finish": due, "sap_sent_version": None, "tz": "UTC", "scheduled_start": None,
+                  "scheduled_end": None}
+        echo = {"basic_start_date": due - timedelta(hours=3), "basic_finish_date": due, "_finish_date_only": False}
+        assert st.db.sap_changed_fields(before, echo, None, sap_tz="UTC") == set()
     finally:
         with _conn(pg) as (conn, cur):
             cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))

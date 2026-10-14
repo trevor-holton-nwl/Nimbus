@@ -473,6 +473,15 @@ class Test_sap_changed_fields:
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(incoming=inc) == {"dates"}
 
+    def test_start_only_change_is_not_a_dates_change(self):
+        """Backward scheduling OQ25 c: the finish decides. A moved start with the finish unchanged keeps the
+        placement, with or without a remembered send."""
+        assert self._run(incoming=self._incoming(basic_start_date=self.S1)) == set()
+        before = self._before(sap_sent_finish=self.F0, sap_sent_version="0001")
+        assert self._run(before, self._incoming(basic_start_date=self.S1)) == set()
+        before = self._before(scheduled_start=self.S0, scheduled_end=self.F0)
+        assert self._run(before, self._incoming(basic_start_date=self.S1)) == set()
+
     def test_dates_finish_only_changed(self):
         assert self._run(incoming=self._incoming(basic_finish_date=self.F1)) == {"dates"}
 
@@ -481,12 +490,18 @@ class Test_sap_changed_fields:
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == set()
 
+    def test_finish_echo_of_the_placed_finish_is_not_changed_whatever_the_start(self):
+        # the placed finish is the anchor: SAP sending it back is an echo even with a different start
+        before = self._before(scheduled_start=self.S1, scheduled_end=self.F1)
+        assert self._run(before, self._incoming(basic_start_date=self.S0, basic_finish_date=self.F1)) == set()
+        assert self._run(before, self._incoming(basic_start_date=None, basic_finish_date=self.F1)) == set()
+
     def test_dates_partial_echo_still_changed(self):
         before = self._before(scheduled_start=self.S1, scheduled_end=self.F0)
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == {"dates"}
 
-    def test_dates_echo_needs_both_schedule_values(self):
+    def test_dates_echo_needs_the_placed_finish(self):
         before = self._before(scheduled_start=self.S1, scheduled_end=None)
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == {"dates"}
@@ -551,6 +566,8 @@ class Test_sap_changed_fields:
         assert self._run(incoming=self._incoming(basic_finish_date=None)) == set()
         inc = self._incoming(basic_start_date=None, basic_finish_date=self.F1)
         assert self._run(incoming=inc) == {"dates"}
+        # no start sent and a moved start baseline is not a change either
+        assert self._run(self._before(sap_basic_start_date=None), self._incoming(basic_start_date=self.S1)) == set()
 
     def test_incoming_none_workcenter_not_changed(self):
         assert self._run(incoming=self._incoming(sap_workcenter=None)) == set()
@@ -593,9 +610,13 @@ class Test_sap_changed_fields:
         assert self._run(incoming=inc) == {"quantity"}
 
     def test_several_fields_at_once(self):
-        inc = self._incoming(basic_start_date=self.S1, sap_workcenter="WC2",
+        inc = self._incoming(basic_finish_date=self.F1, sap_workcenter="WC2",
                              order_quantity=1, sap_production_version="0002")
         assert self._run(incoming=inc) == {"dates", "workcenter", "quantity", "production_version"}
+        # a moved start alone adds nothing
+        inc = self._incoming(basic_start_date=self.S1, sap_workcenter="WC2",
+                             order_quantity=1, sap_production_version="0002")
+        assert self._run(incoming=inc) == {"workcenter", "quantity", "production_version"}
 
     # ---- D20 echo suppression (orders.sap_sent_*) -------------------------
     def test_echo_finish_with_moved_start_is_not_a_dates_change(self):

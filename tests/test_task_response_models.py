@@ -92,6 +92,8 @@ def test_bulk_update_result_round_trips_db_shape():
         # ROUTING_RUNTIME_DESIGN.md §8.5: purely additive sparse {id: reason}
         # map, populated only for the routing-eligibility invalid_ids rejection.
         "rejection_reasons": {},
+        # Backward scheduling Task 2.7: sparse {id: True} -- the ids whose sent start was not trusted.
+        "start_derived": {},
     }
     out = brain.BulkUpdateResult(**sample).model_dump()
     assert out == sample
@@ -188,6 +190,34 @@ def test_placement_exception_is_forwarded_only_when_sent_and_an_explicit_null_cl
     assert "placement_exception" not in captured["items"][0]
     with pytest.raises(ValidationError):
         brain.TaskDateUpdate(id="abc123", placement_exception="sideways")
+
+
+def test_trust_start_is_forwarded_only_when_a_caller_distrusts_the_start(monkeypatch):
+    """Task 2.7 (OQ59): `trust_start` defaults to True and never travels unless a caller sent False, so every
+    existing item shape stays byte-identical; the bulk result's `start_derived` is forwarded as received."""
+    captured = {}
+
+    def fake_update(items, allowed_plants=None):
+        captured["items"] = items
+        return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
+                "not_found_ids": [], "stale": [], "versions": {"abc123": 43}, "start_derived": {"abc123": True}}
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    assert brain.TaskDateUpdate(id="a").trust_start is True
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                                                         end_date="2026-08-01T15:00:00")])
+    assert "trust_start" not in captured["items"][0]
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                                                         end_date="2026-08-01T15:00:00", trust_start=True)])
+    assert "trust_start" not in captured["items"][0]
+    res = brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                                                               end_date="2026-08-01T15:00:00", trust_start=False)])
+    assert captured["items"][0]["trust_start"] is False
+    assert res["start_derived"] == {"abc123": True}
+    out = scheduling_routes.bulk_update(
+        [brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00", end_date="2026-08-01T15:00:00",
+                              trust_start=False)], allowed_plants=None)
+    assert out["start_derived"] == {"abc123": True}
 
 
 def test_task_version_row_carries_firmed():

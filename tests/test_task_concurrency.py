@@ -904,6 +904,162 @@ class TestSaveContractWidthValidator:
         assert self._state(oid)[3] == "overlong" and self._state(oid)[2] is True
 
 
+@pytest.mark.pg
+class TestUntrustedStartSave:
+    """Backward scheduling Task 2.7 (OQ59): an outside writer's start is not trusted. The finish it sends is
+    the placed finish; the stale flag is forced TRUE (it takes precedence over the width validator's
+    clearing, which is skipped for that save) and the response names the ids whose start the browser must
+    re-derive (`start_derived`)."""
+    SUB, PLANT = "ZZTEST_UTS_SUB", "ZZTEST_UTS_PLANT"
+    MACHINE = "ZZTEST_UTS_LINE"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.pg = pg
+        self.s = dt.datetime(2026, 6, 1, 8, 0)
+        self._cleanup()
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'uts') ON CONFLICT DO NOTHING", (self.SUB,))
+            cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'America/Chicago')",
+                        (self.SUB, self.PLANT))
+            conn.commit()
+        yield
+        self._cleanup()
+
+    def _cleanup(self):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM plants WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+            conn.commit()
+
+    def _order(self, name, *, run_time=4, mismatch=False):
+        oid = self.pg.make_id("ZZTEST_UTS_" + name, "ZZTEST_UTS_MAT")
+        end = self.s + dt.timedelta(hours=run_time)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch)"
+                " VALUES (%s,%s,'ZZTEST_UTS_MAT',%s,%s,%s,%s,%s,%s,%s,%s)",
+                (oid, "ZZTEST_UTS_" + name, self.MACHINE, self.PLANT, self.s, end, self.s, end, run_time, mismatch))
+            conn.commit()
+        return oid
+
+    def _state(self, oid):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT scheduled_start, scheduled_end, runtime_schedule_mismatch FROM orders WHERE id = %s",
+                        (oid,))
+            return cur.fetchone()
+
+    def test_an_untrusted_start_skips_the_width_validator_forces_the_flag_and_reports_start_derived(self):
+        oid = self._order("UNTRUSTED")
+        s1, e1 = self.s + dt.timedelta(days=1), self.s + dt.timedelta(days=1, hours=9)   # 9 h bar for a 4 h run time
+        res = self.pg.update_task_dates_bulk([{"id": oid, "start": s1, "end": e1, "trust_start": False}])
+        assert res["persisted"] == 1 and res["invalid_ids"] == [] and res["rejection_reasons"] == {}
+        assert res["start_derived"] == {oid: True}
+        assert self._state(oid) == (s1, e1, True), "the finish is stored as the placed finish, the flag is forced"
+
+    def test_the_forced_flag_beats_the_validators_clearing_even_when_the_width_would_pass(self):
+        oid = self._order("PASSES")
+        s1 = self.s + dt.timedelta(days=1)
+        res = self.pg.update_task_dates_bulk([{"id": oid, "start": s1, "end": s1 + dt.timedelta(hours=4),
+                                              "trust_start": False}])
+        assert res["persisted"] == 1 and res["start_derived"] == {oid: True}
+        assert self._state(oid)[2] is True, "a width that happens to fit does not clear an untrusted start's flag"
+
+    def test_a_trusted_save_is_unchanged_and_reports_no_start_derived(self):
+        oid = self._order("TRUSTED", mismatch=True)
+        s1 = self.s + dt.timedelta(days=1)
+        res = self.pg.update_task_dates_bulk([{"id": oid, "start": s1, "end": s1 + dt.timedelta(hours=4)}])
+        assert res["persisted"] == 1 and res["start_derived"] == {}
+        assert self._state(oid)[2] is False
+        bad = self.pg.update_task_dates_bulk([{"id": oid, "start": s1, "end": s1 + dt.timedelta(hours=9),
+                                              "trust_start": True}])
+        assert bad["rejection_reasons"] == {oid: "width_mismatch"} and bad["start_derived"] == {}
+
+    def test_an_untrusted_save_still_needs_both_edges_and_rejects_an_inverted_range(self):
+        oid = self._order("EDGES")
+        res = self.pg.update_task_dates_bulk([{"id": oid, "end": self.s + dt.timedelta(hours=4), "trust_start": False}])
+        assert res["rejection_reasons"] == {oid: "single_edge"} and res["start_derived"] == {}
+        res = self.pg.update_task_dates_bulk([{"id": oid, "start": self.s, "end": self.s - dt.timedelta(hours=1),
+                                              "trust_start": False}])
+        assert res["invalid_ids"] == [oid] and res["start_derived"] == {}
+
+    def test_the_bulk_route_takes_trust_start_from_the_request_and_carries_start_derived(self, client):
+        import backend.security.auth as auth
+        oid = self._order("ROUTE")
+        s1, e1 = self.s + dt.timedelta(days=2), self.s + dt.timedelta(days=2, hours=7)
+        base = self.pg.get_task_versions([oid])[0]["row_version"]
+        client.app.dependency_overrides[auth.require_authenticated] = lambda: "uts@example.com"
+        client.app.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+        try:
+            res = client.post("/tasks/bulk_update", json=[{
+                "id": oid, "start_date": s1.isoformat(), "end_date": e1.isoformat(),
+                "base_version": base, "trust_start": False}])
+            assert res.status_code == 200, res.text
+            body = res.json()
+            assert body["persisted"] == 1 and body["start_derived"] == {oid: True}
+            assert self._state(oid) == (s1, e1, True)
+            # the default is a trusted start: the same wide bar is refused by the width check, and nothing derives
+            base = self.pg.get_task_versions([oid])[0]["row_version"]
+            res = client.post("/tasks/bulk_update", json=[{
+                "id": oid, "start_date": (s1 + dt.timedelta(days=1)).isoformat(),
+                "end_date": (e1 + dt.timedelta(days=1)).isoformat(), "base_version": base}])
+            body = res.json()
+            assert body["persisted"] == 0 and body["rejection_reasons"] == {oid: "width_mismatch"}
+            assert body["start_derived"] == {}
+        finally:
+            client.app.dependency_overrides.clear()
+
+
+@pytest.mark.pg
+class TestNeverPlacedRowWithoutAStartIsStillServed:
+    """Backward scheduling Task 2.7: the start is optional at ingest, so a never-placed order can carry a NULL
+    start. /tasks must still serve it (it reads its finish as the SAP finish); only a row with neither edge
+    and no queue state has nothing to draw."""
+    SUB, PLANT = "ZZTEST_NSR_SUB", "ZZTEST_NSR_PLANT"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.pg = pg
+        self._cleanup()
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'nsr') ON CONFLICT DO NOTHING", (self.SUB,))
+            cur.execute("INSERT INTO plants (subnetwork, plant, timezone) VALUES (%s, %s, 'UTC')", (self.SUB, self.PLANT))
+            conn.commit()
+        yield
+        self._cleanup()
+
+    def _cleanup(self):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM plants WHERE plant = %s", (self.PLANT,))
+            cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+            conn.commit()
+
+    def test_get_tasks_returns_a_row_with_no_start_and_its_sap_finish(self, client):
+        import backend.security.auth as auth
+        due = dt.datetime(2031, 5, 5, 12, 0)
+        oid = self.pg.make_id("ZZTEST_NSR_ORD", "ZZTEST_NSR_MAT")
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, original_start_received, original_finish_received, run_time)"
+                " VALUES (%s,'ZZTEST_NSR_ORD','ZZTEST_NSR_MAT','ZZTEST_NSR_LINE',%s,NULL,%s,NULL,%s,4)",
+                (oid, self.PLANT, due, due))
+            conn.commit()
+        client.app.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+        try:
+            res = client.get("/tasks", params={"plant": self.PLANT})
+        finally:
+            client.app.dependency_overrides.clear()
+        assert res.status_code == 200, res.text
+        rows = {r["id"]: r for r in res.json()["data"]}
+        assert oid in rows, "a NULL-start never-placed order must not vanish from /tasks"
+        assert rows[oid]["start_date"] is None and rows[oid]["end_date"] == due.strftime("%Y-%m-%dT%H:%M:%S")
+        assert rows[oid]["user_scheduled"] is False
+
+
 def test_conflict_scan_lookback_is_the_fixed_30_day_cap_and_reads_the_stored_finish():
     """Backward scheduling OQ27 (e): the start-indexed lookback is the fixed 30-day cap (no MAX(run_time)
     sizing query any more: a bar's drawn span is no longer start + run time), still bounded by the eff-start

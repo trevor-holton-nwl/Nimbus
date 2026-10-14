@@ -145,9 +145,17 @@ export interface paths {
         /**
          * Bulk Update
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-         *     Payload: [{ id, start_date?, end_date?, base_version? }]
+         *     Payload: [{ id, start_date?, end_date?, base_version?, trust_start? }]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
-         *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons }
+         *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons, start_derived }
+         *
+         *     Both edges are accepted, and `end_date` is read as the PLACED FINISH (the anchor NIMBUS keeps; the start
+         *     is derived from it). `trust_start` (default true) says whether the sent `start_date` was derived from
+         *     the run time by the caller: an external or integration writer that cannot do that sends
+         *     `trust_start: false`, which skips the width check, forces the row's stale flag so the browser re-derives
+         *     the start from the finish, and lists the id in `start_derived` (backward scheduling OQ59). The default
+         *     stays "trusted" because the browser's own saves send starts it computed; the width check then refuses a
+         *     start that does not fit the run time.
          *
          *     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
          *     external caller may not bypass the base_version check. A stale row is
@@ -3111,6 +3119,10 @@ export interface components {
             rejection_reasons?: {
                 [key: string]: string;
             };
+            /** Start Derived */
+            start_derived?: {
+                [key: string]: boolean;
+            };
         };
         /**
          * BulkUsersResult
@@ -3643,6 +3655,11 @@ export interface components {
              * @default false
              */
             force: boolean;
+            /**
+             * Trust Start
+             * @default true
+             */
+            trust_start: boolean;
             /** Planning Status */
             planning_status?: string | null;
             /** Planning Reason */
@@ -3769,7 +3786,8 @@ export interface components {
          *     key precisely is out of scope for this phase and would need to track
          *     DIAGNOSTICS's shape by hand forever. The empty-result path also returns a
          *     smaller `meta` subset (see get_tasks's `empty_meta`), which a strict schema
-         *     would reject.
+         *     would reject. Both paths carry `meta.server_now` (ISO-8601 UTC): the one clock the browser
+         *     projects into each plant's zone (backward scheduling OQ52); it is not a TaskDTO field.
          */
         TasksResponse: {
             /** Data */

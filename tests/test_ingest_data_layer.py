@@ -108,15 +108,17 @@ class TestIngestOrdersFromExcelRealDb:
         assert start_after != first_start, "the updated start date must actually persist"
 
     def test_missing_required_column_rejects_with_zero_rows_written(self, pg):
-        """A workbook missing BASIC_START_DATE must be rejected before any
-        row is written -- the required-columns guard at db.py:2248-2256."""
+        """A workbook missing BASIC_FINISH_DATE (the one required date column since backward scheduling Task
+        2.7) must be rejected before any row is written -- the required-columns guard."""
         db_ = pg
         workbook = _xlsx([{
             "PRODUCTION_ORDER": self.ORDER,
             "MATERIAL_NUMBER": self.MATERIAL,
+            "BASIC_START_DATE": "2026-09-10 08:00",
         }])
         result = db_.ingest_orders_from_excel(workbook, "zztest_ingest_bad.xlsx")
         assert result["status"] == "error"
+        assert "BASIC_FINISH_DATE" in result["message"]
         assert result["inserted"] == 0
         assert result["updated"] == 0
 
@@ -126,6 +128,31 @@ class TestIngestOrdersFromExcelRealDb:
             )
             (count,) = cur.fetchone()
         assert count == 0
+
+    def test_a_workbook_with_no_start_column_loads_rows_with_a_null_start(self, pg):
+        """The start is optional: a workbook with PRODUCTION_ORDER, MATERIAL_NUMBER and BASIC_FINISH_DATE only
+        loads, every row keeping its finish as received and a NULL start (never placed, so the browser derives
+        the start from the finish)."""
+        db_ = pg
+        finish = dt.datetime(2026, 9, 12, 14, 0)
+        workbook = _xlsx([{
+            "PRODUCTION_ORDER": self.ORDER,
+            "MATERIAL_NUMBER": self.MATERIAL,
+            "BASIC_FINISH_DATE": finish.strftime("%Y-%m-%d %H:%M"),
+        }])
+        try:
+            result = db_.ingest_orders_from_excel(workbook, "zztest_ingest_nostart.xlsx")
+            assert result["status"] == "ok", result
+            assert result["inserted"] == 1
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT basic_start_date, basic_finish_date, original_start_received,"
+                            " original_finish_received, scheduled_start, scheduled_end FROM orders"
+                            " WHERE production_order = %s", (self.ORDER,))
+                assert cur.fetchone() == (None, finish, None, finish, None, None)
+        finally:
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE production_order = %s", (self.ORDER,))
+                conn.commit()
 
 
 @pytest.mark.pg
@@ -648,14 +675,35 @@ class TestApplyOrderDateHygieneRows:
         assert out.iloc[1] == pd.Timestamp("2026-09-11")
         assert pd.isna(out.iloc[2]) and pd.isna(out.iloc[3])
 
-    def test_real_time_of_day_finish_kept_and_bad_start_dropped_with_warning(self):
+    def test_real_time_of_day_finish_kept_and_bad_start_kept_with_a_null_start_and_a_warning(self):
         good = {"basic_start_date": self.S, "basic_finish_date": dt.datetime(2026, 9, 10, 15, 45),
                 "run_time": 1, "tag": "keep"}
-        bad = {"basic_start_date": "not-a-date", "basic_finish_date": dt.datetime(2026, 9, 10, 9, 0), "run_time": 1}
+        bad = {"basic_start_date": "not-a-date", "basic_finish_date": dt.datetime(2026, 9, 10, 9, 0), "run_time": 1,
+               "tag": "no-start"}
+        import backend.admin_ops.diagnostics_state as ds
+        before = ds.DIAGNOSTICS.get("unreadable_start_date", 0)
         out, warnings = self._run([bad, good])
-        assert [r["tag"] for r in out] == ["keep"]
-        assert out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 15, 45)
-        assert warnings == [{"level": "error", "msg": "1 row(s) dropped — unparseable BASIC_START_DATE"}]
+        assert ds.DIAGNOSTICS["unreadable_start_date"] == before + 1
+        assert [r["tag"] for r in out] == ["no-start", "keep"]
+        assert out[0]["basic_start_date"] is None and out[0]["basic_finish_date"] == dt.datetime(2026, 9, 10, 9, 0)
+        assert out[1]["basic_finish_date"] == dt.datetime(2026, 9, 10, 15, 45)
+        assert warnings == [{"level": "warn", "msg": "1 row(s) loaded with no start — BASIC_START_DATE is not a "
+                                                      "readable date"}]
+
+    def test_a_blank_start_is_simply_absent_not_a_warning(self):
+        import backend.admin_ops.diagnostics_state as ds
+        before = ds.DIAGNOSTICS.get("unreadable_start_date", 0)
+        out, warnings = self._run([{"production_order": "PO-NS", "basic_start_date": None,
+                                    "basic_finish_date": dt.datetime(2026, 9, 11, 7, 0), "run_time": 2}])
+        assert len(out) == 1 and out[0]["basic_start_date"] is None
+        assert out[0]["basic_finish_date"] == out[0]["sap_basic_finish_date"] == dt.datetime(2026, 9, 11, 7, 0)
+        assert warnings == []
+        assert ds.DIAGNOSTICS.get("unreadable_start_date", 0) == before, "a blank start is not a data problem, so nothing is counted"
+
+    def test_a_finish_with_no_start_is_not_judged_against_the_start(self):
+        # the "finish on an earlier date than the start" rule needs a start; without one the row stays
+        out, warnings = self._run([{"basic_start_date": None, "basic_finish_date": dt.datetime(2026, 9, 1), "run_time": 1}])
+        assert len(out) == 1 and warnings == []
 
     # One shared fixture set: (start, finish, run_time) as the Excel frame and the SAP row dicts carry them.
     PARITY_CASES = [
@@ -666,7 +714,8 @@ class TestApplyOrderDateHygieneRows:
         (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 15, 45), 1),          # real finish kept
         (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 10, 0, 30), "x"),         # junk run time; same-date early finish kept
         (dt.datetime(2026, 9, 10, 8, 0), dt.datetime(2026, 9, 9, 12, 0), 1),            # finish on an earlier date: dropped
-        ("not-a-date", dt.datetime(2026, 9, 10, 12, 0), 1),                             # unparseable start: dropped
+        ("not-a-date", dt.datetime(2026, 9, 10, 12, 0), 1),                             # unparseable start: kept, no start
+        (None, dt.datetime(2026, 9, 10, 12, 0), 1),                                     # blank start: kept, no start
     ]
 
     def test_excel_and_sap_paths_give_identical_results_for_the_same_inputs(self):
@@ -682,9 +731,10 @@ class TestApplyOrderDateHygieneRows:
         rows = db_.apply_order_date_hygiene_rows(
             [{"basic_start_date": s, "basic_finish_date": f, "run_time": r} for s, f, r in self.PARITY_CASES],
             sap_warn)
-        assert sap_warn == ex_warn and len(rows) == len(df) == len(self.PARITY_CASES) - 3
+        assert sap_warn == ex_warn and len(rows) == len(df) == len(self.PARITY_CASES) - 2
         for (_, h), r in zip(df.iterrows(), rows, strict=True):
-            assert r["basic_start_date"] == h["BASIC_START_DATE"].to_pydatetime()
+            assert r["basic_start_date"] == (h["BASIC_START_DATE"].to_pydatetime()
+                                             if pd.notna(h["BASIC_START_DATE"]) else None)
             assert r["basic_finish_date"] == h["BASIC_FINISH_DATE"].to_pydatetime()
             assert r["sap_basic_finish_date"] == (h["_SAP_FINISH_DATE"].to_pydatetime()
                                                   if pd.notna(h["_SAP_FINISH_DATE"]) else None)
@@ -948,6 +998,52 @@ class TestSapTruthReupload:
         o = self._orig()
         assert o["original_finish_received"] == later_f and o["original_start_received"] == later_s
 
+    # ---- a start-only SAP change keeps the placement (backward scheduling OQ25 c, Task 2.7) -------------
+    def test_start_only_sap_change_on_a_never_sent_order_keeps_the_slot_and_refreshes_the_original_start(self):
+        self._up()
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        moved_s = self.base - dt.timedelta(days=1)          # SAP moved the start; the finish is unchanged
+        res = self._up([self._line(BASIC_START_DATE=moved_s)], "zztest_st_2.xlsx")
+        row, o = self._row(), self._orig()
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True and self._segments() == 1
+        assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")]
+        assert row["sap_basic_start_date"] == moved_s and row["basic_start_date"] == moved_s
+        # never sent, so the finish is not an echo: the locked start follows SAP; the finish did not change
+        assert o["original_start_received"] == moved_s
+        assert o["original_finish_received"] == self.base + dt.timedelta(days=1)
+
+    def test_start_only_sap_change_on_a_sent_order_whose_finish_echoes_keeps_the_slot_and_both_locked_dates(self):
+        self._up()
+        f = self.base + dt.timedelta(days=1)
+        self._remember_sent(f)                                  # NIMBUS sent the very finish SAP still holds
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        moved_s = self.base - dt.timedelta(days=1)
+        res = self._up([self._line(BASIC_START_DATE=moved_s)], "zztest_st_2.xlsx")
+        row, o = self._row(), self._orig()
+        assert row["basic_start_date"] == moved_s, "the row was written (SAP's start moved)"
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+        assert not [w for w in res["warnings"] if w.get("category") == "sap_changed"]
+        assert o["original_start_received"] == self.base, "an echo keeps BOTH locked dates"
+        assert o["original_finish_received"] == f
+
+    def test_a_finish_change_still_resets_whatever_the_start_does(self):
+        self._up()
+        self._schedule(self.base + dt.timedelta(days=3))
+        self._up([self._line(BASIC_FINISH_DATE=self.base + dt.timedelta(days=5))], "zztest_st_2.xlsx")
+        row = self._row()
+        assert row["scheduled_start"] is None and row["manual_firmed"] is False
+
+    def test_a_reupload_that_sends_no_start_keeps_the_stored_start_and_the_slot(self):
+        self._up()
+        slot = self.base + dt.timedelta(days=3)
+        self._schedule(slot)
+        self._up([self._line(BASIC_START_DATE=None, RUN_TIME=5)], "zztest_st_2.xlsx")   # run time differs, so the row is written
+        row = self._row()
+        assert row["basic_start_date"] == self.base, "a start SAP did not send never erases the stored one"
+        assert row["scheduled_start"] == slot and row["manual_firmed"] is True
+
     def test_echo_with_null_stored_originals_still_populates_them(self):
         self._up()
         sent = self.base + dt.timedelta(days=3)
@@ -1173,13 +1269,13 @@ class TestSapTruthReupload:
         self._no_sap_reset(res)
         assert self._row()["scheduled_start"] == slot and self._row()["manual_firmed"] is True
 
-    def test_finish_column_absent_drops_every_row_with_a_warning(self):
+    def test_finish_column_absent_is_rejected_before_any_row_is_written(self):
+        """BASIC_FINISH_DATE is the one required date column (backward scheduling Task 2.7)."""
         line = self._line()
         del line["BASIC_FINISH_DATE"]
         res = self.pg.ingest_orders_from_excel(_xlsx([line]), "zztest_st_1.xlsx")
-        assert res["status"] == "ok" and res["inserted"] == 0 and res["updated"] == 0, res
-        errs = [w for w in res["warnings"] if w.get("level") == "error" and "BASIC_FINISH_DATE" in w.get("msg", "")]
-        assert errs and "1 row(s) dropped" in errs[0]["msg"], res["warnings"]
+        assert res["status"] == "error" and res["inserted"] == 0 and res["updated"] == 0, res
+        assert "BASIC_FINISH_DATE" in res["message"]
         with self.pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM orders WHERE id = %s", (self._oid(),))
             assert cur.fetchone()[0] == 0

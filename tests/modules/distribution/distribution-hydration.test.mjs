@@ -58,3 +58,16 @@ test('kept children replace server state, cleared attributes, and obsolete segme
   assert.equal(task.firmed, true);
   assert.equal(task.row_version, 43);
 });
+
+test('a child with only a stored finish counts as placed (scheduled = the stored-edge shape)', () => {
+  const finishOnly = Distribution.hydrateDistributionChild(child({
+    scheduled_start: null, scheduled_end: '2026-10-01T12:00:00', start_date: null, schedule_segments: [],
+    runtime_schedule_mismatch: true,
+  }));
+  assert.equal(finishOnly.user_scheduled, true);
+  const neither = Distribution.hydrateDistributionChild(child({
+    scheduled_start: null, scheduled_end: null, start_date: null, end_date: null, schedule_segments: [],
+  }));
+  assert.equal(neither.user_scheduled, false);
+  assert.equal(Distribution.hydrateDistributionChild(child()).user_scheduled, true);
+});

@@ -1216,7 +1216,11 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
         lits.append("run_time_source = 'routing'")
         pars.append(("run_time_basis", "jsonb", "{v}"))
         vals.append(Jsonb(row["resolved_runtime"]["basis"]))
-    if row["clear_runtime_mismatch"]:
+    if row.get("force_mismatch"):
+        # An untrusted start (trust_start=False, backward scheduling OQ59): the stored bar's start is a
+        # guess, so the row is flagged for the browser to re-derive it. Takes precedence over any clearing.
+        lits.append("runtime_schedule_mismatch = TRUE")
+    elif row["clear_runtime_mismatch"]:
         lits.append("runtime_schedule_mismatch = FALSE")
     for field, column in _ORDER_ATTR_COLUMNS.items():
         if field in row["attrs"]:
@@ -1287,6 +1291,14 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     a `placement_exception`. Inverted ranges are rejected. Unknown ids are reported, not
     written.
 
+    Untrusted start (backward scheduling OQ59, Task 2.7): an item may carry `trust_start: False` (the
+    `/tasks/bulk_update` route forwards the request field). The sent `end` is stored as the placed finish
+    exactly as for any save, but the sent `start` is only a guess: the continuous-width validator is skipped
+    for that item and `runtime_schedule_mismatch` is forced TRUE (this takes precedence over the validator's
+    clearing), so the browser re-derives the start from the finish on its next load. Both edges (or
+    segments) are still required and an inverted range is still rejected. The ids saved this way come back
+    in `start_derived` ({id: True}).
+
     A MACHINE edit is rejected as invalid whenever the row's PARENT_ORDER
     (parent_production_order) is set — a distribution child order may only move
     via its distribution share, never a direct machine change. This mirrors the
@@ -1337,7 +1349,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     save first takes per-(plant, machine) advisory locks in sorted order.
 
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
-    not_found_ids, stale, versions, rejection_reasons}. invalid_ids / not_found_ids
+    not_found_ids, stale, versions, rejection_reasons, start_derived}. invalid_ids / not_found_ids
     carry the actual ids (not just counts) so the client can stop retrying
     terminally-rejected rows while still keeping genuinely-unpersisted rows dirty
     for a retry. `rejection_reasons` is a purely additive, sparse {id: reason}
@@ -1357,7 +1369,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     if not items:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
+                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}, "start_derived": {}}
 
     # Deferred import (never module-level -- avoids a backend.routing <->
     # db.py import cycle, matching this codebase's established convention;
@@ -1702,8 +1714,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # marked the placement as a deliberate exception or the run time is unknown. The server only
             # judges the pair of edges it was sent. A marker sent with this save wins over the stored one
             # (an explicit null clears it, so the check applies again). Segments (>= 2 pieces) are judged
-            # by _validate_schedule_segments above; a bulk route that must not trust the sent start
-            # (trust_start=False, Task 2.7) will bypass this gate and force the flag instead.
+            # by _validate_schedule_segments above; an item that must not trust its sent start
+            # (`trust_start: False`, Task 2.7) bypasses this gate and has the flag forced instead.
             # A save that does not move the bar (both sent edges equal the stored RAW placement, run time
             # unchanged) is not judged: the browser resends the full snapshot on an attribute-only edit, and a
             # stale bar the engine could not re-derive must stay savable. The flag is then left untouched
@@ -1712,7 +1724,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                        and current["stored_start"] is not None and current["stored_end"] is not None
                        and new_start == current["stored_start"] and new_end == current["stored_end"]
                        and not runtime_changed)
-            if not queued and not segment_rows and new_start is not None and new_end is not None and not unmoved:
+            # An untrusted start (OQ59): the pair of edges is stored but not judged; the flag is forced below.
+            trusted = it.get("trust_start", True) is not False
+            if (trusted and not queued and not segment_rows and new_start is not None and new_end is not None
+                    and not unmoved):
                 effective_exception = exception_value if has_exception else current["placement_exception"]
                 width_ok = _validate_continuous_width(
                     new_start, new_end, requested_runtime, effective_exception, current["timezone"])
@@ -1732,8 +1747,13 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 row_planning_status = "scheduled"
                 row_planning_reason = None
 
+            # The start is a guess only when this save really writes a bar (a queued row has none, and a
+            # status-only/attribute-only save writes no edges).
+            force_mismatch = (not trusted and not queued
+                              and (start is not None or end is not None or bool(segment_rows)))
             update_rows.append({
                 "id": tid,
+                "force_mismatch": force_mismatch,
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,
@@ -1750,7 +1770,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 # The stale flag clears only when the stored bar was actually checked against the run time:
                 # a validated segment aggregate, or a continuous bar whose width check ran and held. A bar
                 # with a placement exception (or no known run time) leaves the flag untouched.
-                "clear_runtime_mismatch": queued or bool(segment_rows) or width_passed,
+                "clear_runtime_mismatch": (queued or bool(segment_rows) or width_passed) and not force_mismatch,
                 "has_exception": has_exception and not queued,
                 "placement_exception": exception_value,
                 # The conflict scan below (_scan_conflicts_for_rows) filters by
@@ -1767,7 +1787,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     "invalid": len(invalid_ids), "not_found": len(not_found_ids),
                     "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
                     "stale": stale, "versions": {}, "conflicts": [],
-                    "rejection_reasons": rejection_reasons}
+                    "rejection_reasons": rejection_reasons, "start_derived": {}}
 
         if update_rows:
             try:
@@ -1806,7 +1826,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                             "stale": stale, "versions": {}, "conflicts": conflicts,
                             "status": "error", "error_code": "schedule.conflicts",
                             "cause": f"{len(conflicts)} schedule conflict(s) on the written machines (strict mode)",
-                            "rejection_reasons": rejection_reasons}
+                            "rejection_reasons": rejection_reasons, "start_derived": {}}
                 conn.commit()
                 persisted = applied = len(versions)
             except Exception:
@@ -1821,7 +1841,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             "invalid": len(invalid_ids), "not_found": len(not_found_ids),
             "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
             "stale": stale, "versions": versions, "conflicts": conflicts,
-            "rejection_reasons": rejection_reasons}
+            "rejection_reasons": rejection_reasons,
+            # the ids whose untrusted start was stored (and flagged) -- only those that actually persisted
+            "start_derived": {r["id"]: True for r in update_rows if r["force_mismatch"] and r["id"] in versions}}
 
 
 def get_order_plant(task_id: str) -> str | None:
@@ -2709,14 +2731,14 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     """Which SAP-owned fields did this upload change vs SAP's previous upload?
 
     Pure (no DB). `before` is the stored orders row (SAP baselines
-    `sap_basic_start_date`/`sap_basic_finish_date`/`sap_workcenter`/
-    `sap_production_version`, plus `order_quantity`, `production_version`,
-    `scheduled_start`/`scheduled_end`); `incoming` is the parsed upload row.
-    A field counts as changed only when its baseline is non-NULL, the incoming
-    value differs from it, and the incoming value is not an echo of NIMBUS's
-    own current value (SAP sending back what a planner set). An incoming None means "column/cell
-    not sent or unparseable" and is never a change for that field (each date is
-    judged individually); an incoming "" (blank cell present) is a real value.
+    `sap_basic_finish_date`/`sap_workcenter`/`sap_production_version`, plus
+    `order_quantity`, `production_version`, `scheduled_end`); `incoming` is the
+    parsed upload row. A field counts as changed only when its baseline is non-NULL,
+    the incoming value differs from it, and the incoming value is not an echo of
+    NIMBUS's own current value (SAP sending back what a planner set). An incoming
+    None means "column/cell not sent or unparseable" and is never a change for that
+    field; an incoming "" (blank cell present) is a real value. `dates` is judged
+    on the finish alone: a start-only change is never "dates" (the placement keeps).
     Returns a subset
     of {"dates", "workcenter", "quantity", "production_version"}.
 
@@ -2742,15 +2764,15 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     """
     changed: set[str] = set()
 
-    # dates: either baseline non-NULL and differing, unless both incoming dates
-    # echo NIMBUS's current scheduled_start AND scheduled_end (both non-NULL).
-    base_s, base_f = before.get("sap_basic_start_date"), before.get("sap_basic_finish_date")
-    in_s, in_f = incoming.get("basic_start_date"), incoming.get("basic_finish_date")
-    sched_s, sched_e = before.get("scheduled_start"), before.get("scheduled_end")
-    dates_differ = ((base_s is not None and in_s is not None and in_s != base_s)
-                    or (base_f is not None and in_f is not None and in_f != base_f))
-    dates_echo = (sched_s is not None and sched_e is not None
-                  and in_s == sched_s and in_f == sched_e)
+    # dates: the FINISH decides (backward scheduling OQ25 c, Task 2.7). A start-only SAP change keeps the
+    # placement, because the planner's placed finish is the anchor and the start is derived from it; the
+    # finish changing (baseline non-NULL and differing) counts unless it echoes NIMBUS's own placed finish.
+    # The incoming start is not read here on purpose: it never decides, and may not even be sent.
+    base_f = before.get("sap_basic_finish_date")
+    in_f = incoming.get("basic_finish_date")
+    sched_e = before.get("scheduled_end")
+    dates_differ = base_f is not None and in_f is not None and in_f != base_f
+    dates_echo = sched_e is not None and in_f == sched_e
 
     # D20 echo suppression: NIMBUS remembers the finish/version it last sent to
     # SAP (side table order_sap_sent, joined into the before-image). SAP echoing that finish back is not an SAP change
@@ -2927,7 +2949,9 @@ _UPSERT_SQL = f"""
             WHEN EXCLUDED.plant IS NOT NULL AND EXCLUDED.plant IS DISTINCT FROM orders.plant THEN NULL
             ELSE orders.machine_key
         END,
-        basic_start_date      = EXCLUDED.basic_start_date,
+        -- The start is optional (backward scheduling Task 2.7): an incoming NULL means "not sent" and
+        -- never erases a stored start (the finish below is required, so it is always written).
+        basic_start_date      = COALESCE(EXCLUDED.basic_start_date, orders.basic_start_date),
         basic_finish_date     = EXCLUDED.basic_finish_date,
         -- SAP baselines: the last SAP-sent values, written ONLY here (and by
         -- distribution's child upsert). An incoming NULL means "not sent" and
@@ -4186,7 +4210,8 @@ def extract_upload_plants(file_bytes: bytes) -> list[str] | None:
 
 def _count_dropped_order_rows(counter: str, n: int) -> None:
     """Bump a process-level load-diagnostics counter for rows the order date
-    rules dropped. Best-effort: the Admin Cockpit counter never breaks an ingest."""
+    rules dropped (or, for `unreadable_start_date`, loaded without a start).
+    Best-effort: the Admin Cockpit counter never breaks an ingest."""
     try:
         from backend.admin_ops.diagnostics_state import DIAGNOSTICS
         DIAGNOSTICS[counter] = int(DIAGNOSTICS.get(counter, 0)) + int(n)
@@ -4226,17 +4251,20 @@ def _parse_finish_dates(col):
 def _date_hygiene_df(df, warnings: list):
     """Order date rules shared by the Excel ingest and the SAP staging path.
 
-    Expects BASIC_START_DATE and BASIC_FINISH_DATE (both required) and an
-    optional RUN_TIME column. The finish is stored exactly as received: a
-    date-only (exact midnight) finish is kept, and a finish earlier than the
-    start on the SAME calendar date is kept; neither is rewritten. Returns the
-    frame with: BASIC_START_DATE and BASIC_FINISH_DATE parsed; `_SAP_FINISH_DATE`
-    = the finish as sent (equal to BASIC_FINISH_DATE for every surviving row);
-    RUN_TIME numeric with 1.0 default and `_RUN_TIME_DEFAULTED` flagged. Dropped
-    with one `error` warning each (naming the rows when PRODUCTION_ORDER is
-    present), index reset: rows with an unparseable start, rows with a blank or
-    unparseable finish, and rows whose finish date is earlier than the start date.
+    Expects BASIC_FINISH_DATE (required) and an optional BASIC_START_DATE and RUN_TIME column. The
+    finish is stored exactly as received: a date-only (exact midnight) finish is kept, and a finish
+    earlier than the start on the SAME calendar date is kept; neither is rewritten. The start is
+    optional (backward scheduling OQ24/OQ25): a blank or missing start leaves the row with no start, an
+    unreadable one does too with one `warn` warning, and a row with no start is never dropped for it (the
+    browser derives its start from the finish). Returns the frame with: BASIC_START_DATE (NaT when none) and
+    BASIC_FINISH_DATE parsed; `_SAP_FINISH_DATE` = the finish as sent (equal to BASIC_FINISH_DATE for every
+    surviving row); RUN_TIME numeric with 1.0 default and `_RUN_TIME_DEFAULTED` flagged. Dropped with one
+    `error` warning each (naming the rows when PRODUCTION_ORDER is present), index reset: rows with a blank
+    or unparseable finish, and rows whose finish date is earlier than their start date.
     """
+    if "BASIC_START_DATE" not in df.columns:
+        df["BASIC_START_DATE"] = pd.NaT
+    raw_start = df["BASIC_START_DATE"].copy()
     df["BASIC_START_DATE"] = pd.to_datetime(df["BASIC_START_DATE"], errors="coerce")
     if "BASIC_FINISH_DATE" not in df.columns:
         df["BASIC_FINISH_DATE"] = pd.NaT
@@ -4257,15 +4285,17 @@ def _date_hygiene_df(df, warnings: list):
     df["_RUN_TIME_DEFAULTED"] = _rt.isna()
     df["RUN_TIME"] = _rt.fillna(1.0)
 
-    # Start is still required (a later phase relaxes it).
-    bad_start = df["BASIC_START_DATE"].isna()
-    if bad_start.any():
+    # The start is optional: a value that was there but could not be read keeps its row (with no start) and
+    # warns; a blank cell is just absent. Nothing is dropped, so nothing is counted as dropped.
+    unreadable_start = (df["BASIC_START_DATE"].isna() & raw_start.notna()
+                        & (raw_start.astype(str).str.strip() != ""))
+    if unreadable_start.any():
+        _count_dropped_order_rows("unreadable_start_date", int(unreadable_start.sum()))
         warnings.append({
-            "level": "error",
-            "msg": f"{int(bad_start.sum())} row(s) dropped — unparseable BASIC_START_DATE",
+            "level": "warn",
+            "msg": (f"{int(unreadable_start.sum())} row(s) loaded with no start — BASIC_START_DATE is not a "
+                    f"readable date{_dropped_rows_label(df, unreadable_start)}"),
         })
-        _count_dropped_order_rows("dropped_no_start_date", int(bad_start.sum()))
-    df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
 
     # The finish is required and stored as received (owner rule): blank or
     # unparseable is rejected, never filled with the start or a derived value.
@@ -4281,6 +4311,7 @@ def _date_hygiene_df(df, warnings: list):
 
     # A finish on an earlier CALENDAR DATE than the start is a corrupt row; a
     # finish earlier on the same date (or at exact midnight) is kept as received.
+    # A row with no start has nothing to be earlier than (NaT compares False).
     before_start = df["BASIC_FINISH_DATE"].dt.normalize() < df["BASIC_START_DATE"].dt.normalize()
     if before_start.any():
         warnings.append({
@@ -4299,10 +4330,10 @@ def apply_order_date_hygiene_rows(rows: list[dict], warnings: list) -> list[dict
 
     Reads `production_order` (optional, only to name dropped rows),
     `basic_start_date`, `basic_finish_date`, `run_time` from each row dict and
-    returns the surviving rows (a row with an unparseable start, a blank or
-    unparseable finish, or a finish on an earlier date than the start is dropped,
-    with the same warnings the Excel path emits), each updated in place with the
-    parsed `basic_start_date` / `basic_finish_date` (stored as received) /
+    returns the surviving rows (a blank or unparseable finish, or a finish on an
+    earlier date than the start, drops the row; a missing or unreadable start keeps it
+    with `basic_start_date = None`; same warnings as the Excel path), each updated in
+    place with the parsed `basic_start_date` / `basic_finish_date` (stored as received) /
     `run_time` plus `sap_basic_finish_date` and `_run_time_was_defaulted`.
     Other keys pass through untouched.
     """
@@ -4398,7 +4429,8 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
     if "PRODUCTION_LINE" in df.columns and "MACHINE" not in df.columns:
         df = df.rename(columns={"PRODUCTION_LINE": "MACHINE"})
 
-    required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_START_DATE"}
+    # The finish is the one required date (backward scheduling OQ24/OQ25); the start is optional.
+    required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_FINISH_DATE"}
     missing = required - set(df.columns)
     if missing:
         msg = f"Uploaded file is missing required columns: {sorted(missing)}"

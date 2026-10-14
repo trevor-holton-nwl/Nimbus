@@ -1335,7 +1335,8 @@ class TestPlanApplyAnchorCarry:
         rows_out, plan_structure, warnings = distribution_data.plan([row], batch_id)
         header_key = (self.PLANT, self.ORD, self.MAT)
         assert plan_structure["parents"][header_key]["anchor"] is not None
-        assert plan_structure["parents"][header_key]["anchor"]["anchor"] == self.anchor_start
+        # backward scheduling Task 2.7: what travels is the plain order's STORED FINISH
+        assert plan_structure["parents"][header_key]["anchor"]["finish"] == self.anchor_start + dt.timedelta(hours=10)
         assert self.plain_id in plan_structure["parents"][header_key]["previous_child_ids"]
 
         with db_._pool.connection() as conn:
@@ -1345,12 +1346,17 @@ class TestPlanApplyAnchorCarry:
 
         children = _snapshot_children(db_, self.PLANT, self.ORD)
         assert len(children) == 2
+        finish = self.anchor_start + dt.timedelta(hours=10)
         for child in children:
-            assert child["scheduled_start"] == self.anchor_start
+            # the carry reads the placed finish; no start + run time is written forward (the child's run
+            # time is a share, not the plain order's 10 h), so the start stays unset for the browser to derive
+            assert child["scheduled_end"] == finish and child["scheduled_start"] is None
             assert child["notes"] == "Planner note"
         with db_._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT manual_firmed FROM orders WHERE parent_production_order = %s", (self.ORD,))
-            assert [r[0] for r in cur.fetchall()] == [True, True], "the slot is carried, so the firm follows it"
+            cur.execute("SELECT manual_firmed, runtime_schedule_mismatch, planning_status FROM orders"
+                        " WHERE parent_production_order = %s", (self.ORD,))
+            assert cur.fetchall() == [(True, True, "scheduled")] * 2, \
+                "the placement is carried (the firm follows it) and flagged stale so the start is re-derived"
 
         # The old plain id must be gone.
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -1510,8 +1516,9 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
 
         children = _snapshot_children(db_, self.PLANT, self.ORD)
         assert len(children) == 2
+        finish = self.anchor_start + dt.timedelta(hours=10)
         for child in children:
-            assert child["scheduled_start"] == self.anchor_start
+            assert child["scheduled_end"] == finish and child["scheduled_start"] is None
             assert child["notes"] == "Planner note"
 
         post_apply_rows = self._children_state(db_, "planning_status, planning_reason, run_time")
@@ -1536,7 +1543,8 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
         for planning_status, planning_reason, scheduled_start, _scheduled_end, run_time, run_time_source in final_rows:
             assert planning_status == "scheduled"
             assert planning_reason is None
-            assert scheduled_start == self.anchor_start  # untouched by the resolve
+            assert scheduled_start is None  # the carried placement is finish-only; the resolve does not start it
+            assert _scheduled_end == self.anchor_start + dt.timedelta(hours=10)  # ... and does not move the finish
             assert run_time is not None
             assert run_time_source == "routing"
 
@@ -2886,6 +2894,94 @@ class TestReweightSharesGuards(_ReweightFixtureBase):
         assert l2_child["id"] in result["removed"]
         remaining = _snapshot_children(pg, self.PLANT, self.ORD)
         assert all(c["id"] != l2_child["id"] for c in remaining)
+
+
+@pytest.mark.pg
+class TestFinishOnlyPlacedChildCountsAsScheduled(_ReweightFixtureBase):
+    """Backward scheduling Task 2.7: a child carries a placement when it has a stored finish even if it has no
+    stored start yet (the `_PLACED_SQL` shape), so the removal guard, the dry-run flag and the orphan sweep
+    all see it -- and a child a re-weight creates copies its sibling's finish, flagged stale."""
+    WC = "ZZTEST_WC_FINONLY"
+    L1, L2 = "ZZTEST_L1_FINONLY", "ZZTEST_L2_FINONLY"
+    ORD, MAT = "ZZTEST_ORD_FINONLY", "ZZTEST_MAT_FINONLY"
+    FINISH = dt.datetime(2026, 10, 1, 14, 0)
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _child(self, pg, machine):
+        return next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == machine)
+
+    def _place_finish_only(self, pg, child_id):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start = NULL, scheduled_end = %s,"
+                        " runtime_schedule_mismatch = TRUE WHERE id = %s", (self.FINISH, child_id))
+            conn.commit()
+
+    def test_removing_a_finish_only_child_without_confirm_raises_409(self, pg):
+        l2 = self._child(pg, self.L2)
+        self._place_finish_only(pg, l2["id"])
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        payload = [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}]
+        preview = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], dry_run=True, actor="tester")
+        assert [r["id"] for r in preview["removed_scheduled"]] == [l2["id"]]
+        assert {e["machine"]: e["scheduled"] for e in preview["plan"]}[self.L2] is True
+        with pytest.raises(distribution_data.DistributionChildrenScheduled) as excinfo:
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], actor="tester")
+        assert excinfo.value.children[0]["id"] == l2["id"]
+        assert any(c["id"] == l2["id"] for c in _snapshot_children(pg, self.PLANT, self.ORD)), "nothing was deleted"
+
+    def test_a_child_with_neither_edge_is_still_unscheduled(self, pg):
+        l1, l2 = self._child(pg, self.L1), self._child(pg, self.L2)
+        self._place_finish_only(pg, l2["id"])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            assert distribution_data._unscheduled_ids(cur, {l1["id"], l2["id"]}) == {l1["id"]}
+
+    def test_a_new_child_copies_the_siblings_finish_sets_the_stale_flag_and_writes_no_start(self, pg):
+        l1, l2 = self._child(pg, self.L1), self._child(pg, self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # L1 is placed (a normal bar); L2's child is gone and its share no longer points at it
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s, notes = 'keep' WHERE id = %s",
+                        (self.FINISH - dt.timedelta(hours=6), self.FINISH, l1["id"]))
+            cur.execute("DELETE FROM orders WHERE id = %s", (l2["id"],))
+            cur.execute("UPDATE order_distribution_share SET child_id = NULL WHERE plant = %s AND production_order = %s"
+                        " AND machine = %s", (self.PLANT, self.ORD, self.L2))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 60}, {"machine": self.L2, "weight": 40}],
+            base_version=header["xmin"], actor="tester")
+        new = self._child(pg, self.L2)
+        assert new["scheduled_end"] == self.FINISH, "the sibling's stored finish is copied"
+        assert new["scheduled_start"] is None, "no start + run time is written forward"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT runtime_schedule_mismatch, planning_status FROM orders WHERE id = %s", (new["id"],))
+            assert cur.fetchone() == (True, "scheduled")
+        kept = self._child(pg, self.L1)
+        assert (kept["scheduled_start"], kept["scheduled_end"], kept["notes"]) == (
+            self.FINISH - dt.timedelta(hours=6), self.FINISH, "keep")
+
+    def test_a_new_child_with_no_placed_sibling_stays_unplaced(self, pg):
+        l2 = self._child(pg, self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (l2["id"],))
+            cur.execute("UPDATE order_distribution_share SET child_id = NULL WHERE plant = %s AND production_order = %s"
+                        " AND machine = %s", (self.PLANT, self.ORD, self.L2))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 60}, {"machine": self.L2, "weight": 40}],
+            base_version=header["xmin"], actor="tester")
+        new = self._child(pg, self.L2)
+        assert new["scheduled_start"] is None and new["scheduled_end"] is None, \
+            "the old fallback placed it at the SAP start; nothing is written until a planner places it"
 
 
 @pytest.mark.pg
@@ -4680,9 +4776,10 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         self._place_and_firm(pg)
         mat_before, mat2_before = self._state(pg, self.MAT), self._state(pg, self.MAT2)
         assert len(mat_before) == 2 and len(mat2_before) == 2
-        # SAP "changed" ONE child of MAT only (its stored baseline differs from what arrives).
+        # SAP "changed" ONE child of MAT only (its stored FINISH baseline differs from what arrives; a start-only
+        # difference no longer counts, backward scheduling OQ25 c).
         with pg._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE orders SET sap_basic_start_date = sap_basic_start_date - interval '1 day'"
+            cur.execute("UPDATE orders SET sap_basic_finish_date = sap_basic_finish_date - interval '1 day'"
                         " WHERE id = %s", (mat_before[-1][0],))
             conn.commit()
         mat2_before = self._state(pg, self.MAT2)

@@ -170,6 +170,10 @@ class BulkUpdateResult(BaseModel):
     # unchanged (still a plain id list) so this never breaks a consumer that
     # treats invalid_ids elements as bare ids.
     rejection_reasons: dict[str, str] = Field(default_factory=dict)
+    # Backward scheduling OQ59: sparse {id: True} -- the ids saved with `trust_start: false`. The server
+    # stored the sent finish as the placed finish and flagged the row stale, so the BROWSER re-derives
+    # its start from that finish on the next load. Absent id = the start was trusted.
+    start_derived: dict[str, bool] = Field(default_factory=dict)
 
 
 class TaskVersionRow(BaseModel):
@@ -258,6 +262,11 @@ class TaskDateUpdate(BaseModel):
     placement_exception: Literal["overtime", "overlong"] | None = None
     base_version: int | None = None
     force: bool = False
+    # Backward scheduling OQ59 (external date writers): False says the `start_date` sent is a best guess the
+    # caller did not derive from the run time. The save then skips the width check, stores `end_date` as the
+    # placed finish, forces the row's stale flag, and lists the id in the response's `start_derived`.
+    # Default True (the browser's own save sends starts it derived itself).
+    trust_start: bool = True
     planning_status: str | None = None
     planning_reason: dict[str, Any] | None = None
 

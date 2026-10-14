@@ -1400,7 +1400,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.diag_null_runtime':              'Tiempo de ejecución nulo',
   'ui.diag_date_range_min':            'Rango de fechas mín.',
   'ui.diag_date_range_max':            'Rango de fechas máx.',
-  'ui.diag_dropped_no_start':          'Descartados (sin inicio)',
+  'ui.diag_unreadable_start':          'Inicio ilegible (cargado)',
   'ui.diag_dropped_no_finish':         'Descartados (sin fin)',
   'ui.diag_load_time':                 'Tiempo de carga',
   'ui.diag_scope':                     'Alcance',

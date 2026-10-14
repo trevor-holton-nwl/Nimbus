@@ -113,7 +113,8 @@ export function hydrateDistributionChild(child: WriteResultChild, existing?: Nim
     BASIC_FINISH_DATE: child.basic_finish_date,
     original_start_date: child.basic_start_date,
     original_end_date: child.basic_finish_date,
-    user_scheduled: child.scheduled_start !== null,
+    // placed = a stored start or a stored finish (the server's `_PLACED_SQL` shape): a finish-only child counts
+    user_scheduled: child.scheduled_start !== null || child.scheduled_end !== null,
     planning_status: child.planning_status,
     planning_reason: child.planning_reason,
     schedule_segments: child.schedule_segments,

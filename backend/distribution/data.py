@@ -43,7 +43,7 @@ import logging
 import math
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from psycopg.types.json import Jsonb
 
@@ -587,9 +587,10 @@ def _load_material_attrs(cur, keys: set[tuple[str, str]]) -> dict:
 
 def _load_anchor_sources(cur, ids: list[str]) -> dict:
     """For every id that CURRENTLY exists as an `orders` row, capture the
-    §5.2 anchor -- COALESCE(first segment start, scheduled_start) -- plus
-    notes/planning_status/planning_reason and the manual firm (the firm
-    follows the slot), carried onto new lettered children
+    §5.2 anchor -- the order's STORED FINISH, COALESCE(last segment end,
+    scheduled_end) (backward scheduling Task 2.7: the finish is the placement, a start is
+    derived from it) -- plus notes/planning_status/planning_reason and the manual firm
+    (the firm follows the slot), carried onto new lettered children
     on a 1->N transition (a plain order arrived before its work center was
     configured as `distribute`). Only ids that actually exist come back."""
     if not ids:
@@ -599,10 +600,10 @@ def _load_anchor_sources(cur, ids: list[str]) -> dict:
         """
         SELECT o.id,
                COALESCE(
-                   (SELECT MIN(s.scheduled_start) FROM order_schedule_segments s
+                   (SELECT MAX(s.scheduled_end) FROM order_schedule_segments s
                      WHERE s.order_id = o.id),
-                   o.scheduled_start
-               ) AS anchor,
+                   o.scheduled_end
+               ) AS finish,
                o.notes, o.planning_status, o.planning_reason, o.manual_firmed
           FROM orders o
          WHERE o.id = ANY(%s)
@@ -610,9 +611,9 @@ def _load_anchor_sources(cur, ids: list[str]) -> dict:
         (unique_ids,),
     )
     return {
-        oid: {"anchor": anchor, "notes": notes, "planning_status": planning_status,
+        oid: {"finish": finish, "notes": notes, "planning_status": planning_status,
               "planning_reason": planning_reason, "manual_firmed": bool(manual_firmed)}
-        for oid, anchor, notes, planning_status, planning_reason, manual_firmed in cur.fetchall()
+        for oid, finish, notes, planning_status, planning_reason, manual_firmed in cur.fetchall()
     }
 
 
@@ -1485,6 +1486,7 @@ def _child_upsert_sql(*, ingest: bool) -> str:
             WHEN (CASE WHEN orders.run_time_source IN ('routing', 'manual') THEN orders.run_time
                        ELSE EXCLUDED.run_time END) IS DISTINCT FROM orders.run_time
                  AND (orders.scheduled_start IS NOT NULL
+                      OR orders.scheduled_end IS NOT NULL
                       OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
             THEN TRUE
             ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
@@ -1526,10 +1528,16 @@ _CHILD_UPSERT_SQL_PLANNER = _child_upsert_sql(ingest=False)
 
 
 def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> None:
-    """§5.4 step 5: carry the 1->N anchor onto a BRAND-NEW child only. `anchor`
+    """§5.4 step 5: carry the anchor onto a BRAND-NEW child only. `anchor`
     is None for an ordinary new header with no prior plain order (children
     stay unscheduled, like any newly-uploaded order). Segments are
-    deliberately NOT carried (they belonged to one machine and one run time)."""
+    deliberately NOT carried (they belonged to one machine and one run time).
+
+    What is carried is the placed FINISH (backward scheduling Task 2.7, OQ58): the new child copies
+    the stored finish its sibling / the plain order had and is flagged stale
+    (`runtime_schedule_mismatch`), and NO start is written -- not even start + run time, which the
+    server no longer computes. The browser derives the start from the held finish on the next load.
+    With no stored finish to copy the child stays unplaced (the SAP finish is its due date)."""
     if not anchor:
         return
     if anchor.get("planning_status") == "needs_planning":
@@ -1550,28 +1558,26 @@ def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> Non
         )
         return
 
-    start = anchor.get("anchor")
-    if start is None:
+    finish = anchor.get("finish")
+    if finish is None:
         return
-    cur.execute("SELECT run_time FROM orders WHERE id = %s", (child_id,))
-    row = cur.fetchone()
-    run_time = row[0] if row else None
-    end = start + timedelta(hours=float(run_time)) if run_time and _dec(run_time) > 0 else None
     cur.execute(
         """
         UPDATE orders
-           SET scheduled_start = %(start)s, scheduled_end = %(end)s,
+           SET scheduled_start = NULL, scheduled_end = %(finish)s,
+               runtime_schedule_mismatch = TRUE,
                notes = %(notes)s, planning_status = 'scheduled',
                planning_reason = NULL, manual_firmed = %(firmed)s, updated_at = NOW()
          WHERE id = %(id)s
-           AND (scheduled_start IS DISTINCT FROM %(start)s
-             OR scheduled_end IS DISTINCT FROM %(end)s
+           AND (scheduled_start IS NOT NULL
+             OR scheduled_end IS DISTINCT FROM %(finish)s
+             OR runtime_schedule_mismatch IS DISTINCT FROM TRUE
              OR notes IS DISTINCT FROM %(notes)s
              OR planning_status IS DISTINCT FROM 'scheduled'
              OR planning_reason IS NOT NULL
              OR manual_firmed IS DISTINCT FROM %(firmed)s)
         """,
-        {"start": start, "end": end, "notes": anchor.get("notes"), "id": child_id,
+        {"finish": finish, "notes": anchor.get("notes"), "id": child_id,
          "firmed": bool(anchor.get("manual_firmed"))},
     )
 
@@ -1686,14 +1692,15 @@ def _delete_superseded_children(cur, ids: set[str]) -> int:
 
 
 def _unscheduled_ids(cur, ids: set[str]) -> set[str]:
-    """Subset of `ids` that exist and carry no schedule (no scheduled_start
-    and no segments) -- safe to delete without a scheduled-removal confirm."""
+    """Subset of `ids` that exist and carry no placement (no stored start, no stored finish and no
+    segments: the `_PLACED_SQL` shape, backward scheduling Task 2.7) -- safe to delete without a
+    scheduled-removal confirm."""
     if not ids:
         return set()
     cur.execute(
         """
         SELECT o.id FROM orders o
-         WHERE o.id = ANY(%s) AND o.scheduled_start IS NULL
+         WHERE o.id = ANY(%s) AND o.scheduled_start IS NULL AND o.scheduled_end IS NULL
            AND NOT EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = o.id)
         """,
         (sorted(ids),),
@@ -2481,7 +2488,7 @@ def list_headers_for_plant(plant: str, *, search: str | None = None, workcenter:
         )
         cur.execute(
             "SELECT count(*), COALESCE(SUM((SELECT count(*) FROM orders c"
-            f" WHERE {_OD_CHILD_KEY} AND c.scheduled_start IS NOT NULL)), 0)"
+            f" WHERE {_OD_CHILD_KEY} AND (c.scheduled_start IS NOT NULL OR c.scheduled_end IS NOT NULL))), 0)"
             f" FROM order_distribution WHERE {where}", params,
         )
         total, scheduled_children = cur.fetchone()
@@ -2950,17 +2957,18 @@ def _validate_share_payload(shares_input, existing_shares: dict[str, dict],
     return desired
 
 
-def _compute_reweight_anchor(cur, plant: str, order: str, material: str, fallback) -> dict | None:
-    """SS5.5 step 4: "New children: anchor = the earliest existing child's
-    effective start, else basic_start_date." Shaped like
-    `_load_anchor_sources`' per-id value so `_carry_anchor_onto_new_child`
-    (reused verbatim) needs no change to consume it."""
+def _compute_reweight_anchor(cur, plant: str, order: str, material: str) -> dict | None:
+    """SS5.5 step 4 under backward scheduling (Task 2.7, OQ58): "New children: copy the siblings'
+    stored finish." Siblings share one finish by default, so the anchor is the LATEST stored finish
+    among the header's existing children (last segment end, else `scheduled_end`); with no placed sibling
+    there is none (None) and a new child stays unplaced. Shaped like `_load_anchor_sources`' per-id value
+    so `_carry_anchor_onto_new_child` consumes it."""
     cur.execute(
         """
-        SELECT MIN(COALESCE(seg.first_start, o.scheduled_start))
+        SELECT MAX(COALESCE(seg.last_end, o.scheduled_end))
           FROM orders o
           LEFT JOIN LATERAL (
-              SELECT MIN(s.scheduled_start) AS first_start
+              SELECT MAX(s.scheduled_end) AS last_end
                 FROM order_schedule_segments s WHERE s.order_id = o.id
           ) seg ON true
          WHERE o.plant = %s AND o.parent_production_order = %s AND o.material_number = %s
@@ -2968,11 +2976,10 @@ def _compute_reweight_anchor(cur, plant: str, order: str, material: str, fallbac
         (plant, order, material),
     )
     row = cur.fetchone()
-    earliest = row[0] if row else None
-    start = earliest if earliest is not None else fallback
-    if start is None:
+    finish = row[0] if row else None
+    if finish is None:
         return None
-    return {"anchor": start, "notes": None, "planning_status": None, "planning_reason": None}
+    return {"finish": finish, "notes": None, "planning_status": None, "planning_reason": None}
 
 
 def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
@@ -3254,10 +3261,13 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
         frozen = bool(before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
         removed_details.append({
             "id": before["id"], "production_order": before["production_order"], "machine": machine,
-            "scheduled_start": before["scheduled_start"], "frozen": frozen,
+            "scheduled_start": before["scheduled_start"], "scheduled_end": before["scheduled_end"],
+            "frozen": frozen,
         })
+    # "scheduled" is the placed shape (`db._PLACED_SQL`): a stored start, a stored finish, or segments. A
+    # child holding only a finish (backward scheduling, Task 2.7) is placed, so removing it needs the confirm.
     scheduled_removed = [d for d in removed_details
-                         if d["scheduled_start"] is not None
+                         if d["scheduled_start"] is not None or d["scheduled_end"] is not None
                          or children_before.get(d["machine"], {}).get("has_segments")]
 
     if not dry_run and scheduled_removed and not confirm_remove_scheduled:
@@ -3290,7 +3300,8 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
         else:
             outcome = "unchanged"
         effective_pct = float(weight / total_weight * 100) if total_weight else 0.0
-        scheduled = bool(before and (before["scheduled_start"] is not None or before["has_segments"]))
+        scheduled = bool(before and (before["scheduled_start"] is not None
+                                     or before["scheduled_end"] is not None or before["has_segments"]))
         frozen = bool(before and before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
         below_min_lot = bool(
             min_lot_size and min_lot_size > 0 and qty_after is not None
@@ -3317,8 +3328,7 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     # --- real write from here -------------------------------------------------
     anchor_skip_ids = {collapse["new_child_id"]} if collapse else set()
     real_new_ids = intended_child_ids - previous_child_ids - anchor_skip_ids
-    anchor = _compute_reweight_anchor(cur, plant, order, material, header.get("basic_start_date")) \
-        if real_new_ids else None
+    anchor = _compute_reweight_anchor(cur, plant, order, material) if real_new_ids else None
 
     # `orders.upload_batch_id` is a UUID column -- `audit_action` (a
     # human-readable admin_audit label, e.g. "reweight_shares") is NOT a

@@ -168,7 +168,10 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
 
     # Drop rows with no usable start date (query can't enforce this without
     # losing the NULL diagnostic), then color-merge the scoped subset.
-    df = df[df["BASIC_START_DATE"].notna() |
+    # The start is optional at ingest (backward scheduling OQ24/OQ25), so a never-placed order can have a
+    # finish and no start: it is still served (the browser derives the start). Only a row with neither edge
+    # and no queue state has nothing to draw.
+    df = df[df["BASIC_START_DATE"].notna() | df["BASIC_FINISH_DATE"].notna() |
             (df.get("PLANNING_STATUS", pd.Series("scheduled", index=df.index)) == "needs_planning")].reset_index(drop=True)
     pre_merge_count = len(df)
 
@@ -312,7 +315,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     to a nonexistent one (folded into not_found_ids) rather than leaking plant
     membership via a distinct rejection reason.
 
-    Returns { applied, persisted, failed, invalid, not_found, invalid_ids,
+    Returns { applied, persisted, failed, invalid, not_found, invalid_ids, start_derived,
               not_found_ids, stale, versions, rejection_reasons }. invalid_ids/
     not_found_ids carry the actual rejected ids (from db.update_task_dates_bulk)
     so the client can stop retrying terminal rejections while keeping
@@ -394,6 +397,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             item["schedule_segments"] = segments
         if has_exception:
             item["placement_exception"] = it.placement_exception   # None = clear the marker
+        if "trust_start" in supplied and not it.trust_start:
+            item["trust_start"] = False      # only a caller that distrusts its start sends it (True = default)
         norm.append(item)
 
     forced_ids = [it["id"] for it in norm if it.get("force")]
@@ -534,7 +539,8 @@ def tasks_update(payload: TasksUpdatePayload,
            # eligibility rejection inside db.update_task_dates_bulk — every
            # other invalid_ids cause has no entry here. Purely additive; does
            # not change invalid_ids' own shape.
-           "rejection_reasons": res.get("rejection_reasons", {})}
+           "rejection_reasons": res.get("rejection_reasons", {}),
+           "start_derived": res.get("start_derived", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")
@@ -547,9 +553,17 @@ def bulk_update(tasks: list[TaskDateUpdate],
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-    Payload: [{ id, start_date?, end_date?, base_version? }]
+    Payload: [{ id, start_date?, end_date?, base_version?, trust_start? }]
     Response: { status, updated, persisted, failed, invalid, not_found,
-                invalid_ids, not_found_ids, stale, versions, rejection_reasons }
+                invalid_ids, not_found_ids, stale, versions, rejection_reasons, start_derived }
+
+    Both edges are accepted, and `end_date` is read as the PLACED FINISH (the anchor NIMBUS keeps; the start
+    is derived from it). `trust_start` (default true) says whether the sent `start_date` was derived from
+    the run time by the caller: an external or integration writer that cannot do that sends
+    `trust_start: false`, which skips the width check, forces the row's stale flag so the browser re-derives
+    the start from the finish, and lists the id in `start_derived` (backward scheduling OQ59). The default
+    stays "trusted" because the browser's own saves send starts it computed; the width check then refuses a
+    start that does not fit the run time.
 
     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
     external caller may not bypass the base_version check. A stale row is
@@ -586,7 +600,8 @@ def bulk_update(tasks: list[TaskDateUpdate],
            # eligibility rejection inside db.update_task_dates_bulk — every
            # other invalid_ids cause has no entry here. Purely additive; does
            # not change invalid_ids' own shape.
-           "rejection_reasons": res.get("rejection_reasons", {})}
+           "rejection_reasons": res.get("rejection_reasons", {}),
+           "start_derived": res.get("start_derived", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")
