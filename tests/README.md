@@ -29,8 +29,8 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
   math, Compute, Alerts computation, Utilization, Engine) and
   `schedule-data.mjs` (Persistence, CalendarSync, Session state/API), the
   Phase 2 modules. Cover the worker-protocol/memoization/optimistic-
-  concurrency contracts plus the two data→services seams
-  (`schedule:hydrated` event, `Persistence.setCalendarService`) — no VM
+  concurrency contracts plus the data→services seam
+  (`schedule:hydrated` event; the `Persistence.setCalendarService` seam was removed in backward scheduling Task 2.5) — no VM
   sandbox needed, these are real native modules too.
 - `schedule-workbench.test.mjs` — plain ESM `import` shape and behavior tests
   for `schedule-workbench.mjs` (`Timeline`, `Table`, `Inspector`, `Hierarchy`,

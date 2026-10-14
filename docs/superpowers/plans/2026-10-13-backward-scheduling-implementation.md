@@ -696,6 +696,74 @@ Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-sch
 | 1.7 | summary shape for skipped_unfirmed | build_outbound_groups now returns a 3-tuple (groups, skipped_no_end, skipped_unfirmed) and callers/tests updated | the pure function is the only place that knows which groups were dropped |
 | 1.7 | unit of skipped_unfirmed | counted per planned order (group), not per child row | matches "queued" semantics; firmed-but-no-end counts only in skipped_no_end |
 
+### Phase 2 — gap decisions (2026-10-14)
+
+Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`): every line that starts with `Task 2.N: gap filled:` or is a `Ruling:` for a Phase 2 task (Tasks 2.1 to 2.8), one row each, in ledger order. For a Ruling, Gap is the situation, Choice is what was ruled, and Why is the stated reason followed by its `Cost if wrong:` line, copied from the ledger; where a ruling states no reason, the Why cell is only the cost line. The Phase 2 gate ruling in the ledger (no separate whole-branch review before the Phase 3 gate) is a gate ruling, not a task ruling, so it is not listed here.
+
+| Task | Gap | Choice | Why |
+|---|---|---|---|
+| 2.1 | _freeIntervalsBackward order | chronological (allocator walks from the end) | matches forward _freeIntervals |
+| 2.1 | reason when several causes apply | the last cause reached names the move (no_slot_at_finish / min_piece override closed_finish / blackout) | the later cause explains the final distance |
+| 2.1 | overlong test | run time vs longest merged nominal window (blackouts ignored, finish window measured whole) | mirrors forward hasNominalWindow and avoids false overlong from a clipped window |
+| 2.1 | overlong_only with an overlong order | returns overlong (forward splits) | brief says overlong for never and overlong_only; caller decides OQ50 |
+| 2.1 | lookback/floor exhausted with windows present but no capacity | reached_now | brief's unavailable means no window at all; lets the caller try forward from now |
+| 2.1 | invalid run time or unusable timezone | unavailable | union has no exhausted kind; non-throwing, non-placing is conservative |
+| 2.1 | latestAvailable snapping | minute-level only, no 15-minute snap | second snap would break start + run time = finish |
+| 2.2 | client visibility key (brief says original_start_date) | BASIC_START_DATE ?? original_start_date | original_start_date is the calendar-snapped display baseline, BASIC_START_DATE is the raw copy of the locked wire start |
+| 2.2 | runtime-client.mts:192 | kept BASIC_START_DATE-first precedence, added comment + node pin | it already reads the raw copy of the wire locked start, switching to the snapped field would diverge from the server |
+| 2.2 | _EFF_END_SQL has no queued CASE | added _EFF_END_UNLESS_QUEUED_SQL for wire/refresh/prefetch/distribution readers | replaces four inline copies |
+| 2.2 | dup sort key finish fallback | module-level _duplicate_id_sort_key, finish used only when start is None | rows with a start must sort as before or ingest ids permute |
+| 2.2 | _load_setup_coverage order key | _EFF_START_SQL (queued rows sort last per machine) | brief says order by _EFF_START_SQL |
+| 2.2 (Ruling) | plan text mandated _EFF_END_SQL for neighbours, which makes a never-placed row occupy [SAP start, due date] | the scan's neighbour set is restricted to _PLACED_SQL rows (never-placed and queued rows cannot conflict server-side; the browser's overlap alert still covers display overlaps) | a conflict is between placements, and OQ33 A gives a never-placed row no server placement Cost if wrong: a server-side overlap against a never-placed row goes unreported (client alert remains). |
+| 2.3 | browser always sends schedule_segments (`[]` when continuous) | width gate applies to any continuous saved shape (no segments, [] or one piece), segments ≥ 2 keep the segment rules | otherwise the validator never runs from the real client |
+| 2.3 | marker precedence for the width gate | item's value if sent (None clears), else the stored one | explicit null re-enables the check, a marked bar leaves the flag untouched |
+| 2.3 | single-edge rejection reason | `single_edge` (+ `width_mismatch`) translated in 5 locales | describeRejections shows plain language, not raw codes |
+| 2.3 | zero run time | width gate does not apply | a bar cannot have zero width |
+| 2.3 | trust_start=False (Task 2.7) | no parameter added, gate is one block in the validation loop | avoids dead code, a keyword arg can gate it later |
+| 2.1 (Ruling) | optimize-ui.test.mjs regression (first bad 2f2ec27) | is fixed as Task 2.1 fix round 1 (test bootstrap line only, matching the other optimization test files) — the wrapper keeps reading the compute-core global (one code path) | Cost if wrong: another future Node test importing engine.mjs alone hits the same hazard; mitigated by the comment the fix adds. |
+| 2.3 (Ruling) | plan text implied the gate on every non-segment save | skip the gate when the sent start/end equal the stored RAW scheduled_start/scheduled_end (both non-NULL) and the run time is not changed; width_passed stays False so runtime_schedule_mismatch is untouched; compare raw columns (never the effective/SAP-fallback edges) so an unplaced row's SAP window can never be stamped as a placement | a planner's PRT/machine-only edit on a stale bar the engine could not re-derive (no zone / no calendar) must not be rejected Cost if wrong: a legacy mismatched bar can be re-saved unchanged (flag stays TRUE, so the reconcile still re-derives it). |
+| 2.4 | where blocked plants are recorded | Store._blockedPlants Set + one toast per plant from Store.plantNow | simplest shape; Task 3.3 reads the Set for the alert |
+| 2.4 | plant not yet in master data | plantNow returns null without recording or toasting | avoids a false no-timezone report before master data loads |
+| 2.4 | optimizer liveClock for a blocked plant | keeps the viewer-clock fallback but records the plant | refusing to run is placement-blocking (Tasks 2.6/3.3) and would break many fixtures |
+| 2.4 | Util.plantNowParts cannot import Store | Util.setServerNowResolver self-wired at the bottom of store.mts | no cycle, no app.js edit |
+| 2.4 | compute-core payload now | Record<plant, Date> read per order plant, thread clock when absent | per-plant brief wording, other callers unchanged |
+| 2.1 (Ruling) | optimizer-worker.test.mjs worker_threads realm failure | test-only (real worker imports the core first); fixed as Task 2.1 fix round 2 in the test bridge strings; no production change | Cost if wrong: none at runtime. |
+| 2.5 | refusal channel for a null placement | Engine.lastManualRefusal + opts.quiet | callers must tell "engine already toasted" from "say something" and ask the overtime confirm without changing the return type |
+| 2.5 | overlong_only policy with an overlong order | retry the backward walk as partial_allowed | Task 2.1 returns overlong but the forward allocator splits such an order |
+| 2.5 | blocked plant for a rigid segment translation | translation never needs a zone, only derivation refuses | a translation is not a derivation |
+| 2.5 | no Needs Planning release action exists | release happens through the machine/run-time/version edit surfaces on rows queued runtime_unknown/overlong_never/run_time_over_cap, anchored at Util.dueInstant | the only planner re-placement path today |
+| 2.5 | alert placement_exception on release | not computed on the main thread, Task 3.3 reads the wire field | shared alert-plumbing rule |
+| 2.5 | OQ3 at six run-time-edit sites | one holdStartIfRunning option inside the engine | routing machine moves still need the resolver path in manualRoutingSchedulePatchFor |
+| 2.5 | label for overlong_never | planning_reason.overlong_never rendered in the Planning reason cell | matches run_time_over_cap |
+| 2.5 | toast.commit_failed said "requested start" | reworded in all five locales | placement is finish-anchored now |
+| 2.5 | dead calendar seam after deleting the snap | removed Persistence.setCalendarService, its interface and the app.js wiring | nothing else called it, legacy surface shrinks |
+| 2.5 | left-handle veto | vis onMoving (lockLeftEdge) snaps a start-only drag back, commit-time revert + toast kept as fallback | possible and cheap, handle stays visible, not browser-verified |
+| 2.5 (Ruling) | planner run-time/machine/version edits route through manualSchedulePatchFor | so a held finish that cannot be reached is refused with toast.finish_cannot_hold (same as a drop, OQ13 b) rather than accepting the walk's moved finish; the walk's own answer is reserved for system re-derivations (Task 2.6 reconcile, with the finish_moved_earlier alert) | Cost if wrong: planners must drag the bar to a reachable finish before changing run time/machine on a closed-day finish (reversible; owner can flip the reading later). |
+| 2.5 (Ruling) | a Needs Planning release (overlong_never / run_time_over_cap) whose due instant is already past | is NOT a finishMoved refusal: the release has no held finish to protect, so reached_now resolves forward from now (reversal) and the row carries derivationIssue reversal_forward (detail due_date_past) | Cost if wrong: a late released order lands at now instead of being refused (planner-visible, reversible). |
+| 2.6 | no server-calendar-row predicate | CalendarSync.hasServerLineCalendar reads the line_work_hours keys of GET /plant-calendar | the client default is never a server row |
+| 2.6 | no calendar hydration state | per-plant _hydration (pending/hydrated/failed) in calendar-sync, hydrated set before the calendar:change emit | reconcile must never derive on default hours |
+| 2.6 | no non-dirty source for task writes | new 'engine-runtime-reconcile-display' added to App._trackDirty skip list | never-placed rows derive for display only, Save leaves the server row never-placed |
+| 2.6 | banner ui.derive_paused | #derive-paused-banner driven by Engine.derivePausedPlants | same band as the concurrency banner |
+| 2.6 | run_time_zero "no bar" | row left as is plus derivationIssue run_time_zero | nothing can be placed |
+| 2.6 | running row whose start the allocator would move | keep start, end = start + run time, no segments | start never moves and width equals run time for the server width check |
+| 2.6 | frozen_window_crossed scope | manually firmed rows only | SAP firm is display-only and unfirmed never-placed rows would flood alerts |
+| 2.6 | calendar cannot place a row | untouched + derivationIssue no_operating_window + error-log warn | visible instead of a silent stale flag |
+| 2.6 | setupMinutes | FinishAnchoredOptions.setupMinutes passed as 0 | Task 3.2 only fills it |
+| 2.6 (Ruling) | user_scheduled is a server wire flag the client never updated | any client schedule write that is not display/refresh (drop, edit, optimizer apply, release) sets user_scheduled=true locally and save success keeps it; the reconcile candidate filter also skips Persistence._dirtyIds | the dirty-vs-display split must never let a display derivation clobber or save a planner placement Cost if wrong: a row the planner edited is treated as placed for the session (safe direction). |
+| 2.7 | /tasks/bulk_update trust_start caller list (Phase 0 item g unanswered) | optional request field trust_start: bool = True, forwarded in the item dict only when False, honoured by /tasks/update and /tasks/bulk_update | keeps every existing item shape and test pin unchanged; browser's own save never sends it |
+| 2.7 | dropped_no_start_date cockpit counter | renamed unreadable_start_date, counts only unreadable (non-blank) starts, label reworded in 5 locales (ui.diag_unreadable_start) | rows are no longer dropped; a blank start is normal |
+| 2.7 | malformed start on SAP staging | still invalid_date (Excel keeps the row with a warning) | 'start optional' means absent; a malformed value is corrupt data and the existing validator/builder already reject it |
+| 2.7 | dates_echo vs planner slot | now in_f == scheduled_end only | the finish is the anchor, the start no longer decides |
+| 2.7 | basic_start_date on a re-upload sending no start | COALESCE(EXCLUDED, stored) | NULL means not sent everywhere else in the upsert |
+| 2.7 | new-child carry (1->N and re-weight) | copy placed finish (plain order's stored finish / latest sibling stored finish) as scheduled_end, start NULL, stale flag TRUE; no placed finish = child stays unplaced | OQ58 inference, no forward start+run_time write left in db.py/backend |
+| 2.7 | GET /tasks drop-filter on NULL BASIC_START_DATE | keeps any row with a finish | otherwise a NULL-start never-placed order vanishes from the browser |
+| 2.7 | start_derived shape | sparse {id: True} map of persisted ids on BulkUpdateResult (not on TaskDTO) | like rejection_reasons |
+| 2.7 (Ruling) | /tasks/bulk_update default trust_start=True (the browser save is the main caller and sends starts it derived) | external callers pass trust_start=false to get the start flagged instead of width-checked; flipping the default waits on the Phase 0 item g caller list (owner question) | Cost if wrong: an external writer that omits the flag gets width_mismatch rejections instead of a flagged placement (visible, reversible). |
+| 2.8 | baseline test_sap_staging::test_same_instant_batches_have_exactly_one_winner | instants made relative to now (date_trunc('second', now()) - 1 hour) | hard-coded 2026-10-07 fell outside the 7-day retention window |
+| 2.8 | i18n parity | no edits needed | every Phase 2 key (and the reworded commit_failed/diag_unreadable_start) is already in all five locales with real translations; node --check clean; locale tests green inside npm test |
+| 2.8 | status-only 'scheduled' save on a never-placed row (db.py guard) | rejected as rejection_reasons single_edge, guard reads the RAW stored edges + segment_count (not the SAP-window fallback) | consistent with Task 2.3 (never complete an edge from anything but what the planner sent; no new wire reason, no new locale key since ui.reject_single_edge already exists); a placed row's status-only save still passes and rewrites no edge |
+| 2.8 | distribution header/child basic_start_date | COALESCE(incoming, stored) in the child upsert, header SET and header change-guard (guard uses %(bs)s::timestamp, Postgres cannot infer the bare parameter type) | matches db._UPSERT_SQL; pin drives _apply_children directly because the ingest seam writes children via db._UPSERT_SQL first, which made an upload-only pin non-discriminating for the child half |
+
 ### Phase gate reports
 
 _(appended at the end of each phase)_
@@ -786,6 +854,8 @@ Conformance verdicts (file:line evidence is in the review message): spec section
 - `tests/test_scale_catalog_paging.py` (two parametrised cases) fails identically on the baseline.
 - `tests/test_distribution.py::test_summary_counts_past_5000_headers` failed once in a 34 s run (timing and scale), passed on rerun and in the whole-file run.
 - One flaky optimizer spawn probe (`engine.test.mjs`) failed three times in the baseline run under load; it did not fail in the gate run. Three `knownFailure` todos in `calendar-sync-boundaries.test.mjs`.
+
+Post-fix-wave addendum: fix wave 2ca9ea4 + 5fbdfb7 (optimizer due-instant memo; runbook rehearsal + three doc fixes), re-review clean; Phase 1 tip 5fbdfb7.
 
 ## Appendix B — Context
 
