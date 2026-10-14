@@ -747,7 +747,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.sap_outbound_last_sent':         'Último envio',
   'ui.sap_outbound_error_csv':         'CSV das linhas com erro',
   'ui.sap_send_to_sap':                'Enviar ao SAP',
-  'ui.sap_send_confirm':               'Enviar ao SAP para a planta {{plant}}? Todas as ordens programadas da planta entram na fila para o SAP. Os indicadores de firme só são adicionados, nunca removidos.',
+  'ui.sap_send_confirm':               'Enviar ao SAP para a planta {{plant}}? Somente as ordens firmes entram na fila para o SAP: as firmadas pelo planejador, as que o SAP já tinha firmes e as que começam dentro do horizonte congelado. Os indicadores de firme só são adicionados, nunca removidos.',
   'ui.sap_send_status_ready':          'Pronto',
   'ui.sap_send_status_sent':           'Enviado',
   'ui.sap_send_status_error':          'Erro',

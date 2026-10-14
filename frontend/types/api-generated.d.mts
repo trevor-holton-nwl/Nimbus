@@ -839,8 +839,8 @@ export interface paths {
         put?: never;
         /**
          * Sap Stage Send
-         * @description Queue the plant's scheduled orders for Mulesoft (retires any still-ready earlier queue).
-         *     Response: {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}.
+         * @description Queue the plant's firmed orders for Mulesoft (retires any still-ready earlier queue).
+         *     Response: {send_batch_id, queued, skipped_no_end, skipped_unfirmed, firmed, rolled_up_groups}.
          */
         post: operations["sap_stage_send_sap_staging_send__plant__post"];
         delete?: never;

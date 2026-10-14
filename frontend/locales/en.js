@@ -1719,7 +1719,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.sap_outbound_last_sent':         'Last sent',
   'ui.sap_outbound_error_csv':         'Error rows CSV',
   'ui.sap_send_to_sap':                'Send to SAP',
-  'ui.sap_send_confirm':               'Send to SAP for plant {{plant}}? Every scheduled order in the plant is queued for SAP. Firm flags are only ever added, never removed.',
+  'ui.sap_send_confirm':               'Send to SAP for plant {{plant}}? Only firmed orders are queued for SAP: orders the planner firmed, orders SAP already had firmed, and orders starting inside the frozen horizon. Firm flags are only ever added, never removed.',
   'ui.sap_send_status_ready':          'Ready',
   'ui.sap_send_status_sent':           'Sent',
   'ui.sap_send_status_error':          'Error',

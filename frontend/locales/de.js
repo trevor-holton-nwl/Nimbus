@@ -747,7 +747,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.sap_outbound_last_sent':         'Zuletzt gesendet',
   'ui.sap_outbound_error_csv':         'Fehlerzeilen als CSV',
   'ui.sap_send_to_sap':                'An SAP senden',
-  'ui.sap_send_confirm':               'An SAP für Werk {{plant}} senden? Jeder eingeplante Auftrag des Werks wird für SAP eingereiht. Fixierungskennzeichen werden nur gesetzt, nie entfernt.',
+  'ui.sap_send_confirm':               'An SAP für Werk {{plant}} senden? Nur fixierte Aufträge werden für SAP eingereiht: vom Planer fixierte, in SAP bereits fixierte und Aufträge, die innerhalb des eingefrorenen Horizonts beginnen. Fixierungskennzeichen werden nur gesetzt, nie entfernt.',
   'ui.sap_send_status_ready':          'Bereit',
   'ui.sap_send_status_sent':           'Gesendet',
   'ui.sap_send_status_error':          'Fehler',

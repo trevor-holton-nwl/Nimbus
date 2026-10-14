@@ -751,7 +751,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.sap_outbound_last_sent':         'Último envío',
   'ui.sap_outbound_error_csv':         'CSV de filas con error',
   'ui.sap_send_to_sap':                'Enviar a SAP',
-  'ui.sap_send_confirm':               '¿Enviar a SAP para la planta {{plant}}? Todas las órdenes programadas de la planta se ponen en cola para SAP. Los indicadores de firme solo se añaden, nunca se quitan.',
+  'ui.sap_send_confirm':               '¿Enviar a SAP para la planta {{plant}}? Solo las órdenes en firme se ponen en cola para SAP: las que el planificador fijó en firme, las que SAP ya tenía en firme y las que empiezan dentro del horizonte congelado. Los indicadores de firme solo se añaden, nunca se quitan.',
   'ui.sap_send_status_ready':          'Listo',
   'ui.sap_send_status_sent':           'Enviado',
   'ui.sap_send_status_error':          'Error',

@@ -747,7 +747,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.sap_outbound_last_sent':         'Dernier envoi',
   'ui.sap_outbound_error_csv':         'CSV des lignes en erreur',
   'ui.sap_send_to_sap':                'Envoyer à SAP',
-  'ui.sap_send_confirm':               'Envoyer à SAP pour le site {{plant}} ? Toutes les commandes planifiées du site sont mises en file pour SAP. Les indicateurs de fermeté sont seulement ajoutés, jamais retirés.',
+  'ui.sap_send_confirm':               'Envoyer à SAP pour le site {{plant}} ? Seules les commandes fermes sont mises en file pour SAP : celles que le planificateur a fermées, celles que SAP avait déjà fermées et celles qui démarrent dans l'horizon gelé. Les indicateurs de fermeté sont seulement ajoutés, jamais retirés.',
   'ui.sap_send_status_ready':          'Prêt',
   'ui.sap_send_status_sent':           'Envoyé',
   'ui.sap_send_status_error':          'Erreur',
