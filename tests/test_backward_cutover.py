@@ -250,9 +250,17 @@ def test_restore_before_any_save_is_exact(pg):
             # The window can be re-run: ledger ids gone, snapshot tables gone, snapshot + cutover apply again.
             cur.execute("SELECT count(*) FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))
             assert cur.fetchone()[0] == 0
+            archived = {}
             for t in SNAP_TABLES:
                 cur.execute("SELECT to_regclass(%s)", (t,))
                 assert cur.fetchone()[0] is None, t
+                cur.execute("SELECT table_name FROM information_schema.tables WHERE table_name LIKE %s",
+                            (t + "_rst_%",))
+                names = [r[0] for r in cur.fetchall()]
+                assert len(names) == 1 and len(names[0]) <= 63, (t, names)
+                cur.execute(f"SELECT count(*) FROM {names[0]}")
+                archived[t] = cur.fetchone()[0]
+            assert archived["orders_precutover_snapshot"] > 0
             cur.execute(snapshot_sql)
             cur.execute(cutover_sql)
             cur.execute("SELECT count(*) FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))

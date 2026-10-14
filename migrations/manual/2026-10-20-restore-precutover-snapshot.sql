@@ -14,13 +14,16 @@
 --   * order_sap_sent is not touched: the cutover never writes it, so it needs no restore.
 -- Orders created after the snapshot are left exactly as they are.
 --   * ledger: deletes the schema_migrations rows 'backward_cutover_snapshot' and 'backward_scheduling_cutover' and
---     drops the three snapshot tables, so after a restore the window can be re-run (snapshot retaken, cutover
---     re-applied). Do not run the previous image's recovery from the snapshot tables after this: they are gone.
+--     RENAMES the three snapshot tables to <table>_rst_<yyyymmddhh24mi> (short suffix: the longest name must stay
+--     under 63 characters), so after a restore the window can be re-run (snapshot retaken, cutover re-applied)
+--     while the archived copies keep the pre-cutover rows. The operator drops the archived tables by hand once
+--     the window has closed.
 -- WARNING: anything a planner saved after the cutover (placements, firm flags, segments) on the restored
 -- columns is OVERWRITTEN. Restore only inside the rollback window, before planners start saving, and with the
 -- previous image rolled back first (the old image is forward-scheduling and needs these columns as they were).
 -- Run it in ONE transaction (the deploy runner and psql --single-transaction both do).
 DO $mig$
+DECLARE t TEXT;
 BEGIN
   IF to_regclass('orders_precutover_snapshot') IS NULL
      OR to_regclass('order_schedule_segments_precutover_snapshot') IS NULL THEN
@@ -45,8 +48,11 @@ BEGIN
     FROM order_schedule_segments_precutover_snapshot g;
 
   DELETE FROM schema_migrations WHERE id IN ('backward_cutover_snapshot', 'backward_scheduling_cutover');
-  DROP TABLE orders_precutover_snapshot;
-  DROP TABLE order_schedule_segments_precutover_snapshot;
-  DROP TABLE IF EXISTS order_sap_sent_precutover_snapshot;
+  FOREACH t IN ARRAY ARRAY['orders_precutover_snapshot', 'order_schedule_segments_precutover_snapshot',
+                           'order_sap_sent_precutover_snapshot'] LOOP
+    IF to_regclass(t) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE %I RENAME TO %I', t, t || '_rst_' || to_char(clock_timestamp(), 'YYYYMMDDHH24MI'));
+    END IF;
+  END LOOP;
 END
 $mig$;
