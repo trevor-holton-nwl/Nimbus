@@ -918,7 +918,8 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
                 continue   # another subsystem's hold keeps its own reason
             # R-I5: a PLACED order whose resolved run time did not change keeps its slot and firm flags
             # (a planner released it); only a never-placed order or a changed run time is re-queued.
-            placed = (order.get("scheduled_start") is not None or order.get("scheduled_end") is not None)                 and order.get("planning_status") != "needs_planning"
+            placed = ((order.get("scheduled_start") is not None or order.get("scheduled_end") is not None)
+                      and order.get("planning_status") != "needs_planning")
             if not db.cap_requeue_decision(placed, order.get("run_time"), run_time):
                 continue
             report["over_cap"] = report.get("over_cap", 0) + 1

@@ -431,6 +431,19 @@ class TestUpdateTaskDatesBulkXminConflict:
                 cur.execute("DELETE FROM orders WHERE id = %s", (long_id,))
                 conn.commit()
 
+    def test_get_tasks_row_order_follows_the_stored_edges_for_a_finish_only_row(self, pg):
+        """U7: the link order (machine, effective start) falls back scheduled_start -> scheduled_end ->
+        basic_start_date, so a finish-only placement sits after a never-placed order with an earlier SAP start
+        instead of at its own (earlier) SAP start."""
+        db_ = pg
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_end = %s WHERE id = %s",
+                        (self.start + dt.timedelta(hours=20), self.oid))     # oid: SAP start t0, stored end t0+20h
+            conn.commit()                                                    # oid2: never placed, SAP start t0+6h
+        df, _, _ = db_.query_orders(plant=self.PLANT)
+        id_col = next(c for c in df.columns if c.lower() == "id")
+        assert list(df[id_col]) == [self.oid2, self.oid]
+
     def test_conflict_scan_sees_a_finish_only_neighbour(self, pg):
         """U2: a placed neighbour with a stored finish and no stored start (a distribution carry) is found
         through its stored end; before, only its start key was consulted, so it escaped the scan."""

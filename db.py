@@ -695,7 +695,7 @@ def query_orders(plant: str | None = None, line: str | None = None,
             params.append(horizon_end)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
+        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.scheduled_end, o.basic_start_date)'
         if limit is not None:
             sql += " LIMIT %s"
             params.append(int(limit))
@@ -3550,7 +3550,8 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
             if oid in protect or _order_is_running(b, _plant_local_now(tz)):
                 out["running_kept"] += 1
                 continue
-            placed = (sched_start is not None or sched_end is not None or first_start is not None)                 and status != "needs_planning"
+            placed = ((sched_start is not None or sched_end is not None or first_start is not None)
+                      and status != "needs_planning")
             if not cap_requeue_decision(placed, (prior_run_times or {}).get(oid), run_time,
                                         prior_known=oid in (prior_run_times or {})):
                 continue   # a placed order whose over-cap run time did not change keeps its slot and firm
