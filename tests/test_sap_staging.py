@@ -1455,8 +1455,10 @@ def test_same_instant_batches_have_exactly_one_winner(pg, stg_plant):
     a = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
     b = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
     with _conn(pg) as (conn, cur):
-        cur.execute("UPDATE sap_stage_batch SET received_at = '2026-10-07 08:00:00+00',"
-                    " ready_at = '2026-10-07 08:00:01+00' WHERE batch_id IN (%s, %s)", (a, b))
+        # Relative to now so the shared instant always sits inside the 7-day retention window.
+        cur.execute("UPDATE sap_stage_batch SET received_at = date_trunc('second', now()) - interval '1 hour',"
+                    " ready_at = date_trunc('second', now()) - interval '1 hour' + interval '1 second'"
+                    " WHERE batch_id IN (%s, %s)", (a, b))
         conn.commit()
     out = st.poll_once(actor="pytest")
     winner, loser = (a, b) if str(a) > str(b) else (b, a)
