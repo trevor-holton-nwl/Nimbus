@@ -44,6 +44,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.plant_no_timezone':  'Plant {{plant}} has no valid time zone, so NIMBUS cannot tell which of its orders are running or frozen. Ask an administrator to set the time zone for this plant in Master Data.',
   'toast.finish_cannot_hold':  'Order {{order}} cannot finish at that time on {{machine}}: no working period long enough ends there. It was put back where it was.',
   'toast.left_edge_locked':  'Drag the right edge to set when the order finishes. The start is worked out from the finish, so the left edge cannot be moved.',
+  'toast.manual_refusal_generic':  'Could not place the order in the available working time.',
   'toast.opt_applied':                 'Optimization applied — Ctrl+Z to undo',
   'toast.opt_discarded':               'Optimization discarded — schedule restored',
   'toast.optimize_missing_setup_summary': 'Optimized. {{orders}} order(s) on {{lines}} machine(s) were scheduled without setup data (no changeover bar) — see Alerts.',

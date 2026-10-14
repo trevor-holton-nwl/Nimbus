@@ -1481,3 +1481,27 @@ test('Table.applyOverride writes the FINISH from the dialog and derives the star
     fx.restore();
   }
 });
+
+test('a typed End on an order carrying a marker translates the bar by the delta and keeps its width (grid and Inspector)', () => {
+  const fx = placementFixture('P-MARKED-END');
+  const priorId = Inspector._currentId;
+  const priorRender = Inspector._render;
+  try {
+    const start = new Date('2026-08-05T08:00:00');
+    const end = new Date('2026-08-09T08:00:00');   // 96 h wide, run time 5 h
+    Store.setTasks([{ id: 'mk', PLANT: 'P-MARKED-END', MACHINE: 'L1', RUN_TIME: 5, placement_exception: 'overlong',
+      start_date: start, end_date: end }], 'unit-test');
+    const row = fx.edit('end_date', new Date('2026-08-12T08:00:00'), 'mk');
+    assert.equal(row.end_date.getTime(), new Date('2026-08-12T08:00:00').getTime());
+    assert.equal(row.start_date.getTime(), new Date('2026-08-08T08:00:00').getTime(), 'start moved by the same 3 days');
+    assert.equal(row.end_date.getTime() - row.start_date.getTime(), 96 * 3600 * 1000, 'width kept, not stretched');
+    assert.equal(row.placement_exception, 'overlong');
+
+    Inspector._render = () => {};
+    Inspector._currentId = 'mk';
+    Inspector._onFieldChange('end_date', '2026-08-15 08:00');
+    const after = Store.tasks.mk;
+    assert.equal(after.end_date.getTime() - after.start_date.getTime(), 96 * 3600 * 1000, 'Inspector path translates too');
+    assert.equal(after.end_date.getTime(), new Date('2026-08-15T08:00:00').getTime());
+  } finally { Inspector._currentId = priorId; Inspector._render = priorRender; fx.restore(); }
+});

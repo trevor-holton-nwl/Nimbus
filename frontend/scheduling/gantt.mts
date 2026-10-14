@@ -4345,9 +4345,10 @@ export const Interaction = {
         const currentStart = Util.snap(new Date(v.start));
         const currentEnd = Util.snap(new Date(v.end));
         const currentGroup = v.group || t.MACHINE;
+        // Derived edges are often off the 15-minute grid: compare on the grid on both sides.
         const noActualChange = t.start_date &&
-          currentStart.getTime() === expectedItem.start.getTime() &&
-          currentEnd.getTime() === expectedItem.end.getTime() &&
+          currentStart.getTime() === Util.snap(expectedItem.start).getTime() &&
+          currentEnd.getTime() === Util.snap(expectedItem.end).getTime() &&
           currentGroup === t.MACHINE;
 
         if (noActualChange) {
@@ -4363,8 +4364,10 @@ export const Interaction = {
 
       // Backward scheduling (OQ1): a drop anchors on the FINISH. The right edge (or the whole bar) moving changes
       // the finish; the start is always re-derived from the run time. A change of the left edge alone is not a move.
-      const startMoved = newStart.getTime() !== expectedItem.start.getTime();
-      const endMoved   = newEnd.getTime()   !== expectedItem.end.getTime();
+      // Compare on the grid on both sides: a derived edge off the 15-minute grid must not read as "moved".
+      const expectedEnd = Util.snap(expectedItem.end);
+      const startMoved = newStart.getTime() !== Util.snap(expectedItem.start).getTime();
+      const endMoved   = newEnd.getTime()   !== expectedEnd.getTime();
       const lineMoved  = newLine !== t.MACHINE;
       const moved = startMoved || endMoved || lineMoved;
 
@@ -4394,7 +4397,7 @@ export const Interaction = {
       // Multi-order drag: if the dragged item is part of a multi-selection,
       // move all non-firmed selected items by the same time + line delta.
       // The dragged piece's same-edge delta (OQ17 b): for a one-piece order this is the order's own finish delta.
-      const deltaMs  = newEnd.getTime() - expectedItem.end.getTime();
+      const deltaMs  = newEnd.getTime() - expectedEnd.getTime();
       const requestedFinish = new Date(t.end_date.getTime() + deltaMs);
 
       // Machine lock (decision C, aggregate_to_detail.md §8): reject a

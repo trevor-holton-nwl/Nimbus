@@ -1384,19 +1384,31 @@ export const Engine = {
     const result = Engine.finishAnchoredPatchFor(task, line, finish, policy ?? Engine.splitOrderPolicyFor(plant));
     if (result.kind === 'refuse') {
       if (result.reason === 'overlong_never' && queuedCode === 'overlong_never') {
+        // A release has no held finish to protect: a due instant already in the past starts the bar at the
+        // plant's now instead (reversal, OQ53) and records why.
+        const now = Store.plantNow(plant);
+        const floor = now ? Calendar._floorMinute(now) : null;
+        const reversed = !!floor && finish.getTime() < floor.getTime() + runtimeMinutes * Config.MS_MIN;
+        const start = reversed ? floor! : new Date(finish.getTime() - runtimeMinutes * Config.MS_MIN);
         return {
-          start_date: new Date(finish.getTime() - runtimeMinutes * Config.MS_MIN),
-          end_date: finish,
+          start_date: start,
+          end_date: reversed ? new Date(start.getTime() + runtimeMinutes * Config.MS_MIN) : finish,
           scheduleSegments: [],
           MACHINE: line,
           placement_exception: 'overlong',
           ...released,
+          ...(reversed ? { derivationIssue: { code: 'reversal_forward', detail: 'due_date_past' } } : {}),
         };
       }
       return refuse(result.reason);
     }
     if (result.kind === 'reached_now') return refuse('no_operating_window');   // unreachable: reversal is not deferred
     if (result.finishMoved) {
+      if (result.reversed && queuedCode) {
+        // Releasing a late over-cap row: nothing was held, so the forward reversal from now is the answer.
+        return { ...result.changes, MACHINE: line, ...released,
+          derivationIssue: { code: 'reversal_forward', detail: 'due_date_past' } };
+      }
       if (result.moveReason && !result.reversed && Store.isFirmed(task.id)) {
         if (!opts.confirmedOvertime) return refuse('needs_overtime_confirm');
         return {
@@ -1412,6 +1424,31 @@ export const Engine = {
       return refuse('finish_cannot_hold');
     }
     return { ...result.changes, MACHINE: line, ...released };
+  },
+
+  /** Push +1 hour (OQ8) for a batch: each placed order's FINISH moves `ms` later and the start is re-derived.
+   *  Firmed, frozen and running orders stay where they are, and so does an order whose new finish cannot be
+   *  held on its machine's working hours (quiet: the caller reports one summary). The walks of one plant share
+   *  one calendar run cache. */
+  pushFinishPatches(tasks: NimbusTask[], ms: number): Array<{ id: string; changes: Partial<NimbusTask> }> {
+    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+    const byPlant = new Map<string, NimbusTask[]>();
+    for (const task of tasks) {
+      if (!task.start_date || !task.end_date || Engine.firmingStatus(task).firmed) continue;
+      const plant = task.PLANT || Store.getPlantForLine(task.MACHINE || 'Unknown') || Store.selectedPlant || '';
+      (byPlant.get(plant) ?? byPlant.set(plant, []).get(plant)!).push(task);
+    }
+    for (const [plant, group] of byPlant) {
+      Calendar._beginRun(plant || null);
+      try {
+        for (const task of group) {
+          const changes = Engine.manualSchedulePatchFor(task, task.MACHINE || 'Unknown',
+            new Date(task.end_date!.getTime() + ms), undefined, { quiet: true });
+          if (changes) patches.push({ id: task.id, changes });
+        }
+      } finally { Calendar._endRun(); }
+    }
+    return patches;
   },
 
   /** Repair schedules whose authoritative runtime changed after their last

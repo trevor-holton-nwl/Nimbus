@@ -1302,7 +1302,7 @@ export const Table = {
       return;
     }
     if (reason !== 'finish_cannot_hold') {
-      Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+      Toast.show(Util.t('toast.manual_refusal_generic'), 'error');
     }
   },
 
@@ -1331,6 +1331,9 @@ export const Table = {
       const d = Util.parseDate(p.newValue);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
       requestedFinish = Util.snap(d);
+      // AG Grid has already written the typed value onto the row; placement must see the end the order had
+      // (a marked bar is translated by the delta from it, not stretched).
+      scheduleTask = { ...p.data, end_date: p.oldValue as Date | null };
     } else if (field === 'start_date') {
       // The start is derived from the finish; its column is read-only. Put the value back if a stale caller gets here.
       p.data.start_date = p.oldValue as Date | null;

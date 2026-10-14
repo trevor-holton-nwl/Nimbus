@@ -2096,3 +2096,21 @@ test('Timeline._nowFor judges an order against its own plant clock; the viewer c
     assert.equal(Timeline._inLockBand({ ...running, id: 'lb2', start_date: new Date('2026-08-05T06:00:00'), end_date: new Date('2026-08-05T08:00:00') }), false);
   } finally { restoreClock(); }
 });
+
+test('Interaction._onDataSetUpdate: an echo (or a vetoed left-edge drag) on a bar whose derived start is off the 15-minute grid is ignored, with no left-edge toast', () => {
+  const id = 'fx-offgrid-1';
+  const start = new Date('2026-08-05T08:10:00');   // derived starts are often off the grid
+  const end   = new Date('2026-08-05T12:00:00');
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 3.8333 }], 'test');
+  Store.updateTask(id, { start_date: start }, 'test');   // a derived start lands off the grid; setTasks would snap it
+  assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'sanity: the fixture really is off the grid');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start, end, group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(fx.toasts.length, 0);
+    assert.equal(fx.rebuilds, 0);
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+  } finally { fx.restore(); }
+});

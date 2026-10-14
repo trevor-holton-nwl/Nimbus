@@ -44,6 +44,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.plant_no_timezone':  'A planta {{plant}} não tem um fuso horário válido, então o NIMBUS não consegue saber quais pedidos estão em execução ou congelados. Peça a um administrador que defina o fuso horário da planta em Dados mestres.',
   'toast.finish_cannot_hold':  'O pedido {{order}} não pode terminar nesse horário em {{machine}}: nenhum período de trabalho longo o bastante termina ali. Ele voltou para onde estava.',
   'toast.left_edge_locked':  'Arraste a borda direita para definir quando o pedido termina. O início é calculado a partir do fim, por isso a borda esquerda não pode ser movida.',
+  'toast.manual_refusal_generic':  'Não foi possível programar o pedido no tempo de trabalho disponível.',
   'toast.opt_applied':                 'Otimização aplicada — Ctrl+Z para desfazer',
   'toast.opt_discarded':               'Otimização descartada — programação restaurada',
   'toast.optimize_missing_setup_summary': 'Otimizado. {{orders}} pedido(s) em {{lines}} máquina(s) foram programados sem dados de setup (sem barra de troca) — veja Alertas.',

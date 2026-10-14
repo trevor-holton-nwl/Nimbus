@@ -1232,17 +1232,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           // Push moves the FINISH one hour later and the start follows (backward scheduling OQ8). Firmed,
           // frozen and running orders stay where they are; an order whose new finish cannot be held on the
           // machine's working hours is skipped too (quiet: the one summary toast below counts what moved).
-          const patches = ids
-            .filter(id => Store.tasks[id]?.start_date && Store.tasks[id]?.end_date)
-            .map(id => {
-              const order = Store.tasks[id];
-              if (NIMBUS.Engine?.firmingStatus?.(order)?.firmed) return null;
-              const changes = NIMBUS.Engine?.manualSchedulePatchFor?.(
-                order, order.MACHINE || 'Unknown', new Date(order.end_date.getTime() + 3600000),
-                undefined, { quiet: true });
-              return changes ? { id, changes } : null;
-            })
-            .filter(Boolean);
+          const patches = NIMBUS.Engine?.pushFinishPatches?.(ids.map(id => Store.tasks[id]).filter(Boolean), 3600000) || [];
           if (patches.length) {
             _pushTaskUndo(`Push ${n} orders +1h`, patches.map(p => p.id));
             Store.updateMany(patches, 'cmd-palette');

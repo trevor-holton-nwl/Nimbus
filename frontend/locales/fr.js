@@ -44,6 +44,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.plant_no_timezone':  'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne peut donc pas savoir quels ordres sont en cours ou gelés. Demandez à un administrateur de définir le fuseau horaire de l’usine dans les Données de base.',
   'toast.finish_cannot_hold':  'La commande {{order}} ne peut pas se terminer à cette heure sur {{machine}} : aucune période de travail assez longue ne s’y termine. Elle a été remise à sa place précédente.',
   'toast.left_edge_locked':  'Faites glisser le bord droit pour définir la fin de la commande. Le début est calculé à partir de la fin ; le bord gauche ne peut donc pas être déplacé.',
+  'toast.manual_refusal_generic':  'Impossible de planifier la commande dans le temps de travail disponible.',
   'toast.opt_applied':                 'Optimisation appliquée — Ctrl+Z pour annuler',
   'toast.opt_discarded':               'Optimisation annulée — programme restauré',
   'toast.optimize_missing_setup_summary': 'Optimisé. {{orders}} ordre(s) sur {{lines}} machine(s) ont été planifiés sans données de réglage (aucune barre de changement) — voir Alertes.',

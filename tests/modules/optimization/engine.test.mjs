@@ -33,6 +33,7 @@ import {
 } from '../../../frontend/optimization/engine.mjs';
 import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
+import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
 
 const require = createRequire(import.meta.url);
@@ -4009,4 +4010,46 @@ test('Engine._plantWallNow projects through the shared helper and still refuses 
   assert.equal(wall.getTime(), new Date(2026, 7, 20, 8, 0, 0).getTime(), 'plant wall clock, floored to the minute');
   assert.throws(() => Engine._plantWallNow('', new Date()), /valid IANA timezone/);
   assert.throws(() => Engine._plantWallNow('Not/AZone', new Date()), /valid IANA timezone/);
+});
+
+test('a past-due release has no held finish to protect: overlong starts at now with the marker, over-cap reverses forward from now (reversal_forward)', () => {
+  const fx = manualFixture();   // plant clock: Thu 2026-08-20 09:00
+  try {
+    const pastDue = new Date('2026-08-18T17:00:00');
+    const queued = { id: 'm25-late', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '20', start_date: null, end_date: null,
+      scheduleSegments: [], planning_status: 'needs_planning', planning_reason: { code: 'overlong_never', message: 'x' } };
+    const overlong = Engine.manualSchedulePatchFor(queued, fx.line, pastDue);
+    assert.ok(overlong, 'not refused');
+    assert.equal(overlong.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime(), 'one continuous bar starting now');
+    assert.equal(overlong.end_date.getTime() - overlong.start_date.getTime(), 20 * Config.MS_HOUR);
+    assert.equal(overlong.placement_exception, 'overlong');
+    assert.equal(overlong.planning_status, 'scheduled');
+    assert.deepEqual(overlong.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+
+    const overCap = { ...queued, id: 'm25-late-cap', RUN_TIME: '4', planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const forward = Engine.manualSchedulePatchFor(overCap, fx.line, pastDue);
+    assert.ok(forward, 'not refused finish_cannot_hold');
+    assert.equal(forward.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime());
+    assert.equal(forward.end_date.getTime(), new Date('2026-08-20T13:00:00').getTime());
+    assert.equal(forward.planning_status, 'scheduled');
+    assert.ok(!forward.placement_exception);
+    assert.deepEqual(forward.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+    assert.equal(fx.toasts.length, 0);
+    assert.equal(Engine.lastManualRefusal, null);
+  } finally { fx.restore(); }
+});
+
+test('Engine.pushFinishPatches moves finishes, skips firmed and unholdable orders, and leaves the calendar run cache torn down', () => {
+  const fx = manualFixture();
+  try {
+    const mk = (id, h1, h2) => ({ id, PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: h2 - h1,
+      start_date: new Date(2026, 7, 24, h1), end_date: new Date(2026, 7, 24, h2) });
+    const tasks = [mk('a', 10, 12), mk('b', 17, 19)];
+    const patches = Engine.pushFinishPatches(tasks, 3600000);
+    assert.deepEqual(patches.map(p => p.id), ['a'], '19:00 + 1 h is past closing, so b is skipped quietly');
+    assert.equal(patches[0].changes.end_date.getHours(), 13);
+    assert.equal(patches[0].changes.start_date.getHours(), 11);
+    assert.equal(fx.toasts.length, 0);
+    assert.equal(Calendar._runCache, null);
+  } finally { fx.restore(); }
 });

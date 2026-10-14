@@ -44,6 +44,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.plant_no_timezone':  'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no puede saber qué pedidos están en ejecución o congelados. Pida a un administrador que configure la zona horaria de la planta en Datos maestros.',
   'toast.finish_cannot_hold':  'El pedido {{order}} no puede terminar a esa hora en {{machine}}: no hay un periodo de trabajo lo bastante largo que termine ahí. Se devolvió a su posición anterior.',
   'toast.left_edge_locked':  'Arrastre el borde derecho para fijar cuándo termina el pedido. El inicio se calcula a partir del final, por lo que el borde izquierdo no se puede mover.',
+  'toast.manual_refusal_generic':  'No se pudo programar el pedido en el tiempo de trabajo disponible.',
   'toast.opt_applied':                 'Optimización aplicada — Ctrl+Z para deshacer',
   'toast.opt_discarded':               'Optimización descartada — programa restaurado',
   'toast.optimize_missing_setup_summary': 'Optimizado. {{orders}} pedido(s) en {{lines}} máquina(s) se programaron sin datos de preparación (sin barra de cambio) — vea Alertas.',

@@ -44,6 +44,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.plant_no_timezone':  'Für das Werk {{plant}} ist keine gültige Zeitzone hinterlegt, daher kann NIMBUS nicht erkennen, welche Aufträge dort laufen oder eingefroren sind. Bitte einen Administrator, die Zeitzone des Werks in den Stammdaten zu setzen.',
   'toast.finish_cannot_hold':  'Auftrag {{order}} kann auf {{machine}} nicht zu dieser Zeit enden: Es gibt keinen ausreichend langen Arbeitszeitraum, der dort endet. Er wurde an seinen vorherigen Platz zurückgesetzt.',
   'toast.left_edge_locked':  'Ziehen Sie den rechten Rand, um das Ende des Auftrags festzulegen. Der Start wird aus dem Ende berechnet, daher lässt sich der linke Rand nicht verschieben.',
+  'toast.manual_refusal_generic':  'Der Auftrag konnte in der verfügbaren Arbeitszeit nicht eingeplant werden.',
   'toast.opt_applied':                 'Optimierung angewendet — Strg+Z zum Rückgängigmachen',
   'toast.opt_discarded':               'Optimierung verworfen — Plan wiederhergestellt',
   'toast.optimize_missing_setup_summary': 'Optimiert. {{orders}} Auftrag/Aufträge auf {{lines}} Maschine(n) wurden ohne Rüstdaten eingeplant (kein Rüstbalken) — siehe Warnungen.',

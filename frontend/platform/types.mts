@@ -87,6 +87,8 @@ export interface NimbusTask {
    *  'overlong' (wider than the run time). null/absent = a normal bar; the server skips its width check for a
    *  marked bar. Sent on save (an explicit null clears it). */
   placement_exception?: 'overtime' | 'overlong' | null;
+  /** Session-only note from the engine about a derivation it made or refused (never persisted). */
+  derivationIssue?: { code: string; from?: Date; to?: Date; detail?: string } | null;
   /** Server-computed field describing where an order's RUN_TIME value came from (routing runtime feature). */
   run_time_source?: string | null;
   /** Server-computed metadata sidecar for the RUN_TIME source determination. */
