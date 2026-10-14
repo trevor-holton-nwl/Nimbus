@@ -844,7 +844,7 @@ Implications for a hosted plant pilot:
   - The upload route's size check (413) runs after the file body is read, matching the existing `/upload` and `/bom/upload` routes.
   - A plant with no `timezone` gets no SAP-zone conversion in either direction (both sides stay consistent, no warning).
   - Requeueing outbound rows can race a Mulesoft read, so Mulesoft may send both queues; SAP last-write-wins makes it benign.
-  - The midnight-echo acceptance compares dates in the plant frame; a sent finish that crosses midnight when converted into the SAP zone (e.g. 19:00 Chicago to 00:00 UTC next day) is not recognised as an echo and causes one unnecessary re-plan for that order. Fix would need the plant timezone inside `sap_changed_fields`; deferred.
+  - Resolved by backward-scheduling Phase 1 (2026-10-14): the echo rule now compares in the SAP time frame (see `docs/SAP_STAGING_DESIGN.md`, echo suppression), so a sent finish that crosses midnight when converted into the SAP zone is recognised as an echo.
 
 ### SAP sync skeleton — discrepancies found while building staging (not fixed)
 
@@ -1416,6 +1416,8 @@ Every step is run by the owner. Agents run none of them. Stop at any step whose 
 1. Item a: identify the live image. Run `az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.template.containers[0].image" -o tsv`, check the `NIMBUS_BUILD_ID` in the served page, and confirm whether any Send to SAP has already happened on the pilot. Record the image tag: it is the rollback target.
 2. Item b: snapshot `basic_finish_date`, `sap_basic_start_date`, `sap_basic_finish_date` and `order_sap_sent` before the backfill runs on the pilot. The snapshot must be restorable.
 3. Item c: take a pilot `pg_dump`, restore it locally, run the profile queries Q0 to Q17 (spec §8.12) on the copy, and review Q1, Q8, Q13, Q15, Q16 and Q17. Only Q1 (orders with no run time and no stored end) and Q8 (the repairable set, joined to the sent table) gate the Phase 1 deploy; the rest gate the cutover.
+   - **Rehearse both Phase 1 migration files on that restored copy before the real run.** Apply `2026-10-15-1-orders-original-dates.sql`, then `2026-10-15-2-orders-run-time-bounds-336.sql`, to the local restore with `psql` (one file per run, in that order), read each result, and stop on any error. Why this matters: the first file rewrites every `orders` row, and the table's date check (`chk_orders_sched_range` in `schema.sql`, created `NOT VALID`) is skipped for old rows but still enforced on every row that gets rewritten. One pilot row whose scheduled end is not after its scheduled start therefore makes the whole migration fail and roll back, and without a rehearsal that would only show up on the deploy day.
+   - **Pre-check, on the restored copy and then on the live pilot (SELECT only):** `SELECT count(*) FROM orders WHERE scheduled_start IS NOT NULL AND scheduled_end IS NOT NULL AND scheduled_end <= scheduled_start;` The count must be 0. If it is not 0, list those rows (the same query with the order id and both dates instead of `count(*)`), have the owner fix the dates on those orders first (either correct them in NIMBUS, or clear both dates so the order returns to the queue), and run the pre-check again until it reads 0. Do not start the window with a non-zero count.
 
 **Merge:**
 
