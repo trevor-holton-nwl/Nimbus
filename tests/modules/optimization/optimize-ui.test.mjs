@@ -1687,7 +1687,7 @@ test('gate 24: preview Apply drops a candidate whose derived bar has started by 
   Store._blockedPlants.clear();
   Store.serverOffsetMs = new Date('2026-08-03T08:00:00').getTime() - Date.now();
   // The reconcile derived this order's bar to 09:00-12:00: not started at 08:00.
-  const derived = { ...previewTask(derivedId, plant, 3), start_date: new Date('2026-08-10T09:00:00'), end_date: new Date('2026-08-10T12:00:00') };
+  const derived = { ...previewTask(derivedId, plant, 3), user_scheduled: true, start_date: new Date('2026-08-10T09:00:00'), end_date: new Date('2026-08-10T12:00:00') };
   const fixture = openTaskBaselinePreview(plant, [derived, previewTask(freeId, plant, 1)]);
   try {
     assert.ok(OptimizerPreview._candidate.patches.some(p => p.id === derivedId), 'the preview carries a patch for the order');

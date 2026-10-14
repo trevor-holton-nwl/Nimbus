@@ -252,25 +252,25 @@ test('Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor read Store.frozen
   try {
     Store.setFrozenHorizonEnd(null, 'unit-test');
     assert.equal(Engine.frozenHorizonEnd(), null);
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }, now), false);
-    assert.equal(Engine.isFrozenHorizon({ start_date: null }, now), false, 'an order with no start is never frozen');
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }, now), false);
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: null }, now), false, 'an order with no start is never frozen');
     assert.deepEqual(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')), new Date('2026-08-22T09:00:00'));
 
     const frozenEnd = new Date('2026-08-25T00:00:00');
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
     assert.equal(Engine.frozenHorizonEnd().getTime(), frozenEnd.getTime());
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }, now), true,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }, now), true,
       'start inside [now, end) is frozen (OD-C2a)');
-    assert.equal(Engine.isFrozenHorizon({ start_date: now }, now), true, 'start exactly AT now is frozen -- inclusive lower bound');
-    assert.equal(Engine.isFrozenHorizon({ start_date: frozenEnd }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: now }, now), true, 'start exactly AT now is frozen -- inclusive lower bound');
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: frozenEnd }, now), false,
       'start AT the boundary is not frozen -- it is the earliest allowed instant');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-26T00:00:00') }, now), false);
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-26T00:00:00') }, now), false);
     // C2 fix (regression this closes): an already-overdue order -- however
     // long ago -- must NOT read as frozen just because it's also before the
     // upper bound. The frozen window is [now, end), not (-infinity, end).
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-18T00:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-18T00:00:00') }, now), false,
       'already-overdue (before now) is not frozen even though it is before the boundary too');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2020-01-01T00:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2020-01-01T00:00:00') }, now), false,
       'an order overdue by years is still not frozen -- no lower bound would wrongly pin it forever');
     assert.equal(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')).getTime(), frozenEnd.getTime(),
       'a candidate before the boundary is pushed forward to it');
@@ -295,11 +295,11 @@ test('Engine.isFrozenHorizon requires BOTH bounds — an already-overdue order i
   const frozenEnd = new Date('2026-08-23T00:00:00');
   try {
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-19T09:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-19T09:00:00') }, now), false,
       'yesterday is not frozen');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-01T00:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-01T00:00:00') }, now), false,
       'three weeks overdue is not frozen');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-21T09:00:00') }, now), true,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-21T09:00:00') }, now), true,
       'tomorrow, genuinely inside [now, end), IS frozen -- the lower bound does not overcorrect into never firing');
   } finally {
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
@@ -413,33 +413,33 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
     Store.setFrozenHorizonEnd(null, 'unit-test');
 
     // No reasons at all.
-    Store.setTasks([{ id: 'firming-none', RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-none', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-none'], now), { firmed: false, reasons: [] });
 
     // SAP firm is display-only: never a reason, never firmed.
-    Store.setTasks([{ id: 'firming-ecc', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-ecc', RUN_TIME: '1', ecc_firmed: true, user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-ecc'], now), { firmed: false, reasons: [] });
     assert.equal(Engine.isSapFirmed(Store.tasks['firming-ecc']), true);
     assert.equal(Engine.isSapFirmed({ id: 'plain' }), false);
 
     // 'running' alone -- start <= now < end, both set; boundaries are half-open.
     const runStart = new Date('2026-08-20T06:00:00'), runEnd = new Date('2026-08-20T10:00:00');
-    Store.setTasks([{ id: 'firming-run', RUN_TIME: '4', ecc_firmed: true, start_date: runStart, end_date: runEnd }], 'unit-test');
+    Store.setTasks([{ id: 'firming-run', RUN_TIME: '4', ecc_firmed: true, user_scheduled: true, start_date: runStart, end_date: runEnd }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-run'], now), { firmed: true, reasons: ['running'] });
     assert.equal(Engine.isInProgress(Store.tasks['firming-run'], runStart), true, 'start boundary is inclusive');
     assert.equal(Engine.isInProgress(Store.tasks['firming-run'], runEnd), false, 'end boundary is exclusive');
-    assert.equal(Engine.isInProgress({ id: 'x', start_date: runStart, end_date: null }, now), false, 'missing end is never running');
-    assert.equal(Engine.isInProgress({ id: 'x', start_date: null, end_date: runEnd }, now), false, 'missing start is never running');
+    assert.equal(Engine.isInProgress({ id: 'x', user_scheduled: true, start_date: runStart, end_date: null }, now), false, 'missing end is never running');
+    assert.equal(Engine.isInProgress({ id: 'x', user_scheduled: true, start_date: null, end_date: runEnd }, now), false, 'missing start is never running');
 
     // 'frozen' alone -- inside the horizon band, not manually firmed, not ECC-firmed.
     const frozenEnd = new Date('2026-08-25T00:00:00');
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
-    Store.setTasks([{ id: 'firming-frozen', RUN_TIME: '1', start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-frozen', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-frozen'], now), { firmed: true, reasons: ['frozen'] });
     Store.setFrozenHorizonEnd(null, 'unit-test');
 
     // 'manual' alone -- reflects Store.isFirmed (set via setFirmed), not a stale task.firmed property.
-    Store.setTasks([{ id: 'firming-manual', RUN_TIME: '1', firmed: false, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-manual', RUN_TIME: '1', firmed: false, user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     Store.setFirmed('firming-manual', true, 'unit-test');
     assert.equal(Store.tasks['firming-manual'].firmed, true, 'setFirmed also mirrors onto task.firmed');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-manual'], now), { firmed: true, reasons: ['manual'] });
@@ -453,7 +453,7 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
 
     // Combination -- frozen + manual + running at once (frozen needs start >= now, so use a later "now" for running via end).
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
-    Store.setTasks([{ id: 'firming-all', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-all', RUN_TIME: '1', ecc_firmed: true, user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
     Store.setFirmed('firming-all', true, 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-all'], now), { firmed: true, reasons: ['frozen', 'manual'] });
     const atStart = new Date('2026-08-22T09:00:00');
@@ -494,8 +494,8 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   const frozenStart = new Date('2026-08-22T09:00:00'); // inside [horizonStart, frozenEnd)
   const frozenTaskEnd = new Date('2026-08-22T10:00:00');
   Store.setTasks([
-    { id: 'spt-frozen-in-place', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
-    { id: 'spt-movable-free', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00'), end_date: new Date('2026-08-30T10:00:00') },
+    { id: 'spt-frozen-in-place', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: frozenStart, end_date: frozenTaskEnd },
+    { id: 'spt-movable-free', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00'), end_date: new Date('2026-08-30T10:00:00') },
   ], 'unit-test');
 
   try {
@@ -557,9 +557,9 @@ test('Engine.autoReflow leaves a frozen-window peer exactly in place even when i
     // frozen peer below -- without the C2 pinning check, autoReflow's
     // "already fits" shortcut would not apply and the peer would be pushed.
     { id: 'reflow-changed', PLANT: plant, MACHINE: line, RUN_TIME: '1.5',
-      start_date: changedStart, end_date: changedEnd },
+      user_scheduled: true, start_date: changedStart, end_date: changedEnd },
     { id: 'reflow-frozen-peer', PLANT: plant, MACHINE: line, RUN_TIME: '1',
-      start_date: peerStart, end_date: peerEnd },
+      user_scheduled: true, start_date: peerStart, end_date: peerEnd },
   ], 'unit-test');
 
   try {
@@ -997,8 +997,8 @@ test('running orders never move: changeover and autoReflow leave an in-progress 
     const runEnd = new Date('2035-08-06T09:00:00');
     const runNow = new Date('2035-08-06T08:00:00');
     const base = () => ([
-      { id: 'run-sap', PLANT: plant, MACHINE: line, RUN_TIME: 2, ecc_firmed: true, start_date: runStart, end_date: runEnd },
-      { id: 'run-free', PLANT: plant, MACHINE: line, RUN_TIME: 1, start_date: new Date('2035-08-06T08:30:00'), end_date: new Date('2035-08-06T09:30:00') },
+      { id: 'run-sap', PLANT: plant, MACHINE: line, RUN_TIME: 2, ecc_firmed: true, user_scheduled: true, start_date: runStart, end_date: runEnd },
+      { id: 'run-free', PLANT: plant, MACHINE: line, RUN_TIME: 1, user_scheduled: true, start_date: new Date('2035-08-06T08:30:00'), end_date: new Date('2035-08-06T09:30:00') },
     ]);
     const runOpts = { plant, respectFirmed: false, respectCalendar: true, planningStart: runNow, runNow, endDate: new Date('2035-08-10T00:00:00') };
 
@@ -1016,8 +1016,8 @@ test('running orders never move: changeover and autoReflow leave an in-progress 
     const liveEnd = new Date(nowSnapped + HOUR);
     const dragStart = new Date(nowSnapped - 2 * HOUR);
     Store.setTasks([
-      { id: 'drag', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: dragStart, end_date: new Date(dragStart.getTime() + 2.5 * HOUR) },
-      { id: 'live-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: liveStart, end_date: liveEnd },
+      { id: 'drag', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: dragStart, end_date: new Date(dragStart.getTime() + 2.5 * HOUR) },
+      { id: 'live-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: liveStart, end_date: liveEnd },
     ], 'unit-test');
     Engine.autoReflow('drag');
     assert.equal(Store.tasks['live-peer'].start_date.getTime(), liveStart.getTime(), 'autoReflow must not move a running peer');
@@ -3450,11 +3450,11 @@ test('effectiveFirmedIdSet = manual (gated) + frozen + running (not gated); SAP 
   try {
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
 
-    const manualTask = { id: 'manual-id', start_date: new Date('2026-08-30T09:00:00') };
-    const eccTask = { id: 'ecc-id', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') };
-    const frozenTask = { id: 'frozen-id', start_date: new Date('2026-08-22T09:00:00') }; // inside [now, frozenEnd)
-    const plainTask = { id: 'plain-id', start_date: new Date('2026-08-30T09:00:00') };
-    const runningTask = { id: 'running-id', start_date: new Date('2026-08-20T06:00:00'), end_date: new Date('2026-08-20T10:00:00') };
+    const manualTask = { id: 'manual-id', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') };
+    const eccTask = { id: 'ecc-id', ecc_firmed: true, user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') };
+    const frozenTask = { id: 'frozen-id', user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }; // inside [now, frozenEnd)
+    const plainTask = { id: 'plain-id', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') };
+    const runningTask = { id: 'running-id', user_scheduled: true, start_date: new Date('2026-08-20T06:00:00'), end_date: new Date('2026-08-20T10:00:00') };
     const tasks = [manualTask, eccTask, frozenTask, plainTask, runningTask];
     const baseFirmedIds = new Set(['manual-id']);
 
@@ -3523,8 +3523,8 @@ test('Engine.runAndApply("changeover") never locks on SAP firm: an SAP-firmed or
   const frozenTaskEnd = new Date('2026-08-21T10:00:00');
 
   const baseTasks = [
-    { id: 'co-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '1', ecc_firmed: true, start_date: eccOriginalStart, end_date: eccOriginalEnd },
-    { id: 'co-frozen', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
+    { id: 'co-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '1', ecc_firmed: true, user_scheduled: true, start_date: eccOriginalStart, end_date: eccOriginalEnd },
+    { id: 'co-frozen', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: frozenStart, end_date: frozenTaskEnd },
   ];
 
   try {
@@ -3934,7 +3934,7 @@ test('Store.plantNow projects the server instant into the plant zone as a naive 
 });
 
 test('Engine.isInProgress and isFrozenHorizon default to the plant clock from the server instant', () => {
-  const task = { id: 'oq52-run', PLANT: 'NY', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
+  const task = { id: 'oq52-run', PLANT: 'NY', user_scheduled: true, start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
   const tokyoTask = { ...task, id: 'oq52-run-tk', PLANT: 'TK' };
   withServerClock('2026-08-20T12:00:00Z', [
     { plant: 'NY', timezone: 'America/New_York' },
@@ -3946,7 +3946,7 @@ test('Engine.isInProgress and isFrozenHorizon default to the plant clock from th
     assert.deepEqual(Engine.firmingStatus(task), { firmed: true, reasons: ['running'] });
     // Frozen: start at or after the plant's now and before the horizon end.
     Store.setFrozenHorizonEnd(new Date(2026, 7, 21, 0, 0), 'unit-test');
-    const upcoming = { id: 'oq52-frozen', PLANT: 'NY', start_date: new Date(2026, 7, 20, 9, 0), end_date: new Date(2026, 7, 20, 11, 0) };
+    const upcoming = { id: 'oq52-frozen', PLANT: 'NY', user_scheduled: true, start_date: new Date(2026, 7, 20, 9, 0), end_date: new Date(2026, 7, 20, 11, 0) };
     assert.equal(Engine.isFrozenHorizon(upcoming), true, '09:00 is after the New York now (08:00) and before the horizon end');
     assert.equal(Engine.isFrozenHorizon({ ...upcoming, PLANT: 'TK' }), false, '09:00 is already past in Tokyo (21:00)');
     // An explicit now still wins over the clock.
@@ -3955,7 +3955,7 @@ test('Engine.isInProgress and isFrozenHorizon default to the plant clock from th
 });
 
 test('a plant with no valid timezone is throw-free: not running, not frozen, recorded once with one toast', () => {
-  const task = { id: 'oq52-nozone', PLANT: 'NOZ', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
+  const task = { id: 'oq52-nozone', PLANT: 'NOZ', user_scheduled: true, start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
   withServerClock('2026-08-20T12:00:00Z', [
     { plant: 'NOZ' },
     { plant: 'BAD', timezone: 'Not/AZone' },
@@ -4314,16 +4314,18 @@ describe('reconcile (finish-anchored)', () => {
       const frozenEnd = at(23, 0);
       const derived = fx.task('np', { start_date: at(20, 14), end_date: at(20, 18), systemMove: { from: at(20, 14), to: at(20, 14), reason: 'due_date_derivation' } });
       const placed = fx.task('pl', { user_scheduled: true, start_date: at(20, 14), end_date: at(20, 18) });
-      const stored = fx.task('st', { start_date: at(20, 14), end_date: at(20, 18) });   // a stored start that is not display-derived
+      const stored = fx.task('st', { start_date: at(20, 14), end_date: at(20, 18) });   // a never-placed server row: basic_start_date as its start, user_scheduled false, no stamp
+      const cleared = fx.task('cl', { start_date: at(20, 14), end_date: at(20, 18), systemMove: null });   // a refreshed row whose derivation stamp was cleared
       const derivedFuture = fx.task('nf', { start_date: at(21, 8), end_date: at(21, 12), systemMove: { from: at(21, 8), to: at(21, 8), reason: 'due_date_derivation' } });
       const placedFuture = fx.task('pf', { user_scheduled: true, start_date: at(21, 8), end_date: at(21, 12) });
       assert.equal(Engine.isInProgress(derived, now), false);
       assert.equal(Engine.isInProgress(placed, now), true);
-      assert.equal(Engine.isInProgress(stored, now), true);
+      assert.equal(Engine.isInProgress(stored, now), false);
+      assert.equal(Engine.isInProgress(cleared, now), false);
       assert.equal(Engine.isFrozenHorizon(derivedFuture, now, frozenEnd), false);
       assert.equal(Engine.isFrozenHorizon(placedFuture, now, frozenEnd), true);
-      const ids = effectiveFirmedIdSet([derived, placed, stored, derivedFuture, placedFuture], new Set(), now, false, frozenEnd);
-      assert.deepEqual([...ids].sort(), ['pf', 'pl', 'st']);
+      const ids = effectiveFirmedIdSet([derived, placed, stored, cleared, derivedFuture, placedFuture], new Set(), now, false, frozenEnd);
+      assert.deepEqual([...ids].sort(), ['pf', 'pl']);
     } finally { fx.restore(); }
   });
 

@@ -1099,11 +1099,11 @@ export const Engine = {
     return !!at && task.start_date >= at && task.start_date < end;
   },
 
-  /** Senior review I10 (OQ3): running/frozen arithmetic applies only to a row that carries a real placement: a planner
-   *  placement (`user_scheduled`), or a stored start the reconcile did not derive for display (a display derivation
-   *  stamps `systemMove` and leaves `user_scheduled` false). A never-placed row's derived bar is neither running nor frozen. */
+  /** Senior review I10 (OQ3): running/frozen arithmetic applies only to a row with a real placement, i.e. `user_scheduled`
+   *  (the server sets it for planner placements, legacy placed rows and running rows). A never-placed row's start is
+   *  display-derived or just its basic start, so it is neither running nor frozen. */
   hasPersistedPlacement(task: NimbusTask): boolean {
-    return task.user_scheduled === true || (!!task.start_date && !task.systemMove);
+    return task.user_scheduled === true;
   },
 
   /** True while the order is in progress: start_date <= now < end_date (both set).
