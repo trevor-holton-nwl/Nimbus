@@ -1703,10 +1703,14 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     and (new_start is None or new_end is None)):
                 invalid_ids.append(tid)
                 continue
-            if not queued and has_planning and not has_segments and start is None and end is None and (
-                    current["start"] is None or current["end"] is None):
-                # A status-only save to 'scheduled' (no edges sent) needs a readable window: a queued row has none.
-                # (The effective edges fall back to the SAP window, so this cannot fire for an unplaced row.)
+            if (not queued and has_planning and not has_segments and start is None and end is None
+                    and current["stored_start"] is None and current["stored_end"] is None
+                    and current["segment_count"] < 2):
+                # A status-only save to 'scheduled' (no edges sent) writes no edges, so the row must already hold a
+                # stored placement. A queued row and a never-placed row (both stored edges NULL, no segments) have
+                # none: the SAP window the read path falls back to is not a placement and is never stamped from here.
+                # Rejected as `single_edge` (the planner must save both edges together; no new wire reason).
+                rejection_reasons[tid] = "single_edge"
                 invalid_ids.append(tid)
                 continue
 

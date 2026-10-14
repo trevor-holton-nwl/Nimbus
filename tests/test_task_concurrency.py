@@ -773,6 +773,27 @@ class TestSaveContractWidthValidator:
         res = self._save(oid, start=self.s + dt.timedelta(hours=1))
         assert res["persisted"] == 0 and res["rejection_reasons"] == {oid: "single_edge"}
 
+    def test_a_status_only_scheduled_save_on_a_never_placed_row_is_rejected_and_writes_nothing(self):
+        """The read path falls back to the SAP window for a never-placed row, but that is not a stored placement:
+        a status-only 'scheduled' save (no edges) is refused as `single_edge` instead of labelling an unplaced row."""
+        oid = self._order("UNPLACED")
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start = NULL, scheduled_end = NULL WHERE id = %s", (oid,))
+            conn.commit()
+        before = self._state(oid)
+        assert before[0] is None and before[1] is None
+        res = self._save(oid, planning_status="scheduled")
+        assert res["persisted"] == 0 and res["invalid_ids"] == [oid]
+        assert res["rejection_reasons"] == {oid: "single_edge"}
+        assert self._state(oid) == before, "nothing stamped from the SAP window"
+
+    def test_a_status_only_scheduled_save_on_a_placed_row_is_accepted_without_touching_its_edges(self):
+        oid = self._order("PLACED_STATUS")
+        before = self._state(oid)
+        res = self._save(oid, planning_status="scheduled")
+        assert res["persisted"] == 1 and res["invalid_ids"] == [] and res["rejection_reasons"] == {}
+        assert self._state(oid)[:2] == before[:2], "the stored edges are not rewritten"
+
     def test_both_edges_with_a_width_that_is_not_the_run_time_are_rejected(self):
         oid = self._order("WIDE")
         before = self._state(oid)
