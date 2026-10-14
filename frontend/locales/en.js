@@ -45,6 +45,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.finish_cannot_hold':  'Order {{order}} cannot finish at that time on {{machine}}: no working period long enough ends there. It was put back where it was.',
   'toast.left_edge_locked':  'Drag the right edge to set when the order finishes. The start is worked out from the finish, so the left edge cannot be moved.',
   'toast.system_moved_n':  '{{count}} order(s) had their start time recalculated so that their finish stays where it was. Review them and press Save to keep the change.',
+  'toast.cutover_summary': '{{n}} bars re-anchored on due dates, {{m}} reversed from now, {{k}} kept their running start, {{j}} blocked — Save to keep',
   'toast.manual_refusal_generic':  'Could not place the order in the available working time.',
   'toast.opt_applied':                 'Optimization applied — Ctrl+Z to undo',
   'toast.opt_discarded':               'Optimization discarded — schedule restored',

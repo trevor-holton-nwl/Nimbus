@@ -45,6 +45,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.finish_cannot_hold':  'Auftrag {{order}} kann auf {{machine}} nicht zu dieser Zeit enden: Es gibt keinen ausreichend langen Arbeitszeitraum, der dort endet. Er wurde an seinen vorherigen Platz zurückgesetzt.',
   'toast.left_edge_locked':  'Ziehen Sie den rechten Rand, um das Ende des Auftrags festzulegen. Der Start wird aus dem Ende berechnet, daher lässt sich der linke Rand nicht verschieben.',
   'toast.system_moved_n':  'Bei {{count}} Auftrag/Aufträgen wurde der Start neu berechnet, damit das Ende unverändert bleibt. Prüfen Sie die Änderung und speichern Sie, um sie zu übernehmen.',
+  'toast.cutover_summary': '{{n}} Balken an Fälligkeitsterminen neu verankert, {{m}} ab jetzt umgekehrt, {{k}} behielten ihren laufenden Start, {{j}} blockiert — Zum Übernehmen speichern',
   'toast.manual_refusal_generic':  'Der Auftrag konnte in der verfügbaren Arbeitszeit nicht eingeplant werden.',
   'toast.opt_applied':                 'Optimierung angewendet — Strg+Z zum Rückgängigmachen',
   'toast.opt_discarded':               'Optimierung verworfen — Plan wiederhergestellt',

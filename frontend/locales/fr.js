@@ -45,6 +45,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.finish_cannot_hold':  'La commande {{order}} ne peut pas se terminer à cette heure sur {{machine}} : aucune période de travail assez longue ne s’y termine. Elle a été remise à sa place précédente.',
   'toast.left_edge_locked':  'Faites glisser le bord droit pour définir la fin de la commande. Le début est calculé à partir de la fin ; le bord gauche ne peut donc pas être déplacé.',
   'toast.system_moved_n':  'Le début de {{count}} commande(s) a été recalculé pour que leur fin reste inchangée. Vérifiez-les et cliquez sur Enregistrer pour conserver la modification.',
+  'toast.cutover_summary': '{{n}} barres réancrées sur les échéances, {{m}} inversées à partir de maintenant, {{k}} ont gardé leur début en cours, {{j}} bloquées — Enregistrez pour conserver',
   'toast.manual_refusal_generic':  'Impossible de planifier la commande dans le temps de travail disponible.',
   'toast.opt_applied':                 'Optimisation appliquée — Ctrl+Z pour annuler',
   'toast.opt_discarded':               'Optimisation annulée — programme restauré',

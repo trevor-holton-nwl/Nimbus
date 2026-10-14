@@ -774,6 +774,21 @@ test('Persistence.load does NOT wipe a still-valid cache when reloading the SAME
   }
 });
 
+test('Backward-scheduling cutover (OQ36 / 8.6a a): the cache schema version is 7 and a version-6 cache is discarded on load', () => {
+  assert.equal(Config.SCHEMA_VERSION, 7, 'the cutover bumps the cached snapshot shape version');
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
+    _schemaVersion: 6,
+    tasks: [{ id: 'pre-cutover', MACHINE: 'L1', RUN_TIME: 4 }],
+  }));
+  try {
+    assert.equal(Persistence._loadCache(), false, 'a pre-cutover cache (unsaved offline edits included) must not restore');
+    assert.equal(globalThis.localStorage.getItem(Config.LS_KEY), null, 'and it is removed, not just ignored');
+    assert.equal(Store.tasks['pre-cutover'], undefined);
+  } finally {
+    globalThis.localStorage.removeItem(Config.LS_KEY);
+  }
+});
+
 test('Persistence._loadCache clears the rank cache — the offline restore hydrates without ever loading rank maps', () => {
   // Same exposure as _loadDemo: this is the backend-failed / boot restore path. It
   // rehydrates whatever plant was last persisted, which need not be the plant the

@@ -152,7 +152,7 @@ export const Config = {
   WARN_THRESHOLD:     0.8,
   SHOW_NEAR_CAPACITY_ALERTS: false,           // set true to re-enable near-capacity warnings
   LS_KEY:             'nimbus.state.v3',          // do NOT bump for shape changes — use SCHEMA_VERSION
-  SCHEMA_VERSION:     6,                          // bump whenever _saveCache snapshot fields change
+  SCHEMA_VERSION:     7,                          // bump whenever _saveCache snapshot fields change
   BUILD_ID:           (typeof window !== 'undefined' && window.NIMBUS_BUILD_ID) || 'dev',
   DEFAULT_PLANT:      null,
   KNOWN_PLANTS:       ['5512', '1006'],

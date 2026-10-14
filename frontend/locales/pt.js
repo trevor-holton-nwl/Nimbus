@@ -45,6 +45,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.finish_cannot_hold':  'O pedido {{order}} não pode terminar nesse horário em {{machine}}: nenhum período de trabalho longo o bastante termina ali. Ele voltou para onde estava.',
   'toast.left_edge_locked':  'Arraste a borda direita para definir quando o pedido termina. O início é calculado a partir do fim, por isso a borda esquerda não pode ser movida.',
   'toast.system_moved_n':  'O início de {{count}} pedido(s) foi recalculado para que o fim continue onde estava. Revise-os e clique em Salvar para manter a alteração.',
+  'toast.cutover_summary': '{{n}} barras reancoradas nas datas de entrega, {{m}} revertidas a partir de agora, {{k}} mantiveram o início em andamento, {{j}} bloqueadas — Salve para manter',
   'toast.manual_refusal_generic':  'Não foi possível programar o pedido no tempo de trabalho disponível.',
   'toast.opt_applied':                 'Otimização aplicada — Ctrl+Z para desfazer',
   'toast.opt_discarded':               'Otimização descartada — programação restaurada',

@@ -1577,25 +1577,40 @@ export const Engine = {
       if (sameIssue(task.derivationIssue, issue)) return;
       patches.push({ id: task.id, changes: { derivationIssue: issue }, dirty: false });
     };
+    // OQ53 (Task 4.2): the first load after the backward-scheduling cutover finds most of a plant stale. When more
+    // than half of the plant's non-queued rows are stale (queued rows count on neither side) the pass is the cutover
+    // pass: its reversals are tagged 'cutover' and one summary Toast, counted over the STALE rows only, replaces the
+    // per-row "N moved" Toast. An undo pass (opts.ids) never is one; an explicit reason wins.
+    const nonQueuedCount = Store.tasksByPlant(plant).filter(task => task.planning_status !== 'needs_planning').length;
+    const staleCount = candidates.filter(task => task.runtime_schedule_mismatch).length;
+    const cutover = opts.reason === 'cutover'
+      || (opts.reason === undefined && !opts.ids && nonQueuedCount > 0 && staleCount * 2 > nonQueuedCount);
+    const cutoverCounts = { anchored: 0, reversed: 0, running: 0, blocked: 0 };
+    const tally = (stale: boolean, kind: keyof typeof cutoverCounts): void => { if (stale) cutoverCounts[kind]++; };
     const commit = (): void => {
       const dirty = patches.filter(patch => patch.dirty);
       const display = patches.filter(patch => !patch.dirty);
       if (dirty.length) Store.updateMany(dirty.map(({ id, changes }) => ({ id, changes })), 'engine-runtime-reconcile');
       if (display.length) Store.updateMany(display.map(({ id, changes }) => ({ id, changes })), 'engine-runtime-reconcile-display');
       // An undo already announces itself ("Undone: ..."), so its re-derivation is not counted again.
-      if (dirty.length && opts.reason !== 'undo') Toast.show(Util.t('toast.system_moved_n', { count: dirty.length }), 'info', 6000);
+      if (opts.reason === 'undo') return;
+      const counted = cutoverCounts.anchored + cutoverCounts.reversed + cutoverCounts.running + cutoverCounts.blocked;
+      if (cutover && counted > 0) {
+        Toast.show(Util.t('toast.cutover_summary', {
+          n: cutoverCounts.anchored, m: cutoverCounts.reversed, k: cutoverCounts.running, j: cutoverCounts.blocked,
+        }), 'info', 12000);
+      } else if (dirty.length) Toast.show(Util.t('toast.system_moved_n', { count: dirty.length }), 'info', 6000);
     };
 
     const plantNow = Store.plantNow(plant);
     if (!plantNow) {
       // OQ52: a plant with no zone has no clock, so nothing is derived (Store.plantNow already announced it once).
-      for (const task of candidates) noteOnly(task, { code: 'plant_no_timezone' });
+      for (const task of candidates) { noteOnly(task, { code: 'plant_no_timezone' }); tally(!!task.runtime_schedule_mismatch, 'blocked'); }
       commit();
       return;
     }
     const policy = Engine.splitOrderPolicyFor(plant);
     const floor = Calendar._floorMinute(plantNow);
-    const cutover = opts.reason === 'cutover';
     const moveReason = (stale: boolean): string => cutover ? 'cutover' : (stale ? 'run_time_changed' : 'due_date_derivation');
     // A schedule patch always carries both edges, the segments and both session notes (the notes are cleared
     // by the next edit, Store._clearStaleNotes, unless a change-set carries them).
@@ -1671,8 +1686,8 @@ export const Engine = {
       for (const task of candidates) {
         const line = task.MACHINE;
         // OQ62: a line on the client default hours has no server calendar to derive from.
-        if (!CalendarSync.hasServerLineCalendar(plant, line)) { noteOnly(task, { code: 'line_no_calendar' }); continue; }
         const stale = !!task.runtime_schedule_mismatch;
+        if (!CalendarSync.hasServerLineCalendar(plant, line)) { noteOnly(task, { code: 'line_no_calendar' }); tally(stale, 'blocked'); continue; }
         const placed = !!task.user_scheduled;
 
         if (placed && task.start_date && task.end_date && Engine.isInProgress(task, plantNow)) {
@@ -1686,11 +1701,12 @@ export const Engine = {
             continue;
           }
           schedulePatch(task, stale, changes, null, moveReason(stale), 'end');
+          tally(stale, 'running');
           continue;
         }
 
         const anchor = placed ? task.end_date : Util.dueInstant(task);
-        if (!anchor) { noteOnly(task, { code: 'no_anchor' }); continue; }   // no finish to hold, so nothing can be derived
+        if (!anchor) { noteOnly(task, { code: 'no_anchor' }); tally(stale, 'blocked'); continue; }   // no finish to hold, so nothing can be derived
         let result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: 0 });
         if (result.kind === 'placed' && setupLive) {
           // The first walk shows where the order starts, which names its predecessor; walk again with that
@@ -1712,7 +1728,7 @@ export const Engine = {
             // OQ50: it cannot be one bar under this plant's policy. Queue it; the planner releases it by editing it.
             patches.push({ id: task.id, dirty: stale, changes: Engine.overlongNeverChanges() });
           } else if (result.reason === 'run_time_zero') noteOnly(task, { code: 'run_time_zero' });   // OQ13: no bar
-          else if (result.reason === 'plant_no_timezone') noteOnly(task, { code: 'plant_no_timezone' });
+          else if (result.reason === 'plant_no_timezone') { noteOnly(task, { code: 'plant_no_timezone' }); tally(stale, 'blocked'); }
           else {
             ErrorLog.warn('engine',
               `Order "${task.text || task.id}" could not be re-derived: no operating window within the 90-day calendar search.`,
@@ -1741,6 +1757,7 @@ export const Engine = {
           if (pullFloor && derivedStart < pullFloor) issue = { code: 'pull_floor_crossed', from: derivedStart, to: pullFloor };   // OQ20
         }
         schedulePatch(task, stale, result.changes, issue, moveReason(stale));
+        tally(stale, 'anchored');
       }
 
       // OQ53 b: rows whose walk reached "now" go forward from now, per line, in finish order, one after another.
@@ -1753,6 +1770,7 @@ export const Engine = {
           const detail = cutover ? 'cutover' : (item.row.stale ? 'run_time_grew' : 'due_date_past');
           schedulePatch(item.row.task, item.row.stale, { start_date: start, end_date: end, scheduleSegments: scheduleSegments ?? [] },
             { code: 'reversal_forward', detail }, cutover ? 'cutover' : 'reversal_forward');
+          tally(item.row.stale, 'reversed');
         }
         const overlongIds = new Set(sequence.overlong.map(item => String(item.row.task.id)));
         for (const row of rows) {
@@ -1778,11 +1796,22 @@ export const Engine = {
    *  restored rows from their restored finish under the current run time (OQ21). */
   reconcileRestored(ids: Iterable<string>): void {
     const byPlant = new Map<string, Set<string>>();
+    const neverPlaced: string[] = [];
     for (const raw of ids) {
       const id = String(raw);
       const task = Store.tasks[id];
       const plant = task ? (task.PLANT || Store.getPlantForLine(task.MACHINE)) : null;
       if (plant) (byPlant.get(plant) ?? byPlant.set(plant, new Set()).get(plant)!).add(id);
+      // F10: the reconcile's own never-placed test (`!user_scheduled`, the display-only derive of Task 2.6).
+      if (task && !task.user_scheduled) neverPlaced.push(id);
+    }
+    // A row that was never placed server-side stays display-only after an undo / Time Machine restore: restoreTasks
+    // flagged it stale and the undo write dirtied it, and either would route it through the dirty reconcile patch
+    // (`_markPlaced`) so the next Save persisted a placement it never had. Clear both; the pass below derives it
+    // from its due date through the display source, which the dirty tracker skips.
+    if (neverPlaced.length) {
+      Store.updateMany(neverPlaced.map(id => ({ id, changes: { runtime_schedule_mismatch: false } })), 'engine-runtime-reconcile-display');
+      for (const id of neverPlaced) { Persistence._dirtyIds.delete(id); Persistence._forceIds.delete(id); }
     }
     for (const [plant, restored] of byPlant) Engine.reconcileRuntimeSchedules(plant, { reason: 'undo', ids: restored });
   },
