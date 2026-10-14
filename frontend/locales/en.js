@@ -342,7 +342,6 @@ window.__NIMBUS_LOCALES.en = {
   'btn.upload_production_version':     'Upload Production Versions',
   'btn.upload_routing_operation':      'Upload Routing Operations',
   'btn.delete_filtered':               'Delete Filtered Rows…',
-  'btn.change_scope':                  'Change',
   // Work Centers tab (§4.3).
   'btn.create':                         'Create',
   'btn.load_more':                      'Load more',
@@ -2268,6 +2267,9 @@ window.__NIMBUS_LOCALES.en = {
   'toast.paste_validate_failed': 'Could not check the pasted rows: {{msg}}',
   'ui.paste_rejects_heading': 'These {{count}} row(s) will not be added:',
   'ui.paste_rejects_more': '+{{count}} more',
+  'ui.paste_reject_row': 'Pasted row {{row}}',
+  'ui.upload_reject_row': 'Row {{row}}',
+  'ui.paste_warnings_heading': 'Check these before you save:',
   'ui.upload_replace_confirm_title': 'Replace routing operations?',
   'ui.upload_replace_confirm_message': 'Every operation of each routing in this file will be replaced by the file\'s rows.',
   'ui.upload_replace_confirm_detail': 'Routings not in the file are untouched. To add or edit single operations, use Paste Rows instead.',

@@ -300,7 +300,6 @@ window.__NIMBUS_LOCALES.de = {
   'btn.upload_production_version':     'Produktionsversionen hochladen',
   'btn.upload_routing_operation':      'Fertigungsgänge hochladen',
   'btn.delete_filtered':               'Gefilterte Zeilen löschen…',
-  'btn.change_scope':                  'Ändern',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Maschinen suchen…',
@@ -2058,6 +2057,9 @@ window.__NIMBUS_LOCALES.de = {
   'toast.paste_validate_failed': 'Die eingefügten Zeilen konnten nicht geprüft werden: {{msg}}',
   'ui.paste_rejects_heading': 'Diese {{count}} Zeile(n) werden nicht hinzugefügt:',
   'ui.paste_rejects_more': '+{{count}} weitere',
+  'ui.paste_reject_row': 'Eingefügte Zeile {{row}}',
+  'ui.upload_reject_row': 'Zeile {{row}}',
+  'ui.paste_warnings_heading': 'Bitte vor dem Speichern prüfen:',
   'ui.upload_replace_confirm_title': 'Fertigungsgänge ersetzen?',
   'ui.upload_replace_confirm_message': 'Alle Vorgänge jedes Arbeitsplans in dieser Datei werden durch die Zeilen der Datei ersetzt.',
   'ui.upload_replace_confirm_detail': 'Arbeitspläne, die nicht in der Datei stehen, bleiben unverändert. Zum Hinzufügen oder Bearbeiten einzelner Vorgänge verwenden Sie stattdessen „Zeilen einfügen“.',

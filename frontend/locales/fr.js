@@ -300,7 +300,6 @@ window.__NIMBUS_LOCALES.fr = {
   'btn.upload_production_version':     'Importer les Versions de Production',
   'btn.upload_routing_operation':      'Importer les Opérations d\'Acheminement',
   'btn.delete_filtered':               'Supprimer les Lignes Filtrées…',
-  'btn.change_scope':                  'Modifier',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Rechercher des machines…',
@@ -2019,6 +2018,9 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.paste_validate_failed': 'Impossible de vérifier les lignes collées : {{msg}}',
   'ui.paste_rejects_heading': 'Ces {{count}} ligne(s) ne seront pas ajoutées :',
   'ui.paste_rejects_more': '+{{count}} de plus',
+  'ui.paste_reject_row': 'Ligne collée {{row}}',
+  'ui.upload_reject_row': 'Ligne {{row}}',
+  'ui.paste_warnings_heading': 'À vérifier avant d\'enregistrer :',
   'ui.upload_replace_confirm_title': 'Remplacer les opérations d\'acheminement ?',
   'ui.upload_replace_confirm_message': 'Toutes les opérations de chaque acheminement de ce fichier seront remplacées par les lignes du fichier.',
   'ui.upload_replace_confirm_detail': 'Les acheminements absents du fichier ne sont pas modifiés. Pour ajouter ou modifier des opérations isolées, utilisez plutôt Coller des lignes.',

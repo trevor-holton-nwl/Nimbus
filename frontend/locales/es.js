@@ -304,7 +304,6 @@ window.__NIMBUS_LOCALES.es = {
   'btn.upload_production_version':     'Subir Versiones de Producción',
   'btn.upload_routing_operation':      'Subir Operaciones de Enrutamiento',
   'btn.delete_filtered':               'Eliminar Filas Filtradas…',
-  'btn.change_scope':                  'Cambiar',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Buscar máquinas…',
@@ -2019,6 +2018,9 @@ window.__NIMBUS_LOCALES.es = {
   'toast.paste_validate_failed': 'No se pudieron comprobar las filas pegadas: {{msg}}',
   'ui.paste_rejects_heading': 'Estas {{count}} fila(s) no se agregarán:',
   'ui.paste_rejects_more': '+{{count}} más',
+  'ui.paste_reject_row': 'Fila pegada {{row}}',
+  'ui.upload_reject_row': 'Fila {{row}}',
+  'ui.paste_warnings_heading': 'Revise esto antes de guardar:',
   'ui.upload_replace_confirm_title': '¿Reemplazar las operaciones de enrutamiento?',
   'ui.upload_replace_confirm_message': 'Todas las operaciones de cada enrutamiento de este archivo se reemplazarán por las filas del archivo.',
   'ui.upload_replace_confirm_detail': 'Los enrutamientos que no están en el archivo no se modifican. Para agregar o editar operaciones sueltas, use Pegar filas.',

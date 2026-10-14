@@ -300,7 +300,6 @@ window.__NIMBUS_LOCALES.pt = {
   'btn.upload_production_version':     'Enviar Versões de Produção',
   'btn.upload_routing_operation':      'Enviar Operações de Roteamento',
   'btn.delete_filtered':               'Excluir Linhas Filtradas…',
-  'btn.change_scope':                  'Alterar',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Pesquisar máquinas…',
@@ -2018,6 +2017,9 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.paste_validate_failed': 'Não foi possível verificar as linhas coladas: {{msg}}',
   'ui.paste_rejects_heading': 'Estas {{count}} linha(s) não serão adicionadas:',
   'ui.paste_rejects_more': '+{{count}} a mais',
+  'ui.paste_reject_row': 'Linha colada {{row}}',
+  'ui.upload_reject_row': 'Linha {{row}}',
+  'ui.paste_warnings_heading': 'Verifique antes de salvar:',
   'ui.upload_replace_confirm_title': 'Substituir as operações de roteamento?',
   'ui.upload_replace_confirm_message': 'Todas as operações de cada roteamento deste arquivo serão substituídas pelas linhas do arquivo.',
   'ui.upload_replace_confirm_detail': 'Os roteamentos que não estão no arquivo não são alterados. Para adicionar ou editar operações isoladas, use Colar linhas.',

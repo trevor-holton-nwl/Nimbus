@@ -2966,6 +2966,10 @@ export const MasterData = (() => {
     routing_operation: 'routing_operation',
   };
 
+  // The upload summary names inserted/updated/rejected counts and the plants: too much for the
+  // 1.5 s a success toast gets by default.
+  const UPLOAD_SUMMARY_TOAST_MS = 6000;
+
   // Client-side mirror of master_data.MASS_DELETABLE_TABLES — gates the
   // "Delete filtered rows…" toolbar button (§6.3). The backend route is the
   // real enforcement (404s any table not in its own allowlist); this only
@@ -3883,6 +3887,15 @@ export const MasterData = (() => {
     }, 50);
   }
 
+  // `Runtime` caches ONE plant's rate map (the Gantt's plant), and `Runtime.load` drops it before
+  // fetching, so a refresh for any other plant would leave the Gantt without a map. Reload only
+  // when the write touched the plant the Gantt shows.
+  function _refreshRuntimeFor(plants: Iterable<string | null | undefined>): void {
+    const selected = Store.selectedPlant;
+    if (!selected) return;
+    for (const p of plants) { if (p === selected) { Runtime.load(selected); return; } }
+  }
+
   // Generalized from the former bom_items-only _uploadBom: same FormData/
   // POST/Toast/ErrorLog/cache-refresh sequence, parameterized by
   // UPLOAD_ENDPOINT[table] instead of hardcoded to `/bom/upload`. Toast
@@ -3891,6 +3904,9 @@ export const MasterData = (() => {
   async function _uploadFile(table: MasterDataTable): Promise<void> {
     const endpoint = UPLOAD_ENDPOINT[table];
     if (!endpoint) return;
+    // The upload moves the plant filter and reloads the grid, which would drop pending edits.
+    const unsaved = _unsavedCount(table);
+    if (unsaved) { Toast.show(Util.t('ui.n_unsaved', { count: unsaved }), 'warn'); return; }
     // The operations upload REPLACES every operation of each routing in the file
     // (a scoped delete + insert), so ask before the picker opens.
     if (table === 'routing_operation') {
@@ -3923,6 +3939,7 @@ export const MasterData = (() => {
             plants: plants.length ? plants.join(', ') : '—',
           }),
           result.rejected ? 'warn' : 'success',
+          UPLOAD_SUMMARY_TOAST_MS,
         );
         if (result.warnings && result.warnings.length) {
           result.warnings.slice(0, 10).forEach((w: { msg: string }) => ErrorLog.warn('master-data', w.msg));
@@ -3939,16 +3956,15 @@ export const MasterData = (() => {
         delete _cache[table];
         if (_activeTable === table) {
           await _loadAndRender(table);
-          _renderBulkWarnings(result.warnings || []);
+          // The tab may have changed while the grid reloaded: the warnings block belongs to it.
+          if (_activeTable === table) _renderBulkWarnings(result.warnings || []);
         }
-        // Keep Runtime's per-plant rate-map mirror in sync with what just
-        // changed (mirrors the loadPriorityRankMaps refresh pattern below).
-        // Both routing upload tables (production_version, routing_operation)
-        // are SCOPED_TABLES in 'plant' mode, so _scopeFilter always has the
-        // plant this upload targeted when the result names none.
+        // Keep Runtime's rate-map mirror in sync with what just changed (mirrors the
+        // loadPriorityRankMaps refresh pattern below). Both routing upload tables
+        // (production_version, routing_operation) are SCOPED_TABLES in 'plant' mode, so
+        // _scopeFilter always has the plant this upload targeted when the result names none.
         if (ROUTING_TABLES.has(table)) {
-          const toLoad = plants.length ? plants : [_scopeFilter(table).plant].filter((p): p is string => !!p);
-          toLoad.forEach((p) => Runtime.load(p));
+          _refreshRuntimeFor(plants.length ? plants : [_scopeFilter(table).plant]);
         }
       } catch (e) {
         Toast.show(`${Util.t(`toast.${UPLOAD_TOAST_STEM[table] ?? table}_upload_failed`)}: ${(e as Error).message}`, 'error');
@@ -4023,14 +4039,28 @@ export const MasterData = (() => {
         ErrorLog.error('master-data', `Paste validation failed for ${table}: ${(e as Error).message}`);
         return;
       }
-      rows = validated.rows;
-      const rejects = (validated.warnings || []).filter((w) => w.level === 'reject');
+      // The grid may have been re-scoped or left while the server was checking: the rows now
+      // belong to a grid that is gone.
+      if (_cache[table] !== state || _activeTable !== table) return;
+      rows = validated.rows ?? [];
+      const warnings = validated.warnings || [];
+      const rowLine = (w: MasterDataBulkWarning): string =>
+        `<li>${w.row != null ? `${Util.t('ui.paste_reject_row', { row: w.row })}: ` : ''}${Util.escapeHtml(w.msg || '')}</li>`;
+      const rejects = warnings.filter((w) => w.level === 'reject');
       if (rejects.length) {
-        const items = rejects.slice(0, 20).map((w) =>
-          `<li>${w.row != null ? `row ${w.row}: ` : ''}${Util.escapeHtml(w.msg || '')}</li>`);
+        // The server lists at most 50 rejects (then a truncation line), so the heading counts
+        // from the server's own total, not from what it listed.
+        const items = rejects.slice(0, 20).map(rowLine);
         if (rejects.length > 20) items.push(`<li>${Util.t('ui.paste_rejects_more', { count: rejects.length - 20 })}</li>`);
-        rejectsHtml = `<div class="md-paste-rejects"><strong>${Util.t('ui.paste_rejects_heading', { count: rejects.length })}</strong>` +
+        rejectsHtml = `<div class="md-paste-rejects"><strong>${Util.t('ui.paste_rejects_heading', { count: validated.rejected ?? rejects.length })}</strong>` +
                       `<ul>${items.join('')}</ul></div>`;
+      }
+      // Everything else the server noticed (an ignored column, skipped DELETED rows, a cut-off
+      // list) changes what would be staged, so it belongs in the same confirm.
+      const notes = warnings.filter((w) => w.level !== 'reject');
+      if (notes.length) {
+        rejectsHtml += `<div class="md-paste-rejects"><strong>${Util.t('ui.paste_warnings_heading')}</strong>` +
+                       `<ul>${notes.map(rowLine).join('')}</ul></div>`;
       }
     }
 
@@ -4055,7 +4085,7 @@ export const MasterData = (() => {
     if (!toAdd.length && !toUpdate.length) {
       // Nothing left to confirm, so there is no dialog to list the server's rejections in:
       // show them under the toolbar instead.
-      if (validated) _renderBulkWarnings(validated.warnings || []);
+      if (validated) _renderBulkWarnings(validated.warnings || [], 'ui.paste_reject_row');
       Toast.show(invalid.length
         ? Util.t('toast.missing_key_rows', { count: invalid.length, keys: keys.join(', ') })
         : Util.t('toast.no_valid_rows'), 'error');
@@ -4080,6 +4110,9 @@ export const MasterData = (() => {
                rejectsHtml,
     });
     if (!ok) return;
+    // Same guard as after the validate request: the confirm can sit open while the filter bar,
+    // top-bar plant or tabs are used.
+    if (_cache[table] !== state || _activeTable !== table) return;
 
     toAdd.forEach((row) => {
       const full: MasterDataRow = {};
@@ -4259,9 +4292,9 @@ export const MasterData = (() => {
       Toast.show(Util.t('toast.delete_filtered_done', { count: res.deleted }), 'success');
       delete _cache[table];
       _renderActiveTable();
-      // Keep Runtime's per-plant rate-map mirror in sync — `plant` above is
-      // already resolved and non-null by this point.
-      if (ROUTING_TABLES.has(table)) Runtime.load(plant);
+      // Keep Runtime's rate-map mirror in sync — `plant` above is already resolved and
+      // non-null by this point (reloaded only if it is the Gantt's plant).
+      if (ROUTING_TABLES.has(table)) _refreshRuntimeFor([plant]);
     } catch (e) {
       Toast.show(Util.t('toast.delete_filtered_failed', { msg: (e as Error).message }), 'error');
       ErrorLog.error('master-data', `Delete filtered failed for ${table}: ${(e as Error).message}`);
@@ -4279,7 +4312,9 @@ export const MasterData = (() => {
   // admin-ops edge for four lines of DOM). `warnings[]` is the first
   // consumer of a bulk-write warning beyond ErrorLog (§4.1) — this renders
   // it under the grid's toolbar; an empty array clears any prior block.
-  function _renderBulkWarnings(warnings: MasterDataBulkWarning[]): void {
+  // `rowLabelKey` names what a warning's `row` counts: the Nth pasted data line for a paste
+  // check, the spreadsheet row for a file upload.
+  function _renderBulkWarnings(warnings: MasterDataBulkWarning[], rowLabelKey = 'ui.upload_reject_row'): void {
     const host = document.getElementById('md-bulk-warnings');
     if (!host) return;
     host.textContent = '';
@@ -4294,7 +4329,7 @@ export const MasterData = (() => {
       lvl.textContent = (w.level || 'warn').toUpperCase();
       const msg = document.createElement('span');
       msg.className = 'admin-bwarn-msg';
-      msg.textContent = w.msg || '';
+      msg.textContent = (w.row != null ? `${Util.t(rowLabelKey, { row: w.row })}: ` : '') + (w.msg || '');
       row.appendChild(lvl);
       row.appendChild(msg);
       list.appendChild(row);
@@ -4445,24 +4480,19 @@ export const MasterData = (() => {
       if (ROUTING_TABLES.has(table)) {
         if (table === 'routing_rules') {
           // routing_rules is NOT in SCOPED_TABLES (its grid can show multiple plants'
-          // rows simultaneously, per §7.1), so we must refresh Runtime for EVERY distinct
-          // plant actually present among the saved rows, not just Store.selectedPlant.
-          // Extract distinct plants from upserts AND deletes: deleting an exclude/include
-          // rule changes which operations count toward run time, so the rate map for that
-          // plant is stale just as it is after an edit (delete rows carry the table's key
-          // columns, which include plant). Mirror the pattern from db.py:2734 (resolve_fn loop).
-          const affectedPlants = new Set<string>();
-          [...upserts, ...deletes].forEach((row) => {
-            const plant = row.plant as string | undefined;
-            if (plant) affectedPlants.add(plant);
-          });
-          affectedPlants.forEach((plant) => Runtime.load(plant));
+          // rows simultaneously, per §7.1), so the saved rows can name several plants; the
+          // rate-map mirror holds one plant, so it reloads only if the Gantt's plant is among
+          // them. Plants come from upserts AND deletes: deleting an exclude/include rule
+          // changes which operations count toward run time, so that plant's rate map is stale
+          // just as it is after an edit (delete rows carry the table's key columns, which
+          // include plant). Mirror the pattern from db.py:2734 (resolve_fn loop).
+          _refreshRuntimeFor([...upserts, ...deletes].map((row) => row.plant as string | undefined));
         } else {
           // production_version, routing_operation, and machine are all in SCOPED_TABLES
           // (single-plant scoped), so this branch handles them uniformly.
           const scopeMode = SCOPED_TABLES[table];
           const plant = (scopeMode ? _scopeFilter(table).plant : null) || Store.selectedPlant || null;
-          if (plant) Runtime.load(plant);
+          _refreshRuntimeFor([plant]);
         }
       }
 

@@ -437,18 +437,15 @@ test('MasterData ROUTING_TABLES includes machine for work-center mapping invalid
   assert.match(source, /const ROUTING_TABLES:.*=\s*new Set\(\[.*['"]machine['"]/s);
 });
 
-// Bulk-save (paste/cell-edit) to routing_rules should refresh Runtime.load for
-// EVERY distinct plant present in the saved rows, not just Store.selectedPlant,
-// because routing_rules is NOT in SCOPED_TABLES (its grid shows multiple plants'
-// rows simultaneously). The fix extracts distinct plants from upserts and calls
-// Runtime.load(plant) for each (mirroring db.py's resolve_fn loop at line 2734).
-test('MasterData bulk-save for routing_rules calls Runtime.load for each distinct plant in saved rows', () => {
+// Bulk-save (paste/cell-edit) to routing_rules can name several plants (the table is NOT in
+// SCOPED_TABLES, its grid shows multiple plants' rows simultaneously). Runtime holds ONE plant's
+// rate map, so the saved rows' plants are handed to _refreshRuntimeFor, which reloads only when
+// Store.selectedPlant is among them.
+test('MasterData bulk-save for routing_rules hands the saved rows\' plants to the selected-plant Runtime refresh', () => {
   const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
-  // Verify the special case handler for routing_rules exists and extracts distinct plants
   assert.match(source, /if \(table === ['"]routing_rules['"]\)/);
-  assert.match(source, /new Set<string>\(\)/);
-  assert.match(source, /affectedPlants\.add\(plant\)/);
-  assert.match(source, /affectedPlants\.forEach\(\(plant\) => Runtime\.load\(plant\)\)/);
+  assert.match(source, /function _refreshRuntimeFor\(/);
+  assert.match(source, /if \(p === selected\) \{ Runtime\.load\(selected\)/);
 });
 
 // D38 (aggregate_to_detail.md audit): a successful autosave used to patch only
@@ -696,7 +693,7 @@ test('WorkCenters._autosave serializes queued writes for different work centers,
 // so the refresh set must include plants named in DELETED rows too (not only upserts).
 test('MasterData bulk-save for routing_rules also refreshes Runtime for plants whose rules were deleted', () => {
   const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
-  assert.match(source, /\[\.\.\.upserts, \.\.\.deletes\]\.forEach\(\(row\) => \{\s*const plant = row\.plant as string \| undefined;/);
+  assert.match(source, /_refreshRuntimeFor\(\[\.\.\.upserts, \.\.\.deletes\]\.map\(\(row\) => row\.plant as string \| undefined\)\)/);
 });
 
 test('syncLineSettings posts only the key columns and the changed column, not the whole cached row (#46)', async () => {

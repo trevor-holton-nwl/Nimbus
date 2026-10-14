@@ -68,6 +68,7 @@ const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms));
 const { MasterData } = await import('../../../frontend/master-data/admin-ui.mjs');
 const { Store } = await import('../../../frontend/platform/store.mjs');
 const { Modal, Toast } = await import('../../../frontend/platform/foundation.mjs');
+const { Runtime } = await import('../../../frontend/routing/runtime-client.mjs');
 const confirmCalls = [];
 Modal.confirm = async (opts) => { confirmCalls.push(opts); return true; };
 const toasts = [];
@@ -349,6 +350,8 @@ async function openScoped(tab, plant, columns, rows = []) {
 
 test('P1: pasting production versions posts the rows to /routing/validate and stages only what the server returns', async () => {
   const prior = Store.selectedPlant;
+  const savedLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'ui.paste_reject_row': 'Pasted row {{row}}' } };
   try {
     await openScoped('production_version', 'P1P', pvColsGc);
     useClipboard(async () => 'PLANT\tMATERIAL_ID\tPRODUCTION_VERSION\tGROUP_COUNTER\nP1P\tM1\t1\t1\nP1P\tBAD\t2\t1');
@@ -362,7 +365,7 @@ test('P1: pasting production versions posts the rows to /routing/validate and st
     fire(reqs[0], { rows: [{ plant: 'P1P', material_id: 'M1', production_version: '0001', group_counter: '01' }], rejected: 1,
       warnings: [{ level: 'reject', msg: 'unknown_material', row: 2 }] }); await tick();
     assert.equal(confirmCalls.length, 1);
-    assert.match(confirmCalls[0].detail, /row 2: unknown_material/, 'rejects are listed in the confirm');
+    assert.match(confirmCalls[0].detail, /Pasted row 2: unknown_material/, 'rejects are listed in the confirm');
     assert.deepEqual(tbodyKeys(), ['P1P|M1|0001'], 'only the server-returned row is staged');
     assert.equal(findNode((n) => n.dataset.col === 'group_counter' && n.dataset.rowKey === 'P1P|M1|0001').textContent, '01');
   } finally {
@@ -370,6 +373,7 @@ test('P1: pasting production versions posts the rows to /routing/validate and st
     const mark = pending.length;
     findBtn('btn.discard', 'Discard').onclick(); await tick();
     fire(fetchesSince(mark, '/master-data/production_version')[0], gridPage(pvColsGc, [])); await tick();
+    globalThis.window.__NIMBUS_LOCALES = savedLocales;
     Store.setSelectedPlant(prior, 't');
   }
 });
@@ -493,6 +497,85 @@ test('U1: the routing-operations upload confirms before the picker opens; a file
   } finally {
     globalThis.document.getElementById = realGet;
     globalThis.document.createElement = realCreate; Modal.confirm = realConfirm; globalThis.window.__NIMBUS_LOCALES = savedLocales;
+    Store.setSelectedPlant(prior, 't');
+  }
+});
+
+// ---- Final-review fixes: Runtime plant guard, orphaned paste, non-reject warnings ---------------------
+// Drives the routing-operations upload end to end against a stubbed Runtime.load.
+async function uploadOperations(plant, result) {
+  const realCreate = globalThis.document.createElement, realConfirm = Modal.confirm, realLoad = Runtime.load;
+  const inputs = [], loads = [];
+  globalThis.document.createElement = (tag) => { const e = new El(tag); if (tag === 'input') { e.click = () => {}; inputs.push(e); } return e; };
+  Runtime.load = async (p) => { loads.push(p); };
+  try {
+    await openScoped('routing_operation', plant, pvCols);
+    Modal.confirm = async () => true;
+    await findBtn('btn.upload_routing_operation', 'Upload Routing Operations').onclick(); await tick();
+    const picker = inputs.find((i) => i.type === 'file');
+    picker.files = [{ name: 'ops.xlsx' }];
+    const mark = pending.length;
+    const changed = picker.onchange(); await tick();
+    fire(fetchesSince(mark, '/routing/upload/operations')[0], result); await tick();
+    for (const r of fetchesSince(mark, '/master-data/routing_operation')) fire(r, gridPage(pvCols, []));
+    await changed; await tick();
+    return loads;
+  } finally { globalThis.document.createElement = realCreate; Modal.confirm = realConfirm; Runtime.load = realLoad; }
+}
+
+test('F1: an upload only refreshes Runtime for the plant the Gantt shows, and only when the file touched it', async () => {
+  const prior = Store.selectedPlant;
+  try {
+    const other = await uploadOperations('F1A', { inserted: 1, updated: 0, rejected: 0, warnings: [], plants: ['F1B', 'F1C'] });
+    assert.deepEqual(other, [], 'a file for other plants leaves the Gantt plant\'s rate map alone');
+    const own = await uploadOperations('F1A', { inserted: 1, updated: 0, rejected: 0, warnings: [], plants: ['F1A', 'F1B'] });
+    assert.deepEqual(own, ['F1A'], 'a file that touched the Gantt plant reloads it once');
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('F3: a plant switch or a tab switch while the paste is being validated stages nothing and shows no success toast', async () => {
+  const prior = Store.selectedPlant;
+  try {
+    for (const interrupt of ['plant', 'tab']) {
+      await openScoped('production_version', `F3${interrupt}`, pvColsGc);
+      useClipboard(async () => 'PLANT\tMATERIAL_ID\tPRODUCTION_VERSION\nF3\tM1\t0001');
+      confirmCalls.length = 0; toasts.length = 0;
+      const mark = pending.length;
+      void pasteBtn().onclick(); await tick();
+      const reqs = fetchesSince(mark, '/routing/validate/production_version');
+      assert.equal(reqs.length, 1);
+      if (interrupt === 'plant') clearCombo(barHosts()[0]); else clickTab('machine');
+      await tick();
+      fire(reqs[0], { rows: [{ plant: 'F3', material_id: 'M1', production_version: '0001' }], rejected: 0, warnings: [] }); await tick();
+      assert.equal(confirmCalls.length, 0, `${interrupt}: no confirm for an abandoned grid`);
+      assert.equal(toasts.some((t) => t.endsWith('|success')), false, `${interrupt}: no success toast`);
+    }
+  } finally { Store.setSelectedPlant(prior, 't'); }
+});
+
+test('F2: validate warnings that are not rejects (unknown column) reach the confirm detail beside the rejects', async () => {
+  const prior = Store.selectedPlant;
+  const savedLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'ui.paste_reject_row': 'Pasted row {{row}}', 'ui.paste_warnings_heading': 'Check these before you save:' } };
+  try {
+    await openScoped('production_version', 'F2P', pvColsGc);
+    useClipboard(async () => 'PLANT\tMATERIAL_ID\tPRODUCTION_VERSION\tRUNTIME_X\nF2P\tM1\t1\t5\nF2P\tBAD\t2\t5');
+    confirmCalls.length = 0;
+    const mark = pending.length;
+    void pasteBtn().onclick(); await tick();
+    fire(fetchesSince(mark, '/routing/validate/production_version')[0], {
+      rows: [{ plant: 'F2P', material_id: 'M1', production_version: '0001' }], rejected: 1,
+      warnings: [{ level: 'warn', msg: 'Unknown column(s) ignored: RUNTIME_X <b>' }, { level: 'reject', msg: 'unknown_material', row: 2 }] }); await tick();
+    assert.equal(confirmCalls.length, 1);
+    const detail = confirmCalls[0].detail;
+    assert.match(detail, /Check these before you save:/);
+    assert.match(detail, /Unknown column\(s\) ignored: RUNTIME_X &lt;b&gt;/, 'warning shown, escaped');
+    assert.match(detail, /Pasted row 2: unknown_material/, 'the reject is still listed');
+  } finally {
+    const m2 = pending.length;
+    findBtn('btn.discard', 'Discard').onclick(); await tick();
+    fire(fetchesSince(m2, '/master-data/production_version')[0], gridPage(pvColsGc, [])); await tick();
+    globalThis.window.__NIMBUS_LOCALES = savedLocales;
     Store.setSelectedPlant(prior, 't');
   }
 });
