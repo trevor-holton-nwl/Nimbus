@@ -8,7 +8,7 @@
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
-import { candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
+import { candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
@@ -2761,19 +2761,22 @@ function hasNominalWindow(
   const requiredMs = Math.round(runtimeMinutes) * 60 * 1000;
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
-  for (let offset = 0; offset < 90; offset += 1) {
-    const date = new Date(day);
-    date.setDate(day.getDate() + offset);
-    // `lineHours`/`plantHours` are already confirmed present above, so the
-    // memo's own defaulting (for a missing calendar) never triggers here —
-    // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
-    const joint = ctx
-      ? jointWindowForDay(ctx, snapshot, line, plant, date)
-      : intersectWindows(localWindow(lineHours, date), localWindow(plantHours, date));
-    if (!joint) continue;
-    if (joint.end.getTime() - joint.start.getTime() >= requiredMs) return true;
-  }
-  return false;
+  // Senior review I9 (OQ47): windows that touch at midnight are one contiguous span, the same definition the
+  // backward walk and Calendar.hasNominalWindow use (calendar-engine's fitsMergedSpan).
+  const windows = function* (): Generator<{ s: number; e: number } | null> {
+    for (let offset = 0; offset < 90; offset += 1) {
+      const date = new Date(day);
+      date.setDate(day.getDate() + offset);
+      // `lineHours`/`plantHours` are already confirmed present above, so the
+      // memo's own defaulting (for a missing calendar) never triggers here —
+      // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
+      const joint = ctx
+        ? jointWindowForDay(ctx, snapshot, line, plant, date)
+        : intersectWindows(localWindow(lineHours, date), localWindow(plantHours, date));
+      yield joint ? { s: joint.start.getTime(), e: joint.end.getTime() } : null;
+    }
+  };
+  return fitsMergedSpan(windows(), requiredMs);
 }
 
 /** `'due-date'` mode (2026-09-09): lateness outranks BOTH the priority-list

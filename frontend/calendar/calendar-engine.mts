@@ -165,6 +165,33 @@ export function candidateDefaultWorkHours(): WorkHours {
   return workHours;
 }
 
+/** Senior review I9 (OQ47): the ONE definition of a contiguous operating span. Appends `span` (chronological) to
+ * `out`, merging it into the tail when it touches or overlaps it, and returns the resulting tail. The backward
+ * walk, the forward `hasNominalWindow` and the optimizer's overlong predicate all measure spans through this, so
+ * a 24/7 line or a night shift crossing midnight is one span on every path. */
+export function pushMergedSpan(out: Array<{ s: number; e: number }>, span: { s: number; e: number }): { s: number; e: number } {
+  const prior = out[out.length - 1];
+  if (prior && span.s <= prior.e) {
+    if (span.e > prior.e) prior.e = span.e;
+    return prior;
+  }
+  const fresh = { s: span.s, e: span.e };
+  out.push(fresh);
+  return fresh;
+}
+
+/** True when some merged contiguous span of the chronological `windows` (ms pairs, null = closed day) is at least
+ * `durationMs` long (equal counts). Stops at the first span that is long enough. */
+export function fitsMergedSpan(windows: Iterable<{ s: number; e: number } | null>, durationMs: number): boolean {
+  const merged: Array<{ s: number; e: number }> = [];
+  for (const win of windows) {
+    if (!win || !(win.e > win.s)) continue;
+    const tail = pushMergedSpan(merged, win);
+    if (tail.e - tail.s >= durationMs) return true;
+  }
+  return false;
+}
+
 /* =============================================================================
    CALENDAR — capacity math only (working hours, blackout-block availability).
    All functions operate on a `line` (string) + Date objects. The blackout-
@@ -465,14 +492,18 @@ export const Calendar = {
    * intentionally ignored: they can exhaust normal placement, but do not make
    * a fundamentally fittable order "inherently overlong". */
   hasNominalWindow(line: string, from: Date, durationMs: number): boolean {
-    const cur = new Date(from);
-    cur.setHours(0, 0, 0, 0);
-    for (let day = 0; day < 90; day++) {
-      const win = Calendar.workWindow(line, cur);
-      if (win && win[1].getTime() - win[0].getTime() >= durationMs) return true;
-      cur.setDate(cur.getDate() + 1);
-    }
-    return false;
+    const first = new Date(from);
+    first.setHours(0, 0, 0, 0);
+    // Windows that touch at midnight merge into one contiguous span (senior review I9, OQ47), the backward walk's rule.
+    const windows = function* (): Generator<{ s: number; e: number } | null> {
+      const cur = new Date(first);
+      for (let day = 0; day < 90; day++) {
+        const win = Calendar.workWindow(line, cur);
+        yield win ? { s: win[0].getTime(), e: win[1].getTime() } : null;
+        cur.setDate(cur.getDate() + 1);
+      }
+    };
+    return fitsMergedSpan(windows(), durationMs);
   },
 
   /** Backlog must preserve minute-level candidates: the established
@@ -497,8 +528,21 @@ export const Calendar = {
         continue;
       }
       if (cur < win[0]) cur = new Date(win[0]);
+      // Senior review I9 (OQ47): windows that touch at midnight are one contiguous span, so the bar may run on
+      // through the following days' windows for as long as each one opens exactly where the last one closed.
+      let spanEnd = win[1];
+      if (cur.getTime() + durationMs > spanEnd.getTime()) {
+        const probe = new Date(cur);
+        for (let hop = 0; hop < 90 && cur.getTime() + durationMs > spanEnd.getTime(); hop++) {
+          probe.setDate(probe.getDate() + 1);
+          probe.setHours(0, 0, 0, 0);
+          const nextWin = Calendar.workWindow(line, probe);
+          if (!nextWin || nextWin[0].getTime() !== spanEnd.getTime()) break;
+          spanEnd = nextWin[1];
+        }
+      }
       const end = new Date(cur.getTime() + durationMs);
-      if (end > win[1]) {
+      if (end > spanEnd) {
         cur.setDate(cur.getDate() + 1);
         cur.setHours(0, 0, 0, 0);
         continue;
@@ -680,9 +724,7 @@ export const Calendar = {
     const toSpans = (list: Array<{ start: Date; end: Date }>): MsSpan[] => {
       const out: MsSpan[] = [];
       for (const item of list) {
-        const span = { s: toMs(item.start), e: toMs(item.end) };
-        const prior = out[out.length - 1];
-        if (prior && span.s <= prior.e) { if (span.e > prior.e) prior.e = span.e; } else out.push(span);
+        pushMergedSpan(out, { s: toMs(item.start), e: toMs(item.end) });
       }
       return out;
     };
@@ -713,9 +755,7 @@ export const Calendar = {
         const start = clipStart ? lookbackStart : item.start, end = clipEnd ? nominalHi : item.end;
         if (!(start < end)) continue;
         wall.push({ start, end });
-        const span = { s: clipStart ? toMs(start) : item.s, e: clipEnd ? toMs(end) : item.e };
-        const prior = nominal[nominal.length - 1];
-        if (prior && span.s <= prior.e) { if (span.e > prior.e) prior.e = span.e; } else nominal.push(span);
+        pushMergedSpan(nominal, { s: clipStart ? toMs(start) : item.s, e: clipEnd ? toMs(end) : item.e });
       }
       nominalAvailable = wall.some(span => span.start < finishWall);
     } else {

@@ -5149,6 +5149,29 @@ test('OQ50 c: a never-policy order longer than every operating window queues as 
   assert.equal(fits.status, 'scheduled');
 });
 
+test('senior review I9: the optimizer overlong predicate merges windows that touch at midnight (24/7 line, night shift) and counts run == span as fitting', () => {
+  const synthetic = setupTruth({ current: null, definition: null });
+  // A short horizon makes the order fail to place, which is when neverOverlongReason is consulted: the predicate alone
+  // must not call an order overlong that the backward walk (merged spans) would place as one bar.
+  const run = (hoursByDay, runHours, horizonEnd = '2026-08-17T18:00:00') => {
+    const snapshot = setupSnapshot([scheduledTask('ol-a', runHours, 'RED', '2026-08-05T18:00:00')]);
+    snapshot.calendars = { L1: { workHours: hoursByDay } };
+    snapshot.plants = { P1: { workHours: hoursByDay } };
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(synthetic, { placementStart: at('2026-08-03T08:00:00'), horizonEnd: at(horizonEnd) }), 'due-date');
+    return result.dispositions.find(d => d.id === 'ol-a');
+  };
+  const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  assert.equal(run(all([0, 24]), 30).status, 'scheduled', '24/7: a 30 h run is placed as one contiguous bar');
+  assert.notEqual(run(all([0, 24]), 30, '2026-08-03T18:00:00').reason?.code, 'overlong_never', '24/7: 30 h that merely misses the horizon is not overlong');
+  const night = { 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null };   // Mon 22:00 -> Tue 06:00 = 8 h merged
+  assert.equal(run(night, 8).status, 'scheduled', 'run == merged span length is placed, not overlong');
+  assert.notEqual(run(night, 8, '2026-08-03T23:00:00').reason?.code, 'overlong_never', 'night shift: 8 h in an 8 h merged span is never overlong');
+  assert.equal(run(night, 8.5, '2026-08-03T23:00:00').reason?.code, 'overlong_never', 'longer than the merged span is overlong');
+  const equalWindows = all([8, 16]);
+  assert.notEqual(run(equalWindows, 8, '2026-08-03T10:00:00').reason?.code, 'overlong_never', 'U20: run == window length (equal-length windows)');
+  assert.equal(run(equalWindows, 9).reason?.code, 'overlong_never');
+});
+
 test('instability is keyed on the placed finish: a held finish with a moved start is stable, a moved finish is not (Reading A)', () => {
   const synthetic = setupTruth({ current: null, definition: null });
   const run = (priorStart, priorEnd) => {

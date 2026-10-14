@@ -348,6 +348,35 @@ describe('backward calendar primitives', () => {
         '2026-10-19 08:00 -> 2026-10-23 12:00');
     });
 
+    describe('senior review I9: one overlong definition (merged contiguous spans) on the forward, reversal and backward paths', () => {
+      const H = 3600 * 1000;
+      const night = () => ({ 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null });   // Mon 22:00 -> Tue 06:00 = one 8 h span
+      it('a 24/7 line: a 30 h contiguous run is not overlong anywhere', () => {
+        const line = plain('BW-I9A', everyDay([0, 24]));
+        assert.equal(Calendar.hasNominalWindow(line, at(D.mon, '08:00'), 30 * H), true, 'forward predicate');
+        assert.equal(Calendar.findContiguousSlot(line, at(D.mon, '08:00'), 30 * H).kind, 'slot', 'reversal-queue slot');
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.wed, '12:00'), 30 * 60, 'never', bopts()).kind, 'placed', 'backward walk');
+      });
+      it('a night shift crossing midnight is one span: 8 h fits, 8 h + 1 min is overlong, on all three paths', () => {
+        const line = plain('BW-I9B', night());
+        const from = at(D.mon, '00:00');
+        assert.equal(Calendar.hasNominalWindow(line, from, 8 * H), true, 'run == merged window length fits');
+        assert.equal(Calendar.hasNominalWindow(line, from, 8 * H + 60000), false);
+        assert.equal(Calendar.findContiguousSlot(line, from, 8 * H).kind, 'slot');
+        assert.equal(Calendar.findContiguousSlot(line, from, 8 * H + 60000).kind, 'overlong');
+        const fits = Calendar.allocateRuntimeBackward(line, at(D.tue, '06:00'), 480, 'never', bopts());
+        assert.equal(summary(fits), '2026-10-19 22:00 -> 2026-10-20 06:00');
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.tue, '06:00'), 481, 'never', bopts()).kind, 'overlong');
+      });
+      it('U20 boundaries: run == window length fits, and equal-length windows agree', () => {
+        const line = plain('BW-I9C', weekdays(8, 16));   // five equal 8 h windows, none touching
+        assert.equal(Calendar.hasNominalWindow(line, at(D.mon, '00:00'), 8 * H), true);
+        assert.equal(Calendar.hasNominalWindow(line, at(D.mon, '00:00'), 8 * H + 60000), false);
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.tue, '16:00'), 480, 'never', bopts()).kind, 'placed');
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.tue, '16:00'), 481, 'never', bopts()).kind, 'overlong');
+      });
+    });
+
     for (const zone of ['UTC', 'America/Chicago', 'Asia/Tokyo']) {
       it(`DST case of 4.2.5 (plantTz Chicago, Sun 8 Mar 2026, 5 h finishing 04:00 -> start Sat 22:00), viewer zone ${zone}`, async () => {
         await withZone(zone, () => {

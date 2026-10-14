@@ -4253,6 +4253,23 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('senior review I9: the reversal queue (placeForwardSequence, never) places a 24/7 30 h run as one bar and a night-shift 8 h run in its merged span', () => {
+    const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+    Store.setCalendar('I9-247', all([0, 24]), 'unit-test');
+    Store.setCalendar('I9-NIGHT', { 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null }, 'unit-test');
+    const mk = (line, hours) => [{ task: { id: 't', RUN_TIME: String(hours), MACHINE: line } }];
+    const from = at(17, 8);   // a Monday
+    const long = Engine.placeForwardSequence('I9-247', mk('I9-247', 30), from, 'never');
+    assert.equal(long.overlong.length, 0);
+    assert.equal(long.placed.length, 1);
+    assert.equal(long.placed[0].end.getTime() - long.placed[0].start.getTime(), 30 * 3600000);
+    const fits = Engine.placeForwardSequence('I9-NIGHT', mk('I9-NIGHT', 8), from, 'never');
+    assert.equal(fits.overlong.length, 0);
+    assert.equal(fits.placed.length, 1);
+    const over = Engine.placeForwardSequence('I9-NIGHT', mk('I9-NIGHT', 8.5), from, 'never');
+    assert.equal(over.overlong.length, 1);
+  });
+
   test('senior review I10: running / frozen / the effective-firmed set apply only to rows with a persisted placement', () => {
     const fx = recFixture();
     try {
