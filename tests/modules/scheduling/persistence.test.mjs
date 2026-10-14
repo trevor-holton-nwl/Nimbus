@@ -1366,6 +1366,33 @@ test('_saveCache never writes firmedIds or per-task firmed', () => {
   globalThis.localStorage.removeItem(Config.LS_KEY);
 });
 
+test('_saveCache never writes the session-only derivationIssue / systemMove notes; a refreshed row drops them', async () => {
+  const task = firmTask('wr-notes', {});
+  task.derivationIssue = { code: 'finish_moved_earlier', from: new Date('2026-09-09T20:00:00'), to: new Date('2026-09-09T19:00:00') };
+  task.systemMove = { from: new Date('2026-09-09T08:00:00'), to: new Date('2026-09-09T07:00:00'), reason: 'run_time_changed' };
+  Store.setTasks([task], 'unit-test');
+  Persistence._saveCache();
+  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
+  assert.ok(parsed.tasks.every(t => !('derivationIssue' in t) && !('systemMove' in t)), 'neither note reaches the browser cache');
+  assert.ok(Store.tasks['wr-notes'].derivationIssue, 'the live task keeps its notes');
+  assert.ok(!('derivationIssue' in Persistence._taskEditSnapshot(Store.tasks['wr-notes'])), 'nor the save payload / refresh baseline');
+  globalThis.localStorage.removeItem(Config.LS_KEY);
+
+  // A server refresh of the row replaces whatever the engine derived, so the notes go with it.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [{
+    id: 'wr-notes', MACHINE: 'L', PLANT: 'P', RUN_TIME: 4, row_version: 7,
+    start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T12:00:00', original_start_date: '2026-09-09T08:00:00',
+    original_end_date: '2026-09-09T12:00:00', runtime_schedule_mismatch: false, firmed: false,
+  }], missing: [] }) });
+  try {
+    Persistence._refreshTasks(['wr-notes']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['wr-notes'].derivationIssue, null);
+    assert.equal(Store.tasks['wr-notes'].systemMove, null);
+  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
+});
+
 test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending calendar deletes and What-If; haltCacheWrites stops _saveCache', async () => {
   const { Sandbox } = await import('../../../frontend/optimization/sandbox.mjs');
   const sets = ['_dirtyIds', '_forceIds', '_conflictedIds', '_firmDirtyIds'];

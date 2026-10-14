@@ -84,6 +84,31 @@ export const CalendarSync = {
   _pendingLineHours: {} as Record<string, Record<string, WorkHours>>,   // plant → { line → workHours } awaiting a batched flush
   _whDebounce: {} as Record<string, ReturnType<typeof setTimeout>>,         // plant → timeout id
   _deferredHydrationPlant: null as string | null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
+  /** Per plant: has the SERVER's calendar landed in Store? `pending` until the first GET resolves, `hydrated`
+   *  once `_applyConfig` has run, `failed` when the GET failed and nothing from the server is on hand. `lines`
+   *  are the lines the server holds an hours row for (the client default is never a server row). The
+   *  backward-scheduling reconcile derives starts only from a hydrated plant (OQ51): a derive-and-save on the
+   *  client's default 07:00-19:00 would be written to the server as truth. */
+  _hydration: {} as Record<string, { state: 'hydrated' | 'pending' | 'failed'; lines: Set<string> }>,
+
+  /** Where the plant's calendar stands: `'hydrated'` (the server's rows are in Store), `'pending'` (not fetched
+   *  yet, or in flight) or `'failed'` (the fetch failed and no earlier server copy is on hand). */
+  calendarState(plant: string | null | undefined): 'hydrated' | 'pending' | 'failed' {
+    return (plant && this._hydration[plant]?.state) || 'pending';
+  },
+
+  /** True when the server returned its own hours row for `line` in `plant` (OQ62). A line riding on the client's
+   *  default calendar has no server row and is not derived. */
+  hasServerLineCalendar(plant: string | null | undefined, line: string): boolean {
+    return !!plant && this._hydration[plant]?.state === 'hydrated' && this._hydration[plant].lines.has(line);
+  },
+
+  /** Record a plant's hydration state (the fetch path, and tests that stand in for it). `lines` replaces the
+   *  server line set only when given. */
+  _setHydration(plant: string, state: 'hydrated' | 'pending' | 'failed', lines?: Iterable<string>): void {
+    const prior = this._hydration[plant];
+    this._hydration[plant] = { state, lines: lines ? new Set(lines) : (prior?.lines ?? new Set<string>()) };
+  },
 
   /* ----- load / hydration ----------------------------------------------- */
   fetchPlantConfig(plant: string | null): Promise<void> {
@@ -92,6 +117,9 @@ export const CalendarSync = {
     // resolves reliably even when the master-data fetch REJECTED (the .finally still
     // runs us). Otherwise the migration/clear filters misfire on a stale/empty index. (F4)
     Store.rebuildPlantIndex();
+    // A plant that was never hydrated is `pending` while the GET is in flight; one that already holds a server
+    // copy keeps it (a refetch that fails must not un-know what the server told us earlier).
+    if (this._hydration[plant]?.state !== 'hydrated') this._setHydration(plant, 'pending');
     return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
                             { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PlantCalendarConfig> : Promise.reject(new Error(`HTTP ${r.status}`)))
@@ -100,6 +128,7 @@ export const CalendarSync = {
       .catch(e => {
         // The localStorage restore already painted the UI — degrade gracefully.
         ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
+        if (CalendarSync._hydration[plant]?.state !== 'hydrated') CalendarSync._setHydration(plant, 'failed');
         Toast.show(Util.t('toast.calendar_offline_cache'), 'info');
       });
   },
@@ -218,6 +247,9 @@ export const CalendarSync = {
             start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusPlantBlock);
         }
       }
+      // The server's calendar is now in Store: mark it before the emits below, because the backward-scheduling
+      // reconcile subscribes to `calendar:change` and asks `calendarState` synchronously.
+      this._setHydration(plant, 'hydrated', Object.keys(cfg.line_work_hours || {}));
       // Notify subscribers + refresh the offline cache with backend truth. These
       // emits fire while _hydrating=true, so no POST-back to the backend.
       Store.emit({ type: 'calendar:change',    source: 'calendar-sync', plant });

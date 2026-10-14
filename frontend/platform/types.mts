@@ -89,6 +89,8 @@ export interface NimbusTask {
   placement_exception?: 'overtime' | 'overlong' | null;
   /** Session-only note from the engine about a derivation it made or refused (never persisted). */
   derivationIssue?: { code: string; from?: Date; to?: Date; detail?: string } | null;
+  /** Session-only note: the start the engine moved this row from/to on its own (reconcile) and why. Never persisted. */
+  systemMove?: { from: Date; to: Date; reason: string } | null;
   /** Server-computed field describing where an order's RUN_TIME value came from (routing runtime feature). */
   run_time_source?: string | null;
   /** Server-computed metadata sidecar for the RUN_TIME source determination. */

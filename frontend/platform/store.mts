@@ -404,6 +404,15 @@ export const Store = {
     return { inserted: Object.keys(this._state.tasks).length, collisions };
   },
 
+  /** The session-only derivation notes (`derivationIssue`, `systemMove`) describe the engine's last derivation of
+   *  a row. The next edit of its dates, machine or run time makes them stale, so a change-set that touches
+   *  those fields and does not itself carry a note clears them (the reconcile always carries both). */
+  _clearStaleNotes(task: NimbusTask, changes: Partial<NimbusTask>): void {
+    if (!('start_date' in changes || 'end_date' in changes || 'MACHINE' in changes || 'RUN_TIME' in changes)) return;
+    if (!('derivationIssue' in changes) && task.derivationIssue) task.derivationIssue = null;
+    if (!('systemMove' in changes) && task.systemMove) task.systemMove = null;
+  },
+
   // Update one task with a partial change-set.
   // NOTE: we replace the task *reference* (prev → next) rather than mutating
   // in place, so subscribers (e.g. AG Grid, diff-rebuild) can diff by identity.
@@ -417,6 +426,7 @@ export const Store = {
       next.planning_status = 'scheduled';
       next.planning_reason = null;
     }
+    Store._clearStaleNotes(next, changes);
     Store._normalizeDates(next);
     this._state.tasks[id] = next;
     // Keep the _tasksByPlant index coherent with this reference swap. That index caches
@@ -472,6 +482,7 @@ export const Store = {
       const task = this._state.tasks[p.id];
       if (!task) continue;
       Object.assign(task, p.changes);
+      Store._clearStaleNotes(task, p.changes);
       if (p.changes.planning_status === undefined && p.changes.start_date && p.changes.end_date) {
         task.planning_status = 'scheduled';
         task.planning_reason = null;

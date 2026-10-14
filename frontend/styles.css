@@ -2551,6 +2551,21 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 .concurrency-off .tab-panel,
 .concurrency-off .alert-drawer { margin-top: 34px; }
 
+/* Derivation-paused banner (backward scheduling): the plant's calendar has not loaded, so no start time is recalculated */
+#derive-paused-banner {
+  position: fixed;
+  top: var(--chrome-h); left: 0; right: 0;
+  z-index: 451;
+  background: var(--warn-soft);
+  border-bottom: 1px solid var(--warn);
+  padding: 6px 16px;
+  font-size: 12.5px; font-weight: 500;
+  color: var(--warn);
+}
+#derive-paused-banner[hidden] { display: none; }
+.derive-paused .tab-panel,
+.derive-paused .alert-drawer { margin-top: 34px; }
+
 /* =============================================================================
    P7: PRINT / EXPORT
    ========================================================================== */

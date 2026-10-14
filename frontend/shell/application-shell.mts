@@ -2252,9 +2252,13 @@ const App = {
   // This is deliberately NOT the same as 'engine-runtime-reconcile'
   // (Engine.reconcileRuntimeSchedules' own Store.updateMany source): a
   // reconcile-resized bar genuinely still needs saving through the normal
-  // schedule save path, so that source stays un-skipped here.
+  // schedule save path, so that source stays un-skipped here. Its sibling
+  // 'engine-runtime-reconcile-display' IS skipped: that is a never-placed row
+  // the reconcile only derived for display (backward scheduling Task 2.6), and
+  // Save must leave the server row never-placed.
   _trackDirty(evt: StoreEvent): void {
-    if (evt.source === 'refresh' || evt.source === 'note' || evt.source === 'distribution') return;
+    if (evt.source === 'refresh' || evt.source === 'note' || evt.source === 'distribution'
+      || evt.source === 'engine-runtime-reconcile-display') return;
     const force = evt.source === 'engine' || evt.source === 'undo';
     if (evt.type === 'task:update') {
       Persistence._dirtyIds.add(String(evt.id));

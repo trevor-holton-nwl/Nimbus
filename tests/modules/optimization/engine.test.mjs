@@ -23,7 +23,7 @@
 // ./frontend/optimization/engine.mjs) — a plain string inside a template
 // literal, not a static import, so `npm run build` cannot catch a stale path
 // there; only a whole-tree text grep for the old filenames would.
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -34,6 +34,7 @@ import {
 import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
 
 const require = createRequire(import.meta.url);
@@ -4051,5 +4052,329 @@ test('Engine.pushFinishPatches moves finishes, skips firmed and unholdable order
     assert.equal(patches[0].changes.start_date.getHours(), 11);
     assert.equal(fx.toasts.length, 0);
     assert.equal(Calendar._runCache, null);
+  } finally { fx.restore(); }
+});
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 2.6 (OQ3, OQ4, OQ33, OQ34, OQ51, OQ53, OQ62): the reconcile derives starts from the
+// held finish. A never-placed row is derived for DISPLAY only (a non-dirty write, Save leaves the server row
+// never-placed); a stale-flagged row gets a DIRTY patch the next Save persists (the cutover path).
+// ---------------------------------------------------------------------------
+describe('reconcile (finish-anchored)', () => {
+  const REC_SOURCE = 'engine-runtime-reconcile';
+  const DISPLAY_SOURCE = 'engine-runtime-reconcile-display';
+
+  /** One plant on a hydrated server calendar (default Mon-Fri 07:00-19:00), clock pinned to Thu 20 Aug 09:00. */
+  function recFixture({ policy = 'never', timezone = LOCAL_TZ, state = 'hydrated', lineNames = ['A'], serverLineNames } = {}) {
+    const plant = `R26-${Math.random().toString(36).slice(2, 8)}`;
+    const lines = lineNames.map(name => `${plant}-${name}`);
+    const priorMasterData = Store.masterData;
+    Store.setMasterData({
+      plants: [{ plant, split_order_policy: policy, ...(timezone ? { timezone } : {}) }],
+      lines: lines.map(machine => ({ machine, plant })),
+    }, 'unit-test');
+    const restoreClock = pinPlantClock('2026-08-20T09:00:00');
+    const toasts = captureToasts();
+    CalendarSync._setHydration(plant, state, serverLineNames ? serverLineNames.map(name => `${plant}-${name}`) : lines);
+    const writes = [];
+    const unsubscribe = Store.subscribe(evt => {
+      if (evt.type === 'tasks:bulkUpdate' && String(evt.source).startsWith(REC_SOURCE)) writes.push({ source: evt.source, ids: [...evt.ids] });
+    }, 'reconcile-test');
+    const priorFrozen = Store.frozenHorizonEnd;
+    return {
+      plant, line: lines[0], lines, toasts: toasts.toasts, writes,
+      task(id, over = {}) {
+        return { id, PLANT: plant, plant, MACHINE: lines[0], RUN_TIME: '4', user_scheduled: false, ...over };
+      },
+      restore() {
+        unsubscribe(); toasts.restore(); restoreClock();
+        Store.setMasterData(priorMasterData, 'unit-test');
+        Store.setFrozenHorizonEnd(priorFrozen, 'unit-test');
+        Store.setTasks([], 'unit-test');
+        for (const line of lines) delete Store.calendars[line];
+        delete CalendarSync._hydration[plant];
+        Engine.derivePausedPlants.delete(plant);
+      },
+    };
+  }
+  const at = (day, hour) => new Date(2026, 7, day, hour);
+
+  test('a never-placed row derives backward from its due instant and is a display-only (non-dirty) write', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('np', {
+        original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10), runtime_schedule_mismatch: false,
+      })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.np;
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'due 17:00 minus 4 h');
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime());
+      assert.deepEqual(fx.writes, [{ source: DISPLAY_SOURCE, ids: ['np'] }], 'committed through the non-dirty source only');
+      assert.equal(t.user_scheduled, false, 'a display derivation never claims the row is placed');
+      assert.equal(t.derivationIssue ?? null, null);
+      assert.equal(t.systemMove.reason, 'due_date_derivation');
+      assert.equal(fx.toasts.length, 0, 'no batch toast for display-only rows');
+    } finally { fx.restore(); }
+  });
+
+  test('a stale placed row holds its stored finish and gets a dirty patch carrying both edges', () => {
+    const fx = recFixture();
+    try {
+      // Run time grew from 4 h to 6 h: the 17:00 finish holds, the start moves earlier.
+      Store.setTasks([fx.task('st', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      const sawMismatch = [];
+      const stop = Store.subscribe(evt => { if (String(evt.source) === REC_SOURCE) sawMismatch.push(Store.tasks.st.runtime_schedule_mismatch); }, 'rec-flag');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      stop();
+      const t = Store.tasks.st;
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime(), 'the finish is held');
+      assert.equal(t.start_date.getTime(), at(26, 11).getTime());
+      assert.deepEqual(t.scheduleSegments ?? [], []);
+      assert.equal(t.runtime_schedule_mismatch, false, 'display state until the server clears it on Save');
+      assert.deepEqual(sawMismatch, [false]);
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['st'] }]);
+      assert.equal(t.user_scheduled, true);
+      assert.deepEqual([t.systemMove.from.getTime(), t.systemMove.to.getTime()], [at(26, 13).getTime(), at(26, 11).getTime()]);
+      assert.equal(t.systemMove.reason, 'run_time_changed');
+      assert.equal(fx.toasts.length, 1, 'one batch toast');
+    } finally { fx.restore(); }
+  });
+
+  test('Review Focus 3: a running stale row keeps its start and moves its finish later', () => {
+    const fx = recFixture();
+    try {
+      // Now is Thu 09:00: started 08:00, was due to end 12:00 (4 h); the run time grew to 6 h.
+      Store.setTasks([fx.task('run', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(20, 8), end_date: at(20, 12),
+      })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.run;
+      assert.equal(t.start_date.getTime(), at(20, 8).getTime(), 'a running order never loses its start');
+      assert.equal(t.end_date.getTime(), at(20, 14).getTime(), 'the finish follows the new run time');
+      assert.equal(t.runtime_schedule_mismatch, false);
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['run'] }]);
+      assert.equal(t.derivationIssue ?? null, null, 'no reversal, no overlap repair');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ4: a firmed row is re-derived like any other, stays firmed, and a start inside the frozen window is flagged', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('fm', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      Store.setFirmed(['fm'], true, 'unit-test');
+      Store.setFrozenHorizonEnd(at(27, 0), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.fm;
+      assert.equal(t.start_date.getTime(), at(26, 11).getTime());
+      assert.equal(Store.isFirmed('fm'), true, 'nothing is un-firmed');
+      assert.equal(t.firmed, true);
+      assert.equal(t.derivationIssue.code, 'frozen_window_crossed');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ53: three reversing orders on one line land X at now, Y after X, Z in the next window (finish order)', () => {
+    const fx = recFixture();
+    try {
+      // Due dates all in the past (now is Thu 09:00), 4 h each on a 07:00-19:00 line with the never-split policy.
+      Store.setTasks([
+        fx.task('z', { original_end_date: at(20, 8) }),
+        fx.task('x', { original_end_date: at(19, 17) }),
+        fx.task('y', { original_end_date: at(19, 18) }),
+      ].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const span = id => [Store.tasks[id].start_date.getTime(), Store.tasks[id].end_date.getTime()];
+      assert.deepEqual(span('x'), [at(20, 9).getTime(), at(20, 13).getTime()], 'X starts at now');
+      assert.deepEqual(span('y'), [at(20, 13).getTime(), at(20, 17).getTime()], 'Y follows X');
+      assert.deepEqual(span('z'), [at(21, 7).getTime(), at(21, 11).getTime()], 'Z does not fit the rest of today and takes the next window');
+      for (const id of ['x', 'y', 'z']) {
+        assert.deepEqual(Store.tasks[id].derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' }, id);
+        assert.equal(Store.tasks[id].systemMove.reason, 'reversal_forward');
+      }
+      assert.deepEqual(fx.writes.map(w => w.source), [DISPLAY_SOURCE], 'never-placed reversals are display-only');
+    } finally { fx.restore(); }
+  });
+
+  test('a stale reversing row records run_time_grew and is dirty; reason cutover tags every reversal cutover', () => {
+    const fx = recFixture();
+    try {
+      const stale = (id) => fx.task(id, {
+        user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(19, 10), end_date: at(19, 14),
+      });
+      Store.setTasks([stale('g1')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(Store.tasks.g1.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' });
+      assert.equal(Store.tasks.g1.start_date.getTime(), at(20, 9).getTime());
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['g1'] }], 'a stale row is a dirty write');
+
+      Store.setTasks([stale('g2')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant, { reason: 'cutover' });
+      assert.deepEqual(Store.tasks.g2.derivationIssue, { code: 'reversal_forward', detail: 'cutover' });
+      assert.equal(Store.tasks.g2.systemMove.reason, 'cutover');
+    } finally { fx.restore(); }
+  });
+
+  test('Review Focus 4: a failed or pending calendar derives nothing, moves nothing, and raises the paused banner', () => {
+    const fx = recFixture({ state: 'failed' });
+    const priorDocument = globalThis.document;
+    const banner = { hidden: true, textContent: '' };
+    globalThis.document = { getElementById: id => (id === 'derive-paused-banner' ? banner : null), body: { classList: { add() {}, remove() {}, toggle() {} } } };
+    try {
+      Store.setTasks([fx.task('f1', {
+        original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10),
+      }), fx.task('f2', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.f1.start_date.getTime(), at(18, 6).getTime(), 'nothing moved on the default hours');
+      assert.equal(Store.tasks.f2.start_date.getTime(), at(26, 13).getTime());
+      assert.equal(Store.tasks.f2.runtime_schedule_mismatch, true, 'the flag stays for the next hydrated pass');
+      assert.deepEqual(fx.writes, []);
+      assert.equal(fx.toasts.length, 0);
+      assert.ok(Engine.derivePausedPlants.has(fx.plant));
+      assert.equal(banner.hidden, false);
+      assert.match(banner.textContent, /ui\.derive_paused/);
+
+      CalendarSync._setHydration(fx.plant, 'pending');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.writes, [], 'pending is not hydrated either');
+
+      CalendarSync._setHydration(fx.plant, 'hydrated', fx.lines);
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.ok(fx.writes.length > 0, 'derivation resumes once the server calendar is in');
+      assert.equal(Engine.derivePausedPlants.has(fx.plant), false);
+      assert.equal(banner.hidden, true);
+    } finally { globalThis.document = priorDocument; fx.restore(); }
+  });
+
+  test('OQ62: a line with no server calendar row is untouched and carries line_no_calendar', () => {
+    const fx = recFixture({ lineNames: ['A', 'B'], serverLineNames: ['A'] });
+    try {
+      const withRow = fx.task('ok', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) });
+      const noRow = fx.task('nr', { MACHINE: fx.lines[1], original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) });
+      Store.setTasks([withRow, noRow], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.ok.start_date.getTime(), at(26, 13).getTime());
+      assert.equal(Store.tasks.nr.start_date.getTime(), at(18, 6).getTime(), 'untouched');
+      assert.equal(Store.tasks.nr.end_date.getTime(), at(18, 10).getTime());
+      assert.equal(Store.tasks.nr.derivationIssue.code, 'line_no_calendar');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ52: a plant with no time zone is skipped whole, every row carries plant_no_timezone, nothing is toasted twice', () => {
+    const fx = recFixture({ timezone: null });
+    try {
+      Store.setTasks([
+        fx.task('n1', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('n2', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      for (const id of ['n1', 'n2']) assert.equal(Store.tasks[id].derivationIssue.code, 'plant_no_timezone', id);
+      assert.equal(Store.tasks.n1.start_date.getTime(), at(18, 6).getTime());
+      assert.equal(Store.tasks.n2.start_date.getTime(), at(26, 13).getTime());
+      assert.equal(Store.tasks.n2.runtime_schedule_mismatch, true);
+      assert.equal(fx.toasts.filter(t => /system_moved/.test(t.msg)).length, 0);
+      assert.equal(fx.toasts.length, 1, 'only the one-time plant toast from Store.plantNow');
+    } finally { fx.restore(); }
+  });
+
+  test('a row carrying placement_exception, and a queued row, are left alone', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('pe', { RUN_TIME: '5', user_scheduled: true, runtime_schedule_mismatch: true, placement_exception: 'overlong',
+          start_date: at(24, 8), end_date: at(28, 8) }),
+        fx.task('qd', { planning_status: 'needs_planning', planning_reason: { code: 'planner_unscheduled', message: 'x' },
+          start_date: null, end_date: null, original_end_date: at(26, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.pe.start_date.getTime(), at(24, 8).getTime());
+      assert.equal(Store.tasks.pe.end_date.getTime(), at(28, 8).getTime());
+      assert.equal(Store.tasks.pe.runtime_schedule_mismatch, true);
+      assert.equal(Store.tasks.qd.start_date, null);
+      assert.deepEqual(fx.writes, []);
+    } finally { fx.restore(); }
+  });
+
+  test('the batch toast counts dirty patches only (display-only rows are not counted)', () => {
+    const fx = recFixture();
+    const priorT = Util.t;
+    Util.t = (key, vars) => key === 'toast.system_moved_n' ? `${key}:${vars.count}` : priorT.call(Util, key, vars);
+    try {
+      Store.setTasks([
+        fx.task('d1', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
+        fx.task('d2', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(27, 13), end_date: at(27, 17) }),
+        fx.task('np', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const dirtyCount = fx.writes.filter(w => w.source === REC_SOURCE).reduce((n, w) => n + w.ids.length, 0);
+      assert.equal(dirtyCount, 2);
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.system_moved_n:2']);
+    } finally { Util.t = priorT; fx.restore(); }
+  });
+
+  test('overlong under a never-split plant queues the row (overlong_never); run time zero places nothing and says so', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('ol', { RUN_TIME: '20', original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('rz', { RUN_TIME: '0', original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const ol = Store.tasks.ol;
+      assert.equal(ol.planning_status, 'needs_planning');
+      assert.equal(ol.planning_reason.code, 'overlong_never');
+      assert.equal(ol.start_date, null);
+      assert.deepEqual(ol.scheduleSegments, []);
+      assert.equal(Store.tasks.rz.start_date.getTime(), at(18, 6).getTime(), 'no bar is derived');
+      assert.equal(Store.tasks.rz.derivationIssue.code, 'run_time_zero');
+    } finally { fx.restore(); }
+  });
+
+  test('finish_moved_earlier is recorded with the held and the derived finish when the walk cannot hold it', () => {
+    const fx = recFixture();
+    try {
+      // 20:00 is after the 19:00 close: the walk lands on the latest operating instant before it.
+      Store.setTasks([fx.task('fe', { RUN_TIME: '4', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 16), end_date: at(26, 20) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.fe;
+      assert.equal(t.end_date.getTime(), at(26, 19).getTime());
+      assert.equal(t.derivationIssue.code, 'finish_moved_earlier');
+      assert.equal(t.derivationIssue.from.getTime(), at(26, 20).getTime());
+      assert.equal(t.derivationIssue.to.getTime(), at(26, 19).getTime());
+    } finally { fx.restore(); }
+  });
+
+  test('the next edit of a task clears its session-only derivation notes', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('cl', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10), RUN_TIME: '0' })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.cl.derivationIssue.code, 'run_time_zero');
+      Store.updateMany([{ id: 'cl', changes: { start_date: at(26, 9), end_date: at(26, 13) } }], 'unit-test');
+      assert.equal(Store.tasks.cl.derivationIssue ?? null, null);
+      assert.equal(Store.tasks.cl.systemMove ?? null, null);
+    } finally { fx.restore(); }
+  });
+});
+
+test('Task 2.5 carry-in: only a releasable queue code takes the release-reversal path', () => {
+  const fx = manualFixture();
+  try {
+    const queued = { id: 'g-guard', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4',
+      planning_status: 'needs_planning', planning_reason: { code: 'planner_unscheduled', message: 'x' },
+      start_date: null, end_date: null, scheduleSegments: [] };
+    // A finish in the past forces a reversal; a planner-unscheduled row is not a release, so the normal rule applies.
+    const patch = Engine.manualSchedulePatchFor(queued, fx.line, new Date('2026-08-20T10:00:00'), 'never');
+    assert.equal(patch, null);
+    assert.equal(Engine.lastManualRefusal, 'finish_cannot_hold');
   } finally { fx.restore(); }
 });

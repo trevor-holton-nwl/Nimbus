@@ -1417,6 +1417,9 @@ export const Persistence = {
           tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
           tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
           tk.placement_exception = row.placement_exception ?? null;
+          // The server row replaces whatever the engine derived locally, so its session notes go with it.
+          tk.derivationIssue = null;
+          tk.systemMove = null;
           // The server's manual firm is authoritative; _normalizeDates re-syncs firmedIds from it.
           const serverFirmed = row.firmed;
           if (typeof serverFirmed === 'boolean') tk.firmed = serverFirmed;
@@ -1582,7 +1585,9 @@ export const Persistence = {
         _optimizerDirtyIds: [...Persistence._forceIds].filter(id => Persistence._dirtyIds.has(id)),
         _dirtyIds:      [...Persistence._dirtyIds],
         // firm is server state: never cached (a cached copy could revive a stale firm).
-        tasks:          Store.tasksArr.map(({ firmed: _firmed, ...rest }) => rest as Record<string, unknown>),
+        // The session-only derivation notes (`derivationIssue`, `systemMove`) are never cached either: they describe
+        // this session's derivation, and a restored copy would keep announcing a move that no longer applies.
+        tasks:          Store.tasksArr.map(({ firmed: _firmed, derivationIssue: _issue, systemMove: _move, ...rest }) => rest as Record<string, unknown>),
         blocks:         Store.blocks,
         calendars:      Store.calendars,
         plants:         Store.plants,

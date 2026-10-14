@@ -67,6 +67,7 @@ import { Config, Util, ErrorLog, PerfMonitor, Toast, Modal } from '../platform/f
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
+import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
@@ -139,6 +140,27 @@ export type FinishAnchoredResult =
 export interface FinishAnchoredOptions {
   /** Return `{kind:'reached_now'}` unresolved instead of reversing forward from now. */
   deferReversal?: boolean;
+  /** Minutes of setup to reserve before the start (Task 3.2 fills this; ignored until then). */
+  setupMinutes?: number;
+}
+
+/** One order in a forward sequence: `notBefore` is the earliest it may start (the cursor still wins when later). */
+export interface ForwardSequenceItem { task: NimbusTask; notBefore?: Date }
+
+/** What `Engine.placeForwardSequence` placed, and why it stopped when it did not place everything. */
+export interface ForwardSequenceResult<T extends ForwardSequenceItem> {
+  placed: Array<{ item: T; start: Date; end: Date; scheduleSegments?: OrderScheduleSegment[] }>;
+  /** Items skipped for a missing or non-positive run time. */
+  invalidRuntime: T[];
+  /** Items placed although longer than any single working window (the contiguous policy). */
+  overlong: T[];
+  /** The item the calendar could not place; the walk ends there. */
+  failure: { item: T; reason: 'no-operating-interval' | 'search-exhausted' } | null;
+}
+
+export interface ReconcileOptions {
+  /** `'cutover'` (Task 4.2) tags every reversal `detail: 'cutover'`. */
+  reason?: string;
 }
 
 /** Options for a manual (planner) placement. */
@@ -1350,8 +1372,9 @@ export const Engine = {
     const finish = Util.snap(requestedFinish);
     const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
     const queuedCode = task.planning_status === 'needs_planning' ? task.planning_reason?.code : undefined;
-    const released: Partial<NimbusTask> = queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap'
-      ? { planning_status: 'scheduled', planning_reason: null } : {};
+    // Only these two queue reasons are releasable by a placement; any other queued row follows the ordinary rule.
+    const releasable = queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap';
+    const released: Partial<NimbusTask> = releasable ? { planning_status: 'scheduled', planning_reason: null } : {};
 
     if (opts.holdStartIfRunning && task.start_date && Engine.isInProgress(task)) {
       // OQ3: it is already producing, so its start cannot move; the finish follows from the new run time.
@@ -1404,7 +1427,7 @@ export const Engine = {
     }
     if (result.kind === 'reached_now') return refuse('no_operating_window');   // unreachable: reversal is not deferred
     if (result.finishMoved) {
-      if (result.reversed && queuedCode) {
+      if (result.reversed && releasable) {
         // Releasing a late over-cap row: nothing was held, so the forward reversal from now is the answer.
         return { ...result.changes, MACHINE: line, ...released,
           derivationIssue: { code: 'reversal_forward', detail: 'due_date_past' } };
@@ -1451,36 +1474,250 @@ export const Engine = {
     return patches;
   },
 
-  /** Repair schedules whose authoritative runtime changed after their last
-   * valid aggregate was persisted. The existing parent start is the anchor;
-   * failures intentionally leave the previous valid intervals and their
-   * critical mismatch flag in place. Firmed is parent-level only and does not
-   * suppress this required runtime correction. */
-  reconcileRuntimeSchedules(plant: string | null): void {
+  /** Plants whose derive-and-save is paused because their server calendar has not landed (OQ51). Session only;
+   *  `_renderDerivePaused` shows the banner while the set is non-empty. */
+  derivePausedPlants: new Set<string>(),
+
+  _setDerivePaused(plant: string, paused: boolean): void {
+    if (paused) Engine.derivePausedPlants.add(plant); else Engine.derivePausedPlants.delete(plant);
+    Engine._renderDerivePaused();
+  },
+
+  _renderDerivePaused(): void {
+    if (typeof document === 'undefined') return;
+    const banner = document.getElementById('derive-paused-banner');
+    if (!banner) return;
+    const plants = [...Engine.derivePausedPlants];
+    banner.hidden = plants.length === 0;
+    banner.textContent = plants.length ? Util.t('ui.derive_paused', { plant: plants.join(', ') }) : '';
+    document.body?.classList?.toggle('derive-paused', plants.length > 0);
+  },
+
+  /** Re-derive starts from the held finish (backward scheduling OQ3, OQ4, OQ33, OQ34, OQ51, OQ53, OQ62).
+   *
+   * Which rows: `runtime_schedule_mismatch` (the stored start may be out of date) or never placed
+   * (`!user_scheduled`); queued rows and rows carrying `placement_exception` are left alone. The held finish
+   * is the anchor: a placed row's stored end, a never-placed row's due instant. A RUNNING placed row keeps its
+   * start and lets the finish follow the run time (OQ3, no reversal). A firmed row is re-derived like any other
+   * and stays firmed (OQ4); a derived start that lands in the frozen window is only noted.
+   *
+   * Two write kinds. A row the server flagged stale gets a DIRTY patch (the cutover path: the next Save persists
+   * it and the server clears the flag). A never-placed row that is not flagged is derived for DISPLAY only
+   * (source `engine-runtime-reconcile-display`, skipped by the dirty tracker), so Save leaves the server row
+   * never-placed. Every patch carries both edges (and the segments), and every touched or skipped row carries a
+   * session-only `derivationIssue`.
+   *
+   * Nothing is derived from a plant whose server calendar is `pending` or `failed` (default 07:00-19:00 hours
+   * would be saved as truth), from a plant with no time zone, or on a line with no server calendar row. Rows
+   * whose walk reaches "now" are collected per line and placed forward in finish order from now (OQ53 b).
+   * No undo entry (OQ57); one Toast counts the dirty patches. `opts.reason === 'cutover'` tags the reversals. */
+  reconcileRuntimeSchedules(plant: string | null, opts: ReconcileOptions = {}): void {
     if (!plant) return;
+    const candidates = Store.tasksByPlant(plant).filter(task =>
+      (task.runtime_schedule_mismatch || !task.user_scheduled)
+      && task.planning_status !== 'needs_planning' && !task.placement_exception && !!task.MACHINE);
+    if (!candidates.length) { Engine._setDerivePaused(plant, false); return; }
+    // OQ51: only an authoritative (server) calendar may derive a start; otherwise wait for it.
+    if (CalendarSync.calendarState(plant) !== 'hydrated') { Engine._setDerivePaused(plant, true); return; }
+    Engine._setDerivePaused(plant, false);
+
+    interface ReconcilePatch { id: string; changes: Partial<NimbusTask>; dirty: boolean }
+    type Issue = NonNullable<NimbusTask['derivationIssue']>;
+    const patches: ReconcilePatch[] = [];
+    const sameIssue = (a: NimbusTask['derivationIssue'], b: NimbusTask['derivationIssue']): boolean =>
+      (a ?? null) === (b ?? null) || (!!a && !!b && a.code === b.code && a.detail === b.detail
+        && a.from?.getTime() === b.from?.getTime() && a.to?.getTime() === b.to?.getTime());
+    // A note on a row the reconcile did not (or could not) place: session-only, never dirty, and not repeated.
+    const noteOnly = (task: NimbusTask, issue: Issue): void => {
+      if (sameIssue(task.derivationIssue, issue)) return;
+      patches.push({ id: task.id, changes: { derivationIssue: issue }, dirty: false });
+    };
+    const commit = (): void => {
+      const dirty = patches.filter(patch => patch.dirty);
+      const display = patches.filter(patch => !patch.dirty);
+      if (dirty.length) Store.updateMany(dirty.map(({ id, changes }) => ({ id, changes })), 'engine-runtime-reconcile');
+      if (display.length) Store.updateMany(display.map(({ id, changes }) => ({ id, changes })), 'engine-runtime-reconcile-display');
+      if (dirty.length) Toast.show(Util.t('toast.system_moved_n', { count: dirty.length }), 'info', 6000);
+    };
+
+    const plantNow = Store.plantNow(plant);
+    if (!plantNow) {
+      // OQ52: a plant with no zone has no clock, so nothing is derived (Store.plantNow already announced it once).
+      for (const task of candidates) noteOnly(task, { code: 'plant_no_timezone' });
+      commit();
+      return;
+    }
     const policy = Engine.splitOrderPolicyFor(plant);
-    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+    const floor = Calendar._floorMinute(plantNow);
+    const cutover = opts.reason === 'cutover';
+    const moveReason = (stale: boolean): string => cutover ? 'cutover' : (stale ? 'run_time_changed' : 'due_date_derivation');
+    // A schedule patch always carries both edges, the segments and both session notes (the notes are cleared
+    // by the next edit, Store._clearStaleNotes, unless a change-set carries them).
+    const schedulePatch = (task: NimbusTask, stale: boolean, changes: Partial<NimbusTask>,
+                           issue: Issue | null, reason: string, moved: 'start' | 'end' = 'start'): void => {
+      const before = moved === 'start' ? task.start_date : task.end_date;
+      const after = (moved === 'start' ? changes.start_date : changes.end_date) ?? before;
+      const full: Partial<NimbusTask> = {
+        ...changes, scheduleSegments: changes.scheduleSegments ?? [], runtime_schedule_mismatch: false,
+        derivationIssue: issue,
+        systemMove: after ? { from: before ?? after, to: after, reason } : null,
+      };
+      // A display-only row whose derivation changes nothing is not rewritten on every pass.
+      if (!stale && task.start_date?.getTime() === full.start_date?.getTime()
+        && task.end_date?.getTime() === full.end_date?.getTime()
+        && Engine._sameScheduleSegments(task.scheduleSegments, full.scheduleSegments ?? [])
+        && sameIssue(task.derivationIssue, issue)) return;
+      patches.push({ id: task.id, changes: full, dirty: stale });
+    };
+
+    interface Reversal { task: NimbusTask; anchor: Date; stale: boolean }
+    const reversals = new Map<string, Reversal[]>();
     Calendar._beginRun(plant);
     try {
-      for (const task of Store.tasksByPlant(plant)) {
-        if (!task.runtime_schedule_mismatch || !task.start_date) continue;
-        const line = task.MACHINE || 'Unknown';
-        const changes = Engine.schedulePatchFor(task, line, task.start_date, policy);
-        if (!changes?.start_date || !changes.end_date) {
-          ErrorLog.warn('engine',
-            `Runtime changed for order "${task.text || task.id}", but its schedule could not be regenerated within the 90-day calendar search.`,
-            { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
+      for (const task of candidates) {
+        const line = task.MACHINE;
+        // OQ62: a line on the client default hours has no server calendar to derive from.
+        if (!CalendarSync.hasServerLineCalendar(plant, line)) { noteOnly(task, { code: 'line_no_calendar' }); continue; }
+        const stale = !!task.runtime_schedule_mismatch;
+        const placed = !!task.user_scheduled;
+
+        if (placed && task.start_date && task.end_date && Engine.isInProgress(task, plantNow)) {
+          // OQ3: it is already producing. The start holds and the finish follows the run time (no reversal).
+          const held = Engine.schedulePatchFor(task, line, task.start_date, policy);
+          if (!held?.start_date || !held.end_date) {
+            ErrorLog.warn('engine',
+              `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the 90-day calendar search.`,
+              { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
+            noteOnly(task, { code: 'no_operating_window' });
+            continue;
+          }
+          let changes: Partial<NimbusTask> = held;
+          if (held.start_date.getTime() !== task.start_date.getTime()) {
+            // It started outside working time, so the allocator moved the start; a running order never loses its
+            // start, so the bar is the held start plus the run time as one continuous piece.
+            changes = { start_date: task.start_date, end_date: new Date(task.start_date.getTime() + Math.round(Util.runHours(task) * 60) * Config.MS_MIN), scheduleSegments: [] };
+          }
+          schedulePatch(task, stale, changes, null, moveReason(stale), 'end');
           continue;
         }
-        changes.runtime_schedule_mismatch = false;
-        patches.push({ id: task.id, changes });
+
+        const anchor = placed ? task.end_date : Util.dueInstant(task);
+        if (!anchor) continue;   // no finish to hold: nothing can be derived (the server queues rows with no usable finish)
+        const result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: 0 });
+        if (result.kind === 'reached_now') {
+          (reversals.get(line) ?? reversals.set(line, []).get(line)!).push({ task, anchor, stale });
+          continue;
+        }
+        if (result.kind === 'refuse') {
+          if (result.reason === 'overlong_never') {
+            // OQ50: it cannot be one bar under this plant's policy. Queue it; the planner releases it by editing it.
+            patches.push({ id: task.id, dirty: stale, changes: {
+              ...Engine.plannerUnscheduleChanges(),
+              planning_reason: { code: 'overlong_never', message: Util.t('planning_reason.overlong_never') },
+              runtime_schedule_mismatch: false, derivationIssue: null, systemMove: null,
+            } });
+          } else if (result.reason === 'run_time_zero') noteOnly(task, { code: 'run_time_zero' });   // OQ13: no bar
+          else if (result.reason === 'plant_no_timezone') noteOnly(task, { code: 'plant_no_timezone' });
+          else {
+            ErrorLog.warn('engine',
+              `Order "${task.text || task.id}" could not be re-derived: no operating window within the 90-day calendar search.`,
+              { line, taskId: task.id, policy, reason: result.reason });
+            noteOnly(task, { code: 'no_operating_window' });
+          }
+          continue;
+        }
+
+        // Placed. Several findings can apply to one row; the most important one is recorded.
+        const derivedStart = result.changes.start_date!;
+        let issue: Issue | null = null;
+        if (result.finishMoved) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
+        else if (Store.isFirmed(task.id) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart }, plantNow)) {
+          issue = { code: 'frozen_window_crossed' };   // OQ4: alert only, nothing is un-firmed
+        } else {
+          const pullFloor = Engine.earliestAllowedStart(task, plant, null);
+          if (pullFloor && derivedStart < pullFloor) issue = { code: 'pull_floor_crossed', from: derivedStart, to: pullFloor };   // OQ20
+        }
+        schedulePatch(task, stale, result.changes, issue, moveReason(stale));
+      }
+
+      // OQ53 b: rows whose walk reached "now" go forward from now, per line, in finish order, one after another.
+      for (const [line, rows] of reversals) {
+        rows.sort((a, b) => a.anchor.getTime() - b.anchor.getTime() || String(a.task.id).localeCompare(String(b.task.id)));
+        const sequence = Engine.placeForwardSequence(line, rows.map(row => ({ task: row.task, row })), floor, policy);
+        const placedIds = new Set<string>();
+        for (const { item, start, end, scheduleSegments } of sequence.placed) {
+          placedIds.add(String(item.row.task.id));
+          const detail = cutover ? 'cutover' : (item.row.stale ? 'run_time_grew' : 'due_date_past');
+          schedulePatch(item.row.task, item.row.stale, { start_date: start, end_date: end, scheduleSegments: scheduleSegments ?? [] },
+            { code: 'reversal_forward', detail }, cutover ? 'cutover' : 'reversal_forward');
+        }
+        for (const row of rows) {
+          if (placedIds.has(String(row.task.id))) continue;
+          ErrorLog.warn('engine',
+            `Order "${row.task.text || row.task.id}" could not be placed forward from now: no operating window found.`,
+            { line, taskId: row.task.id, policy, reason: 'reversal-forward' });
+          noteOnly(row.task, { code: 'no_operating_window' });
+        }
       }
     } finally {
       Calendar._endRun();
     }
-    if (patches.length) Store.updateMany(patches, 'engine-runtime-reconcile');
+    commit();
   },
 
+  /** Place `items` one after another on `line`, each starting at the later of the running cursor and its own
+   *  `notBefore`, walking the calendar forward under `policy` (the cursor loop Remove Backlog and the reversal
+   *  queue share). Pure: nothing is written. `opts.stopWhen` ends the walk before an item (Remove Backlog stops
+   *  when the compressing cursor has caught up with an item that has not started yet); the first item the
+   *  calendar cannot place ends it too, reported in `failure`. Callers own the surrounding calendar run. */
+  placeForwardSequence<T extends ForwardSequenceItem>(
+    line: string, items: ReadonlyArray<T>, from: Date, policy: SplitOrderPolicy,
+    opts: { stopWhen?: (item: T, cursor: Date) => boolean } = {},
+  ): ForwardSequenceResult<T> {
+    const out: ForwardSequenceResult<T> = { placed: [], invalidRuntime: [], overlong: [], failure: null };
+    let cursor = new Date(from);
+    for (const item of items) {
+      if (opts.stopWhen?.(item, cursor)) break;
+      const runtimeHours = Number(item.task.RUN_TIME);
+      if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
+        out.invalidRuntime.push(item);
+        continue;
+      }
+      const runtimeMs = runtimeHours * Config.MS_HOUR;
+      const candidate = item.notBefore ? new Date(Math.max(item.notBefore.getTime(), cursor.getTime())) : cursor;
+      let start: Date;
+      let end: Date;
+      let scheduleSegments: OrderScheduleSegment[] | undefined;
+      if (policy === 'never') {
+        // Preserve the existing continuous-bar contract exactly for legacy
+        // schedules. A split schedule that is explicitly regenerated under
+        // this policy is cleared below as one atomic parent aggregate.
+        const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
+        if (!('start' in slot)) {
+          out.failure = { item, reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+          break;
+        }
+        start = slot.start;
+        end = new Date(start.getTime() + runtimeMs);
+        if (slot.kind === 'overlong') out.overlong.push(item);
+        if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
+      } else {
+        const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy);
+        if (allocation.kind !== 'allocated') {
+          out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+          break;
+        }
+        start = allocation.start;
+        end = allocation.end;
+        // Always include the full child aggregate, including [], so a
+        // regenerated continuous parent removes obsolete child rows.
+        scheduleSegments = allocation.scheduleSegments;
+      }
+      cursor = end;
+      out.placed.push({ item, start, end, ...(scheduleSegments !== undefined ? { scheduleSegments } : {}) });
+    }
+    return out;
+  },
   _sameScheduleSegments(a: OrderScheduleSegment[] | undefined, b: OrderScheduleSegment[]): boolean {
     const left = Array.isArray(a) ? a : [];
     if (left.length !== b.length) return false;
@@ -1574,54 +1811,19 @@ export const Engine = {
         const firstBacklog = items.findIndex(item => item.snapshotStart < now);
         if (firstBacklog < 0) continue;
         diagnostics.backlogFound += items.filter(item => item.snapshotStart < now).length;
-        let cursor = new Date(now);
-        for (let index = firstBacklog; index < items.length; index++) {
-          const item = items[index];
-          if (item.snapshotStart >= now && cursor <= item.snapshotStart) break;
+        // The compressing cursor walk is shared with the reversal queue (placeForwardSequence).
+        const sequence = Engine.placeForwardSequence(
+          line,
+          items.slice(firstBacklog).map(item => ({ ...item, notBefore: item.snapshotStart >= now ? item.snapshotStart : undefined })),
+          now, splitPolicy,
+          { stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart });
+        for (const item of sequence.invalidRuntime) diagnostics.invalidRuntimeIds.push(item.task.id);
+        for (const item of sequence.overlong) diagnostics.overlongIds.push(item.task.id);
+        if (sequence.failure) {
+          diagnostics.calendarSearchFailures.push({ line, taskId: sequence.failure.item.task.id, reason: sequence.failure.reason });
+        }
+        for (const { item, start, end, scheduleSegments } of sequence.placed) {
           const runtimeHours = Number(item.task.RUN_TIME);
-          if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
-            diagnostics.invalidRuntimeIds.push(item.task.id);
-            continue;
-          }
-          const runtimeMs = runtimeHours * Config.MS_HOUR;
-          const candidate = item.snapshotStart < now
-            ? cursor
-            : new Date(Math.max(item.snapshotStart.getTime(), cursor.getTime()));
-          let start: Date;
-          let end: Date;
-          let scheduleSegments: OrderScheduleSegment[] | undefined;
-          if (splitPolicy === 'never') {
-            // Preserve the existing continuous-bar contract exactly for legacy
-            // schedules. A split schedule that is explicitly regenerated under
-            // this policy is cleared below as one atomic parent aggregate.
-            const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
-            if (!('start' in slot)) {
-              diagnostics.calendarSearchFailures.push({
-                line, taskId: item.task.id,
-                reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
-              });
-              break;
-            }
-            start = slot.start;
-            end = new Date(start.getTime() + runtimeMs);
-            if (slot.kind === 'overlong') diagnostics.overlongIds.push(item.task.id);
-            if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
-          } else {
-            const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), splitPolicy);
-            if (allocation.kind !== 'allocated') {
-              diagnostics.calendarSearchFailures.push({
-                line, taskId: item.task.id,
-                reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
-              });
-              break;
-            }
-            start = allocation.start;
-            end = allocation.end;
-            // Always include the full child aggregate, including [], so a
-            // regenerated continuous parent removes obsolete child rows.
-            scheduleSegments = allocation.scheduleSegments;
-          }
-          cursor = end;
           const currentStart = item.snapshotStart.getTime();
           const currentEnd = finiteDate(item.task.end_date)?.getTime() ?? NaN;
           const segmentsChanged = scheduleSegments !== undefined

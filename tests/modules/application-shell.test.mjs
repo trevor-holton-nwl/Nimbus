@@ -147,6 +147,11 @@ test('App._trackDirty skips distribution-sourced writes but still marks engine-r
 
     App._trackDirty({ type: 'tasks:bulkUpdate', ids: ['reconcile-1'], source: 'engine-runtime-reconcile', revision: 2, mode: 'live' });
     assert.ok(Persistence._dirtyIds.has('reconcile-1'), 'an engine-runtime-reconcile source must still mark the task dirty');
+
+    // A never-placed row the reconcile only DERIVES FOR DISPLAY (backward scheduling Task 2.6) is not a planner edit:
+    // Save must leave the server row never-placed, so the display source joins the skip list.
+    App._trackDirty({ type: 'tasks:bulkUpdate', ids: ['display-1'], source: 'engine-runtime-reconcile-display', revision: 3, mode: 'live' });
+    assert.ok(!Persistence._dirtyIds.has('display-1'), 'a display-only reconcile write must not mark the task dirty');
   } finally {
     Persistence._dirtyIds.clear();
     Persistence._forceIds.clear();
