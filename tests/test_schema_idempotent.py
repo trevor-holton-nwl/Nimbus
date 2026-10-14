@@ -177,6 +177,8 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-15-1-orders-original-dates.sql",
         "2026-10-15-2-orders-run-time-bounds-336.sql",
         "2026-10-16-1-orders-placement-exception.sql",
+        "2026-10-20-0-orders-precutover-snapshot.sql",
+        "2026-10-20-1-backward-cutover.sql",
     }
     all_names = {
         os.path.basename(path)

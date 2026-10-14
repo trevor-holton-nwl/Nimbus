@@ -2037,3 +2037,61 @@ BEGIN
   END IF;
 END
 $mig$;
+
+-- Backward-scheduling cutover (mirrors migrations/2026-10-20-0-orders-precutover-snapshot.sql and
+-- migrations/2026-10-20-1-backward-cutover.sql). Placed last: it reads orders, segments and order_sap_sent.
+-- Each block is ledger-guarded, so a re-apply never repeats it. NOTE: a developer database that re-applies
+-- schema.sql runs the cutover ONCE and nulls its local placed finishes and segments (running rows keep theirs).
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_cutover_snapshot') THEN
+    CREATE TABLE orders_precutover_snapshot AS
+      SELECT id, plant, machine, planning_status, run_time,
+             basic_start_date, basic_finish_date,
+             scheduled_start, scheduled_end,
+             manual_firmed, firming_indicator,
+             runtime_schedule_mismatch, placement_exception,
+             updated_at
+      FROM orders;
+    CREATE TABLE order_schedule_segments_precutover_snapshot AS
+      SELECT * FROM order_schedule_segments;
+    CREATE TABLE order_sap_sent_precutover_snapshot AS
+      SELECT * FROM order_sap_sent;
+    INSERT INTO schema_migrations (id) VALUES ('backward_cutover_snapshot');
+  END IF;
+END
+$mig$;
+
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_scheduling_cutover') THEN
+    -- running = a planner-placed start at or before plant-local now and the old effective end after it
+    -- (Task 0 ruling: real column names — plants.plant (PK is (subnetwork, plant); MIN(timezone) per plant as
+    --  sap_staging.py does, a plant may sit in two subnetworks), orders.planning_status = 'needs_planning',
+    --  order_schedule_segments.scheduled_end; plant-local naive now is simply now() AT TIME ZONE tz.)
+    WITH plant_now AS (
+      SELECT p.plant, now() AT TIME ZONE COALESCE(NULLIF(MIN(p.timezone),''),'UTC') AS pnow
+      FROM plants p GROUP BY p.plant
+    ), old_end AS (
+      SELECT o.id, COALESCE(MAX(s.scheduled_end), o.scheduled_start + (o.run_time * INTERVAL '1 hour'), o.scheduled_end) AS old_end
+      FROM orders o LEFT JOIN order_schedule_segments s ON s.order_id = o.id GROUP BY o.id
+    ), running AS (
+      SELECT o.id, e.old_end FROM orders o JOIN plant_now pn ON pn.plant = o.plant JOIN old_end e ON e.id = o.id
+      WHERE o.scheduled_start IS NOT NULL AND o.scheduled_start <= pn.pnow AND e.old_end > pn.pnow
+    )
+    UPDATE orders o SET
+      -- Task 0 ruling B4 (OQ3/OQ5): a running row keeps BOTH its start and its old forward end so it still
+      -- reads as running (server _order_is_running needs both edges; client isInProgress needs now < end)
+      -- even when its due date is already past. Every other row loses both edges and re-derives from its due date.
+      scheduled_start = CASE WHEN r.id IS NOT NULL THEN o.scheduled_start ELSE NULL END,
+      scheduled_end   = CASE WHEN r.id IS NOT NULL THEN r.old_end        ELSE NULL END,
+      placement_exception = NULL,
+      runtime_schedule_mismatch = TRUE,
+      updated_at = now()
+    FROM (SELECT id FROM orders) a LEFT JOIN running r ON r.id = a.id
+    WHERE o.id = a.id AND o.planning_status <> 'needs_planning';
+    DELETE FROM order_schedule_segments s USING orders o WHERE s.order_id = o.id AND o.planning_status <> 'needs_planning';
+    INSERT INTO schema_migrations (id) VALUES ('backward_scheduling_cutover');
+  END IF;
+END
+$mig$;

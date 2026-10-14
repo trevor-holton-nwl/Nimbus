@@ -158,6 +158,8 @@ az containerapp create -g rg-nimbus-dev -n ca-nimbus-dev --environment cae-nimbu
 > re-multiplied values on every run — is now recorded in a `schema_migrations` ledger and no longer
 > executes on apply. See `MIGRATION.md` → "Schema migration ledger". You still only *need* to run it
 > once (at provisioning); re-running just won't corrupt anything.
+>
+> **Exception (backward-scheduling cutover):** `schema.sql` now also mirrors the ledger-guarded cutover (`backward_cutover_snapshot`, then `backward_scheduling_cutover`). On a developer database that has not yet recorded those ids, re-applying `schema.sql` runs the cutover ONCE and nulls local placed finishes and schedule segments (running rows keep their start and end). Later re-applies are no-ops. On Azure the cutover ships through `migrations/` in its own `-AllowDestructive` run, never through `schema.sql`.
 
 ## Verify
 ```powershell

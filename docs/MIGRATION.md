@@ -1390,6 +1390,8 @@ as follow-up work for whoever picks up ingest/resolver hardening next.
 
 ## Backward scheduling — Phase 1 shipped / Phases 2–4 pending
 
+> **Cutover files (Task 4.1):** `migrations/2026-10-20-0-orders-precutover-snapshot.sql` (ledger id `backward_cutover_snapshot`, read-only copies of order dates/flags, segments and sent rows) and `migrations/2026-10-20-1-backward-cutover.sql` (ledger id `backward_scheduling_cutover`, destructive by text) are mirrored in `schema.sql` in the same guarded form. A developer database that re-applies `schema.sql` therefore runs the cutover once and nulls its local placed finishes and segments (running rows keep start and end); later re-applies do nothing.
+
 Phase 1 of the backward-scheduling migration is built and committed on `feature/backward-scheduling-phase1` (code commits `3169a08` to `643b7eb`). It is not merged to `main` and not deployed. Phases 2 to 4 (the stored-finish contract, the backward calendar and optimizer output, and the global cutover) are not started; they ship as one release after Phase 1. The plan is `docs/superpowers/plans/2026-10-13-backward-scheduling-implementation.md`; the spec is `BACKWARD_SCHEDULING_MIGRATION.md` (section 7.3 covers Phase 1).
 
 ### (a) Owner list: sent orders whose SAP original may be lost
