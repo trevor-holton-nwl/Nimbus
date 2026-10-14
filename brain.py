@@ -767,6 +767,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/distribution/{plant}/resolve": "distribution.resolve_write",
     "/routing/upload/production-versions": "routing.upload_production_versions",
     "/routing/upload/operations": "routing.upload_operations",
+    "/routing/validate/{table}": "routing.validate",
     "/routing/{plant}/recompute": "routing.recompute",
     "/master-data/{table}/delete-filtered": "master_data.delete_filtered",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",

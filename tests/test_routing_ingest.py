@@ -20,6 +20,7 @@ from contextlib import contextmanager
 import io
 
 import pandas as pd
+import pytest
 
 import backend.routing.ingest as ingest
 
@@ -354,3 +355,37 @@ def test_unknown_header_column_ignored_with_warning_not_error():
     assert any("SOME_FUTURE_SAP_FIELD" in m for m in warn_msgs)
     assert _reject_msgs(warnings) == []
     assert len(result["upserts"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. map_row_keys -- shared header mapping for the Excel adapter and the
+#    paste/validate route
+# ---------------------------------------------------------------------------
+def test_map_row_keys_maps_headers_and_nimbus_column_names():
+    rows = [{"PLANT": "5512", "Material Id": "1000261702", "ALTERNATE_BOM": "1",
+             "group_counter": 1}]
+
+    mapped, warnings = ingest.map_row_keys(rows, ingest.PRODUCTION_VERSION_HEADERS)
+
+    assert mapped == [{"plant": "5512", "material_id": "1000261702",
+                       "alternative_bom": "1", "group_counter": 1}]
+    assert warnings == []
+
+
+def test_map_row_keys_drops_unknown_key_with_one_warning():
+    rows = [{"PLANT": "5512", "FOO": 1}, {"PLANT": "5513", "FOO": 2}]
+
+    mapped, warnings = ingest.map_row_keys(rows, ingest.PRODUCTION_VERSION_HEADERS)
+
+    assert mapped == [{"plant": "5512"}, {"plant": "5513"}]
+    assert len(warnings) == 1
+    assert warnings[0]["level"] == "warn"
+    assert "FOO" in warnings[0]["msg"]
+
+
+def test_read_excel_rows_still_raises_on_missing_key_header():
+    file_bytes = _xlsx_bytes([{"PLANT": "5512", "MATERIAL_ID": "1000261702"}])
+
+    with pytest.raises(ValueError, match="PRODUCTION_VERSION"):
+        ingest._read_excel_rows(file_bytes, ingest.PRODUCTION_VERSION_HEADERS,
+                                ingest.PRODUCTION_VERSION_KEY_HEADERS)

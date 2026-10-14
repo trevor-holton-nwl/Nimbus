@@ -27,3 +27,19 @@ class RoutingUploadResult(BaseModel):
     updated: int
     rejected: int
     warnings: list[UploadWarning] = []
+    # Distinct plants the file touched, sorted, so the UI can sync its plant filter.
+    plants: list[str] = []
+
+
+class RoutingValidateRequest(BaseModel):
+    """Body of POST /routing/validate/{table}: pasted rows keyed by template
+    header or NIMBUS column name."""
+    rows: list[dict] = []
+
+
+class RoutingValidateResult(BaseModel):
+    """Shape returned by POST /routing/validate/{table}: the cleaned rows the
+    Excel upload would have kept, with its rejection warnings. Never writes."""
+    rows: list[dict]
+    rejected: int
+    warnings: list[UploadWarning] = []

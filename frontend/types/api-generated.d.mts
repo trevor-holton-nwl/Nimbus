@@ -1675,6 +1675,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/routing/validate/{table}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Validate Rows
+         * @description Paste Rows pre-check: run pasted production_version / routing_operation
+         *     rows through the Excel upload's cleaning and validation (zero-padding,
+         *     boolean/numeric parsing, unknown plant/material/work center and in-batch
+         *     duplicate rejection) and return the cleaned rows plus warnings. Never
+         *     writes to the DB.
+         */
+        post: operations["validate_rows_routing_validate__table__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/routing/{plant}/recompute": {
         parameters: {
             query?: never;
@@ -3477,6 +3501,43 @@ export interface components {
             inserted: number;
             /** Updated */
             updated: number;
+            /** Rejected */
+            rejected: number;
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: components["schemas"]["UploadWarning"][];
+            /**
+             * Plants
+             * @default []
+             */
+            plants: string[];
+        };
+        /**
+         * RoutingValidateRequest
+         * @description Body of POST /routing/validate/{table}: pasted rows keyed by template
+         *     header or NIMBUS column name.
+         */
+        RoutingValidateRequest: {
+            /**
+             * Rows
+             * @default []
+             */
+            rows: {
+                [key: string]: unknown;
+            }[];
+        };
+        /**
+         * RoutingValidateResult
+         * @description Shape returned by POST /routing/validate/{table}: the cleaned rows the
+         *     Excel upload would have kept, with its rejection warnings. Never writes.
+         */
+        RoutingValidateResult: {
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
             /** Rejected */
             rejected: number;
             /**
@@ -6713,6 +6774,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RoutingUploadResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_rows_routing_validate__table__post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                table: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoutingValidateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutingValidateResult"];
                 };
             };
             /** @description Validation Error */

@@ -231,15 +231,46 @@ def _read_excel_rows(file_bytes: bytes, header_map: dict[str, str],
     missing_required = [h for h in key_headers if h not in headers_present]
     if missing_required:
         raise ValueError(f"Missing required column(s): {', '.join(missing_required)}")
-    prefix: list[dict] = []
-    unk = _unknown_headers_warning(headers_present, header_map)
-    if unk:
-        prefix.append(unk)
-    rows = [
-        {col: record[header] for header, col in header_map.items() if header in record}
-        for record in df.to_dict("records")
+    return map_row_keys(df.to_dict("records"), header_map)
+
+
+def _normalize_header(key) -> str:
+    """Same rule as `db.clean()` applies to a DataFrame's column names:
+    strip, upper-case, each space -> underscore."""
+    return str(key).strip().upper().replace(" ", "_")
+
+
+def map_row_keys(rows: list[dict], header_map: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    """Map each row's keys to NIMBUS column names, shared by the Excel adapter
+    and the paste/validate route. A key is normalised like `db.clean()` and
+    looked up in `header_map` (template header -> column); failing that it is
+    accepted when its lower-case form is already a NIMBUS column name; any
+    other key is dropped. Returns `(mapped_rows, warnings)` where `warnings`
+    holds one unknown-header notice naming every dropped key across all rows."""
+    columns = frozenset(header_map.values())
+    resolved: dict = {}
+    unknown: set[str] = set()
+    for row in rows:
+        for key in row:
+            if key in resolved:
+                continue
+            norm = _normalize_header(key)
+            if norm in header_map:
+                resolved[key] = header_map[norm]
+            elif norm.lower() in columns:
+                resolved[key] = norm.lower()
+            else:
+                resolved[key] = None
+                unknown.add(norm)
+    mapped = [
+        {resolved[key]: value for key, value in row.items() if resolved[key] is not None}
+        for row in rows
     ]
-    return rows, prefix
+    warnings: list[dict] = []
+    unk = _unknown_headers_warning(unknown, {})
+    if unk:
+        warnings.append(unk)
+    return mapped, warnings
 
 
 def _unknown_headers_warning(headers_present: set[str], header_map: dict[str, str]) -> dict | None:

@@ -30,7 +30,7 @@ import db
 import master_data as md
 import backend.routing.ingest as ingest
 from backend.admin_ops.logbuffer import _set_admin_log_details
-from backend.routing.models import RoutingUploadResult
+from backend.routing.models import RoutingUploadResult, RoutingValidateRequest, RoutingValidateResult
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
 
@@ -58,7 +58,8 @@ def _do_upload_production_versions(file_bytes: bytes, user_email: str | None) ->
     ops, warnings = ingest.parse_production_versions_upload(file_bytes)
     rejected = _rejected_count(warnings)
     result = write_production_versions(ops, user_email)
-    _recompute_after_write([row.get("plant") for row in ops.get("upserts", [])])
+    upsert_plants = [row.get("plant") for row in ops.get("upserts", [])]
+    _recompute_after_write(upsert_plants)
     if len(warnings) > 200:
         warnings = warnings[:200]
     return {
@@ -66,6 +67,7 @@ def _do_upload_production_versions(file_bytes: bytes, user_email: str | None) ->
         "updated": result.get("updated", 0),
         "rejected": rejected,
         "warnings": warnings,
+        "plants": sorted({p for p in upsert_plants if p}),
     }
 
 
@@ -82,12 +84,13 @@ def _do_upload_operations(file_bytes: bytes, user_email: str | None) -> dict:
     if len(warnings) > 200:
         warnings = warnings[:200]
     if not groups:
-        return {"inserted": 0, "updated": 0, "rejected": rejected, "warnings": warnings}
+        return {"inserted": 0, "updated": 0, "rejected": rejected, "warnings": warnings, "plants": []}
 
     plants = sorted({key[0] for key in groups})
     inserted = write_operation_groups(groups, user_email)
     _recompute_after_write(plants)
-    return {"inserted": inserted, "updated": 0, "rejected": rejected, "warnings": warnings}
+    return {"inserted": inserted, "updated": 0, "rejected": rejected, "warnings": warnings,
+            "plants": plants}
 
 
 def write_production_versions(ops: dict, user_email: str | None) -> dict:
@@ -182,6 +185,44 @@ async def upload_operations(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _set_admin_log_details(request, filename=file.filename, **{k: v for k, v in result.items() if k != "warnings"})
     return result
+
+
+_VALIDATE_MAX_ROWS = 20_000
+
+
+def _do_validate(table: str, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Blocking header-map + parse of pasted rows (same cleaning and checks as
+    the Excel upload; read-only reference lookups, never a write). Returns
+    `(cleaned_rows, warnings)`; operations' routing-key groups are flattened
+    in group order, then row order."""
+    if table == "production_version":
+        mapped, prefix = ingest.map_row_keys(rows, ingest.PRODUCTION_VERSION_HEADERS)
+        ops, warnings = ingest.parse_production_versions_rows(
+            mapped, first_row=1, prefix_warnings=prefix)
+        return ops["upserts"], warnings
+    mapped, prefix = ingest.map_row_keys(rows, ingest.ROUTING_OPERATION_HEADERS)
+    groups, warnings = ingest.parse_routing_operations_rows(
+        mapped, first_row=1, prefix_warnings=prefix)
+    return [row for group_rows in groups.values() for row in group_rows], warnings
+
+
+@router.post("/routing/validate/{table}", response_model=RoutingValidateResult,
+            dependencies=[Depends(require_api_key), Depends(require_admin)])
+async def validate_rows(table: str, body: RoutingValidateRequest, request: Request):
+    """Paste Rows pre-check: run pasted production_version / routing_operation
+    rows through the Excel upload's cleaning and validation (zero-padding,
+    boolean/numeric parsing, unknown plant/material/work center and in-batch
+    duplicate rejection) and return the cleaned rows plus warnings. Never
+    writes to the DB."""
+    if table not in ("production_version", "routing_operation"):
+        raise HTTPException(status_code=404, detail="Unknown table")
+    if len(body.rows) > _VALIDATE_MAX_ROWS:
+        raise HTTPException(status_code=413,
+                            detail=f"Validate accepts at most {_VALIDATE_MAX_ROWS} rows")
+    rows, warnings = await run_in_threadpool(_do_validate, table, body.rows)
+    rejected = _rejected_count(warnings)
+    _set_admin_log_details(request, table=table, rows=len(rows), rejected=rejected)
+    return {"rows": rows, "rejected": rejected, "warnings": warnings}
 
 
 @router.post("/routing/{plant}/recompute",
