@@ -1672,3 +1672,40 @@ test('G6: preview Apply drops candidate patches for orders that are running at a
     fixture.restore();
   }
 });
+
+test('gate 24: preview Apply drops a candidate whose derived bar has started by the PLANT clock at Apply time (no isInProgress stub; viewer clock elsewhere)', () => {
+  const plant = 'APPLY-DERIVED';
+  const derivedId = 'apply-derived-1';
+  const freeId = 'apply-derived-free';
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
+  const priorShow = Toast.show;
+  const toasts = [];
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // The plant clock reads Mon 2026-08-03 08:00 (the bar is a week out) when the preview opens; the viewer's own clock is the real today.
+  Store.setMasterData({ ...priorMaster, plants: [{ plant, timezone: tz }], lines: [] }, 'unit-test');
+  Store._blockedPlants.clear();
+  Store.serverOffsetMs = new Date('2026-08-03T08:00:00').getTime() - Date.now();
+  // The reconcile derived this order's bar to 09:00-12:00: not started at 08:00.
+  const derived = { ...previewTask(derivedId, plant, 3), start_date: new Date('2026-08-10T09:00:00'), end_date: new Date('2026-08-10T12:00:00') };
+  const fixture = openTaskBaselinePreview(plant, [derived, previewTask(freeId, plant, 1)]);
+  try {
+    assert.ok(OptimizerPreview._candidate.patches.some(p => p.id === derivedId), 'the preview carries a patch for the order');
+    assert.equal(Engine.isInProgress(Store.tasks[derivedId]), false, 'sanity: not running when the preview opened');
+    // The preview sat open and the PLANT clock advanced to 10:00: the bar is now running.
+    Store.serverOffsetMs = new Date('2026-08-10T10:00:00').getTime() - Date.now();
+    assert.equal(Engine.isInProgress(Store.tasks[derivedId]), true, 'sanity: the plant clock (not the viewer clock) says it is running');
+    Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+    OptimizerPreview.apply();
+    assert.equal(Store.tasks[derivedId].start_date.getTime(), new Date('2026-08-10T09:00:00').getTime(), 'the running order keeps its derived start');
+    assert.equal(Store.tasks[derivedId].end_date.getTime(), new Date('2026-08-10T12:00:00').getTime());
+    assert.ok(toasts.some(t => t.type === 'warn' && t.msg === String(Util.t('toast.opt_apply_running_skipped', { count: 1 }))),
+      'counted in toast.opt_apply_running_skipped');
+  } finally {
+    Toast.show = priorShow;
+    fixture.restore();
+    Store.serverOffsetMs = priorOffset;
+    Store._blockedPlants.clear();
+    Store.setMasterData(priorMaster, 'unit-test');
+  }
+});

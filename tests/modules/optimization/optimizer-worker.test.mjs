@@ -428,3 +428,39 @@ test('real optimizer worker can be cancelled before returning a response', async
   await worker.terminate();
   assert.equal(response, false, 'terminating the acknowledged worker must prevent a stale response');
 });
+
+test('gate 16: a worker-produced patch keeps end = the last productive edge (finish-first) and carries the run time, on a segmented and a continuous order', () => {
+  const hours = { 0: [8, 12], 1: [8, 12], 2: [8, 12], 3: [8, 12], 4: [8, 12], 5: [8, 12], 6: [8, 12] };
+  const workerSnapshot = {
+    ...snapshot, selectedPlant: 'P', setupSnapshot: null,
+    masterData: { plants: [{ plant: 'P', split_order_policy: 'partial_allowed' }], lines: [{ plant: 'P', machine: 'L1' }] },
+    calendars: { L1: { workHours: hours } }, plants: { P: { workHours: hours } },
+    tasks: [
+      { id: 'w-seg', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 6, original_end_date: '2035-08-09T18:00:00.000Z',
+        start_date: null, end_date: null, planning_status: 'scheduled' },
+      { id: 'w-one', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 2, original_end_date: '2035-08-09T18:00:00.000Z',
+        start_date: null, end_date: null, planning_status: 'scheduled' },
+    ],
+  };
+  const response = buildOptimizerWorkerResponse({
+    runId: 'finish-first', mode: 'spt', snapshot: workerSnapshot,
+    request: { mode: 'spt', plant: 'P', respectCalendar: true,
+      now: '2035-08-06T08:00:00.000Z', planningStart: '2035-08-06T08:00:00.000Z', endDate: '2035-08-12T00:00:00.000Z' },
+    deadlineDurationMs: 1000,
+  }, () => 7000);
+  const when = value => new Date(value).getTime();
+  const byId = Object.fromEntries(response.candidate.patches.map(patch => [patch.id, patch.changes]));
+  assert.ok(byId['w-seg'] && byId['w-one'], 'both orders are placed by the worker');
+  for (const [id, changes] of Object.entries(byId)) {
+    const segs = changes.scheduleSegments ?? [];
+    const last = segs.length ? segs[segs.length - 1].endDate : changes.end_date;
+    const first = segs.length ? segs[0].startDate : changes.start_date;
+    assert.equal(when(changes.end_date), when(last), `${id}: end_date is the last productive edge`);
+    assert.equal(when(changes.start_date), when(first), `${id}: start_date is the first productive edge`);
+    const productive = segs.length
+      ? segs.reduce((sum, s) => sum + (when(s.endDate) - when(s.startDate)), 0)
+      : when(changes.end_date) - when(changes.start_date);
+    assert.equal(productive / 3600000, id === 'w-seg' ? 6 : 2, `${id}: the pieces add up to the run time`);
+  }
+  assert.ok((byId['w-seg'].scheduleSegments ?? []).length >= 2, 'the 6 h order does not fit one 4 h window, so it is split');
+});

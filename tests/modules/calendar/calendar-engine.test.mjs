@@ -368,6 +368,46 @@ describe('backward calendar primitives', () => {
       });
     }
 
+    for (const [label, [month, day], first] of [
+      ['spring-forward night (Sun 8 Mar 2026)', [2, 8], '2026-03-08 00:00'],
+      ['fall-back night (Sun 1 Nov 2026)', [10, 1], '2026-11-01 00:00'],
+    ]) {
+      it(`gate 2: a partial_allowed walk under a Chicago plant zone across the ${label} places pieces whose plant-zone elapsed total is the run time`, async () => {
+        await withZone('UTC', () => {
+          const line = plain(`BW-E3-${first}`, everyDay([0, 6]));   // the change falls INSIDE the 00:00-06:00 window
+          const finish = new Date(2026, month, day, 6, 0);           // built inside withZone: a viewer-zone wall time
+          const r = Calendar.allocateRuntimeBackward(line, finish, 480, 'partial_allowed',
+            bopts({ plantTz: 'America/Chicago', floor: new Date(2026, 1, 1) }));
+          assert.equal(r.kind, 'placed');
+          const core = globalThis.NimbusComputeCore;
+          const pieces = r.scheduleSegments.length ? r.scheduleSegments : [{ startDate: r.start, endDate: r.end }];
+          assert.equal(fmt(pieces[pieces.length - 1].startDate), first, 'the change-night window is taken whole');
+          const elapsed = pieces.reduce((sum, piece) => sum
+            + (+core.plantInstantFromWallClock('America/Chicago', piece.endDate) - +core.plantInstantFromWallClock('America/Chicago', piece.startDate)), 0);
+          assert.equal(elapsed / 60000, 480, 'the pieces add up to 8 elapsed hours even though the wall clock spans 7 or 9');
+          assert.equal(r.finishMoved, false);
+        });
+      });
+    }
+
+    it('merges a Sunday-night window with Monday-morning hours into one contiguous window (week wrap)', () => {
+      const line = plain('BW-E4', { 0: [22, 24], 1: [0, 6], 2: null, 3: null, 4: null, 5: null, 6: null });
+      const r = Calendar.allocateRuntimeBackward(line, at(D.mon, '04:00'), 360, 'never', bopts());
+      assert.equal(summary(r), '2026-10-18 22:00 -> 2026-10-19 04:00');
+      assert.deepEqual(r.scheduleSegments, []);
+    });
+
+    it('when the finish is both clamped by a blackout and unplaceable there, no_slot_at_finish takes precedence over blackout', () => {
+      const line = plain('BW-E5');
+      Store.replaceBlocks([blk('e5', line, at(D.wed, '14:00'), at(D.wed, '18:00'))], 'unit-test');
+      // The finish (Wed 17:00) clamps to 14:00. 8 h fit in Wed 06-14: the only cause is the blackout.
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '17:00'), 480, 'never', bopts())),
+        '2026-10-21 06:00 -> 2026-10-21 14:00 moved:blackout');
+      // 10 h do not fit in that 8 h window: the walk lands on Tuesday, and that cause wins.
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '17:00'), 600, 'never', bopts())),
+        '2026-10-20 08:00 -> 2026-10-20 18:00 moved:no_slot_at_finish');
+    });
+
     it('hops days by calendar date across the fall-back change (never minus 24 h)', async () => {
       await withZone('America/New_York', () => {
         const line = plain('BW-E2', everyDay([8, 16]));

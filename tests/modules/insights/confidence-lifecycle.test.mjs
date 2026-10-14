@@ -621,3 +621,41 @@ test('TimeMachine.snapshot prunes IndexedDB to 200 and trims the in-memory histo
     assert.equal(TimeMachine._snapshots[0].label, 'old0');
   });
 });
+
+test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stale and hands the ids to Engine.reconcileRestored (OQ21)', () => {
+  const { TimeMachine, UndoStack, Toast } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorEntries = UndoStack._entries.slice();
+  const priorSnaps = TimeMachine._snapshots;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorToast = Toast.show;
+  const Engine = nimbus.Engine;
+  const priorReconcile = Engine.reconcileRestored;
+  const reconciled = [];
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  Toast.show = () => {};
+  Engine.reconcileRestored = ids => { reconciled.push([...ids].map(String)); };
+  try {
+    Store.setTasks([{ id: 'tm1', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 2, runtime_schedule_mismatch: false,
+      start_date: new Date('2031-03-04T08:00:00'), end_date: new Date('2031-03-04T10:00:00') }], 'test');
+    TimeMachine._snapshots = [{ id: 1, ts: 4242, label: 'before', plant: 'TM-P', tasks: [
+      { id: 'tm1', start_date: '2031-03-03T06:00:00', end_date: '2031-03-03T08:00:00' },
+      { id: 'gone', start_date: '2031-03-03T06:00:00', end_date: '2031-03-03T08:00:00' }] }];
+    TimeMachine.restore(4242);
+    const t = Store.tasks.tm1;
+    assert.equal(t.end_date.getTime(), new Date('2031-03-03T08:00:00').getTime(), 'the snapshot finish is restored');
+    assert.equal(t.runtime_schedule_mismatch, true, 'the restored start is a placeholder: the row is flagged stale');
+    assert.deepEqual(reconciled, [['tm1']], 'only rows that still exist are re-derived, through Engine.reconcileRestored');
+    assert.equal(UndoStack._entries.at(-1).label, 'Before Time Machine restore', 'the restore is itself undoable');
+  } finally {
+    Engine.reconcileRestored = priorReconcile;
+    TimeMachine._snapshots = priorSnaps;
+    UndoStack._entries = priorEntries;
+    Toast.show = priorToast;
+    Alerts.scheduleRecompute = priorSchedule;
+    globalThis.NIMBUS = priorNimbus;
+    Store.setTasks(priorTasks, 'test');
+  }
+});

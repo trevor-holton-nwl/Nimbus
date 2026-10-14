@@ -204,6 +204,12 @@ test('computeAlerts reports resolved setup violations and de-duplicates supplied
     { requiredMinutes: violation?.requiredMinutes, availableMinutes: violation?.availableMinutes, shortMinutes: violation?.shortMinutes },
     { requiredMinutes: 60, availableMinutes: 20, shortMinutes: 40 },
   );
+  // Gate 7: the localized message is keyed, with the three numbers its text interpolates.
+  assert.equal(violation.msgKey, 'alert.setup_violated');
+  assert.deepEqual(
+    { required: violation.msgVars.required, available: violation.msgVars.available, short: violation.msgVars.short, line: violation.msgVars.line },
+    { required: 60, available: 20, short: 40, line: 'L' },
+  );
   assert.equal(alerts.filter(alert => alert.type === 'setup-uncovered').length, 1);
   assert.deepEqual(alerts.filter(alert => alert.type !== 'setup-violated' && alert.type !== 'setup-uncovered').map(alert => alert.type).sort(), [
     'current-state-diverged', 'initial-state-unknown', 'override-inactive',

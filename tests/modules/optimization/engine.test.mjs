@@ -4468,6 +4468,22 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('gate 23 a / gate 16: restoring an Apply snapshot brings back the finish AND the run time of a row whose run time changed after the Apply', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('ap', { user_scheduled: true, RUN_TIME: '4', start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false })], 'unit-test');
+      const snap = UndoStack.snapshotTasks(['ap']);              // what OptimizerPreview.apply / runAndApply push
+      // After the Apply the planner (or a routing change) edits the run time and the finish moves with the new bar.
+      Store.updateMany([{ id: 'ap', changes: { RUN_TIME: '6', start_date: at(26, 14), end_date: at(26, 20) } }], 'unit-test');
+      assert.equal(String(Store.tasks.ap.RUN_TIME), '6', 'sanity: the edit landed');
+      UndoStack.restoreTasks(snap);
+      const t = Store.tasks.ap;
+      assert.equal(String(t.RUN_TIME), '4', 'the run time is restored together with the finish');
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime(), 'the finish is restored');
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'and the start is re-derived from them (17:00 minus 4 h)');
+    } finally { fx.restore(); }
+  });
+
   test('OQ20 (verified): a derived start below the pull floor records pull_floor_crossed', () => {
     const fx = recFixture();
     try {

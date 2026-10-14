@@ -577,3 +577,19 @@ test('group 32: the retired Original/Updated keys are gone from every locale', (
     for (const key of RETIRED_KEYS) assert.ok(!have.has(key), `${locale}.js still carries retired key "${key}"`);
   }
 });
+
+test('gate 4b: every alert.* message key the compute core can emit exists in all 5 locales (literals, derivation-issue codes, reversal details)', () => {
+  const core = readFileSync(join(__dirname, '..', '..', 'frontend', 'nimbus-compute-core.js'), 'utf8');
+  const emitted = new Set([...core.matchAll(/'(alert\.[a-z_]+)'/g)].map(m => m[1]));
+  // `alert.${code}` is built from the derivation-issue switch: every case label is a key.
+  const sw = core.slice(core.indexOf("switch (code) {"), core.indexOf("default:", core.indexOf("switch (code) {")));
+  const codes = [...sw.matchAll(/case '([a-z_]+)'/g)].map(m => m[1]);
+  assert.ok(codes.includes('finish_moved_earlier') && codes.includes('pull_floor_crossed'), 'the derivation switch was found');
+  for (const code of codes) emitted.add(code === 'reversal_forward' ? 'alert.reversal_forward' : `alert.${code}`);
+  for (const detail of ['run_time_grew', 'due_date_past', 'cutover']) emitted.add(`alert.reversal_forward_${detail}`);
+  assert.ok(emitted.size >= 20, `expected the core to emit 20+ alert keys, found ${emitted.size}`);
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of emitted) {
+    for (const locale of LOCALES) assert.ok(perLocale[locale].has(key), `${locale}.js is missing alert key "${key}"`);
+  }
+});
