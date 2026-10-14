@@ -1750,3 +1750,30 @@ test('OQ56 a: the Remove Backlog dialog names how many orders are backlog only b
     if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
+
+test('senior review U21: the Optimize dialog refuses to run on a plant with no valid timezone, with a localized message', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorMaster = Store.masterData;
+  const priorShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'NTZ-P', split_order_policy: 'never' }], lines: [{ machine: 'NTZ-L', plant: 'NTZ-P' }] }, 'unit-test');
+    Store._blockedPlants.clear();
+    Store.setTasks([{ id: 'z1', PLANT: 'NTZ-P', MACHINE: 'NTZ-L', RUN_TIME: 2,
+      start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T10:00:00') }], 'unit-test');
+    await OptimizeDialog.selectPlant('NTZ-P');
+    const seqBefore = OptimizerPreview._runSeq;
+    await OptimizeDialog.run();
+    assert.equal(OptimizerPreview._runSeq, seqBefore, 'no optimizer run was started');
+    assert.ok(toasts.some(t => t.type === 'error' && t.msg === Util.t('toast.optimize_plant_no_timezone', { plant: 'NTZ-P' })),
+      `the refusal is the localized toast, got ${JSON.stringify(toasts)}`);
+  } finally {
+    Toast.show = priorShow;
+    Store._blockedPlants.clear();
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});

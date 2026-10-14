@@ -39,6 +39,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.no_tasks_to_optimise':        'Nenhuma tarefa para otimizar',
   'toast.select_plant_before_opt':     'Selecione uma planta na barra superior antes de otimizar.',
   'toast.select_plant_to_opt':         'Selecione uma planta para otimizar',
+  'toast.optimize_plant_no_timezone': 'A planta {{plant}} não tem um fuso horário válido, então o NIMBUS não a otimizará. Peça a um administrador para definir o fuso horário desta planta em Dados mestres.',
   'toast.select_lines_to_opt':         'Selecione pelo menos uma máquina ou mude para Planta inteira.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraram em execução enquanto a prévia estava aberta e foram mantidos como estão.',
   'toast.plant_no_timezone':  'A planta {{plant}} não tem um fuso horário válido, então o NIMBUS não consegue saber quais pedidos estão em execução ou congelados. Peça a um administrador que defina o fuso horário da planta em Dados mestres.',

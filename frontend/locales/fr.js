@@ -39,6 +39,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.no_tasks_to_optimise':        'Aucune tâche à optimiser',
   'toast.select_plant_before_opt':     'Sélectionnez une usine dans la barre supérieure avant d\'optimiser.',
   'toast.select_plant_to_opt':         'Sélectionnez une usine à optimiser',
+  'toast.optimize_plant_no_timezone': 'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne l’optimisera donc pas. Demandez à un administrateur de définir le fuseau horaire de cette usine dans les Données de base.',
   'toast.select_lines_to_opt':         'Sélectionnez au moins une machine à optimiser, ou passez à Usine entière.',
   'toast.opt_apply_running_skipped':  '{{count}} ordre(s) ont démarré pendant que l’aperçu était ouvert et ont été laissés tels quels.',
   'toast.plant_no_timezone':  'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne peut donc pas savoir quels ordres sont en cours ou gelés. Demandez à un administrateur de définir le fuseau horaire de l’usine dans les Données de base.',

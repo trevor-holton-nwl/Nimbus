@@ -39,6 +39,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.no_tasks_to_optimise':        'No tasks to optimise',
   'toast.select_plant_before_opt':     'Select a plant in the top bar before optimizing.',
   'toast.select_plant_to_opt':         'Select a plant to optimize',
+  'toast.optimize_plant_no_timezone': 'Plant {{plant}} has no valid time zone, so NIMBUS will not optimize it. Ask an administrator to set the time zone for this plant in Master Data.',
   'toast.select_lines_to_opt':         'Select at least one machine to optimize, or switch to Whole plant.',
   'toast.opt_apply_running_skipped':  '{{count}} order(s) started running while the preview was open and were left as they are.',
   'toast.plant_no_timezone':  'Plant {{plant}} has no valid time zone, so NIMBUS cannot tell which of its orders are running or frozen. Ask an administrator to set the time zone for this plant in Master Data.',
