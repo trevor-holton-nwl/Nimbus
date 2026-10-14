@@ -411,6 +411,61 @@ describe('backward calendar primitives', () => {
       });
     }
 
+    it('U17: the nominal pass is memoised per line inside a run: 50 orders cost at most 2x the workWindow lookups of one', () => {
+      const line = plain('BW-U17', weekdays(6, 18));
+      const tz = 'America/Chicago';
+      const finishes = Array.from({ length: 50 }, (_, i) => new Date(2026, 9, 5 + (i % 25), 6 + (i % 12), 0));
+      const run = (finishList) => {
+        const original = Calendar.workWindow;
+        let calls = 0;
+        Calendar.workWindow = function (...args) { calls++; return original.apply(this, args); };
+        Calendar._beginRun(null);
+        try {
+          const results = finishList.map(finish => summary(Calendar.allocateRuntimeBackward(line, finish, 240, 'never',
+            bopts({ plantTz: tz, floor: new Date(finish.getTime() - 3 * 86400000) }))));
+          return { calls, results };
+        } finally { Calendar._endRun(); Calendar.workWindow = original; }
+      };
+      const one = run(finishes.slice(0, 1));
+      const many = run(finishes);
+      assert.ok(one.calls > 0);
+      assert.ok(many.calls <= 2 * one.calls, `50 orders made ${many.calls} lookups, one order ${one.calls}`);
+      // Same answers as the unmemoised (no run) path, order by order.
+      const plainResults = finishes.map(finish => summary(Calendar.allocateRuntimeBackward(line, finish, 240, 'never',
+        bopts({ plantTz: tz, floor: new Date(finish.getTime() - 3 * 86400000) }))));
+      assert.deepEqual(many.results, plainResults);
+      // Longest-window and availability facts still match when a run order is overlong or the line has no window.
+      Calendar._beginRun(null);
+      try {
+        assert.equal(Calendar.allocateRuntimeBackward(line, finishes[0], 13 * 60, 'never', bopts({ plantTz: tz })).kind, 'overlong');
+        Store.setCalendar('BW-U17-CLOSED', everyDay(null), 'unit-test');
+        assert.equal(Calendar.allocateRuntimeBackward('BW-U17-CLOSED', finishes[0], 60, 'never', bopts({ plantTz: tz })).kind, 'unavailable');
+      } finally { Calendar._endRun(); }
+    });
+
+    it('U18: a finish at 00:00 on an open 24 h day held by a blackout in the previous window reports blackout, not closed_finish', () => {
+      const line = plain('BW-U18', everyDay([0, 24]));
+      Store.replaceBlocks([blk('u18', line, at(D.tue, '20:00'), at(D.wed, '06:00'))], 'unit-test');
+      const midnight = Calendar.allocateRuntimeBackward(line, at(D.wed, '00:00'), 60, 'never', bopts());
+      assert.equal(midnight.kind, 'placed');
+      assert.equal(midnight.finishMoved, true);
+      assert.equal(midnight.moveReason, 'blackout');
+      const inside = Calendar.allocateRuntimeBackward(line, at(D.wed, '03:00'), 60, 'never', bopts());
+      assert.equal(inside.moveReason, 'blackout');
+      // A finish after close stays closed_finish.
+      const weekday = plain('BW-U18B', weekdays(6, 18));
+      assert.equal(Calendar.allocateRuntimeBackward(weekday, at(D.wed, '18:30'), 60, 'never', bopts()).moveReason, 'closed_finish');
+    });
+
+    it('U19: latestAvailable rounds the run time like the allocator (90.4 min -> 90, not 91)', () => {
+      const line = plain('BW-U19', weekdays(6, 18));
+      const finish = at(D.wed, '12:00');
+      const got = Calendar.latestAvailable(line, finish, 90.4 * 60000, { floor: FLOOR });
+      assert.equal((got.end - got.start) / 60000, 90);
+      const placed = Calendar.allocateRuntimeBackward(line, finish, 90.4, 'never', bopts());
+      assert.equal(fmt(got.start), fmt(placed.start));
+    });
+
     it('merges a Sunday-night window with Monday-morning hours into one contiguous window (week wrap)', () => {
       const line = plain('BW-E4', { 0: [22, 24], 1: [0, 6], 2: null, 3: null, 4: null, 5: null, 6: null });
       const r = Calendar.allocateRuntimeBackward(line, at(D.mon, '04:00'), 360, 'never', bopts());

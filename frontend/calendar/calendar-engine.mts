@@ -119,6 +119,16 @@ export interface BackwardAllocationOptions extends BackwardLookupOptions {
 
 interface MsSpan { s: number; e: number }
 
+/** One line's nominal (blackout-free) operating spans over a padded date range, held for a whole run so every order on
+ * the line shares the pass (U17). Each span carries its plant-zone instants so a request only converts clipped ends. */
+interface NominalEntry {
+  lo: Date;
+  hi: Date;
+  items: Array<{ start: Date; end: Date; s: number; e: number }>;
+}
+/** Days of padding either side of the first request when a nominal entry is built (the walk caps at 400 days). */
+const NOMINAL_PAD_DAYS = 90;
+
 type BackwardFrame =
   | { kind: 'unavailable' }
   | {
@@ -169,7 +179,7 @@ export const Calendar = {
   // workWindow memoization, keyed by `${line}|${startOfDayMs}`. Values are
   // `null` (closed day) or the same [Date, Date] tuple returned to every
   // caller during one run — callers must NOT mutate window endpoints.
-  _runCache: null as { ww: Map<string, [Date, Date] | null> } | null,
+  _runCache: null as { ww: Map<string, [Date, Date] | null>; nominal: Map<string, NominalEntry> } | null,
   // Pre-parsed blackout blocks scoped to the plant being optimized.
   // { byLine: Map<line|'__any__', BlockRec[]>, byPlant: Map<plant|'__any__', BlockRec[]> }
   // where BlockRec = { s: ms, e: ms, startDate: Date, endDate: Date }.
@@ -177,7 +187,7 @@ export const Calendar = {
 
   /** Install per-run caches. Called once at the top of Engine.runAndApply. */
   _beginRun(plant: string | null): void {
-    Calendar._runCache  = { ww: new Map() };
+    Calendar._runCache  = { ww: new Map(), nominal: new Map() };
     Calendar._runBlocks = Calendar._indexBlocks(plant);
   },
   /** Tear down per-run caches. Called in a finally{} so it always runs. */
@@ -398,7 +408,7 @@ export const Calendar = {
    *  diagnostics. Never applies the minimum-piece rule and never snaps to the drag grid (a second snap
    *  would break start + run time = finish). */
   latestAvailable(line: string, finish: Date, durationMs: number, opts: BackwardLookupOptions = {}): { start: Date; end: Date } | null {
-    const runMs = Math.ceil(Number(durationMs) / Config.MS_MIN) * Config.MS_MIN;
+    const runMs = Math.round(Number(durationMs) / Config.MS_MIN) * Config.MS_MIN;
     if (!Number.isFinite(runMs) || runMs <= 0) return null;
     const frame = Calendar._backwardFrame(line, finish, opts);
     if (frame.kind !== 'ok' || runMs > frame.longestMs) return null;
@@ -679,9 +689,41 @@ export const Calendar = {
 
     // Nominal windows: blackouts ignored (a blackout never makes an order "inherently overlong"), and the
     // right edge pushed two calendar days past the finish so the window that holds the finish is measured whole.
-    const nominalWall = Calendar._operatingSpansBackward(line, new Date(y, m, d + 2), lookbackStart, false);
-    if (!nominalWall.some(span => span.start < finishWall)) return { kind: 'unavailable' };
-    const nominal = toSpans(nominalWall);
+    const nominalHi = new Date(y, m, d + 2);
+    const rc = Calendar._runCache;
+    let nominalAvailable: boolean;
+    let nominal: MsSpan[];
+    if (rc) {
+      // Inside a run (_beginRun) the nominal pass is memoised per line: one padded walk serves every order on it.
+      const key = line + '|' + (tz || '');
+      let entry = rc.nominal.get(key);
+      if (!entry || entry.lo > lookbackStart || entry.hi < nominalHi) {
+        const lo = new Date(y, m, d - Math.min(days, BACKWARD_MAX_DAYS) - NOMINAL_PAD_DAYS, finishWall.getHours(), finishWall.getMinutes());
+        const hi = new Date(y, m, d + 2 + NOMINAL_PAD_DAYS);
+        const items = Calendar._operatingSpansBackward(line, hi, lo, false)
+          .map(span => ({ start: span.start, end: span.end, s: toMs(span.start), e: toMs(span.end) }));
+        entry = { lo, hi, items };
+        if (!failed) rc.nominal.set(key, entry);
+      }
+      const wall: Array<{ start: Date; end: Date }> = [];
+      nominal = [];
+      for (const item of entry.items) {
+        if (item.end <= lookbackStart || item.start >= nominalHi) continue;
+        const clipStart = item.start < lookbackStart, clipEnd = item.end > nominalHi;
+        const start = clipStart ? lookbackStart : item.start, end = clipEnd ? nominalHi : item.end;
+        if (!(start < end)) continue;
+        wall.push({ start, end });
+        const span = { s: clipStart ? toMs(start) : item.s, e: clipEnd ? toMs(end) : item.e };
+        const prior = nominal[nominal.length - 1];
+        if (prior && span.s <= prior.e) { if (span.e > prior.e) prior.e = span.e; } else nominal.push(span);
+      }
+      nominalAvailable = wall.some(span => span.start < finishWall);
+    } else {
+      const nominalWall = Calendar._operatingSpansBackward(line, nominalHi, lookbackStart, false);
+      nominalAvailable = nominalWall.some(span => span.start < finishWall);
+      nominal = nominalAvailable ? toSpans(nominalWall) : [];
+    }
+    if (!nominalAvailable) return { kind: 'unavailable' };
     const longestMs = nominal.reduce((max, span) => Math.max(max, span.e - span.s), 0);
 
     const bound = opts.floor && opts.floor.getTime() > lookbackStart.getTime() ? opts.floor : lookbackStart;
@@ -691,9 +733,12 @@ export const Calendar = {
 
     // Why a finish that cannot be honoured as given moves: it is held by the working day itself (closed day,
     // at or before the window open, after the close) or by a blackout inside an open window.
-    const win = Calendar.workWindow(line, new Date(y, m, d));
+    // Judged on the minute just BEFORE the finish (U18): at 00:00 on an open 24 h day the cause is the previous
+    // day's window, not "closed at the finish".
+    const before = new Date(finishWall.getTime() - Config.MS_MIN);
+    const win = Calendar.workWindow(line, new Date(before.getFullYear(), before.getMonth(), before.getDate()));
     const clampReason: 'closed_finish' | 'blackout' =
-      !win || finishWall <= win[0] || finishWall > win[1] ? 'closed_finish' : 'blackout';
+      win && before >= win[0] && before < win[1] ? 'blackout' : 'closed_finish';
     return {
       kind: 'ok', finishMs, spans, longestMs, clampReason,
       toWall: ms => core.plantWallClockFromInstant(tz, new Date(ms)),
