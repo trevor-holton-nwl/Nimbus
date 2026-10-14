@@ -613,28 +613,52 @@ def test_build_outbound_groups_rolls_children_up_with_max_end_and_any_firm():
         _o("c1", "PAR1-A", parent="PAR1", end=datetime(2026, 11, 1, 8), version=None),
         _o("c2", "PAR1-B", parent="PAR1", end=datetime(2026, 11, 2, 9), manual=True, version="V2"),
         _o("c3", "PAR1-C", parent="PAR1", end=None, status="needs_planning"),           # skipped member, still a member
-        _o("p1", "1001", end=datetime(2026, 11, 3, 6)),
+        _o("p1", "1001", end=datetime(2026, 11, 3, 6), manual=True),
         _o("n1", "1002", end=None),
         _o("n2", "1003", status="needs_planning"),
     ]
-    groups, skipped = st.build_outbound_groups(rows, None)
+    groups, skipped, unfirmed = st.build_outbound_groups(rows, None)
     by = {g["plnum"]: g for g in groups}
-    assert sorted(by) == ["1001", "PAR1"] and skipped == 3
+    assert sorted(by) == ["1001", "PAR1"] and skipped == 3 and unfirmed == 0
     par = by["PAR1"]
     assert par["end"] == datetime(2026, 11, 2, 9)                                       # max child end
     assert par["auffx"] == "X" and par["rolled_up"] is True and par["verid"] == "V2"
     assert par["member_ids"] == ["c1", "c2", "c3"] and par["nimbus_order_id"] is None
     assert par["sent_ids"] == ["c1", "c2"]                                              # L9: skipped member not remembered
     plain = by["1001"]
-    assert plain["auffx"] == "" and plain["rolled_up"] is False and plain["nimbus_order_id"] == "p1"
+    assert plain["auffx"] == "X" and plain["rolled_up"] is False and plain["nimbus_order_id"] == "p1"
     assert plain["verid"] == "V1"
 
 
 def test_build_outbound_groups_groups_by_material_and_applies_frozen_firming():
     rows = [_o("a", "9", mat="M1", start=datetime(2026, 10, 9)), _o("b", "9", mat="M2", start=datetime(2026, 10, 20))]
-    groups, skipped = st.build_outbound_groups(rows, _FROZEN)
-    assert skipped == 0 and len(groups) == 2
-    assert {g["matnr"]: g["auffx"] for g in groups} == {"M1": "X", "M2": ""}
+    groups, skipped, unfirmed = st.build_outbound_groups(rows, _FROZEN)
+    assert skipped == 0 and unfirmed == 1 and len(groups) == 1           # M2 starts after the frozen end: not firmed
+    assert {g["matnr"]: g["auffx"] for g in groups} == {"M1": "X"}
+
+
+def test_send_skips_unfirmed_orders():
+    """OQ61: only firmed planned orders are sent -- planner-firmed, SAP-firmed or inside the frozen horizon."""
+    rows = [
+        _o("u1", "U1"),                                                  # nothing qualifies -> dropped
+        _o("m1", "M1", manual=True),                                     # planner-firmed
+        _o("s1", "S1", ind="X"),                                         # SAP-firmed
+        _o("f1", "F1", start=datetime(2026, 10, 9)),                     # starts inside the frozen horizon
+        _o("n1", "N1", end=None, manual=True),                           # firmed but no end: counted as no-end, not unfirmed
+        # an aggregate with one firmed child stays; its end is the latest over ALL children (the unfirmed one too)
+        _o("c1", "AG-A", parent="AG", end=datetime(2026, 11, 1, 8), manual=True),
+        _o("c2", "AG-B", parent="AG", end=datetime(2026, 11, 5, 8)),
+        # an aggregate with no firmed child is dropped as ONE planned order
+        _o("d1", "DG-A", parent="DG"),
+        _o("d2", "DG-B", parent="DG"),
+    ]
+    groups, no_end, unfirmed = st.build_outbound_groups(rows, _FROZEN)
+    by = {g["plnum"]: g for g in groups}
+    assert sorted(by) == ["AG", "F1", "M1", "S1"]
+    assert all(g["auffx"] == "X" for g in groups)
+    assert by["AG"]["end"] == datetime(2026, 11, 5, 8) and by["AG"]["member_ids"] == ["c1", "c2"]
+    assert no_end == 1 and unfirmed == 2                                 # unfirmed planned orders: U1 and the DG aggregate
+
 
 
 def test_outbound_end_is_converted_plant_local_to_sap_system_zone():
@@ -844,7 +868,8 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         ins(cur, "zzstg-c2", "PAR1-B", parent="PAR1", start=t0 + timedelta(days=1))
         ins(cur, "zzstg-np", "NP", status="needs_planning")
         ins(cur, "zzstg-nd", "ND", with_dates=False)
-        cur.execute("UPDATE orders SET manual_firmed = TRUE WHERE id = 'zzstg-c1'")
+        ins(cur, "zzstg-uf", "UF")                                        # unfirmed plain order: never queued (OQ61)
+        cur.execute("UPDATE orders SET manual_firmed = TRUE WHERE id IN ('zzstg-c1', 'zzstg-p1')")
         conn.commit()
     with _conn(pg) as (_c, cur):
         cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
@@ -854,11 +879,12 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         with _conn(pg) as (_c, cur):                                      # A2: the FIRST send writes no orders row
             cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
             assert dict(cur.fetchall()) == xmin_initial
-        assert res["queued"] == 2 and res["skipped_no_end"] == 2 and res["firmed"] == 1
+        assert res["queued"] == 2 and res["skipped_no_end"] == 2 and res["firmed"] == 2
+        assert res["skipped_unfirmed"] == 1
         assert res["rolled_up_groups"] == 1 and res["send_batch_id"]
         rows = {r["plnum"]: r for r in st.outbound_rows(PLANT)}
         assert sorted(rows) == ["P1", "PAR1"] and all(r["row_status"] == "ready" for r in rows.values())
-        assert rows["PAR1"]["auffx"] == "X" and rows["P1"]["auffx"] == ""
+        assert rows["PAR1"]["auffx"] == "X" and rows["P1"]["auffx"] == "X"
         child_end = t0 + timedelta(days=1, hours=2)
         d, t = st.plant_local_to_sap(child_end, "UTC")
         assert rows["PAR1"]["pedtr"] == d.isoformat() and rows["PAR1"]["pedti"] == t.isoformat()
@@ -871,8 +897,9 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
             sent = {r[0]: r[1:] for r in cur.fetchall()}
         assert sent["zzstg-c1"] == (child_end, "V1", True, True)         # children remember the rolled-up end
         assert sent["zzstg-c2"] == (child_end, "V1", True, True)
-        assert sent["zzstg-p1"] == (t0 + timedelta(hours=2), "V1", False, True)
+        assert sent["zzstg-p1"] == (t0 + timedelta(hours=2), "V1", True, True)
         assert sent["zzstg-np"][0] is None and sent["zzstg-nd"][0] is None
+        assert sent["zzstg-uf"][0] is None                                # the unfirmed order was not sent, so nothing is remembered
 
         with _conn(pg) as (_c, cur):
             cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
@@ -1029,8 +1056,8 @@ def test_send_uses_the_runtime_mismatch_effective_end(pg, stg_plant):
     with _conn(pg) as (conn, cur):
         cur.execute(
             "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date, basic_finish_date,"
-            " scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch, planning_status)"
-            " VALUES ('zzstg-rm', 'RM1', '777', %s, %s, %s, %s, %s, 2, TRUE, 'scheduled')",
+            " scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch, planning_status, manual_firmed)"
+            " VALUES ('zzstg-rm', 'RM1', '777', %s, %s, %s, %s, %s, 2, TRUE, 'scheduled', TRUE)",
             (PLANT, t0, t0 + timedelta(hours=9), t0, t0 + timedelta(hours=9)))
         conn.commit()
     try:

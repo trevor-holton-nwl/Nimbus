@@ -2161,7 +2161,7 @@ def firm_flag(manual_firmed, firming_indicator, eff_start, frozen_end) -> str:
     return ""
 
 
-def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int]:
+def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int, int]:
     """Roll candidate order rows up to one outbound row per planned order (D9 / D17). Pure.
 
     `rows`: dicts with id, production_order, parent_production_order, material_number, manual_firmed,
@@ -2170,7 +2170,10 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
     counted as skipped. Rows group by (parent order or own order number, material): the group's end is
     the latest member end, its firm flag is 'X' when ANY candidate member qualifies (`firm_flag`), its
     version is the smallest non-blank member version (children of one parent carry the same one).
-    Returns (groups, skipped_no_end); a group carries `member_ids` (every row of the group, skipped
+    Only FIRMED planned orders are sent (OQ61, D9): a group whose firm flag would be blank is dropped and
+    counted in `skipped_unfirmed` (one per planned order, not per child). An aggregate stays when ANY candidate
+    member is firmed, and its end is still the latest end over ALL its candidate members, firmed or not.
+    Returns (groups, skipped_no_end, skipped_unfirmed); a group carries `member_ids` (every row of the group, skipped
     members included), `sent_ids` (only the members that had an effective end and were not in Needs
     Planning -- the ones whose sent values are remembered) and `rolled_up` (true when it stands for
     distribution children)."""
@@ -2196,14 +2199,18 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
         if v:
             g["versions"].append(v)
     out = []
+    skipped_unfirmed = 0
     for g in groups.values():
         if g["end"] is None:
+            continue
+        if not g["firm"]:                       # OQ61: unfirmed planned orders are not transmitted
+            skipped_unfirmed += 1
             continue
         out.append({"plnum": g["plnum"], "matnr": g["matnr"], "end": g["end"],
                     "auffx": "X" if g["firm"] else "", "verid": min(g["versions"]) if g["versions"] else None,
                     "member_ids": g["member_ids"], "sent_ids": g["sent_ids"], "rolled_up": g["rolled_up"],
                     "nimbus_order_id": None if g["rolled_up"] else g["single_id"]})
-    return out, skipped
+    return out, skipped, skipped_unfirmed
 
 
 def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
@@ -2223,7 +2230,8 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
 
     Still-`ready` rows from an earlier click are retired first (row_status='error',
     error_text='requeued', so history survives; the poll sweeps them after 30 days). Every
-    scheduled order of the plant is queued (D9); distribution children roll up to their parent
+    firmed order of the plant is queued (D9, OQ61: planner-firmed, SAP-firmed or starting inside the frozen
+    horizon; the rest are counted in `skipped_unfirmed`); distribution children roll up to their parent
     order with the latest child end (D17); the end is converted plant-local -> SAP system zone
     (D34); the firm flag is add-only (D10). NIMBUS also remembers what it sent on each member order
     (side table `order_sap_sent`, D20) so SAP's echo of that finish is not read as an SAP change. Only member
@@ -2232,7 +2240,7 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
     `orders` row is ever written by a Send: xmin (the optimistic-concurrency `base_version`) is untouched
     and a planner's unsaved edit survives the click.
     Everything -- retire, insert, remember, audit -- is one transaction.
-    Returns {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
+    Returns {send_batch_id, queued, skipped_no_end, skipped_unfirmed, firmed, rolled_up_groups}."""
     plant = (plant or "").strip()
     if not plant:
         raise ValueError("plant is required")
@@ -2244,7 +2252,7 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
             with conn.cursor() as cur:
                 tz = _plant_info(cur, plant)["timezone"]
                 _vis, frozen_end = db._horizon_bounds_for_plant(cur, plant)
-                groups, skipped = build_outbound_groups(_outbound_candidate_rows(cur, plant), frozen_end)
+                groups, skipped, skipped_unfirmed = build_outbound_groups(_outbound_candidate_rows(cur, plant), frozen_end)
                 cur.execute("UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued',"
                             " sent_at = now() WHERE plant = %s AND row_status = 'ready'", (plant,))
                 firmed = rolled = 0
@@ -2279,15 +2287,16 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                     "INSERT INTO admin_audit (table_name, action, details, user_email)"
                     " VALUES ('sap_stage_planned_order_out', 'send_to_sap', %s, %s)",
                     (Jsonb({"plant": plant, "send_batch_id": send_batch_id, "queued": len(groups),
-                            "skipped_no_end": skipped, "firmed": firmed}), actor))
+                            "skipped_no_end": skipped, "skipped_unfirmed": skipped_unfirmed,
+                            "firmed": firmed}), actor))
             conn.commit()
         except Exception:
             conn.rollback()
             raise
     _log("info", "SAP send queued", plant=plant, send_batch_id=send_batch_id, queued=len(groups),
-         skipped_no_end=skipped, firmed=firmed, user=actor)
+         skipped_no_end=skipped, skipped_unfirmed=skipped_unfirmed, firmed=firmed, user=actor)
     return {"send_batch_id": send_batch_id, "queued": len(groups), "skipped_no_end": skipped,
-            "firmed": firmed, "rolled_up_groups": rolled}
+            "skipped_unfirmed": skipped_unfirmed, "firmed": firmed, "rolled_up_groups": rolled}
 
 
 def outbound_status(plant: str) -> dict:

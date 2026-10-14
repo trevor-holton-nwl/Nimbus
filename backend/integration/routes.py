@@ -875,8 +875,8 @@ async def sap_stage_restore(archive_id: int, request: Request,
 @router.post("/sap/staging/send/{plant}", dependencies=[Depends(require_api_key), Depends(require_admin)])
 async def sap_stage_send(plant: str, request: Request,
                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Queue the plant's scheduled orders for Mulesoft (retires any still-ready earlier queue).
-    Response: {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
+    """Queue the plant's firmed orders for Mulesoft (retires any still-ready earlier queue).
+    Response: {send_batch_id, queued, skipped_no_end, skipped_unfirmed, firmed, rolled_up_groups}."""
     _assert_stage_plant_allowed(plant, allowed_plants)
     actor = _stage_actor(request)
     _set_admin_log_details(request, plant=plant)
@@ -886,7 +886,8 @@ async def sap_stage_send(plant: str, request: Request,
         raise HTTPException(status_code=400, detail=str(e)) from e
     _log_event("info", "sap_staging", "Send to SAP queued", plant=plant, actor=actor,
                send_batch_id=result.get("send_batch_id"), queued=result.get("queued"),
-               skipped_no_end=result.get("skipped_no_end"), firmed=result.get("firmed"))
+               skipped_no_end=result.get("skipped_no_end"), skipped_unfirmed=result.get("skipped_unfirmed"),
+               firmed=result.get("firmed"))
     return result
 
 
