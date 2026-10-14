@@ -6343,7 +6343,7 @@ export function allowedPlanningWindow(snapshot: Readonly<ScheduleSnapshot>, boun
   const due = dueInstant(task, dueScopeFor(snapshot, bounds));
   const day = (offset: number): Date | null => {
     if (!due) return null;
-    const value = new Date(due); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + offset); return value;
+    const value = new Date(+due - 1); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + offset); return value;
   };
   return { floor: hasPull ? day(-Number(pull)) : null, ceiling: hasPush ? day(Number(push) + 1) : null, missingDue: (hasPull || hasPush) && !due };
 }

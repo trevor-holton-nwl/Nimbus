@@ -4628,6 +4628,16 @@ test('hard bounds read a date-only SAP due (exact midnight) as the end of its wo
   assert.equal(window.floor.getTime(), at('2026-08-09T00:00:00').getTime());
 });
 
+test('hard bounds on a 06:00-24:00 line: the next-day-00:00 due still gives the due-day floor and ceiling (R-I6)', () => {
+  const open = { 0: [6, 24], 1: [6, 24], 2: [6, 24], 3: [6, 24], 4: [6, 24], 5: [6, 24], 6: [6, 24] };
+  const snapshot = setupSnapshot([scheduledTask('d24', 1, 'GREEN', '2026-08-05T00:00:00')]);
+  snapshot.calendars.L1.workHours = open; snapshot.plants.P1.workHours = open;
+  Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 2, max_push_forward_days: 1 });
+  const window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-03T00:00:00').getTime(), 'due day Wed 5 Aug minus 2 days');
+  assert.equal(window.ceiling.getTime(), at('2026-08-07T00:00:00').getTime(), 'due day Wed 5 Aug plus 1 + 1 days');
+});
+
 test('the memoised due instant follows a changed due or line and matches the unmemoised read', () => {
   const weekdays = { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null };
   const snapshot = setupSnapshot([scheduledTask('m', 1, 'GREEN', '2026-08-09T00:00:00')]);

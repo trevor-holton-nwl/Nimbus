@@ -882,6 +882,17 @@ test('late alert (R-I6): on a 06:00-24:00 line a bar ending exactly at the close
   assert.equal(late[0].sev, 'warn');
 });
 
+test('late alert (R-I6): the push ceiling on a 06:00-24:00 line is the due DAY midnight + N + 1, not shifted by the next-day-00:00 due', () => {
+  const cal = { L: { workHours: allDays([6, 24]) } };
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P', max_push_forward_days: 0 }] };
+  const lateOf = (end) => Core.computeAlerts(alertBase([dueFri({ start_date: D(16, 10), end_date: end })],
+    { calendars: cal, plants: { P: { workHours: allDays([0, 24]) } }, masterData })).alerts.filter(a => a.type === 'late');
+  // Due Fri 16 Oct (read as Sat 00:00), cap 0 => ceiling Sat 00:00: a finish a minute after it is beyond the cap.
+  const over = lateOf(D(17, 0, 1));
+  assert.equal(over.length, 1);
+  assert.equal(over[0].sev, 'err', 'beyond the ceiling (due day + 1 day), not warn');
+});
+
 test('late alert: a timed due date compares exactly, and a line with no calendar row reads a date-only due as 23:59:59', () => {
   const timed = dueFri({ original_end_date: D(16, 12, 30), start_date: D(16, 9), end_date: D(16, 12, 31) });
   assert.equal(Core.computeAlerts(alertBase([timed])).alerts.filter(a => a.type === 'late').length, 1);

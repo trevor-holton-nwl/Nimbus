@@ -969,7 +969,8 @@
       const cap = pushCapDays(t.PLANT || plantOf(line));
       let beyondCap = false;
       if (cap !== null) {
-        const ceiling = new Date(due); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
+        // A due on a 24:00 close is the exclusive next-day 00:00: the due DAY is the one before it (R-I6).
+        const ceiling = new Date(+due - 1); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
         beyondCap = end > ceiling;
       }
       const vars = { order: orderNumber(t), hours: hours.toFixed(1), days: cap ?? '' };

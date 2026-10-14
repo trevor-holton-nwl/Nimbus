@@ -245,7 +245,7 @@ test('a successful line-hours POST adds the line to the server-line set so the r
   CalendarSync._setHydration('P-I7', 'hydrated', ['OTHER']);
   assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'LINE-X'), false, 'no server row yet: orders are blocked');
   const events = [];
-  const off = Store.subscribe ? Store.subscribe(ev => { if (ev?.type === 'calendar:change') events.push(ev); }) : null;
+  const off = Store.subscribe(ev => { if (ev?.type === 'calendar:change') events.push(ev); });
   try {
     // A failed POST must not unblock the line.
     globalThis.fetch = () => Promise.resolve({ ok: false, status: 503 });
@@ -258,7 +258,7 @@ test('a successful line-hours POST adds the line to the server-line set so the r
     await CalendarSync._flushLineHours('P-I7');
     assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'LINE-X'), true, 'saved hours make the line a server row');
     assert.equal(CalendarSync.hasServerLineCalendar('P-I7', 'OTHER'), true, 'existing lines are kept');
-    if (off) assert.ok(events.some(e => e.plant === 'P-I7'), 'calendar:change re-runs the reconcile');
+    assert.ok(events.some(e => e.plant === 'P-I7'), 'calendar:change re-runs the reconcile');
   } finally {
     globalThis.fetch = priorFetch; Toast.show = priorToast;
     if (typeof off === 'function') off();

@@ -1194,7 +1194,7 @@ export const Engine = {
     if (Number.isInteger(value) && (value as number) >= 0) {
       const due = sourceDueInstant(task, plant);
       if (due) {
-        floor = new Date(due);
+        floor = new Date(+due - 1);   // a due on a 24:00 close is next-day 00:00 exclusive: its due DAY is the day before (R-I6)
         floor.setHours(0, 0, 0, 0);
         floor.setDate(floor.getDate() - (value as number));
       }
@@ -1218,7 +1218,7 @@ export const Engine = {
     if (!Number.isInteger(value) || (value as number) < 0) return null;
     const due = sourceDueInstant(task, plant);
     if (!due) return null;
-    const ceiling = new Date(due);
+    const ceiling = new Date(+due - 1);   // due-DAY midnight even when the due is a 24:00 close (R-I6)
     ceiling.setHours(0, 0, 0, 0);
     ceiling.setDate(ceiling.getDate() + (value as number) + 1);
     return ceiling;
@@ -1624,6 +1624,7 @@ export const Engine = {
     }
     const policy = Engine.splitOrderPolicyFor(plant);
     const floor = Calendar._floorMinute(plantNow);
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;   // the reversal's forward leg runs on plant-zone instants (U16)
     const moveReason = (stale: boolean): string => cutover ? 'cutover' : (stale ? 'run_time_changed' : 'due_date_derivation');
     // A schedule patch always carries both edges, the segments and both session notes (the notes are cleared
     // by the next edit, Store._clearStaleNotes, unless a change-set carries them).
@@ -1779,7 +1780,7 @@ export const Engine = {
       // OQ53 b: rows whose walk reached "now" go forward from now, per line, in finish order, one after another.
       for (const [line, rows] of reversals) {
         rows.sort((a, b) => a.anchor.getTime() - b.anchor.getTime() || String(a.task.id).localeCompare(String(b.task.id)));
-        const sequence = Engine.placeForwardSequence(line, rows.map(row => ({ task: row.task, row })), floor, policy);
+        const sequence = Engine.placeForwardSequence(line, rows.map(row => ({ task: row.task, row })), floor, policy, { plantTz });
         const placedIds = new Set<string>();
         for (const { item, start, end, scheduleSegments } of sequence.placed) {
           placedIds.add(String(item.row.task.id));
@@ -1845,7 +1846,7 @@ export const Engine = {
    *  calendar cannot place ends it too, reported in `failure`. Callers own the surrounding calendar run. */
   placeForwardSequence<T extends ForwardSequenceItem>(
     line: string, items: ReadonlyArray<T>, from: Date, policy: SplitOrderPolicy,
-    opts: { stopWhen?: (item: T, cursor: Date) => boolean } = {},
+    opts: { stopWhen?: (item: T, cursor: Date) => boolean; plantTz?: string | null } = {},
   ): ForwardSequenceResult<T> {
     const out: ForwardSequenceResult<T> = { placed: [], invalidRuntime: [], overlong: [], failure: null };
     let cursor = new Date(from);
@@ -1873,9 +1874,16 @@ export const Engine = {
         if (slot.kind === 'overlong') { out.overlong.push(item); continue; }
         start = slot.start;
         end = new Date(start.getTime() + runtimeMs);
+        if (opts.plantTz) {
+          // The reversal's forward leg measures the run in plant-zone elapsed time (OQ46, U16), not viewer-zone.
+          const core = globalThis.NimbusComputeCore;
+          const startInstant = core?.plantInstantFromWallClock(opts.plantTz, start);
+          const endWall = startInstant ? core?.plantWallClockFromInstant(opts.plantTz, new Date(startInstant.getTime() + runtimeMs)) : null;
+          if (endWall) end = endWall;
+        }
         if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
       } else {
-        const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy);
+        const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy, opts.plantTz ?? null);
         if (allocation.kind !== 'allocated') {
           out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
           break;

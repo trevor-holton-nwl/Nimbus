@@ -91,6 +91,21 @@ test('Engine derives a due-date-day pull-forward floor using calendar days', () 
 });
 
 
+test('Engine floor and ceiling on a 06:00-24:00 line use the due DAY, not the next-day-00:00 close (R-I6)', () => {
+  const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  Store.setMasterData({ plants: [{ plant: 'P24', max_pull_forward_days: 3, max_push_forward_days: 1 }], lines: [{ machine: 'L24', plant: 'P24' }] }, 'unit-test');
+  const hours = all([6, 24]);
+  Util.setDueCalendarResolver(line => (line === 'L24' ? { lineHours: hours, plantHours: hours, plant: 'P24', rev: 1 } : null));
+  try {
+  const task = { PLANT: 'P24', MACHINE: 'L24', original_end_date: new Date(2026, 7, 17, 0, 0, 0) };
+  assert.equal(+Util.sapDueDate(task), +new Date(2026, 7, 18, 0, 0, 0), 'precondition: the due is the exclusive close');
+  const floor = Engine.earliestAllowedStart(task, 'P24');
+  assert.deepEqual([floor.getMonth(), floor.getDate(), floor.getHours()], [7, 14, 0], 'due day 17 Aug minus 3 days');
+  const ceiling = Engine.latestAllowedEnd(task, 'P24');
+  assert.deepEqual([ceiling.getMonth(), ceiling.getDate(), ceiling.getHours()], [7, 19, 0], 'due day 17 Aug + 1 + 1 days');
+  } finally { Util.setDueCalendarResolver(null); }
+});
+
 test('Engine leaves undated orders and disabled pull-forward limits unrestricted', () => {
   Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: null }], lines: [] }, 'unit-test');
   assert.equal(Engine.earliestAllowedStart({ PLANT: 'OPEN', BASIC_FINISH_DATE: new Date('2026-08-17') }, 'OPEN'), null);
@@ -4220,6 +4235,28 @@ describe('reconcile (finish-anchored)', () => {
       }
       assert.deepEqual(fx.writes.map(w => w.source), [DISPLAY_SOURCE], 'never-placed reversals are display-only');
     } finally { fx.restore(); }
+  });
+
+  test('U16: the reconcile reversal queue hands the plant zone to placeForwardSequence, and the forward leg measures plant-zone elapsed time under never and partial policies', () => {
+    const fx = recFixture();
+    const original = Engine.placeForwardSequence;
+    const seen = [];
+    Engine.placeForwardSequence = function (...args) { seen.push(args[4]); return original.apply(this, args); };
+    try {
+      Store.setTasks([fx.task('u16', { original_end_date: at(19, 17) })].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(seen.length, 1, 'one reversal queue ran');
+      assert.equal(seen[0]?.plantTz, LOCAL_TZ, 'the plant zone is passed on the reversal forward call');
+    } finally { Engine.placeForwardSequence = original; fx.restore(); }
+    // The leg itself: Chicago spring-forward, 24/7 line, 5 h from Sun 00:00 ends 06:00 wall (5 elapsed hours).
+    const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+    Store.setCalendar('U16-247', all([0, 24]), 'unit-test');
+    for (const policy of ['never', 'partial_allowed']) {
+      const out = Engine.placeForwardSequence('U16-247', [{ task: { id: 't', RUN_TIME: '5', MACHINE: 'U16-247' } }],
+        new Date(2026, 2, 8, 0, 0), policy, { plantTz: 'America/Chicago' });
+      assert.equal(out.placed.length, 1, policy);
+      assert.equal(out.placed[0].end.getHours(), 6, `${policy}: wall end 06:00 after the 02:00 jump`);
+    }
   });
 
   test('senior review M1: the never-branch reversal rounds the run time to whole minutes (no fractional-minute finish)', () => {
