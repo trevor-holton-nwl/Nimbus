@@ -2650,6 +2650,28 @@ def finish_echoes(incoming_finish_plant_local: datetime | None, incoming_date_on
             == sent_sap.replace(second=0, microsecond=0))
 
 
+def _row_finish_echo(before: dict, row: dict, sap_tz: str | None, *,
+                     finish_key: str = "basic_finish_date") -> bool:
+    """True when `row`'s finish is an echo of the finish NIMBUS last sent for `before`'s order.
+
+    The one row-level echo decision (`sap_changed_fields`, `_patch_locked_originals` and the distribution
+    writers all call it): `before["sap_sent_finish"]` is the remembered sent finish (no sent row = never an
+    echo), `row[finish_key]` the SAP finish just received (an ingest row carries it as
+    `sap_basic_finish_date`; `sap_changed_fields`' `incoming` dict as `basic_finish_date`), and
+    `row["_finish_date_only"]` says SAP sent no time (the staging parser sets it). A row with no such flag
+    (the Excel path cannot tell a date-only cell from an exact midnight) is date only when the finish is at
+    exactly 00:00:00. `sap_tz=None` means the SAP frame is the plant's frame (`before["tz"]`)."""
+    sent_f = before.get("sap_sent_finish") if before else None
+    if sent_f is None:
+        return False
+    in_f = row.get(finish_key)
+    date_only = row.get("_finish_date_only")
+    if date_only is None:
+        n = _naive_dt(in_f)
+        date_only = isinstance(n, datetime) and n.time() == dt_time.min
+    return finish_echoes(in_f, bool(date_only), sent_f, sap_tz, before.get("tz"))
+
+
 def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None, *,
                        sap_tz: str | None = None) -> set[str]:
     """Which SAP-owned fields did this upload change vs SAP's previous upload?
@@ -2703,14 +2725,8 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     # even when SAP back-scheduled the start; the new SAP baselines are still
     # written by the upsert. Only a finish, version or work center that differs
     # from what was sent re-plans the order.
-    sent_f, sent_v = before.get("sap_sent_finish"), before.get("sap_sent_version")
-    in_date_only = incoming.get("_finish_date_only")
-    if in_date_only is None:
-        # No explicit flag (the Excel path cannot tell a date-only cell from an exact midnight): midnight
-        # means date only.
-        in_n = _naive_dt(in_f)
-        in_date_only = isinstance(in_n, datetime) and in_n.time() == dt_time.min
-    finish_echo = sent_f is not None and finish_echoes(in_f, bool(in_date_only), sent_f, sap_tz, before.get("tz"))
+    sent_v = before.get("sap_sent_version")
+    finish_echo = _row_finish_echo(before, incoming, sap_tz)
     in_pv_raw = incoming.get("sap_production_version")
     # An incoming version of None means "column not sent": it cannot contradict.
     version_echo = finish_echo and (sent_v is None or in_pv_raw is None
@@ -3383,7 +3399,7 @@ def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
                             sap_tz: str | None) -> list[tuple]:
     """Fill the trailing (original_start_received, original_finish_received) of each upsert tuple.
 
-    Per incoming row: `echo = sent_finish is not None and finish_echoes(...)`. On an echo of the finish
+    Per incoming row: `echo = _row_finish_echo(...)` (a sent finish exists and the incoming one echoes it). On an echo of the finish
     NIMBUS last sent, BOTH locked columns keep their STORED values (a start-only SAP change whose finish
     echoes must not refresh `original_start_received`); a column that has no stored value yet takes the
     incoming one, so a first write still populates it. Not an echo (never-sent order, or a genuine finish
@@ -3396,15 +3412,8 @@ def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
             out.append(t)
             continue
         in_s, in_f = row.get("basic_start_date"), row.get("basic_finish_date")
-        sent = b.get("sap_sent_finish") if b else None
-        echo = False
-        if sent is not None:
-            in_echo_f = row.get("sap_basic_finish_date") or in_f
-            date_only = row.get("_finish_date_only")
-            if date_only is None:     # Excel path: an exact-midnight finish means date only
-                n = _naive_dt(in_echo_f)
-                date_only = isinstance(n, datetime) and n.time() == dt_time.min
-            echo = finish_echoes(in_echo_f, bool(date_only), sent, sap_tz, b.get("tz"))
+        # the finish SAP actually sent (`sap_basic_finish_date`), judged exactly as sap_changed_fields does
+        echo = bool(b) and _row_finish_echo(b, row, sap_tz, finish_key="sap_basic_finish_date")
         if echo:
             orig_s = b.get("original_start_received") if b.get("original_start_received") is not None else in_s
             orig_f = b.get("original_finish_received") if b.get("original_finish_received") is not None else in_f
