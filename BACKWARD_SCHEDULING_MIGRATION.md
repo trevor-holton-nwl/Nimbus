@@ -55,7 +55,7 @@ The work touches the database read and save path, the calendar engine, 25 places
 
 1. **Running orders stay start-anchored (OQ3(iii)).** A run-time change on an order that is running moves its finish and holds its start. Example: started Wed 06:00, finish Wed 14:00, run time 8 to 12 h: the finish becomes Wed 18:00.
 2. **Never-placed rows keep a start-plus-run-time read (OQ33(B)).** An order nobody has placed shows today's bar (SAP start plus run time) and is not sent until it has a placed finish; the due date is not its fallback. 6.2 states this rule once.
-3. **Retained forward paths.** The optimizer and its Apply (Reading A, OQ14(a)), the alert "Fix" with its cascade and Remove Backlog (both listed in 4.3) place forward, from a cursor or from now. "Replaced" means their output is stored as the placed finish, not that they become backward walks.
+3. **Retained forward paths.** The optimizer and its Apply (Reading A, OQ14(a)), the alert "Fix" with its cascade and Remove Backlog (both listed in 4.3) place forward, from a cursor or from now. `Engine.schedulePatchFor` (through `Engine.heldStartPatchFor`) is also retained, for the OQ3 running-order start hold. "Replaced" means their output is stored as the placed finish, not that they become backward walks.
 4. **The held finish can still move.** When no contiguous slot ends at it (OQ13), when reversal flips the walk forward (O2), when the minimum-piece rule pulls a landing (OQ55), and for the degenerate inputs of 4.2.5 (a finish in closed time, run time zero, a shutdown of many days). Who re-derives a stored start after a calendar edit is OQ51.
 5. **The optimizer's ranking is not wholly unchanged.** OQ20 moves its instability and "moved" keys from the start to the finish (2.3 says the ranking objectives do not change).
 6. **The outbound firm flag follows derived starts.** A run-time change can move an unfirmed order's derived start into the frozen window and add the SAP firm flag, which SAP never clears (4.11; OQ54). "The planner's firm flag keeps its role" holds for the planner flag only.
@@ -5270,7 +5270,7 @@ Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-sch
 | 2.5 | toast.commit_failed said "requested start" | reworded in all five locales | placement is finish-anchored now |
 | 2.5 | dead calendar seam after deleting the snap | removed Persistence.setCalendarService, its interface and the app.js wiring | nothing else called it, legacy surface shrinks |
 | 2.5 | left-handle veto | vis onMoving (lockLeftEdge) snaps a start-only drag back, commit-time revert + toast kept as fallback | possible and cheap, handle stays visible, not browser-verified |
-| 2.5 (Ruling) | planner run-time/machine/version edits route through manualSchedulePatchFor | so a held finish that cannot be reached is refused with toast.finish_cannot_hold (same as a drop, OQ13 b) rather than accepting the walk's moved finish; the walk's own answer is reserved for system re-derivations (Task 2.6 reconcile, with the finish_moved_earlier alert) | Cost if wrong: planners must drag the bar to a reachable finish before changing run time/machine on a closed-day finish (reversible; owner can flip the reading later). |
+| 2.5 (Ruling) | planner run-time/machine/version edits route through manualSchedulePatchFor | so a held finish that cannot be reached is refused with toast.finish_cannot_hold (same as a drop, OQ13 b) rather than accepting the walk's moved finish; the walk's own answer is reserved for system re-derivations (Task 2.6 reconcile, with the finish_moved_earlier alert) **[Corrected in the Phase 3 fix wave: the refusal applies only when the walk would move the finish EARLIER; a backward start before now reverses forward from now with `reversal_forward` (O2, OQ3, OQ7 a, OQ19 c).]** | Cost if wrong: planners must drag the bar to a reachable finish before changing run time/machine on a closed-day finish (reversible; owner can flip the reading later). |
 | 2.5 (Ruling) | a Needs Planning release (overlong_never / run_time_over_cap) whose due instant is already past | is NOT a finishMoved refusal: the release has no held finish to protect, so reached_now resolves forward from now (reversal) and the row carries derivationIssue reversal_forward (detail due_date_past) | Cost if wrong: a late released order lands at now instead of being refused (planner-visible, reversible). |
 | 2.6 | no server-calendar-row predicate | CalendarSync.hasServerLineCalendar reads the line_work_hours keys of GET /plant-calendar | the client default is never a server row |
 | 2.6 | no calendar hydration state | per-plant _hydration (pending/hydrated/failed) in calendar-sync, hydrated set before the calendar:change emit | reconcile must never derive on default hours |
@@ -5481,4 +5481,49 @@ Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-sch
 
 ### Phase 3 — gate report
 
-pending the whole-branch review
+**Branch and range.** `feature/backward-scheduling` (Phase 2 complete at `e86a8b1`; Phase 1 tip `5fbdfb7`). Range `5fbdfb7..HEAD`: 40 commits to `5bb605b` (112 files, +9424 / -2591) plus the docs commit that carries this report. Phase 3 itself is Tasks 3.1 to 3.6 (commits `63795d0..4a53356`); the whole-branch review (Phases 2 and 3, `5fbdfb7..f671657`) and its single fix wave (`c23c0ac..5bb605b`, 7 commits) follow. Nothing was pushed, merged or deployed (owner charter, plan section 0.2a).
+
+**Commands run and counts.**
+
+| Command | Pre-fix, at `f671657` (ledger "Phase 3 gate") | Post-fix, at `5bb605b` | Phase 2 gate |
+|---|---|---|---|
+| `npm test` legacy (`tests/js`) | 68 / 68 pass | 68 / 68 pass | 47 / 47 |
+| `npm test` modules (`tests/modules`) | 1387 tests: 1384 pass, 0 fail, 3 todo | 1403 tests: 1400 pass, 0 fail, 3 todo (the `knownFailure` baseline) | 1326 pass, 3 todo |
+| `npm run lint` | 0 errors, 35 warnings | 0 errors, 35 warnings (none in code this wave added) | 0 errors |
+| `npm run typecheck`, `check:static-assets`, `check:legacy-surface` | clean | clean (a first attempt at the F8 fix added one legacy-surface consumer, `Util.alertMessage`; reworked to use the local `t()` so the ratchet holds) | clean |
+| `python -m pytest tests/ -q` | 1777 passed, 2 failed (baseline `test_scale_catalog_paging` x2), 1 skipped, 13 xfailed | 1779 passed, 2 failed (same baseline pair), 1 skipped, 13 xfailed | 1772 passed |
+
+One module test (`changeover advances to a future order pull-forward floor ...`, the known load-sensitive optimizer probe) failed once in a run that overlapped other work and passed on rerun and in the gate run.
+
+**Tests flipped and added in Phase 3.** Module tests grew from 1329 (Phase 2 gate) to 1387 at the review point and 1403 after the fix wave; pytest from 1772 to 1777 to 1779. Phase 3 flipped the tests that pinned start-keyed behaviour (instability, separation and the collapse carry now judged or written on the finish), added the day-attribution, late/reversal alert, setup-reservation, variance-badge and locale-guard tests, and the fix wave added the missing gate-group tests listed below.
+
+**Whole-branch review (fresh Sonnet, read-only; Phases 2 and 3, `5fbdfb7..f671657`).** 1 Critical, 5 Important, 13 Minor; forward-path leaks: none (one sanctioned-but-unlisted path); scoped gate groups met 22 of 30, 5 partial, 3 with no discriminating test.
+- Fixed: F1 (Critical): a planner edit or drop whose backward start falls before now now places forward from the plant's now with `reversal_forward` (`due_date_past` or `run_time_grew`) and the late alert; only a finish that would have to move earlier is still refused (`c23c0ac`). F2: the manual running-order edit keeps the real start through the shared `Engine.heldStartPatchFor` (`c23c0ac`). F3: the collapse carry with a NULL or 0 run time writes `scheduled_end = scheduled_start + 1 minute` and keeps the stale flag, so `chk_orders_sched_range` holds (`b3d1798`). F4: the multi-drag ghost preview takes the finish delta (`e0377c6`). F5 and F6: every missing or partial gate group has a test now (`160f2d2`). F7, F8, F12 (impliedOriginalStart, stale comments, test title, `_markPlaced` comment), F15, F16 (the refresh-triggered reconcile only wakes plants whose refreshed rows hold a candidate) and F13 (docs) are fixed as the "cheap" triage set (`b00e79d`, `6c5679e`, `5bb605b`).
+- Left, with reasons: F9 (alert-card headlines for the new types are English title-cased type codes; 8 types x 5 locales, not cheap); F10 (undo of a never-placed row persists a placement on the next Save; needs a design call on `_markPlaced` and the reconcile's dirty flag); F11 (`_overlayUserMoves` drops the placement marker on a reload before Save); F12 remainder (`Calendar.latestAvailable` has tests only; deleting it deletes its tests); F14 (display only); F16 remainder (`Store.plantNow` is un-memoised, the full-plant pass is unmeasured at plant scale: Phase 4 gate); F17 (DST residual on forward legs, 24/7 lines, about twice a year, risk not reproduced); F18 (sticky placement marker, owner to confirm); F19 (three adapters of one shape, refactor).
+- Rulings: the Task 2.5 ruling "a held finish that cannot be reached is refused ... the walk's own answer is reserved for system re-derivations" was applied to the later-finish reversal as well, which contradicts O2, OQ3, OQ7(a) and OQ19(c). Corrected: the refusal applies only when the walk would move the finish earlier; a start before now reverses forward from now (the second Task 2.5 ruling, the release of a late over-cap row, generalised). The Task 3.5 ruling "a collapse carry with no run time keeps end = start" is amended to start + 1 minute (F3).
+
+**Missing gate-group tests now added** (`160f2d2` unless noted; each fails without the behaviour it pins).
+- 23 a: `engine.test.mjs`, restoring an Apply snapshot brings back the finish and the run time together. 23 b: `services.test.mjs`, the overload auto-fix leaves exactly two undo entries and one Ctrl+Z restores the line.
+- 24: `optimize-ui.test.mjs`, Apply drops a candidate whose derived bar started by the plant clock at Apply time (no `isInProgress` stub; the viewer clock is months away, so a viewer-clock filter fails it).
+- 33: `services.test.mjs`, the "order moved" toast date equals `Util.fmtDT(finish)` and not the start.
+- 4a: `engine.test.mjs` and `orders.test.mjs` (`c23c0ac`), the OQ7(a) GAP06 example (`runtime_unknown` hold, due Monday 18:00, now Wednesday 10:00, RUN_TIME 6 -> Wednesday 10:00-16:00, `due_date_past`), a not-started order whose start falls before now (`run_time_grew`), and the refused side (a finish on a closed day still toasts `finish_cannot_hold`).
+- 4b: `locale-completeness.test.mjs`, every `alert.*` key the compute core can emit (literals, the derivation-issue switch, the three reversal details) exists in all five locales.
+- 15: `confidence-lifecycle.test.mjs`, `TimeMachine.restore` restores the finish, flags the row stale and calls `Engine.reconcileRestored` for existing ids only.
+- 16: `optimizer-worker.test.mjs`, a worker-produced patch has `end_date` equal to its last productive edge and pieces that add up to the run time (segmented and continuous order); 23 a doubles as the Apply-undo test.
+- 30: `gantt.test.mjs` (`e0377c6`), a right-edge resize ghosts the companions by the finish delta.
+- 2: `calendar-engine.test.mjs`, a `partial_allowed` walk under a Chicago plant zone across the spring-forward and the fall-back night places pieces whose plant-zone elapsed total is the run time; also the Sunday-night merge and multi-cause `moveReason` precedence (2.1 minor).
+- 7: `compute-core.test.js`, the setup-violated alert carries `msgKey` and the required / available / short vars.
+- G-0.25 and 3.1 minors: `services.test.mjs` (`Alerts.applyFix` never moves a marked row), `optimize-ui.test.mjs` (the Remove Backlog dialog names the run-time-grew count).
+
+**Open owner items carried forward.**
+- Appendix A questions 1 to 5.
+- Phase 0 item g: the caller list for `POST /tasks/bulk_update` (`trust_start` defaults to true until answered).
+- Profile counts Q13 (lines with no server hours row, skipped by the reconcile) and Q15 (plants with no timezone) must be 0 on the restored copy before cutover.
+- The Phase 1 hard-bound shift (the optimizer's floor and ceiling on a closed due day).
+- Plants with `visibility_horizon_days` below 14 get a run-time cap below 336 h.
+- Task 3.5: a planner-typed MANUAL partial-share run time is carried onto the survivor by the distribution collapse (D11) and now drives the carried finish; confirm that the full-share run time is what is intended.
+- F18: a placement marker (overtime / overlong) is sticky until Unschedule even when the bar is dragged back into normal hours; confirm.
+- F10 and F11 are open defects awaiting a design call (undo of a never-placed row persists a placement; a reload before Save drops a placement marker). F17 (DST on forward legs) is an accepted residual to measure in Phase 4.
+- Browser checks still owed (not run by this session): the Phase 2 list (left-handle veto through vis `onMoving`, the derive-paused banner, the overtime confirm for a firmed order, display-only never-placed rows), and for Phase 3 and the fix wave the multi-drag ghost on a right-edge resize, the reversal toast and alert on a planner run-time edit of a late order, the alert cards and glossary in all five locales, and the distribution separation wording.
+
+**Not released.** Rollback = the branch is not merged.
