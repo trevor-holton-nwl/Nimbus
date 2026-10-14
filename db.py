@@ -264,6 +264,58 @@ _EFF_END_WITH_RUNTIME_MISMATCH_SQL = (
 
 MIN_SEGMENT_MINUTES = 30
 
+# Run-time length limits (backward-scheduling OQ28). The DATABASE bound is only a representation
+# bound (hours in a year: keeps NaN/Infinity/garbage out of interval arithmetic); the LIMIT an order
+# is scheduled with is `cap_hours(plant)`: 336 h (14 days), or the plant's visibility horizon when
+# that is shorter. A longer order is not an error: it waits in Needs Planning.
+RUN_TIME_REPRESENTATION_BOUND_HOURS = 8760.0
+RUN_TIME_MAX_HOURS = 336.0
+RUN_TIME_OVER_CAP_CODE = "run_time_over_cap"
+
+
+def cap_hours(plant_row) -> float:
+    """The longest run time (hours) an order on this plant may be scheduled with:
+    min(336, visibility_horizon_days * 24) when the plant has a positive visibility horizon, else 336.
+    `plant_row` is any mapping carrying `visibility_horizon_days` (None / missing = no horizon).
+    No other planning-horizon setting exists (the optimizer's 35 days is a constant), so if the owner
+    later names a different setting only this function changes."""
+    days = plant_row.get("visibility_horizon_days") if plant_row else None
+    if isinstance(days, bool) or days is None:
+        return RUN_TIME_MAX_HOURS
+    try:
+        days_f = float(days)
+    except (TypeError, ValueError):
+        return RUN_TIME_MAX_HOURS
+    if not days_f > 0 or days_f != days_f:
+        return RUN_TIME_MAX_HOURS
+    return min(RUN_TIME_MAX_HOURS, days_f * 24.0)
+
+
+def _fmt_hours(value) -> str:
+    return f"{float(value):,.1f}".rstrip("0").rstrip(".")
+
+
+def run_time_over_cap_reason(run_time, cap: float) -> dict:
+    """The Needs Planning reason for an order whose run time is over the cap (same {code, message}
+    shape as every other planning_reason; the extra numbers feed the localised label in the grid)."""
+    return {
+        "code": RUN_TIME_OVER_CAP_CODE,
+        "message": (f"Run time of {_fmt_hours(run_time)} h is longer than the {_fmt_hours(cap)} h limit. "
+                    f"Shorten the run time or split the order, then schedule it."),
+        "run_time": float(run_time),
+        "cap_hours": float(cap),
+    }
+
+
+def _plant_caps(cur, plants) -> dict[str, float]:
+    """{plant: cap_hours} for a distinct plant set in ONE query (a plant with no row reads as 336 h)."""
+    clean_plants = sorted({p for p in plants if p})
+    if not clean_plants:
+        return {}
+    cur.execute("SELECT p.plant, p.visibility_horizon_days FROM plants p WHERE p.plant = ANY(%s)",
+                (clean_plants,))
+    return {row[0]: cap_hours({"visibility_horizon_days": row[1]}) for row in cur.fetchall()}
+
 
 def _min_segment_minutes_by_plant(cur, plants) -> dict[str, int]:
     """Batch-resolve plants.min_productive_segment_minutes for a distinct
@@ -1342,6 +1394,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
         seen_ids: set[str] = set()
         known_machines_by_plant: dict[str, dict[str, str]] = {}
         eligibility_cache: dict = {}   # per-call plant lookups for check_eligibility (P7)
+        plant_caps: dict[str, float] = {}   # per-call run-time cap by plant (OQ28), loaded lazily
         for it in items:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
@@ -1514,6 +1567,17 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                                  else it.get("RUN_TIME") if has_runtime else current["run_time"])
             requested_runtime_minutes = _canonical_runtime_minutes(requested_runtime)
             runtime_changed = has_runtime and requested_runtime_minutes != current_runtime_minutes
+            # Run-time cap (OQ28): a new or changed run time longer than the plant's cap is rejected
+            # for this id alone (200 envelope, rejection_reasons[id]); nothing is written for it. An
+            # unchanged over-cap value (has_runtime was cleared above) never blocks an unrelated save.
+            if has_runtime and requested_runtime is not None:
+                if current["plant"] not in plant_caps:
+                    plant_caps.update(_plant_caps(cur, [current["plant"]]))
+                cap_for_plant = plant_caps.get(current["plant"], RUN_TIME_MAX_HOURS)
+                if float(requested_runtime) > cap_for_plant:
+                    rejection_reasons[tid] = RUN_TIME_OVER_CAP_CODE
+                    invalid_ids.append(tid)
+                    continue
             segment_rows: list[dict] | None = None
 
             if queued:
@@ -3296,6 +3360,68 @@ def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
     return out
 
 
+def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None = None) -> dict:
+    """The ingest side of the run-time cap (OQ28), over the orders an upload just wrote.
+
+    An order whose stored run time is over its plant's `cap_hours` is queued exactly like a routing
+    hold (planning_status 'needs_planning', reason {code 'run_time_over_cap', message}, both dates
+    NULL, firm cleared, segments deleted -- the shape `orders_planning_state_check` requires, written
+    by the resolver's `_write_holds`). The symmetric release: a queued order whose reason is
+    'run_time_over_cap' and whose run time is now within the cap goes back to 'scheduled' (never
+    touches any other queued reason). A RUNNING order (and any id in `protect_ids`) keeps its slot:
+    the SAP-truth rule that a running order is never un-scheduled by an upload.
+    Commits when it wrote anything. Returns {queued, released, running_kept}."""
+    out = {"queued": 0, "released": 0, "running_kept": 0}
+    ids = sorted(set(ids or ()))
+    if not ids:
+        return out
+    cur.execute(
+        "SELECT o.id, o.run_time, o.planning_status, o.planning_reason->>'code', o.plant, p.timezone,"
+        " p.visibility_horizon_days, o.scheduled_start, o.scheduled_end, o.basic_start_date,"
+        " o.basic_finish_date, seg.first_start, seg.last_end"
+        " FROM orders o LEFT JOIN plants p ON p.plant = o.plant " + _SCHEDULE_SEGMENTS_LATERAL_SQL +
+        " WHERE o.id = ANY(%s) AND o.run_time IS NOT NULL ORDER BY o.id",
+        (ids,),
+    )
+    protect = set(protect_ids or ())
+    to_queue: list[tuple] = []
+    to_release: list[str] = []
+    for (oid, run_time, status, reason_code, plant, tz, horizon, sched_start, sched_end,
+         basic_start, basic_finish, first_start, last_end) in cur.fetchall():
+        cap = cap_hours({"visibility_horizon_days": horizon})
+        if float(run_time) > cap:
+            if status == "needs_planning" and reason_code not in (None, RUN_TIME_OVER_CAP_CODE, "runtime_pending"):
+                continue   # another subsystem's hold keeps its own reason
+            b = {"planning_status": status, "first_start": first_start, "last_end": last_end,
+                 "scheduled_start": sched_start, "scheduled_end": sched_end, "basic_start_date": basic_start,
+                 "basic_finish_date": basic_finish, "run_time": run_time}
+            # Only an order that really holds a slot can be "running"; a never-scheduled order whose SAP
+            # window happens to cover now has no slot to protect (same rule as the SAP-change reset).
+            has_slot = sched_start is not None or first_start is not None
+            if oid in protect or (has_slot and _order_is_running(b, _plant_local_now(tz))):
+                out["running_kept"] += 1
+                continue
+            to_queue.append((oid, Jsonb(run_time_over_cap_reason(run_time, cap))))
+        elif status == "needs_planning" and reason_code == RUN_TIME_OVER_CAP_CODE:
+            to_release.append(oid)
+    if to_queue:
+        # Deferred import: backend.routing.resolver imports db (never the reverse at module scope).
+        import backend.routing.resolver as routing_resolver
+        routing_resolver._write_holds(cur, to_queue)
+        out["queued"] = len(to_queue)
+    if to_release:
+        cur.execute(
+            "UPDATE orders SET planning_status = 'scheduled', planning_reason = NULL, updated_at = NOW()"
+            " WHERE id = ANY(%s) AND planning_status = 'needs_planning'"
+            " AND planning_reason->>'code' = %s",
+            (to_release, RUN_TIME_OVER_CAP_CODE),
+        )
+        out["released"] = len(to_release)
+    if to_queue or to_release:
+        conn.commit()
+    return out
+
+
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None,
@@ -3789,6 +3915,26 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # mode machine-code rewrite), never by itself a reason to
                 # surface this entry.
                 warnings.append(distribution_plan["warnings_entry"])
+            # ---------- Run-time cap (OQ28): over-cap orders wait in Needs Planning ----------
+            # After the last write (plant fully resolved, distribution children written) and before
+            # the routing resolve (which owns run time on routing plants and applies the same cap).
+            over_cap_result = _apply_run_time_cap(cur, conn, touched_ids, running_changed_ids)
+            if over_cap_result["queued"] or over_cap_result["released"] or over_cap_result["running_kept"]:
+                parts = []
+                if over_cap_result["queued"]:
+                    parts.append(f"{over_cap_result['queued']} order(s) with a run time over the length limit "
+                                 f"were put in Needs Planning")
+                if over_cap_result["released"]:
+                    parts.append(f"{over_cap_result['released']} order(s) now within the limit were released "
+                                 f"from Needs Planning")
+                if over_cap_result["running_kept"]:
+                    parts.append(f"{over_cap_result['running_kept']} running order(s) over the limit were left "
+                                 f"on the schedule")
+                warnings.append({
+                    "level": "warn" if over_cap_result["queued"] or over_cap_result["running_kept"] else "info",
+                    "category": RUN_TIME_OVER_CAP_CODE, **over_cap_result,
+                    "msg": "; ".join(parts) + ".",
+                })
             # ---------- Routing runtime: resolve() seam (ROUTING_RUNTIME_DESIGN.md §4 item 4) ----------
             # Runs after Order Distribution's plan/apply step (so each sub-order
             # resolves at its own machine/quantity), after the SAP-change reset
@@ -4188,6 +4334,32 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
                 "level": "info",
                 "msg": f"{_mh_n} row(s): run time taken from Machine Hours (MEINH)",
             })
+
+    # A run time outside the database's representation bound (negative, 8,760 h or more, or not a
+    # finite number) would fail the whole upsert chunk at the CHECK constraint. Reject that ROW, by
+    # its spreadsheet row number, instead; everything else (including a run time over the 336 h cap,
+    # which only queues the order) goes on to the upsert. Done before date hygiene resets the index,
+    # so the row number is still the file's (the header is row 1).
+    if "RUN_TIME" in df.columns:
+        _rt_num = pd.to_numeric(df["RUN_TIME"], errors="coerce")
+        _rt_bad = _rt_num.notna() & ~((_rt_num >= 0) & (_rt_num < RUN_TIME_REPRESENTATION_BOUND_HOURS))
+        if _rt_bad.any():
+            _bad_rows = df.index[_rt_bad].tolist()
+            for _i in _bad_rows[:25]:
+                _who = (_str_id(df.at[_i, "PRODUCTION_ORDER"]) if "PRODUCTION_ORDER" in df.columns else "")
+                warnings.append({
+                    "level": "error",
+                    "msg": (f"Row {int(_i) + 2}{f' (order {_who})' if _who else ''} not loaded — run time "
+                            f"{_rt_num.at[_i]:g} h is not between 0 and "
+                            f"{RUN_TIME_REPRESENTATION_BOUND_HOURS:,.0f} hours."),
+                })
+            if len(_bad_rows) > 25:
+                warnings.append({
+                    "level": "error",
+                    "msg": f"{len(_bad_rows) - 25} more row(s) not loaded — run time outside 0 to "
+                           f"{RUN_TIME_REPRESENTATION_BOUND_HOURS:,.0f} hours.",
+                })
+            df = df.loc[~_rt_bad]
 
     diag["stage"] = "date_hygiene"
     df = _date_hygiene_df(df, warnings)

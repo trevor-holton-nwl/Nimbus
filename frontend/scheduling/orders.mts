@@ -511,8 +511,14 @@ export const Table = {
             const reason = p.data?.planning_reason;
             if (!reason) return '';
             // A planner Delete carries a fixed code; resolve it through the locale so the
-            // label follows the user's language. Other codes keep their stored message.
-            return reason.code === 'planner_unscheduled' ? Util.t('planning_reason.planner_unscheduled') : (reason.message ?? '');
+            // label follows the user's language. The run-time-over-cap reason does the same, filling in
+            // the hours the server stored beside the message. Other codes keep their stored message.
+            if (reason.code === 'planner_unscheduled') return Util.t('planning_reason.planner_unscheduled');
+            const extra = reason as { run_time?: number; cap_hours?: number };
+            if (reason.code === 'run_time_over_cap' && typeof extra.run_time === 'number' && typeof extra.cap_hours === 'number') {
+              return Util.t('planning_reason.run_time_over_cap', { hours: String(Math.round(extra.run_time * 10) / 10), cap: String(Math.round(extra.cap_hours * 10) / 10) });
+            }
+            return reason.message ?? '';
           } },
         { headerName: Util.t('col.planning_window'), colId: 'planning_window', minWidth: 260, editable: false,
           valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),

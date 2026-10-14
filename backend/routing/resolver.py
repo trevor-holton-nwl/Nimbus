@@ -599,6 +599,11 @@ def _is_routing_hold(planning_reason) -> bool:
         # db.upsert_orders' placeholder for a fresh insert awaiting its
         # post-upload resolve; nothing else sets or consumes it.
         return True
+    if code == db.RUN_TIME_OVER_CAP_CODE:
+        # A run time over the plant's cap (OQ28), queued by this resolver or by ingest. The resolver
+        # owns the run time on a routing plant, so a fresh resolve may release it (now within the
+        # cap) or re-write it (still over).
+        return True
     if code != "runtime_unknown":
         return False
     step = planning_reason.get("step")
@@ -842,7 +847,12 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         write_rows: list[tuple] = []
         held_rows: list[tuple] = []
         held_candidates: list[tuple[dict, str]] = []
+        over_cap_candidates: list[tuple[dict, float]] = []
         unmapped_workcenters: set[str] = set()
+        # The plant's run-time cap (OQ28): 336 h, or its visibility horizon when shorter.
+        cur.execute("SELECT visibility_horizon_days FROM plants WHERE plant = %s", (plant,))
+        cap_row = cur.fetchone()
+        plant_cap = db.cap_hours({"visibility_horizon_days": cap_row[0] if cap_row else None})
 
         for order in orders:
             result = resolve_one(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
@@ -866,6 +876,16 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
                 report["legacy_retained"] += 1
 
             write_row = _build_write_row(order, result, is_cutover)
+            if result.get("run_time") is not None and float(result["run_time"]) > plant_cap:
+                # Over the cap: the order is queued with reason run_time_over_cap (below), never
+                # released by this outcome. A run time past the database's representation bound
+                # cannot be stored at all, so only the hold is written for it.
+                over_cap_candidates.append((order, float(result["run_time"])))
+                if write_row is not None:
+                    if float(result["run_time"]) >= db.RUN_TIME_REPRESENTATION_BOUND_HOURS:
+                        write_row = None
+                    else:
+                        write_row = write_row[:4] + (False,) + write_row[5:]
             if write_row is not None:
                 write_rows.append(write_row)
 
@@ -876,7 +896,9 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         protected |= _running_ids(
             cur, plant,
             [o["id"] for o, _ in held_candidates
-             if o["id"] not in protected and o.get("planning_status") != "needs_planning"])
+             if o["id"] not in protected and o.get("planning_status") != "needs_planning"]
+            + [o["id"] for o, _ in over_cap_candidates
+               if o["id"] not in protected and o.get("planning_status") != "needs_planning"])
         for order, step in held_candidates:
             if order["id"] in protected:
                 report["running_kept"] = report.get("running_kept", 0) + 1
@@ -887,6 +909,15 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             held_row = _build_held_row(order, step)
             if held_row is not None:
                 held_rows.append(held_row)
+
+        for order, run_time in over_cap_candidates:
+            if order["id"] in protected:
+                report["running_kept"] = report.get("running_kept", 0) + 1
+                continue
+            if order.get("planning_status") == "needs_planning" and not _is_routing_hold(order.get("planning_reason")):
+                continue   # another subsystem's hold keeps its own reason
+            report["over_cap"] = report.get("over_cap", 0) + 1
+            held_rows.append((order["id"], Jsonb(db.run_time_over_cap_reason(run_time, plant_cap))))
 
         _write_outcomes(cur, write_rows)
         _write_holds(cur, held_rows)

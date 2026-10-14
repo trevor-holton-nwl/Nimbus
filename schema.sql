@@ -111,14 +111,21 @@ ALTER TABLE orders ADD CONSTRAINT chk_orders_sched_range
 -- (migrations/2026-09-25-orders-run-time-bounds.sql +
 -- migrations/2026-09-26-orders-run-time-bounds-validate.sql) splits it into
 -- two separate files/transactions instead.
+--
+-- Run-time cap (OQ28): the bound is now a pure REPRESENTATION bound (< 8760 hours); the LIMIT an order
+-- is scheduled with (336 h, or the plant's visibility horizon when shorter) is enforced in the
+-- application. An initialised database still carries the old < 168 constraint under the SAME name, so
+-- this block drops and re-adds it exactly once, guarded by the schema_migrations ledger id
+-- 'orders_run_time_bounds_8760' (mirrors migrations/2026-10-15-2-orders-run-time-bounds-336.sql;
+-- destructive by text: DROP CONSTRAINT, then re-ADD). Widening can never fail validation.
 DO $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'
-  ) THEN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760') THEN
+    ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_run_time_bounds;
     ALTER TABLE orders
       ADD CONSTRAINT chk_orders_run_time_bounds
-      CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 168));
+      CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 8760));
+    INSERT INTO schema_migrations (id) VALUES ('orders_run_time_bounds_8760') ON CONFLICT DO NOTHING;
   END IF;
 END $$;
 

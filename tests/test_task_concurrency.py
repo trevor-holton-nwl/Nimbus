@@ -260,6 +260,30 @@ class TestUpdateTaskDatesBulkXminConflict:
             cur.execute("SELECT machine FROM orders WHERE id = %s", (self.oid,))
             assert cur.fetchone()[0] == self.MACHINE
 
+    def test_run_time_edit_over_the_cap_is_rejected_with_a_reason_and_writes_nothing(self, pg):
+        """OQ28: a planner run-time edit longer than the plant's cap (336 h on a plant with no
+        visibility horizon) is rejected for that id alone (200 envelope, rejection reason), even
+        though the database now accepts anything under 8,760 h."""
+        db_ = pg
+        version = self._current_version(db_)
+        result = db_.update_task_dates_bulk([{"id": self.oid, "RUN_TIME": 400, "base_version": version}])
+        assert result["invalid_ids"] == [self.oid]
+        assert result["rejection_reasons"] == {self.oid: "run_time_over_cap"}
+        assert result["persisted"] == 0 and self.oid not in result["versions"]
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time FROM orders WHERE id = %s", (self.oid,))
+            assert cur.fetchone()[0] is None
+        # The same edit at the cap (and a sibling row in the same batch) is accepted.
+        ok = db_.update_task_dates_bulk([
+            {"id": self.oid, "RUN_TIME": 336, "base_version": version},
+            {"id": self.oid2, "RUN_TIME": 400},
+        ])
+        assert ok["persisted"] == 1 and ok["invalid_ids"] == [self.oid2]
+        assert ok["rejection_reasons"] == {self.oid2: "run_time_over_cap"}
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time FROM orders WHERE id = %s", (self.oid,))
+            assert float(cur.fetchone()[0]) == 336.0
+
     def test_machine_edit_accepts_case_space_variant_of_a_machine_holding_orders(self, pg):
         """The seeded machine is unregistered but holds orders in the plant, so
         a case/space variant of it is a legitimate target."""

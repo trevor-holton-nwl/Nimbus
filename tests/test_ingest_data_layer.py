@@ -17,6 +17,7 @@ import io
 
 import pandas as pd
 import pytest
+from psycopg.types.json import Jsonb
 
 import master_data
 
@@ -1364,3 +1365,150 @@ class TestOriginalDatesBackfill:
             finally:
                 conn.rollback()
 
+
+
+# ---------------------------------------------------------------------------
+# Run-time cap (backward-scheduling OQ28): an order longer than 336 h (or the plant's visibility
+# horizon, when shorter) is queued in Needs Planning at upload instead of being scheduled; a row
+# outside the database's representation bound (8,760 h) is rejected BY ROW NUMBER, not by failing
+# the chunk.
+# ---------------------------------------------------------------------------
+class TestCapHoursPure:
+    def test_default_is_336_and_horizon_can_only_lower_it(self):
+        import db as db_
+        assert db_.cap_hours(None) == 336.0
+        assert db_.cap_hours({}) == 336.0
+        assert db_.cap_hours({"visibility_horizon_days": None}) == 336.0
+        assert db_.cap_hours({"visibility_horizon_days": 0}) == 336.0
+        assert db_.cap_hours({"visibility_horizon_days": -3}) == 336.0
+        assert db_.cap_hours({"visibility_horizon_days": 5}) == 120.0
+        assert db_.cap_hours({"visibility_horizon_days": 14}) == 336.0
+        assert db_.cap_hours({"visibility_horizon_days": 90}) == 336.0
+
+    def test_reason_shape_is_the_queue_shape(self):
+        import db as db_
+        reason = db_.run_time_over_cap_reason(400, 336.0)
+        assert reason["code"] == "run_time_over_cap"
+        assert isinstance(reason["message"], str) and "400" in reason["message"] and "336" in reason["message"]
+
+
+@pytest.mark.pg
+class TestRunTimeCapIngestRealDb:
+    SUB, PLANT, MACHINE = "ZZTEST_CAP_SUB", "ZZTEST_CAP_PLANT", "ZZTEST_CAP_LINE"
+    SHORT_PLANT = "ZZTEST_CAP_SHORT"   # visibility horizon 5 days -> cap 120 h
+    MATERIAL = "ZZTEST_CAP_MAT"
+    PREFIX = "ZZTEST_CAP_ORD"
+
+    def _cleanup(self, cur):
+        cur.execute("DELETE FROM orders WHERE production_order LIKE %s", (self.PREFIX + "%",))
+        cur.execute("DELETE FROM upload_audit WHERE filename LIKE 'zztest_cap_%'")
+        cur.execute("DELETE FROM plants WHERE plant = %s", (self.SHORT_PLANT,))
+        cur.execute("DELETE FROM subnetworks WHERE code = %s", (self.SUB,))
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self.pg = pg
+        self.base = (dt.datetime.now() + dt.timedelta(days=40)).replace(hour=8, minute=0, second=0, microsecond=0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute("INSERT INTO subnetworks (code, name) VALUES (%s, 'cap test')", (self.SUB,))
+            cur.execute("INSERT INTO plants (subnetwork, plant, timezone, visibility_horizon_days)"
+                        " VALUES (%s, %s, 'UTC', 5)", (self.SUB, self.SHORT_PLANT))
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            conn.commit()
+
+    def _line(self, order, run_time, plant=None, **kw):
+        row = {
+            "PRODUCTION_ORDER": f"{self.PREFIX}_{order}", "MATERIAL_NUMBER": self.MATERIAL,
+            "WERKS": plant or self.PLANT, "MACHINE": self.MACHINE, "BASIC_START_DATE": self.base,
+            "BASIC_FINISH_DATE": self.base + dt.timedelta(days=1), "RUN_TIME": run_time,
+        }
+        row.update(kw)
+        return row
+
+    def _up(self, rows, name="zztest_cap_1.xlsx"):
+        res = self.pg.ingest_orders_from_excel(_xlsx(rows), name)
+        assert res["status"] == "ok", res
+        return res
+
+    def _row(self, order):
+        oid = self.pg.make_id(f"{self.PREFIX}_{order}", self.MATERIAL)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT planning_status, planning_reason, scheduled_start, scheduled_end, run_time,"
+                " manual_firmed, (SELECT COUNT(*) FROM order_schedule_segments s WHERE s.order_id = o.id)"
+                " FROM orders o WHERE id = %s", (oid,))
+            r = cur.fetchone()
+        if not r:
+            return None
+        return dict(zip(("status", "reason", "start", "end", "run_time", "firmed", "segments"), r, strict=True))
+
+    def test_over_cap_row_is_queued_with_reason_and_null_dates(self):
+        self._up([self._line("A", 400)])
+        row = self._row("A")
+        assert row["status"] == "needs_planning"
+        assert row["reason"]["code"] == "run_time_over_cap"
+        assert "400" in row["reason"]["message"] and "336" in row["reason"]["message"]
+        assert row["start"] is None and row["end"] is None
+        assert float(row["run_time"]) == 400.0
+
+    def test_run_time_at_the_cap_is_scheduled_normally(self):
+        self._up([self._line("B", 336)])
+        row = self._row("B")
+        assert row["status"] == "scheduled" and row["reason"] is None
+
+    def test_plant_visibility_horizon_lowers_the_cap(self):
+        self._up([self._line("C", 200, plant=self.SHORT_PLANT), self._line("D", 100, plant=self.SHORT_PLANT)])
+        assert self._row("C")["status"] == "needs_planning"      # 200 h > 5 days x 24 h
+        assert self._row("D")["status"] == "scheduled"
+
+    def test_machine_hours_run_time_over_cap_is_queued_too(self):
+        self._up([self._line("E", 4, **{"MACHINE_HOURS_(MEINH)": 500})])
+        row = self._row("E")
+        assert float(row["run_time"]) == 500.0 and row["status"] == "needs_planning"
+
+    def test_a_placed_order_made_too_long_loses_its_slot_segments_and_firm_then_is_released(self):
+        self._up([self._line("F", 100)])
+        oid = self.pg.make_id(f"{self.PREFIX}_F", self.MATERIAL)
+        start = self.base + dt.timedelta(hours=2)
+        end = start + dt.timedelta(hours=100)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=TRUE WHERE id=%s",
+                        (start, end, oid))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start,"
+                        " scheduled_end) VALUES (%s, 1, %s, %s)", (oid, start, end))
+            conn.commit()
+        self._up([self._line("F", 400)], "zztest_cap_2.xlsx")
+        row = self._row("F")
+        assert row["status"] == "needs_planning" and row["reason"]["code"] == "run_time_over_cap"
+        assert row["start"] is None and row["end"] is None
+        assert row["segments"] == 0 and row["firmed"] is False
+        # Re-upload within the cap releases it again (and only it).
+        self._up([self._line("F", 50)], "zztest_cap_3.xlsx")
+        row = self._row("F")
+        assert row["status"] == "scheduled" and row["reason"] is None and float(row["run_time"]) == 50.0
+
+    def test_another_hold_reason_is_not_overwritten_or_released(self):
+        self._up([self._line("G", 100)])
+        oid = self.pg.make_id(f"{self.PREFIX}_G", self.MATERIAL)
+        planner_hold = Jsonb({"code": "planner_unscheduled", "message": "Unscheduled by planner"})
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET planning_status='needs_planning', scheduled_start=NULL, scheduled_end=NULL,"
+                " planning_reason=%s WHERE id=%s", (planner_hold, oid))
+            conn.commit()
+        self._up([self._line("G", 120)], "zztest_cap_4.xlsx")          # changed but within the cap
+        assert self._row("G")["reason"]["code"] == "planner_unscheduled"
+        self._up([self._line("G", 500)], "zztest_cap_5.xlsx")          # over the cap: a planner hold keeps its reason
+        assert self._row("G")["reason"]["code"] == "planner_unscheduled"
+
+    def test_representation_overflow_rejects_the_row_by_number_and_commits_the_rest(self):
+        res = self._up([self._line("H1", 10), self._line("H2", 9000), self._line("H3", 20)])
+        assert res["inserted"] == 2 and self._row("H2") is None
+        assert self._row("H1")["status"] == "scheduled" and self._row("H3")["status"] == "scheduled"
+        msgs = [w["msg"] for w in res["warnings"] if w.get("level") == "error"]
+        # H2 is the second data row = spreadsheet row 3 (the header is row 1).
+        assert any(m.startswith("Row 3") and "H2" in m and "8,760" in m for m in msgs), msgs

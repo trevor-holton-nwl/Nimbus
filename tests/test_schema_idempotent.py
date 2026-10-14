@@ -175,6 +175,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-08-sap-staging-columns.sql",
         "2026-10-08-sap-staging-tables.sql",
         "2026-10-15-1-orders-original-dates.sql",
+        "2026-10-15-2-orders-run-time-bounds-336.sql",
     }
     all_names = {
         os.path.basename(path)
@@ -759,3 +760,50 @@ def test_original_dates_schema_applies_twice_and_ledger_has_one_row(pg):
         }
         cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_original_dates_backfill'")
         assert cur.fetchone()[0] == 1
+
+
+# --- Run-time cap (backward-scheduling Task 1.6): the CHECK becomes a representation bound ------------------
+RUN_TIME_BOUNDS_MIGRATION = "2026-10-15-2-orders-run-time-bounds-336.sql"
+
+
+def test_run_time_bounds_8760_in_schema_and_migration_say_destructive_and_use_the_ledger():
+    with open(os.path.join(ROOT, "migrations", RUN_TIME_BOUNDS_MIGRATION), encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    assert "Destructive by text" in migration_text
+    for text in (schema_text, migration_text):
+        assert "DROP CONSTRAINT IF EXISTS chk_orders_run_time_bounds" in text
+        assert "run_time >= 0 AND run_time < 8760" in text
+        assert "orders_run_time_bounds_8760" in text
+    # schema.sql must not keep creating the old 168-hour bound under the same name.
+    assert "run_time < 168" not in schema_text
+
+
+@pytest.mark.pg
+def test_run_time_bounds_schema_reapply_raises_an_old_bound_exactly_once(pg):
+    """An initialised database carries the old < 168 constraint under the same name: re-applying
+    schema.sql (ledger row absent) must drop and re-add it at 8760, then leave it alone."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("DELETE FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760'")
+            cur.execute("ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_run_time_bounds")
+            cur.execute("ALTER TABLE orders ADD CONSTRAINT chk_orders_run_time_bounds"
+                        " CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 168))")
+            conn.commit()
+            cur.execute(schema_sql)
+            conn.commit()
+            cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'")
+            assert "8760" in cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760'")
+            assert cur.fetchone()[0] == 1
+            # Second apply: the ledger row stops it; the bound is unchanged.
+            cur.execute(schema_sql)
+            conn.commit()
+            cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'")
+            assert "8760" in cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760'")
+            assert cur.fetchone()[0] == 1
+        finally:
+            conn.rollback()

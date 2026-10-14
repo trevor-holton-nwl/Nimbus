@@ -791,18 +791,19 @@ from math import inf, nan  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 
-@pytest.mark.parametrize("value", [nan, inf, -inf, -1, 168, 200])
+@pytest.mark.parametrize("value", [nan, inf, -inf, -1, 8760, 9000])
 def test_task_date_update_run_time_rejects_non_finite_or_out_of_range_values(value):
     """A crafted RUN_TIME of NaN reaches SQL interval arithmetic in db.py and
     crashes reads/saves for the whole plant (H8). The model-level validator
     must reject it — and every other non-finite or out-of-bounds value —
     before it ever reaches a route or the database. Upper bound is exclusive
-    (168 itself is rejected), matching the DB CHECK constraint."""
+    (8760 itself is rejected), matching the DB CHECK constraint -- a representation
+    bound; the 336 h scheduling cap is enforced per plant in db.update_task_dates_bulk."""
     with pytest.raises(ValidationError):
         brain.TaskDateUpdate(id="abc123", RUN_TIME=value)
 
 
-@pytest.mark.parametrize("value", [0, 0.5, 40.25, 167.99, None])
+@pytest.mark.parametrize("value", [0, 0.5, 40.25, 167.99, 168, 400, 8759.99, None])
 def test_task_date_update_run_time_accepts_finite_in_range_values(value):
     """Sanity check on the other side of the boundary: legitimate values
     (including the None default meaning "unchanged") must not be rejected."""
@@ -877,14 +878,16 @@ class TestOrdersRunTimeBoundsConstraint:
         )
         assert "chk_orders_run_time_bounds" in str(exc)
 
-    @pytest.mark.parametrize("run_time_sql", ["200", "-1", "168"])
+    @pytest.mark.parametrize("run_time_sql", ["9000", "-1", "8760"])
     def test_constraint_rejects_out_of_range_finite_run_time(self, pg, run_time_sql):
         exc = self._insert_run_time(pg, run_time_sql)
         assert exc is not None
         assert isinstance(exc, pg_errors.CheckViolation)
 
-    def test_constraint_accepts_in_range_run_time(self, pg):
-        exc = self._insert_run_time(pg, "40.5")
+    @pytest.mark.parametrize("run_time_sql", ["40.5", "168", "400", "8759.99"])
+    def test_constraint_accepts_in_range_run_time(self, pg, run_time_sql):
+        """The bound is a representation bound (< 8760 h); the 336 h limit is application-level."""
+        exc = self._insert_run_time(pg, run_time_sql)
         assert exc is None
 
 

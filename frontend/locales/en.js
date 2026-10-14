@@ -288,6 +288,7 @@ window.__NIMBUS_LOCALES.en = {
   'col.planning_status':               'Planning status',
   'col.planning_reason':               'Planning reason',
   'planning_reason.planner_unscheduled': 'Unscheduled by planner',
+  'planning_reason.run_time_over_cap': 'Run time of {{hours}} h is longer than the {{cap}} h limit. Shorten the run time or split the order, then schedule it.',
   'col.planning_window':               'Allowed window',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -738,7 +739,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.max_pull_forward_failed':        'Could not save maximum pull-forward',
   'ui.max_push_forward_title':         'Due-date push-forward limit',
   'ui.max_push_forward_none':          'No limit',
-  'ui.max_push_forward_help':          'Leave blank for no limit. The optimizer will not schedule a dated order to finish more than this many calendar days after its due-date day unless the machine has no sequence that avoids it — orders still over the limit are counted in the preview and in a warning after the run. Remove Backlog ignores this limit.',
+  'ui.max_push_forward_help':          'Leave blank for no limit. The optimizer treats this as a hard limit: it will not place a dated order to finish more than this many calendar days after its due-date day. Orders that cannot meet the limit are counted in the preview and in a warning after the run. Remove Backlog ignores this limit.',
   'ui.max_push_forward_invalid':       'Enter a whole number of days, zero or greater.',
   'ui.max_push_forward_saved':         'Maximum push-forward saved for this plant.',
   'ui.max_push_forward_failed':        'Could not save maximum push-forward',
@@ -2259,6 +2260,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.reject_no_routing': 'no routing',
   'ui.reject_no_operation_at_workcenter': 'machine\'s work center has no routing operation',
   'ui.reject_zero_runtime': 'calculated run time is zero',
+  'ui.reject_run_time_over_cap': 'run time is over the length limit',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',

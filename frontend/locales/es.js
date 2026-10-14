@@ -250,6 +250,7 @@ window.__NIMBUS_LOCALES.es = {
   'col.planning_status':               'Estado de planificación',
   'col.planning_reason':               'Motivo de planificación',
   'planning_reason.planner_unscheduled': 'Desprogramada por el planificador',
+  'planning_reason.run_time_over_cap': 'La duración de {{hours}} h supera el límite de {{cap}} h. Acorte la duración o divida la orden y luego prográmela.',
   'col.planning_window':               'Ventana permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -2010,6 +2011,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.reject_no_routing': 'no routing',
   'ui.reject_no_operation_at_workcenter': 'machine\'s work center has no routing operation',
   'ui.reject_zero_runtime': 'calculated run time is zero',
+  'ui.reject_run_time_over_cap': 'la duración supera el límite de longitud',
+  'ui.max_push_forward_help': 'Déjelo en blanco para no tener límite. El optimizador lo trata como un límite estricto: no programará una orden con fecha para que termine más de este número de días naturales después del día de su fecha de entrega. Las órdenes que no puedan cumplir el límite se cuentan en la vista previa y en una advertencia tras la ejecución. Quitar atrasos ignora este límite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',

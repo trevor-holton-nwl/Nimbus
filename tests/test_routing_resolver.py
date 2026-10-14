@@ -571,3 +571,102 @@ def test_check_eligibility_cache_loads_plant_lookups_once_per_call_scope():
     assert len(opened) == 1
     check_eligibility(*args, conn=conn)          # no cache -> loads again
     assert len(opened) == 2
+
+
+# ---------------------------------------------------------------------------
+# Run-time cap (OQ28): a recomputed run time over the plant's cap is queued with reason
+# run_time_over_cap through the same hold writer routing holds use; a run time within the cap
+# releases a previous over-cap hold. Driven through _resolve_orders_on_conn with the loaders and
+# writers stubbed (no database), like the gate tests above.
+# ---------------------------------------------------------------------------
+class _CapCursor:
+    def __init__(self, horizon_days):
+        self.horizon_days = horizon_days
+        self._one = None
+
+    def execute(self, statement, params=None):
+        stmt = str(statement)
+        if "SELECT routing_runtime_enabled FROM plants" in stmt:
+            self._one = (True,)
+        elif "SELECT EXISTS(SELECT 1 FROM orders" in stmt:
+            self._one = (True,)
+        elif "SELECT visibility_horizon_days FROM plants" in stmt:
+            self._one = (self.horizon_days,)
+        else:
+            self._one = None
+
+    def fetchone(self):
+        return self._one
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _CapConn:
+    def __init__(self, horizon_days=None):
+        self.cursor_obj = _CapCursor(horizon_days)
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+def _run_cap_resolve(monkeypatch, orders, results, horizon_days=None):
+    from backend.routing import resolver as r
+
+    writes: list = []
+    holds: list = []
+    monkeypatch.setattr(r, "_load_orders", lambda *a, **k: orders)
+    for loader in ("_load_pv_lookup", "_load_op_lookup", "_load_machine_workcenter", "_load_rules"):
+        monkeypatch.setattr(r, loader, lambda *a, **k: {})
+    monkeypatch.setattr(r, "resolve_one", lambda order, **k: results[order["id"]])
+    monkeypatch.setattr(r, "_running_ids", lambda *a, **k: set())
+    monkeypatch.setattr(r, "_write_outcomes", lambda cur, rows: writes.extend(rows))
+    monkeypatch.setattr(r, "_write_holds", lambda cur, rows: holds.extend(rows))
+    report = r._resolve_orders_on_conn("P1", _CapConn(horizon_days))
+    return report, writes, holds
+
+
+def _resolved(hours):
+    return {"status": "resolved", "run_time": hours, "run_time_source": "routing",
+            "run_time_basis": {"unit": "h"}}
+
+
+class TestRunTimeCap:
+    ORDER = {"id": "o1", "planning_status": "scheduled", "planning_reason": None,
+             "scheduled_start": None, "scheduled_end": None, "run_time_source": "routing"}
+
+    def test_recomputed_run_time_over_the_cap_is_held_with_the_over_cap_reason(self, monkeypatch):
+        report, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(400.0)})
+        assert report["over_cap"] == 1
+        assert [h[0] for h in holds] == ["o1"]
+        reason = holds[0][1].obj
+        assert reason["code"] == "run_time_over_cap" and "400" in reason["message"] and reason["cap_hours"] == 336.0
+        # The computed run time is still stored (the order keeps its number), but never releases a hold.
+        assert len(writes) == 1 and writes[0][1] == 400.0 and writes[0][4] is False
+
+    def test_run_time_within_the_cap_is_written_and_not_held(self, monkeypatch):
+        report, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(336.0)})
+        assert holds == [] and "over_cap" not in report and len(writes) == 1
+
+    def test_plant_visibility_horizon_lowers_the_cap(self, monkeypatch):
+        _, _, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(200.0)}, horizon_days=5)
+        assert holds and holds[0][1].obj["cap_hours"] == 120.0
+
+    def test_run_time_past_the_representation_bound_is_held_without_writing_the_number(self, monkeypatch):
+        _, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(9000.0)})
+        assert writes == [] and len(holds) == 1
+
+    def test_an_over_cap_hold_is_released_when_the_run_time_comes_back_within_the_cap(self, monkeypatch):
+        held = dict(self.ORDER, planning_status="needs_planning",
+                    planning_reason={"code": "run_time_over_cap", "message": "x"})
+        _, writes, holds = _run_cap_resolve(monkeypatch, [held], {"o1": _resolved(100.0)})
+        assert holds == [] and len(writes) == 1 and writes[0][4] is True    # release_hold
+
+    def test_another_subsystems_hold_is_not_overwritten(self, monkeypatch):
+        held = dict(self.ORDER, planning_status="needs_planning",
+                    planning_reason={"code": "planner_unscheduled", "message": "x"})
+        report, _, holds = _run_cap_resolve(monkeypatch, [held], {"o1": _resolved(400.0)})
+        assert holds == [] and "over_cap" not in report

@@ -254,16 +254,17 @@ class TaskDateUpdate(BaseModel):
         """H8: an unvalidated RUN_TIME (e.g. NaN from a crafted request) reaches
         SQL interval arithmetic in db.py (`_EFF_END_SQL` et al.) and crashes
         `GET /tasks`/`/tasks/refresh`/the save-lock query for the whole plant.
-        Bounds mirror the DB-level CHECK constraint added (as NOT VALID, then
-        validated by a later, separate file) in
-        migrations/2026-09-25-orders-run-time-bounds.sql +
-        migrations/2026-09-26-orders-run-time-bounds-validate.sql, which is
-        the backstop for the separate Excel/SAP ingest write path (db.py's
-        bulk upsert) that this pydantic model never sees."""
+        Bounds mirror the DB-level CHECK constraint (a representation bound:
+        migrations/2026-10-15-2-orders-run-time-bounds-336.sql raised it from 168
+        to 8760 hours; first added by migrations/2026-09-25-orders-run-time-bounds.sql),
+        which is the backstop for the separate Excel/SAP ingest write path (db.py's
+        bulk upsert) that this pydantic model never sees. The LIMIT an order is
+        scheduled with is the plant's cap (336 h or its visibility horizon, db.cap_hours),
+        enforced per id in db.update_task_dates_bulk, not here."""
         if value is None:
             return value
-        if not math.isfinite(value) or value < 0 or value >= 168:
-            raise ValueError("RUN_TIME must be a finite number of hours in [0, 168)")
+        if not math.isfinite(value) or value < 0 or value >= 8760:
+            raise ValueError("RUN_TIME must be a finite number of hours in [0, 8760)")
         return value
 
 
