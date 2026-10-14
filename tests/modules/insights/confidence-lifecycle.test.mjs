@@ -260,7 +260,7 @@ test('Push +1 hour moves the finish and re-derives the start; firmed, frozen and
   Store.serverOffsetMs = new Date(2026, 7, 3, 6, 0).getTime() - Date.now();   // plant clock: Mon 2026-08-03 06:00
   Store.setFrozenHorizonEnd(new Date(2026, 7, 3, 9, 0), 'test');
   const mk = (id, h1, h2) => ({ id, PLANT: 'PUSH-P', MACHINE: 'PUSH-L', RUN_TIME: h2 - h1,
-    start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
+    user_scheduled: true, start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
   try {
     Store.setTasks([mk('normal', 10, 11), mk('firmed', 12, 13), mk('running', 5, 7), mk('frozen', 8, 9), mk('late', 18, 19)], 'test');
     Store.setSelectedPlant('PUSH-P', 'test');

@@ -26,7 +26,7 @@ function task(id, start, hours, extra = {}) {
     PLANT: plant,
     MACHINE: line,
     RUN_TIME: String(hours),
-    start_date: at(start),
+    user_scheduled: true, start_date: at(start),
     end_date: new Date(+at(start) + hours * HOUR),
     BASIC_START_DATE: at('2000-01-01T00:00'),
     BASIC_FINISH_DATE: at('2000-01-01T01:00'),

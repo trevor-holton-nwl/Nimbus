@@ -593,9 +593,9 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
     priorMasterData = Store.masterData;
     Store.setMasterData({ lines: [], ...Store.masterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'unit-test');
     Store.setTasks([
-      { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, ecc_firmed: true },
-      { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
-      { id: 'ff-run', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: runStart, end_date: runEnd },
+      { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: start, end_date: end, ecc_firmed: true },
+      { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: start, end_date: end },
+      { id: 'ff-run', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: runStart, end_date: runEnd },
     ], 'unit-test');
     Store.setFirmed(['ff-man'], true, 'unit-test');
     // SAP firm is display-only: the fix goes ahead and moves the order.

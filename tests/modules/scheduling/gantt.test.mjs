@@ -303,8 +303,8 @@ test('Timeline._itemForTask: className reflects firming status (order-firmed for
 
 test('G5: the live lock-band scan membership includes running orders, not only the frozen horizon', () => {
   const now = new Date('2026-09-09T10:00:00');
-  const running = { id: 'lb-run', start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00') };
-  const future = { id: 'lb-fut', start_date: new Date('2026-09-09T14:00:00'), end_date: new Date('2026-09-09T16:00:00') };
+  const running = { id: 'lb-run', user_scheduled: true, start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00') };
+  const future = { id: 'lb-fut', user_scheduled: true, start_date: new Date('2026-09-09T14:00:00'), end_date: new Date('2026-09-09T16:00:00') };
   const priorEnd = Store.frozenHorizonEnd;
   try {
     Store.setFrozenHorizonEnd(null, 'test');
@@ -1953,12 +1953,12 @@ function _unscheduleFixture(extra = []) {
   const farEnd   = new Date('2035-03-01T12:00:00');
   const mk = (id, over = {}) => ({
     id, PRODUCTION_ORDER: id, MATERIAL_NUMBER: 'M', MACHINE: 'L1', plant: '5512', PLANT: '5512',
-    start_date: farStart, end_date: farEnd, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
-    original_start_date: new Date('2035-02-27T08:00:00'), original_end_date: new Date('2035-02-27T12:00:00'),
+    user_scheduled: true, start_date: farStart, end_date: farEnd, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+    original_user_scheduled: true, start_date: new Date('2035-02-27T08:00:00'), original_end_date: new Date('2035-02-27T12:00:00'),
     ...over,
   });
   Store.setTasks([mk('un-ok'), mk('un-manual'), mk('un-frozen'), mk('un-running', {
-    start_date: new Date(Date.now() - 3600_000), end_date: new Date(Date.now() + 3600_000),
+    user_scheduled: true, start_date: new Date(Date.now() - 3600_000), end_date: new Date(Date.now() + 3600_000),
   }), mk('un-split', { scheduleSegments: [
     { sequence: 1, startDate: farStart, endDate: farEnd }, { sequence: 2, startDate: new Date('2035-03-02T08:00:00'), endDate: new Date('2035-03-02T12:00:00') },
   ] }), ...extra], 'test');
@@ -2091,7 +2091,7 @@ test('Timeline._nowFor judges an order against its own plant clock; the viewer c
     const viewer = Timeline._nowFor({ PLANT: 'NOT-IN-MASTER-DATA' });
     assert.ok(Math.abs(viewer.getTime() - Date.now()) < 5000, 'no zone known: the viewer clock');
     // The lock band follows the plant clock: running at 10:00 plant time even though the real clock is far later.
-    const running = { id: 'lb', PLANT: 'TZ-GANTT-NOW', start_date: new Date('2026-08-05T09:00:00'), end_date: new Date('2026-08-05T11:00:00') };
+    const running = { id: 'lb', PLANT: 'TZ-GANTT-NOW', user_scheduled: true, start_date: new Date('2026-08-05T09:00:00'), end_date: new Date('2026-08-05T11:00:00') };
     assert.equal(Timeline._inLockBand(running), true);
     assert.equal(Timeline._inLockBand({ ...running, id: 'lb2', start_date: new Date('2026-08-05T06:00:00'), end_date: new Date('2026-08-05T08:00:00') }), false);
   } finally { restoreClock(); }

@@ -1388,9 +1388,9 @@ test('S6: a run-time edit holds the finish; on a RUNNING order it holds the star
   try {
     Store.setTasks([
       { id: 'later', PLANT: 'P-RUNTIME-EDIT', MACHINE: 'L1', RUN_TIME: 4,
-        start_date: new Date('2026-08-03T14:00:00'), end_date: new Date('2026-08-03T18:00:00') },
+        user_scheduled: true, start_date: new Date('2026-08-03T14:00:00'), end_date: new Date('2026-08-03T18:00:00') },
       { id: 'running', PLANT: 'P-RUNTIME-EDIT', MACHINE: 'L2', RUN_TIME: 4,
-        start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T12:00:00') },
+        user_scheduled: true, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T12:00:00') },
     ], 'unit-test');
     const later = fx.edit('RUN_TIME', 6, 'later');
     assert.equal(later.end_date.getTime(), new Date('2026-08-03T18:00:00').getTime(), 'the finish is held');
@@ -1434,7 +1434,7 @@ test('F2 (OQ3): a run-time edit on a RUNNING order started off the 15-minute gri
   try {
     Store.setTasks([
       { id: 'running', PLANT: 'P-RUN-OFFGRID', MACHINE: 'L1', RUN_TIME: 4,
-        start_date: new Date('2026-08-03T10:08:00'), end_date: new Date('2026-08-03T14:08:00') },
+        user_scheduled: true, start_date: new Date('2026-08-03T10:08:00'), end_date: new Date('2026-08-03T14:08:00') },
     ], 'unit-test');
     // The store snaps incoming starts to the grid; a derived start is off-grid, so set the real one directly.
     Store.tasks.running.start_date = new Date('2026-08-03T10:08:00');
