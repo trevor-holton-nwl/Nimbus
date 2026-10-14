@@ -1517,14 +1517,14 @@ class TestOriginalDatesBackfill:
 # the chunk.
 # ---------------------------------------------------------------------------
 class TestCapHoursPure:
-    def test_default_is_336_and_horizon_can_only_lower_it(self):
+    def test_cap_is_a_flat_336_and_the_visibility_horizon_does_not_lower_it(self):
         import db as db_
         assert db_.cap_hours(None) == 336.0
         assert db_.cap_hours({}) == 336.0
         assert db_.cap_hours({"visibility_horizon_days": None}) == 336.0
         assert db_.cap_hours({"visibility_horizon_days": 0}) == 336.0
         assert db_.cap_hours({"visibility_horizon_days": -3}) == 336.0
-        assert db_.cap_hours({"visibility_horizon_days": 5}) == 120.0
+        assert db_.cap_hours({"visibility_horizon_days": 5}) == 336.0     # U5: no horizon term
         assert db_.cap_hours({"visibility_horizon_days": 14}) == 336.0
         assert db_.cap_hours({"visibility_horizon_days": 90}) == 336.0
 
@@ -1538,7 +1538,7 @@ class TestCapHoursPure:
 @pytest.mark.pg
 class TestRunTimeCapIngestRealDb:
     SUB, PLANT, MACHINE = "ZZTEST_CAP_SUB", "ZZTEST_CAP_PLANT", "ZZTEST_CAP_LINE"
-    SHORT_PLANT = "ZZTEST_CAP_SHORT"   # visibility horizon 5 days -> cap 120 h
+    SHORT_PLANT = "ZZTEST_CAP_SHORT"   # visibility horizon 5 days (no effect on the flat 336 h cap)
     MATERIAL = "ZZTEST_CAP_MAT"
     PREFIX = "ZZTEST_CAP_ORD"
 
@@ -1603,10 +1603,11 @@ class TestRunTimeCapIngestRealDb:
         row = self._row("B")
         assert row["status"] == "scheduled" and row["reason"] is None
 
-    def test_plant_visibility_horizon_lowers_the_cap(self):
-        self._up([self._line("C", 200, plant=self.SHORT_PLANT), self._line("D", 100, plant=self.SHORT_PLANT)])
-        assert self._row("C")["status"] == "needs_planning"      # 200 h > 5 days x 24 h
-        assert self._row("D")["status"] == "scheduled"
+    def test_plant_visibility_horizon_does_not_lower_the_cap(self):
+        # U5: a 5-day horizon plant takes a 200 h order like any other plant; only > 336 h is queued.
+        self._up([self._line("C", 200, plant=self.SHORT_PLANT), self._line("D", 400, plant=self.SHORT_PLANT)])
+        assert self._row("C")["status"] == "scheduled"
+        assert self._row("D")["status"] == "needs_planning"
 
     def test_machine_hours_run_time_over_cap_is_queued_too(self):
         self._up([self._line("E", 4, **{"MACHINE_HOURS_(MEINH)": 500})])
@@ -1633,6 +1634,32 @@ class TestRunTimeCapIngestRealDb:
         self._up([self._line("F", 50)], "zztest_cap_3.xlsx")
         row = self._row("F")
         assert row["status"] == "scheduled" and row["reason"] is None and float(row["run_time"]) == 50.0
+
+    def _place_and_firm(self, order, hours=400):
+        oid = self.pg.make_id(f"{self.PREFIX}_{order}", self.MATERIAL)
+        start = self.base + dt.timedelta(hours=2)
+        end = start + dt.timedelta(hours=hours)
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET planning_status='scheduled', planning_reason=NULL, scheduled_start=%s,"
+                        " scheduled_end=%s, manual_firmed=TRUE WHERE id=%s", (start, end, oid))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start,"
+                        " scheduled_end) VALUES (%s, 1, %s, %s)", (oid, start, end))
+            conn.commit()
+
+    def test_a_released_placed_over_cap_order_survives_a_reupload_but_a_changed_run_time_requeues_it(self):
+        # R-I5 (V2 reproduction): queue at 400 h, planner releases + firms it, an upload that does not
+        # change the run time must leave it placed; a changed (still over-cap) run time re-queues it.
+        self._up([self._line("R", 400), self._line("R2", 100)])
+        assert self._row("R")["status"] == "needs_planning"
+        self._place_and_firm("R")
+        self._up([self._line("R", 400, MATERIAL_DESCRIPTION="renamed")], "zztest_cap_6.xlsx")
+        row = self._row("R")
+        assert row["status"] == "scheduled" and row["start"] is not None and row["end"] is not None
+        assert row["firmed"] is True and row["segments"] == 1 and float(row["run_time"]) == 400.0
+        self._up([self._line("R", 450)], "zztest_cap_7.xlsx")
+        row = self._row("R")
+        assert row["status"] == "needs_planning" and row["reason"]["code"] == "run_time_over_cap"
+        assert row["start"] is None and row["firmed"] is False and row["segments"] == 0
 
     def test_another_hold_reason_is_not_overwritten_or_released(self):
         self._up([self._line("G", 100)])

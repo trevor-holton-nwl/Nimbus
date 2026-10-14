@@ -651,9 +651,23 @@ class TestRunTimeCap:
         report, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(336.0)})
         assert holds == [] and "over_cap" not in report and len(writes) == 1
 
-    def test_plant_visibility_horizon_lowers_the_cap(self, monkeypatch):
-        _, _, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(200.0)}, horizon_days=5)
-        assert holds and holds[0][1].obj["cap_hours"] == 120.0
+    def test_plant_visibility_horizon_does_not_lower_the_cap(self, monkeypatch):
+        # U5: the cap is a flat 336 h; a 5-day horizon plant resolves a 200 h order normally.
+        _, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(200.0)}, horizon_days=5)
+        assert holds == [] and len(writes) == 1
+
+    def test_a_placed_over_cap_order_with_an_unchanged_run_time_is_not_requeued(self, monkeypatch):
+        # R-I5: planner-released + placed + firm; every upload re-resolves it to the same 400 h.
+        placed = dict(self.ORDER, run_time=Decimal("400.0"),
+                      scheduled_start=dt.datetime(2026, 11, 1, 8), scheduled_end=dt.datetime(2026, 11, 18, 0))
+        report, writes, holds = _run_cap_resolve(monkeypatch, [placed], {"o1": _resolved(400.0)})
+        assert holds == [] and "over_cap" not in report
+        # a CHANGED over-cap run time re-queues it, and so does a never-placed order
+        _, _, holds = _run_cap_resolve(monkeypatch, [placed], {"o1": _resolved(450.0)})
+        assert [h[0] for h in holds] == ["o1"]
+        _, _, holds = _run_cap_resolve(monkeypatch, [dict(placed, scheduled_start=None, scheduled_end=None)],
+                                       {"o1": _resolved(400.0)})
+        assert [h[0] for h in holds] == ["o1"]
 
     def test_run_time_past_the_representation_bound_is_held_without_writing_the_number(self, monkeypatch):
         _, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(9000.0)})

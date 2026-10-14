@@ -263,29 +263,19 @@ MIN_SEGMENT_MINUTES = 30
 
 # Run-time length limits (backward-scheduling OQ28). The DATABASE bound is only a representation
 # bound (hours in a year: keeps NaN/Infinity/garbage out of interval arithmetic); the LIMIT an order
-# is scheduled with is `cap_hours(plant)`: 336 h (14 days), or the plant's visibility horizon when
-# that is shorter. A longer order is not an error: it waits in Needs Planning.
+# is scheduled with is a flat 336 h (14 days) on every plant (U5: the backward walk looks back ~90
+# days, so a plant's visibility horizon no longer buys derivability). A longer order is not an error:
+# it waits in Needs Planning.
 RUN_TIME_REPRESENTATION_BOUND_HOURS = 8760.0
 RUN_TIME_MAX_HOURS = 336.0
 RUN_TIME_OVER_CAP_CODE = "run_time_over_cap"
 
 
-def cap_hours(plant_row) -> float:
-    """The longest run time (hours) an order on this plant may be scheduled with:
-    min(336, visibility_horizon_days * 24) when the plant has a positive visibility horizon, else 336.
-    `plant_row` is any mapping carrying `visibility_horizon_days` (None / missing = no horizon).
-    No other planning-horizon setting exists (the optimizer's 35 days is a constant), so if the owner
-    later names a different setting only this function changes."""
-    days = plant_row.get("visibility_horizon_days") if plant_row else None
-    if isinstance(days, bool) or days is None:
-        return RUN_TIME_MAX_HOURS
-    try:
-        days_f = float(days)
-    except (TypeError, ValueError):
-        return RUN_TIME_MAX_HOURS
-    if not days_f > 0 or days_f != days_f:
-        return RUN_TIME_MAX_HOURS
-    return min(RUN_TIME_MAX_HOURS, days_f * 24.0)
+def cap_hours(plant_row=None) -> float:
+    """The longest run time (hours) an order may be scheduled with: the flat RUN_TIME_MAX_HOURS (336 h).
+    `plant_row` is accepted (and ignored) so every caller keeps one place to change if the owner later
+    names a per-plant setting."""
+    return RUN_TIME_MAX_HOURS
 
 
 def _fmt_hours(value) -> str:
@@ -305,13 +295,11 @@ def run_time_over_cap_reason(run_time, cap: float) -> dict:
 
 
 def _plant_caps(cur, plants) -> dict[str, float]:
-    """{plant: cap_hours} for a distinct plant set in ONE query (a plant with no row reads as 336 h)."""
+    """{plant: cap_hours} for a distinct plant set (flat 336 h; kept as one seam for a future per-plant cap)."""
     clean_plants = sorted({p for p in plants if p})
     if not clean_plants:
         return {}
-    cur.execute("SELECT p.plant, p.visibility_horizon_days FROM plants p WHERE p.plant = ANY(%s)",
-                (clean_plants,))
-    return {row[0]: cap_hours({"visibility_horizon_days": row[1]}) for row in cur.fetchall()}
+    return {p: cap_hours() for p in clean_plants}
 
 
 def _min_segment_minutes_by_plant(cur, plants) -> dict[str, int]:
@@ -3500,7 +3488,20 @@ def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
     return out
 
 
-def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None = None) -> dict:
+def cap_requeue_decision(placed: bool, prior_run_time, run_time, *, prior_known: bool = True) -> bool:
+    """Should an order whose run time is over the cap be (re)queued? (ruling R-I5)
+    Yes when it holds no placement, or when its resolved run time changed versus the stored one. A placed
+    order whose over-cap run time is UNCHANGED (a planner released it) keeps its slot and firm flags.
+    `prior_known=False` (no before-image for the row) reads as unchanged."""
+    if not placed:
+        return True
+    if not prior_known:
+        return False
+    return _canonical_runtime_minutes(prior_run_time) != _canonical_runtime_minutes(run_time)
+
+
+def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None = None, *,
+                        prior_run_times: dict | None = None, commit: bool = True) -> dict:
     """The ingest side of the run-time cap (OQ28), over the orders an upload just wrote.
 
     An order whose stored run time is over its plant's `cap_hours` is queued exactly like a routing
@@ -3509,15 +3510,18 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
     by the resolver's `_write_holds`). The symmetric release: a queued order whose reason is
     'run_time_over_cap' and whose run time is now within the cap goes back to 'scheduled' (never
     touches any other queued reason). A RUNNING order (and any id in `protect_ids`) keeps its slot:
-    the SAP-truth rule that a running order is never un-scheduled by an upload.
-    Commits when it wrote anything. Returns {queued, released, running_kept}."""
+    the SAP-truth rule that a running order is never un-scheduled by an upload. A PLACED order whose
+    over-cap run time did not change versus `prior_run_times[id]` (the stored value before this write)
+    also keeps its slot and firm flags (R-I5); an id absent from `prior_run_times` reads as unchanged.
+    Commits when it wrote anything unless `commit=False` (a caller inside its own transaction, e.g. the
+    distribution planner). Returns {queued, released, running_kept}."""
     out = {"queued": 0, "released": 0, "running_kept": 0}
     ids = sorted(set(ids or ()))
     if not ids:
         return out
     cur.execute(
         "SELECT o.id, o.run_time, o.planning_status, o.planning_reason->>'code', o.plant, p.timezone,"
-        " p.visibility_horizon_days, o.scheduled_start, o.scheduled_end, o.basic_start_date,"
+        " NULL, o.scheduled_start, o.scheduled_end, o.basic_start_date,"
         " o.basic_finish_date, seg.first_start, seg.last_end"
         " FROM orders o LEFT JOIN plants p ON p.plant = o.plant " + _SCHEDULE_SEGMENTS_LATERAL_SQL +
         " WHERE o.id = ANY(%s) AND o.run_time IS NOT NULL ORDER BY o.id",
@@ -3528,7 +3532,7 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
     to_release: list[str] = []
     for (oid, run_time, status, reason_code, plant, tz, horizon, sched_start, sched_end,
          basic_start, basic_finish, first_start, last_end) in cur.fetchall():
-        cap = cap_hours({"visibility_horizon_days": horizon})
+        cap = cap_hours()
         if float(run_time) > cap:
             if status == "needs_planning" and reason_code not in (None, RUN_TIME_OVER_CAP_CODE, "runtime_pending"):
                 continue   # another subsystem's hold keeps its own reason
@@ -3540,6 +3544,10 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
             if oid in protect or _order_is_running(b, _plant_local_now(tz)):
                 out["running_kept"] += 1
                 continue
+            placed = (sched_start is not None or sched_end is not None or first_start is not None)                 and status != "needs_planning"
+            if not cap_requeue_decision(placed, (prior_run_times or {}).get(oid), run_time,
+                                        prior_known=oid in (prior_run_times or {})):
+                continue   # a placed order whose over-cap run time did not change keeps its slot and firm
             to_queue.append((oid, Jsonb(run_time_over_cap_reason(run_time, cap))))
         elif status == "needs_planning" and reason_code == RUN_TIME_OVER_CAP_CODE:
             to_release.append(oid)
@@ -3556,7 +3564,7 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
             (to_release, RUN_TIME_OVER_CAP_CODE),
         )
         out["released"] = len(to_release)
-    if to_queue or to_release:
+    if (to_queue or to_release) and commit:
         conn.commit()
     return out
 
@@ -3832,6 +3840,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
+    prior_run_times: dict[str, object] = {}   # stored run_time before this upload (R-I5: cap re-queue judges change)
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             for i in range(0, len(tuples), _UPSERT_CHUNK):
@@ -3840,6 +3849,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # (a) lock first (rows to be written + every sibling of a distribution child)
                 cur.execute(_CHUNK_READ_SQL, {"ids": chunk_ids})
                 before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
+                prior_run_times.update({rid: b["run_time"] for rid, b in before.items()})
                 # (a') the locked original_*_received per row, from the stored originals + the sent finish
                 chunk = _patch_locked_originals(chunk, before, row_by_id, sap_tz)
                 # (b) upsert (rows SAP did not change return nothing)
@@ -4052,7 +4062,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # ---------- Run-time cap (OQ28): over-cap orders wait in Needs Planning ----------
             # After the last write (plant fully resolved, distribution children written) and before
             # the routing resolve (which owns run time on routing plants and applies the same cap).
-            over_cap_result = _apply_run_time_cap(cur, conn, touched_ids, running_changed_ids)
+            over_cap_result = _apply_run_time_cap(cur, conn, touched_ids, running_changed_ids,
+                                                  prior_run_times=prior_run_times)
             if over_cap_result["queued"] or over_cap_result["released"] or over_cap_result["running_kept"]:
                 parts = []
                 if over_cap_result["queued"]:

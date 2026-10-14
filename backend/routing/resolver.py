@@ -851,10 +851,8 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         held_candidates: list[tuple[dict, str]] = []
         over_cap_candidates: list[tuple[dict, float]] = []
         unmapped_workcenters: set[str] = set()
-        # The plant's run-time cap (OQ28): 336 h, or its visibility horizon when shorter.
-        cur.execute("SELECT visibility_horizon_days FROM plants WHERE plant = %s", (plant,))
-        cap_row = cur.fetchone()
-        plant_cap = db.cap_hours({"visibility_horizon_days": cap_row[0] if cap_row else None})
+        # The run-time cap (OQ28, U5): a flat 336 h on every plant (db.cap_hours).
+        plant_cap = db.cap_hours()
 
         for order in orders:
             result = resolve_one(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
@@ -918,6 +916,11 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
                 continue
             if order.get("planning_status") == "needs_planning" and not _is_routing_hold(order.get("planning_reason")):
                 continue   # another subsystem's hold keeps its own reason
+            # R-I5: a PLACED order whose resolved run time did not change keeps its slot and firm flags
+            # (a planner released it); only a never-placed order or a changed run time is re-queued.
+            placed = (order.get("scheduled_start") is not None or order.get("scheduled_end") is not None)                 and order.get("planning_status") != "needs_planning"
+            if not db.cap_requeue_decision(placed, order.get("run_time"), run_time):
+                continue
             report["over_cap"] = report.get("over_cap", 0) + 1
             held_rows.append((order["id"], Jsonb(db.run_time_over_cap_reason(run_time, plant_cap))))
 

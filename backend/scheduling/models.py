@@ -281,7 +281,7 @@ class TaskDateUpdate(BaseModel):
         to 8760 hours; first added by migrations/2026-09-25-orders-run-time-bounds.sql),
         which is the backstop for the separate Excel/SAP ingest write path (db.py's
         bulk upsert) that this pydantic model never sees. The LIMIT an order is
-        scheduled with is the plant's cap (336 h or its visibility horizon, db.cap_hours),
+        scheduled with is the flat 336 h cap (db.cap_hours),
         enforced per id in db.update_task_dates_bulk, not here."""
         if value is None:
             return value
