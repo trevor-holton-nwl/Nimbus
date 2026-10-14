@@ -1229,25 +1229,18 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_shift_orders_1h'),
         run() {
           CommandPalette.close();
+          // Push moves the FINISH one hour later and the start follows (backward scheduling OQ8). Firmed,
+          // frozen and running orders stay where they are; an order whose new finish cannot be held on the
+          // machine's working hours is skipped too (quiet: the one summary toast below counts what moved).
           const patches = ids
             .filter(id => Store.tasks[id]?.start_date && Store.tasks[id]?.end_date)
             .map(id => {
               const order = Store.tasks[id];
-              const requestedStart = new Date(order.start_date.getTime() + 3600000);
-              const plant = Store.getPlantForLine(order.MACHINE || 'Unknown')
-                || order.PLANT || Store.selectedPlant;
-              const policy = NIMBUS.Engine?.splitOrderPolicyFor?.(plant);
-              const needsAggregate = (order.scheduleSegments?.length ?? 0) >= 2
-                || (policy && policy !== 'never');
-              if (needsAggregate) {
-                const changes = NIMBUS.Engine?.manualSchedulePatchFor?.(
-                  order, order.MACHINE || 'Unknown', requestedStart);
-                return changes ? { id, changes } : null;
-              }
-              return { id, changes: {
-                start_date: requestedStart,
-                end_date: new Date(order.end_date.getTime() + 3600000),
-              }};
+              if (NIMBUS.Engine?.firmingStatus?.(order)?.firmed) return null;
+              const changes = NIMBUS.Engine?.manualSchedulePatchFor?.(
+                order, order.MACHINE || 'Unknown', new Date(order.end_date.getTime() + 3600000),
+                undefined, { quiet: true });
+              return changes ? { id, changes } : null;
             })
             .filter(Boolean);
           if (patches.length) {

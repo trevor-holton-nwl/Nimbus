@@ -2328,8 +2328,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="readonly" id="ovr-order"></div>
       </div>
       <div class="form-row">
-        <label>New start date / time</label>
-        <input type="text" id="ovr-start" readonly>
+        <label data-i18n="modal.override_finish_label">New finish date / time</label>
+        <input type="text" id="ovr-finish" readonly>
       </div>
       <div class="form-row">
         <label>New production line</label>
@@ -2341,8 +2341,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <span data-i18n="ui.ovr_also_firm">Also firm this order (lock from optimizer)</span>
         </label>
       </div>
-      <div class="hint">
-        The duration (run time) is preserved. End time is computed from the run-time value.
+      <div class="hint" data-i18n="modal.override_finish_hint">
+        The finish stays exactly as you set it. The start is worked out backward from it, using the run time and the machine's working hours.
       </div>
     </div>
     <footer class="modal-foot">

@@ -187,6 +187,8 @@ window.__NIMBUS_LOCALES.fr = {
   'modal.purge_impact_override':       '{{count}} ont une planification définie par le planificateur qui sera perdue — un nouveau téléchargement restaure les dates SAP mais pas la planification manuelle ni les notes.',
   'modal.remove_color_wheel':          'Supprimer la roue de couleurs pour l\'usine {{plant}} ? Cette action est irréversible.',
   'modal.confirm_cancel':              'Annuler',
+  'modal.override_finish_label':       'Nouvelle date / heure de fin',
+  'modal.override_finish_hint':        'La fin reste exactement telle que vous l’avez définie. Le début est calculé à rebours à partir de celle-ci, selon le temps de production et les heures de travail de la machine.',
   'modal.confirm_overtime_title':      'Planifier hors des heures de travail ?',
   'modal.confirm_overtime_msg':        'La commande {{order}} est ferme. Elle s’exécuterait en dehors des heures de travail de cette machine. La planifier quand même comme heures supplémentaires approuvées ?',
   'modal.confirm_overtime_confirm':    'Planifier en heures supplémentaires',
@@ -256,6 +258,7 @@ window.__NIMBUS_LOCALES.fr = {
   'col.planning_reason':               'Motif de planification',
   'planning_reason.planner_unscheduled': 'Déprogrammé par le planificateur',
   'planning_reason.run_time_over_cap': 'La durée de {{hours}} h dépasse la limite de {{cap}} h. Raccourcissez la durée ou scindez l\'ordre, puis planifiez-le.',
+  'planning_reason.overlong_never': 'Plus longue que n’importe quelle période de travail de cette machine, et cette usine ne fractionne pas les commandes. Changez la machine ou le temps de production pour la placer en une seule barre continue se terminant à sa date d’échéance.',
   'col.planning_window':               'Fenêtre autorisée',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

@@ -216,6 +216,8 @@ window.__NIMBUS_LOCALES.en = {
   'modal.purge_impact_override':       '{{count}} have a planner-set schedule that will be lost — re-uploading the source file restores SAP dates but not manual schedules or notes.',
   'modal.remove_color_wheel':          'Remove the color wheel for plant {{plant}}? This cannot be undone.',
   'modal.confirm_cancel':              'Cancel',
+  'modal.override_finish_label':       'New finish date / time',
+  'modal.override_finish_hint':        'The finish stays exactly as you set it. The start is worked out backward from it, using the run time and the machine\'s working hours.',
   'modal.confirm_overtime_title':      'Place outside working hours?',
   'modal.confirm_overtime_msg':        'Order {{order}} is firmed. It would run outside this machine\'s working hours. Place it there anyway as approved overtime?',
   'modal.confirm_overtime_confirm':    'Place as overtime',
@@ -295,6 +297,7 @@ window.__NIMBUS_LOCALES.en = {
   'col.planning_reason':               'Planning reason',
   'planning_reason.planner_unscheduled': 'Unscheduled by planner',
   'planning_reason.run_time_over_cap': 'Run time of {{hours}} h is longer than the {{cap}} h limit. Shorten the run time or split the order, then schedule it.',
+  'planning_reason.overlong_never': 'Longer than any single working period on this machine, and this plant does not split orders. Change the machine or the run time to place it as one continuous bar that ends at its due date.',
   'col.planning_window':               'Allowed window',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

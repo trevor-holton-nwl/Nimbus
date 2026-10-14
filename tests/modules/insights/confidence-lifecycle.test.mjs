@@ -186,9 +186,14 @@ test('#25 command-palette Firm/Unfirm/Push/Unschedule push a REAL undo that rest
   const priorEntries = UndoStack._entries.slice();
   const priorNimbus = globalThis.NIMBUS;
   const priorSchedule = Alerts.scheduleRecompute;
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
   globalThis.NIMBUS = nimbus;
   Alerts.scheduleRecompute = () => {};
   CommandPalette.close = () => {};
+  // Push derives the start from the held finish on the plant's clock: give the plant a zone and pin the clock.
+  Store.setMasterData({ ...priorMaster, plants: [{ plant: 'UNDO-P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
+  Store.serverOffsetMs = new Date(2026, 7, 1).getTime() - Date.now();
   const mk = (id, h) => ({ id, PLANT: 'UNDO-P', MACHINE: 'UNDO-L', RUN_TIME: 1,
     start_date: new Date(2026, 7, 3, h), end_date: new Date(2026, 7, 3, h + 1) });
   const run = (labelRe) => {
@@ -230,6 +235,53 @@ test('#25 command-palette Firm/Unfirm/Push/Unschedule push a REAL undo that rest
     UndoStack._entries.length = 0;
     for (const e of priorEntries) UndoStack._entries.push(e);
     Alerts.scheduleRecompute = priorSchedule;
+    Store.setMasterData(priorMaster, 'test');
+    Store.serverOffsetMs = priorOffset;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('Push +1 hour moves the finish and re-derives the start; firmed, frozen and running orders stay put (OQ8)', () => {
+  const { CommandPalette, UndoStack, Selection } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorEntries = UndoStack._entries.slice();
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
+  const priorFrozen = Store.frozenHorizonEnd;
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  CommandPalette.close = () => {};
+  Store.setMasterData({ ...priorMaster, plants: [{ plant: 'PUSH-P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
+  Store.serverOffsetMs = new Date(2026, 7, 3, 6, 0).getTime() - Date.now();   // plant clock: Mon 2026-08-03 06:00
+  Store.setFrozenHorizonEnd(new Date(2026, 7, 3, 9, 0), 'test');
+  const mk = (id, h1, h2) => ({ id, PLANT: 'PUSH-P', MACHINE: 'PUSH-L', RUN_TIME: h2 - h1,
+    start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
+  try {
+    Store.setTasks([mk('normal', 10, 11), mk('firmed', 12, 13), mk('running', 5, 7), mk('frozen', 8, 9), mk('late', 18, 19)], 'test');
+    Store.setSelectedPlant('PUSH-P', 'test');
+    Store.setFirmed(['firmed'], true, 'test');
+    Selection.set(['normal', 'firmed', 'running', 'frozen', 'late']);
+    const cmd = CommandPalette._buildSelectionCommands().find(c => /push/i.test(c.label));
+    cmd.run();
+    const at = id => [Store.tasks[id].start_date.getHours(), Store.tasks[id].end_date.getHours()];
+    assert.deepEqual(at('normal'), [11, 12], 'finish +1 h, start re-derived from the run time');
+    assert.deepEqual(at('firmed'), [12, 13], 'a firmed order is skipped');
+    assert.deepEqual(at('running'), [5, 7], 'a running order is skipped');
+    assert.deepEqual(at('frozen'), [8, 9], 'a frozen order is skipped');
+    assert.deepEqual(at('late'), [18, 19], 'a finish past closing cannot be held, so it is skipped rather than leapt');
+  } finally {
+    Selection.clear();
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setMasterData(priorMaster, 'test');
+    Store.serverOffsetMs = priorOffset;
+    Store.setFrozenHorizonEnd(priorFrozen, 'test');
     Store.setTasks(priorTasks, 'test');
     Store.setSelectedPlant(priorPlant, 'test');
     globalThis.NIMBUS = priorNimbus;

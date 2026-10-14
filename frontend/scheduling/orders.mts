@@ -28,7 +28,7 @@ import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
-import type { SetupObservation } from '../optimization/engine.mjs';
+import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
@@ -224,7 +224,7 @@ export const Table = {
   _rangeHighlighted: new Set<string>(),
   _applyingLayout:   false,   // true while restoring saved layout — suppresses capture echo
   _captureTimer:     null as ReturnType<typeof setTimeout> | null,
-  _fpOvrStart:       null as NimbusVendor.FlatpickrInstance | null,  // Flatpickr instance for the override modal's start-date input
+  _fpOvrFinish:      null as NimbusVendor.FlatpickrInstance | null,  // Flatpickr instance for the override modal's finish date/time input
   _suppressSelectionEcho: false,
 
   /* ── Saved grid layout (pref('gridLayout'), user tier) ────────────────────
@@ -360,6 +360,23 @@ export const Table = {
       try { Session.setPref('gridLayout', Table._currentLayout()); } catch {}
     }
     return true;
+  },
+
+  /** Updated Start / Updated End columns (backward scheduling OQ1). The FINISH is the input and the start is
+   *  derived from it, so Updated Start is read-only and Updated End takes the typed value. Extracted (like
+   *  `_runTimeEditable`) so it is testable without a live AG Grid instance. */
+  _scheduleDateColumns(): TableColDef[] {
+    return [
+      { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
+        editable: false,
+        valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
+        cellClass: 'cell-date' },
+      { headerName: Util.t('col.updated_end'), field: 'end_date', minWidth: 160,
+        editable: true,
+        valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
+        cellEditor: Table._DateTimeEditor,
+        cellClass: 'cell-date' },
+    ] as unknown as TableColDef[];
   },
 
   /** RUN_TIME column's row-dependent `editable` (ROUTING_RUNTIME_DESIGN.md
@@ -514,6 +531,7 @@ export const Table = {
             // label follows the user's language. The run-time-over-cap reason does the same, filling in
             // the hours the server stored beside the message. Other codes keep their stored message.
             if (reason.code === 'planner_unscheduled') return Util.t('planning_reason.planner_unscheduled');
+            if (reason.code === 'overlong_never') return Util.t('planning_reason.overlong_never');
             const extra = reason as { run_time?: number; cap_hours?: number };
             if (reason.code === 'run_time_over_cap' && typeof extra.run_time === 'number' && typeof extra.cap_hours === 'number') {
               return Util.t('planning_reason.run_time_over_cap', { hours: String(Math.round(extra.run_time * 10) / 10), cap: String(Math.round(extra.cap_hours * 10) / 10) });
@@ -553,15 +571,7 @@ export const Table = {
           editable: false, hide: Table._fieldHidden('original_end_date'),
           valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
           cellClass: 'cell-date cell-date-original' },
-        { headerName: Util.t('col.updated_start'), field: 'start_date', minWidth: 160,
-          editable: true,
-          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
-          cellEditor: Table._DateTimeEditor,
-          cellClass: 'cell-date' },
-        { headerName: Util.t('col.updated_end'), field: 'end_date', minWidth: 160,
-          editable: false,
-          valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
-          cellClass: 'cell-date' },
+        ...Table._scheduleDateColumns(),
         { headerName: Util.t('col.alerts'), field: 'id', width: 90, flex: 0, sortable: false, filter: false, editable: false,
           cellRenderer: (p: { value: unknown }) => {
             const rel = Store.alertsByTask().get(String(p.value)) || [];
@@ -1269,13 +1279,31 @@ export const Table = {
     return !!Store.masterData?.plants?.find(p => p.plant === plant)?.routing_runtime_enabled;
   },
 
-  /** A runtime hold can recover its known SAP start; other holds require
-   *  their own resolution. Never invent a placement for an undated order. */
+  /** Queue reasons a planner action releases (OQ7, OQ50): an unresolved run time, or an order queued as overlong
+   *  or over the run-time cap. Any other reason stays queued until the optimizer or a planner resolves it. */
+  _RELEASABLE_HOLDS: new Set(['runtime_unknown', 'overlong_never', 'run_time_over_cap']),
+
+  /** The FINISH a placement edit holds (backward scheduling OQ7): the placed finish; for a releasable held order
+   *  (no placed finish) its due instant. Never invent a placement for any other undated order. */
   _runtimeEditAnchor(task: NimbusTask): Date | null {
-    return Util.parseDate(task.start_date) || (
-      task.planning_status === 'needs_planning' && task.planning_reason?.code === 'runtime_unknown'
-        ? Util.parseDate(task.BASIC_START_DATE === undefined ? task.original_start_date : task.BASIC_START_DATE) : null
-    );
+    const placed = Util.parseDate(task.end_date);
+    if (placed) return placed;
+    return task.planning_status === 'needs_planning' && Table._RELEASABLE_HOLDS.has(task.planning_reason?.code ?? '')
+      ? Util.dueInstant(task) : null;
+  },
+
+  /** A manual placement returned null. A firmed order dropped outside working hours asks the planner to confirm
+   *  overtime (OQ63) and `retry` runs again with the approval; everything else is explained here, except the
+   *  refusal the engine already toasted (`finish_cannot_hold`). */
+  _explainManualRefusal(task: NimbusTask, retry: () => void): void {
+    const reason = Engine.lastManualRefusal;
+    if (reason === 'needs_overtime_confirm') {
+      void Engine.confirmOvertimePlacement(task).then(ok => { if (ok) retry(); });
+      return;
+    }
+    if (reason !== 'finish_cannot_hold') {
+      Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+    }
   },
 
   _unplacedMachineRuntime(task: NimbusTask, machine: string): Partial<NimbusTask> {
@@ -1290,26 +1318,31 @@ export const Table = {
   },
 
   /** Called when a grid cell is edited. Push the change through the store. */
-  _onCellChanged(p: TableCellValueChangedEvent): void {
+  _onCellChanged(p: TableCellValueChangedEvent, opts: ManualPlacementOptions = {}): void {
     const field = p.colDef.field;
     const id = String(p.data.id);
     const changes: Partial<NimbusTask> = {};
-    let requestedStart: Date | null = null;
+    let requestedFinish: Date | null = null;
     let requestedLine: string | null = null;
     let scheduleTask = p.data;
 
-    if (field === 'start_date') {
+    if (field === 'end_date') {
+      // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(p.newValue);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
-      changes.start_date = Util.snap(d);
-      requestedStart = changes.start_date;
+      requestedFinish = Util.snap(d);
+    } else if (field === 'start_date') {
+      // The start is derived from the finish; its column is read-only. Put the value back if a stale caller gets here.
+      p.data.start_date = p.oldValue as Date | null;
+      Table._api!.refreshCells({ rowNodes: [p.node] });
+      return;
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(String(p.newValue)) || 0;
       changes.RUN_TIME = h;
       // Release the runtime hold only after constructing a valid placement.
       changes.run_time_source = 'manual';
       scheduleTask = { ...p.data, RUN_TIME: h };
-      requestedStart = Table._runtimeEditAnchor(p.data);
+      requestedFinish = Table._runtimeEditAnchor(p.data);
     } else if (field === 'MACHINE') {
       const newMachine = String(p.newValue || 'Unknown');
       // AG Grid's default valueSetter already wrote p.newValue onto
@@ -1335,8 +1368,8 @@ export const Table = {
       changes.MACHINE = newMachine;
       scheduleTask = { ...p.data, MACHINE: priorMachine };
       requestedLine = changes.MACHINE;
-      requestedStart = Table._runtimeEditAnchor(p.data);
-      if (!requestedStart) Object.assign(changes, Table._unplacedMachineRuntime(scheduleTask, newMachine));
+      requestedFinish = Table._runtimeEditAnchor(p.data);
+      if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(scheduleTask, newMachine));
     } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(p.data)) {
       const pv = String(p.newValue ?? '');
       changes.PRODUCTION_VERSION = pv;
@@ -1346,7 +1379,7 @@ export const Table = {
         changes.run_time_source = result.basis.source;
         changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
         scheduleTask = { ...p.data, PRODUCTION_VERSION: pv, RUN_TIME: result.hours };
-        requestedStart = Table._runtimeEditAnchor(p.data);
+        requestedFinish = Table._runtimeEditAnchor(p.data);
       } else {
         // Same "held, no fallback" shape setup-scheduler.mts uses for a
         // needs_planning disposition — null committed dates/segments so the
@@ -1383,15 +1416,21 @@ export const Table = {
       changes[field!] = p.newValue;
     }
 
-    if (requestedStart) {
+    if (requestedFinish) {
       const targetLine = requestedLine || p.data.MACHINE || 'Unknown';
-      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedStart);
+      // A run-time, machine or version edit holds the finish — except on a RUNNING order, which holds its start
+      // (OQ3); a typed End is a placement, not a run-time edit.
+      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedFinish,
+        { ...opts, holdStartIfRunning: field !== 'end_date' });
       if (!schedule?.start_date || !schedule.end_date) {
         // AG Grid has already applied the edited cell to the Store object.
         // Restore it when allocating the candidate duration fails.
         if (field) Object.assign(p.data, { [field]: p.oldValue });
-        Toast.show('Could not regenerate the order in the available calendar window.', 'error');
         Table._api!.refreshCells({ rowNodes: [p.node] });
+        Table._explainManualRefusal(p.data, () => {
+          if (field) Object.assign(p.data, { [field]: p.newValue });
+          Table._onCellChanged(p, { confirmedOvertime: true });
+        });
         return;
       }
       Object.assign(changes, schedule);
@@ -1482,30 +1521,31 @@ export const Table = {
 
     Table._selectedId = id;
     orderEl.textContent = `${t.text || t.ORDER || t.id}  ·  Line: ${t.MACHINE || '—'}`;
-    if (!Table._fpOvrStart) {
-      Table._fpOvrStart = Util.fpDatetime('#ovr-start');
+    // The dialog takes the FINISH (backward scheduling OQ1): the start is worked out from it.
+    if (!Table._fpOvrFinish) {
+      Table._fpOvrFinish = Util.fpDatetime('#ovr-finish');
     }
-    Table._fpOvrStart.setDate(t.start_date!, false);
+    Table._fpOvrFinish.setDate(t.end_date!, false);
     const lines = Table._getLineOptions(t);
     lineEl.innerHTML = lines.map(l => `<option value="${Util.escapeHtml(l)}" ${l === t.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('');
     firmEl.checked = !!t.firmed;
     Modal.open('modal-override');
   },
 
-  applyOverride(): void {
+  applyOverride(opts: ManualPlacementOptions = {}): void {
     const id = Table._selectedId;
     if (!id) return;
     const t = Store.tasks[id];
     if (!t) return;
-    const startEl = document.getElementById('ovr-start') as HTMLInputElement | null;
+    const finishEl = document.getElementById('ovr-finish') as HTMLInputElement | null;
     const lineEl = document.getElementById('ovr-line') as HTMLSelectElement | null;
     const firmEl = document.getElementById('ovr-firm') as HTMLInputElement | null;
-    if (!startEl || !lineEl || !firmEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
+    if (!finishEl || !lineEl || !firmEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
-    const newStart = Util.parseDate(startEl.value);
+    const newFinish = Util.parseDate(finishEl.value);
     const newLine  = lineEl.value;
     const alsoFirm = firmEl.checked;
-    if (!newStart) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
+    if (!newFinish) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
 
     // Machine lock (decision C, aggregate_to_detail.md §8): a sub-order
     // (PARENT_ORDER set) may not change machine via the Override dialog
@@ -1524,9 +1564,9 @@ export const Table = {
       return;
     }
 
-    const schedule = Engine.manualRoutingSchedulePatchFor(t, newLine, newStart);
+    const schedule = Engine.manualRoutingSchedulePatchFor(t, newLine, Util.snap(newFinish), opts);
     if (!schedule?.start_date || !schedule.end_date) {
-      Toast.show('Could not regenerate the order in the available calendar window.', 'error');
+      Table._explainManualRefusal(t, () => Table.applyOverride({ confirmedOvertime: true }));
       return;
     }
 
@@ -1906,13 +1946,13 @@ export function notifyResidualFirming(ids: string[]): void {
 export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
-  // The start-date Flatpickr is built on an <input> that every _render() replaces, so the
+  // The finish (Updated End) Flatpickr is built on an <input> that every _render() replaces, so the
   // previous instance (and its calendar popup appended to <body>) must be destroyed first —
   // otherwise one picker + one popup DOM tree leaks per render.
-  _fpStart: null as NimbusVendor.FlatpickrInstance | null,
-  _destroyStartPicker(): void {
-    const fp = Inspector._fpStart;
-    Inspector._fpStart = null;
+  _fpEnd: null as NimbusVendor.FlatpickrInstance | null,
+  _destroyEndPicker(): void {
+    const fp = Inspector._fpEnd;
+    Inspector._fpEnd = null;
     try { fp?.destroy(); } catch { /* already torn down with its DOM */ }
   },
 
@@ -1968,7 +2008,7 @@ export const Inspector = {
   },
   clear(): void {
     Inspector._currentId = null;
-    Inspector._destroyStartPicker();
+    Inspector._destroyEndPicker();
     const body = document.getElementById('inspector-body');
     if (body) body.innerHTML = `<div class="empty-state">${Util.t('empty.select_order')}</div>`;
   },
@@ -2150,7 +2190,7 @@ export const Inspector = {
     const distPct = distTotalQty > 0 ? Math.round(distThisQty / distTotalQty * 100) : 0;
     const distOtherSiblings = distSiblings.filter(s => String(s.id) !== String(task.id));
 
-    Inspector._destroyStartPicker();
+    Inspector._destroyEndPicker();
     body.innerHTML = `
       ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}${firmStatus.reasons.includes('running') ? `<div>${Util.t('ui.firm_reason_running')}</div>` : ''}</div>` : ''}
       ${sapFirmed ? `<div class="insp-sap-firm-info">${Util.t('ui.sap_firm_marker')}</div>` : ''}
@@ -2227,11 +2267,11 @@ export const Inspector = {
           <div class="insp-val">${task.original_end_date ? Util.fmtDTReadable(task.original_end_date) : '—'}</div></div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_updated_start')}</label>
           <div class="insp-val">
-            <input type="text" data-field="start_date" value="${Util.toLocalInput(task.start_date)}">
+            ${Util.fmtDTReadable(task.start_date)}
             ${Inspector._varianceBadge(task)}
           </div></div>
         <div class="insp-row"><label>${Util.t('ui.insp_updated_end')}</label>
-          <div class="insp-val">${Util.fmtDTReadable(task.end_date)}</div></div>
+          <div class="insp-val"><input type="text" data-field="end_date" value="${Util.toLocalInput(task.end_date)}"></div></div>
         <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
           <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>
         ${task.run_time_source && Inspector._fieldVisible('run_time_basis') ? `
@@ -2339,11 +2379,11 @@ export const Inspector = {
         Inspector._updateNote(_noteId, trimmed);
       };
     }
-    // Upgrade start_date to Flatpickr datetime picker
-    const _dtEl = body.querySelector('[data-field="start_date"]') as HTMLInputElement | null;
+    // Upgrade end_date (the finish a planner types; the start is derived) to Flatpickr datetime picker
+    const _dtEl = body.querySelector('[data-field="end_date"]') as HTMLInputElement | null;
     if (_dtEl) {
-      Inspector._fpStart = Util.fpDatetime(_dtEl, {
-        onChange() { Inspector._onFieldChange('start_date', _dtEl.value); }
+      Inspector._fpEnd = Util.fpDatetime(_dtEl, {
+        onChange() { Inspector._onFieldChange('end_date', _dtEl.value); }
       });
     }
   },
@@ -2417,27 +2457,31 @@ export const Inspector = {
     return `<span class="insp-var ${cls}" title="${Util.t('ui.insp_variance_shifted')}">${txt}</span>`;
   },
 
-  _onFieldChange(field: string, value: string): void {
+  _onFieldChange(field: string, value: string, opts: ManualPlacementOptions = {}): void {
     if (!Inspector._currentId) return;
     const id = Inspector._currentId;
     const t  = Store.tasks[id];
     if (!t) return;
     const changes: Partial<NimbusTask> = {};
-    let requestedStart: Date | null = null;
+    let requestedFinish: Date | null = null;
     let requestedLine: string | null = null;
     let scheduleTask = t;
-    if (field === 'start_date') {
+    if (field === 'end_date') {
+      // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(value);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
-      changes.start_date = Util.snap(d);
-      requestedStart = changes.start_date;
+      requestedFinish = Util.snap(d);
+    } else if (field === 'start_date') {
+      // The start is derived from the finish and is no longer an input; nothing to apply.
+      Inspector._render(t);
+      return;
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(value) || 0;
       changes.RUN_TIME = h;
       // Release the runtime hold only after constructing a valid placement.
       changes.run_time_source = 'manual';
       scheduleTask = { ...t, RUN_TIME: h };
-      requestedStart = Table._runtimeEditAnchor(t);
+      requestedFinish = Table._runtimeEditAnchor(t);
     } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(t)) {
       const result = Runtime.resolve({ ...t, PRODUCTION_VERSION: value });
       changes.PRODUCTION_VERSION = value;
@@ -2446,7 +2490,7 @@ export const Inspector = {
         changes.run_time_source = result.basis.source;
         changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
         scheduleTask = { ...t, PRODUCTION_VERSION: value, RUN_TIME: result.hours };
-        requestedStart = Table._runtimeEditAnchor(t);
+        requestedFinish = Table._runtimeEditAnchor(t);
       } else {
         // Same "held, no fallback" shape setup-scheduler.mts uses for a
         // needs_planning disposition — null committed dates/segments so the
@@ -2484,17 +2528,20 @@ export const Inspector = {
           return;
         }
         requestedLine = newMachine;
-        requestedStart = Table._runtimeEditAnchor(t);
-        if (!requestedStart) Object.assign(changes, Table._unplacedMachineRuntime(t, newMachine));
+        requestedFinish = Table._runtimeEditAnchor(t);
+        if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(t, newMachine));
       }
       changes[field] = value;
     }
-    if (requestedStart) {
+    if (requestedFinish) {
       const targetLine = requestedLine || t.MACHINE || 'Unknown';
-      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedStart);
+      // Same rule as the grid: run-time, machine and version edits hold the finish (a RUNNING order holds its
+      // start instead, OQ3); a typed End is a placement.
+      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedFinish,
+        { ...opts, holdStartIfRunning: field !== 'end_date' });
       if (!schedule?.start_date || !schedule.end_date) {
-        Toast.show('Could not regenerate the order in the available calendar window.', 'error');
         Inspector._render(t);
+        Table._explainManualRefusal(t, () => Inspector._onFieldChange(field, value, { confirmedOvertime: true }));
         return;
       }
       Object.assign(changes, schedule);

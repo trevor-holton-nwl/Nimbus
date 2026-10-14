@@ -187,6 +187,8 @@ window.__NIMBUS_LOCALES.de = {
   'modal.purge_impact_override':       '{{count}} haben einen planergesetzten Zeitplan, der verloren geht — ein erneuter Upload stellt SAP-Daten, aber keine manuellen Zeitpläne oder Notizen wieder her.',
   'modal.remove_color_wheel':          'Farbreihe für Werk {{plant}} entfernen? Diese Aktion kann nicht rückgängig gemacht werden.',
   'modal.confirm_cancel':              'Abbrechen',
+  'modal.override_finish_label':       'Neues Enddatum / neue Endzeit',
+  'modal.override_finish_hint':        'Das Ende bleibt genau so, wie Sie es festlegen. Der Start wird rückwärts daraus berechnet, anhand der Laufzeit und der Arbeitszeiten der Maschine.',
   'modal.confirm_overtime_title':      'Außerhalb der Arbeitszeit einplanen?',
   'modal.confirm_overtime_msg':        'Auftrag {{order}} ist fixiert. Er würde außerhalb der Arbeitszeit dieser Maschine laufen. Trotzdem als genehmigte Mehrarbeit dort einplanen?',
   'modal.confirm_overtime_confirm':    'Als Mehrarbeit einplanen',
@@ -256,6 +258,7 @@ window.__NIMBUS_LOCALES.de = {
   'col.planning_reason':               'Planungsgrund',
   'planning_reason.planner_unscheduled': 'Vom Planer ausgeplant',
   'planning_reason.run_time_over_cap': 'Die Laufzeit von {{hours}} h überschreitet die Grenze von {{cap}} h. Laufzeit verkürzen oder den Auftrag aufteilen und dann einplanen.',
+  'planning_reason.overlong_never': 'Länger als jeder einzelne Arbeitszeitraum dieser Maschine, und dieses Werk teilt Aufträge nicht auf. Ändern Sie Maschine oder Laufzeit, um ihn als einen durchgehenden Balken zu platzieren, der an seinem Fälligkeitsdatum endet.',
   'col.planning_window':               'Zulässiges Fenster',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

@@ -187,6 +187,8 @@ window.__NIMBUS_LOCALES.pt = {
   'modal.purge_impact_override':       '{{count}} têm uma programação definida pelo planejador que será perdida — reenviar o arquivo restaura as datas do SAP, mas não a programação manual nem as notas.',
   'modal.remove_color_wheel':          'Remover a roda de cores da planta {{plant}}? Esta ação não pode ser desfeita.',
   'modal.confirm_cancel':              'Cancelar',
+  'modal.override_finish_label':       'Nova data / hora de término',
+  'modal.override_finish_hint':        'O término fica exatamente como você definir. O início é calculado de trás para frente a partir dele, usando o tempo de execução e o horário de trabalho da máquina.',
   'modal.confirm_overtime_title':      'Programar fora do horário de trabalho?',
   'modal.confirm_overtime_msg':        'O pedido {{order}} está firmado. Ele rodaria fora do horário de trabalho desta máquina. Programá-lo ali mesmo assim como hora extra aprovada?',
   'modal.confirm_overtime_confirm':    'Programar como hora extra',
@@ -256,6 +258,7 @@ window.__NIMBUS_LOCALES.pt = {
   'col.planning_reason':               'Motivo de planejamento',
   'planning_reason.planner_unscheduled': 'Desprogramada pelo planejador',
   'planning_reason.run_time_over_cap': 'A duração de {{hours}} h é maior que o limite de {{cap}} h. Reduza a duração ou divida a ordem e depois programe-a.',
+  'planning_reason.overlong_never': 'Mais longo que qualquer período de trabalho desta máquina, e esta planta não divide pedidos. Altere a máquina ou o tempo de execução para colocá-lo como uma única barra contínua que termina na data de vencimento.',
   'col.planning_window':               'Janela permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

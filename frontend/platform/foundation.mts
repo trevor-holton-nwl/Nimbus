@@ -645,6 +645,12 @@ export const Util = {
     return core.dueDateInstant(raw, date => Util._dueWindowForLine(line, date));
   },
 
+  /** The due instant of an order: the finish a held (unplaced) order anchors on. The finish-anchored name for
+   *  `sapDueDate` (same value; the SAP finish as received, a date-only one read as the close of that day). */
+  dueInstant(t: NimbusTask): Date | null {
+    return Util.sapDueDate(t);
+  },
+
   /** Working window of `line` on one calendar date (line hours intersected with its plant's), or
    *  null when closed or when Store holds no calendar rows for the line. Cached per line+date for
    *  the current Store revision, so per-row callers stay O(1). Internal to sapDueDate. */
@@ -682,8 +688,7 @@ export const Util = {
   // to a Date) when there's no due date to anchor on. Pure/cheap — no
   // Calendar lookup, no persistence — and never writes back to the task:
   // original_start_date itself stays untouched because it's load-bearing
-  // for _snapToWorkingHours's startMoved guard and _overlayUserMoves's
-  // move-detection. Edge case (not clamped, deliberately): an order whose
+  // for _overlayUserMoves's move-detection. Edge case (not clamped, deliberately): an order whose
   // RUN_TIME exceeds the gap between midnight and its due time will show
   // an implied start before midnight (the previous calendar day).
   impliedOriginalStart(t: NimbusTask): Date | null {
