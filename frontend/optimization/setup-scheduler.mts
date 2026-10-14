@@ -593,6 +593,9 @@ export interface SetupRunContext {
    *  (see `dueWindowForDay`); distinct from `_dayWindow` because a missing calendar row means
    *  "no calendar" here, not default hours. */
   _dueWindow: Map<string, PlacementInterval | null>;
+  /** Per-task memo of the due instant (see `dueInstantMs`); each entry carries the inputs it
+   *  was computed from and is ignored when any of them differ. Weak so tasks can be collected. */
+  _dueInstant: WeakMap<NimbusTask, DueInstantEntry>;
   /** F2: lazy per-(plant, line) index of the line's free intervals over
    *  `freeIndexSpan`, built once by running the day-walk over the whole span.
    *  Null caches "this line's walk output is not sorted/disjoint, never
@@ -669,6 +672,7 @@ export function buildRunContext(
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
     _dueWindow: new Map(),
+    _dueInstant: new WeakMap(),
     _freeIndex: new Map(),
     freeIndexSpan: freeIndexSpanFor(bounds),
     _overridesByLine: new Map(),
@@ -1207,6 +1211,15 @@ export interface DueScope {
   ctx?: SetupRunContext;
 }
 
+interface DueInstantEntry {
+  rawMs: number;
+  snapshot: DueScope['snapshot'];
+  plant: string | null | undefined;
+  line: string;
+  core: unknown;
+  ms: number;
+}
+
 function dueScopeFor(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): DueScope {
   return { snapshot, plant: bounds.setup.plant, ctx: bounds.runContext };
 }
@@ -1217,16 +1230,33 @@ function dueScopeFor(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueD
  * (raw + 23:59:59), matching `Util.sapDueDate` on the main thread. Null when the order has no
  * SAP due date. */
 export function dueInstant(task: NimbusTask, scope: DueScope): Date | null {
+  const ms = dueInstantMs(task, scope);
+  return ms === null ? null : new Date(ms);
+}
+
+/** The due instant as epoch milliseconds (null = no SAP due date), memoized per task on the
+ * run context. The memo entry is served only while the raw due value, the snapshot, the
+ * scope's plant, the task's line and the compute core all still match, so a changed due, a
+ * moved order or a different run never reads a stale instant. A scope with no run context
+ * (ad-hoc callers) is never memoized. */
+function dueInstantMs(task: NimbusTask, scope: DueScope): number | null {
   const raw = timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE);
   if (!raw) return null;
+  const rawMs = raw.getTime();
   const core = globalThis.NimbusComputeCore;
-  if (!core?.dueDateInstant) return raw;
+  if (!core?.dueDateInstant) return rawMs;
   const line = task.MACHINE ? String(task.MACHINE) : '';
+  const memo = scope.ctx?._dueInstant;
+  const hit = memo?.get(task);
+  if (hit && hit.rawMs === rawMs && hit.snapshot === scope.snapshot && hit.plant === scope.plant
+    && hit.line === line && hit.core === core) return hit.ms;
   const plant = scope.plant ?? resolveTaskPlant(task, scope.snapshot, scope.ctx);
-  return core.dueDateInstant(raw, day => {
+  const ms = core.dueDateInstant(raw, day => {
     const win = line ? dueWindowForDay(scope, line, plant, day) : null;
     return win ? { open: win.start, close: win.end } : null;
-  });
+  }).getTime();
+  memo?.set(task, { rawMs, snapshot: scope.snapshot, plant: scope.plant, line, core, ms });
+  return ms;
 }
 
 /** (line ∩ plant) work window of one calendar day for due-date reading, or null when closed or
@@ -1252,7 +1282,7 @@ function dueWindowForDay(scope: DueScope, line: string, plant: string | null, da
 }
 
 function dueTimestamp(task: NimbusTask, scope: DueScope): number {
-  return dueInstant(task, scope)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  return dueInstantMs(task, scope) ?? Number.MAX_SAFE_INTEGER;
 }
 
 function taskId(task: NimbusTask): string {
@@ -2851,6 +2881,7 @@ function candidateForSequence(
   suppressExplanations = false,
 ): DueDateCandidate {
   const definition = bounds.setup.definition!;
+  const dueScope = dueScopeFor(snapshot, bounds);
   let predecessorState = fragment.predecessorState;
   let predecessorOrderId = fragment.predecessorOrderId;
   let cursor = new Date(fragment.start);
@@ -3060,7 +3091,7 @@ function candidateForSequence(
     const priorStart = timestamp(task.start_date);
     if (priorStart) instabilityMinutes += Math.abs(first.start.getTime() - priorStart.getTime()) / 60000;
     setupMinutes += effectiveSetupMinutes;
-    const due = dueTimestamp(task, dueScopeFor(snapshot, bounds));
+    const due = dueTimestamp(task, dueScope);
     if (Number.isFinite(due) && last.end.getTime() > due) {
       const lateMinutes = Math.ceil((last.end.getTime() - due) / (60 * 1000));
       lateCount += 1;
@@ -6364,6 +6395,7 @@ interface UrgencyKey {
 
 function urgencyKeyFor(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, task: NimbusTask,
+  dueScope: DueScope,
 ): UrgencyKey {
   const effectiveLine = line || String(task.MACHINE);
   const ctx = bounds.runContext;
@@ -6378,7 +6410,7 @@ function urgencyKeyFor(
     task,
     deadline: notAfterFor(bounds, task)?.getTime() ?? Infinity,
     policy: policyKeyForSequence(snapshot, bounds.setup.plant, effectiveLine, [task], ctx),
-    due: dueTimestamp(task, dueScopeFor(snapshot, bounds)),
+    due: dueTimestamp(task, dueScope),
     start: timestamp(task.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER,
     id: taskId(task),
   };
@@ -6387,7 +6419,8 @@ function urgencyKeyFor(
 }
 
 function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
-  const keyed = tasks.map(task => ({ task, key: urgencyKeyFor(snapshot, bounds, line, task) }));
+  const dueScope = dueScopeFor(snapshot, bounds);
+  const keyed = tasks.map(task => ({ task, key: urgencyKeyFor(snapshot, bounds, line, task, dueScope) }));
   keyed.sort((a, b) => {
     const deadline = a.key.deadline - b.key.deadline;
     if (deadline && !Number.isNaN(deadline)) return deadline;

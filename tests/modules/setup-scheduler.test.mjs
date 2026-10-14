@@ -4628,6 +4628,34 @@ test('hard bounds read a date-only SAP due (exact midnight) as the end of its wo
   assert.equal(window.floor.getTime(), at('2026-08-09T00:00:00').getTime());
 });
 
+test('the memoised due instant follows a changed due or line and matches the unmemoised read', () => {
+  const weekdays = { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null };
+  const snapshot = setupSnapshot([scheduledTask('m', 1, 'GREEN', '2026-08-09T00:00:00')]);
+  snapshot.calendars.L1.workHours = weekdays; snapshot.plants.P1.workHours = weekdays;
+  const bounds = dueDateBounds(setupTruth());
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const memoScope = { snapshot, plant: 'P1', ctx };
+  const plainScope = { snapshot, plant: 'P1' };
+  const subject = snapshot.tasks[0];
+  const read = scope => SetupScheduler.dueInstant(subject, scope).getTime();
+  // Sunday midnight reads as Friday's 18:00 close, twice (second read is memoised).
+  assert.equal(read(memoScope), at('2026-08-07T18:00:00').getTime());
+  assert.equal(read(memoScope), at('2026-08-07T18:00:00').getTime());
+  // A changed due on the same task object is never served from the old entry.
+  subject.original_end_date = at('2026-08-05T00:00:00');
+  assert.equal(read(memoScope), read(plainScope));
+  assert.equal(read(memoScope), at('2026-08-05T18:00:00').getTime());
+  // A timed due is returned as received.
+  subject.original_end_date = at('2026-08-05T09:30:00');
+  assert.equal(read(memoScope), at('2026-08-05T09:30:00').getTime());
+  // A line with no calendar row reads as "no calendar" (raw + 23:59:59), not the old line's window.
+  subject.original_end_date = at('2026-08-05T00:00:00');
+  assert.equal(read(memoScope), at('2026-08-05T18:00:00').getTime());
+  subject.MACHINE = 'NOCAL';
+  assert.equal(read(memoScope), read(plainScope));
+  assert.notEqual(read(memoScope), at('2026-08-05T18:00:00').getTime());
+});
+
 test('hard bounds retry valid work after a fixed boundary instead of queueing an outgoing setup conflict', () => {
   const snapshot = setupSnapshot([
     scheduledTask('retry', 1, 'RED', '2026-08-03T18:00:00'),
