@@ -1,0 +1,609 @@
+# Backward Scheduling Migration — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Every implementation task is dispatched to the model named in its **Model:** line (Sonnet by default; Haiku only where the task says so). Every Haiku task gets a Sonnet review before its commit. The orchestrator never writes code. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Move NIMBUS from forward scheduling (stored start + run time = finish) to finish-anchored scheduling (stored placed finish; start derived backward through working hours), with the SAP finish kept as an immutable due date, reversal to forward-from-now for orders whose derived start is in the past, and a global cutover that re-derives every order from its due date.
+
+**Architecture:** The server stores the placed finish in the existing `orders.scheduled_end` column and a derived start in `scheduled_start`; it never walks a calendar. The browser owns derivation: a new backward primitive in `calendar-engine.mts` walks back from a held finish, and the load-time reconcile re-derives every row flagged "start may be stale". A row with no stored finish anchors on its due date (OQ33 A), so the cutover is one ledger-guarded migration that nulls every placed finish, drops stored segments and flags every row stale; the first browser to load each plant under the new image re-derives it from due dates and the first Save persists it (owner choice 2026-10-13: "automatic on first load"; the flag survives an unsaved tab, so the pass is idempotent). Two new immutable columns hold the SAP start and finish as received; the echo rule freezes them once SAP's finish matches what NIMBUS sent. Phase 1 (due-date protection) ships to the pilot alone from `main`; Phases 2–3 live on `feature/backward-scheduling` (sequential, one implementer at a time) and ship with the Phase 4 cutover in one image.
+
+**Tech Stack:** FastAPI + psycopg (`db.py`, `backend/<domain>/`), Postgres 16 (`schema.sql` + ledger-guarded `migrations/*.sql`), TypeScript `.mts` compiled in place by `tsc` (`npm run build`), node:test (`tests/modules`, `tests/js`), pytest (`tests/*.py`, Postgres-backed tests need local Postgres + `NIMBUS_TEST_DB=1`).
+
+**Spec:** `BACKWARD_SCHEDULING_MIGRATION.md` (repo root). §1.6 (owner decisions of 2026-10-14) governs wherever it differs from §4–§11; §12 holds the full decision text under each OQ. This plan argues from §1.6 + §12 and uses §4–§8 only for mechanism and anchors.
+
+---
+
+## Global Constraints
+
+Copied from the spec; every task's requirements implicitly include these.
+
+- **O1–O4 are fixed.** Finish-anchored everywhere (Reading A); Reading B deferred. Past start → forward from now with a late alert ("reversal"). Global cutover, all plants, forward paths replaced (no per-plant switch, no dormant-code flag). The SAP finish as received is the due date and is never rewritten; the planner's placed finish is the anchor and is what Send transmits.
+- **Release mechanism = option B (§7.1.1):** Phase 1 merges to `main` and may deploy alone. Phases 2–3 merge only into `feature/backward-scheduling` (draft PR for CI). That branch merges to `main` as the first step of Phase 4. Nothing from Phases 2–3 reaches `main` before that.
+- **Compiled output is gitignored.** After any `.mts`/`.ts` edit run `npm run build`. Never commit `.mjs` twins.
+- **Locale ratchet has zero headroom** (§4.12, test group 32): every new or reworded English key lands in all five locales (`en`, + 4) in the same commit.
+- **Deploy runner treats ALTER/UPDATE/DELETE/DROP/TRUNCATE/RENAME/GRANT/REVOKE as destructive by text, comments included** (`.claude/skills/promote-azure/scripts/apply-migrations.ps1`). Any migration carrying those words must say so in its PR description; `-AllowDestructive` releases every pending matching file, so each destructive file ships in its own deploy run.
+- **Every new column, index, constraint or ledger id in a migration must also be mirrored in `schema.sql`** or `scripts/schema_bootstrap_smoke.py` fails CI (§10.6).
+- **pytest refuses to collect unless `PG_HOST` is local and `NIMBUS_TEST_DB=1`.** Never point `.env` at Azure. Node tests (`npm test`) need no database.
+- **`TaskDTO` key-set is pinned** (`tests/test_task_response_models.py`): any new wire field edits sample row + route dict literal + DTO + `frontend/types/api-generated.d.mts` (`npm run generate:api-types`) together. This plan adds exactly **one new `TaskDTO` field**, `placement_exception` (Task 2.3); the locked SAP columns are served through the existing `original_start_date` / `original_end_date` wire names, and `server_now` travels in the `/tasks` envelope or a header, not on the DTO.
+- **Run-time cap:** 336 h or the plant's planning horizon, whichever is smaller, measured on run time (working hours), not drawn span (OQ28). The schema check `chk_orders_run_time_bounds` rises to `< 336`.
+- **One clock:** server instant projected into the plant zone, delivered on each task load; a plant with no `timezone` is blocked with an alert (OQ52). Window math for any stored backward walk is in the plant zone (OQ46).
+- **"Contiguous" on 24/7 plants:** touching intervals merge across midnight, as the optimizer already does (OQ47).
+- **Send transmits only firmed orders** (planner-firmed, SAP-firmed, or starting inside the frozen horizon); the firm rule itself is unchanged and add-only (OQ54, OQ61).
+- **Plain-language UI text, i18n via `data-i18n`/`t()`;** no hardcoded English; no SAP field codes in docs or UI strings.
+- **Sonnet for all implementation; Haiku only for tasks marked `Model: Haiku`** (docs rewrites, pinned translations, mechanical mirrors, one-line fixes with a pinned test). Every Haiku commit is reviewed by Sonnet before it lands.
+- **Sequential execution within a phase; no two agents commit to the same checkout concurrently** (shared-index races observed 2026-10-13).
+
+## Review Focus
+
+Inputs the spec implies but no task's tests exercise, most likely to bite first. Each line names the task that owns its pinning test.
+
+1. **A date-only SAP finish that falls on a closed day or inside a blackout** (Sunday due date on a Mon–Fri plant): the OQ23 reading "end of that date's working window" has no window; expected: the previous open day's close, never midnight (and, once derived, the OQ13 "finish moved earlier" issue). → Task 1.5 test.
+2. **A firmed order with no placement (never dragged) at Send time:** Send now transmits firmed orders only; a firmed-but-unplaced row's placed finish falls back to the due date, so Send would echo SAP's own finish back. Expected: it is sent with that finish and the echo rule treats the return as a match (no original rewrite). → Task 2.7 test.
+3. **A running order at cutover whose start + run time, walked forward through the calendar, now ends after its due date:** expected: start kept, finish moved later, late alert fires, no reversal, no overlap repair. → Task 2.6 test.
+4. **Two tabs: one saves a re-derived start computed on default (7–19) hours because the calendar fetch timed out:** expected: derive-and-save is paused for that plant (OQ51) and the save never carries a default-hours start. → Task 2.6 test.
+5. **An overlong order (run time longer than the longest window) on a `never` plant that a planner releases from Needs Planning with the approved-exception marker, then its run time shrinks below the window:** expected: the marker keeps the bar as one continuous bar at the held finish until a planner clears it; the reconcile does not re-walk it. → Task 2.5 test.
+
+---
+
+## 0. Shape, branches, gates
+
+### 0.1 Phase map
+
+| Phase | Branch | Ships alone? | Content | Gate to leave |
+|---|---|---|---|---|
+| 0 | n/a | n/a | Owner facts and decisions (§1.5). **No code.** | Items 0.2 below |
+| 1 | `main` via short-lived `p1/*` branches + PRs | Yes (first) | Locked original-date columns + echo match rule, distribution baseline-write stop, hygiene inversion (finish side), OQ23 date-only read rule, OQ24 rejection, retire baseline-correct relay, legacy due-date repair (never-sent only), run-time cap 336 h + Needs Planning route, purge preview fix, dead counters | Test groups 6 + 13(hygiene); flipped hygiene tests; owner check §7.1.2 signed before first live Send |
+| 2 | `feature/backward-scheduling` | No | Stored-finish read rule and save contract; backward calendar primitives; one clock; manual placement + run-time triggers hold the finish; reconcile on finish with running/firmed/frozen guards and reversal queue; stale-flag semantics; ingest finish-required; Send reads stored finish; markers for OQ50/OQ63 | Groups 1,2,3,4a,5,10,11,13,14,17,18,21 + flipped tests of §10.2 |
+| 3 | `feature/backward-scheduling` | No | Optimizer A-lite output = placed finish, instability key on finish, undo re-derives, dead walk deleted; setup rule at 12 sites; late alert; day attribution; "today" tiles; grid/Inspector/Override/i18n; distribution shared finish, collapse carry, separation alert, CSV due column | Groups 4b,7,8,12,15,16,19,22–26,28–33 |
+| 4 | merge → `main`; migrations | Yes (single flip) | Pilot-copy rehearsal; cutover migration (null placed finishes, drop segments, flag stale, ledger id); cutover image; operator opens each plant once in the window so the load-time reconcile runs and saves (counts shown in a cutover toast); verification; go/no-go; post-roll watch; per-plant SAP staging first apply later | Group 9 + 32 re-run; runbook gates G-1…G-12 (§8.13) |
+| 5 | deferred | — | Reading B | not planned here |
+
+### 0.2 Phase 0 — owner gates (no code; listed so no task starts without them)
+
+All OQ decisions are taken (§1.6). Still owed by the owner before the phase named:
+
+| # | Item | Blocks |
+|---|---|---|
+| a | Identify the live image (`az containerapp show` tag + `NIMBUS_BUILD_ID` in the served page → commit); confirm whether any Send to SAP has happened on the pilot | Phase 1 deploy |
+| b | Snapshot `basic_finish_date`, `sap_basic_start_date`, `sap_basic_finish_date`, `order_sap_sent` before any Send and before the repair (8.13 step 2) | Task 1.9 (repair) and first Send |
+| c | Pilot `pg_dump` + local restore; run profile Q0–Q17 (§8.12) on the copy; review Q1, Q8, Q13, Q15, Q16, Q17 | Phase 1 deploy (Q1, Q8); Phase 4 (rest) |
+| d | Real-SAP echo test (blocker 18, assumption A9) and the Appendix D questions to SAP Development, in writing or accepted as assumptions | first production Send; Phase 4 |
+| e | Five-minute browser check of vis-timeline resize handles (OQ1) | Task 2.8 |
+| f | Platform operator facts: PITR enabled + retention; Mulesoft role/firewall/poll/clock | first Send; Phase 4 |
+| g | Caller list for `POST /tasks/bulk_update` (OQ59) | Phase 4 |
+| h | Named roles (decider, deploy operator, platform operator, dump owner, SAP contact, watcher, capturer) and abort thresholds N | Phase 4 |
+| i | Name the planning-horizon setting the 336 h cap compares against (plant setting; what if shorter than 336 h) | Task 1.7 — **assumption in this plan:** the plant's existing optimizer horizon setting (35 days default); cap = min(336 h, horizon_days × 24 h); if the owner names a different setting, only Task 1.7's constant changes |
+
+### 0.2a Autonomy charter (owner instructions of 2026-10-13: run Phases 1–4 without stopping)
+
+**Scope decisions (owner, 2026-10-13):** build and test everything locally; **deploy nothing** (no `az`, no `psql` against the pilot, no `/promote-azure`); **branches only, no merge to `main`**; Postgres-backed tests run against the local database using `.env` for host/db and the owner-supplied `postgres` credentials passed as environment variables on each command (never written to any file, commit, log or report).
+
+**Branch model under "branches only":**
+- `feature/backward-scheduling-phase1` forks from `main` at HEAD; Tasks 1.1–1.9 commit there in order (no `p1/*` sub-branches).
+- `feature/backward-scheduling` forks from the **tip of the phase1 branch** when Phase 1's gate is green; Phases 2–4 commit there.
+- Nothing is pushed unless the owner says so. The owner merges `feature/backward-scheduling-phase1` → `main` (deployable alone) and later `feature/backward-scheduling` → `main` (cutover). Task 4.3 becomes a written runbook, not an executed step.
+
+**Proceed without asking** (routine gap-filling; each instance is logged in Appendix C of this plan **and** appended to `BACKWARD_SCHEDULING_MIGRATION.md` under a new final section "Implementation log and gap decisions (2026-10)"): naming, helper placement, test fixture shapes, which existing utility to reuse, flipping a test the spec did not list when the new rule makes it wrong, wording of UI copy and locale text, column/index names, migration file naming within the stated order, any `file:line` drift, the five open owner questions of Appendix A (defaults: optimizer horizon setting; keep the two evaluator labels; left-edge drag reverted with a toast; reworded-key list extended as needed; A9 tolerance = minute, SAP frame).
+
+**Stop and ask only for a truly large deviation**, defined as: (1) an owner decision in spec §1.6 cannot be implemented as stated and the only way forward changes what a planner sees or what SAP receives; (2) a step would write to the live pilot or push to `origin` (never done in this run); (3) a test suite cannot be made green without reversing an owner decision; (4) a dependency, tool or environment failure blocks a whole phase for longer than two repair attempts (for example local Postgres down, `npm run build` broken by something outside this work). Everything else is a gap to fill and log.
+
+**Reporting:** each phase ends with a short written gate report in Appendix C (tests run, counts, flips, gaps); the final report to the owner repeats the gap list verbatim.
+
+### 0.3 Execution rules for the orchestrator
+
+1. Record `git rev-parse HEAD` at the start of each phase; re-verify every `file:line` anchor in a task against the live file before dispatching it (the owner commits to `main` from other sessions mid-run).
+2. One implementer at a time per checkout. Phase 2 and Phase 3 run sequentially on the feature branch. If parallelism is wanted, use `EnterWorktree` per agent and merge by PR; never two agents committing into one working tree.
+3. Each task: implementer (Sonnet, or Haiku where marked) → `npm run build` + scoped tests → Sonnet reviewer (fresh context, given the diff and the task text, not the implementer's summary) → commit. Reviewer gates: spec conformance, no forward-path left behind in the touched files, locale parity, no new wire field.
+4. Test scope per task is the scoped command in the task; the full `npm test` and `python -m pytest tests/ -q` run once at the end of each phase. Known baseline noise: 1 flaky optimizer spawn probe, 3 knownFailure todos, 1 pre-existing pytest failure in the schema-idempotent skip-set (verify at phase start; don't chase).
+5. Commit messages: conventional prefix (`feat(scheduling):`, `fix(integration):`, `test:`, `docs:`), one logical change per commit, ending with the attribution line.
+
+---
+
+## 1. Phase 1 — Protect the due date (ships alone from `main`)
+
+Branch: `feature/backward-scheduling-phase1` from `main` (see 0.2a); one commit series per task, in order. Anchors verified at HEAD `0317dd8` on 2026-10-13. Local Postgres is up (`pg_isready` ok). Python test commands set `NIMBUS_TEST_DB=1`, `PG_HOST=localhost`, `PG_DB` (from `.env` or `nimbus`), `PG_USER=postgres`, `PG_PASS=<owner-supplied, env var only>` on the command line; `.env` is never edited.
+
+**Naming fixed for every task below** (do not vary): DB columns `orders.original_start_received`, `orders.original_finish_received`, `order_distribution.original_finish_received` (all `TIMESTAMP`, nullable); wire names unchanged (`original_start_date`, `original_end_date` are now served from the locked columns with a fallback to `basic_*`); Python helper `finish_echoes(...)` in `backend/integration/sap_staging.py`; TS helper `dueDateInstant(...)` in `frontend/nimbus-compute-core.js` (mirrored to the worker by the existing build).
+
+### Task 1.1: Locked original-date columns, backfill, and read projection
+
+**Model:** Sonnet
+**Files:**
+- Create: `migrations/2026-10-15-1-orders-original-dates.sql`
+- Modify: `schema.sql:41-45` (orders columns), `schema.sql:181` (header), ledger mirror near `schema.sql:1787-1796` pattern
+- Modify: `db.py` GET `/tasks` projection (the SELECT that emits `original_start_date`/`original_end_date`; locate with `rg -n '"original_end_date"' db.py backend/`), `/tasks/refresh` projection `db.py:839-853`, `backend/scheduling/models.py:170-194` (`TaskVersionRow`), `backend/distribution/data.py` child read (`~3027`), `backend/integration/sap_staging.py` vanish detail (`~786-802`) if it emits the due date
+- Modify: `frontend/scheduling/persistence.mts:1731-1737` (apply `original_end_date` from refresh)
+- Test: `tests/test_task_response_models.py` (refresh row column order ~296), `tests/test_ingest_data_layer.py` (new class `TestOriginalDatesBackfill`), `tests/test_schema_idempotent.py`
+
+**Interfaces:**
+- Produces: columns above; wire `original_end_date = COALESCE(original_finish_received, basic_finish_date)`, `original_start_date = COALESCE(original_start_received, basic_start_date)`; `TaskVersionRow.original_end_date: datetime | None` (new field on the refresh row only — not on `TaskDTO`).
+- Backfill rule (ledger id `orders_original_dates_backfill`): for rows with **no** `order_sap_sent` row → `original_finish_received = COALESCE(sap_basic_finish_date, basic_finish_date)`, `original_start_received = COALESCE(sap_basic_start_date, basic_start_date)`; for rows **with** a sent row → `original_* = basic_*` (original lost; listed for the owner by the SELECT in step 6). Header: `original_finish_received = basic_finish_date`.
+
+- [ ] **Step 1: Write the failing migration test** in `tests/test_schema_idempotent.py` style: apply `schema.sql` twice, assert `information_schema.columns` has the three columns and `schema_migrations` has `orders_original_dates_backfill` once.
+- [ ] **Step 2: Run** `python -m pytest tests/test_schema_idempotent.py -q -k original_dates` → FAIL (column missing).
+- [ ] **Step 3: Write the migration** (ALTER + ledger-guarded UPDATE in one file; name sorts after every existing file):
+
+```sql
+-- migrations/2026-10-15-1-orders-original-dates.sql
+-- Locked copies of the SAP start/finish as received (OQ31 b, OQ26). Destructive by text (ALTER, UPDATE).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_original_dates_backfill') THEN
+    UPDATE orders o SET
+      original_finish_received = CASE WHEN s.order_id IS NULL THEN COALESCE(o.sap_basic_finish_date, o.basic_finish_date) ELSE o.basic_finish_date END,
+      original_start_received  = CASE WHEN s.order_id IS NULL THEN COALESCE(o.sap_basic_start_date,  o.basic_start_date)  ELSE o.basic_start_date  END
+    FROM (SELECT DISTINCT order_id FROM order_sap_sent) s
+    WHERE s.order_id = o.id OR TRUE  -- left-join shape: see note
+    ;
+    UPDATE order_distribution SET original_finish_received = basic_finish_date WHERE original_finish_received IS NULL;
+    INSERT INTO schema_migrations (id) VALUES ('orders_original_dates_backfill');
+  END IF;
+END
+$mig$;
+```
+  The implementer writes the orders UPDATE as a real LEFT JOIN (`UPDATE orders o SET ... FROM orders o2 LEFT JOIN order_sap_sent s ON s.order_id = o2.id WHERE o2.id = o.id`) — the sketch above only fixes the CASE semantics. Check the `order_sap_sent` key column name at `migrations/2026-10-08-sap-staging-tables.sql:210`.
+- [ ] **Step 4: Mirror in `schema.sql`** (columns + the same guarded DO block) and run `python scripts/schema_bootstrap_smoke.py` locally → PASS.
+- [ ] **Step 5: Switch the wire** — every projection that emits `original_end_date`/`original_start_date` reads the COALESCE; add `original_end_date` to `TaskVersionRow` + the refresh SELECT + `persistence.mts:1731-1737` apply; `npm run generate:api-types`.
+- [ ] **Step 6: Write the owner list query** into `docs/MIGRATION.md` (SELECT id, plant, basic_finish_date, sap_basic_finish_date FROM orders o JOIN order_sap_sent s … WHERE sent rows differ) — SELECT-only, never executed by agents.
+- [ ] **Step 7: Run** `python -m pytest tests/test_schema_idempotent.py tests/test_task_response_models.py -q` and `npm run build && node --test tests/modules/scheduling/persistence.test.mjs` → PASS.
+- [ ] **Step 8: Commit** `feat(scheduling): add locked original SAP date columns and serve the due date from them`
+
+### Task 1.2: One echo rule, written once; the order upsert writes the locked columns
+
+**Model:** Sonnet
+**Files:**
+- Modify: `backend/integration/sap_staging.py:184-242` (add `finish_echoes`), staging row build (carry `_finish_date_only` from `_parse_sap_time` → `None`), `db.py:2602-2666` (`sap_changed_fields`: replace the plant-frame midnight branch 2655-2659 with `finish_echoes`), `db.py:3168-3195` (`_CHUNK_READ_SQL` also selects `original_start_received`, `original_finish_received`), `db.py:3533-3545` (tuple build: in-memory patch sets the two original values), `db.py:2741-2771 + 2829-2836 + 2914` (`_UPSERT_SQL` SET `original_* = COALESCE(EXCLUDED.original_*, orders.original_*)`; never SET from `EXCLUDED.basic_*`)
+- Test: `tests/test_orders_routing_ingest.py` (pure echo class ~436-640; add M1 cross-zone case), `tests/test_ingest_data_layer.py::TestSapTruthReupload` (Postgres)
+
+**Interfaces:**
+- Produces:
+```python
+def finish_echoes(incoming_finish_plant_local: datetime | None, incoming_date_only: bool,
+                  sent_finish_plant_local: datetime | None, sap_tz: str, plant_tz: str | None) -> bool:
+    """True when SAP's incoming finish is the finish NIMBUS last sent, judged in the SAP frame.
+    date_only: compare the SAP-frame calendar date of the sent value with the incoming date.
+    timed: compare to the minute after converting both to the SAP frame."""
+```
+- Rule for the locked columns per incoming row (computed in Python before the chunk upsert):
+  - `echo = sent_finish is not None and finish_echoes(...)`
+  - `echo` → tuple carries the **stored** `original_*` (unchanged).
+  - not echo → tuple carries incoming `basic_start_date`/`basic_finish_date` (first ingest or genuine SAP change). Note: only the finish decides echo (OQ31); a start-only SAP change with the finish unchanged still refreshes `original_start_received` but does not wipe the placement (OQ25 c, in Task 2.10).
+- Consumes: Task 1.1 columns.
+
+- [ ] **Step 1: Failing pure tests** in `tests/test_orders_routing_ingest.py`: (a) M1 — plant `America/New_York`, SAP zone `UTC`, sent finish Thu 22 Oct 19:00 plant-local, incoming date-only Fri 23 Oct → `finish_echoes` True and `sap_changed_fields` reports no `dates`; (b) genuine change — incoming Sat 24 Oct date-only → False; (c) timed echo to the minute → True; (d) no sent row → False.
+- [ ] **Step 2: Run** `python -m pytest tests/test_orders_routing_ingest.py -q -k "echo"` → FAIL (`finish_echoes` undefined).
+- [ ] **Step 3: Implement** `finish_echoes`; wire into `sap_changed_fields`; carry `_finish_date_only` from the staging parser and from the Excel path (time == 00:00:00 ⇒ date-only — the two cannot be told apart there; document in the docstring).
+- [ ] **Step 4: Failing Postgres tests** in `TestSapTruthReupload`: (e) first ingest sets `original_*`; (f) send → echo upload leaves `original_finish_received` unchanged while `basic_finish_date` may move; (g) send → genuinely later SAP finish updates `original_finish_received`; (h) existing `test_baseline_correct_then_same_file_resets_nothing` (840-856) is **deleted** in Task 1.5, not here.
+- [ ] **Step 5: Implement** the chunk read + tuple patch + upsert SET; run `python -m pytest tests/test_ingest_data_layer.py -q -k "SapTruth or Original"` → PASS.
+- [ ] **Step 6: Commit** `fix(integration): judge the SAP finish echo in the SAP frame and lock the received dates against it`
+
+### Task 1.3: Distribution writers — stop the baseline writes, lock header and child dates (OQ29)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `backend/distribution/data.py:1509-1510` (remove `setdefault(sap_basic_*, basic_*)`), `1326-1418` `_CHILD_UPSERT_SQL` (SET `original_finish_received`/`original_start_received` via COALESCE-from-EXCLUDED, never from re-weight facts; stop SET of `basic_finish_date` from non-ingest callers — split the SQL into ingest and planner variants or pass NULL for the date columns on planner paths), `1161-1194` `_write_header_facts` (write `original_finish_received` only on ingest and only when not echo), `1124-1158` `_insert_new_header`, `3719-3800` `_resolve_machines` (header due from the plain order's `original_finish_received`, not `basic_finish_date`), `784-785`, `898-900` (children inherit the header's `original_*`), `2668-2703` `_parent_facts_from_header`
+- Test: `tests/test_distribution.py::TestSapTruthDistributionReupload` (~4595) — add the false-reset case
+
+**Interfaces:** consumes `finish_echoes` (Task 1.2). Children's echo judgement uses the aggregate's remembered sent finish (roll-up end) from `order_sap_sent` keyed on the parent/child as `queue_send_to_sap` stores it (`sap_staging.py:2257-2272`; verify the key).
+
+- [ ] **Step 1: Failing Postgres test** `test_reweight_then_unchanged_dateonly_upload_resets_no_sibling`: ingest aggregate with date-only finish Fri 23 Oct, re-weight 60/40 → 50/50, upload the same file → no sibling slot reset, `original_finish_received` unchanged on header and children, `sap_basic_finish_date` on the new child NULL (filled by the next upload).
+- [ ] **Step 2: Run** `python -m pytest tests/test_distribution.py -q -k reweight_then_unchanged` → FAIL (siblings reset).
+- [ ] **Step 3: Implement** the writer changes above. Keep `_collapse_to_survivor` carrying no baseline (as today). Known one-cycle detection gap after collapse/re-weight/1-to-N is accepted (OQ29 evidence).
+- [ ] **Step 4: Run** `python -m pytest tests/test_distribution.py -q -k "SapTruth or header or resolve"` → PASS; whole file once.
+- [ ] **Step 5: Commit** `fix(distribution): re-weight, reset, repair and work-center resolve no longer write SAP baselines or the due date`
+
+### Task 1.4: Hygiene inversion — finish side (OQ23 store-as-received, OQ24 rejection)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `db.py:3941-4014` `_date_hygiene_df` — delete the fill at 3962, the ≤-start rewrite at 3982-3988 (replace with: finish **date** earlier than start date → drop row with `error` warning naming the row; same-date midnight stays), the midnight rewrite at 4005-4012 (delete); unparseable finish → drop with `error` warning (fixes A.3 #13 at `db.py:3436-3442`, `3847-3852`); `backend/integration/sap_staging.py:522-527` (blank `pedtr` → `invalid_date`), remove the post-conversion midnight rewrite (`~392-397`, `436`); `backend/admin_ops/diagnostics_state.py:30-31` counters incremented at the drop sites (rename the finish counter to `dropped_no_finish_date`); `frontend/admin-ops/admin-ui.mts:87-88, 783, 894, 968` label.
+- Keep: start required (`db.py:4118`) until Phase 2; `_RUN_TIME_DEFAULTED` 1.0 h rule.
+- Test: `tests/test_ingest_data_layer.py::TestApplyOrderDateHygieneRows` (flip 568, 574, 579; keep 586, 606 with updated `PARITY_CASES`), `tests/test_sap_staging.py:292` (flip: blank finish → `invalid_date`), `tests/test_setup_data.py:419, 430-466` (flip: finish required / stored as received)
+
+- [ ] **Step 1: Rewrite the three hygiene tests** to the new expectations (midnight kept; finish-before-start-same-date kept; missing finish dropped with warning + counter incremented) and add `test_excel_unparseable_finish_is_dropped_with_warning`.
+- [ ] **Step 2: Run** `python -m pytest tests/test_ingest_data_layer.py -q -k Hygiene` → FAIL.
+- [ ] **Step 3: Implement**; run the three test files scoped → PASS.
+- [ ] **Step 4: Commit** `fix(integration): store the SAP finish as received; reject rows with no usable finish`
+
+### Task 1.5: Date-only due reading in the browser; retire the due-date rewrite relay
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/nimbus-compute-core.js` (add `dueDateInstant(raw, dayWindowFor)`), `frontend/platform/foundation.mts:611-647` (`Util.sapDueDate` → instant via `dueDateInstant` with the task's line calendar from `Store`; `Util.scheduledEnd`, `latenessHours` unchanged in shape), `frontend/optimization/setup-scheduler.mts:1197, 6223` (worker reads the due through the same helper with its own window index), `engine.mts:1092, 1118, 1156`
+- Delete: `frontend/scheduling/persistence.mts:48, 578, 890-891, 910-939, 998-1193` (phase, `_dueEndOfShift`, `_relayDueDateCorrections`), `frontend/calendar/calendar-sync.mts:13, 250, 259-266`, `backend/scheduling/routes.py:621-655` + imports 23/25, `backend/scheduling/models.py:209-220, 299-311, 314-315`, `db.py:1657-1787` + comments 2738-2740, 3529-3531, `backend/distribution/data.py:1394-1396` comment, `tests/test_ingest_data_layer.py:840-856`, `tests/test_task_response_models.py:670` entry; `npm run generate:api-types`
+- Docs (Haiku follow-up in Task 1.9): `backend/scheduling/CLAUDE.md:13,15,30` + AGENTS twin, `frontend/scheduling/CLAUDE.md:61,79`, `backend/integration/CLAUDE.md:73` + `AGENTS.md:72`, `docs/MIGRATION.md:260, 979`
+- Test: `tests/js/compute-core.test.js` (new `dueDateInstant` cases), `tests/modules/scheduling/persistence.test.mjs` (remove relay expectations), `tests/modules/optimization/setup-scheduler.test.mjs` ("hard bounds never use a scheduled finish as a missing SAP due baseline" must stay green)
+
+**Interfaces:**
+```js
+// nimbus-compute-core.js
+/** raw: Date (naive plant wall-clock). dayWindowFor(date) -> {open: Date, close: Date} | null for that calendar date.
+ *  Returns raw when raw is not exactly 00:00:00. For an exact-midnight raw: the close of that date's window;
+ *  if that date has no window, the close of the latest open date before it (bounded 30 days; else raw + 23:59:59). */
+export function dueDateInstant(raw, dayWindowFor) { ... }
+```
+Review-focus item 1 pins the closed-day case here.
+
+- [ ] **Step 1: Failing tests** in `tests/js/compute-core.test.js`: timed raw returned as-is; midnight on an open 06:00–22:00 day → 22:00; midnight on Sunday (closed) → previous Friday close; midnight on a 24/7 line → 23:59:59 of that date (window close = end of day); no calendar at all → 23:59:59.
+- [ ] **Step 2: Run** `node --test tests/js/compute-core.test.js` → FAIL.
+- [ ] **Step 3: Implement** helper + `Util.sapDueDate`; worker path uses the optimizer's `jointWindowForDay`-style index (name per `setup-scheduler.mts`).
+- [ ] **Step 4: Remove the relay** end-to-end per the file list; delete the two tests; regenerate types.
+- [ ] **Step 5: Run** `npm run build && npm run lint && node --test tests/modules/scheduling/persistence.test.mjs tests/modules/optimization/setup-scheduler.test.mjs tests/js/compute-core.test.js` and `python -m pytest tests/test_task_response_models.py tests/test_ingest_data_layer.py -q` → PASS.
+- [ ] **Step 6: Commit** (two commits) `feat(platform): read a date-only due date as the end of that day's working window` and `refactor(scheduling): retire the client due-date rewrite and the baseline-correct route`
+
+### Task 1.6: Run-time cap → 336 h / planning horizon; over-cap rows go to Needs Planning (OQ28)
+
+**Model:** Sonnet
+**Files:**
+- Create: `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` (DROP CONSTRAINT + ADD `CHECK (run_time >= 0 AND run_time < 8760) NOT VALID` + VALIDATE, following `migrations/2026-09-25-orders-run-time-bounds.sql` + `2026-09-26-...-validate.sql`); mirror `schema.sql:114-123`
+- Modify: `backend/scheduling/models.py:277-278` (`RUN_TIME < 8760`, message), `db.py` ingest (after hygiene, before upsert: rows with `run_time > cap_hours(plant)` get `planning_state = 'queued'` with `planning_reason = {code: 'run_time_over_cap', message: ...}` — reuse the existing routing-hold queue shape; locate the writer with `rg -n "planning_reason" db.py backend/routing/resolver.py`), `db.py:4141-4158` Machine Hours (unchanged rule; over-cap handled by the same queue step; a per-row representation check (`>= 8760`) rejects the row by number instead of failing the chunk — fixes A.3 #14), `frontend/locales/*.js` (new reason key in 5 locales), the push-cap help text at `frontend/locales/en.js:741` + 4 locales (A.3 #7, stale "soft limit" wording)
+- Test: `tests/test_ingest_data_layer.py` (new: 400 h row → queued with reason; 9,000 h row → rejected by row number, chunk committed), `tests/test_task_response_models.py` (bound), `tests/modules/i18n` parity test
+
+**Interfaces:** `cap_hours(plant_row) -> float = min(336.0, horizon_days(plant_row) * 24.0)` where `horizon_days` is the plant's optimizer planning-horizon setting (Phase 0 item i; default 35 days → cap 336 h for the default plant). Produces reason code `run_time_over_cap` consumed by the Needs Planning list (existing UI renders `planning_reason.message`).
+
+- [ ] **Step 1: Failing tests** (queue + reject-by-row).
+- [ ] **Step 2: Run** scoped pytest → FAIL.
+- [ ] **Step 3: Implement**; locale keys in all five files.
+- [ ] **Step 4: Run** `python -m pytest tests/test_ingest_data_layer.py tests/test_task_response_models.py tests/test_schema_idempotent.py -q` and `npm test -- --test-name-pattern=i18n` (or the locale parity test file) → PASS.
+- [ ] **Step 5: Commit** `feat(integration): raise the order length cap to 336 h or the planning horizon; longer orders wait in Needs Planning`
+
+### Task 1.7: Send transmits firmed orders only (OQ61)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `backend/integration/sap_staging.py:2206-2215` `_outbound_candidate_rows` (add the firm predicate using the same terms as `firm_flag`: `manual_firmed OR firming_indicator = 'X' OR eff_start < frozen_end`), `2161-2203` roll-up (an aggregate is a candidate if any child qualifies; unchanged), `2218-2286` summary (`skipped_unfirmed` count), `docs/SAP_STAGING_DESIGN.md` D9
+- Test: `tests/test_sap_staging.py:827-875` (seed firm on the sent order; add an unfirmed order that must not be queued), `tests/test_domain_sap_staging_edges_coverage.py:60-99`
+
+- [ ] **Step 1: Failing test** `test_send_skips_unfirmed_orders`.
+- [ ] **Step 2: Run** `python -m pytest tests/test_sap_staging.py -q -k "send or queue"` → FAIL.
+- [ ] **Step 3: Implement**; D9 rewritten.
+- [ ] **Step 4: Run** scoped → PASS. **Step 5: Commit** `feat(integration): Send to SAP transmits firmed orders only`
+
+### Task 1.8: Purge preview range (OQ45)
+
+**Model:** Haiku (Sonnet review before commit)
+**Files:** `frontend/admin-ops/admin-ui.mts:1304-1312` (send `T00:00:00` / `T23:59:59` exactly as line 1534 does); test `tests/modules/admin-ops/*.test.mjs` if a preview test exists, else add one asserting the request body.
+
+- [ ] Step 1 failing test → Step 2 run → Step 3 fix → Step 4 `npm run build && node --test tests/modules/admin-ops/` → Step 5 commit `fix(admin-ops): purge preview counts the whole last day`
+
+### Task 1.9: Phase 1 docs
+
+**Model:** Haiku (Sonnet review)
+**Files:** the CLAUDE.md/AGENTS.md/docs lines listed in Task 1.5; `backend/integration/CLAUDE.md` hygiene line numbers (now `db.py:3941`, `4017`); `docs/MIGRATION.md` new section "Backward scheduling — Phase 1 shipped / Phases 2–4 pending" with the owner list query from Task 1.1 and the deploy order below; `docs/DEPLOYMENT.md` note that `2026-10-15-1` and `-2` are destructive-by-text and need their own `-AllowDestructive` run after reading every pending file.
+
+- [ ] Rewrite → Sonnet review → commit `docs: record Phase 1 of the backward-scheduling migration`
+
+### Phase 1 close-out (orchestrator; deploy steps are written for the owner, not executed)
+
+- [ ] Full `npm test` and `python -m pytest tests/ -q` on the phase1 branch after the last task; compare with the baseline noted in 0.3; gate report in Appendix C.
+- [ ] Fresh Sonnet review of the whole phase1 branch diff against spec §7.3 + §1.6 consequence 7.
+- [ ] Write the owner's Phase 1 deploy runbook into `docs/MIGRATION.md` (Task 1.9): merge the branch to `main`; Phase 0 items a, b, c(Q1/Q8); planner notice ("save and close tabs"; lateness figures will change; no bar moves except rows with NULL run time and no stored end); `promote-azure` with `-AllowDestructive` in a run whose pending set is exactly `2026-10-15-1` and `-2` (read `migration_files_applied` first); owner check §7.1.2 before any admin presses Send; rollback = previous image (the locked columns are inert to old code; `basic_finish_date` is never rewritten in Phase 1).
+
+---
+
+## 2. Phase 2 — Stored-finish contract, backward calendar, manual placement, reconcile (feature branch)
+
+Branch: `feature/backward-scheduling` cut from `main` after Phase 1 merges. Draft PR to `main` opened immediately for CI. Tasks run in the order given; each is one commit series on the branch.
+
+**Naming fixed for Phase 2 and 3** (do not vary):
+- SQL fragments in `db.py`: `_EFF_START_SQL` (queued → NULL, else `COALESCE(seg.first_start, scheduled_start, basic_start_date)`), `_EFF_END_SQL = COALESCE(seg.last_end, scheduled_end, original_finish_received, basic_finish_date)` (no run-time arm), `_SAP_START_RECEIVED_SQL = COALESCE(original_start_received, basic_start_date, original_finish_received)` (visibility/vanish key), `_PLACED_SQL = (seg.segment_count >= 2 OR scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL)`.
+- New column `orders.placement_exception TEXT NULL CHECK (placement_exception IN ('overtime','overlong'))`; wire field `placement_exception` (the **one** new `TaskDTO` field of this migration; add to sample row, route dict literal, DTO, generated types together).
+- Python `db._order_is_running(row, now)` keeps its name; never-placed rows return False.
+- TS: `Calendar.allocateRuntimeBackward`, `Calendar.latestAvailable`, `Calendar._freeIntervalsBackward`, type `BackwardResult`; `Engine.manualSchedulePatchFor(task, line, requestedFinish, policy, opts)` (third argument is now the **finish**); `Engine.finishAnchoredPatchFor(task, line, finish, policy, opts)`; `Engine.placeForwardSequence(line, items, from, policy)`; `Store.plantNow(plant): Date | null`; `Util.dueInstant(task)` (alias of the Phase 1 `Util.sapDueDate` instant); reason codes `overlong_never`, `run_time_over_cap`; alert types `finish_moved_earlier`, `reversal_forward`, `plant_no_timezone`, `line_no_calendar`, `placement_exception`, `setup_override_orphaned`, `pull_floor_crossed`, `late`, `start_may_be_stale`; session-only task field `derivationIssue: {code, from?, to?, detail?} | null` (set by the engine in Phase 2, rendered as alerts by the worker in Task 3.3); Store source tag `'engine-runtime-reconcile'` unchanged.
+
+### Task 2.1: Backward calendar primitives (pure, Node-tested)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/calendar/calendar-engine.mts` (new functions beside `nextAvailable` 261-333, `_freeIntervals` 495-516, `allocateRuntime` 531-597; export the new type), `frontend/nimbus-compute-core.js:72-78` (add `prevCalendarDay` twin of `nextCalendarDay`), `frontend/optimization/engine.mts:579-593` (add `plantInstantFromWallClock(tz, wall)` inverse of `plantWallClockFromInstant`; move both to the compute core if the worker needs them)
+- Test: `tests/modules/calendar/calendar-engine.test.mjs` (new describe blocks), `tests/modules/calendar/capacity-allocation-integration.test.mjs`
+
+**Interfaces (produces):**
+```ts
+export type BackwardResult =
+  | { kind: 'placed'; start: Date; end: Date; scheduleSegments: ScheduleSegmentLike[];
+      finishMoved: boolean; moveReason?: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout' }
+  | { kind: 'reached_now' }   // the walk hit `floor` before placing every minute → caller reverses
+  | { kind: 'overlong' }      // policy never / overlong_only and run time > longest merged window (OQ50)
+  | { kind: 'unavailable' };  // no operating window within the lookback
+
+Calendar.allocateRuntimeBackward(line: LineId, finish: Date, runtimeMinutes: number, policy: SplitOrderPolicy,
+  opts: { floor: Date; minSegmentMinutes: number; plantTz: string | null; lookbackDays?: number /* default 90 */ }): BackwardResult
+Calendar.latestAvailable(line, finish, durationMs, opts): { start: Date; end: Date } | null  // contiguous twin of nextAvailable
+Calendar._freeIntervalsBackward(line, finish, floor): Array<{start: Date; end: Date}>      // right-clipped at finish, left-bounded by floor, merged across midnight (OQ47)
+```
+Rules the implementation must follow (each is a test): finish after close → clamp to close (`finishMoved`, `closed_finish`); finish on a closed day or inside a blackout → latest operating instant before it (blackout **start** rounds down to the minute); finish exactly at window close is valid; finish exactly at window open hops to the previous open day's close; pieces fill from the latest fragment backward, each piece anchored at its fragment's end; a piece ending at the finish shorter than `minSegmentMinutes` is skipped and the finish moves earlier (`min_piece`, OQ55); under `never`, the latest merged free interval of at least the run time that ends at or before the finish is used, and if its end is earlier than the finish → `finishMoved` with `no_slot_at_finish` (OQ13); run time > longest merged window under `never`/`overlong_only` → `overlong`; the walk reaching `floor` → `reached_now`; day hops by calendar date (`prevCalendarDay`), never minus 24 h; when `plantTz` is given, all elapsed arithmetic runs on plant-zone instants (`plantInstantFromWallClock`) and results are returned as naive wall-clock Dates (OQ46); touching free intervals across midnight merge (OQ47). Forward helpers are untouched in this task.
+
+- [ ] **Step 1: Failing tests** (one `it` per rule above plus: the 4.2.3 case — 8 h order, fragments Wed 06–18, Thu 06–10/12–18, Fri 06–18, finish Fri 10:00 under `never` → Wed 18:00 with `no_slot_at_finish`; under `partial_allowed` → pieces Thu 14–18 + Fri 06–10; the 4.2.7 minimum-piece mirror — 4 h 20 m, finish Fri 10:00, `partial_allowed`, min 30 → Thu 17:30–18:00 + Fri 06:10–10:00; the DST case of 4.2.5 (Chicago, Sun 8 Mar 2026, 5 h finishing 04:00 → start Sat 22:00); the `reached_now` case of 4.2.4).
+- [ ] **Step 2: Run** `npm run build && node --test tests/modules/calendar/calendar-engine.test.mjs` → FAIL.
+- [ ] **Step 3: Implement.** Reuse `_blockingIntervals`, `workWindow`, `_ceilMinute`/`_floorMinute`, `_beginRun`/`_endRun` caches. Keep every function pure.
+- [ ] **Step 4: Run** both calendar test files → PASS; `npm run lint`.
+- [ ] **Step 5: Commit** `feat(calendar): backward allocation from a held finish (latestAvailable, allocateRuntimeBackward)`
+
+### Task 2.2: Server read rule — the placed finish wins; shared start/end fragments; running test on stored values; horizon keys
+
+**Model:** Sonnet
+**Files:**
+- Modify: `db.py:212-217` (`_EFF_END_SQL` → new definition), `247-263` (`_EFF_END_WITH_RUNTIME_MISMATCH_SQL` → alias of `_EFF_END_SQL`, keep the computed mismatch arm 247-252), `553-559`, `652-658`, `699-702`, `841-842`, `1037-1056` (conflict scan: end from `_EFF_END_SQL`, lookback fixed at the 30-day cap — OQ27 e), `1281-1282`, `3209-3226` (`_order_is_running`: start = first segment else `scheduled_start`; end = last segment else `scheduled_end`; both must be non-NULL, else False), `3468-3472` (dup sort key: finish fallback), `backend/integration/sap_staging.py:709-710` (vanish key → `_SAP_START_RECEIVED_SQL`), `2206-2215` (candidate `eff_end` → `_EFF_END_SQL`; `eff_start` = first segment else `scheduled_start` else SAP start), `backend/distribution/data.py:2451-2462` (regex rewrite → import the fragments instead), `3025-3027`, `backend/setup/data.py:497-511` (use `_EFF_END_SQL` + exclude `planning_state = 'queued'`), `993-997` (order by `_EFF_START_SQL`), `frontend/scheduling/orders.mts:760-761` (client visibility filter reads `original_start_date`), `backend/routing/resolver.py:277, 764-778` + `db.py:1295, 1322, 1444` + `frontend/routing/runtime-client.mts:192` (production-version validity judged on `original_start_received` / wire `original_start_date`, OQ26)
+- Test: `tests/test_task_concurrency.py:511` (flip: lookback fixed 30 d; end from stored finish), `tests/test_ingest_data_layer.py:796, 810` (flip: never-placed row is never running), `tests/test_sap_staging.py:576-580, 827-875, 1026-1040` (flip: Send reads stored finish; seed stores one), `tests/test_distribution.py:741-745, 4035` (V2 hold cases), `tests/test_setup_data.py` (observer reads shared fragment), `tests/test_visibility_horizon.py:159`, resolver validity tests
+
+**Interfaces:** produces the fragments named above; consumed by Tasks 2.3, 2.7, 3.x.
+
+- [ ] **Step 1: Flip/add the Postgres tests** named above to the new rule (a placed row's `end_date` equals its stored `scheduled_end` whatever the run time; a never-placed row's `end_date` equals `original_end_date`; `_order_is_running` False for a row with no stored dates even if SAP start < now; validity unchanged by an echo that moves `basic_start_date`).
+- [ ] **Step 2: Run** `python -m pytest tests/test_task_concurrency.py tests/test_ingest_data_layer.py tests/test_sap_staging.py tests/test_distribution.py tests/test_setup_data.py tests/test_visibility_horizon.py -q` → FAIL on the flipped cases.
+- [ ] **Step 3: Implement**; grep `run_time \* INTERVAL` / `INTERVAL '1 hour'` across `db.py backend/` to confirm no end copy remains (`rg -n "INTERVAL '1 hour'" db.py backend/`).
+- [ ] **Step 4: Run** the same files → PASS. **Step 5: Commit** `feat(scheduling): the stored finish is the order's finish; one start and one end fragment server-wide`
+
+### Task 2.3: Save contract, duration validator, stale-flag semantics, `placement_exception` column
+
+**Model:** Sonnet
+**Files:**
+- Create: `migrations/2026-10-16-1-orders-placement-exception.sql` (ALTER ADD COLUMN + CHECK; destructive by text); mirror `schema.sql`
+- Modify: `db.py:1092-1137` (`_order_update_shape`: write `placement_exception` when sent; queued → NULL it), `1483-1495` + `1551-1558` (single-edge writes rejected for non-segment rows: both edges or segments, always — drop the edge-completion borrow), new `_validate_continuous_width(start, end, run_time, placement_exception)` with 60 s tolerance, called at 1551 for non-segment rows unless `placement_exception IS NOT NULL` or `run_time IS NULL`; `1585` + `1128-1129` (clear `runtime_schedule_mismatch` only when the validator passed), `2838-2852` (Excel re-upload flag CASE applies to every placed order, not children only), `3661-3667` (SAP-change reset also sets `runtime_schedule_mismatch = FALSE, placement_exception = NULL`), `backend/routing/resolver.py:673-679` (set the flag on **any** run-time change for a placed order, not only cutover; `718` SQL), `768-769` (holds clear the flag and the exception), `backend/integration/sap_staging.py:1793-1797` (zero-open sweep clears both), `backend/scheduling/models.py:235-261` (`TaskDateUpdate.placement_exception: Literal['overtime','overlong'] | None`), `routes.py:193-197` + `tests/test_task_response_models.py` sample row + `npm run generate:api-types`, `frontend/scheduling/persistence.mts:1410-1430` (`_taskEditSnapshot` sends `placement_exception` when dirty), `frontend/platform/store.mts` task type
+- Test: `tests/test_task_concurrency.py` (new: end-only save rejected; both-edges save with width ≠ run time rejected with reason `width_mismatch`; width within 60 s accepted and flag cleared; `placement_exception='overtime'` save with width ≠ run time accepted and flag untouched), `tests/test_planning_exceptions.py` (queued rows null the exception), `tests/test_ingest_data_layer.py` (re-upload run-time change flags a placed plain order), `tests/test_schema_idempotent.py`, `tests/modules/scheduling/persistence.test.mjs` (payload carries the field)
+
+- [ ] Step 1 failing tests → Step 2 run (FAIL) → Step 3 implement → Step 4 run `python -m pytest tests/test_task_concurrency.py tests/test_planning_exceptions.py tests/test_ingest_data_layer.py tests/test_schema_idempotent.py tests/test_task_response_models.py -q && npm run build && node --test tests/modules/scheduling/persistence.test.mjs` → PASS → Step 5 commit `feat(scheduling): save both edges or segments; width validator gates the stale flag; placement_exception marker`
+
+### Task 2.4: One clock — server instant, plant zone, blocked plants (OQ52, OQ18 rounding)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `backend/scheduling/routes.py` `/tasks` response (add `server_now` ISO-UTC to the response envelope/meta the client already reads for horizons — locate with `rg -n "horizons" backend/scheduling/routes.py frontend/scheduling/persistence.mts`; if `/tasks` returns a bare list, use a response header `X-Nimbus-Server-Now` and read it in `persistence.mts`), `frontend/platform/store.mts` (`Store.serverOffsetMs`, `Store.plantNow(plant)` = `plantWallClockFromInstant(tz, new Date(Date.now() + offset))`, `null` when the plant has no valid zone), `frontend/optimization/engine.mts:1015-1027` (`isFrozenHorizon`/`isInProgress` default `now` → `Store.plantNow(task.plant)`; `null` zone → throw-free: treat as not frozen/not running and raise `plant_no_timezone` once per plant), `2028-2032` (`liveClock` uses `Store.plantNow`, floored to the minute), `1293-1311` (`_plantWallNow` delegates), `frontend/optimization/optimize-ui.mts:2115-2118` (`applyNow = Store.plantNow(plant)`), `frontend/platform/foundation.mts:749-767` (`plantNowParts` uses the offset), `frontend/insights/services.mts:187-190` (worker payload carries `now` per plant), `frontend/nimbus-compute-core.js:414-416` (alert clock reads the payload `now`), `calendar-engine.mts:264` (15-minute snap stays for forward searches; the reversal forward leg in Task 2.6 floors to the minute instead — OQ18)
+- Test: `tests/modules/optimization/engine.test.mjs` (frozen/running with injected offset; no-zone plant → alert, not throw), `tests/js/compute-core.test.js` (alert horizon uses payload `now`), `tests/modules/scheduling/persistence.test.mjs` (offset captured from the response), `tests/test_task_response_models.py` if the envelope is a model
+
+- [ ] Step 1 failing tests → 2 run → 3 implement → 4 `npm run build && node --test tests/modules/optimization/engine.test.mjs tests/js/compute-core.test.js tests/modules/scheduling/persistence.test.mjs` → 5 commit `feat(platform): one plant-zone clock from the server instant; plants without a zone are blocked with an alert`
+
+### Task 2.5: Manual placement and every run-time trigger hold the finish (OQ1, OQ7, OQ8, OQ13 b, OQ15, OQ17, OQ50 release, OQ63)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/optimization/engine.mts:1169-1182` (`schedulePatchFor` stays forward — used for running orders and reversal), new `finishAnchoredPatchFor` (backward via Task 2.1; `reached_now` → forward from `Store.plantNow` floored to the minute via `allocateRuntime`/`findContiguousSlot`; `overlong` → `{kind:'refuse', reason:'overlong_never'}`; `placement_exception` set → translate verbatim), `1208-1245` (`manualSchedulePatchFor(task, line, requestedFinish, …)`: segments ≥ 2 → rigid translation by the dragged piece's **same-edge** delta (OQ17 b); otherwise `finishAnchoredPatchFor(snap(finish))`; a manual drop whose result has `finishMoved` → return `null` and `Toast` key `toast.finish_cannot_hold` (OQ13 b: the Gantt reverts); firmed task + drop outside hours + `opts.confirmedOvertime` → raw placement with `placement_exception='overtime'` (OQ63)), `1186-1199` (`manualRoutingSchedulePatchFor` passes the finish), `1038-1046` (`plannerUnscheduleChanges` also nulls `placement_exception`)
+- Modify callers: `frontend/scheduling/gantt.mts:4321-4327, 4346, 4483-4498, 4437-4457` (anchor = `newEnd`; `deltaMs = newEnd - t.end_date`; a left-edge-only change (start moved, end unchanged) is reverted with `toast.left_edge_locked` unless Phase 0 item e shows the handle can be hidden via vis `editable.updateTime` + `onMoving`; `moved` compares end + group), `frontend/scheduling/orders.mts:550-559` (Updated Start `editable:false`, Updated End `editable:true` with `_DateTimeEditor`), `1264-1269` (`_runtimeEditAnchor` → returns the **finish**: `task.end_date` if placed else `Util.dueInstant(task)`), `1291-1358` + `2410-2497` (S5 removed: typing a start is no longer possible; S6/S7/S8 and Inspector: if `Engine.isInProgress(task)` → `schedulePatchFor(task, line, task.start_date)` (OQ3) else `manualSchedulePatchFor(task, line, anchorFinish)`), `frontend/nimbus-intelligence.js:1230-1263` (Push +1h: finish + 1 h, start re-derived; skip firmed/frozen/running), `frontend/scheduling/persistence.mts:915-991` (delete `_snapToWorkingHours` and its calls at 578 and `calendar-sync.mts:250`; the reconcile of Task 2.6 covers never-placed rows), the Needs Planning release path (locate: `rg -n "needs_planning" frontend/scheduling/*.mts frontend/shell/*.mts | rg -i release`): a row queued with reason `overlong_never` releases as one continuous elapsed bar ending at `Util.dueInstant(task)` with `placement_exception='overlong'` and alert `placement_exception`; a row queued with `run_time_over_cap` releases through `finishAnchoredPatchFor`
+- Test: `tests/modules/optimization/engine.test.mjs:3158` (flip: finish held, start derived), `3206` (keep), `tests/modules/scheduling/gantt.test.mjs:971` (flip: end-only change is a real move), `1041` (flip: same-edge delta), `tests/modules/routing/machine-edit-contract.test.mjs:122-147` (flip: release holds the due instant), `tests/modules/scheduling/orders.test.mjs` (Updated Start read-only; End editable; run-time edit on a running order holds the start), `tests/modules/scheduling/persistence.test.mjs:563` (delete the snap expectation), new: Push +1h skips firmed; firmed overtime confirm stores the marker; overlong-never release draws one bar with the marker; marked order's run-time shrink leaves the bar (Review Focus 5)
+
+- [ ] Step 1 flip/add tests → 2 run `npm run build && node --test tests/modules/optimization/engine.test.mjs tests/modules/scheduling/gantt.test.mjs tests/modules/scheduling/orders.test.mjs tests/modules/routing/machine-edit-contract.test.mjs tests/modules/scheduling/persistence.test.mjs` (FAIL) → 3 implement → 4 same command → PASS; `npm run check:legacy-surface` (the surface must shrink or stay; never grow) → 5 commit in two: `feat(scheduling): manual placement anchors on the finish and walks the calendar backward` and `feat(scheduling): run-time, machine and version edits hold the finish; running orders hold the start`
+
+### Task 2.6: Reconcile on the finish — stale rows, never-placed rows, reversal queue, guards, cutover path (OQ3, OQ4, OQ33, OQ34, OQ51, OQ53, OQ62)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/optimization/engine.mts:1252-1275` (`reconcileRuntimeSchedules(plant, opts?: {reason?: string})`), new `placeForwardSequence` (extract the cursor loop of `removeBacklog` 1397-1432 so both use it), `2777-2791` (subscriptions unchanged in kind: calendar hydration + refresh; **never** ordinary calendar edits), `frontend/calendar/calendar-sync.mts:96-104, 165-198, 231-233` (expose `calendarState(plant): 'hydrated' | 'pending' | 'failed'`; `failed`/`pending` → reconcile is skipped and the banner `ui.derive_paused` shows), `frontend/distribution/distribution-pane.mts:1428` (call shape), `frontend/platform/store.mts` (per-task session note `systemMove: {from: Date, to: Date, reason: string} | null`, not persisted)
+- Selection: `task.runtime_schedule_mismatch || !task.user_scheduled`, excluding queued rows and rows with `placement_exception`.
+- Per row: `anchor = task.user_scheduled ? task.end_date : Util.dueInstant(task)`; if `task.user_scheduled && Engine.isInProgress(task, plantNow)` → hold start, `schedulePatchFor(task, line, task.start_date)` (OQ3; finish may move later); else `finishAnchoredPatchFor(task, line, anchor)`; firmed orders are re-derived like any other and keep `firmed` (OQ4); line with no calendar row (`Store` has no row for the line **from the server**, not the default) → skip + alert `line_no_calendar` (OQ62); plant with no zone → skip whole plant + `plant_no_timezone` (OQ52); `overlong` → `plannerUnscheduleChanges` + reason `overlong_never` (OQ50); `reached_now` rows are collected per line, sorted by anchor finish then id, placed by `placeForwardSequence(line, items, plantNow)` (OQ53 b), each flagged `reversal_forward`; `finishMoved` → alert `finish_moved_earlier` with the distance; every patch records `systemMove` and the batch ends with one `Toast` (`toast.system_moved_n`, OQ53 e / OQ57 a). Patches set `runtime_schedule_mismatch: false` locally and commit through `Store.updateMany(patches, 'engine-runtime-reconcile')` (dirty; explicit Save persists). No undo entry (OQ57).
+- Test: `tests/modules/split-order.test.mjs:275` (flip: backward from the 20:00 finish into the previous day), `308` (keep), `tests/modules/optimization/engine.test.mjs` new describe `reconcile (finish-anchored)`: never-placed row derives from the due instant; stale placed row holds its stored finish; running stale row keeps its start and moves its finish later (Review Focus 3); firmed row re-derived and still firmed; three reversing orders on one line land X at now, Y after X, Z next window (the OQ53 example); calendar `failed` → nothing moves and the banner key is set (Review Focus 4); line without a server calendar row → untouched + alert; plant without zone → untouched + alert; `placement_exception` row untouched; batch toast count equals patches
+
+- [ ] Step 1 tests → 2 run `node --test tests/modules/split-order.test.mjs tests/modules/optimization/engine.test.mjs` (FAIL) → 3 implement → 4 PASS → 5 commit `feat(optimization): reconcile derives starts from the held finish, reverses past-due walks in finish order, and leaves marked or unanchored rows alone`
+
+### Task 2.7: Ingest under the new rule — finish required, start optional; reset/hold/wipe rules; Send remembers the stored finish (OQ24, OQ25, OQ59)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `db.py:4118` (required Excel columns: `PRODUCTION_ORDER, MATERIAL_NUMBER, BASIC_FINISH_DATE`; start optional), `3990-3996` (unparseable **start** → warning, keep row with NULL start), `3468-3472` (dup sort: finish fallback), `2602-2666` (`sap_changed_fields`: the `dates` field fires only when the finish changed and is not an echo; a start-only change updates `original_start_received` without a wipe — OQ25 c; quantity rule 2674-2688 unchanged — OQ25 a), `backend/integration/sap_staging.py:522-527` (start optional, finish required), `backend/scheduling/routes.py:531-545` + `db.py` bulk route (`/tasks/bulk_update`: accept both edges, read `end_date` as the placed finish, set `runtime_schedule_mismatch = TRUE` when the sent start is not trusted, return `start_derived: true` per id — OQ59 b), `backend/distribution/data.py:3102-3112, 3141-3142, 1383, 1555, 2295, 2336, 2388` + `frontend/distribution/distribution-pane.mts:116` ("scheduled" = `_PLACED_SQL` shape), `data.py:1457` (new child from re-weight: copy the siblings' stored finish, set the stale flag; no forward start+run-time write — OQ58 inference)
+- Test: `tests/test_ingest_data_layer.py` (flip the start-required cases; new: start-only SAP change keeps the slot and updates `original_start_received`), `tests/test_sap_staging.py:280-287` (flip: missing start valid, missing finish `invalid_date`), `tests/test_orders_routing_ingest.py:628` (flip for OQ25 c), `tests/test_distribution.py:1349, 1514, 1539` (flip: carry reads the placed finish), `tests/test_task_concurrency.py` (bulk route response carries `start_derived`), `tests/test_distribution.py` (finish-only placed child counts as scheduled → 409 guard fires on re-weight removal), `tests/test_sap_staging.py` (Review Focus 2: a firmed never-placed order is sent with `original_finish_received` as its finish, and the echo of that value is a match in `finish_echoes`)
+
+- [ ] Step 1 tests → 2 run scoped (FAIL) → 3 implement → 4 PASS → 5 commit `feat(integration): finish required and start optional at ingest; start-only SAP changes keep the placement; external date writes read the finish as placed`
+
+### Task 2.8: Phase 2 flipped-test sweep, i18n keys, docs
+
+**Model:** Sonnet (tests) then Haiku (locale rows + docs, Sonnet-reviewed)
+**Files:** every test named in §10.2 lines 3450-3462 not already flipped in 2.1–2.7 (`tests/test_setup_data.py:419, 430-466`; `tests/modules/scheduling/persistence.test.mjs:578`; the nine hygiene cases); all new keys of Phase 2 (`toast.finish_cannot_hold`, `toast.left_edge_locked`, `toast.system_moved_n`, `ui.derive_paused`, `alert.finish_moved_earlier`, `alert.reversal_forward`, `alert.plant_no_timezone`, `alert.line_no_calendar`, `alert.placement_exception`, `reason.overlong_never`, `modal.confirm_overtime_*`) present in all five locale files; `frontend/scheduling/CLAUDE.md`, `frontend/calendar/CLAUDE.md`, `frontend/optimization/CLAUDE.md`, `backend/scheduling/CLAUDE.md` + AGENTS twins rewritten for the finish anchor (the REWRITE rows of §11.2 that belong to these domains).
+
+- [ ] Run full `npm test` and `python -m pytest tests/ -q` on the branch; fix or flip until green except the known baseline noise; commit `test: flip forward-rule pins to the finish anchor` then `docs: scheduling, calendar and optimization CLAUDE.md describe the finish anchor`.
+
+### Phase 2 gate
+- Groups 1, 2, 3, 4a, 5, 10, 11, 13, 14, 17, 18, 21 present (map each group to the test names added above in the PR description).
+- `npm test`, `python -m pytest tests/ -q` green on the branch; CI green on the draft PR.
+- Not released. Rollback = the branch is not merged.
+
+---
+
+## 3. Phase 3 — Optimizer output, setup rule, consumers, UI, i18n, distribution (feature branch, after Phase 2)
+
+**Alert plumbing rule for Phases 2–3:** engine-side findings (finish moved earlier, reversal, blocked plant/line, marker, orphaned override, pull-floor crossing) are recorded on the task as a session-only field `derivationIssue: {code, from?, to?, detail?} | null` in Phase 2 (Task 2.6 records; the user sees a Toast). Task 3.3 turns those fields into alerts in the worker so they appear in the Alerts panel like every other alert. No alert is computed on the main thread.
+
+### Task 3.1: Optimizer under Reading A — A-lite, finish-keyed instability, undo re-derives, dead walk deleted (OQ14, OQ20, OQ21, OQ22; groups 16, 22–26)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/optimization/setup-scheduler.mts:2999-3000, 7202-7203` (instability = |new last end − prior end| in minutes), `6876-6880` (keep; "changed" already compares both edges), `frontend/optimization/engine.mts:2216-2221` + `frontend/optimization/optimize-ui.mts:2125-2126` + `frontend/platform/store.mts:1005-1016` (`UndoStack.restoreTasks` restores the finish, sets `runtime_schedule_mismatch: true` on each restored row and calls `Engine.reconcileRuntimeSchedules(plant, {reason:'undo'})` so the start follows the current run time — OQ21; `TimeMachine.restore` at `frontend/nimbus-intelligence.js:1449-1467` gets the same flag-and-reconcile treatment — group 15), delete `engine.mts:2357-2619` and `_dispatchPolicyAware` (1872) with `tests/modules/optimization/engine.test.mjs:938, 1167` (review the shared group 147-180; keep `capAwareSequence` tests) — OQ22 (the evaluator labels `throughput`/`due-date-first` at `engine.mts:871-893` **stay**; owner confirmation still open, Appendix B), `engine.mts:1084-1108` + Task 2.6 reconcile (derived start below `earliestAllowedStart` → `derivationIssue.code = 'pull_floor_crossed'` — OQ20), `optimize-ui.mts` preview (a `Store` event with source `'engine-runtime-reconcile'` while a preview is open marks it stale: Apply disabled + banner key `ui.preview_stale` — group 26), `optimize-ui.mts:348-360` (Remove Backlog dialog shows "N orders are backlog because their run time grew" from `derivationIssue` — OQ56 a), `tests/modules/optimization/scheduler-plant-scale.test.mjs` (add the finish-first output check: every placed task's `end_date` equals its last segment end / start + productive minutes; Reading A needs no fixture change)
+- Test: `tests/modules/setup-scheduler.test.mjs:5056` (flip to finish key), `tests/modules/optimization/optimize-ui.test.mjs:1629` (keep; uses `Store.plantNow`), new undo-re-derive test, new preview-stale test, new pull-floor-crossed test, legacy tests deleted
+
+- [ ] Step 1 flip/add → 2 `npm run build && node --test tests/modules/setup-scheduler.test.mjs tests/modules/optimization/` (FAIL) → 3 implement → 4 PASS; `node scripts/bench-optimizer.mjs` digest unchanged within noise → 5 commit `feat(optimization): optimizer result is the placed finish; instability keyed on the finish; undo re-derives the start; legacy walk removed`
+
+### Task 3.2: Setup rule at its 12 sites (OQ2 V1, OQ40; group 7)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/calendar/calendar-engine.mts` (`allocateRuntimeBackward` gains `opts.setupMinutes`: the earliest piece's fragment must hold `setupMinutes` immediately before the productive start; if not, that fragment is clipped and the walk continues into the previous fragment — V1), Task 2.6 reconcile (passes `setupMinutes` from the setup domain's required changeover for the predecessor pair on that line, `frontend/setup/setup-domain.mts:467` adjacency; manual drops pass 0 — OQ40 alert-only), `frontend/optimization/engine.mts:320-379` (`setupAvailabilityMinutes` counts across midnight on merged intervals — fixes A.3 #9), `434-437` (adjacency by start — unchanged, but when an override's pair no longer sits adjacent after a re-derive record `derivationIssue.code='setup_override_orphaned'` on the successor), `setup-scheduler.mts:307-374, 3032, 3102-3107, 4581-4598, 6577-6585, 7003-7012, 7217-7228` (review only: forward placement in the optimizer is retained; confirm each site reads the task's wire edges and not start + run time; change nothing that the review finds correct), `frontend/nimbus-compute-core.js:858-873` (setup alert text → locale key, 5 locales)
+- Test: `tests/modules/calendar/calendar-engine.test.mjs` (the OQ2 V1 example: window 06–18, A Mon 08–16, B 8 h held Tue 14:00, 30 min setup → `partial_allowed`: Mon 17:30–18:00 + Tue 06:30–14:00; `never`: `no_slot_at_finish` → Mon 18:00), `tests/modules/optimization/engine.test.mjs` (midnight availability 23:50 → 00:10 with 30 min = 20 available; orphaned override issue), `tests/modules/setup-scheduler.test.mjs:4548` (keep)
+
+- [ ] Step 1 tests → 2 run (FAIL) → 3 implement → 4 PASS → 5 commit `feat(setup): backward derivation reserves changeover ahead of the productive start in the same window`
+
+### Task 3.3: Alerts, KPIs, utilization, labor — late alert, one day-attribution rule, "today", engine findings as alerts (OQ6, OQ12, OQ41, OQ42; groups 4b, 8, 14)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `frontend/nimbus-compute-core.js` (new alert `late`: `end > dueDateInstant(...)` → warning; also beyond the push ceiling → error, using the payload's per-plant push-cap days; new `workingMinutesByDay(task, dayWindowFor)` used by the utilization matrix 1023, the overload rule 585-587 and exported for the cell briefing; alerts from `task.derivationIssue` codes `finish_moved_earlier`, `reversal_forward`, `plant_no_timezone`, `line_no_calendar`, `placement_exception`, `setup_override_orphaned`, `pull_floor_crossed`; mismatch alert 781-787 reworded via key `alert.start_may_be_stale`; the clock at 414-416 reads the payload `now` from Task 2.4), `frontend/platform/types.mts:469-477` + `frontend/nimbus-compute-core.d.ts:28-32` (add the new members and the missing `distribution-separation` so the two unions agree), `frontend/insights/insights-ui.mts:390, 400-402` + `frontend/scheduling/orders.mts:751-754` + `frontend/scheduling/gantt.mts:2744` ("today" = overlaps today — OQ42), `insights-ui.mts:1250-1251` (cell briefing uses `workingMinutesByDay`), `frontend/insights/services.mts:842, 836, 907` (delete `dayByLine`/`todayByLine` and their tests — OQ41), `frontend/labor/labor-planning.mts:279` (no change; verify it reads the matrix), `frontend/platform/foundation.mts:696-735` (`scheduleKpis` late count via `dueInstant`), locale keys in 5 files
+- Test: `tests/js/compute-core.test.js` (late alert warning/error; day attribution: a 14 h order held Fri 00:00 with start Wed 22:00 on an 08–18 calendar puts 14 h on Thursday in matrix, overload and briefing alike; derivation-issue alerts; midnight overlap "today"), `tests/modules/insights/*.test.mjs` tiles, `tests/modules/labor/*` unchanged green
+
+- [ ] Step 1 tests → 2 run `node --test tests/js/compute-core.test.js tests/modules/insights/ tests/modules/labor/` (FAIL) → 3 implement → 4 PASS → 5 commit `feat(insights): late alert on the due instant; one calendar-aware day-attribution rule; engine findings surface as alerts`
+
+### Task 3.4: Grid, Inspector, Override, hover/print copy, i18n (OQ16, OQ43, OQ57; groups 19, 28, 30, 31, 32, 33)
+
+**Model:** Sonnet (code) + Haiku (the four non-English locale rows and the encoding fix, Sonnet-reviewed)
+**Files:**
+- Modify: `frontend/scheduling/orders.mts:534-549` (retire the Original Start column; Original End relabelled key `col.due_date`), `550-558` (Updated End → key `col.planned_finish`, editable with its own `_DateTimeEditor` instance; Updated Start → key `col.planned_start`, read-only), `230-255` (saved layouts: ignore unknown column ids on restore; add a unit test that a layout naming `original_start_date` loads), `2212-2224` (Inspector: End input editable, Start text; explain-the-move line from `task.derivationIssue`/`systemMove` with key `ui.insp_system_move`), `2392-2408` (`_varianceBadge` = planned finish − due instant; key `ui.insp_variance_*`), `1465-1532` + `frontend/index.html:2317-2350` (Override modal: finish field, line, firm; every string keyed), `1383, 1519, 2486, 568` (failure toasts and "Click to view alerts" keyed), `2652` (print range = overlap), `2689, 2736` (CSV/print headers unchanged — OQ43 a), `frontend/scheduling/order-field-catalog.mjs:51-53` (remove `original_start_date` entry; keep the wire field), `frontend/scheduling/gantt.mts` hover card strings keyed; `toast.order_moved` text reads the finish (group 33); `frontend/locales/{en,de,es,fr,pt}.js` (reworded keys `col.orig_end→col.due_date`, `col.updated_*→col.planned_*`, `ui.insp_orig_end`, `ui.insp_updated_*`, `ui.insp_variance_shifted`, `ui.diff_kind_*`, `toast.order_moved`, `toast.commit_failed`; new modal/inspector keys; `de.js:851`/`pt.js:851` encoding fix — A.3 #10), `tests/modules/locale-completeness.test.mjs:506` (baseline stays 231; add `REWORDED_KEYS` pinned list asserting each reworded key exists in all five files with the new English text — group 32)
+- Test: `tests/modules/scheduling/orders.test.mjs` (`:1202` Flatpickr start-field → end field; badge: due Tue 09:00, 6 h, finish Tue 09:00 → "0.0h"; Override writes a finish), `tests/modules/scheduling/gantt.test.mjs` (resize right edge = finish move; no-op resize no undo entry — A.3 #18), locale tests
+
+- [ ] Step 1 tests → 2 run `node --test tests/modules/scheduling/orders.test.mjs tests/modules/scheduling/gantt.test.mjs tests/modules/locale-completeness.test.mjs tests/js/locale-keys.test.js` (FAIL) → 3 implement (Sonnet), then Haiku fills `de/es/fr/pt` rows from the pinned English list → Sonnet review → 4 PASS → 5 commits `feat(scheduling): Planned finish is the editable date; Due date and Planned start are read-only; Override sets a finish` and `i18n: reworded and new scheduling keys in five locales`
+
+### Task 3.5: Distribution — shared finish, collapse carry, separation alert, CSV due column, guards (OQ11, OQ37, OQ38, OQ39; group 12)
+
+**Model:** Sonnet
+**Files:**
+- Modify: `backend/distribution/data.py:2827-2862` (`_collapse_to_survivor`: carry the survivor's stored **finish** only, null `scheduled_start`, delete segments, set `runtime_schedule_mismatch = TRUE` so the browser derives the 100 %-share start — OQ37 R2), `3822` (repair passes through the `scheduled_removed` 409 guard — A.3 #16), `2839-2840` (collapse dry-run lists the survivor in `removed_scheduled` when firmed — A.3 #15), CSV writer near `2083-2088` (add `due_date` column from `original_finish_received`; window key unchanged — OQ39), `frontend/nimbus-compute-core.js:541-543` + `frontend/optimization/setup-scheduler.mts:6722-6731` (separation buckets on the finish — OQ38; keep the "mirror" comments pointing at each other), `frontend/distribution/distribution-pane.mts` (list badge reads the shared finish; A.3 #23 badge/response disagreement resolved by reading the wire flag only)
+- Test: `tests/test_distribution.py` (collapse carries finish and flags; repair 409; dry-run firmed survivor listed; CSV has `due_date`), `tests/js/compute-core.test.js` + `tests/modules/setup-scheduler.test.mjs` (separation on finish: 70/30 family finishing together raises nothing)
+
+- [ ] Step 1 tests → 2 run → 3 implement → 4 `python -m pytest tests/test_distribution.py -q && node --test tests/js/compute-core.test.js tests/modules/setup-scheduler.test.mjs` PASS → 5 commit `feat(distribution): siblings share the finish; collapse carries the finish; separation judged on finishes`
+
+### Task 3.6: Phase 3 docs and remaining doc rewrites (§11.2, §11.2a, §11.3, §11.8)
+
+**Model:** Haiku (Sonnet review)
+**Files:** the REWRITE/DELETE lines verified at HEAD: `aggregate_to_detail.md:29, 54, 297, 310, 320, 322, 374, 375, 429, 439, 560, 669`; `backend/distribution/CLAUDE.md:11, 65`; `backend/integration/CLAUDE.md:25, 26, 127` + `AGENTS.md:126`; `backend/routing/CLAUDE.md:38`; `frontend/scheduling/CLAUDE.md:31, 37, 44` + AGENTS twin `31, 37`; `frontend/calendar/CLAUDE.md:22` + twin; `frontend/routing/CLAUDE.md:20`; `docs/MIGRATION.md:888-896`; `ROUTING_RUNTIME_DESIGN.md:25, 174, 244, 321, 392`; `docs/SAP_STAGING_DESIGN.md:36, 108, 118, 163`; `docs/SAP_STAGING_VALIDATION_PLAN.md:401`; `docs/architecture/optimizer-dispatch.md:14, 92`; `docs/NIMBUS_INTERFACE_ARCHITECTURE.md:105, 367, 596`; `docs/SAP_INTEGRATION_ROADMAP.md:25, 122, 287`; `PRODUCT.md:21`; `DESIGN.md:211`; `frontend/scheduling/gantt.mts:3349` comment; `schema.sql:75` index comment; root `CLAUDE.md` Scheduling/Calendar/Optimization rows. HISTORICAL files get a one-line "superseded by the finish anchor, 2026-10" note at the top, not edits.
+
+- [ ] Rewrite → Sonnet review (each statement checked against the Phase 2/3 code) → commit `docs: finish-anchored scheduling across domain docs`
+
+### Phase 3 gate
+- Groups 4b, 7, 8, 12, 15, 16, 19, 22–26, 28–33 present; the REVIEW tests of §10.4 resolved per owner decision.
+- Full `npm test` + `python -m pytest tests/ -q` green on the branch; CI green on the draft PR; `npm run check:static-assets`, `npm run check:legacy-surface`, `npm run lint` clean.
+- A **fresh Sonnet whole-branch review** of `feature/backward-scheduling` against spec §1.6 + §12 (not against the implementer summaries): every forward path either replaced or on the retained list (optimizer forward placement, Alerts Fix/autoReflow cascade, Remove Backlog, reversal forward leg).
+
+---
+
+## 4. Phase 4 — Global cutover (one image, one migration run)
+
+### Task 4.1: Cutover migration files + group 9 test
+
+**Model:** Sonnet
+**Files:**
+- Create: `migrations/2026-10-20-0-orders-precutover-snapshot.sql` (CREATE TABLE … AS SELECT of `orders` date/flag columns + `order_schedule_segments` + `order_sap_sent`; **no** destructive word anywhere, comments included; ledger id `backward_cutover_snapshot`), `migrations/2026-10-20-1-backward-cutover.sql` (ledger id `backward_scheduling_cutover`; destructive by text); mirror both in `schema.sql`
+- Test: `tests/test_backward_cutover.py` (new, Postgres; seeds its own fleet: running placed, future placed, never placed, queued, split, firmed, marked, distribution family; applies both files twice; asserts the write set and ledger idempotence — group 9)
+
+**Migration content (the owner-chosen "automatic on first load" mechanism):**
+```sql
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_scheduling_cutover') THEN
+    -- running = a planner-placed start at or before plant-local now and the old effective end after it
+    WITH plant_now AS (
+      SELECT p.id AS plant, (now() AT TIME ZONE 'UTC') AT TIME ZONE COALESCE(NULLIF(p.timezone,''),'UTC') AS pnow FROM plants p
+    ), old_end AS (
+      SELECT o.id, COALESCE(MAX(s.end_date), o.scheduled_start + (o.run_time * INTERVAL '1 hour'), o.scheduled_end) AS old_end
+      FROM orders o LEFT JOIN order_schedule_segments s ON s.order_id = o.id GROUP BY o.id
+    ), running AS (
+      SELECT o.id FROM orders o JOIN plant_now pn ON pn.plant = o.plant JOIN old_end e ON e.id = o.id
+      WHERE o.scheduled_start IS NOT NULL AND o.scheduled_start <= pn.pnow AND e.old_end > pn.pnow
+    )
+    UPDATE orders o SET
+      scheduled_end = NULL,
+      scheduled_start = CASE WHEN r.id IS NOT NULL THEN o.scheduled_start ELSE NULL END,
+      placement_exception = NULL,
+      runtime_schedule_mismatch = TRUE,
+      updated_at = now()
+    FROM (SELECT id FROM orders) a LEFT JOIN running r ON r.id = a.id
+    WHERE o.id = a.id AND o.planning_state <> 'queued';
+    DELETE FROM order_schedule_segments s USING orders o WHERE s.order_id = o.id AND o.planning_state <> 'queued';
+    INSERT INTO schema_migrations (id) VALUES ('backward_scheduling_cutover');
+  END IF;
+END
+$mig$;
+```
+Check the real column names for `plants.id`, `orders.plant`, `planning_state`, segment `end_date`, and the queued literal before writing. Consequence (verified against Phase 2's read rule): every non-queued row now reads as never placed (due date = finish on the wire) except running rows, which keep their start; the Phase 2 reconcile (Task 2.6) derives all of them on the first load of each plant under the new image, in the OQ53 order, and the first Save persists them. Every row's version moves, so the cached-edit overlay (`persistence.mts:885`) skips every row: no online-path discard is needed.
+
+- [ ] Step 1 test → 2 `python -m pytest tests/test_backward_cutover.py -q` (FAIL) → 3 write files + schema mirror → 4 PASS; `python scripts/schema_bootstrap_smoke.py` PASS (the smoke's sentinel order is queued-less and dateless: assert it is untouched) → 5 commit `feat(migrations): backward-scheduling cutover — null placed finishes, keep running starts, flag every order stale`
+
+### Task 4.2: Cutover image client bits
+
+**Model:** Sonnet
+**Files:** `frontend/platform/foundation.mts:144` (`SCHEMA_VERSION: 7` — §8.6a option a; the offline fallback is lost once, accepted), Task 2.6 reconcile (first-load cutover counts: the batch Toast reads "N bars re-anchored on due dates, M reversed from now, K kept their running start, J blocked — Save to keep", key `toast.cutover_summary`, shown when more than 50 % of a plant's rows were stale), `frontend/nimbus-intelligence.js` Time Machine (no code: the planner notice says "do not restore a snapshot dated before the cutover" — §8.7a option a), `docs/DEPLOYMENT.md` cutover section.
+- [ ] Tests: persistence cache discard on version 6 → 7; toast text keyed in 5 locales. Commit `feat(shell): cutover summary toast; cache schema version 7`
+
+### Task 4.3: Cutover runbook (written into `docs/DEPLOYMENT.md` by Task 4.2; **not executed in this run** — owner decision "deploy nothing", 2026-10-13)
+
+- [ ] Merge `feature/backward-scheduling` into `main` by PR (one merge; CI green). Pending migration set on the pilot must then be exactly: `2026-10-16-1-orders-placement-exception.sql`, `2026-10-20-0-…snapshot.sql`, `2026-10-20-1-backward-cutover.sql` (read `migration_files_applied` first; `-DryRun` shows apply order).
+- [ ] G-10 part 2: fresh pilot dump → local restore → apply the three files twice with explicit `-PgHost localhost` → run `uvicorn` against the copy → open each plant in a browser → record the reconcile toast counts per plant → owner reviews.
+- [ ] G-9: build the image **before** the migration (`az acr build` under a fresh tag; CI green for that commit; record the previous tag as rollback target). Hold the roll.
+- [ ] G-11: quiet window from profile Q12; planner notice (save and close tabs; hard reload after; do not restore old Time Machine snapshots; every bar will move to its due-date position; late warnings will fire); `NIMBUS_SAP_STAGING_POLL_SECONDS = 0`; all `sap_sync_config.apply_mode = manual`; Excel uploads frozen; outbound `ready` queue count zero per plant (operator-run statement from §8.13 step 1 with the owner's go).
+- [ ] Pre-roll capture (alerts by type, tiles, utilization 14 d, Late filter count) per plant.
+- [ ] Apply the three files through `promote-azure` with `-AllowDestructive` (exit 3 = stop). G-6 here = row count updated equals the non-queued order count.
+- [ ] Roll the image; cache-busted verification of `NIMBUS_BUILD_ID`.
+- [ ] Operator opens each plant once under the new image (admin tab), lets the reconcile run, records the toast counts, presses Save. Expect a stale answer only if a tab was left open.
+- [ ] G-12 go/no-go by the named decider; then planners resume. Post-roll watch per §8.13 step 6 with the owner's N values.
+- [ ] Rollback matrix per §8.8 + 8.8a: image-only until the first Save; after that, snapshot restore (operator-run, loses later edits). Retire any `ready` outbound rows at rollback.
+- [ ] Later, per plant, in its own window: SAP staging first apply (OQ10); its reset nulls placed finishes where SAP's dates differ, and those rows re-derive from the due date on the next load by the same path.
+
+---
+
+## 5. Model assignment summary
+
+| Task | Model | Why |
+|---|---|---|
+| 0 (plan audit, see 0.4) | Sonnet | fresh-eyes check of this plan against §1.6/§12 before any code |
+| 1.1–1.7, 2.1–2.7, 3.1–3.5, 4.1–4.2 | Sonnet | data-destructive, contract-defining, or cross-cutting |
+| 1.8 (purge preview one-liner), 1.9, 2.8 locale rows + docs, 3.4 locale rows, 3.6 docs | Haiku, Sonnet-reviewed before commit | pinned text, mechanical, reversible, a test or reviewer catches a miss |
+| Every reviewer | Sonnet (fresh context, diff + task text only) | never the implementer's summary |
+
+### 0.4 Task 0 — plan audit (runs first)
+**Model:** Sonnet. Read spec §1.6, §12 and §7, then this plan. Report: (a) any §1.6 decision with no task; (b) any task that contradicts an owner decision; (c) any `file:line` that no longer resolves (HEAD may have moved). Orchestrator fixes the plan before Task 1.1. No code.
+
+---
+
+## Verification (end-to-end)
+
+- Per task: the scoped commands in each task; `npm run build` after any `.mts` edit.
+- Per phase: `npm test`, `python -m pytest tests/ -q` (local Postgres, `NIMBUS_TEST_DB=1`), `npm run lint`, `npm run check:static-assets`, `npm run check:legacy-surface`.
+- Phase 1 live: cache-busted `GET /tasks` after the roll; `original_end_date` for a known never-sent row equals its as-sent SAP finish; lateness tiles change, bars do not (except profile-Q1 rows).
+- Phase 4 rehearsal (G-10 part 2) is the only end-to-end run of the cutover before the real one; the browser pass over each plant on the restored copy is the acceptance test.
+- Manual browser checks owed after Phase 2 (Phase 0 item e): drag body → finish held; right-edge resize → finish moves; left edge locked; firmed drop outside hours → confirm → marker shown.
+
+---
+
+## Appendix A — Things learned along the way
+
+**Environment**
+- HEAD `0317dd8` on `main`; the only commit since the spec's anchor commit `757dd86` is docs-only; no code anchor in §4–§8 has moved (three independent verifications, 2026-10-13). Working tree: `.dockerignore` modified, two root review docs staged for deletion, the spec and an FSD `.docx` untracked.
+- Local Postgres 18 is up (`pg_isready` ok). The verification agent was denied read access to `.env`; confirm `PG_HOST=localhost` and `NIMBUS_TEST_DB=1` before Task 1.1 (pytest refuses to collect otherwise, by design).
+- Python runs from the repo `.venv`, not a bare `py`.
+
+**Corrected spec claims (anchor drift found while planning)**
+- "Machine Hours rule and the 168 h check at `db.py:3887-3892`": that range is the generic chunk-failure `except`. The Machine Hours rule is `db.py:4141-4158`; **there is no 168 h check in db.py** — the bound lives only in `schema.sql:121`, the two 2026-09-25/26 migrations and `models.py:277-278`.
+- `backend/distribution/data.py:3719-3800` (`_resolve_machines`) is a **fourth** header-due-date writer the spec's OQ29/§4.7.6 lists omit (writes the header from the plain order's possibly client-rewritten `basic_finish_date`). Covered in Task 1.3.
+- `Util.scheduledEnd` (`foundation.mts:616-619`) and `orders.mts:200` are lateness/due readers §4.6.3 omits. Covered in Task 1.5.
+- `tests/test_sap_staging.py:292` pins today's blank-finish acceptance and is not in the spec's FLIP list; it flips under OQ24. Covered in Task 1.4.
+- The dead legacy optimizer walk is `engine.mts:2357-2619`, not "~2262-2619" (2262 is inside the live apply branch).
+- `SCHEMA_VERSION` is `foundation.mts:144`, read by `persistence.mts:1210-1212` and `1902`.
+- `nimbus-compute-core.d.ts:28-32` lists 18 alert types and lacks `distribution-separation`; `types.mts:469-475` lists 19. They already disagree.
+- The save prefetch (`db.py:1282`) and the conflict scan (`1049`, `1056`) use `_EFF_END_SQL` while `/tasks`, refresh and Send use the mismatch-hold variant; §8.4 lists the copies but not this read/save disagreement. Task 2.2 collapses them.
+- `engine.mts:2782-2790` listens to `tasks:bulkUpdate` with source `'refresh'` (the concurrency refresh), not a "conflict refresh".
+- No mismatch-flag clearing exists in `persistence.mts` (the spec's `~1423` is the `schedule_segments` payload key); clearing is server-side (`db.py:1585→1128-1129`) and in `engine.mts:1268`.
+- `backend/integration/AGENTS.md:72, 126` are the twins the §11 lists mean by "AGENTS.md"; the root `AGENTS.md` lines are blank.
+
+**Design choices made in this plan (not in the spec)**
+- The locked SAP dates reuse the existing wire names `original_start_date`/`original_end_date` (served with a fallback to `basic_*`); the Phase 1 "repair" is therefore a backfill of the new columns and never rewrites `basic_finish_date`.
+- `placement_exception` ('overtime' | 'overlong') is the single per-order marker for OQ50 + OQ63 and the one new `TaskDTO` field.
+- The run-time cap is enforced in application logic (`min(336 h, horizon)` → Needs Planning); the DB check becomes a representation bound (`< 8760`), because a 400 h order could not otherwise be stored at all.
+- The cutover nulls `scheduled_start` too (except running rows) so that a date-only due date is read through the OQ23 window rule by the browser rather than as literal midnight from the server.
+- OQ27 lookback: fixed 30-day window now (option e); the finish-indexed select (option f) is deferred.
+- Forward calendar helpers (`nextAvailable`, `allocateRuntime`) are not converted to plant-zone arithmetic; only the backward walk and the reversal leg are. The divergence is the spec's own accepted one for retained forward paths; recorded for `docs/MIGRATION.md`.
+
+**Pre-existing defects fixed on the way (A.3 numbers):** 1, 2, 4, 5, 6, 7, 9, 10, 13, 14, 15, 16, 18, 23, 25 (partly), 26 (partly). **Left open:** 3 (echo flips validity — mitigated by OQ26's locked start), 8 (dead echo shield — removed), 11 (first Send of an untouched aggregate — moot under OQ61), 12, 17, 19, 20, 21, 22, 24 (midnight staleness), 27, 28, 29, 30 (snap loop deleted).
+
+**Open questions for the owner (do not block Phase 1)**
+1. Which plant setting is "the planning horizon" for the 336 h cap (Phase 0 item i; plan assumes the optimizer horizon, 35 days default).
+2. Delete the unreachable evaluator labels `throughput` / `due-date-first` with the dead walk, or keep (plan keeps; §4.8.3a).
+3. Whether the vis-timeline left resize handle can be hidden (Phase 0 item e); the plan falls back to revert-with-toast.
+4. Group 32's reworded-key list is pinned to the keys named in §10.5; any further rewording in Task 3.4 extends it.
+5. The SAP echo tolerance for the locked-column match (minute precision, SAP frame) assumes assumption A9 holds; blocker 18's real-SAP test may change the compare rule in `finish_echoes` only.
+
+## Appendix C — Gap decisions and gate reports (filled during execution)
+
+Every routine decision the plan did not spell out is logged here as it is made (task, gap, choice, why, where it shows), and the same entries are appended to `BACKWARD_SCHEDULING_MIGRATION.md` under "Implementation log and gap decisions (2026-10)". Each phase ends with a gate report: commands run, pass/fail counts against the baseline, tests flipped or added, review findings and their fixes.
+
+_(empty until execution starts)_
+
+## Appendix B — Context
+
+**Brief.** Owner (2026-10-13): "I want to implement Backward_Scheduling_Migration. Draw up an implementation plan that has Sonnet do ALL the work except for very low risk changes for Haiku."
+
+**Owner answers during planning (2026-10-13).**
+- Cutover run: "Automatic on first load" — the migration flags every row stale; the first browser to load a plant under the new image re-derives and the first Save persists (over the recommended admin button and the offline-precompute script).
+- Phase 2/3 parallelism: "Sequential" — one implementer at a time on the feature branch.
+- Autonomy (second prompt): run Phases 1–4 completely autonomously; stop only for a truly large deviation; fill small gaps and record them in an appended section of the .md and in the final report; deploy nothing; branches only, no merge to `main`; local Postgres via `.env` plus owner-supplied `postgres` credentials (env vars only).
+
+**Findings that shaped the plan.** No server calendar (every derivation is browser-side, so the cutover is a flag-and-reconcile, not an identity write); the echo overwrites the due date in four places plus a fifth writer found during planning; only ~4 % of tests pin the forward rule, so the 33 new-test groups are the gate; every deploy ships all of `main`, hence the feature branch; the deploy runner's destructive-by-text filter dictates file naming and separate runs; the locale ratchet has zero headroom.
+
+**Rejected alternatives.** Per-plant switch or dormant code (ruled out by O3); new placed-finish column (OQ32 rejected by owner; re-purpose `scheduled_end`); identity-preserving cutover (OQ5 rejected; bulk re-derive from due dates); admin-run cutover action and offline SQL precompute (owner chose first-load); guard-only due-date protection (OQ31 rejected; locked columns); Send of unfirmed orders with a split summary (OQ61 rejected; firmed only); parallel worktrees for Phases 2/3 (owner chose sequential); Reading B in any form (deferred).
+
+**Spec sections this plan relies on.** §1.6 (decisions), §12 (decision text), §7 (phases and gates), §8.4–8.8 and §8.13 (runner, first-load paths, rollback, runbook), §10.2 and §10.5 (tests to flip and add), §6.2 (never-placed read rule, superseded by OQ33 A), §4.1–4.12 (anchors; verified at HEAD 0317dd8).
