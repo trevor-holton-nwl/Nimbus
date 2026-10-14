@@ -1,4 +1,7 @@
 -- migrations/2026-10-20-1-backward-cutover.sql
+-- nimbus-migration: manual-only
+-- (the deploy runner SKIPS this file in every mode, -AllowDestructive included; apply it deliberately with
+--  -Only 2026-10-20-1 in its own cutover run -- see docs/DEPLOYMENT.md, Backward-scheduling cutover)
 -- Backward-scheduling global cutover (OQ3, OQ5, OQ52, OQ53). Destructive by text (UPDATE, DELETE).
 -- Apply AFTER migrations/2026-10-20-0-orders-precutover-snapshot.sql, in its own deploy run.
 --

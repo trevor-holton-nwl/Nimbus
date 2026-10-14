@@ -1,4 +1,7 @@
 -- migrations/2026-10-20-0-orders-precutover-snapshot.sql
+-- nimbus-migration: manual-only
+-- (the deploy runner SKIPS this file in every mode, -AllowDestructive included; apply it deliberately with
+--  -Only 2026-10-20-0 in the cutover window, immediately before the cutover -- see docs/DEPLOYMENT.md)
 -- Pre-cutover snapshot for the backward-scheduling cutover (migrations/2026-10-20-1-backward-cutover.sql).
 -- Plain copies of the order dates and flags, the schedule segments and the SAP-sent rows, taken once
 -- BEFORE the cutover rewrites placed finishes. It is the recovery path if the cutover must be reviewed.

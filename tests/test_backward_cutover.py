@@ -15,6 +15,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT_SQL = os.path.join(ROOT, "migrations", "2026-10-20-0-orders-precutover-snapshot.sql")
 CUTOVER_SQL = os.path.join(ROOT, "migrations", "2026-10-20-1-backward-cutover.sql")
 LEDGER_IDS = ("backward_cutover_snapshot", "backward_scheduling_cutover")
+RESTORE_SQL = os.path.join(ROOT, "migrations", "manual", "2026-10-20-restore-precutover-snapshot.sql")
+MARKER = "-- nimbus-migration: manual-only"
 SNAP_TABLES = (
     "orders_precutover_snapshot",
     "order_schedule_segments_precutover_snapshot",
@@ -207,3 +209,43 @@ def test_backward_cutover_write_set_and_idempotence(pg):
         finally:
             conn.rollback()
 
+
+def test_snapshot_cutover_and_restore_files_carry_the_manual_only_marker():
+    """I1/I2: the deploy runner skips files with this header line in every mode, so none of the three can be
+    applied by a routine promote (the runner behaviour itself is exercised in the B1 report / DEPLOYMENT.md)."""
+    for path in (SNAPSHOT_SQL, CUTOVER_SQL, RESTORE_SQL):
+        head = _read(path).splitlines()[:6]
+        assert MARKER in head, path
+
+
+@pytest.mark.pg
+def test_restore_before_any_save_is_exact(pg):
+    """M2: snapshot, cutover, then the restore script puts every restored column and every segment back exactly
+    (updated_at is deliberately set to the restore time so caches re-read)."""
+    snapshot_sql, cutover_sql, restore_sql = _read(SNAPSHOT_SQL), _read(CUTOVER_SQL), _read(RESTORE_SQL)
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("DELETE FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))
+            for t in SNAP_TABLES:
+                cur.execute(f"DROP TABLE IF EXISTS {t}")
+            _seed(cur)
+            cols = ("scheduled_start, scheduled_end, manual_firmed, firming_indicator, runtime_schedule_mismatch, "
+                    "placement_exception")
+            q_orders = f"SELECT id, {cols} FROM orders WHERE id LIKE 'zzcut-%' ORDER BY id"
+            q_segs = ("SELECT order_id, segment_no, scheduled_start, scheduled_end FROM order_schedule_segments "
+                      "WHERE order_id LIKE 'zzcut-%' ORDER BY order_id, segment_no")
+            cur.execute(q_orders)
+            orders_before = cur.fetchall()
+            cur.execute(q_segs)
+            segs_before = cur.fetchall()
+            cur.execute(snapshot_sql)
+            cur.execute(cutover_sql)
+            cur.execute(q_orders)
+            assert cur.fetchall() != orders_before  # the cutover really changed something
+            cur.execute(restore_sql)
+            cur.execute(q_orders)
+            assert cur.fetchall() == orders_before
+            cur.execute(q_segs)
+            assert cur.fetchall() == segs_before
+        finally:
+            conn.rollback()

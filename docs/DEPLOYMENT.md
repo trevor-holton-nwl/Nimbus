@@ -102,7 +102,7 @@ The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`
 8. **`NIMBUS_SAP_SYSTEM_TZ` is set** to the value SAP Development confirmed. A wrong or invalid value shows as the warning `sap_system_tz_invalid` on every batch and refuses planned-order apply and Send to SAP.
 ## Backward scheduling Phase 1 migrations (2026-10-15)
 
-`migrations/2026-10-15-1-orders-original-dates.sql` and `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` are destructive by text (`ALTER`, `UPDATE`, `DROP`, comments included). The runner blocks each one unless `-AllowDestructive` is passed, and that flag releases every pending destructive file in the folder the runner reads, so each file needs its own `-AllowDestructive` run. Before each run, read `migration_files_applied` and every pending file, and point the runner at a folder that holds only that run's file (`-MigrationsDir`). The owner runbook is in `docs/MIGRATION.md`, section "Backward scheduling — Phase 1 shipped / Phases 2–4 pending".
+`migrations/2026-10-15-1-orders-original-dates.sql` and `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` are destructive by text (`ALTER`, `UPDATE`, `DROP`, comments included). The runner blocks each one unless `-AllowDestructive` is passed, and that flag releases every pending destructive file in the folder the runner reads, so each file needs its own `-AllowDestructive` run. Before each run, read `migration_files_applied` and every pending file, and point the runner at a folder that holds only that run's file (`-MigrationsDir`), or name it with `-Only <file>`. The owner runbook is in `docs/MIGRATION.md`, section "Backward scheduling — Phase 1 shipped / Phases 2–4 pending".
 
 The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps each row's xmin (the optimistic-concurrency `base_version`). Apply it at deploy time, never mid-shift. Planners must save before the run (an unsaved edit goes stale on its next save) and reload afterwards. The `2026-10-15-1` file also reads `order_sap_sent`, so `2026-10-08-sap-staging-tables.sql` must already be in the ledger.
 
@@ -138,10 +138,12 @@ SELECT filename, applied_at FROM migration_files_applied ORDER BY filename;
 The pending set must then be **exactly** these three files, and nothing else:
 
 1. `2026-10-16-1-orders-placement-exception.sql` (adds a nullable column; inert to the old image)
-2. `2026-10-20-0-orders-precutover-snapshot.sql` (copies orders, segments and sent-to-SAP rows into three snapshot tables; contains none of the runner's destructive words)
-3. `2026-10-20-1-backward-cutover.sql` (the data change described above)
+2. `2026-10-20-0-orders-precutover-snapshot.sql` (copies orders, segments and sent-to-SAP rows into three snapshot tables; **manual-only**)
+3. `2026-10-20-1-backward-cutover.sql` (the data change described above; **manual-only**)
 
-`apply-migrations.ps1 -DryRun` lists every file in the folder in apply order and never reads the ledger, so it cannot show what is pending; compare its list with the ledger yourself. It also shows which files the runner treats as destructive (the 1st and 3rd are, by text: `ALTER`, `UPDATE`, `DELETE`). The runner has no per-file selector, and `-AllowDestructive` releases **every** pending destructive file in the folder it reads, so each destructive file runs alone, from a scratch folder holding only that file (step 11).
+Files 2 and 3 carry the header line `-- nimbus-migration: manual-only`. The runner SKIPS such a file with a visible warning in every mode, `-AllowDestructive` included, so a routine `/promote-azure` after the merge (plain, or re-run with `-AllowDestructive`) can never take the snapshot early or run the cutover. They run only when the operator names them with `-Only` (steps 10 and 11). Until then the runner's summary lists them under `manual-only (skipped, use -Only)` and a later pending file is unaffected.
+
+`apply-migrations.ps1 -DryRun` lists every file in the folder in apply order and never reads the ledger, so it cannot show what is pending; compare its list with the ledger yourself. It also shows which files the runner treats as destructive (the 1st and 3rd are, by text: `ALTER`, `UPDATE`, `DELETE`). `-Only <file-name-or-id-prefix>` applies exactly the named file(s) and nothing else (for example `-Only 2026-10-20-1`); it is the only way to run a manual-only file, and the file is still subject to the destructive check and the applied ledger. Without `-Only`, `-AllowDestructive` releases every pending destructive file that is not manual-only, so give each destructive file its own `-Only` run (step 11).
 
 **3. Rehearse on a copy of the pilot database (gate G-10, part 2).** Do this from a **fresh** dump, shortly before the window; it is the only end-to-end run of the cutover before the real one.
 
@@ -201,19 +203,16 @@ az acr task list-runs --registry acrnimbusdev --top 1 -o table   # expect Succee
 SELECT plant, count(*) FROM orders WHERE planning_status <> 'needs_planning' GROUP BY plant ORDER BY plant;
 ```
 
-**10. Run 2: the snapshot (plain run, no destructive flag).** One file, the snapshot, from its own scratch folder, **without** `-AllowDestructive` (its dry-run line must read "additive (auto)"; if the runner marks it destructive, stop and read the file). Confirm afterwards that `orders_precutover_snapshot`, `order_schedule_segments_precutover_snapshot` and `order_sap_sent_precutover_snapshot` exist and that the first has as many rows as `orders`. The platform operator separately confirms the platform's own backup / point-in-time-restore window **[unverified: not visible from the repository]** and records the time.
+**10. Run 2: the snapshot (`-Only`, no destructive flag).** One file, named with `-Only 2026-10-20-0` and **without** `-AllowDestructive` (the snapshot holds none of the runner's destructive words; if `-DryRun -Only 2026-10-20-0` marks it destructive, stop and read the file). Confirm afterwards that `orders_precutover_snapshot`, `order_schedule_segments_precutover_snapshot` and `order_sap_sent_precutover_snapshot` exist and that the first has as many rows as `orders`. The platform operator separately confirms the platform's own backup / point-in-time-restore window **[unverified: not visible from the repository]** and records the time.
 
-**11. Run 3: the cutover, alone, inside the window.** Read the whole file first, comments included (the runner counts the word "update" in a comment). Apply it alone through a scratch folder and the runner's own `-AllowDestructive`. **Three separate runs, in order, never one run for all three.** The scratch-folder pattern for any single-file run (shown for run 3):
+**11. Run 3: the cutover, alone, inside the window.** Read the whole file first, comments included (the runner counts the word "update" in a comment). Apply it alone with `-Only` and the runner's own `-AllowDestructive`. **Three separate runs, in order, never one run for all three.** The pattern for any single-file run (shown for run 3):
 
 ```powershell
-$run = Join-Path $env:TEMP 'nimbus-cutover-run3'
-New-Item -ItemType Directory -Force $run | Out-Null
-Copy-Item .\migrations\2026-10-20-1-backward-cutover.sql $run
-.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -MigrationsDir $run -DryRun          # read the line for this file
-.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -MigrationsDir $run -AllowDestructive   # prompts for the password, hidden
+.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -Only 2026-10-20-1 -DryRun                    # read the line for this file
+.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -Only 2026-10-20-1 -AllowDestructive         # prompts for the password, hidden
 ```
 
-Run 1 and run 2 use the same pattern with their own file (run 1 with `-AllowDestructive`, run 2 without). **Exit 3 means a file was blocked: stop.** Each file and its ledger row run in one transaction, so a failure leaves nothing half-applied.
+Run 1 uses the same pattern with its own file (`-Only 2026-10-16-1`), run 2 with `-Only 2026-10-20-0` and no destructive flag. **Exit 3 means a file was blocked: stop.** Each file and its ledger row run in one transaction, so a failure leaves nothing half-applied.
 
 **Gate G-6** (rows updated equals the non-queued order count), as an admin login in a read-only transaction, per plant:
 
@@ -253,9 +252,11 @@ The abort decision belongs to the decider, who must know what an abort costs (st
 
 | Situation | What restores | What is lost |
 |---|---|---|
-| The image fails **before any planner saves** under the new rule | Roll the previous image tag only (the recorded rollback target: `az containerapp update ... --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`) | No planner edit is lost. The cutover has already emptied the placed starts and ends, so old code reads those orders as never placed and shows them wherever it shows a never-placed order **[unverified: what the previous image does with orders that are flagged for a re-derive and have no placement; check it in the rehearsal by running the previous image against the migrated copy]**; the old placements are in the run-2 snapshot tables |
-| Planners **have saved**, then the image rolls back | Nothing in the database restores the old placed finishes; recovery is the run-2 snapshot tables or the platform's point-in-time restore, run by the operator | Every edit made after the snapshot; the restore is itself an update and bumps every row's version |
+| The image fails **before any planner saves** under the new rule | Roll the previous image tag only (the recorded rollback target: `az containerapp update ... --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`) | No planner edit is lost. The cutover has already emptied the placed starts and ends, so old code reads those orders as never placed and shows them wherever it shows a never-placed order **[unverified: what the previous image does with orders that are flagged for a re-derive and have no placement; check it in the rehearsal by running the previous image against the migrated copy]**; the old placements are in the run-2 snapshot tables, and `migrations/manual/2026-10-20-restore-precutover-snapshot.sql` puts them back (see below) |
+| Planners **have saved**, then the image rolls back | Nothing restores the old placed finishes without losing newer work; the restore script below overwrites the saved columns, so the alternatives are fix-forward or the platform's point-in-time restore, run by the operator | Every edit made after the snapshot; the restore is itself an update and bumps every row's version |
 | Finishes already sent to SAP | Cannot be recalled | n/a |
+
+**Restore script (`migrations/manual/2026-10-20-restore-precutover-snapshot.sql`, manual-only).** Rolls the pre-cutover placements, firm flags, `runtime_schedule_mismatch`, `placement_exception` and schedule segments back from the three snapshot tables, for every order that was in the snapshot (orders created later are left alone; `updated_at` is set to the restore time so caches re-read). A restore before any planner save is exact; after a save it overwrites that save. Run it only after the previous image is back, in one transaction, as the admin login: `psql --single-transaction -f migrations/manual/2026-10-20-restore-precutover-snapshot.sql` (it lives outside `migrations/`, so the runner never lists it).
 
 At any rollback: **retire any `ready` outbound rows** queued under the new rule with the statement of step 8; send the planner notice again (hard reload, clear site data, do not restore snapshots dated after the cutover); and **record the rollback timestamp**. If the new image later returns, the stale placed-finish case of section 8.8a of the spec applies and needs its own decision before the roll forward.
 
@@ -314,7 +315,7 @@ az containerapp create -g rg-nimbus-dev -n ca-nimbus-dev --environment cae-nimbu
 > executes on apply. See `MIGRATION.md` → "Schema migration ledger". You still only *need* to run it
 > once (at provisioning); re-running just won't corrupt anything.
 >
-> **Exception (backward-scheduling cutover):** `schema.sql` now also mirrors the ledger-guarded cutover (`backward_cutover_snapshot`, then `backward_scheduling_cutover`). On a developer database that has not yet recorded those ids, re-applying `schema.sql` runs the cutover ONCE and nulls local placed finishes and schedule segments (running rows keep their start and end). Later re-applies are no-ops. On Azure the cutover ships through `migrations/` in its own `-AllowDestructive` run, never through `schema.sql`.
+> **Exception (backward-scheduling cutover):** `schema.sql` now also mirrors the ledger-guarded cutover (`backward_cutover_snapshot`, then `backward_scheduling_cutover`). On a developer database that has not yet recorded those ids, re-applying `schema.sql` runs the cutover ONCE and nulls local placed finishes and schedule segments (running rows keep their start and end). Later re-applies are no-ops. On Azure the cutover ships through `migrations/` as a manual-only file, in its own `-Only ... -AllowDestructive` run, never through `schema.sql` and never from a routine promote.
 
 ## Verify
 ```powershell

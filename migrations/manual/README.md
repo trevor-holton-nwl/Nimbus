@@ -19,6 +19,7 @@ that predates the 2026-08-20 Production Line -> Machine cutover.
 | `2026-08-17-line-key-columns.sql` | Adds a generated `line_key` column and indexes on `production_lines` (plus `orders.line_key`); `production_lines` no longer exists, so it fails on a current-schema database. |
 | `2026-08-20-line-to-machine.sql` | The one-way, non-repeatable Production Line -> Machine rename (tables, columns, indexes, metadata, SAP seed keys). Errors on re-run by design. Must be applied by hand, exactly once, and is not recorded in `schema_migrations`. |
 | `2026-08-20-setup-value-case-fold-backfill.sql` | One-time data backfill that upper-cases setup attribute values inside JSONB state keys (may merge PK-colliding rows). Data-mutating, intended to run alongside the deploy of the matching application fold, not as routine maintenance. |
+| `2026-10-20-restore-precutover-snapshot.sql` | Rollback for the backward-scheduling cutover: restores placements, firm flags and segments from the `*_precutover_snapshot` tables. Manual-only, destructive by design; see the rollback matrix in `docs/DEPLOYMENT.md`. |
 | `2026-10-08-nimbus-mulesoft-role.sql` | Environment-specific, not a legacy file: creates the least-privilege `nimbus_mulesoft` login and its grants on the `sap_stage_*` tables. The password and network rules are set per environment, so a DB admin applies it by hand after `2026-10-08-sap-staging-tables.sql`. |
 
 ## Which databases need these
