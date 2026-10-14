@@ -686,7 +686,9 @@
        separation it did not create. Same condition, two severity scales - keep both.
     1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
        PARENT_ORDER; a per-work-center policy (max_separation: 'hour'|'day'|'week')
-       caps how far apart their scheduled starts may drift. Grouped by
+       caps how far apart their scheduled FINISHES may drift (backward scheduling OQ38: the siblings share
+       the finish, so a 70/30 family that finishes together raises nothing even though the long child starts
+       earlier). Hand-mirrored by setup-scheduler.mts checkDistributionSeparation - keep the two in step. Grouped by
        (plant, PARENT_ORDER, MATERIAL_NUMBER) so an unlikely parent-order-number
        collision across two different materials never conflates two distinct
        distributions. Queued (needs_planning) siblings have no dates yet and are
@@ -711,11 +713,11 @@
         if (policy?.max_separation) { maxSeparation = policy.max_separation; break; }
       }
       if (!maxSeparation || maxSeparation === 'none') continue;
-      const dated = g.tasks.filter(t => t.start_date);
+      const dated = g.tasks.filter(t => t.end_date);
       if (dated.length < 2) continue;
-      const buckets = new Set(dated.map(t => separationBucketKey(t.start_date, maxSeparation)));
+      const buckets = new Set(dated.map(t => separationBucketKey(t.end_date, maxSeparation)));
       if (buckets.size <= 1) continue;
-      const sortedDated = dated.slice().sort((a, b) => a.start_date.getTime() - b.start_date.getTime());
+      const sortedDated = dated.slice().sort((a, b) => a.end_date.getTime() - b.end_date.getTime());
       const earliest = sortedDated[0];
       const earliestLine = earliest.MACHINE || 'Unknown';
       // Mirrors the tool-conflict rule's own onlyLines gate above: the peer pool
@@ -726,9 +728,9 @@
       alerts.push({
         id: `dist-sep:${g.plant ?? ''}:${g.parent}:${g.material}`,
         sev: 'err', type: 'distribution-separation',
-        msg: `Sub-orders of "${g.parent}" start in different ${maxSeparation}s.`,
+        msg: `Sub-orders of "${g.parent}" finish in different ${maxSeparation}s.`,
         msgKey: 'alert.distribution_separation', msgVars: vars,
-        taskId: earliest.id, line: earliestLine, time: earliest.start_date,
+        taskId: earliest.id, line: earliestLine, time: earliest.start_date || earliest.end_date,
       });
     }
 

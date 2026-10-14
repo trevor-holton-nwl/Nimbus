@@ -746,6 +746,14 @@ class TestComputeDerivedStatuses:
         statuses = compute_derived_statuses(header, shares, children, None, {})
         assert "runtime_mismatch" in statuses
 
+    def test_runtime_mismatch_reads_the_wire_flag_only_never_the_dates(self):
+        """A.3 #23: the list badge follows the flag, so a child whose stored finish disagrees with the sum of its
+        pieces but carries no flag raises nothing, and a flagged finish-only child does."""
+        dated = {"runtime_schedule_mismatch": False, "scheduled_start": None, "scheduled_end": "2026-10-07T16:00"}
+        assert "runtime_mismatch" not in compute_derived_statuses({}, [], [dated], None, {})
+        assert "runtime_mismatch" in compute_derived_statuses(
+            {}, [], [{**dated, "runtime_schedule_mismatch": True}], None, {})
+
     def test_incomplete_missing_child(self):
         """Positive share with no corresponding child."""
         header = {}
@@ -2327,6 +2335,9 @@ class TestDistributionReadRoutes:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/csv")
         assert self.ORD in response.text
+        header_row = response.text.lstrip("\ufeff").splitlines()[0].split(",")
+        assert header_row[:3] == ["production_order", "material_number", "machine"]
+        assert "due_date" in header_row and header_row[header_row.index("finish")] == "finish"
 
     def test_unresolved_lists_the_unmapped_machine(self, client):
         response = client.get(f"/distribution/{self.PLANT}/unresolved")
@@ -3176,11 +3187,79 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
 
         assert old_still_exists == 0, "the superseded lettered child must be deleted"
         assert new_row is not None, "the surviving 100% machine's bare id must exist"
-        assert new_row[0] == sched_start and new_row[1] == sched_end
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time, runtime_schedule_mismatch FROM orders WHERE id = %s", (new_bare_id,))
+            survivor_run_time, mismatch = cur.fetchone()
+        # OQ37 rule R2: the kept start plus the survivor's full run time, never the partial-share end verbatim
+        assert new_row[0] == sched_start
+        assert new_row[1] == sched_start + dt.timedelta(hours=float(survivor_run_time))
+        assert mismatch is True
         assert new_row[2] == "keep me"
         assert new_row[3] is True, "the slot is carried, so the manual firm must follow it"
-        assert segment_owner is not None and segment_owner[0] == new_bare_id, \
-            "the segment must be re-pointed onto the new bare id, not cascade-deleted"
+        assert segment_owner is None, "the partial-share segments are deleted, not re-pointed (R2)"
+
+    def test_collapse_carries_the_full_run_time_end_and_flags_the_spec_example(self, pg):
+        """Spec example: partial-share end Wed 12:00, kept start Tue 18:00, full run time 22 h -> stored end
+        Wed 16:00 (plain arithmetic), start kept, segments gone, mismatch flag set."""
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        start, partial_end = dt.datetime(2026, 10, 6, 18, 0), dt.datetime(2026, 10, 7, 12, 0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time=22, run_time_source='manual',"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (start, partial_end, old["id"]))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                        " VALUES (%s, 1, %s, %s)", (old["id"], start, partial_end))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester")
+        new_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT scheduled_start, scheduled_end, runtime_schedule_mismatch FROM orders WHERE id=%s",
+                        (new_id,))
+            assert cur.fetchone() == (start, dt.datetime(2026, 10, 7, 16, 0), True)
+            cur.execute("SELECT COUNT(*) FROM order_schedule_segments WHERE order_id=%s", (new_id,))
+            assert cur.fetchone()[0] == 0
+
+    def test_collapse_of_a_firmed_survivor_is_listed_in_the_dry_run_and_needs_the_confirm(self, pg):
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=TRUE WHERE id=%s",
+                        (dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 12), old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        payload = [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}]
+        preview = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], dry_run=True, actor="tester")
+        assert old["id"] in [r["id"] for r in preview["removed_scheduled"]]
+        with pytest.raises(distribution_data.DistributionChildrenScheduled):
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], actor="tester")
+
+    def test_collapse_of_an_unfirmed_survivor_is_not_listed(self, pg):
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=FALSE,"
+                        " firming_indicator=NULL WHERE id=%s",
+                        (dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 12), old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        preview = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], dry_run=True, actor="tester")
+        assert old["id"] not in [r["id"] for r in preview["removed_scheduled"]]
+
+    def test_repair_runs_with_the_scheduled_removal_confirmed(self, pg):
+        """Repair re-materializes with `confirm_remove_scheduled=True` (A.3 #16): the guard is evaluated, never
+        raised, for a header repair must fix."""
+        with mock.patch.object(distribution_data, "_materialize_reweight",
+                               return_value={"children": [], "removed": []}) as mat, \
+                mock.patch.object(distribution_data, "_load_one_header_shares", return_value={}), \
+                mock.patch.object(distribution_data, "_load_one_material_attrs", return_value={}):
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                distribution_data._repair_one_header(
+                    cur, self.PLANT, self.ORD, self.MAT, {"source": "x", "default_basis": "y"})
+        assert mat.call_args.kwargs["confirm_remove_scheduled"] is True
 
 
 @pytest.mark.pg
@@ -4128,7 +4207,7 @@ class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
             cur.execute("SELECT COUNT(*) FROM orders WHERE id=%s", (added["id"],))
             assert cur.fetchone()[0] == 0
 
-    def test_collapse_response_carries_preserved_segment_aggregate(self, pg):
+    def test_collapse_response_carries_the_carried_finish_and_no_segments(self, pg):
         survivor = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
         segments = [(1, dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 11)),
                     (2, dt.datetime(2026, 10, 1, 12), dt.datetime(2026, 10, 1, 15))]
@@ -4148,12 +4227,8 @@ class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
         child = result["children"][0]
         assert child["id"] != survivor["id"]
         assert child["plant"] == self.PLANT and child["material_number"] == self.MAT
-        assert len(child["schedule_segments"]) == 2
-        for actual, (sequence, start, end) in zip(child["schedule_segments"], segments, strict=True):
-            assert actual["sequence"] == sequence
-            assert dt.datetime.fromisoformat(actual["start_date"]) == start
-            assert dt.datetime.fromisoformat(actual["end_date"]) == end
-        assert child["runtime_schedule_mismatch"] is True  # preserved pieces total 6 h, parent now 10 h
+        assert not child["schedule_segments"], "R2 deletes the partial-share segments"
+        assert child["runtime_schedule_mismatch"] is True  # the browser re-derives from the carried finish
 
     @pytest.mark.parametrize("operation", ["shares", "reset"])
     def test_response_reads_runtime_attributes_and_version_after_resolver_commit(self, pg, operation):
@@ -5373,3 +5448,12 @@ def test_aggregate_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
     assert data[:3] == ["'=1+1", "'+MAT", "'-WC"]
     assert data[10] == "'@X"
     assert data[3] == "10" and data[7] == "1"
+    assert parsed[0][-1] == "due_date" and data[-1] == "", "no due date from SAP -> empty cell, no fallback"
+    rows[0]["due_date"] = dt.datetime(2026, 10, 9, 16, 0)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+    try:
+        again = TestClient(brain.api).get("/distribution/ZZPLANT/aggregate", params={"format": "csv"})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert list(_csv.reader(_io.StringIO(again.content.decode("utf-8-sig"))))[1][-1] == "2026-10-09 16:00:00"

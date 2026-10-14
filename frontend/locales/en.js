@@ -990,7 +990,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.fix_alert':                     'Automatically resolve this alert',
   'alert.tool_conflict':               'Tool "{{tool}}" is needed by "{{a}}" on {{lineA}} and "{{b}}" on {{lineB}} at the same time.',
   'alert.setup_violated':              'Not enough changeover time before order "{{order}}" on {{line}}: needs {{required}} min, only {{available}} min available ({{short}} min short).',
-  'alert.distribution_separation':     'Sub-orders of {{parent}} start in different {{scope}}s',
+  'alert.distribution_separation':     'Sub-orders of {{parent}} finish in different {{scope}}s',
   'alert.start_may_be_stale': 'The start of order "{{order}}" may be out of date: its run time changed after the schedule was saved.',
   'alert.late': 'Order "{{order}}" finishes {{hours}} h after its due date.',
   'alert.late_beyond_cap': 'Order "{{order}}" finishes {{hours}} h after its due date, beyond the plant limit of {{days}} day(s) late.',

@@ -659,7 +659,7 @@ window.__NIMBUS_LOCALES.pt = {
   'tip.fix_alert':                     'Resolver este alerta automaticamente',
   'alert.tool_conflict':               'A ferramenta "{{tool}}" é necessária ao mesmo tempo por "{{a}}" em {{lineA}} e "{{b}}" em {{lineB}}.',
   'alert.setup_violated':              'Tempo de troca insuficiente antes da ordem "{{order}}" em {{line}}: precisa de {{required}} min, só há {{available}} min disponíveis (faltam {{short}} min).',
-  'alert.distribution_separation':     'Subpedidos de {{parent}} começam em diferentes {{scope}}s',
+  'alert.distribution_separation':     'Subpedidos de {{parent}} terminam em diferentes {{scope}}s',
   'alert.start_may_be_stale': 'O início da ordem "{{order}}" pode estar desatualizado: o tempo de execução mudou depois que a programação foi salva.',
   'alert.late': 'A ordem "{{order}}" termina {{hours}} h depois da data de vencimento.',
   'alert.late_beyond_cap': 'A ordem "{{order}}" termina {{hours}} h depois da data de vencimento, acima do limite da planta de {{days}} dia(s) de atraso.',

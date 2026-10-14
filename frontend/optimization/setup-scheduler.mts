@@ -6791,8 +6791,10 @@ function retainCompatiblePlacements(
  * condition is sev 'err' - a validation 'error' would block Apply on a condition the
  * optimizer cannot always repair, whereas the alert is the planner-facing red flag.
  * when a SAP aggregate order's distributed sub-orders (siblings sharing
- * `PARENT_ORDER`) start further apart than their work center's configured
- * `max_separation` policy allows. A future alignment pass may actually fix
+ * `PARENT_ORDER`) finish further apart than their work center's configured
+ * `max_separation` policy allows (judged on the FINISH, backward scheduling OQ38:
+ * siblings share the finish, so a family that finishes together raises nothing).
+ * Hand-mirrored by nimbus-compute-core.js `computeAlerts` rule 1c - keep the two in step. A future alignment pass may actually fix
  * these; this only surfaces them.
  */
 function checkDistributionSeparation(
@@ -6836,17 +6838,17 @@ function checkDistributionSeparation(
     if (!maxSeparation || maxSeparation === 'none') continue;
     // D50: mirror nimbus-compute-core.js's computeAlerts — an undated sibling
     // (no start_date yet, e.g. still mid-placement) is not yet part of the
-    // "do these siblings start together" question and must not be bucketed at
+    // "do these siblings finish together" question and must not be bucketed at
     // all, let alone bucketed as its own mismatching group of one.
-    const dated = group.filter(task => task.start_date);
+    const dated = group.filter(task => task.end_date);
     if (dated.length < 2) continue;
-    const buckets = dated.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.start_date, maxSeparation));
+    const buckets = dated.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.end_date, maxSeparation));
     if (buckets.some(bucket => bucket !== buckets[0])) {
       findings.push({
         code: 'distribution_separation',
         severity: 'warning',
         parents: dated.map(taskId),
-        message: `Sub-orders of ${dated[0].PARENT_ORDER} start in different ${maxSeparation} buckets.`,
+        message: `Sub-orders of ${dated[0].PARENT_ORDER} finish in different ${maxSeparation} buckets.`,
       });
     }
   }

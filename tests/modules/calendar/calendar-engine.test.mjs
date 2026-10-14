@@ -541,3 +541,30 @@ describe('backward calendar primitives', () => {
     });
   });
 });
+
+// Gate group 17 (Task 3.5): the 620-minute forward-versus-backward drift, on a sibling family.
+// Windows 06:00-16:00, 30-minute minimum piece. Two siblings share the finish Tue 16:00 and each run 620 minutes.
+// A BACKWARD walk from the shared finish honours it (start Mon 15:30); a FORWARD walk from that derived start ends
+// at Tue 15:50, ten minutes early. Finish-anchored placement must therefore be the backward one.
+describe('gate 17: sibling family finish survives only the backward walk (620 min over a closed window)', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+
+  it('both siblings land at the shared finish backward; a forward walk from the derived start drifts 10 minutes', () => {
+    for (const line of ['G17-A', 'G17-B']) {
+      Store.setCalendar(line, weekdays(6, 16), 'unit-test');
+      Store.replaceBlocks([], 'unit-test');
+    }
+    const finish = at(D.tue, '16:00');
+    const placed = ['G17-A', 'G17-B'].map(line => Calendar.allocateRuntimeBackward(line, finish, 620, 'partial_allowed', bopts()));
+    for (const r of placed) {
+      assert.equal(summary(r), '2026-10-19 15:30 -> 2026-10-20 16:00 [2026-10-19 15:30-2026-10-19 16:00 | 2026-10-20 06:10-2026-10-20 16:00]');
+      assert.equal(r.end.getTime(), finish.getTime(), 'the shared finish is honoured exactly');
+    }
+    const forward = Calendar.allocateRuntime('G17-A', placed[0].start, 620, 'partial_allowed');
+    assert.equal(forward.kind, 'allocated');
+    assert.equal(fmt(forward.end), '2026-10-20 15:50', 'the forward walk would end 10 minutes before the held finish');
+    assert.equal(finish.getTime() - forward.end.getTime(), 10 * 60 * 1000);
+  });
+});

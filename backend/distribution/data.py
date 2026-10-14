@@ -2579,7 +2579,8 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
     """`GET /distribution/{plant}/aggregate` (§10.2). One row per header:
     `{production_order, material_number, machine, quantity, sum_child_quantity,
     start, finish, child_count, queued_children, all_scheduled,
-    firming_indicator, reviewed, children}`.
+    firming_indicator, reviewed, children, due_date}`; `due_date` is the header's
+    SAP due date as received (`original_finish_received`), None when SAP sent none.
 
     Built from `db._EFF_START_SQL` / `db._EFF_END_UNLESS_QUEUED_SQL` /
     `db._SCHEDULE_SEGMENTS_LATERAL_SQL` -- the SAME shared fragments the `/tasks`
@@ -2607,7 +2608,7 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
 
     query = f"""
         SELECT hd.production_order, hd.material_number, hd.sap_workcenter,
-               hd.order_quantity, hd.firming_indicator, hd.reviewed,
+               hd.order_quantity, hd.firming_indicator, hd.reviewed, hd.original_finish_received,
                o.production_order, o.machine, o.order_quantity, o.planning_status,
                {eff_start_sql}, {eff_end_sql}
           FROM order_distribution hd
@@ -2624,7 +2625,7 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
 
     by_header: dict[tuple, dict] = {}
     order_keys: list[tuple] = []
-    for (po, mat, wc, header_qty, firming, reviewed, child_po, child_machine, child_qty,
+    for (po, mat, wc, header_qty, firming, reviewed, due_date, child_po, child_machine, child_qty,
          planning_status, eff_start, eff_end) in rows:
         key = (po, mat)
         if key not in by_header:
@@ -2634,6 +2635,8 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
                 "sum_child_quantity": Decimal(0),
                 "start": None, "finish": None, "child_count": 0, "queued_children": 0,
                 "firming_indicator": firming, "reviewed": reviewed, "children": [],
+                # the SAP due date as received (never rewritten); None when SAP sent none
+                "due_date": due_date,
             }
             order_keys.append(key)
         agg = by_header[key]
@@ -2986,18 +2989,34 @@ def _compute_reweight_anchor(cur, plant: str, order: str, material: str) -> dict
 
 def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
     """SS5.5 bullet 6, the N->1 collapse: when the surviving 100 % machine
-    already had a living child, copy that child's `scheduled_*`, `notes`,
-    `planning_status`/`planning_reason`, `manual_firmed` and re-point its
-    `order_schedule_segments` rows onto the NEW bare id BEFORE the old
-    lettered child is deleted -- schedule-preserving collapse. Must run
-    AFTER the new bare row has been upserted (so it exists as an UPDATE
-    target) and BEFORE `_delete_superseded_children` removes `old_child_id`
-    (segments cascade-delete on that removal otherwise)."""
+    already had a living child, carry that child's `notes`, `planning_status`/
+    `planning_reason`, `manual_firmed` and its kept `scheduled_start` onto the
+    NEW bare id BEFORE the old lettered child is deleted. Must run AFTER the new
+    bare row has been upserted (so it exists as an UPDATE target) and BEFORE
+    `_delete_superseded_children` removes `old_child_id`.
+
+    Finish-anchored carry (OQ37 rule R2, backward scheduling Task 3.5): the stored
+    finish is the anchor, and the survivor's old end was only its PARTIAL share's
+    end, so it is never copied. The carried finish is "the end the planner sees
+    today": the kept start plus the survivor's full run time as plain elapsed hours
+    (no calendar). `runtime_schedule_mismatch` is set so the browser re-derives
+    the start backward from that finish through the calendar. The partial-share
+    segments are deleted (their hours no longer add up to the whole order). A
+    survivor with no run time carries `scheduled_end = scheduled_start` (the
+    engine's `run_time_zero` issue surfaces it); one with no kept start (finish-only
+    placement) keeps its stored finish; an unplaced one carries nothing."""
     cur.execute(
         """
         UPDATE orders AS new_o
            SET scheduled_start = old_o.scheduled_start,
-               scheduled_end   = old_o.scheduled_end,
+               scheduled_end   = CASE
+                   WHEN old_o.scheduled_start IS NULL THEN old_o.scheduled_end
+                   WHEN COALESCE(@RT@, 0) > 0
+                        THEN old_o.scheduled_start + (@RT@) * INTERVAL '1 hour'
+                   ELSE old_o.scheduled_start END,
+               runtime_schedule_mismatch = CASE
+                   WHEN old_o.scheduled_start IS NOT NULL OR old_o.scheduled_end IS NOT NULL THEN TRUE
+                   ELSE new_o.runtime_schedule_mismatch END,
                notes           = old_o.notes,
                planning_status = old_o.planning_status,
                planning_reason = old_o.planning_reason,
@@ -3008,8 +3027,7 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
                prt_02          = old_o.prt_02,
                -- D11: a partial share's hours must not land on the now-whole order,
                -- so run time travels only when a planner typed it.
-               run_time        = CASE WHEN old_o.run_time_source = 'manual'
-                                      THEN old_o.run_time ELSE new_o.run_time END,
+               run_time        = @RT@,
                run_time_source = CASE WHEN old_o.run_time_source = 'manual'
                                       THEN old_o.run_time_source ELSE new_o.run_time_source END,
                run_time_basis  = CASE WHEN old_o.run_time_source = 'manual'
@@ -3017,13 +3035,12 @@ def _collapse_to_survivor(cur, old_child_id: str, new_child_id: str) -> None:
                updated_at      = NOW()
           FROM orders AS old_o
          WHERE new_o.id = %s AND old_o.id = %s
-        """,
+        """.replace("@RT@", "CASE WHEN old_o.run_time_source = 'manual' THEN old_o.run_time ELSE new_o.run_time END"),
         (new_child_id, old_child_id),
     )
-    cur.execute(
-        "UPDATE order_schedule_segments SET order_id = %s WHERE order_id = %s",
-        (new_child_id, old_child_id),
-    )
+    # The partial-share segments are dropped, not re-pointed: the browser re-derives the placement from the
+    # carried finish. (They would cascade-delete with the old child anyway; this makes the intent explicit.)
+    cur.execute("DELETE FROM order_schedule_segments WHERE order_id = %s", (old_child_id,))
 
 
 def _stamp_batch_children(conn, ids: list[str]) -> None:
@@ -3140,7 +3157,8 @@ def _fetch_children_by_machine(cur, plant: str, order: str, material: str, *,
         f"""
         SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
                o.scheduled_start, o.scheduled_end, o.notes, o.planning_status, o.planning_reason,
-               EXISTS(SELECT 1 FROM order_schedule_segments s WHERE s.order_id = o.id) AS has_segments
+               EXISTS(SELECT 1 FROM order_schedule_segments s WHERE s.order_id = o.id) AS has_segments,
+               o.manual_firmed, o.firming_indicator
           FROM orders o
          WHERE o.plant = %s AND o.parent_production_order = %s AND o.material_number = %s
          ORDER BY o.id
@@ -3150,12 +3168,13 @@ def _fetch_children_by_machine(cur, plant: str, order: str, material: str, *,
     )
     out = {}
     for (oid, po, machine, qty, run_time, sched_start, sched_end, notes, plan_status,
-         plan_reason, has_segments) in cur.fetchall():
+         plan_reason, has_segments, manual_firmed, firming_indicator) in cur.fetchall():
         out[machine] = {
             "id": oid, "production_order": po, "order_quantity": qty, "run_time": run_time,
             "scheduled_start": sched_start, "scheduled_end": sched_end, "notes": notes,
             "planning_status": plan_status, "planning_reason": plan_reason,
             "has_segments": bool(has_segments),
+            "firmed": bool(manual_firmed) or str(firming_indicator or "").strip().upper() == "X",
         }
     return out
 
@@ -3258,8 +3277,11 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     for machine, before in children_before.items():
         if before["id"] not in removed_ids:
             continue
-        if collapse and before["id"] == collapse["old_child_id"]:
-            continue  # schedule survives via _collapse_to_survivor, not a destructive removal
+        if collapse and before["id"] == collapse["old_child_id"] and not before["firmed"]:
+            # An unfirmed survivor's schedule carries via _collapse_to_survivor, not a destructive removal. A FIRMED
+            # one is listed (and needs the confirm): its start re-derives from the carried finish (OQ37 rule R2),
+            # so the protected placement may move.
+            continue
         frozen = bool(before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
         removed_details.append({
             "id": before["id"], "production_order": before["production_order"], "machine": machine,

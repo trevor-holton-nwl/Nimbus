@@ -543,6 +543,27 @@ test('computeAlerts raises exactly one distribution-separation alert per recompu
   assert.equal(hits2[0].id, hits1[0].id);
 });
 
+// Backward scheduling OQ38: the alert is judged on the FINISH (mirrors setup-scheduler checkDistributionSeparation).
+test('computeAlerts distribution-separation: a 70/30 family finishing together raises nothing; different finishes do', () => {
+  const day1 = new Date(Date.now() + 24 * 3600000); day1.setHours(9, 0, 0, 0);
+  const day2 = new Date(day1.getTime() + 24 * 3600000);
+  const finish = new Date(day2.getTime() + 7 * 3600000);
+  const mk = (id, line, start, end) => ({
+    id, MACHINE: line, RUN_TIME: 2, PARENT_ORDER: 'A-2000', MATERIAL_NUMBER: 'MAT-2', start_date: start, end_date: end,
+  });
+  const masterData = {
+    lines: [{ machine: 'L1', plant: 'P1', sap_workcenter: 'WC1' }, { machine: 'L2', plant: 'P1', sap_workcenter: 'WC1' }],
+    workcenters: [{ sap_workcenter: 'WC1', max_separation: 'day' }],
+  };
+  const run = tasks => Core.computeAlerts({
+    tasks, blocks: [], plantBlocks: [], calendars: {}, plants: {}, lineSettings: {}, masterData, dismissed: [], opts: {},
+  }).alerts.filter(a => a.type === 'distribution-separation');
+  // long child starts a day earlier (day1), short child starts day2; both finish together on day2
+  assert.equal(run([mk('a', 'L1', day1, finish), mk('b', 'L2', day2, finish)]).length, 0);
+  // same starts, finishes on different days
+  assert.equal(run([mk('a', 'L1', day1, new Date(day1.getTime() + 2 * 3600000)), mk('b', 'L2', day2, finish)]).length, 1);
+});
+
 // ── computeAlerts routing-runtime kinds (ROUTING_RUNTIME_DESIGN.md §8.6) ────
 
 test('computeAlerts raises runtime-unknown for a task held with planning_reason.code === "runtime_unknown"', () => {

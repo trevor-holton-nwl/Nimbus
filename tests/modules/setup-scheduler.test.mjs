@@ -5351,8 +5351,8 @@ test('checkDistributionSeparation stays silent when siblings share a bucket, the
 test('checkDistributionSeparationForTest ignores an undated sibling: two dated siblings sharing a bucket plus one undated gives no finding', () => {
   const parent = 'PO-DIST-UNDATED';
   const material = 'MAT-DIST-UNDATED';
-  const dated1 = { id: 'dist-undated-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
-  const dated2 = { id: 'dist-undated-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T14:00:00') };
+  const dated1 = { id: 'dist-undated-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00'), end_date: at('2026-08-03T10:00:00') };
+  const dated2 = { id: 'dist-undated-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T14:00:00'), end_date: at('2026-08-03T16:00:00') };
   const undated = { id: 'dist-undated-c', MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
   const snapshot = setupSnapshot([dated1, dated2, undated]);
   snapshot.masterData = distributionMasterData();
@@ -5366,7 +5366,7 @@ test('checkDistributionSeparationForTest ignores an undated sibling: two dated s
 test('checkDistributionSeparationForTest still requires at least two DATED siblings: one dated plus one undated gives no finding', () => {
   const parent = 'PO-DIST-UNDATED-SOLO';
   const material = 'MAT-DIST-UNDATED-SOLO';
-  const dated = { id: 'dist-solo-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
+  const dated = { id: 'dist-solo-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00'), end_date: at('2026-08-03T10:00:00') };
   const undated = { id: 'dist-solo-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
   const snapshot = setupSnapshot([dated, undated]);
   snapshot.masterData = distributionMasterData();
@@ -5380,8 +5380,8 @@ test('checkDistributionSeparationForTest still requires at least two DATED sibli
 test('checkDistributionSeparationForTest still flags dated siblings landing in different buckets with an undated sibling present', () => {
   const parent = 'PO-DIST-UNDATED-MISMATCH';
   const material = 'MAT-DIST-UNDATED-MISMATCH';
-  const dated1 = { id: 'dist-mis-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
-  const dated2 = { id: 'dist-mis-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-05T08:00:00') };
+  const dated1 = { id: 'dist-mis-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00'), end_date: at('2026-08-03T10:00:00') };
+  const dated2 = { id: 'dist-mis-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-05T08:00:00'), end_date: at('2026-08-05T10:00:00') };
   const undated = { id: 'dist-mis-c', MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
   const snapshot = setupSnapshot([dated1, dated2, undated]);
   snapshot.masterData = distributionMasterData();
@@ -5391,6 +5391,28 @@ test('checkDistributionSeparationForTest still flags dated siblings landing in d
   assert.equal(findings.length, 1, 'genuinely different-bucket DATED siblings must still raise the finding');
   assert.deepEqual(findings[0].parents.slice().sort(), ['dist-mis-a', 'dist-mis-b'],
     'the undated sibling must not appear in parents — it was never part of the comparison');
+});
+
+// Backward scheduling OQ38: separation is judged on the FINISH (hand-mirrored in nimbus-compute-core.js computeAlerts).
+// A 70/30 family: the long child starts a day earlier but both end together -> nothing raised. The same starts with
+// finishes on different days -> raised.
+test('checkDistributionSeparationForTest judges the finish: a 70/30 family finishing together raises nothing, different finishes do', () => {
+  const parent = 'PO-DIST-FINISH';
+  const material = 'MAT-DIST-FINISH';
+  const long = { id: 'dist-fin-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material,
+    start_date: at('2026-08-03T18:00:00'), end_date: at('2026-08-04T16:00:00') };
+  const short = { id: 'dist-fin-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material,
+    start_date: at('2026-08-04T13:00:00'), end_date: at('2026-08-04T16:00:00') };
+  const together = setupSnapshot([long, short]);
+  together.masterData = distributionMasterData();
+  assert.equal(SetupScheduler.checkDistributionSeparationForTest([], together)
+    .filter(f => f.code === 'distribution_separation').length, 0, 'different start days, same finish: no finding');
+
+  const apart = setupSnapshot([long, { ...short, end_date: at('2026-08-05T16:00:00') }]);
+  apart.masterData = distributionMasterData();
+  const findings = SetupScheduler.checkDistributionSeparationForTest([], apart)
+    .filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 1, 'finishes on different days raise the finding');
 });
 
 // Regression: fillPlanningGaps used to silently discard distribution_separation

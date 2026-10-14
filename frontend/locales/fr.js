@@ -659,7 +659,7 @@ window.__NIMBUS_LOCALES.fr = {
   'tip.fix_alert':                     'Résoudre automatiquement cette alerte',
   'alert.tool_conflict':               'L\'outil "{{tool}}" est requis en même temps par "{{a}}" sur {{lineA}} et "{{b}}" sur {{lineB}}.',
   'alert.setup_violated':              'Temps de changement insuffisant avant l\'ordre "{{order}}" sur {{line}} : {{required}} min nécessaires, seulement {{available}} min disponibles ({{short}} min manquantes).',
-  'alert.distribution_separation':     'Les sous-commandes de {{parent}} commencent dans différents {{scope}}s',
+  'alert.distribution_separation':     'Les sous-commandes de {{parent}} se terminent dans différents {{scope}}s',
   'alert.start_may_be_stale': 'Le début de l’ordre "{{order}}" est peut-être obsolète : son temps de cycle a changé après l’enregistrement du planning.',
   'alert.late': 'L’ordre "{{order}}" se termine {{hours}} h après sa date d’échéance.',
   'alert.late_beyond_cap': 'L’ordre "{{order}}" se termine {{hours}} h après sa date d’échéance, au-delà de la limite de l’usine de {{days}} jour(s) de retard.',

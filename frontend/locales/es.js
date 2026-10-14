@@ -663,7 +663,7 @@ window.__NIMBUS_LOCALES.es = {
   'tip.fix_alert':                     'Resolver esta alerta automáticamente',
   'alert.tool_conflict':               'La herramienta "{{tool}}" la necesitan "{{a}}" en {{lineA}} y "{{b}}" en {{lineB}} al mismo tiempo.',
   'alert.setup_violated':              'No hay tiempo suficiente de cambio antes de la orden "{{order}}" en {{line}}: necesita {{required}} min, solo hay {{available}} min disponibles (faltan {{short}} min).',
-  'alert.distribution_separation':     'Los subpedidos de {{parent}} comienzan en diferentes {{scope}}s',
+  'alert.distribution_separation':     'Los subpedidos de {{parent}} terminan en diferentes {{scope}}s',
   'alert.start_may_be_stale': 'Es posible que el inicio de la orden "{{order}}" esté desactualizado: su tiempo de ejecución cambió después de guardar el programa.',
   'alert.late': 'La orden "{{order}}" termina {{hours}} h después de su fecha de entrega.',
   'alert.late_beyond_cap': 'La orden "{{order}}" termina {{hours}} h después de su fecha de entrega, por encima del límite de la planta de {{days}} día(s) de retraso.',

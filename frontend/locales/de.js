@@ -659,7 +659,7 @@ window.__NIMBUS_LOCALES.de = {
   'tip.fix_alert':                     'Diese Warnung automatisch beheben',
   'alert.tool_conflict':               'Werkzeug "{{tool}}" wird gleichzeitig von "{{a}}" auf {{lineA}} und "{{b}}" auf {{lineB}} benötigt.',
   'alert.setup_violated':              'Zu wenig Umrüstzeit vor Auftrag "{{order}}" auf {{line}}: benötigt {{required}} Min., nur {{available}} Min. verfügbar ({{short}} Min. zu wenig).',
-  'alert.distribution_separation':     'Teilaufträge von {{parent}} beginnen in verschiedenen {{scope}}s',
+  'alert.distribution_separation':     'Teilaufträge von {{parent}} enden in verschiedenen {{scope}}s',
   'alert.start_may_be_stale': 'Der Start von Auftrag "{{order}}" ist möglicherweise veraltet: Seine Laufzeit hat sich nach dem Speichern des Plans geändert.',
   'alert.late': 'Auftrag "{{order}}" endet {{hours}} Std. nach seinem Fälligkeitsdatum.',
   'alert.late_beyond_cap': 'Auftrag "{{order}}" endet {{hours}} Std. nach seinem Fälligkeitsdatum und damit über der Werksgrenze von {{days}} Tag(en) Verspätung.',

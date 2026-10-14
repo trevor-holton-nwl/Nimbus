@@ -216,7 +216,8 @@ def get_distribution_aggregate(
         buf.write(CSV_BOM)
         writer.writerow(["production_order", "material_number", "machine", "quantity",
                          "sum_child_quantity", "start", "finish", "child_count",
-                         "queued_children", "all_scheduled", "firming_indicator", "reviewed", "children"])
+                         "queued_children", "all_scheduled", "firming_indicator", "reviewed", "children",
+                         "due_date"])
         for r in rows:
             children_summary = "; ".join(
                 f"{c['production_order']}|{c['machine']}|{c['quantity']}|{c['start'] or ''}|{c['end'] or ''}"
@@ -225,7 +226,7 @@ def get_distribution_aggregate(
             writer.writerow(csv_row([r["production_order"], r["material_number"], r["machine"], r["quantity"],
                                      r["sum_child_quantity"], r["start"] or "", r["finish"] or "", r["child_count"],
                                      r["queued_children"], r["all_scheduled"], r["firming_indicator"], r["reviewed"],
-                                     children_summary]))
+                                     children_summary, r.get("due_date") or ""]))
         headers = {"Content-Disposition": f'attachment; filename="distribution-aggregate-{plant}.csv"',
                   "Cache-Control": "no-store"}
         return Response(content=buf.getvalue(), media_type="text/csv", headers=headers)
