@@ -129,6 +129,7 @@ let _settingsDefaultsResolver: SettingsDefaultsResolver = () => ({});
 // Wired at module load (store.mjs imports foundation.mjs, so this is a legal edge, not a cycle): the
 // header clock and greeting read the server's instant through Util without Util importing Store.
 Util.setServerNowResolver(() => Store.serverNow());
+Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
 
 export const Store = {
   /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,
@@ -137,7 +138,7 @@ export const Store = {
    *  that asks "what time is it at this plant" goes through `plantNow`, never `new Date()`. */
   serverOffsetMs: 0,
   /** Plants whose derivations are blocked because they have no valid IANA timezone (OQ52). Session
-   *  only, filled once per plant by `plantNow`; Task 3.3 turns it into the plant_no_timezone alert. */
+   *  only, filled once per plant by `plantNow`; pruned when the plant resolves; the compute core renders it as plant_no_timezone. */
   _blockedPlants: new Set<string>(),
   _tasksByPlant: {} as Record<string, NimbusTask[]>,
   _lineToPlant: {} as Record<string, string | null>,
@@ -323,7 +324,7 @@ export const Store = {
     const row = this._state.masterData?.plants?.find(p => p.plant === plant);
     const tz = typeof row?.timezone === 'string' ? row.timezone.trim() : '';
     const wall = tz ? globalThis.NimbusComputeCore!.plantWallClockFromInstant(tz, this.serverNow()) : null;
-    if (wall) return wall;
+    if (wall) { this._blockedPlants.delete(plant); return wall; }   // a plant that resolves is no longer blocked
     if (row && !this._blockedPlants.has(plant)) {
       this._blockedPlants.add(plant);
       Toast.show(Util.t('toast.plant_no_timezone', { plant }), 'warn', 9000);

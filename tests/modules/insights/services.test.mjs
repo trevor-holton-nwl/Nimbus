@@ -174,14 +174,6 @@ test('Utilization.computeMatrix memoizes on (startMs, days, Store.rev(), plant s
 });
 
 
-test('Utilization.dayByLine is unmemoized — two calls with the same args recompute independently', () => {
-  const a = Utilization.dayByLine(new Date());
-  const b = Utilization.dayByLine(new Date());
-  assert.deepEqual(a, b);
-  assert.notEqual(a, b, 'must not be the same cached object reference — dayByLine has no memo');
-});
-
-
 test('Alerts publishes scoped setup observations without invoking Engine, including Fix It', () => {
   // This fails if alerts bypass the shared setup projection, resolve matrices in
   // the core, or make a setup diagnostic recursively optimize on Fix It.
@@ -549,4 +541,16 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
     Store.setSelectedPlant(priorPlant, 'unit-test');
     if (priorMasterData !== undefined) Store.setMasterData(priorMasterData, 'unit-test');
   }
+});
+
+
+test('Utilization.minutesByDay (the cell-briefing rule): the 14 h order held Fri 00:00 with start Wed 22:00 on 08-18 puts 14 h on Thursday', () => {
+  const line = 'L-BRIEF';
+  const priorCalendar = Store.calendars[line];
+  const wh = {}; for (let i = 0; i < 7; i++) wh[i] = [8, 18];
+  Store.calendars[line] = { workHours: wh };
+  try {
+    const task = { id: 'brief', MACHINE: line, RUN_TIME: 14, start_date: new Date(2026, 9, 14, 22), end_date: new Date(2026, 9, 16, 0) };
+    assert.deepEqual(Utilization.minutesByDay(task, line), { '2026-10-15': 840 });
+  } finally { if (priorCalendar) Store.calendars[line] = priorCalendar; else delete Store.calendars[line]; }
 });

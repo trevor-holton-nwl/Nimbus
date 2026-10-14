@@ -764,10 +764,8 @@ export const Table = {
     if (f.lines.size > 0 && !f.lines.has(data.MACHINE)) return false;
     if (f.colors.size > 0 && !f.colors.has(String(data.COLOR || '').toUpperCase())) return false;
     if (!Util.taskMatchesPasteSet(data, f.poMat)) return false;
-    if (f.dateKey) {
-      const dk = data.start_date ? Util.dayKey(data.start_date) : '';
-      if (dk !== f.dateKey) return false;
-    }
+    // OQ42: a day chip keeps every order whose bar overlaps that day (a bar crossing midnight shows on both days).
+    if (f.dateKey && !Util.overlapsDay(data, f.dateKey)) return false;
     // C1 (2026-08-20), OD-C1d/e: gate on start only, hide (not merely block
     // scrolling to) rows beyond the plant's visibility horizon. Belt-and-
     // suspenders — db.query_orders already excludes these rows from the
@@ -1047,8 +1045,8 @@ export const Table = {
 
     let dateLabel = Util.t('ui.any_date');
     if (f.dateKey) {
-      const todayKey = Util.dayKey(Util.startOfDay(new Date())!);
-      const tomorrow = Util.startOfDay(new Date())!;
+      const todayKey = Util.dayKey(Util.plantToday(Store.selectedPlant));
+      const tomorrow = Util.plantToday(Store.selectedPlant);
       tomorrow.setDate(tomorrow.getDate() + 1);
       const tomorrowKey = Util.dayKey(tomorrow);
       if (f.dateKey === todayKey) dateLabel = Util.t('ui.today');
@@ -1718,7 +1716,7 @@ export const Table = {
       return `
         <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg-subtle);margin-bottom:6px">
           <span style="flex-shrink:0;font-size:13px;margin-top:1px">${icon}</span>
-          <span style="flex:1;font-size:12.5px;color:var(--fg);line-height:1.45">${Util.escapeHtml(a.msg)}</span>
+          <span style="flex:1;font-size:12.5px;color:var(--fg);line-height:1.45">${Util.escapeHtml(Util.alertMessage(a))}</span>
           ${date ? `<span style="flex-shrink:0;font-size:10.5px;color:var(--fg-mute);white-space:nowrap;margin-top:2px">${date}</span>` : ''}
           <button data-alert-id="${Util.escapeHtml(a.id)}"
             style="flex-shrink:0;padding:2px 10px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:none;cursor:pointer;color:var(--fg-mute);white-space:nowrap;margin-top:1px">
@@ -2199,7 +2197,7 @@ export const Inspector = {
       ${sapFirmed ? `<div class="insp-sap-firm-info">${Util.t('ui.sap_firm_marker')}</div>` : ''}
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
-        ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(a.msg)}</div>`).join('')}
+        ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(Util.alertMessage(a))}</div>`).join('')}
       </div>` : ''}
 
       <div class="insp-card">

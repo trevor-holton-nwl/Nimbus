@@ -186,6 +186,10 @@ let _dueCalendarResolver: DueCalendarResolver | null = null;
 // The server's instant (OQ52, one clock). store.mts wires this to Store.serverNow() when it loads;
 // until then (Node tests that load foundation alone) it is the viewer's own clock, as it always was.
 let _serverNowResolver: (() => Date) | null = null;
+// "Now" at a plant (OQ52): the server instant projected into the plant's zone, as the naive wall-clock Date every
+// derivation compares against. store.mts wires this to Store.plantNow; null (or null result) falls back to the
+// server instant and then the viewer's clock, as before the seam existed.
+let _plantClockResolver: ((plant: string | null | undefined, line?: string | null) => Date | null) | null = null;
 // Day window per (line, calendar date), valid for one Store revision: latenessHours runs per row
 // in grid filters and tile loops, so a midnight due date must not rebuild its window each call.
 let _dueWindowRev = NaN;
@@ -216,6 +220,9 @@ export const Util = {
     _dueWindowCache.clear(); _dueWindowRev = NaN;
   },
   setServerNowResolver(fn: (() => Date) | null): void { _serverNowResolver = typeof fn === 'function' ? fn : null; },
+  setPlantClockResolver(fn: ((plant: string | null | undefined, line?: string | null) => Date | null) | null): void {
+    _plantClockResolver = typeof fn === 'function' ? fn : null;
+  },
   setApiKey(key: string): void { _apiKey = key || ''; },
 
   /** The task fields whose change between adjacent orders is a changeover, for
@@ -699,10 +706,42 @@ export const Util = {
     return new Date(due.getTime() - Util.runHours(t) * Config.MS_HOUR);
   },
 
-  // Hours that scheduled finish slips past the SAP planning date (clamped at 0).
+  /** The plant clock: "now" at `plant` (or at the plant of `line`) as the naive wall-clock Date derivations use.
+   *  Falls back to the server instant, then the viewer's clock, when the plant has no valid zone or none is wired. */
+  plantClock(plant?: string | null, line?: string | null): Date {
+    let at: Date | null = null;
+    if (_plantClockResolver) { try { at = _plantClockResolver(plant, line); } catch { at = null; } }
+    return at ?? (_serverNowResolver ? _serverNowResolver() : new Date());
+  },
+
+  /** Start of "today" at a plant, on the plant clock (the day key every "today" filter compares against). */
+  plantToday(plant?: string | null, line?: string | null): Date {
+    return Util.startOfDay(Util.plantClock(plant, line))!;
+  },
+
+  /** OQ42: an order is "on" a calendar day when its bar overlaps that day, so a bar crossing midnight counts on
+   *  both days (and one that ends exactly at midnight does not count on the next). A split order is tested piece
+   *  by piece; a start with no finish counts on its start day. `key` is a Util.dayKey ('YYYY-MM-DD'). */
+  overlapsDay(t: NimbusTask, key: string): boolean {
+    const dayStart = new Date(key + 'T00:00:00');
+    if (isNaN(dayStart.getTime())) return false;
+    const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
+    const intervals = Util.scheduleIntervals(t);
+    if (intervals.length) return intervals.some(i => i.start < dayEnd && i.end > dayStart);
+    const start = Util.parseDate(t?.start_date);
+    return !!start && start >= dayStart && start < dayEnd;
+  },
+
+  /** The alert text in the viewer's language: worker alerts carry a locale key + vars, with English `msg` as the fallback. */
+  alertMessage(a: { msg: string; msgKey?: string; msgVars?: Record<string, string | number> }): string {
+    return a.msgKey ? Util.t(a.msgKey, a.msgVars as Record<string, string | number> | undefined) : a.msg;
+  },
+
+  // Hours that scheduled finish slips past the SAP planning date (clamped at 0). A queued order has no placed
+  // finish, so "now" on its own plant's clock stands in for its end.
   latenessHours(t: NimbusTask): number {
-    const end = t.planning_status === 'needs_planning' ? new Date() : Util.scheduledEnd(t);
-    const due = Util.sapDueDate(t);
+    const end = t.planning_status === 'needs_planning' ? Util.plantClock(t.PLANT, t.MACHINE) : Util.scheduledEnd(t);
+    const due = Util.dueInstant(t);
     if (!end || !due) return 0;
     const diff = (end.getTime() - due.getTime()) / Config.MS_HOUR;
     return diff > 0 ? diff : 0;
@@ -771,7 +810,7 @@ export const Util = {
     let peak = 0, peakFrozen = 0, peakOpen = 0;
     try {
       if (!_utilizationResolver) throw new Error('utilization resolver not wired');
-      const m = _utilizationResolver(new Date(), horizonDays, tasks, utilizationContext);
+      const m = _utilizationResolver(Util.plantClock(tasks[0]?.PLANT, tasks[0]?.MACHINE), horizonDays, tasks, utilizationContext);
       for (const ln of Object.keys(m)) {
         for (const d of Object.keys(m[ln])) {
           const p = m[ln][d]?.pct || 0;

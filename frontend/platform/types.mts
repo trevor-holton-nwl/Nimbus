@@ -480,7 +480,10 @@ export type AlertType =
   | 'runtime-schedule-mismatch' | 'tool-conflict'
   | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged'
   | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown' | 'distribution-separation'
-  | 'runtime-unknown' | 'pv-lot-size';
+  | 'runtime-unknown' | 'pv-lot-size'
+  | 'late' | 'finish_moved_earlier' | 'reversal_forward' | 'plant_no_timezone' | 'line_no_calendar'
+  | 'placement_exception' | 'setup_override_orphaned' | 'pull_floor_crossed' | 'frozen_window_crossed'
+  | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue';
 
 export type AlertSev = 'err' | 'warn';
 

@@ -9,6 +9,10 @@ import { Table } from '../../../frontend/scheduling/orders.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
+import { createRequire } from 'node:module';
+
+// Utilization / Util delegate to the UMD compute core through this ambient global (a real browser loads it first).
+globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 
 // Same split-realm/no-DOM situation documented in
 // tests/modules/optimization/engine.test.mjs and
@@ -283,5 +287,30 @@ test('Dashboard _renderSituation appends distribution segment when needs_review 
   } finally {
     globalThis.document.getElementById = priorGetElementById;
     Store._state.distributionSummary = priorDistribution;
+  }
+});
+
+
+test('Orders Today counts every order that overlaps today on the plant clock (a bar crossing midnight counts on both days)', () => {
+  const priorOffset = Store.serverOffsetMs;
+  const priorSelected = Store.selectedPlant;
+  Store.setMasterData({ plants: [{ plant: 'P-TODAY', timezone: 'UTC' }], lines: [{ machine: 'L-TODAY', plant: 'P-TODAY' }] }, 'unit-test');
+  Store.setSelectedPlant('P-TODAY', 'unit-test');
+  Store.setServerNow('2026-10-15T14:00:00Z');   // plant today = 2026-10-15
+  const mk = (id, start, end) => ({ id, PLANT: 'P-TODAY', MACHINE: 'L-TODAY', RUN_TIME: 1, start_date: start, end_date: end });
+  const tasks = [
+    mk('crosses', new Date(2026, 9, 14, 22), new Date(2026, 9, 15, 6)),     // Wed 22:00 -> Thu 06:00: overlaps Thursday
+    mk('ends-at-midnight', new Date(2026, 9, 14, 20), new Date(2026, 9, 15, 0)),   // ends exactly at Thursday 00:00: not Thursday
+    mk('inside', new Date(2026, 9, 15, 9), new Date(2026, 9, 15, 11)),
+    mk('tomorrow', new Date(2026, 9, 16, 9), new Date(2026, 9, 16, 11)),
+  ];
+  try {
+    Store.setTasks(tasks, 'unit-test');
+    Dashboard._renderKPIs(undefined, tasks);
+    assert.equal(Dashboard._lastSituation.todayCount, 2, 'crosses + inside');
+  } finally {
+    Store.serverOffsetMs = priorOffset;
+    Store.setSelectedPlant(priorSelected, 'unit-test');
+    Store.setTasks([], 'unit-test');
   }
 });

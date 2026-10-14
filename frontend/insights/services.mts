@@ -86,15 +86,6 @@ interface UtilizationMatrixResolved {
   [line: string]: Record<string, UtilizationRowResolved>;
 }
 
-/** Utilization.dayByLine/todayByLine's row shape — a THIRD, distinct shape:
- *  no date/tasks at all. */
-interface DayByLineRow {
-  capacity: number;
-  effectiveCapacity: number;
-  scheduled: number;
-  pct: number;
-}
-
 /** One clock for alerts (OQ52): each plant's wall-clock "now" (the server instant in the plant's zone,
  *  via Store.plantNow), keyed by plant, for the compute core's active-order horizon. A plant with no
  *  valid timezone has no entry (the core then keeps its own clock for that plant; the plant is
@@ -106,6 +97,16 @@ function _plantClocks(plants: Iterable<string>): Record<string, Date> {
     if (now) out[plant] = now;
   }
   return out;
+}
+
+/** The clock half of every alert payload: each plant's wall-clock "now" plus the plants Store.plantNow refused
+ *  (no valid timezone), which the compute core renders as plant_no_timezone alerts. Worker request and the
+ *  synchronous fallback both build it here, so the two paths cannot drift. Asking for the clocks first is what
+ *  registers a blocked plant, so the blocked list is read after. */
+function _alertClockPayload(plants: Iterable<string>): { now: Record<string, Date>; blockedPlants: string[] } {
+  const list = [...plants];
+  const now = _plantClocks(list);
+  return { now, blockedPlants: list.filter(plant => Store._blockedPlants.has(plant)) };
 }
 
 /* =============================================================================
@@ -269,7 +270,7 @@ export const Compute = (() => {
       const _t0 = performance.now();
       return _post('ALERTS', {
         ..._snap(),
-        now: _plantClocks(Store.selectedPlant ? [Store.selectedPlant] : []),
+        ..._alertClockPayload(Store.selectedPlant ? [Store.selectedPlant] : []),
         dismissed: [...(dismissed || [])],
         opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
       }).then(r => { PerfMonitor.record('Worker.alerts', performance.now() - _t0); return r; });
@@ -354,7 +355,7 @@ export const Alerts = {
         calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
         masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
       }),
-      now:          _plantClocks(Object.keys(Store._tasksByPlant)),
+      ..._alertClockPayload(Object.keys(Store._tasksByPlant)),
       dismissed:    [...Alerts._dismissed],
       opts:         { lines: onlyLines ? [...onlyLines] : null },
     });
@@ -848,87 +849,14 @@ export const Utilization = {
     return 'ok';
   },
 
-  /** Today's utilisation summary keyed by line. */
-  todayByLine(): Record<string, DayByLineRow> {
-    return Utilization.dayByLine(new Date());
-  },
-
-  /** Utilisation summary for any given day, keyed by line.
-   *  Pass `srcTasks` to scope the result to a filtered task subset. */
-  dayByLine(date: Date, srcTasks: NimbusTask[] | null = null): Record<string, DayByLineRow> {
-    const taskList = srcTasks !== null ? srcTasks : Store.tasksArr;
-    const d = Util.startOfDay(date) || Util.startOfDay(new Date())!;
-    const dEndMs = (() => { const x = new Date(d); x.setDate(x.getDate() + 1); return x.getTime(); })();
-    const out: Record<string, DayByLineRow> = {};
-    const lines = new Set(taskList.map(t => t.MACHINE || 'Unknown'));
-    const dayKeyTarget = Util.dayKey(d);
-    // Pre-parse blackout blocks once; reused for both capacity and the per-task clip below.
-    const blockIdx = Calendar._indexCapacityBlocks();
-    for (const line of lines) {
-      const cap = Calendar.dailyCapacityHours(line, d, blockIdx);
-      const effectiveCap = Calendar.effectiveFromCapacity(line, cap);
-      const workWin = Calendar.workWindow(line, d);
-      let sched = 0;
-      if (workWin) {
-        const plant = Store.getPlantForLine(line);
-        const blackouts: Array<{ s: Date; e: Date }> = [];
-        // line:null blocks (globalLine) apply only within their own plant; concrete
-        // blocks under a reused line code are likewise resolved by plant.
-        const _lb = blockIdx.lineBlocks.get(line); if (_lb) for (const x of _lb) if (!x.plant || x.plant === plant) blackouts.push(x);
-        for (const x of blockIdx.globalLine) if (!x.plant || x.plant === plant) blackouts.push(x);
-        const _pb = blockIdx.plantBlocks.get(plant!); if (_pb) for (const x of _pb) blackouts.push(x);
-        for (const x of blockIdx.globalPlant) blackouts.push(x);
-        for (const t of taskList) {
-          if ((t.MACHINE || 'Unknown') !== line) continue;
-          if (!t.start_date) continue;
-          const intervals = Util.scheduleIntervals(t);
-          if (intervals.length >= 2) {
-            for (const interval of intervals) {
-              const tStartMs = interval.start.getTime();
-              const tEndMs = interval.end.getTime();
-              if (tEndMs <= d.getTime() || tStartMs >= dEndMs) continue;
-              const workingHrs = Util.mergedOverlapHours(workWin, [{ s: interval.start, e: interval.end }]);
-              if (workingHrs <= 0) continue;
-              const blackoutsClipped = blackouts
-                .filter(b => b.s.getTime() < tEndMs && b.e.getTime() > tStartMs)
-                .map(b => ({
-                  s: new Date(Math.max(b.s.getTime(), tStartMs)),
-                  e: new Date(Math.min(b.e.getTime(), tEndMs))
-                }));
-              sched += Math.max(0, workingHrs - Util.mergedOverlapHours(workWin, blackoutsClipped));
-            }
-            continue;
-          }
-          if (!t.end_date) {
-            if (Util.dayKey(t.start_date) === dayKeyTarget) sched += Util.runHours(t);
-            continue;
-          }
-          const tStartMs = t.start_date.getTime();
-          const tEndMs   = t.end_date.getTime();
-          if (tEndMs <= tStartMs) continue;
-          if (tEndMs <= d.getTime() || tStartMs >= dEndMs) continue;
-          const taskRunHrs = Util.runHours(t);
-          if (taskRunHrs <= 0) continue;
-          const workingHrs = Util.mergedOverlapHours(workWin, [{ s: t.start_date, e: t.end_date }]);
-          if (workingHrs <= 0) continue;
-          const blackoutsClipped = blackouts
-            .filter(b => b.s.getTime() < tEndMs && b.e.getTime() > tStartMs)
-            .map(b => ({
-              s: new Date(Math.max(b.s.getTime(), tStartMs)),
-              e: new Date(Math.min(b.e.getTime(), tEndMs))
-            }));
-          const blackoutOverlap = Util.mergedOverlapHours(workWin, blackoutsClipped);
-          const dayHrs = Math.max(0, workingHrs - blackoutOverlap);
-          // Cap at RUN_TIME so SAP-bloated end_dates don't over-attribute.
-          sched += Math.min(dayHrs, taskRunHrs);
-        }
-      }
-      out[line] = {
-        capacity: cap, effectiveCapacity: effectiveCap, scheduled: sched,
-        pct: cap > 0 ? sched / cap : (sched > 0 ? 1 : 0)
-      };
-    }
-    return out;
+  /** THE day-attribution rule for one order (OQ12/OQ41): minutes of its work per calendar day on `line`, keyed by
+   *  Util.dayKey. The compute core's workingMinutesByDay with the line's working windows, so the cell briefing
+   *  reads exactly what the matrix and the overload alert read. */
+  minutesByDay(task: NimbusTask, line: string = task.MACHINE || 'Unknown'): Record<string, number> {
+    return globalThis.NimbusComputeCore!.workingMinutesByDay(task, date => {
+      const win = Calendar.workWindow(line, date);
+      return win ? { open: win[0], close: win[1] } : null;
+    });
   },
 
   // Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix

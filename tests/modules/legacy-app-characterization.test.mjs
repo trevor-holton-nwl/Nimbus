@@ -76,7 +76,6 @@ test('Alerts.recompute is callable and Utilization.computeMatrix returns structu
 
   // Utilization.computeMatrix accepts a task list, start ms, and day count.
   assert.ok(typeof Utilization.computeMatrix === 'function', 'Utilization.computeMatrix must be a function');
-  assert.ok(typeof Utilization.dayByLine === 'function', 'Utilization.dayByLine must be a function');
 
   // Signature only — computeMatrix needs seeded calendars to run without error;
   // the compute-core.test.js suite covers the algorithm itself.

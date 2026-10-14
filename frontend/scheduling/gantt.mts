@@ -2744,8 +2744,8 @@ export const Hierarchy = {
       ];
     }
 
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
+    const todayStart = Util.plantToday(Store.selectedPlant);
+    const _todayDayKey = Util.dayKey(todayStart);
 
     // Utilization chip reads the SAME proportional daily-load matrix the Dashboard
     // heatmap + Line Status use, so all three agree for today (fixes R197). Plant-scoped
@@ -2765,7 +2765,7 @@ export const Hierarchy = {
       const ci    = Timeline._colorIndex(name);
       const color = Config.COLORS[ci % Config.COLORS.length];
       const tasks = lines[name]
-        .filter(tk => !!tk.start_date && tk.start_date.getTime() >= todayStart.getTime() && tk.start_date.getTime() <= todayEnd.getTime())
+        .filter(tk => Util.overlapsDay(tk, _todayDayKey))   // OQ42: overlaps today on the plant clock
         .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       const u   = _utilToday[name]?.[_todayKey];
       const pct = (u && u.scheduled > 0) ? Math.round(u.pct! * 100) : null;

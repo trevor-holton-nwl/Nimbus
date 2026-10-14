@@ -743,3 +743,252 @@ test('computeAlerts reads the active-order horizon from the payload now of the o
   const later = new Date(2020, 0, 8, 7);
   assert.equal(Core.computeAlerts(payload({ P: later })).alerts.filter(a => a.type === 'overlap').length, 0);
 });
+
+
+/* ── Task 3.3: one day-attribution rule, the late alert, engine findings as alerts ─────────────── */
+
+// 2026-10-14 is a Wednesday. Every calendar day open 08:00-18:00.
+const D = (day, hour = 0, minute = 0) => new Date(2026, 9, day, hour, minute);
+const open0818 = { workHours: allDays([8, 18]) };
+const windowFor0818 = (calendar) => (date) => {
+  const win = Core._dayWindow(calendar.workHours, date);
+  return win ? { open: win[0], close: win[1] } : null;
+};
+// The brief's worked example: a 14 h order held to Fri 00:00 whose derived start is Wed 22:00.
+const workedExample = (over = {}) => ({
+  id: 'w', MACHINE: 'L', PLANT: 'P', RUN_TIME: 14, start_date: D(14, 22), end_date: D(16, 0), ...over,
+});
+const alertBase = (tasks, extra = {}) => ({
+  tasks, blocks: [], plantBlocks: [], calendars: { L: open0818 }, plants: {},
+  lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P' }] },
+  dismissed: [], opts: {}, now: { P: D(14, 6) }, ...extra,
+});
+
+test('workingMinutesByDay: the worked example puts all 14 h on Thursday (Wed has no working overlap after the 22:00 start)', () => {
+  const byDay = Core.workingMinutesByDay(workedExample(), windowFor0818(open0818));
+  assert.deepEqual(byDay, { '2026-10-15': 14 * 60 });
+});
+
+test('workingMinutesByDay: a closed day takes no share; shares follow working-time overlap', () => {
+  // Fri 14:00 -> Mon 10:00 with the weekend closed: Fri 4 h of window, Mon 2 h of window.
+  const calendar = { workHours: { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null } };
+  const task = { id: 'f', RUN_TIME: 6, start_date: D(16, 14), end_date: D(19, 10) };
+  const byDay = Core.workingMinutesByDay(task, windowFor0818(calendar));
+  assert.deepEqual(Object.keys(byDay).sort(), ['2026-10-16', '2026-10-19']);
+  assert.equal(byDay['2026-10-16'], 240);   // 4 of 6 working hours
+  assert.equal(byDay['2026-10-19'], 120);
+});
+
+test('workingMinutesByDay: a bar wholly in closed time falls back to wall-clock overlap so its hours stay visible', () => {
+  const task = { id: 'c', RUN_TIME: 2, start_date: D(14, 19), end_date: D(14, 21) };
+  assert.deepEqual(Core.workingMinutesByDay(task, windowFor0818(open0818)), { '2026-10-14': 120 });
+});
+
+test('workingMinutesByDay: split orders are exact by piece; a start with no finish lands on the start day', () => {
+  const split = { id: 's', RUN_TIME: 5, start_date: D(14, 16), end_date: D(15, 11),
+    scheduleSegments: [{ sequence: 1, startDate: D(14, 16), endDate: D(14, 18) }, { sequence: 2, startDate: D(15, 8), endDate: D(15, 11) }] };
+  assert.deepEqual(Core.workingMinutesByDay(split, windowFor0818(open0818)), { '2026-10-14': 120, '2026-10-15': 180 });
+  assert.deepEqual(Core.workingMinutesByDay({ id: 'n', RUN_TIME: 3, start_date: D(14, 9) }, null), { '2026-10-14': 180 });
+});
+
+test('worked example: the matrix, the overload alert and the briefing helper all put the 14 h on Thursday', () => {
+  const task = workedExample();
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: { L: { plant: 'P' } }, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }] }, startMs: +D(14), days: 3, lines: ['L'],
+  });
+  assert.equal(matrix.L['2026-10-14'].scheduled, 0);
+  assert.equal(matrix.L['2026-10-15'].scheduled, 14);
+  assert.equal(matrix.L['2026-10-16'].scheduled, 0);
+
+  const { alerts } = Core.computeAlerts(alertBase([task]));
+  const overloads = alerts.filter(a => a.type === 'overload');
+  assert.deepEqual(overloads.map(a => a.id), ['ovl-day-L-2026-10-15'], 'overload lands on Thursday, not the start day');
+  assert.match(overloads[0].msg, /14\.0h scheduled/);
+
+  // The briefing reads the same function (Utilization.minutesByDay wraps it with the line's working windows).
+  assert.equal(Core.workingMinutesByDay(task, windowFor0818(open0818))['2026-10-15'] / 60, 14);
+});
+
+test('overload rule no longer buckets a multi-day bar wholly on its start day', () => {
+  // 10 h order Wed 17:00 -> Thu 13:00 on 08-18: 1 h of Wed window, 5 h of Thu window -> 1/6 and 5/6 of 10 h.
+  const task = { id: 'm', MACHINE: 'L', PLANT: 'P', RUN_TIME: 12, start_date: D(14, 17), end_date: D(15, 13) };
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: {}, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [] }, startMs: +D(14), days: 2, lines: ['L'],
+  });
+  assert.equal(matrix.L['2026-10-14'].scheduled, 2);
+  assert.equal(matrix.L['2026-10-15'].scheduled, 10);
+  const { alerts } = Core.computeAlerts(alertBase([task]));
+  assert.ok(!alerts.some(a => a.type === 'overload' && a.id.endsWith('2026-10-14')), 'Wed holds 2 h, not 12 h');
+});
+
+const dueFri = (over = {}) => ({
+  id: 'late1', MACHINE: 'L', PLANT: 'P', RUN_TIME: 4, ORDER: '5001',
+  original_end_date: D(16, 0),                       // SAP finish: Fri, date only
+  start_date: D(16, 13), end_date: D(16, 17), ...over,
+});
+
+test('late alert: a finish after the due instant is a warning; on or before it there is none', () => {
+  // Date-only due Fri reads as the close of Fri's window (18:00).
+  assert.deepEqual(Core.computeAlerts(alertBase([dueFri()])).alerts.filter(a => a.type === 'late'), [], 'Fri 17:00 is before the 18:00 close');
+  const late = Core.computeAlerts(alertBase([dueFri({ start_date: D(16, 16), end_date: D(16, 20) })])).alerts.filter(a => a.type === 'late');
+  assert.equal(late.length, 1);
+  assert.equal(late[0].sev, 'warn');
+  assert.equal(late[0].id, 'late-late1');
+  assert.equal(late[0].msgKey, 'alert.late');
+  assert.equal(late[0].msgVars.hours, '2.0');
+  assert.equal(late[0].taskId, 'late1');
+  assert.equal(late[0].line, 'L');
+});
+
+test('late alert: a timed due date compares exactly, and a line with no calendar row reads a date-only due as 23:59:59', () => {
+  const timed = dueFri({ original_end_date: D(16, 12, 30), start_date: D(16, 9), end_date: D(16, 12, 31) });
+  assert.equal(Core.computeAlerts(alertBase([timed])).alerts.filter(a => a.type === 'late').length, 1);
+  const bare = alertBase([dueFri({ start_date: D(16, 20), end_date: D(16, 23, 0) })], { calendars: {} });
+  assert.equal(Core.computeAlerts(bare).alerts.filter(a => a.type === 'late').length, 0, 'due reads Fri 23:59:59 with no calendar row');
+});
+
+test('late alert: beyond the plant push-forward ceiling it is an error', () => {
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P', max_push_forward_days: 1 }] };
+  // Due Fri; N = 1 gives a ceiling of Sun 00:00 (Fri midnight + 2 days).
+  const within = Core.computeAlerts(alertBase([dueFri({ start_date: D(17, 9), end_date: D(17, 13) })], { masterData })).alerts.find(a => a.type === 'late');
+  assert.equal(within.sev, 'warn');
+  const beyond = Core.computeAlerts(alertBase([dueFri({ start_date: D(18, 9), end_date: D(18, 13) })], { masterData })).alerts.find(a => a.type === 'late');
+  assert.equal(beyond.sev, 'err');
+  assert.equal(beyond.msgKey, 'alert.late_beyond_cap');
+  assert.equal(beyond.msgVars.days, 1);
+});
+
+test('late alert: a queued order and an order with no due date get none', () => {
+  const queued = dueFri({ planning_status: 'needs_planning', start_date: null, end_date: null });
+  const noDue = dueFri({ id: 'nd', original_end_date: null, start_date: D(16, 16), end_date: D(16, 20) });
+  assert.deepEqual(Core.computeAlerts(alertBase([queued, noDue])).alerts.filter(a => a.type === 'late'), []);
+});
+
+const issueTask = (id, issue, over = {}) => ({ id, MACHINE: 'L', PLANT: 'P', ORDER: `ORD-${id}`, RUN_TIME: 2,
+  start_date: D(15, 9), end_date: D(15, 11), derivationIssue: issue, ...over });
+const issueAlerts = (tasks, extra = {}) => Core.computeAlerts(alertBase(tasks, extra)).alerts
+  .filter(a => !['overlap', 'overload', 'late'].includes(a.type));
+
+test('every engine derivationIssue code renders an alert with a locale key, the ruled severity and a task+code id', () => {
+  const table = {
+    finish_moved_earlier:   { sev: 'warn', key: 'alert.finish_moved_earlier', extra: { from: D(15, 17), to: D(15, 11) } },
+    setup_override_orphaned:{ sev: 'warn', key: 'alert.setup_override_orphaned' },
+    frozen_window_crossed:  { sev: 'warn', key: 'alert.frozen_window_crossed' },
+    pull_floor_crossed:     { sev: 'warn', key: 'alert.pull_floor_crossed', extra: { from: D(15, 9), to: D(16, 8) } },
+    run_time_zero:          { sev: 'warn', key: 'alert.run_time_zero' },
+    no_operating_window:    { sev: 'warn', key: 'alert.no_operating_window' },
+    no_anchor:              { sev: 'err',  key: 'alert.no_anchor' },
+  };
+  const codes = Object.keys(table);
+  const tasks = codes.map((code, i) => issueTask(`i${i}`, { code, ...(table[code].extra || {}) }, { start_date: D(15, 9 + i % 3), end_date: D(15, 10 + i % 3) }));
+  const alerts = issueAlerts(tasks);
+  for (const [i, code] of codes.entries()) {
+    const alert = alerts.find(a => a.id === `derivation-i${i}-${code}`);
+    assert.ok(alert, `${code} renders`);
+    assert.equal(alert.type, code);
+    assert.equal(alert.sev, table[code].sev, `${code} severity`);
+    assert.equal(alert.msgKey, table[code].key);
+    assert.equal(alert.taskId, `i${i}`);
+    assert.equal(alert.msgVars.order, `ORD-i${i}`);
+    assert.ok(alert.msg.length > 10, 'carries an English fallback');
+  }
+});
+
+test('reversal_forward renders one key per detail and is an error; an unrecorded detail takes the generic key', () => {
+  const tasks = ['run_time_grew', 'due_date_past', 'cutover', undefined].map((detail, i) => issueTask(`r${i}`, { code: 'reversal_forward', ...(detail ? { detail } : {}) }));
+  const byId = Object.fromEntries(issueAlerts(tasks).map(a => [a.taskId, a]));
+  assert.equal(byId.r0.msgKey, 'alert.reversal_forward_run_time_grew');
+  assert.equal(byId.r1.msgKey, 'alert.reversal_forward_due_date_past');
+  assert.equal(byId.r2.msgKey, 'alert.reversal_forward_cutover');
+  assert.equal(byId.r3.msgKey, 'alert.reversal_forward');
+  for (const alert of Object.values(byId)) { assert.equal(alert.sev, 'err'); assert.equal(alert.type, 'reversal_forward'); }
+});
+
+test('gate 14: pull_floor_crossed renders, and an unfirmed order whose start flips into the frozen window renders frozen_window_crossed', () => {
+  const unfirmed = issueTask('uf', { code: 'frozen_window_crossed' }, { firmed: false, start_date: D(14, 9), end_date: D(14, 11) });
+  const floor = issueTask('pf', { code: 'pull_floor_crossed', from: D(15, 7), to: D(15, 9) });
+  const alerts = issueAlerts([unfirmed, floor]);
+  assert.ok(alerts.some(a => a.id === 'derivation-uf-frozen_window_crossed' && a.type === 'frozen_window_crossed' && a.sev === 'warn'));
+  assert.ok(alerts.some(a => a.id === 'derivation-pf-pull_floor_crossed' && a.type === 'pull_floor_crossed' && a.sev === 'warn'));
+});
+
+test('plant-level and line-level findings de-duplicate to one alert per plant / per line', () => {
+  const tasks = [
+    issueTask('a', { code: 'plant_no_timezone' }, { MACHINE: 'L2' }),
+    issueTask('b', { code: 'plant_no_timezone' }, { MACHINE: 'L1' }),
+    issueTask('c', { code: 'plant_no_timezone' }, { MACHINE: 'L1' }),
+    issueTask('d', { code: 'line_no_calendar' }, { MACHINE: 'L1' }),
+    issueTask('e', { code: 'line_no_calendar' }, { MACHINE: 'L1' }),
+    issueTask('f', { code: 'line_no_calendar' }, { MACHINE: 'L2' }),
+  ];
+  const masterData = { lines: [{ machine: 'L1', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const alerts = issueAlerts(tasks, { masterData, calendars: { L1: open0818, L2: open0818 }, lineSettings: { L1: { plant: 'P' }, L2: { plant: 'P' } } });
+  const plantAlerts = alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(plantAlerts.length, 1);
+  assert.equal(plantAlerts[0].id, 'plant-no-timezone-P');
+  assert.equal(plantAlerts[0].line, 'L1', 'sits on the plant\'s first affected line');
+  assert.equal(plantAlerts[0].sev, 'err');
+  assert.deepEqual(plantAlerts[0].msgVars, { plant: 'P' });
+  const lineAlerts = alerts.filter(a => a.type === 'line_no_calendar');
+  assert.deepEqual(lineAlerts.map(a => a.id).sort(), ['line-no-calendar-L1', 'line-no-calendar-L2']);
+  assert.ok(lineAlerts.every(a => a.sev === 'err'));
+});
+
+test('a plant the clock refused (blockedPlants) alerts even when no order carries a note; a scoped run stays on its own line', () => {
+  const masterData = { lines: [{ machine: 'L1', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const payload = { masterData, blockedPlants: ['P'], calendars: {}, lineSettings: {} };
+  const full = Core.computeAlerts(alertBase([], payload)).alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(full.length, 1);
+  assert.equal(full[0].line, 'L1');
+  const scopedOther = Core.computeAlerts(alertBase([], { ...payload, opts: { lines: ['L2'] } })).alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(scopedOther.length, 0, 'an incremental run for L2 does not duplicate the L1-anchored alert');
+  const scopedOwn = Core.computeAlerts(alertBase([], { ...payload, opts: { lines: ['L1'] } })).alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(scopedOwn.length, 1);
+});
+
+test('an unknown derivationIssue code still renders a generic alert (never silently dropped)', () => {
+  const alerts = issueAlerts([issueTask('u', { code: 'brand_new_code' })]);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].type, 'derivation_issue');
+  assert.equal(alerts[0].msgKey, 'alert.derivation_issue');
+  assert.equal(alerts[0].msgVars.code, 'brand_new_code');
+  assert.equal(alerts[0].sev, 'warn');
+});
+
+test('placement_exception markers render as errors; a normal row or a cleared marker does not', () => {
+  const tasks = [
+    issueTask('o', null, { placement_exception: 'overtime' }),
+    issueTask('l', null, { placement_exception: 'overlong' }),
+    issueTask('n', null, { placement_exception: null }),
+  ];
+  const alerts = issueAlerts(tasks).filter(a => a.type === 'placement_exception');
+  assert.deepEqual(alerts.map(a => [a.taskId, a.msgKey, a.sev]).sort(), [
+    ['l', 'alert.placement_exception_overlong', 'err'], ['o', 'alert.placement_exception_overtime', 'err'],
+  ]);
+});
+
+test('the runtime/schedule mismatch alert is reworded through alert.start_may_be_stale', () => {
+  const alert = Core.computeAlerts(alertBase([issueTask('s', null, { runtime_schedule_mismatch: true })])).alerts
+    .find(a => a.type === 'runtime-schedule-mismatch');
+  assert.equal(alert.msgKey, 'alert.start_may_be_stale');
+  assert.deepEqual(alert.msgVars, { order: 'ORD-s' });
+  assert.match(alert.msg, /may be out of date/);
+});
+
+test('engine findings respect the incremental line scope and the dismissed set', () => {
+  const tasks = [issueTask('a', { code: 'run_time_zero' }, { MACHINE: 'L' }), issueTask('b', { code: 'run_time_zero' }, { MACHINE: 'L2' })];
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const base = { masterData, calendars: { L: open0818, L2: open0818 }, lineSettings: { L: { plant: 'P' }, L2: { plant: 'P' } } };
+  const scoped = issueAlerts(tasks, { ...base, opts: { lines: ['L2'] } });
+  assert.deepEqual(scoped.map(a => a.id), ['derivation-b-run_time_zero']);
+  const dismissed = issueAlerts(tasks, { ...base, dismissed: ['derivation-a-run_time_zero'] });
+  assert.deepEqual(dismissed.map(a => a.id), ['derivation-b-run_time_zero']);
+});
+
+test('the alert horizon reads the payload per-plant clock: an order that ended before the plant\'s today is ignored', () => {
+  const yesterday = dueFri({ id: 'y', start_date: D(13, 9), end_date: D(13, 13), original_end_date: D(13, 0) });
+  const stale = Core.computeAlerts(alertBase([yesterday, { ...yesterday, id: 'y2', end_date: D(13, 20), original_end_date: D(13, 12) }])).alerts;
+  assert.equal(stale.filter(a => a.type === 'late').length, 0, 'finished before today on the plant clock: past the horizon');
+});

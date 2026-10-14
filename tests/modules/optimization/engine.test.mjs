@@ -3958,6 +3958,19 @@ test('a plant with no valid timezone is throw-free: not running, not frozen, rec
   });
 });
 
+test('a blocked plant is pruned from Store._blockedPlants once it resolves, and is announced again if it is blocked again', () => {
+  withServerClock('2026-08-20T12:00:00Z', [{ plant: 'FIXME' }], (toasts) => {
+    assert.equal(Store.plantNow('FIXME'), null);
+    assert.deepEqual([...Store._blockedPlants], ['FIXME']);
+    Store.setMasterData({ plants: [{ plant: 'FIXME', timezone: 'America/New_York' }], lines: [] }, 'unit-test');
+    assert.ok(Store.plantNow('FIXME') instanceof Date, 'the zone is now valid');
+    assert.equal(Store._blockedPlants.size, 0, 'a plant that resolves is no longer blocked');
+    Store.setMasterData({ plants: [{ plant: 'FIXME' }], lines: [] }, 'unit-test');
+    assert.equal(Store.plantNow('FIXME'), null);
+    assert.equal(toasts.length, 2, 'blocked again after being fixed: announced again');
+  });
+});
+
 test('a task whose plant cannot be resolved is not running and is not recorded as a blocked plant', () => {
   withServerClock('2026-08-20T12:00:00Z', [{ plant: 'NY', timezone: 'America/New_York' }], () => {
     assert.equal(Engine.isInProgress({ id: 'x', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) }), false);
@@ -4180,6 +4193,24 @@ describe('reconcile (finish-anchored)', () => {
         assert.equal(Store.tasks[id].systemMove.reason, 'reversal_forward');
       }
       assert.deepEqual(fx.writes.map(w => w.source), [DISPLAY_SOURCE], 'never-placed reversals are display-only');
+    } finally { fx.restore(); }
+  });
+
+  test('gate 4a: the resulting running status of a reversed order is read on the plant clock (X runs from now, Y and Z are queued behind it)', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('x', { original_end_date: at(19, 17) }),
+        fx.task('y', { original_end_date: at(19, 18) }),
+        fx.task('z', { original_end_date: at(20, 8) }),
+      ].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      // Plant now is Thu 09:00: the first reversal starts exactly now, so it is running; the others start later.
+      assert.equal(Engine.isInProgress(Store.tasks.x), true, 'X starts at now and is running');
+      assert.deepEqual(Engine.firmingStatus(Store.tasks.x).reasons, ['running']);
+      assert.equal(Engine.isInProgress(Store.tasks.y), false, 'Y starts after X ends');
+      assert.equal(Engine.isInProgress(Store.tasks.z), false, 'Z starts in the next window');
+      assert.equal(Engine.firmingStatus(Store.tasks.z).firmed, false);
     } finally { fx.restore(); }
   });
 

@@ -314,7 +314,7 @@ export const Dashboard = {
     // to both _renderKPIs and _renderHeatmap (each otherwise rebuilds an identical
     // filtered-subset matrix — three full computeMatrix passes per render, two of them
     // duplicate 7-day work). The 1-day line-status matrix stays its own call.
-    const _now7    = new Date();
+    const _now7    = Util.plantClock(Store.selectedPlant);   // the plant clock (OQ52), not the viewer's
     const _filtered = Dashboard._filteredTasks();
     // Memoize the 7-day matrix across renders (R14). _filteredTasks scopes by selected
     // plant + line filter, so the matrix is a pure function of (plant, filterLines,
@@ -385,9 +385,11 @@ export const Dashboard = {
 
   _renderKPIs(matrix7?: DashboardUtilMatrix, tasksArg?: NimbusTask[]): void {
     const tasks = tasksArg !== undefined ? tasksArg : Dashboard._filteredTasks();
-    const today = Util.startOfDay(new Date());
+    const today = Util.plantToday(Store.selectedPlant);
 
-    const todayOrders = tasks.filter(t => t.start_date && Util.dayKey(t.start_date) === Util.dayKey(today));
+    // OQ42: "today" = the order overlaps today on the plant clock, so a bar that crosses midnight counts on both days.
+    const todayKey = Util.dayKey(today);
+    const todayOrders = tasks.filter(t => Util.overlapsDay(t, todayKey));
 
     // Overdue backlog: every order whose scheduled finish has slipped past its SAP due date.
     const lateCount = tasks.filter(t => Util.latenessHours(t) > 0).length;
@@ -404,7 +406,7 @@ export const Dashboard = {
 
     // Capacity Headroom Next 7D: 1 - average utilization across all line-day cells with capacity.
     // Reuse the matrix built once in render() when provided; recompute standalone otherwise.
-    if (matrix7 === undefined) matrix7 = Utilization.computeMatrix(new Date(), 7, tasks);
+    if (matrix7 === undefined) matrix7 = Utilization.computeMatrix(today, 7, tasks);
     let pctSum = 0, pctN = 0;
     for (const ln of Dashboard._visibleLines(matrix7)) {
       for (const d of Object.keys(matrix7[ln])) {
@@ -509,8 +511,7 @@ export const Dashboard = {
     switch (action) {
       case 'orders-today': {
         NIMBUS!.App!.goto!('table');
-        const todayDt = Util.startOfDay(new Date());
-        const ymd = Util.dayKey(todayDt);
+        const ymd = Util.dayKey(Util.plantToday(Store.selectedPlant));
         setTimeout(() => {
           if (NIMBUS!.Table && NIMBUS!.Table!._applyChipFilter) {
             NIMBUS!.Table!._applyChipFilter!({ dateKey: ymd });
@@ -529,7 +530,7 @@ export const Dashboard = {
       }
       case 'alerts-today': {
         NIMBUS!.App!.goto!('table');
-        const ymd = Util.dayKey(Util.startOfDay(new Date()));
+        const ymd = Util.dayKey(Util.plantToday(Store.selectedPlant));
         setTimeout(() => {
           if (NIMBUS!.Table && NIMBUS!.Table!._applyChipFilter) {
             NIMBUS!.Table!._applyChipFilter!({ status: 'conflict', dateKey: ymd });
@@ -666,7 +667,7 @@ export const Dashboard = {
     if (!container) return;
 
     // Reuse the 7-day matrix built once in render() when provided; recompute standalone otherwise.
-    if (matrix === undefined) matrix = Utilization.computeMatrix(new Date(), 7, Dashboard._filteredTasks());
+    if (matrix === undefined) matrix = Utilization.computeMatrix(Util.plantClock(Store.selectedPlant), 7, Dashboard._filteredTasks());
     const lines = Dashboard._visibleLines(matrix).sort();
 
     if (!lines.length) {
@@ -794,7 +795,7 @@ export const Dashboard = {
     const el = document.getElementById('line-status-panel');
     if (!el) return;
     const tasks = Dashboard._filteredTasks();
-    const now   = new Date();
+    const now   = Util.plantClock(Store.selectedPlant);
 
     const byLine: Record<string, NimbusTask[]> = {};
     for (const l of Dashboard._selectedPlantLines()) byLine[l] = [];  // idle lines show up with zero rows
@@ -895,7 +896,7 @@ export const Dashboard = {
     list.innerHTML = alerts.slice(0, 8).map(a => `
       <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">
         <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
-        <div class="msg">${Util.escapeHtml(a.msg)}</div>
+        <div class="msg">${Util.escapeHtml(Util.alertMessage(a))}</div>
         <span class="meta">${a.time ? Util.fmtDT(a.time).slice(5, 16) : ''}</span>
         <button type="button" class="dismiss" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
       </div>
@@ -945,15 +946,16 @@ export const Dashboard = {
 
     const horizonDays = Dashboard._latenessHorizon || 14;
     const tasks = Dashboard._filteredTasks();
-    const startKey = Util.dayKey(Util.startOfDay(new Date()));
-    const endDate  = new Date(); endDate.setDate(endDate.getDate() + horizonDays - 1);
+    const plantNow = Util.plantClock(Store.selectedPlant);
+    const startKey = Util.dayKey(Util.plantToday(Store.selectedPlant));
+    const endDate  = new Date(plantNow); endDate.setDate(endDate.getDate() + horizonDays - 1);
     const endKey   = Util.dayKey(Util.startOfDay(endDate));
 
     // Build line × day map: line → dayKey → { lateHours, lateCount, lineLabel }
     const allLines = [...new Set([...Dashboard._selectedPlantLines(), ...tasks.map(t => t.MACHINE || 'Unknown')])].sort();
     const days: string[]  = [];
     {
-      const d = Util.startOfDay(new Date())!;
+      const d = Util.plantToday(Store.selectedPlant);
       for (let i = 0; i < horizonDays; i++) {
         days.push(Util.dayKey(d));
         d.setDate(d.getDate() + 1);
@@ -965,7 +967,7 @@ export const Dashboard = {
       for (const dk of days) cells[ln][dk] = { lateHours: 0, lateCount: 0, tasks: [] };
     }
     for (const t of tasks) {
-      const end = t.planning_status === 'needs_planning' ? new Date() : Util.scheduledEnd(t);
+      const end = t.planning_status === 'needs_planning' ? plantNow : Util.scheduledEnd(t);
       if (!end) continue;
       const dk = Util.dayKey(end);
       if (dk < startKey || dk > endKey) continue;
@@ -1244,23 +1246,13 @@ export const AlertsUIAdapter = {
     const cellEntries: Array<{ task: NimbusTask; scheduledHours: number; sortAt: Date }> = [];
     for (const task of Store.tasksArr) {
       if ((task.MACHINE || 'Unknown') !== line) continue;
-      const isSplit = (task.scheduleSegments?.length ?? 0) >= 2;
-      if (!isSplit) {
-        // Preserve legacy continuous-order accounting in Never mode.
-        if (task.start_date && Util.dayKey(task.start_date) === dayKey) {
-          cellEntries.push({ task, scheduledHours: Util.runHours(task), sortAt: task.start_date });
-        }
-        continue;
-      }
-      const intervals = Util.scheduleIntervals(task)
-        .filter(interval => interval.start < dayEnd && interval.end > dayStart);
-      if (!intervals.length) continue;
-      const scheduledHours = intervals.reduce((sum, interval) => {
-        const start = Math.max(interval.start.getTime(), dayStart.getTime());
-        const end = Math.min(interval.end.getTime(), dayEnd.getTime());
-        return sum + (end - start) / Config.MS_HOUR;
-      }, 0);
-      cellEntries.push({ task, scheduledHours, sortAt: intervals[0].start });
+      // The one day-attribution rule (OQ41): the same hours the utilization matrix and the overload alert put on this day.
+      const minutes = Utilization.minutesByDay(task, line)[dayKey] || 0;
+      if (minutes <= 0) continue;
+      const onDay = Util.scheduleIntervals(task).filter(interval => interval.start < dayEnd && interval.end > dayStart);
+      const sortAt = onDay[0]?.start ?? task.start_date;
+      if (!sortAt) continue;
+      cellEntries.push({ task, scheduledHours: minutes / 60, sortAt });
     }
     cellEntries.sort((a, b) => a.sortAt.getTime() - b.sortAt.getTime());
     const cellTasks = cellEntries.map(entry => entry.task);
@@ -1324,7 +1316,7 @@ export const AlertsUIAdapter = {
 
     const renderCard = (a: NimbusAlert) => {
       // Headline + right-side numeric.
-      let headline = Util.escapeHtml(a.type.replace(/-/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
+      let headline = Util.escapeHtml(a.type.replace(/[-_]/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
       let num = '';
       let chipsHtml = '';
 
@@ -1373,7 +1365,7 @@ export const AlertsUIAdapter = {
             <span>${headline}</span>
             ${num}
           </div>
-          <div class="ac-card-msg">${Util.escapeHtml(a.msg)}</div>
+          <div class="ac-card-msg">${Util.escapeHtml(Util.alertMessage(a))}</div>
           ${chipsHtml}
           <div class="ac-card-actions">
             ${gotoBtn}

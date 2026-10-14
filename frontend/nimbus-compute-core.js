@@ -382,6 +382,54 @@
     return result;
   }
 
+  // THE day-attribution rule (OQ12/OQ41): which calendar days an order's work lands on, in minutes. The
+  // utilization matrix, the overload alert and the cell briefing all read this one function, so they can never
+  // disagree about the same order. `dayWindowFor(date)` -> {open, close} | null is the working window of that
+  // calendar date (null when closed).
+  //  - A split order (two or more explicit pieces) is attributed exactly: each piece's wall-clock overlap per day.
+  //  - A single bar spreads its run time across the days it spans in proportion to each day's WORKING-time overlap
+  //    with [start, end], so a bar that starts after one day's close puts nothing on that day and a closed day takes
+  //    no share. A bar with no working overlap at all (an order sitting wholly in closed time) falls back to
+  //    wall-clock overlap, so its hours stay visible and the closed-day alert can fire.
+  //  - A start with no finish puts the whole run time on the start day.
+  // Returns { [dayKey]: minutes }; days with no work are absent.
+  function workingMinutesByDay(task, dayWindowFor) {
+    const out = {};
+    const add = (key, minutes) => { if (minutes > 0) out[key] = (out[key] || 0) + minutes; };
+    const intervals = scheduleIntervals(task);
+    if (intervals.length >= 2) {
+      for (const interval of intervals) {
+        let cursor = startOfDay(new Date(+interval.start));   // startOfDay mutates a Date argument
+        while (cursor < interval.end) {
+          const next = nextCalendarDay(cursor);
+          add(dayKey(cursor), (Math.min(+interval.end, +next) - Math.max(+interval.start, +cursor)) / 60000);
+          cursor = next;
+        }
+      }
+      return out;
+    }
+    const start = parseDate(task?.start_date);
+    if (!start) return out;
+    const runMin = runHours(task) * 60;
+    const end = parseDate(task?.end_date);
+    if (!end) { add(dayKey(start), runMin); return out; }
+    if (end <= start || runMin <= 0) return out;
+    const days = [];
+    let working = 0, wall = 0;
+    for (let cursor = startOfDay(new Date(+start)); cursor <= end; cursor = nextCalendarDay(cursor)) {
+      const next = nextCalendarDay(cursor);
+      const wallMin = Math.max(0, (Math.min(+end, +next) - Math.max(+start, +cursor)) / 60000);
+      const win = dayWindowFor ? dayWindowFor(cursor) : null;
+      const workMin = win && win.open && win.close
+        ? Math.max(0, (Math.min(+end, +win.close) - Math.max(+start, +win.open)) / 60000) : 0;
+      days.push({ key: dayKey(cursor), wallMin, workMin });
+      working += workMin; wall += wallMin;
+    }
+    const weight = working > 0 ? d => d.workMin / working : (wall > 0 ? d => d.wallMin / wall : () => 0);
+    for (const d of days) add(d.key, runMin * weight(d));
+    return out;
+  }
+
   // A date-only SAP finish reaches the browser as an exact-midnight timestamp (the server no
   // longer rewrites it). Read such a value as the end of that date's working window (OQ23).
   // `raw`: Date (naive plant wall-clock). `dayWindowFor(date)` -> {open, close} | null for that
@@ -469,7 +517,7 @@
   // are already filtered against `dismissed`. Merging the incremental `opts.lines` scope
   // into the retained list is the caller's responsibility.
 
-  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup, now }) {
+  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup, now, blockedPlants }) {
     const t0 = performance.now();
 
     const onlyLines = Array.isArray(opts?.lines) && opts.lines.length
@@ -504,6 +552,16 @@
     _plantMemo = new Map();
     _taskPlantFallback = _buildTaskPlantFallback(tasks);
     const plantOf = line => getPlantForLine(line, lineSettings, masterData);
+    // The line's working window on a calendar date as {open, close} (the shape dueDateInstant and
+    // workingMinutesByDay read), or null when closed. A line with NO calendar row sent in the payload has no
+    // window at all (Util.dueInstant reads it the same way), so the late rule agrees with the Store-side KPIs.
+    const inScopeLine = line => !onlyLines || onlyLines.has(line || 'Unknown');
+    const calendarLines = new Set(Object.keys(calendars || {}));
+    const dayWindowForLine = (line, requireRow = false) => date => {
+      if (requireRow && !calendarLines.has(line)) return null;
+      const win = workWindow(line, date, calendars, plants, lineSettings, masterData);
+      return win ? { open: win[0], close: win[1] } : null;
+    };
     const setupActiveForLine = line => masterData?.plants?.find(p => p.plant === plantOf(line))?.setup_active !== false;
 
     const alerts = [];
@@ -676,30 +734,14 @@
 
     /* 2. OVERLOAD / CLOSED */
     const byLineDay = {};
+    // One attribution rule (workingMinutesByDay): the same days and hours the utilization matrix and the cell
+    // briefing use, so the overload alert can never contradict the heatmap for one order.
     for (const t of activeTasks) {
       const line = t.MACHINE || 'Unknown';
-      const intervals = scheduleIntervals(t);
-      if (intervals.length >= 2) {
-        for (const interval of intervals) {
-          let cursor = startOfDay(new Date(interval.start));
-          while (cursor && cursor < interval.end) {
-            const nextDay = new Date(cursor); nextDay.setDate(nextDay.getDate() + 1);
-            const overlapHours = (Math.min(+interval.end, +nextDay) - Math.max(+interval.start, +cursor)) / MS_HOUR;
-            if (overlapHours > 0) {
-              const day = dayKey(cursor);
-              const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
-              row.hours += overlapHours;
-              row.tasks.push(t);
-            }
-            cursor = nextDay;
-          }
-        }
-      } else if (t.start_date) {
-        // Preserve the legacy continuous-order accounting exactly under the
-        // default policy; only explicit child schedules use productive pieces.
-        const day = dayKey(t.start_date);
+      const windowFor = dayWindowForLine(line);
+      for (const [day, minutes] of Object.entries(workingMinutesByDay(t, windowFor))) {
         const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
-        row.hours += runHours(t);
+        row.hours += minutes / 60;
         row.tasks.push(t);
       }
     }
@@ -897,10 +939,154 @@
       const line = t.MACHINE || 'Unknown';
       alerts.push({
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
-        msg: `Order "${orderNumber(t)}" has a runtime that no longer matches its saved schedule.`,
+        msg: `The start of order "${orderNumber(t)}" may be out of date: its run time changed after the schedule was saved.`,
+        msgKey: 'alert.start_may_be_stale', msgVars: { order: orderNumber(t) },
         taskId: t.id, line, time: t.start_date || new Date(),
       });
     }
+
+    /* LATE (OQ6) - the placed finish is after the due instant. Data-only: it needs no clock, so it is fresh on
+       every store event. Warning for any positive lateness; error when the finish is also beyond the plant's
+       push-forward ceiling (the due date's local midnight + N + 1 days, the same ceiling the optimizer honours).
+       A queued order has no placed finish and gets none (its lateness shows through Util.latenessHours). The due
+       instant is the SAP finish as received, a date-only one read as the close of that day's window. */
+    const pushCapDays = plant => {
+      const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
+      return Number.isInteger(value) && value >= 0 ? value : null;
+    };
+    for (const t of activeTasks) {
+      if (t.planning_status === 'needs_planning') continue;
+      const end = parseDate(t.end_date), rawDue = parseDate(t.original_end_date);
+      if (!end || !rawDue) continue;
+      const line = t.MACHINE || 'Unknown';
+      const due = dueDateInstant(rawDue, dayWindowForLine(line, true));
+      if (!(end > due)) continue;
+      const hours = (end - due) / MS_HOUR;
+      const cap = pushCapDays(t.PLANT || plantOf(line));
+      let beyondCap = false;
+      if (cap !== null) {
+        const ceiling = new Date(due); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
+        beyondCap = end > ceiling;
+      }
+      const vars = { order: orderNumber(t), hours: hours.toFixed(1), days: cap ?? '' };
+      alerts.push({
+        id: `late-${t.id}`, sev: beyondCap ? 'err' : 'warn', type: 'late',
+        msg: beyondCap
+          ? `Order "${vars.order}" finishes ${vars.hours} h after its due date, beyond the plant limit of ${cap} day(s) late.`
+          : `Order "${vars.order}" finishes ${vars.hours} h after its due date.`,
+        msgKey: beyondCap ? 'alert.late_beyond_cap' : 'alert.late', msgVars: vars,
+        taskId: t.id, line, time: end,
+      });
+    }
+
+    /* PLACEMENT EXCEPTION - the marker the server stores when an order was placed outside the normal rules
+       (overtime or overlong). One alert per marked order. */
+    const PLACEMENT_KEYS = { overtime: 'alert.placement_exception_overtime', overlong: 'alert.placement_exception_overlong' };
+    for (const t of activeTasks) {
+      const marker = t.placement_exception;
+      if (marker !== 'overtime' && marker !== 'overlong') continue;
+      const line = t.MACHINE || 'Unknown';
+      const vars = { order: orderNumber(t), line };
+      alerts.push({
+        id: `placement-exception-${t.id}`, sev: 'err', type: 'placement_exception',
+        msg: marker === 'overtime'
+          ? `Order "${vars.order}" is placed outside working hours on ${line}.`
+          : `Order "${vars.order}" is longer than any working window on ${line} and is placed as one long bar.`,
+        msgKey: PLACEMENT_KEYS[marker], msgVars: vars,
+        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || new Date(),
+      });
+    }
+
+    /* ENGINE FINDINGS - every note the schedule engine leaves on a task (task.derivationIssue, session-only) is
+       rendered here, in the same pass as every other alert, so nothing is computed on the main thread. Keyed by
+       task id + code so a re-render replaces rather than accumulates. Plant-level findings (no time zone) and
+       line-level ones (no server calendar) are de-duplicated to ONE alert per plant / per line; a plant alert sits
+       on the plant's first affected line (stable across incremental runs) and is emitted when that line is in
+       scope. An unknown code still renders a generic alert. */
+    const ISSUE_SEV_ERR = new Set(['reversal_forward', 'plant_no_timezone', 'line_no_calendar', 'no_anchor']);
+    const readable = d => { const v = parseDate(d); return v ? fmtDTReadable(v) : ''; };
+    const plantFirstLine = new Map();   // plant -> smallest affected line (all tasks, scope-independent)
+    const noteFirstLine = (plant, line) => {
+      if (plant == null) return;
+      const cur = plantFirstLine.get(plant);
+      if (cur === undefined || line < cur) plantFirstLine.set(plant, line);
+    };
+    for (const t of tasks) {
+      if (t.derivationIssue?.code === 'plant_no_timezone') noteFirstLine(t.PLANT || plantOf(t.MACHINE || 'Unknown'), t.MACHINE || 'Unknown');
+    }
+    const blockedSet = new Set(Array.isArray(blockedPlants) ? blockedPlants : []);
+    for (const plant of blockedSet) {
+      let first;
+      for (const l of masterData?.lines ?? []) if (l?.plant === plant && l.machine && (first === undefined || l.machine < first)) first = l.machine;
+      if (first !== undefined) noteFirstLine(plant, first);
+    }
+    const emittedPlants = new Set(), emittedLines = new Set();
+    const emitPlantNoTimezone = plant => {
+      const line = plantFirstLine.get(plant);
+      if (plant == null || line === undefined || emittedPlants.has(plant) || !inScopeLine(line)) return;
+      emittedPlants.add(plant);
+      alerts.push({
+        id: `plant-no-timezone-${plant}`, sev: 'err', type: 'plant_no_timezone',
+        msg: `Plant ${plant} has no valid time zone, so NIMBUS cannot derive start times for its orders.`,
+        msgKey: 'alert.plant_no_timezone', msgVars: { plant },
+        line, time: now?.[plant] || new Date(),
+      });
+    };
+    for (const t of tasks) {
+      const issue = t.derivationIssue;
+      if (!issue || !issue.code) continue;
+      const line = t.MACHINE || 'Unknown';
+      const plant = t.PLANT || plantOf(line);
+      const code = issue.code;
+      if (code === 'plant_no_timezone') { emitPlantNoTimezone(plant); continue; }
+      if (!inScopeLine(line)) continue;
+      if (code === 'line_no_calendar') {
+        if (emittedLines.has(line)) continue;
+        emittedLines.add(line);
+        alerts.push({
+          id: `line-no-calendar-${line}`, sev: 'err', type: 'line_no_calendar',
+          msg: `${line} has no saved working calendar, so NIMBUS cannot derive start times for its orders.`,
+          msgKey: 'alert.line_no_calendar', msgVars: { line },
+          line, time: now?.[plant] || new Date(),
+        });
+        continue;
+      }
+      const order = orderNumber(t);
+      const vars = { order, line, from: readable(issue.from), to: readable(issue.to) };
+      let key = `alert.${code}`, type = code, msg;
+      const sev = ISSUE_SEV_ERR.has(code) ? 'err' : 'warn';
+      switch (code) {
+        case 'finish_moved_earlier':
+          msg = `Order "${order}" could not hold its finish and now ends earlier, at ${vars.to} (was ${vars.from}).`; break;
+        case 'reversal_forward': {
+          const detail = issue.detail;
+          if (detail === 'run_time_grew' || detail === 'due_date_past' || detail === 'cutover') key = `alert.reversal_forward_${detail}`;
+          msg = detail === 'run_time_grew'
+            ? `Order "${order}" was placed forward from now because its run time grew and its start would fall in the past.`
+            : detail === 'cutover'
+              ? `Order "${order}" was placed forward from now when scheduling switched to the finish date, because its start would fall in the past.`
+              : detail === 'due_date_past'
+                ? `Order "${order}" was placed forward from now because its due date has already passed; it will finish late.`
+                : `Order "${order}" was placed forward from now because its start would fall in the past; it will finish after its held finish.`;
+          break;
+        }
+        case 'no_anchor': msg = `Order "${order}" has no finish date to schedule from.`; break;
+        case 'no_operating_window': msg = `Order "${order}" could not be placed: no working window was found for ${line} in the next 90 days.`; break;
+        case 'run_time_zero': msg = `Order "${order}" has no run time, so it has no bar to place.`; break;
+        case 'setup_override_orphaned': msg = `A manual changeover override for order "${order}" on ${line} no longer matches the order before it.`; break;
+        case 'pull_floor_crossed': msg = `Order "${order}" now starts ${vars.from}, before the earliest start the plant allows (${vars.to}).`; break;
+        case 'frozen_window_crossed': msg = `Order "${order}" now starts inside the frozen window.`; break;
+        default:
+          type = 'derivation_issue'; key = 'alert.derivation_issue'; vars.code = String(code);
+          msg = `Order "${order}" has a scheduling note (${code}).`;
+      }
+      alerts.push({
+        id: `derivation-${t.id}-${code}`, sev, type, msg, msgKey: key, msgVars: vars,
+        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || now?.[plant] || new Date(),
+      });
+    }
+    // A plant announced as blocked by the clock (Store.plantNow) alerts even when none of its orders carry a note.
+    for (const plant of blockedSet) emitPlantNoTimezone(plant);
 
     // RUNTIME-UNKNOWN (ROUTING_RUNTIME_DESIGN.md §8.6) — a task held in Needs
     // Planning specifically because the routing resolver (backend/routing/resolver.py
@@ -1072,78 +1258,21 @@
       }
     }
 
+    // One attribution rule (workingMinutesByDay), shared with the overload alert and the cell briefing.
     for (const t of tasks) {
       if (!t.start_date) continue;
       const line = t.MACHINE || 'Unknown';
-      if (!matrix[line]) continue;
-
-      const intervals = scheduleIntervals(t);
-      if (intervals.length >= 2) {
-        const lineRows = matrix[line];
-        for (const interval of intervals) {
-          const intervalStartMs = interval.start.getTime();
-          const intervalEndMs = interval.end.getTime();
-          // Optimize: only iterate days this interval actually spans, not all days in the horizon.
-          const dayStart = startOfDay(new Date(intervalStartMs));
-          const dayEnd = startOfDay(new Date(intervalEndMs));
-          let currentDay = new Date(dayStart);
-          while (currentDay <= dayEnd) {
-            const key = dayKey(currentDay);
-            const row = lineRows[key];
-            if (row) {
-              const dayStartMs = row.date.getTime();
-              const dayEndMs = nextCalendarDay(row.date).getTime();
-              const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
-              if (contribution > 0) {
-                row.scheduled += contribution;
-                if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
-              }
-            }
-            currentDay = nextCalendarDay(currentDay);
-          }
-        }
-        continue;
-      }
-
-      if (!t.end_date) {
-        const key = dayKey(t.start_date);
-        if (matrix[line][key]) {
-          matrix[line][key].scheduled += runHours(t);
-          matrix[line][key].tasks.push(t.id);
-        }
-        continue;
-      }
-
-      const tStartMs   = t.start_date.getTime();
-      const tEndMs     = t.end_date.getTime();
-      if (tEndMs <= tStartMs) continue;
-      const taskRunHrs = runHours(t);
-      if (taskRunHrs <= 0) continue;
-      const totalTaskMs = tEndMs - tStartMs;
-
       const lineRows = matrix[line];
-      // Optimize: only iterate days this task actually spans, not all days in the horizon.
-      const dayStart = startOfDay(new Date(tStartMs));
-      const dayEnd = startOfDay(new Date(tEndMs));
-      let currentDay = new Date(dayStart);
-      while (currentDay <= dayEnd) {
-        const key = dayKey(currentDay);
+      if (!lineRows) continue;
+      const windowFor = date => {
+        const win = workWindow(line, date, calendars, plants, lineSettings, masterData);
+        return win ? { open: win[0], close: win[1] } : null;
+      };
+      for (const [key, minutes] of Object.entries(workingMinutesByDay(t, windowFor))) {
         const row = lineRows[key];
-        if (row) {
-          if (!workWindow(line, row.date, calendars, plants, lineSettings, masterData)) {
-            currentDay = nextCalendarDay(currentDay);
-            continue;
-          }
-          const dayStartMs = row.date.getTime();
-          const dayEndMs   = nextCalendarDay(row.date).getTime();
-          const overlapMs    = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
-          const contribution = taskRunHrs * (overlapMs / totalTaskMs);
-          if (contribution > 0) {
-            row.scheduled += contribution;
-            row.tasks.push(t.id);
-          }
-        }
-        currentDay = nextCalendarDay(currentDay);
+        if (!row) continue;
+        row.scheduled += minutes / 60;
+        if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
       }
     }
 
@@ -1194,7 +1323,7 @@
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
-    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant,
+    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization,
