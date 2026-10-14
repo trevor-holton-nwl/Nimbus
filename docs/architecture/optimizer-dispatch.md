@@ -1,3 +1,4 @@
+> Superseded in part by the finish anchor (2026-10): the old per-line forward walk is deleted, the setup-aware evaluators still place forward but judge the placed finish, and every other placement derives its start backward from the finish; see BACKWARD_SCHEDULING_MIGRATION.md.
 # Optimizer Dispatch — `Engine.runAndApply` internals
 
 Full mechanics behind the summary in `web/optimization/CLAUDE.md`. Read this before touching `Engine._sortTerms`, `Engine.evaluateSetupAware`, or anything that reads `Store.priorityRankMaps`.

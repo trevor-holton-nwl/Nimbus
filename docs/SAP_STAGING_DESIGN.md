@@ -1,3 +1,4 @@
+> Superseded by the finish anchor (2026-10): starts are derived backward from the placed finish; see BACKWARD_SCHEDULING_MIGRATION.md.
 # SAP ECC Staging Tables in NIMBUS — Design of Record
 
 | | |

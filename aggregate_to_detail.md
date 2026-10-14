@@ -1,3 +1,4 @@
+> Superseded by the finish anchor (2026-10): starts are derived backward from the placed finish; see BACKWARD_SCHEDULING_MIGRATION.md.
 # NIMBUS Order Distribution — SAP Aggregate Work Center ↔ NIMBUS Detail Machine — Design
 
 Status: **DRAFT for review** · Date: 2026-09-17, revision 3 (gap review and UI review folded in the same day — §16.10) · Author: Trevor Holton with Claude

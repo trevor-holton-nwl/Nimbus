@@ -5409,3 +5409,76 @@ Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-sch
 - Browser checks owed (not run by this session; code and unit tests only): the left-handle veto while dragging (`lockLeftEdge` through the timeline's move hook; the commit-time revert is the fallback), the derive-paused banner (appearance, and overlap with the concurrency banner), the overtime confirm for a firmed order dropped outside working hours, and display-only never-placed rows (rows with no start are derived for display, and Save leaves them never-placed).
 
 **Not released.** Rollback = the branch is not merged.
+
+### Phase 3 — gap decisions (2026-10-14)
+
+Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`, Phase 3 lines extracted to `phase3-ledger-extract.md`): every line that starts with `Task 3.N: gap filled:` or is a `Ruling:` for a Phase 3 task (Tasks 3.1 to 3.5), one row each, in ledger order. For a Ruling, Gap is the review finding or gate label, Choice is what was ruled, and Why is the cost line copied from the ledger. Task 3.6 (this documentation pass) is not a ledger task. The Phase 3 gate report is not written yet (the whole-branch review is still running); its placeholder heading follows the Phase 2 gate report.
+
+| Task | Gap | Choice | Why |
+|---|---|---|---|
+| 3.1 | reconcile on undo vs dirty rows | new ReconcileOptions.ids bypasses the unsaved-edit skip for restored ids | undo rows are dirty by construction |
+| 3.1 | toast after undo re-derivation | suppressed (reason 'undo') | undo already announces itself |
+| 3.1 | G-0.25 in Remove Backlog | marked rows excluded from the move set | Remove Backlog ignores firmed, so "fixed" must mean not moved |
+| 3.1 | OQ50 c elapsed bar | placeForwardSequence refuses never-policy overlong (queued overlong_never via Engine.overlongNeverChanges; reconcile reversal queue too) | only remaining continuous-bar path |
+| 3.1 | legacy walk callers | none in production (only 'legacy-compat' tests); unknown modes now take the setup-aware path | nothing to re-route |
+| 3.1 (Ruling) | I1 | the implementer gap-fill "the optimizer has no overlong path" is overturned: a never-policy order the setup-aware scheduler cannot fit because its run time exceeds every contiguous window is queued with reason overlong_never (brief OQ50 c/a7), not no_fit_found/search_limit, so the release path keyed on overlong_never can act on it; a genuine no-window-at-all failure keeps no_fit_found | cost if wrong: an order mislabelled overlong_never could be released as an elapsed bar when it was really unplaceable for another reason (visible, reversible). |
+| 3.1 | never-policy overlong detection | longer than every contiguous window while the line has windows (hasNominalWindow false for run time, true for 1 minute) | separates overlong from no-window and plain no-fit |
+| 3.2 | adjacency helper at setup-domain.mts:467 does not exist | used by-start adjacency (as deriveSetupObservation) via a per-pass line index in the reconcile | brief anchor stale, same rule the setup bars use |
+| 3.2 | issue priority when several findings apply | finish_moved_earlier > setup_override_orphaned > frozen_window_crossed > pull_floor_crossed | one derivationIssue field; orphaned loses planner data so outranks the advisory two |
+| 3.2 | no predecessor on the line | asserted machine state if any, else 0; a display-only predecessor also gives 0 | mirrors observation "initial" and the orchestrator ruling |
+| 3.2 | setup-scheduler.test.mjs O(n^2) availability reference | updated to merge across midnight | it mirrors production and would disagree by design after the A.3 #9 fix |
+| 3.2 (Ruling) | I1 | when the setup-aware second walk in the reconcile cannot place (contiguous policy, run within setupMinutes of the longest window), the zero-setup placement with the held finish stands and the setup-violated alert fires; the row is never pushed to the forward reversal by the setup reservation alone (setup is a preference the V1 rule tries to honour, not a reason to reverse) | cost if wrong: a planner sees a held-finish bar with too little changeover room flagged by an alert instead of a reversed bar. |
+| 3.3 | day-attribution rule | working-window-weighted spread; split exact; closed-time-only bar falls back to wall-clock | keeps hours visible so the closed alert fires, matrix sums to run time |
+| 3.3 | plant-level alert line | plant smallest affected line, emitted only when in scope | incremental merges never duplicate the plant alert |
+| 3.3 | late alert scope and ceiling | non-queued orders in the alert horizon; ceiling = due midnight + (N+1) days from max_push_forward_days; no-calendar line reads raw+23:59:59 | matches Util.dueInstant and the optimizer ceiling |
+| 3.3 | mismatch alert type | kept runtime-schedule-mismatch, reworded via alert.start_may_be_stale | existing tests and CAT_MAP depend on the type |
+| 3.3 | severity table | error: late beyond cap, reversal_forward, placement_exception, plant_no_timezone, line_no_calendar, no_anchor; warning: late, finish_moved_earlier, pull_floor_crossed, frozen_window_crossed, setup_override_orphaned, run_time_zero, no_operating_window, unknown code | orchestrator ruling |
+| 3.3 | unknown derivationIssue code | generic type derivation_issue with key alert.derivation_issue | never silently dropped |
+| 3.3 (Ruling) | gate 14 | the Task 2.6 scope of frozen_window_crossed (manually firmed rows only) is widened to placed, unfirmed rows whose derived start moves from outside to inside the frozen window in that reconcile (a from->to transition); never-placed / display-only / queued rows stay excluded, so the 2.6 flood concern holds while spec R26 (an unfirmed order flipping frozen is sent firm irreversibly) becomes visible to the planner | cost if wrong: extra warnings on rows a planner already expected to firm (noise, no data change). |
+| 3.4 | keyboard move path | no keyboard bar-move exists, so tests pin that arrows write no dates and that drag, grid End and Inspector End all call manualRoutingSchedulePatchFor with the finish | the Gantt keyboard handler only selects (G6) |
+| 3.4 | retired Original/Updated locale keys | deleted from all five files by the implementer, Haiku only adds the new-name keys | keeps the superset test green and avoids stale wrong-meaning translations |
+| 3.4 | explain-the-move line | ui.insp_system_move plus six ui.insp_move_reason_* keys; codes that are not moves render nothing | matches the orchestrator ruling |
+| 3.4 | no-op resize | a patch equal to the stored bar writes nothing, pushes no undo entry, rebuilds the item | A.3 #18 |
+| 3.5 | CSV due_date column position | appended last | keeps existing column indices stable |
+| 3.5 | "firmed" survivor in collapse dry-run | manual_firmed or SAP firming X, listed and needs confirm | start may move under R2 |
+| 3.5 | gate 17 layer | calendar-engine test (allocateRuntimeBackward vs allocateRuntime) | the allocators are where the 10-minute drift lives |
+| 3.5 | separation alert wording | reworded in five locales (start→finish) | message must match the finish judgement |
+| 3.5 (Ruling) | minor "commit trailer reads Claude Fable 5.1" | not a defect: the session attribution rule mandates that trailer for every commit of this run; no change. |  |
+| 3.5 (Ruling) | minor "manual run time carried into the R2 end" | stands as pre-existing D11 behaviour (R2 builds the end from whatever run time the collapse re-weight leaves on the survivor; whether a planner-typed partial-share run time should be rescaled on collapse is an owner question for the final report) | cost if wrong: a collapsed survivor with a manual run time gets a finish that is too early by the share ratio, visible on the Gantt and reversible by re-typing the run time. |
+
+**Deferred minors from Phase 3 reviews** (verbatim from the ledger):
+
+- Task 3.1: minor (deferred): setup-scheduler.test.mjs:5113 title still says "moved starts" (brief said flip it).
+- Task 3.1: minor (deferred): no tests for autoReflow/Alerts.applyFix marked-row guard, Remove Backlog dialog note, TimeMachine.restore.
+- Task 3.1: minor (deferred): stale "legacy" comments in engine.mts (864-871, 909-915, 962, 1721, 2423, 2477, 2568).
+- Task 3.1: minor (deferred): the plain no-fit-with-windows side of neverOverlongReason has no explicit test (returns null by construction).
+- Task 3.2: minor (deferred): reconcile predecessor search ties by id but the observation sorts by start only (same-start rows may differ).
+- Task 3.2: minor (deferred): no test pins msgKey/msgVars on the emitted setup-violated alert.
+- Task 3.2: minor (deferred): stray blank line at end of the midnight availability test in engine.test.mjs.
+- Task 3.3: minor (deferred): services.mts:872 _prewarm uses the viewer today while Dashboard keys the matrix on the plant clock (cache miss only when zones differ).
+- Task 3.3: minor (deferred): nimbus-intelligence.js:1836 shows English a.msg for worker alerts (t() is reachable; pre-existing, one-line fix).
+- Task 3.3: minor (deferred): alert card headlines for new types are title-cased English from the type code (no ui.alert_headline_* keys).
+- Task 3.3: minor (deferred): workingMinutesByDay ignores blackout blocks (matrix/overload/briefing still agree).
+- Task 3.4: minor (deferred): Util.impliedOriginalStart (foundation.mts:701) now has no callers; delete.
+- Task 3.4: minor (deferred): stale "Updated End" comment at orders.mts:1948.
+- Task 3.4: minor (deferred): Alerts auto-fix toast (services.mts ~469) reads the finish before autoReflow runs.
+- Task 3.4: minor (deferred): _varianceBadge gives a 0.0h variance the "early" class (cosmetic).
+- Task 3.4: minor (deferred): still-unkeyed English: Inspector setup-override editor, Productive schedule/Part N card, hover alert type ids, modal close aria-label.
+- Task 3.5: minor (deferred): stale "start" wording remains in en.js:2178 ui.dist_status_separation_violated_tip and hardcoded optimize-ui.mts:2005 beside the reworded finish alert.
+- Task 3.5: minor (deferred): collapse carries a planner-typed MANUAL partial-share run_time (D11) as the survivor run time, which now drives the R2 end; confirm intended "full-share run time".
+- Task 3.5: minor (deferred): untested branches: NULL/0 run-time collapse arm, SAP firming X in `firmed`, repair guard is a kwarg-capture mock.
+- Task 3.5: minor (deferred): get_aggregate due_date value has no DB-backed round-trip test (mocked rows only).
+- Task 3.5: minor (deferred): commit trailer reads "Claude Fable 5.1" instead of "Claude Sonnet 5.5".
+
+**Unverified in Phase 3** (verbatim from the ledger, one per cannot-verify line):
+
+- Task 3.1: ⚠️ cannot verify: bench wall time (after run under load; digests identical per report only) and full-suite status.
+- Task 3.2: ⚠️ cannot verify: test results (read-only review); DST behaviour of the 14-day touching-window loop in setupAvailabilityMinutes.
+- Task 3.3: ⚠️ cannot verify: browser rendering of msgKey alert text and plant-clock today in Gantt/orders (no smoke).
+- Task 3.3: ⚠️ cannot verify: payload calendars absent-row reading always equals Util.dueInstant no-calendar reading when Store auto-creates default calendars.
+- Task 3.4: ⚠️ cannot verify: Override modal / hover card in a browser; system-move line only tested against a stub locale.
+- Task 3.5: ⚠️ cannot verify: pytest/node results (read-only review; relied on the implementer report).
+
+### Phase 3 — gate report
+
+pending the whole-branch review

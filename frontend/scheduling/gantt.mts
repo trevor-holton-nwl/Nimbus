@@ -3370,7 +3370,7 @@ type ArrowKey = 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown';
         vis-timeline  ─click/dblclick/ctxmenu─►  Interaction  ─►  Selection
                                                              └─►  Inspector
         vis-timeline  ─DataSet 'update'──────►  Interaction  ─►  Store.updateTask
-                                                             └─►  Engine.autoReflow
+                                                             └─►  Engine.manualSchedulePatchFor (finish-anchored; a drop runs no autoReflow cascade)
         keyboard      ─F / Del / Esc / Z / ←→─►  Interaction  ─►  Store / UndoStack
 
    CRITICAL / CORRECTED (CQ-1 Phase 3 Task 5 — the previous wording here claimed
@@ -4316,7 +4316,7 @@ export const Interaction = {
     Interaction._distSiblingItemIds = nextIds;
   },
 
-  /** Drag commit: update the store and reflow ONLY if times/line actually changed.
+  /** Drag commit: update the store (finish-anchored, through `Engine.manualSchedulePatchFor`) ONLY if times/line actually changed.
    *  Firmed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a firmed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */

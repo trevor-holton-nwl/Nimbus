@@ -18,7 +18,7 @@ NIMBUS schedules production orders across manufacturing lines and plants so they
 
 ## Positioning
 
-Due-date-aware scheduling that holds up at scale — a day-integrity dispatch, real-time conflict alerts, and an optimizer built for 50+ plants and 3,500+ lines, not a spreadsheet with a timeline view bolted on.
+Due-date-aware scheduling that holds up at scale — a finish-anchored scheduler that derives each start backward from the planned finish through the line's working time, real-time conflict alerts, and an optimizer built for 50+ plants and 3,500+ lines, not a spreadsheet with a timeline view bolted on.
 
 ## Brand Personality
 

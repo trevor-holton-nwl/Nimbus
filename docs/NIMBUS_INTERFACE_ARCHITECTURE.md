@@ -593,7 +593,7 @@ Apply and restore refusals (admin side). They reach the admin's browser as `409`
 | `vanish_not_reviewed` | Batch warning: some orders became deletion candidates after the admin's review and were kept; the next snapshot decides |
 | `order_exists` | Restoring an archived order was refused because that order number is live again |
 
-Planned-order apply also reports the shared order-upsert warnings (the same ones an Excel upload shows), informational for the admin: `sap_changed` (orders whose dates, work center, quantity or version SAP changed were reset to SAP's dates), `unfirmed` (manually firmed orders un-firmed because SAP changed them), `sap_changed_running` (running orders SAP changed keep their slot and firm), `routing_running_kept` (running orders keep their run time), `unparseable_dates` (dates that could not be read count as "not sent"), and `not_applicable` / `superseded` (the batch is no longer in an applicable state, or a newer batch exists).
+Planned-order apply also reports the shared order-upsert warnings (the same ones an Excel upload shows), informational for the admin: `sap_changed` (orders whose dates, work center, quantity or version SAP changed had their planned slot cleared, so the browser re-derives the start from the SAP finish, the due date), `unfirmed` (manually firmed orders un-firmed because SAP changed them), `sap_changed_running` (running orders SAP changed keep their slot and firm), `routing_running_kept` (running orders keep their run time), `unparseable_dates` (dates that could not be read count as "not sent"), and `not_applicable` / `superseded` (the batch is no longer in an applicable state, or a newer batch exists).
 
 ### 7.7 Outbound contract (NIMBUS to SAP)
 

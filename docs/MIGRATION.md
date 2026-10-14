@@ -887,7 +887,7 @@ here because they are at-scale/multi-user hardening or product decisions, not pi
   of relying on global plant uniqueness.
 - **Gantt bar-width vs. explicit resize (F12 — resolved by backward scheduling, 2026-10-14).** The
   read no longer derives the bar width from `scheduled_start + run_time`: `db.py._EFF_END_SQL` is
-  the STORED finish (last segment end, else `scheduled_end`, else the locked SAP finish), so a saved bar
+  the STORED finish (last segment end, else `scheduled_end`, else the SAP finish: `original_finish_received`, then `basic_finish_date`), so a saved bar
   reloads as saved. A right-edge resize sets the finish; the start is re-derived backward from it. The
   server's width check (`width_mismatch`, 60 s tolerance, skipped for a bar carrying a
   `placement_exception` or one that was not moved) is what keeps a stored bar and its run time in

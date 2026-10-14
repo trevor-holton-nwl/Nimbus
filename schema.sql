@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_machine       ON orders(machine);
 -- (db.query_orders ORDER BY machine, effective start). Supersedes
 -- relying on the two single-column indexes above for that access pattern.
 CREATE INDEX IF NOT EXISTS idx_orders_machine_start ON orders(machine, basic_start_date);
--- Matches db.query_orders() ORDER BY exactly: per-machine scan ordered by effective start.
+-- Matches db.query_orders() ORDER BY exactly: per-machine scan ordered by effective start (a finish-anchored row can store only scheduled_end, so it sorts by its SAP start here; the browser derives the real start from the stored finish).
 -- Supersedes idx_orders_machine_start for the /tasks read path when scheduled_start is set.
 CREATE INDEX IF NOT EXISTS idx_orders_machine_eff_start
   ON orders(machine, COALESCE(scheduled_start, basic_start_date));
