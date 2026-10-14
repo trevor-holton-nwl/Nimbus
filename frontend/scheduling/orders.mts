@@ -1945,7 +1945,7 @@ export function notifyResidualFirming(ids: string[]): void {
 export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
-  // The finish (Updated End) Flatpickr is built on an <input> that every _render() replaces, so the
+  // The Planned Finish Flatpickr is built on an <input> that every _render() replaces, so the
   // previous instance (and its calendar popup appended to <body>) must be destroyed first —
   // otherwise one picker + one popup DOM tree leaks per render.
   _fpEnd: null as NimbusVendor.FlatpickrInstance | null,

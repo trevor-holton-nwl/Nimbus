@@ -1833,7 +1833,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             ${sortedAlerts.map(a => `
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
-                <span class="ni-conf-msg">${_esc(a.msg)}</span>
+                <span class="ni-conf-msg">${_esc(a.msgKey ? t(a.msgKey, a.msgVars) : a.msg)}</span>
                 <span class="ni-conf-date">${a.time ? a.time.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</span>
                 ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
               </div>`).join('')}

@@ -687,25 +687,6 @@ export const Util = {
     return t?.end_date || Util.sapDueDate(t);
   },
 
-  // Display-only derived "Original Start": due date minus RUN_TIME, so
-  // Orig Start and Orig End always form a runtime-consistent pair (e.g.
-  // RUN_TIME 1h, due 7:00 PM -> Orig Start 6:00 PM) instead of the raw
-  // midnight SAP date (sapDueDate already reads a date-only finish as the
-  // end of that day's working window). Falls back to the raw original_start_date (coerced
-  // to a Date) when there's no due date to anchor on. Pure/cheap — no
-  // Calendar lookup, no persistence — and never writes back to the task:
-  // original_start_date itself stays untouched because it's load-bearing
-  // for _overlayUserMoves's move-detection. Edge case (not clamped, deliberately): an order whose
-  // RUN_TIME exceeds the gap between midnight and its due time will show
-  // an implied start before midnight (the previous calendar day).
-  impliedOriginalStart(t: NimbusTask): Date | null {
-    const due = Util.sapDueDate(t);
-    if (!due) {
-      return t?.original_start_date instanceof Date ? t.original_start_date : Util.parseDate(t?.original_start_date);
-    }
-    return new Date(due.getTime() - Util.runHours(t) * Config.MS_HOUR);
-  },
-
   /** The plant clock: "now" at `plant` (or at the plant of `line`) as the naive wall-clock Date derivations use.
    *  Falls back to the server instant, then the viewer's clock, when the plant has no valid zone or none is wired. */
   plantClock(plant?: string | null, line?: string | null): Date {

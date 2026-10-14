@@ -405,9 +405,6 @@ export const Store = {
     return { inserted: Object.keys(this._state.tasks).length, collisions };
   },
 
-  /** The session-only derivation notes (`derivationIssue`, `systemMove`) describe the engine's last derivation of
-   *  a row. The next edit of its dates, machine or run time makes them stale, so a change-set that touches
-   *  those fields and does not itself carry a note clears them (the reconcile always carries both). */
   /** `user_scheduled` is the server's "a planner placed this row" wire flag and nothing else updates it on the
    *  client. A client write that gives the row both edges (a drop, a grid/Inspector edit, Override, an optimizer
    *  apply, a release, Push +1 hour, a dirty reconcile patch) is a placement, so the row is placed locally from
@@ -420,6 +417,9 @@ export const Store = {
     task.user_scheduled = true;
   },
 
+  /** The session-only derivation notes (`derivationIssue`, `systemMove`) describe the engine's last derivation of
+   *  a row. The next edit of its dates, machine or run time makes them stale, so a change-set that touches
+   *  those fields and does not itself carry a note clears them (the reconcile always carries both). */
   _clearStaleNotes(task: NimbusTask, changes: Partial<NimbusTask>): void {
     if (!('start_date' in changes || 'end_date' in changes || 'MACHINE' in changes || 'RUN_TIME' in changes)) return;
     if (!('derivationIssue' in changes) && task.derivationIssue) task.derivationIssue = null;

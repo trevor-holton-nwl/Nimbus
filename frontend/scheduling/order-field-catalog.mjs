@@ -46,8 +46,7 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'RUN_TIME', dbColumn: 'run_time', type: 'number',
         gridDefault: true, inspectorDefault: true,
         i18nGridKey: 'col.run_h', i18nInspectorKey: 'ui.insp_run_time' },
-    // Display-only derived scheduling fields (see Util.impliedOriginalStart) —
-    // shown in both surfaces today (grid column + Inspector Schedule card row).
+    // Display-only scheduling fields — shown in both surfaces today (grid column + Inspector Schedule card row).
     // The retired Original Start entry is gone (backward scheduling OQ16); Due Date is the SAP finish as received.
     { key: 'original_end_date', dbColumn: 'basic_finish_date', type: 'text',
         gridDefault: true, inspectorDefault: true,

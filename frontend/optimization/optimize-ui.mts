@@ -2002,7 +2002,7 @@ export const OptimizerPreview = {
     const distributionSeparationFindings = (OptimizerPreview._candidate?.validationFindings ?? [])
       .filter(item => item.code === 'distribution_separation');
     const distributionSeparationHtml = distributionSeparationFindings.length ? `<details class="opt-pv-section">
-      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Sub-orders may start in different buckets</span><span class="opt-pv-section-badge">${distributionSeparationFindings.length}</span></summary>
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_distribution_separation_head'))}</span><span class="opt-pv-section-badge">${distributionSeparationFindings.length}</span></summary>
       <div class="opt-pv-section-body">
         <ul>${distributionSeparationFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(item.message)}</li>`).join('')}</ul>

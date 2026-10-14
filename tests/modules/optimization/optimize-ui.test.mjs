@@ -1709,3 +1709,44 @@ test('gate 24: preview Apply drops a candidate whose derived bar has started by 
     Store.setMasterData(priorMaster, 'unit-test');
   }
 });
+
+test('OQ56 a: the Remove Backlog dialog names how many orders are backlog only because their run time grew', async () => {
+  const priorDocument = globalThis.document;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const hintEl = makeSandboxElement('opt-strategy-hint');
+  const elements = new Map([
+    ['opt-strategy-select', makeSandboxElement('opt-strategy-select', 'changeover')],
+    ['opt-strategy-hint', hintEl],
+    ['opt-run-btn', makeSandboxElement('opt-run-btn')],
+    ['opt-wheel-badge', makeSandboxElement('opt-wheel-badge')],
+  ]);
+  globalThis.document = {
+    getElementById(id) { return elements.get(id) || null; },
+    addEventListener() {}, removeEventListener() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    createElement() { return makeSandboxElement('created'); },
+    body: { appendChild() {}, classList: { add() {}, remove() {} } },
+  };
+  try {
+    const mk = (id, issue) => ({ id, PLANT: 'NOTE-P', MACHINE: 'NOTE-L', RUN_TIME: 2,
+      start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T10:00:00'), derivationIssue: issue });
+    Store.setTasks([
+      mk('n1', { code: 'reversal_forward', detail: 'run_time_grew' }),
+      mk('n2', { code: 'reversal_forward', detail: 'run_time_grew' }),
+      mk('n3', { code: 'reversal_forward', detail: 'due_date_past' }),   // late for another reason: not counted
+      mk('n4', null),
+    ], 'unit-test');
+    await OptimizeDialog.selectPlant('NOTE-P');
+    OptimizeDialog.selectMode('backlog');
+    assert.ok(hintEl.textContent.includes(Util.t('ui.opt_backlog_runtime_grew', { count: 2 })),
+      `the hint carries the run-time-grew count (2), got: ${hintEl.textContent}`);
+    OptimizeDialog.selectMode('changeover');
+    assert.ok(!hintEl.textContent.includes(Util.t('ui.opt_backlog_runtime_grew', { count: 2 })), 'other strategies show no backlog note');
+  } finally {
+    globalThis.document = priorDocument;
+    OptimizeDialog.selectMode('changeover');
+    Store.setTasks(priorTasks, 'unit-test');
+    if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});

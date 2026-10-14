@@ -877,9 +877,9 @@ function detachedCandidateResult(
   return {
     patches,
     // A2: 7th element is the uncovered-edge-count tier (SCORE_UNCOVERED in
-    // setup-scheduler.mts) — a detached legacy result has no coverage concept
+    // setup-scheduler.mts) — a detached placement result has no coverage concept
     // of its own, so it contributes 0.
-    // score[7] = SCORE_OVER_CAP (setup-scheduler), never populated on the legacy path
+    // score[7] = SCORE_OVER_CAP (setup-scheduler), never populated on this detached path
     score: [0, 0, 0, 0, 0, patches.length, 0, 0],
     explanation: [],
     diagnostics: {
@@ -922,7 +922,7 @@ export const Engine = {
    * on-demand, not consumed-and-wiped like `lastBacklogResult`. */
   lastSetupAwareResult: null as CandidateResult | null,
 
-  /** Evaluate the established legacy placement algorithm against a deep,
+  /** Evaluate the detached forward placement path (the optimizer's retained forward placement) against a deep,
    * detached snapshot. This is synchronous, so the private source selector is
    * always cleared before another caller can observe it. */
   evaluateSchedule(
@@ -2658,8 +2658,7 @@ export const Engine = {
     let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
     if (result.validationContext) result.validationContext = { ...result.validationContext, baselineSnapshot: baseSnapshot };
     // The setup-aware evaluators group every line for the plant with no
-    // opts.lines/excludeFromOpt filter of their own (unlike the legacy walk
-    // below) — apply both as a post-filter over the returned patches so a
+    // opts.lines/excludeFromOpt filter of their own (unlike the retired per-line walk) — apply both as a post-filter over the returned patches so a
     // line-scoped run or an opted-out line still behaves as promised.
     const optsLines = opts.lines as string[] | undefined;
     const allowedLines = Array.isArray(optsLines) && optsLines.length ? new Set(optsLines) : null;
@@ -2992,7 +2991,11 @@ Store.subscribe(evt => {
     const plants = new Set<string>();
     for (const id of evt.ids) {
       const task = Store.tasks[String(id)];
-      const plant = task ? Store.getPlantForLine(task.MACHINE) : null;
+      // Only a refreshed row the reconcile could re-derive wakes a plant-wide pass (the same candidate test as
+      // reconcileRuntimeSchedules): a refresh of rows that are all placed and current needs no pass (F16).
+      if (!task || !(task.runtime_schedule_mismatch || !task.user_scheduled)
+        || task.planning_status === 'needs_planning' || task.placement_exception || !task.MACHINE) continue;
+      const plant = Store.getPlantForLine(task.MACHINE);
       if (plant) plants.add(plant);
     }
     for (const plant of plants) Engine.reconcileRuntimeSchedules(plant);
@@ -3005,7 +3008,7 @@ UndoStack.afterRestore = (ids: string[]): void => Engine.reconcileRestored(ids);
 
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound
- * to `snapshot`.  This adapter shares the legacy mode implementation; it
+ * to `snapshot`.  This adapter shares the Engine's mode implementation; it
  * emits patches and never applies them while evaluating a candidate.
  *
  * Moved here verbatim from optimization/setup-scheduler.mts (this phase's
