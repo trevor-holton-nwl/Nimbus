@@ -976,6 +976,19 @@ test('plant-level and line-level findings de-duplicate to one alert per plant / 
   assert.ok(lineAlerts.every(a => a.sev === 'err'));
 });
 
+test('computeAlerts never mutates now[plant]; derivation alerts carry the real now as their time (U15)', () => {
+  const nowP = D(14, 15, 42);
+  const before = +nowP;
+  const masterData = { lines: [{ machine: 'L1', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const alerts = issueAlerts([issueTask('n1', { code: 'line_no_calendar' }, { MACHINE: 'L1' })], {
+    masterData, calendars: {}, lineSettings: { L1: { plant: 'P' } }, now: { P: nowP },
+  });
+  assert.equal(+nowP, before, 'the now Date passed in is left alone');
+  const alert = alerts.find(x => x.type === 'line_no_calendar');
+  assert.ok(alert, 'line_no_calendar alert present');
+  assert.equal(+alert.time, before, 'alert time is the real now, not 00:00');
+});
+
 test('a plant the clock refused (blockedPlants) alerts even when no order carries a note; a scoped run stays on its own line', () => {
   const masterData = { lines: [{ machine: 'L1', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
   const payload = { masterData, blockedPlants: ['P'], calendars: {}, lineSettings: {} };

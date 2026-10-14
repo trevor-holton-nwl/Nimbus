@@ -584,7 +584,7 @@
       const at = plant != null && now ? now[plant] : null;
       if (!at) return fallbackToday;
       let day = todayByPlant.get(plant);
-      if (!day) todayByPlant.set(plant, day = startOfDay(at) || fallbackToday);
+      if (!day) todayByPlant.set(plant, day = startOfDay(at instanceof Date ? new Date(+at) : at) || fallbackToday);
       return day;
     };
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
