@@ -4813,6 +4813,25 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('senior review I8: a setup-aware walk that would MOVE the held finish is discarded; the zero-setup held-finish bar stands', () => {
+    const fx = recFixture({ policy: 'never' });
+    try {
+      withSetup(fx, { minutes: 90 }, () => {
+        // 07-19 window (12 h), 10 h order held to Wed 26 17:00, RED -> BLUE 90 min. 10 h + 90 min does not fit the 12 h window slack
+        // at the finish, so the setup-aware walk would pick an earlier day (finishMoved). Setup is a preference: the finish holds.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '10', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 7), end_date: at(26, 17) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const t = Store.tasks.pb;
+        assert.equal(fmtLocal(t.end_date), '8/26 17:00', 'the held finish never moves for a changeover');
+        assert.equal(fmtLocal(t.start_date), '8/26 07:00');
+        assert.notEqual(t.derivationIssue?.code, 'finish_moved_earlier');
+      });
+    } finally { fx.restore(); }
+  });
+
   test('Task 3.2 (OQ40): a manual drop reserves no changeover; finishAnchoredPatchFor honours an explicit setupMinutes', () => {
     const fx = recFixture({ policy: 'partial_allowed' });
     try {

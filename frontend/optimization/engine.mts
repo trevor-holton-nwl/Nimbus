@@ -1722,7 +1722,10 @@ export const Engine = {
             // The reservation alone never sends a row to the forward reversal: when the setup-aware walk cannot
             // place, the zero-setup placement at the held finish stands and the setup-violated alert fires.
             const withSetup = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: minutes });
-            if (withSetup.kind === 'placed') result = withSetup;
+            // Senior review I8 (ruling 3.2): a second walk that moved the finish (a window too tight for run + changeover)
+            // is discarded too; setup is a preference, never a reason to move a held finish.
+            if (withSetup.kind === 'placed'
+              && (!withSetup.finishMoved || withSetup.changes.end_date?.getTime() === result.changes.end_date?.getTime())) result = withSetup;
           }
         }
         if (result.kind === 'reached_now') {
