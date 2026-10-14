@@ -1505,3 +1505,29 @@ test('a typed End on an order carrying a marker translates the bar by the delta 
     assert.equal(after.end_date.getTime(), new Date('2026-08-15T08:00:00').getTime());
   } finally { Inspector._currentId = priorId; Inspector._render = priorRender; fx.restore(); }
 });
+
+test('OQ42: the date-chip Today/Tomorrow presets are the plant\'s days, not the viewer\'s, near midnight', () => {
+  const priorGet = globalThis.document.getElementById;
+  const priorOffset = Store.serverOffsetMs;
+  const priorSelected = Store.selectedPlant;
+  const drop = { innerHTML: '' };
+  globalThis.document.getElementById = id => id === 'tbl-flt-date-dropdown' ? drop : null;
+  Store.setMasterData({ plants: [
+    { plant: 'P-EAST', timezone: 'Pacific/Kiritimati' },   // UTC+14
+    { plant: 'P-WEST', timezone: 'Etc/GMT+12' },            // UTC-12
+  ], lines: [] }, 'unit-test');
+  Store.setServerNow('2026-10-15T10:00:00Z', Date.now());
+  const presets = () => [...drop.innerHTML.matchAll(/name="tbl-flt-date" value="(\d{4}-\d\d-\d\d)"/g)].map(m => m[1]);
+  try {
+    Store.setSelectedPlant('P-EAST', 'unit-test');
+    Table._buildDateChipDropdown();
+    assert.deepEqual(presets(), ['2026-10-16', '2026-10-17'], 'plant clock is Fri 00:00');
+    Store.setSelectedPlant('P-WEST', 'unit-test');
+    Table._buildDateChipDropdown();
+    assert.deepEqual(presets(), ['2026-10-14', '2026-10-15'], 'plant clock is Wed 22:00');
+  } finally {
+    globalThis.document.getElementById = priorGet;
+    Store.serverOffsetMs = priorOffset;
+    Store.setSelectedPlant(priorSelected, 'unit-test');
+  }
+});

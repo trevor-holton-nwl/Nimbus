@@ -900,7 +900,7 @@ export const Table = {
   _buildDateChipDropdown(): void {
     const drop = document.getElementById('tbl-flt-date-dropdown');
     if (!drop) return;
-    const today = Util.startOfDay(new Date())!;
+    const today = Util.plantToday(Store.selectedPlant);   // OQ42: the plant's day, not the viewer's
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
     const cur = Table._chipFilters.dateKey;
