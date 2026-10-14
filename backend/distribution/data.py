@@ -664,6 +664,12 @@ def _extract_parent_facts(row: dict) -> tuple[dict, bool]:
         "labor_hours": row.get("labor_hours"),
         "machine_hours": row.get("machine_hours"),
         "no_of_fte": row.get("no_of_fte"),
+        # What the header's echo judgement needs: the finish SAP actually sent (a row that never set
+        # `sap_basic_finish_date` is judged on its `basic_finish_date`, db.upsert_orders' own default) and
+        # whether SAP sent no time on it. Never persisted: only `_header_finish_echo` reads them.
+        "sap_basic_finish_date": (row["sap_basic_finish_date"] if "sap_basic_finish_date" in row
+                                  else row.get("basic_finish_date")),
+        "_finish_date_only": row.get("_finish_date_only"),
     }
     return facts, runtime_defaulted
 
@@ -783,6 +789,10 @@ def _build_child_rows(plant: str, production_order: str, material_number: str,
             "plant": plant,
             "basic_start_date": parent_facts.get("basic_start_date"),
             "basic_finish_date": parent_facts.get("basic_finish_date"),
+            # A child created by a planner write inherits the header's locked originals (None on the ingest
+            # path, which decides them per child from the stored originals and the sent finish).
+            "original_start_received": parent_facts.get("original_start_received"),
+            "original_finish_received": parent_facts.get("original_finish_received"),
             "run_time": float(child_run_time) if child_run_time is not None else None,
             "color": parent_facts.get("color"),
             "order_quantity": float(child_qty) if child_qty is not None else None,
@@ -895,9 +905,15 @@ def _plan_one_parent(plant: str, production_order: str, material_number: str, ro
     for child in child_rows:
         child["sap_workcenter"] = row.get("sap_workcenter", raw_code)
         child["sap_production_version"] = raw_pv
+        if "sap_basic_start_date" in row:
+            child["sap_basic_start_date"] = row["sap_basic_start_date"]
         if "sap_basic_finish_date" in row:
             # the finish SAP actually sent (None = not sent), never the derived one
             child["sap_basic_finish_date"] = row["sap_basic_finish_date"]
+        if "_finish_date_only" in row:
+            # SAP sent no time on the finish: the children's echo judgement must not fall back to the
+            # midnight inference for a timed 00:00:00 finish
+            child["_finish_date_only"] = row["_finish_date_only"]
     warnings["zero_quantity_children"] += zero_qty_count
 
     parent_plan = {
@@ -1145,33 +1161,74 @@ def _insert_new_header(cur, parent: dict, batch_id: str) -> bool:
             plant, production_order, material_number, sap_workcenter,
             order_quantity, run_time, basic_start_date, basic_finish_date,
             firming_indicator, sap_facts, source, default_basis,
-            reviewed, reviewed_by, reviewed_at, reviewed_quantity, last_batch_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default', %s, %s, %s, %s, %s, %s)
+            reviewed, reviewed_by, reviewed_at, reviewed_quantity, last_batch_id,
+            original_finish_received
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'default', %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (plant, production_order, material_number) DO NOTHING
         """,
         (parent["plant"], parent["production_order"], parent["material_number"],
          parent["sap_workcenter"], facts.get("order_quantity"), facts.get("run_time"),
          facts.get("basic_start_date"), facts.get("basic_finish_date"),
          facts.get("firming_indicator"), Jsonb(sap_facts), parent["default_basis"],
-         reviewed, "policy" if reviewed else None, reviewed_at, reviewed_quantity, batch_id),
+         reviewed, "policy" if reviewed else None, reviewed_at, reviewed_quantity, batch_id,
+         # the locked due date of a brand-new header: the finish SAP sent (ingest), or the plain order's own
+         # locked original (resolve); a caller that has both puts the right one under original_finish_received
+         facts.get("original_finish_received") or facts.get("basic_finish_date")),
     )
     return cur.rowcount == 1
+
+
+def _header_finish_echo(cur, parent: dict) -> bool:
+    """True when the finish this ingest carries is an echo of the roll-up finish NIMBUS last sent to SAP for
+    this aggregate (the one echo rule, `db._row_finish_echo`, judged in the SAP frame `parent["_sap_tz"]`).
+
+    The header has no `order_sap_sent` row of its own: that table is keyed per member CHILD id and every
+    member carries the same roll-up end as `sent_finish`, so the header is judged on the sent finish of any
+    live member (MAX, deterministic). A family with no sent row on any member is not an echo. After a
+    collapse / re-weight the lettered child's sent row cascades away with it; the one-cycle detection gap
+    that leaves (the header then reads as never sent) is the accepted OQ29 gap."""
+    facts = parent["parent_facts"]
+    cur.execute(
+        """
+        SELECT MAX(s.sent_finish), (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = %s)
+          FROM order_distribution_share sh
+          JOIN order_sap_sent s ON s.order_id = sh.child_id
+         WHERE sh.plant = %s AND sh.production_order = %s AND sh.material_number = %s
+        """,
+        (parent["plant"], parent["plant"], parent["production_order"], parent["material_number"]),
+    )
+    sent, tz = cur.fetchone()
+    if sent is None:
+        return False
+    return db._row_finish_echo(
+        {"sap_sent_finish": sent, "tz": tz},
+        {"sap_basic_finish_date": facts.get("sap_basic_finish_date"),
+         "_finish_date_only": facts.get("_finish_date_only")},
+        parent.get("_sap_tz"), finish_key="sap_basic_finish_date")
 
 
 def _write_header_facts(cur, parent: dict, batch_id: str) -> None:
     """Refresh header SAP facts only (§5.2 "Existing"), guarded so a second
     run with identical facts changes nothing -- shares/reviewed/default_basis
-    are untouched here by design."""
+    are untouched here by design.
+
+    INGEST ONLY (apply()'s three call sites). `original_finish_received`, the locked SAP due date, moves
+    here and nowhere else: on an echo of the roll-up finish NIMBUS sent it keeps the stored value (a NULL
+    one is filled), otherwise it takes the finish this ingest carries (a NULL incoming finish keeps what is
+    stored)."""
     facts = parent["parent_facts"]
     sap_facts = _build_sap_facts(facts, parent.get("previous_workcenter"), parent.get("runtime_defaulted"))
+    orig_expr = """CASE WHEN %(echo)s THEN COALESCE(original_finish_received, %(of)s)
+                        ELSE COALESCE(%(of)s, original_finish_received) END"""
     cur.execute(
-        """
+        f"""
         UPDATE order_distribution
            SET sap_workcenter    = %(wc)s,
                order_quantity    = %(qty)s,
                run_time          = %(rt)s,
                basic_start_date  = %(bs)s,
                basic_finish_date = %(bf)s,
+               original_finish_received = {orig_expr},
                firming_indicator = %(fi)s,
                sap_facts         = %(facts)s,
                last_batch_id     = %(batch)s,
@@ -1182,6 +1239,7 @@ def _write_header_facts(cur, parent: dict, batch_id: str) -> None:
              OR run_time          IS DISTINCT FROM %(rt)s
              OR basic_start_date  IS DISTINCT FROM %(bs)s
              OR basic_finish_date IS DISTINCT FROM %(bf)s
+             OR original_finish_received IS DISTINCT FROM ({orig_expr})
              OR firming_indicator IS DISTINCT FROM %(fi)s
              OR sap_facts         IS DISTINCT FROM %(facts)s
              OR last_batch_id     IS DISTINCT FROM %(batch)s)
@@ -1189,6 +1247,7 @@ def _write_header_facts(cur, parent: dict, batch_id: str) -> None:
         {"wc": parent["sap_workcenter"], "qty": facts.get("order_quantity"),
          "rt": facts.get("run_time"), "bs": facts.get("basic_start_date"),
          "bf": facts.get("basic_finish_date"), "fi": facts.get("firming_indicator"),
+         "of": facts.get("basic_finish_date"), "echo": _header_finish_echo(cur, parent),
          "facts": Jsonb(sap_facts), "batch": batch_id,
          "plant": parent["plant"], "po": parent["production_order"], "mat": parent["material_number"]},
     )
@@ -1323,7 +1382,39 @@ def _replan_from_current_header(cur, parent: dict, current: dict | None) -> dict
     return new_parent
 
 
-_CHILD_UPSERT_SQL = """
+def _child_upsert_sql(*, ingest: bool) -> str:
+    """The child-row upsert in its two variants.
+
+    INGEST (`_CHILD_UPSERT_SQL`, used by apply()): SAP is the writer, so `basic_*` follow the incoming row,
+    the SAP baselines are `COALESCE(EXCLUDED, stored)` and the locked `original_*_received` are
+    `COALESCE(EXCLUDED.original_*, orders.original_*)` -- the caller decides the EXCLUDED values
+    (`db._locked_originals`: the stored ones on an echo of the sent finish, the incoming dates otherwise),
+    never this statement from `EXCLUDED.basic_*`.
+
+    PLANNER (`_CHILD_UPSERT_SQL_PLANNER`, re-weight / reset / repair, whose facts come from the stored
+    header, not from SAP): never SETs `basic_start_date`, `basic_finish_date`, `sap_basic_*` or
+    `original_*_received` on a conflict. A child it INSERTs gets the header's dates and originals and NO SAP
+    baseline (the next upload fills it)."""
+    if ingest:
+        set_basic = (
+            "        basic_start_date        = EXCLUDED.basic_start_date,\n"
+            "        basic_finish_date       = EXCLUDED.basic_finish_date,\n")
+        set_sap = (
+            "        sap_basic_start_date    = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),\n"
+            "        sap_basic_finish_date   = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),\n"
+            "        -- Locked \"as SAP first sent it\" dates: decided by the caller, never a planner fact.\n"
+            "        original_start_received  = COALESCE(EXCLUDED.original_start_received, orders.original_start_received),\n"
+            "        original_finish_received = COALESCE(EXCLUDED.original_finish_received, orders.original_finish_received),\n")
+        where_sap = (
+            "       -- SAP's dates are compared against the stored SAP baseline, never basic_*\n"
+            "       -- (baseline-correct rewrites basic_finish_date).\n"
+            "       OR (EXCLUDED.sap_basic_start_date IS NOT NULL\n"
+            "           AND orders.sap_basic_start_date IS DISTINCT FROM EXCLUDED.sap_basic_start_date)\n"
+            "       OR (EXCLUDED.sap_basic_finish_date IS NOT NULL\n"
+            "           AND orders.sap_basic_finish_date IS DISTINCT FROM EXCLUDED.sap_basic_finish_date)\n")
+    else:
+        set_basic = set_sap = where_sap = ""
+    return f"""
     INSERT INTO orders (
         id, production_order, material_number, material_description,
         machine, plant, basic_start_date, basic_finish_date,
@@ -1332,7 +1423,7 @@ _CHILD_UPSERT_SQL = """
         bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
         parent_production_order, distribution_letter,
         sap_workcenter, sap_production_version, sap_basic_start_date, sap_basic_finish_date,
-        upload_batch_id, updated_at
+        upload_batch_id, original_start_received, original_finish_received, updated_at
     ) VALUES (
         %(id)s, %(production_order)s, %(material_number)s, %(material_description)s,
         %(machine)s, %(plant)s, %(basic_start_date)s, %(basic_finish_date)s,
@@ -1341,7 +1432,7 @@ _CHILD_UPSERT_SQL = """
         %(bom_alternative)s, %(bom_usage)s, %(labor_hours)s, %(machine_hours)s, %(no_of_fte)s,
         %(parent_production_order)s, %(distribution_letter)s,
         %(sap_workcenter)s, %(sap_production_version)s, %(sap_basic_start_date)s, %(sap_basic_finish_date)s,
-        %(batch_id)s, NOW()
+        %(batch_id)s, %(original_start_received)s, %(original_finish_received)s, NOW()
     )
     ON CONFLICT (id) DO UPDATE SET
         order_quantity          = EXCLUDED.order_quantity,
@@ -1351,9 +1442,7 @@ _CHILD_UPSERT_SQL = """
         labor_hours             = EXCLUDED.labor_hours,
         machine_hours           = EXCLUDED.machine_hours,
         material_description    = EXCLUDED.material_description,
-        basic_start_date        = EXCLUDED.basic_start_date,
-        basic_finish_date       = EXCLUDED.basic_finish_date,
-        color                   = EXCLUDED.color,
+{set_basic}        color                   = EXCLUDED.color,
         form_size               = EXCLUDED.form_size,
         firming_indicator       = EXCLUDED.firming_indicator,
         planned_order_initial_quantity = EXCLUDED.planned_order_initial_quantity,
@@ -1372,9 +1461,7 @@ _CHILD_UPSERT_SQL = """
         -- INSERT, so an unchanged re-upload leaves a child's xmin alone.
         sap_workcenter          = COALESCE(EXCLUDED.sap_workcenter, orders.sap_workcenter),
         sap_production_version  = COALESCE(EXCLUDED.sap_production_version, orders.sap_production_version),
-        sap_basic_start_date    = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),
-        sap_basic_finish_date   = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),
-        -- H10/D33: a SCHEDULED child whose effective run time actually changed needs
+{set_sap}        -- H10/D33: a SCHEDULED child whose effective run time actually changed needs
         -- its bar re-fitted (the client reconcile reads this flag); anything else
         -- keeps the existing flag untouched. Effective = the run_time CASE above.
         runtime_schedule_mismatch = CASE
@@ -1391,13 +1478,7 @@ _CHILD_UPSERT_SQL = """
        OR orders.labor_hours IS DISTINCT FROM EXCLUDED.labor_hours
        OR orders.machine_hours IS DISTINCT FROM EXCLUDED.machine_hours
        OR orders.material_description IS DISTINCT FROM EXCLUDED.material_description
-       -- SAP's dates are compared against the stored SAP baseline, never basic_*
-       -- (baseline-correct rewrites basic_finish_date). color is re-stamped from
-       -- master data and upload_batch_id is just a tag: neither is a difference.
-       OR (EXCLUDED.sap_basic_start_date IS NOT NULL
-           AND orders.sap_basic_start_date IS DISTINCT FROM EXCLUDED.sap_basic_start_date)
-       OR (EXCLUDED.sap_basic_finish_date IS NOT NULL
-           AND orders.sap_basic_finish_date IS DISTINCT FROM EXCLUDED.sap_basic_finish_date)
+{where_sap}       -- color is re-stamped from master data and upload_batch_id is just a tag: neither is a difference.
        OR (EXCLUDED.sap_workcenter IS NOT NULL
            AND orders.sap_workcenter IS DISTINCT FROM EXCLUDED.sap_workcenter)
        OR (EXCLUDED.sap_production_version IS NOT NULL
@@ -1416,6 +1497,10 @@ _CHILD_UPSERT_SQL = """
        OR orders.parent_production_order IS DISTINCT FROM EXCLUDED.parent_production_order
        OR orders.distribution_letter IS DISTINCT FROM EXCLUDED.distribution_letter
 """
+
+
+_CHILD_UPSERT_SQL = _child_upsert_sql(ingest=True)
+_CHILD_UPSERT_SQL_PLANNER = _child_upsert_sql(ingest=False)
 # Deliberately NOT in the SET clause (mirrors db.py's own _UPSERT_SQL
 # comment): scheduled_start, scheduled_end, notes, planning_status,
 # planning_reason. A KEPT child's schedule/notes/planning state must survive
@@ -1474,6 +1559,26 @@ def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> Non
     )
 
 
+def _ingest_originals(cur, child_ids: list[str]) -> dict[str, dict]:
+    """The before-image `db._locked_originals` judges an ingest child against: its stored locked dates, the
+    finish NIMBUS last sent for it (`order_sap_sent`, keyed per child id) and its plant's zone. Rows that
+    do not exist yet are simply absent (a brand-new child is never an echo)."""
+    if not child_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT o.id, o.original_start_received, o.original_finish_received, ss.sent_finish,
+               (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant)
+          FROM orders o
+          LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
+         WHERE o.id = ANY(%s)
+        """,
+        (child_ids,),
+    )
+    return {r[0]: {"original_start_received": r[1], "original_finish_received": r[2],
+                   "sap_sent_finish": r[3], "tz": r[4]} for r in cur.fetchall()}
+
+
 def _apply_children(cur, parent: dict) -> int:
     """Idempotently create/correct every child row this parent's current
     shares call for (§5.3 materialization + §5.4 steps 3 and 5). Any child
@@ -1482,10 +1587,18 @@ def _apply_children(cur, parent: dict) -> int:
     the number of rows actually written (touched); when the caller put a list
     under `parent["_touched_ids"]`, the ids of those rows are appended to it
     (the ingest seam re-stamps and re-resolves exactly those, instead of a
-    batch tag)."""
+    batch tag).
+
+    Two callers, two SQL variants. apply() marks the parent `_ingest` (SAP is the writer: the dates and the
+    locked originals follow the incoming row, judged per child by the one echo rule, in the SAP frame
+    `parent["_sap_tz"]`). Every planner write (re-weight / reset / repair, whose parent stub carries no such
+    mark) uses the planner variant, which never touches a date, an SAP baseline or a locked original of an
+    existing child, and gives a child it creates the header's dates and originals but no SAP baseline."""
     previous_ids = parent["previous_child_ids"]
     anchor = parent.get("anchor")
     touched_ids = parent.get("_touched_ids")
+    ingest = bool(parent.get("_ingest"))
+    sql = _CHILD_UPSERT_SQL if ingest else _CHILD_UPSERT_SQL_PLANNER
     touched = 0
     # Deadlock guard: a concurrent /tasks save locks child rows in id order,
     # while the upserts below run in letter order. Lock every child this
@@ -1495,20 +1608,31 @@ def _apply_children(cur, parent: dict) -> int:
                        for r in parent["child_rows"]} | set(previous_ids))
     if lock_ids:
         cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (lock_ids,))
+    before = _ingest_originals(cur, lock_ids) if ingest else {}
     for child_row in parent["child_rows"]:
         child_id = db.make_id(child_row["production_order"], child_row["material_number"])
         is_new = child_id not in previous_ids
         params = dict(child_row)
         params["id"] = child_id
         params["batch_id"] = parent["batch_id"]
-        # SAP baselines: rows planned by ingest carry them; a re-weight/reset/repair
-        # child (built from the header's SAP facts) records the header's dates and
-        # work center, and never a production version of its own.
+        # SAP work center / production version: rows planned by ingest carry them; a planner-created child
+        # takes the parent's work center and never a production version of its own.
         params.setdefault("sap_workcenter", parent.get("sap_workcenter"))
         params.setdefault("sap_production_version", None)
-        params.setdefault("sap_basic_start_date", params.get("basic_start_date"))
-        params.setdefault("sap_basic_finish_date", params.get("basic_finish_date"))
-        cur.execute(_CHILD_UPSERT_SQL, params)
+        if ingest:
+            # the locked originals, decided by the one echo rule (db.upsert_orders' own default applies: a row
+            # that never set `sap_basic_finish_date` is judged on its `basic_finish_date`)
+            judged = {**params, "sap_basic_finish_date": params.get(
+                "sap_basic_finish_date", params.get("basic_finish_date"))}
+            params["original_start_received"], params["original_finish_received"] = db._locked_originals(
+                before.get(child_id), judged, parent.get("_sap_tz"))
+            params.setdefault("sap_basic_start_date", None)
+            params.setdefault("sap_basic_finish_date", None)
+        else:
+            # a planner write never records an SAP baseline: INSERT leaves it NULL, a conflict never sets it
+            params["sap_basic_start_date"] = None
+            params["sap_basic_finish_date"] = None
+        cur.execute(sql, params)
         if cur.rowcount:
             touched += 1
             if touched_ids is not None:
@@ -1680,7 +1804,7 @@ def _apply_chunk_size(n_parents: int) -> int:
     return max(_APPLY_CHUNK_PARENTS, -(-n_parents // _APPLY_MAX_CHUNKS))
 
 
-def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
+def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str | None = None) -> dict:
     """§5.4: the post-hook transaction, run AFTER the caller's normal upsert
     chunks and backfills have committed, as ONE transaction on `conn` (the
     caller commits/rolls back -- this function does call `conn.commit()`
@@ -1690,6 +1814,9 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
     `plan` is exactly the `plan_structure` `plan()` returned (its
     `ingest_warnings` key rides along so this function doesn't need a
     separate parameter for function 1's warnings dict).
+
+    `sap_tz` is the SAP system zone the echo rule judges in (db.upsert_orders passes the one it was given;
+    None = the plant's own zone, the Excel path and every standalone caller).
 
     Idempotent: every write here is guarded (`ON CONFLICT ... DO NOTHING` /
     `DO UPDATE ... WHERE`, or a plain `UPDATE ... WHERE x IS DISTINCT FROM`)
@@ -1762,6 +1889,10 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system") -> dict:
         def _apply_one_parent(key: tuple[str, str, str], local: dict) -> None:
             parent = parents[key]
             plant, production_order, material_number = key
+            # apply() is the ingest writer: SAP's dates and the locked originals may move here (and only here,
+            # besides the plain-order upsert). `_sap_tz` is the SAP frame db.upsert_orders judges echoes in.
+            parent["_ingest"] = True
+            parent["_sap_tz"] = sap_tz
 
             if parent["is_new_header"]:
                 inserted = _insert_new_header(cur, parent, batch_id)
@@ -2691,9 +2822,25 @@ def _parent_facts_from_header(cur, plant: str, order: str, material: str, header
     )
     row = cur.fetchone()
     labor_hours, machine_hours = row if row else (None, None)
+    # The locked originals a planner-created child inherits. Finish: the header's own locked due date (NULL on
+    # a header written before the column existed -> its basic_finish_date, which only ingest writes). Start:
+    # the header has no locked start, so the earliest locked start among its living children, else the
+    # header's basic_start_date (also ingest-only).
+    cur.execute(
+        "SELECT (SELECT d.original_finish_received FROM order_distribution d"
+        "         WHERE d.plant = %s AND d.production_order = %s AND d.material_number = %s),"
+        "       (SELECT MIN(o.original_start_received) FROM orders o"
+        "         WHERE o.id IN (SELECT s.child_id FROM order_distribution_share s"
+        "                         WHERE s.plant = %s AND s.production_order = %s AND s.material_number = %s"
+        "                           AND s.child_id IS NOT NULL))",
+        (plant, order, material, plant, order, material),
+    )
+    orig_finish, orig_start = cur.fetchone()
     facts.update({
         "basic_start_date": header.get("basic_start_date"),
         "basic_finish_date": header.get("basic_finish_date"),
+        "original_start_received": orig_start if orig_start is not None else header.get("basic_start_date"),
+        "original_finish_received": orig_finish if orig_finish is not None else header.get("basic_finish_date"),
         "order_quantity": header.get("order_quantity"),
         "run_time": header.get("run_time"),
         "firming_indicator": header.get("firming_indicator"),
@@ -3012,6 +3159,8 @@ def _read_write_children(cur, child_ids) -> list[dict]:
         f"""
         SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
                o.labor_hours, o.machine_hours, o.scheduled_start, o.scheduled_end,
+               -- NAMING TRAP: these two columns are the LOCKED original SAP dates (COALESCE to basic_* only for
+               -- a row not yet backfilled), emitted under the basic_* keys the child DTO has always used.
                COALESCE(o.original_start_received, o.basic_start_date) AS basic_start_date,
                COALESCE(o.original_finish_received, o.basic_finish_date) AS basic_finish_date, o.notes,
                o.planning_status, o.planning_reason, o.distribution_letter, o.parent_production_order,
@@ -3635,10 +3784,12 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
         cur.execute(
             """
             SELECT o.id, o.production_order, o.material_number, o.material_description, o.machine,
-                   o.basic_start_date, o.basic_finish_date, o.run_time, o.color, o.order_quantity,
+                   COALESCE(o.original_start_received, o.basic_start_date),
+                   COALESCE(o.original_finish_received, o.basic_finish_date), o.run_time, o.color,
+                   o.order_quantity,
                    o.form_size, o.firming_indicator, o.planned_order_initial_quantity, o.reduced_quantity,
                    o.order_category, o.order_type, o.bom_alternative, o.bom_usage, o.labor_hours,
-                   o.machine_hours, o.no_of_fte
+                   o.machine_hours, o.no_of_fte, o.sap_basic_start_date, o.sap_basic_finish_date
               FROM orders o
              WHERE o.plant = %s AND o.parent_production_order IS NULL
                AND o.machine IN (SELECT sap_workcenter FROM sap_workcenter WHERE plant = %s)
@@ -3660,6 +3811,10 @@ def _resolve_wc_codes(plant: str, actor: str, dry_run: bool) -> dict:
                 "reduced_quantity": r[13], "order_category": r[14], "order_type": r[15],
                 "bom_alternative": r[16], "bom_usage": r[17], "labor_hours": r[18],
                 "machine_hours": r[19], "no_of_fte": r[20],
+                # The plain order's own SAP baselines carry over to its children (None keeps/leaves NULL): a
+                # resolve never invents a baseline from a planner-touched `basic_*`, and the dates above are
+                # the LOCKED originals, so the new header/children lock the right due date.
+                "sap_basic_start_date": r[21], "sap_basic_finish_date": r[22],
             }
             for r in candidates
         ]
@@ -3735,7 +3890,8 @@ def _resolve_machines(plant: str, workcenter: str, actor: str, dry_run: bool) ->
         cur.execute(
             """
             SELECT o.id, o.production_order, o.material_number, o.machine, o.order_quantity, o.run_time,
-                   o.basic_start_date, o.basic_finish_date, o.firming_indicator
+                   o.basic_start_date, COALESCE(o.original_finish_received, o.basic_finish_date),
+                   o.firming_indicator
               FROM orders o
               LEFT JOIN order_distribution od
                 ON od.plant = o.plant AND od.production_order = o.production_order
@@ -3757,13 +3913,15 @@ def _resolve_machines(plant: str, workcenter: str, actor: str, dry_run: bool) ->
         letters = service.assign_letters(sorted(members))
         resolve_batch_id = str(uuid.uuid4())  # order_distribution.last_batch_id is UUID-typed
         headers_created = 0
+        # `bf` is the plain order's LOCKED original finish (basic_finish_date only for a row not yet backfilled):
+        # a client-rewritten basic_finish_date must never become the header's due date.
         for oid, order, material, machine, qty, run_time, bs, bf, firming in candidates:
             shares = {m: (Decimal(100) if m == machine else Decimal(0)) for m in members}
             parent = {
                 "plant": plant, "production_order": order, "material_number": material,
                 "sap_workcenter": workcenter, "parent_facts": {
                     "order_quantity": qty, "run_time": run_time, "basic_start_date": bs,
-                    "basic_finish_date": bf, "firming_indicator": firming,
+                    "basic_finish_date": bf, "original_finish_received": bf, "firming_indicator": firming,
                 },
                 "default_basis": "workcenter_weights", "is_new_header": True, "letters": letters,
                 "shares": shares, "runtime_defaulted": False,

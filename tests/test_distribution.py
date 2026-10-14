@@ -4687,6 +4687,163 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
             assert sched is not None and firmed is True
 
+    def _originals(self, pg, mat):
+        """(header original_finish_received, {child id: (original_start_received, original_finish_received,
+        sap_basic_start_date, sap_basic_finish_date)})."""
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT original_finish_received FROM order_distribution"
+                        " WHERE plant=%s AND production_order=%s AND material_number=%s",
+                        (self.PLANT, self.ORD, mat))
+            header = cur.fetchone()[0]
+            cur.execute("SELECT id, original_start_received, original_finish_received, sap_basic_start_date,"
+                        " sap_basic_finish_date FROM orders WHERE plant=%s AND parent_production_order=%s"
+                        " AND material_number=%s ORDER BY id", (self.PLANT, self.ORD, mat))
+            return header, {r[0]: tuple(r[1:]) for r in cur.fetchall()}
+
+    def _mark_sent(self, pg, mat, sent_finish):
+        """What a Send to SAP leaves behind: one order_sap_sent row per member child carrying the roll-up end."""
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO order_sap_sent (order_id, plant, sent_finish)"
+                        " SELECT id, plant, %s FROM orders WHERE plant=%s AND parent_production_order=%s"
+                        " AND material_number=%s ON CONFLICT (order_id) DO UPDATE SET sent_finish = EXCLUDED.sent_finish",
+                        (sent_finish, self.PLANT, self.ORD, mat))
+            conn.commit()
+
+    def test_reweight_then_unchanged_dateonly_upload_resets_no_sibling(self, pg):
+        """A date-only SAP finish (Fri 23 Oct) that NIMBUS already sent back is an echo. A planner re-weight
+        must not make the next unchanged upload look like an SAP change (no sibling slot reset), must not
+        move the locked originals on the header or the children, and must not stamp an SAP baseline on a
+        child it creates."""
+        fri = dt.datetime(2026, 10, 23)                       # date only: SAP sent no time
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        rows = [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)]
+        self._upload(pg, rows)
+        header_before, kids_before = self._originals(pg, self.MAT)
+        assert header_before == fri and len(kids_before) == 2
+        assert all(k[1] == fri for k in kids_before.values())
+        self._mark_sent(pg, self.MAT, fri + dt.timedelta(hours=14))   # NIMBUS's roll-up end, same calendar day
+        self._place_and_firm(pg)
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 50}, {"machine": self.L2, "weight": 50}],
+            base_version=header["xmin"], actor="tester")
+        # the re-weight itself writes no SAP baseline and no original
+        assert self._originals(pg, self.MAT) == (header_before, kids_before)
+        res = self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
+        for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+            assert sched is not None and firmed is True, "an echoed upload must not reset any sibling"
+        assert self._originals(pg, self.MAT) == (header_before, kids_before)
+
+    def test_reweight_adding_a_member_leaves_the_new_child_without_sap_baseline(self, pg):
+        """A child created by a planner re-weight inherits the header's originals but carries no SAP baseline
+        of its own (the next upload fills it); the existing children's baselines are not rewritten."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        L3 = "ZZTEST_L3_STR"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                        " VALUES (%s,%s,%s,%s,0)", (self.SUB, self.PLANT, L3, self.WC))
+            conn.commit()
+        try:
+            header_before, kids_before = self._originals(pg, self.MAT)
+            header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT,
+                [{"machine": self.L1, "weight": 40}, {"machine": self.L2, "weight": 40}, {"machine": L3, "weight": 20}],
+                base_version=header["xmin"], actor="tester")
+            header_after, kids_after = self._originals(pg, self.MAT)
+            assert header_after == header_before
+            assert len(kids_after) == 3
+            for cid, vals in kids_after.items():
+                if cid in kids_before:
+                    assert vals == kids_before[cid]
+                else:
+                    assert vals[0] == start and vals[1] == fri, "the new child inherits the locked originals"
+                    assert vals[2] is None and vals[3] is None, "and carries no SAP baseline yet"
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+                conn.commit()
+
+    def test_reweight_never_rewrites_a_childs_dates_or_baseline(self, pg):
+        """A planner re-weight leaves every child's basic_finish_date, SAP baselines and locked originals
+        exactly as they are, even when the stored values differ from what the header would recompute."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        moved = dt.datetime(2026, 10, 27, 12, 0)     # what a client baseline-correct would leave behind
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET basic_finish_date = %s WHERE plant=%s AND parent_production_order=%s",
+                        (moved, self.PLANT, self.ORD))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 50}, {"machine": self.L2, "weight": 50}],
+            base_version=header["xmin"], actor="tester")
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT basic_start_date, basic_finish_date, sap_basic_start_date, sap_basic_finish_date,"
+                        " original_start_received, original_finish_received FROM orders"
+                        " WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        for r in rows:
+            assert r == (start, moved, start, fri, start, fri)
+
+    def test_header_original_finish_follows_the_echo_rule(self, pg):
+        """The header's locked due date: set by the first ingest, kept when the next upload echoes the roll-up
+        finish NIMBUS sent (judged on ANY member child's sent row), replaced by a genuine SAP change."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        assert self._originals(pg, self.MAT)[0] == fri
+        # no sent row on any member: a different finish is a genuine change
+        mon = dt.datetime(2026, 10, 26)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=mon)])
+        assert self._originals(pg, self.MAT)[0] == mon
+        # NIMBUS sent Wed 28 Oct; SAP echoes that date back (date only): the locked due date stays
+        self._mark_sent(pg, self.MAT, dt.datetime(2026, 10, 28, 14, 0))
+        wed = dt.datetime(2026, 10, 28)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=wed)])
+        header_orig, kids = self._originals(pg, self.MAT)
+        assert header_orig == mon and all(k[1] == mon for k in kids.values())
+        # a finish that is neither the old one nor the sent one is SAP's own change
+        thu = dt.datetime(2026, 10, 29)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=thu)])
+        header_orig, kids = self._originals(pg, self.MAT)
+        assert header_orig == thu and all(k[1] == thu for k in kids.values())
+
+    def test_resolve_machines_header_due_comes_from_the_plain_orders_locked_original(self, pg):
+        """`resolve` scope `machines`: the new header's due date is the plain order's locked original finish,
+        never a client-rewritten basic_finish_date."""
+        fri = dt.datetime(2026, 10, 23)
+        moved = dt.datetime(2026, 10, 27, 12, 0)
+        oid = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # start from a plain order: drop the family the fixture ingested
+            cur.execute("DELETE FROM orders WHERE plant=%s AND (parent_production_order=%s OR id=%s)",
+                        (self.PLANT, self.ORD, oid))
+            cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, original_start_received, original_finish_received, order_quantity, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,100,10)",
+                (oid, self.ORD, self.MAT, self.L1, self.PLANT, dt.datetime(2026, 10, 21, 8), moved,
+                 dt.datetime(2026, 10, 21, 8), fri))
+            conn.commit()
+        res = distribution_data.resolve(self.PLANT, "machines", workcenter=self.WC, actor="tester")
+        assert res["headers_created"] == 1
+        assert self._originals(pg, self.MAT)[0] == fri
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT basic_finish_date FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            assert cur.fetchone()[0] == fri
+
     def test_parent_quantity_change_resets_all_children(self, pg):
         self._upload(pg, [self._parent(self.MAT)])
         self._place_and_firm(pg)
@@ -4785,6 +4942,7 @@ class TestMutationHolesChildUpsertAndDelete(_ReweightFixtureBase):
         "order_type", "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
         "parent_production_order", "distribution_letter",
         "sap_workcenter", "sap_production_version", "sap_basic_start_date", "sap_basic_finish_date",
+        "original_start_received", "original_finish_received",
     )
 
     def _child(self, pg, machine):

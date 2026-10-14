@@ -3395,31 +3395,37 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
     return result
 
 
+def _locked_originals(b: dict | None, row: dict, sap_tz: str | None) -> tuple:
+    """(original_start_received, original_finish_received) to write for one incoming row.
+
+    `b` is the stored before-image (None = brand-new row), `row` the ingest row (`basic_*` are SAP's dates as
+    received, `sap_basic_finish_date` the finish judged for the echo). On an echo of the finish NIMBUS last
+    sent, BOTH locked columns keep their STORED values (a start-only SAP change whose finish echoes must not
+    refresh `original_start_received`); a column with no stored value yet takes the incoming one, so a first
+    write still populates it. Not an echo (never-sent order, or a genuine finish change): both carry the
+    incoming SAP start / finish. Only the finish decides (OQ31). Shared by the order upsert and the
+    distribution child writer."""
+    in_s, in_f = row.get("basic_start_date"), row.get("basic_finish_date")
+    # the finish SAP actually sent (`sap_basic_finish_date`), judged exactly as sap_changed_fields does
+    if b and _row_finish_echo(b, row, sap_tz, finish_key="sap_basic_finish_date"):
+        orig_s = b.get("original_start_received") if b.get("original_start_received") is not None else in_s
+        orig_f = b.get("original_finish_received") if b.get("original_finish_received") is not None else in_f
+        return orig_s, orig_f
+    return in_s, in_f
+
+
 def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
                             sap_tz: str | None) -> list[tuple]:
-    """Fill the trailing (original_start_received, original_finish_received) of each upsert tuple.
-
-    Per incoming row: `echo = _row_finish_echo(...)` (a sent finish exists and the incoming one echoes it). On an echo of the finish
-    NIMBUS last sent, BOTH locked columns keep their STORED values (a start-only SAP change whose finish
-    echoes must not refresh `original_start_received`); a column that has no stored value yet takes the
-    incoming one, so a first write still populates it. Not an echo (never-sent order, or a genuine finish
-    change): both carry the incoming SAP start / finish. Only the finish decides (OQ31). The upsert SETs
-    `COALESCE(EXCLUDED.original_*, orders.original_*)`, never from `EXCLUDED.basic_*`."""
+    """Fill the trailing (original_start_received, original_finish_received) of each upsert tuple from
+    `_locked_originals`. The upsert SETs `COALESCE(EXCLUDED.original_*, orders.original_*)`, never from
+    `EXCLUDED.basic_*`."""
     out: list[tuple] = []
     for t in chunk:
-        row, b = row_by_id.get(t[0]), before.get(t[0])
+        row = row_by_id.get(t[0])
         if row is None:
             out.append(t)
             continue
-        in_s, in_f = row.get("basic_start_date"), row.get("basic_finish_date")
-        # the finish SAP actually sent (`sap_basic_finish_date`), judged exactly as sap_changed_fields does
-        echo = bool(b) and _row_finish_echo(b, row, sap_tz, finish_key="sap_basic_finish_date")
-        if echo:
-            orig_s = b.get("original_start_received") if b.get("original_start_received") is not None else in_s
-            orig_f = b.get("original_finish_received") if b.get("original_finish_received") is not None else in_f
-        else:
-            orig_s, orig_f = in_s, in_f
-        out.append((*t[:-2], orig_s, orig_f))
+        out.append((*t[:-2], *_locked_originals(before.get(t[0]), row, sap_tz)))
     return out
 
 
@@ -3890,7 +3896,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # planned parent — an empty plan (no distribute-mode rows this
             # batch) is a no-op plan_fn already accounted for.
             if apply_fn is not None and distribution_plan.get("parents"):
-                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=filename or "system")
+                # apply() judges the distribution header's echo in the SAP frame the chunks used (the Excel path
+                # has none: its apply_fn call stays exactly as before)
+                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=filename or "system",
+                                     **({"sap_tz": sap_tz} if sap_tz else {}))
                 # Same insertion style as the missing_master_data entry above —
                 # one dict, `level`/`msg` are the two fields the cockpit's
                 # warning list actually reads.
