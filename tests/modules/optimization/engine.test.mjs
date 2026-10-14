@@ -4586,6 +4586,27 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('Task 3.2 fix round 1: a setup-aware walk that cannot place keeps the zero-setup held-finish placement (no reversal)', () => {
+    const fx = recFixture({ policy: 'never' });
+    try {
+      withSetup(fx, { minutes: 30 }, () => {
+        Store.setCalendar(fx.line, Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [7, 15] : null])), 'unit-test');
+        // 07-15 window (inside the plant's 07-19), 8 h order held to Wed 26 15:00 after a RED -> BLUE 30-minute changeover. No window holds
+        // 8 h + 30 min, so the setup-aware walk fails; the zero-setup bar (07:00-15:00) must stand.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '8', original_end_date: at(26, 15), start_date: at(18, 6), end_date: at(18, 14) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const t = Store.tasks.pb;
+        assert.equal(fmtLocal(t.start_date), '8/26 07:00');
+        assert.equal(fmtLocal(t.end_date), '8/26 15:00');
+        assert.notEqual(t.derivationIssue?.code, 'reversal_forward');
+        assert.equal(t.derivationIssue ?? null, null);
+      });
+    } finally { fx.restore(); }
+  });
+
   test('Task 3.2 (OQ40): a manual drop reserves no changeover; finishAnchoredPatchFor honours an explicit setupMinutes', () => {
     const fx = recFixture({ policy: 'partial_allowed' });
     try {

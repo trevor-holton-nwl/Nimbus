@@ -1686,7 +1686,12 @@ export const Engine = {
           // The first walk shows where the order starts, which names its predecessor; walk again with that
           // pair's changeover so the earliest piece also holds it (only the start can move, never the finish).
           const { minutes } = setupBefore(task, line, result.changes.start_date!);
-          if (minutes > 0) result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: minutes });
+          if (minutes > 0) {
+            // The reservation alone never sends a row to the forward reversal: when the setup-aware walk cannot
+            // place, the zero-setup placement at the held finish stands and the setup-violated alert fires.
+            const withSetup = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: minutes });
+            if (withSetup.kind === 'placed') result = withSetup;
+          }
         }
         if (result.kind === 'reached_now') {
           (reversals.get(line) ?? reversals.set(line, []).get(line)!).push({ task, anchor, stale });
