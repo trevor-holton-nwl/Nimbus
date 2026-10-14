@@ -5150,6 +5150,25 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         for r in rows:
             assert r == (start, moved, start, fri, start, fri)
 
+    def test_a_startless_header_matches_a_date_range_on_its_finish(self, pg):
+        """U14: a header created from a start-less row keeps basic_start_date NULL; the Board list and the
+        aggregate CSV date-range filters match it on its basic_finish_date instead of dropping it."""
+        finish = self.base + dt.timedelta(days=3)
+        self._upload(pg, [self._parent(self.MAT2, basic_start_date=None, basic_finish_date=finish)])
+        window = dict(date_from=finish - dt.timedelta(days=1), date_to=finish + dt.timedelta(days=1))
+        outside = dict(date_from=finish + dt.timedelta(days=5), date_to=finish + dt.timedelta(days=9))
+
+        def listed(**kw):
+            out = distribution_data.list_headers_for_plant(self.PLANT, search=self.ORD, limit=0, **kw)
+            return any(r["header"]["material_number"] == self.MAT2 for r in out["data"])
+
+        def aggregated(**kw):
+            return any(r.get("material_number") == self.MAT2 or r.get("material") == self.MAT2
+                       for r in distribution_data.get_aggregate(self.PLANT, **kw))
+
+        assert listed() and listed(**window) and not listed(**outside)
+        assert aggregated() and aggregated(**window) and not aggregated(**outside)
+
     def test_new_child_without_a_sent_row_inherits_the_family_echo_decision(self, pg):
         """U11: send -> re-weight (a new child with no order_sap_sent row) -> SAP echoes the sent finish. The
         header and the old children keep their locked original finish; the new child must too (it used to take

@@ -2250,10 +2250,10 @@ def _header_where_sql(plant: str, *, search=None, workcenter=None, reviewed=None
         where.append("last_batch_id = %s")
         params.append(batch)
     if date_from is not None:
-        where.append("basic_start_date >= %s")
+        where.append("COALESCE(basic_start_date, basic_finish_date) >= %s")
         params.append(date_from)
     if date_to is not None:
-        where.append("basic_start_date <= %s")
+        where.append("COALESCE(basic_start_date, basic_finish_date) <= %s")
         params.append(date_to)
     if machines:
         where.append(
@@ -2608,10 +2608,10 @@ def get_aggregate(plant: str, *, workcenter: str | None = None, date_from=None, 
         where.append("hd.sap_workcenter = %s")
         params.append(workcenter)
     if date_from is not None:
-        where.append("hd.basic_start_date >= %s")
+        where.append("COALESCE(hd.basic_start_date, hd.basic_finish_date) >= %s")
         params.append(date_from)
     if date_to is not None:
-        where.append("hd.basic_start_date <= %s")
+        where.append("COALESCE(hd.basic_start_date, hd.basic_finish_date) <= %s")
         params.append(date_to)
     where_sql = " AND ".join(where)
 
