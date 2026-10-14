@@ -106,6 +106,161 @@ The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`
 
 The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps each row's xmin (the optimistic-concurrency `base_version`). Apply it at deploy time, never mid-shift. Planners must save before the run (an unsaved edit goes stale on its next save) and reload afterwards. The `2026-10-15-1` file also reads `order_sap_sent`, so `2026-10-08-sap-staging-tables.sql` must already be in the ledger.
 
+## Backward-scheduling cutover
+
+> **This runbook was written, not executed.** The 2026-10 backward-scheduling work was built and reviewed without touching the pilot (owner decision "deploy nothing", 2026-10-13): no `az` command, no `psql` against Azure and no `/promote-azure` run was made while writing it. Every command below is a plan for the operator, to be rehearsed on a copy first (step 3). Where a platform fact could not be checked from the repository it is marked **[unverified]**. The design evidence and every decision behind it are in `BACKWARD_SCHEDULING_MIGRATION.md` (section 8.13 is the long form of this runbook; section 8.8 is the rollback matrix).
+
+### What the cutover does
+
+From the cutover image on, a bar is anchored on its **finish** and its start is derived backward from it through the working calendar. For the data, the cutover migration does this to every order that is not waiting in Needs Planning:
+
+- It removes the placed start and end, so the order reads as "never placed" and re-derives from its due date the first time its plant is opened under the new image.
+- A **running** order keeps its start and its end. A running order that has a run time and no segments gets `scheduled_end = scheduled_start + run_time`, replacing any differing stored end.
+- It removes the schedule segments of those orders, clears the placement-exception marker, flags the order as needing a re-derive (`runtime_schedule_mismatch`) and moves `updated_at`, which gives every touched row a new version (any unsaved edit in an open browser tab goes stale).
+- Orders in Needs Planning are not touched. Nothing is sent to SAP by the migration.
+
+Nothing in the database restores the old placed finishes once planners have saved under the new rule (step 13). The snapshot tables from run 2 are the only recovery path, and using them loses every later edit.
+
+### Roles (the owner fills in names before the window)
+
+**Decider** (go, no-go, abort) `<name>`; **deploy operator** (runs the migration runner and the image commands) `<name>`; **platform operator** (backup, restore, firewall) `<name>`; **dump owner** (takes the pilot dump for the rehearsal) `<name>`; **SAP contact** `<name>`; **watcher** (reads Admin Cockpit, Logs and planner reports in the first shift) `<name>`; **capturer** (takes the pre-roll numbers) `<name>`.
+
+### The runbook, in order
+
+**1. Merge, once.** Merge `feature/backward-scheduling` into `main` by pull request: one merge, CI green on the PR. Nothing from this branch deploys before that.
+
+**2. Read the pending set.** Phase 1 (`2026-10-15-1-orders-original-dates.sql` and `2026-10-15-2-orders-run-time-bounds-336.sql`) must already be in the ledger; if it is not, stop and apply it first as described in the section above. Read the ledger, read-only, as an admin login (never paste the password into chat or a command line):
+
+```sql
+SELECT filename, applied_at FROM migration_files_applied ORDER BY filename;
+```
+
+The pending set must then be **exactly** these three files, and nothing else:
+
+1. `2026-10-16-1-orders-placement-exception.sql` (adds a nullable column; inert to the old image)
+2. `2026-10-20-0-orders-precutover-snapshot.sql` (copies orders, segments and sent-to-SAP rows into three snapshot tables; contains none of the runner's destructive words)
+3. `2026-10-20-1-backward-cutover.sql` (the data change described above)
+
+`apply-migrations.ps1 -DryRun` lists every file in the folder in apply order and never reads the ledger, so it cannot show what is pending; compare its list with the ledger yourself. It also shows which files the runner treats as destructive (the 1st and 3rd are, by text: `ALTER`, `UPDATE`, `DELETE`). The runner has no per-file selector, and `-AllowDestructive` releases **every** pending destructive file in the folder it reads, so each destructive file runs alone, from a scratch folder holding only that file (step 11).
+
+**3. Rehearse on a copy of the pilot database (gate G-10, part 2).** Do this from a **fresh** dump, shortly before the window; it is the only end-to-end run of the cutover before the real one.
+
+1. The dump owner takes a fresh `pg_dump` of `pgdb-nimbus-dev` / `nimbus` and records how. The dump holds real order data and user rows: handle it under the owner's data rule.
+2. Restore it into a local Postgres database (a new database name, for example `nimbus_rehearsal`).
+3. Apply the three files to the copy **twice**, in the order of step 2, with the connection given explicitly so the runner cannot reach the pilot (its defaults are the pilot host and user): `-PgHost localhost -Port 5432 -Database nimbus_rehearsal -User postgres`, one file per run through scratch folders exactly as in step 11. The second pass of each must change nothing (the ledger skips it). The runner always connects with `sslmode=require` **[unverified: whether the local server accepts it]**; if it does not, run each file with `psql --single-transaction -v ON_ERROR_STOP=1 -f <file> -c "INSERT INTO migration_files_applied (filename) VALUES ('<file name>') ON CONFLICT (filename) DO NOTHING;"` instead, which is what the runner does per file. Time every file against the length of the quiet window.
+4. Start the app against the copy (`uvicorn brain:api --port 8000` with `PG_HOST`/`PG_DB`/`PG_USER`/`PG_PASS` in the shell environment pointing at the local copy; never edit `.env` to point at Azure), open **every plant** in a browser, let the reconcile finish, and write down the toast it shows for each plant (the "N bars re-anchored on due dates, M reversed from now, K kept their running start, J blocked" summary) and any alert about a plant without a time zone or a line without a calendar.
+5. The owner reviews the numbers. **Pass bar:** the second apply is a no-op; the count of rows the cutover updated equals the number of non-queued orders on the copy (gate G-6); every plant's toast counts are explained (the running count matches the orders actually in production at the dump time; blocked is zero or accounted for); the timings fit the window.
+
+**4. Gate: no plant without a time zone (OQ52, profile Q15).** On the pilot, before run 3, in a read-only transaction:
+
+```sql
+BEGIN READ ONLY;
+SELECT plant FROM plants GROUP BY plant HAVING COALESCE(NULLIF(MIN(timezone), ''), '') = '';
+ROLLBACK;
+```
+
+The result must be **zero rows**. The cutover SQL falls back to UTC for a plant with no time zone when it decides which orders are running; that fallback must never decide a real row. A plant listed here is a stop until its time zone is set in master data.
+
+**5. Build the image before the migration (gate G-9).** Run the preflight and the build from the `promote-azure` skill (`az account show`, then read the current image tag) and **record the current tag as the rollback target**. Confirm CI is green for the commit being built, and that local `npm test` and `npm run check:static-assets` pass on a clean tree or a pushed commit. Build under a **fresh** tag, passing the build id so the cache-bust stamp follows the commit:
+
+```powershell
+az acr build --registry acrnimbusdev --image nimbus:vN --build-arg BUILD_ID=$(git rev-parse --short HEAD) .
+az acr task list-runs --registry acrnimbusdev --top 1 -o table   # expect Succeeded
+```
+
+**Hold the roll.** Unlike a routine promotion, do not let the skill build and roll in one go here: the image is built first only so that the old image never serves planners on migrated data while a build runs. The roll is step 12. Run 1 (step 7) may follow right after this build.
+
+**6. Quiet window and planner notice (gate G-11).** Pick the window from profile Q12 (plant time; no query can see an open browser tab). Send the notice ahead and again at the start:
+
+- the date and time of the window;
+- **save and close every browser tab before the window** (an unsaved edit goes stale when the migration gives every order a new version);
+- after the roll, **hard reload** (Ctrl+F5); if the page looks unchanged, clear this site's data for the address (save first: unsaved local edits are lost);
+- **unsaved offline edits in a pre-cutover cache are discarded**: the cached copy of the board in each browser (cache version 7) is thrown away on first load, so anything not yet saved to the server is lost once;
+- **do not restore a Time Machine snapshot dated before the cutover** (it would put old start-anchored bars back and a Save would store them as placed finishes);
+- **every bar will move to its due-date position**, and the late warnings will fire at once for every late order; the dashboard tiles and the utilization figures use the new rules too;
+- whom to tell about a moved bar and how; and that the old behaviour cannot be restored once planners have saved, so "report, do not retry".
+
+**7. Run 1, early or in the window: the placement-exception column.** It adds a nullable column and is inert to the old image, so it may run days before the window.
+
+**8. Flows stopped.**
+
+- Staging poll off: `NIMBUS_SAP_STAGING_POLL_SECONDS` is `0` (the default) or unset. If it must be changed, change it **before** the window opens (changing an environment variable creates a new revision **[unverified: platform behaviour]**).
+- Every staging object on manual apply: `GET /sap/interface/objects` shows `"apply_mode": "manual"` for all of them, or `SELECT * FROM sap_sync_config;` shows `manual`. A poll with an object on automatic apply would rewrite order rows inside the window.
+- Excel uploads frozen: tell every uploader. No code switch exists for this **[unverified]**.
+- **Outbound `ready` queue is zero for every plant.** Check:
+
+  ```sql
+  SELECT plant, count(*) FROM sap_stage_planned_order_out WHERE row_status = 'ready' GROUP BY plant;
+  ```
+
+  Any rows listed hold a finish computed under the old rule and would reach SAP after the roll, because Mulesoft reads them on its own cadence. With the owner's explicit go, the database administrator retires them with the statement the application itself runs (outside the runner), once per plant: `UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued', sent_at = now() WHERE plant = '<plant>' AND row_status = 'ready';`. Rows Mulesoft has already read cannot be recalled.
+
+**9. Pre-roll capture (capturer, from the old image, per plant).** Alert counts by type and in total; the dashboard tile values (including Late and Capacity Headroom 7D); the utilization matrix by line and day for the next 14 days; the Orders grid Late filter count. Screenshot or export, filed with the rehearsal numbers. Also record the count of non-queued orders per plant for gate G-6:
+
+```sql
+SELECT plant, count(*) FROM orders WHERE planning_status <> 'needs_planning' GROUP BY plant ORDER BY plant;
+```
+
+**10. Run 2: the snapshot (plain run, no destructive flag).** One file, the snapshot, from its own scratch folder, **without** `-AllowDestructive` (its dry-run line must read "additive (auto)"; if the runner marks it destructive, stop and read the file). Confirm afterwards that `orders_precutover_snapshot`, `order_schedule_segments_precutover_snapshot` and `order_sap_sent_precutover_snapshot` exist and that the first has as many rows as `orders`. The platform operator separately confirms the platform's own backup / point-in-time-restore window **[unverified: not visible from the repository]** and records the time.
+
+**11. Run 3: the cutover, alone, inside the window.** Read the whole file first, comments included (the runner counts the word "update" in a comment). Apply it alone through a scratch folder and the runner's own `-AllowDestructive`. **Three separate runs, in order, never one run for all three.** The scratch-folder pattern for any single-file run (shown for run 3):
+
+```powershell
+$run = Join-Path $env:TEMP 'nimbus-cutover-run3'
+New-Item -ItemType Directory -Force $run | Out-Null
+Copy-Item .\migrations\2026-10-20-1-backward-cutover.sql $run
+.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -MigrationsDir $run -DryRun          # read the line for this file
+.\.claude\skills\promote-azure\scripts\apply-migrations.ps1 -MigrationsDir $run -AllowDestructive   # prompts for the password, hidden
+```
+
+Run 1 and run 2 use the same pattern with their own file (run 1 with `-AllowDestructive`, run 2 without). **Exit 3 means a file was blocked: stop.** Each file and its ledger row run in one transaction, so a failure leaves nothing half-applied.
+
+**Gate G-6** (rows updated equals the non-queued order count), as an admin login in a read-only transaction, per plant:
+
+```sql
+SELECT plant, count(*) AS flagged_non_queued FROM orders
+WHERE planning_status <> 'needs_planning' AND runtime_schedule_mismatch AND updated_at >= '<time run 3 started>'
+GROUP BY plant ORDER BY plant;
+```
+
+Each count must equal the step 9 count for that plant. The orders that still carry a start are the running ones: their number should match the rehearsal's "kept their running start" figure.
+
+**12. Roll the image, then verify with cache-busted requests, planners still out.** Roll the image built in step 5:
+
+```powershell
+az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:vN
+```
+
+Poll health every 15 seconds as the skill's step 4 does, **cache-busting every request** (a random query parameter and a `no-cache` header; the corporate proxy caches by URL and will serve a pre-roll page). Then request the page itself the same way (for example `GET /?cb=<random>`) and check that the `NIMBUS_BUILD_ID` it carries is the commit stamped in step 5 **[unverified: whether the proxy caches the page]**. `GET /tasks?plant=<code>` must answer 200 for each plant. Read backend errors in the browser as an administrator (Admin Cockpit, Logs); the log route answers 401 to an anonymous request, which is not a failed deploy.
+
+**13. Open each plant once, record the toast, press Save.** The operator signs in on the admin tab, opens each plant once under the new image, lets the reconcile run, writes down the cutover summary toast it shows (the four counts) and presses Save. Saving persists the re-derived bars and clears the flag on the server. Expect a "stale" answer to a save only if a tab was left open across the migration. Compare the toast counts with the rehearsal's and with the step 9 capture; the alerts, tiles and utilization differences must each be explained by a named rule change. The first planner save under the new rule ends the clean rollback (step 16), so no one saves in a plant before step 14.
+
+**14. Go / no-go (gate G-12).** Go only when the checks above are true (rehearsal passed, time-zone gate zero, G-6 equal, image verified, plants opened without unexplained differences), no `ready` outbound rows exist, and the **decider** has said go in writing. Only then tell planners they may resume.
+
+**15. Post-roll watch (first shift, watcher).** Starting values are suggestions; the owner sets the numbers before the window.
+
+| Signal | Source | Abort (roll back the image) if | Starting value |
+|---|---|---|---|
+| Plant differs from the capture without a rule that explains it | Step 13 | Any unexplained difference | 0 unexplained |
+| Stale and conflict notices | `schedule.conflicts`, planner reports | More than N in the first hour | N = `<owner>` |
+| Reports of a moved bar | Reports to the watcher | Any no rule explains, or more than N | N = `<owner>` |
+| Server errors on `/tasks` or on a save | Admin Cockpit, Logs | Any sustained error | longer than `<owner>` minutes |
+| `ready` outbound rows appear | `sap_stage_planned_order_out` | Any (nobody should press Send) | 0 |
+
+The abort decision belongs to the decider, who must know what an abort costs (step 16): after the first save it is a fix-forward decision, not a rollback.
+
+**16. Rollback matrix.**
+
+| Situation | What restores | What is lost |
+|---|---|---|
+| The image fails **before any planner saves** under the new rule | Roll the previous image tag only (the recorded rollback target: `az containerapp update ... --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`) | No planner edit is lost. The cutover has already emptied the placed starts and ends, so old code reads those orders as never placed and shows them from their due dates; the old placements are in the run-2 snapshot tables |
+| Planners **have saved**, then the image rolls back | Nothing in the database restores the old placed finishes; recovery is the run-2 snapshot tables or the platform's point-in-time restore, run by the operator | Every edit made after the snapshot; the restore is itself an update and bumps every row's version |
+| Finishes already sent to SAP | Cannot be recalled | n/a |
+
+At any rollback: **retire any `ready` outbound rows** queued under the new rule with the statement of step 8; send the planner notice again (hard reload, clear site data, do not restore snapshots dated after the cutover); and **record the rollback timestamp**. If the new image later returns, the stale placed-finish case of section 8.8a of the spec applies and needs its own decision before the roll forward.
+
+**17. Later, per plant, in its own window: the SAP staging first apply (OQ10).** Snapshot the as-sent baselines first. The first apply resets slots where SAP's dates differ from the stored ones; those orders lose their placed finishes and re-derive from the due date on the next load by the same path. Record the reset count against the rehearsal's count, and only switch the poll on, or press an apply, inside that window.
+
 ## Prerequisites
 
 - Azure CLI (`winget install --exact --id Microsoft.AzureCLI`), `az login`, and **Contributor on `rg-nimbus-dev`**.

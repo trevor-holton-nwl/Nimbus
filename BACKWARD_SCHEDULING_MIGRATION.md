@@ -5412,7 +5412,7 @@ Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-sch
 
 ### Phase 3 — gap decisions (2026-10-14)
 
-Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`, Phase 3 lines extracted to `phase3-ledger-extract.md`): every line that starts with `Task 3.N: gap filled:` or is a `Ruling:` for a Phase 3 task (Tasks 3.1 to 3.5), one row each, in ledger order. For a Ruling, Gap is the review finding or gate label, Choice is what was ruled, and Why is the cost line copied from the ledger. Task 3.6 (this documentation pass) is not a ledger task. The Phase 3 gate report is not written yet (the whole-branch review is still running); its placeholder heading follows the Phase 2 gate report.
+Copied from the implementation ledger (`.superpowers/sdd/2026-10-13-backward-scheduling-implementation/progress.md`, Phase 3 lines extracted to `phase3-ledger-extract.md`): every line that starts with `Task 3.N: gap filled:` or is a `Ruling:` for a Phase 3 task (Tasks 3.1 to 3.5), one row each, in ledger order. For a Ruling, Gap is the review finding or gate label, Choice is what was ruled, and Why is the cost line copied from the ledger. Task 3.6 (this documentation pass) is not a ledger task. The Phase 3 gate report is written: see the heading `### Phase 3 — gate report` below.
 
 | Task | Gap | Choice | Why |
 |---|---|---|---|
