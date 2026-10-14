@@ -9,9 +9,8 @@
 // `Persistence` (scheduling/persistence.mjs) is a real cross-file import
 // forming a two-way ESM cycle with that module — this file's flush path
 // (`_flushLineHours`/`_flushPlantHours`) calls back into
-// `Persistence._dirtyIds`/`_forceIds`/`_snapToWorkingHours`/`_saveCache`
-// so a re-snap against freshly-authoritative
-// hours can fold into the SAME dirty/force bookkeeping an in-flight manual
+// `Persistence._dirtyIds`/`_forceIds`/`_saveCache`
+// so a flush can fold into the SAME dirty/force bookkeeping an in-flight manual
 // edit already established, rather than silently reverting it. Safe under
 // the same rule used throughout this split: every cross-reference is inside
 // a method body invoked after both modules finish loading, never at
@@ -227,36 +226,8 @@ export const CalendarSync = {
     } finally {
       this._hydrating = false;
     }
-    // Backend-authoritative working hours just landed. The initial ingest snap
-    // (Persistence._snapToWorkingHours at load) ran against default/stale hours, and is
-    // never otherwise re-run — so fresh (non-user-scheduled) orders may sit outside the
-    // real working window. Re-snap against the now-correct hours and re-render/cache.
-    // Idempotent when hours match; _snapToWorkingHours re-baselines each pass, so a
-    // second pass leaves the correct final baseline (no set-once needed). (F7)
-    // Deliberately NOT gated on (has.plantHours || has.lineHours): "backend has no
-    // override" is still an authoritative answer (use defaults), so the re-snap runs
-    // for every plant, including the common one that has never had custom hours saved.
-    if (Store.tasksArr.length) {
-      try {
-        // A slow (8s) fetchPlantConfig can resolve AFTER the user started editing this
-        // session. tasks:bulk clears _dirtyIds/_forceIds (reload semantics, app.js:14840),
-        // so snapshot and restore them — the re-snap only re-places non-user-scheduled
-        // orders (user moves are startMoved-skipped) and must not drop pending saves.
-        const dirtySnapshot  = new Set(Persistence._dirtyIds);
-        const forceSnapshot  = new Set(Persistence._forceIds);
-        const { movedIds } = Persistence._snapToWorkingHours(Store.tasksArr, plant);
-        Persistence._saveCache();
-        // Only emit and re-render if tasks actually moved; idempotent when hours haven't
-        // changed (nextAvailable will find the same slots, startMoved-skip user-placed).
-        if (movedIds.length) {
-          Store.emit({ type: 'tasks:bulkUpdate', ids: movedIds, source: 'calendar-resnap' });
-        }
-        for (const id of dirtySnapshot) Persistence._dirtyIds.add(id);
-        for (const id of forceSnapshot) Persistence._forceIds.add(id);
-      } catch (e) {
-        ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${(e as Error).message}`);
-      }
-    }
+    // (There is no post-hydration re-snap any more: backend-authoritative hours landing does not move any
+    // bar. Task 2.6's reconcile derives never-placed rows once the calendar state is known.)
     // Migrate the slices the backend still lacks but local has. Covers first upgrade
     // (backend fully empty) AND partial-migration retry. Each slice is one atomic POST
     // (all-or-nothing); a failed slice stays un-migrated and retries next load.

@@ -27,7 +27,7 @@ import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Utilization, Alerts } from '../insights/services.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
-import type { SetupObservation } from '../optimization/engine.mjs';
+import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { Persistence } from './persistence.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
@@ -154,7 +154,7 @@ export const Timeline = {
   _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
   _alertHorizonIds: [] as string[],
   _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
-  _rebuildNow: null as Date | null,         // P2: hoisted clock so every item in one rebuild() pass classifies firming against the same instant
+  _rebuildNow: null as Date | null,         // the viewer's clock at the start of the last rebuild() pass (timeline min bound); firming/lock styling reads the plant clock via _nowFor
   _frozenBandIds: null as Set<string> | null, // P2: task ids currently inside the frozen horizon band, for live repaint diffing
   _zonePushedMs: 0,                         // epoch ms of the "now" last written into the zone bands; 0 = unknown, next tick pushes
   _zoneEdgeKey: '',                         // `${hzMinutes}|${frozenEndMs}` the bands were last written with; a change forces a push
@@ -278,6 +278,12 @@ export const Timeline = {
       // background items stay put because they are created with editable:false.
       itemsAlwaysDraggable: { item: true },
       snap: (d: Date) => Util.snap(d),
+      // OQ1: the start is derived from the finish, so the left edge is not an input. vis-timeline has no per-handle
+      // switch for it; this veto snaps a drag that changes the start but not the end back to the stored start, so the
+      // left handle moves nothing (a left-edge change that still reaches the commit is reverted with a toast).
+      onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
+        callback(lockLeftEdge(item, (Timeline._items?.get(String(item.id)) as TimelineVisItem | null) ?? null));
+      },
       groupOrder: (a: TimelineGroupData, b: TimelineGroupData) => (a.order ?? 0) - (b.order ?? 0),
       // item:'top' too — Core._updateScrollTop bottom-anchors scrollTop whenever
       // orientation.item != 'top' (shifts it by the change in scroll range on every
@@ -365,7 +371,7 @@ export const Timeline = {
       if (document.hidden) return; // skip ticker work while the tab is backgrounded
       if (!Timeline._items || !Timeline._pastZoneIds.length) return;
       const _pmT0 = performance.now();
-      const now  = new Date();
+      const now  = Timeline._plantNow(Store.selectedPlant);
       let hz: number | null = null;
       if (Timeline._alertHorizonIds.length) {
         const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
@@ -412,9 +418,8 @@ export const Timeline = {
       // the band's own absence in that state.
       if (Date.now() - Timeline._lastFirmScanTs > 30_000) {
         Timeline._lastFirmScanTs = Date.now();
-        const scanNow = new Date();
         const next = new Set<string>();
-        for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Timeline._inLockBand(t, scanNow)) next.add(String(t.id));
+        for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Timeline._inLockBand(t)) next.add(String(t.id));
         const prev = Timeline._frozenBandIds;
         if (prev) {
           for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
@@ -432,8 +437,20 @@ export const Timeline = {
   /** Membership of the live lock band the 30s scan diffs: inside the frozen horizon OR running now.
    *  Running is included so an order that starts while the page is open gets its running lock
    *  styling without a reload (C5). */
-  _inLockBand(t: NimbusTask, now: Date): boolean {
+  _inLockBand(t: NimbusTask, now: Date = Timeline._nowFor(t)): boolean {
     return Engine.isFrozenHorizon(t, now) || Engine.isInProgress(t, now);
+  },
+
+  /** "Now" at a plant: the server instant in the plant's zone, as the naive wall-clock Date the bars use (the
+   *  one clock, OQ52). The viewer's own clock only when the plant has no valid zone (it is then blocked and
+   *  announced elsewhere; the styling still needs some instant). */
+  _plantNow(plant: string | null | undefined): Date {
+    return Store.plantNow(plant) ?? new Date();
+  },
+
+  /** The instant an order is judged against for firming/lock styling: its own plant's clock. */
+  _nowFor(t: NimbusTask): Date {
+    return Timeline._plantNow(t.PLANT || (t.MACHINE ? Store.getPlantForLine(t.MACHINE) : null) || Store.selectedPlant);
   },
 
   // Cached lookup for the (static) #gantt-tab; lazily caches on first call so
@@ -737,7 +754,7 @@ export const Timeline = {
   /** Build an item object for a task. */
   _itemForTask(t: NimbusTask): TimelineVisItem {
     const line = t.MACHINE || 'Unknown';
-    const firmed = Engine.firmingStatus(t, Timeline._rebuildNow || undefined).firmed;
+    const firmed = Engine.firmingStatus(t, Timeline._nowFor(t)).firmed;
     const conflict = Timeline._conflictIds().has(String(t.id));
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
@@ -1013,10 +1030,8 @@ export const Timeline = {
 
     /* ---- desired items ---------------------------------------------------- */
     const _pmT0desired = performance.now();
-    // Hoisted clock: every item derived in this pass classifies its firming
-    // status against the same instant (see _itemForTask). _itemPatchFor /
-    // _applyTaskPatch run outside a full rebuild and may see this go stale —
-    // that's fine, they fall back to "live now" when it's null.
+    // The viewer's clock for this pass (the timeline's min bound reads it). Firming/lock styling and the
+    // zone bands read the PLANT's clock instead (_nowFor / _plantNow: the one clock, OQ52).
     Timeline._rebuildNow = new Date();
     const desired = new Map<string, TimelineVisItem>();
     const itemIdsByTask: Record<string, string[]> = {};
@@ -1067,7 +1082,7 @@ export const Timeline = {
     // Past-zone shading — one background item per visible line covering [epoch → now].
     // vis-timeline clips the rendered span to the visible window, so the far-past
     // start date is harmless. The item updates each rebuild so the boundary tracks time.
-    const pastEnd = new Date();
+    const pastEnd = Timeline._plantNow(plant);
     const pastStart = new Date('2000-01-01T00:00:00');
     for (const line of visibleLines) {
       const item: TimelineVisItem = {
@@ -1090,7 +1105,7 @@ export const Timeline = {
       const plantRow = Store.masterData?.plants?.find(p => p.plant === plant) ?? null;
       const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
       if (typeof hz === 'number') {
-        const hzNow = new Date();
+        const hzNow = Timeline._plantNow(plant);
         const hzEnd = new Date(hzNow.getTime() + hz * Config.MS_MIN);
         for (const line of visibleLines) {
           desired.set(`alert-horizon-zone-${line}`, {
@@ -1121,7 +1136,7 @@ export const Timeline = {
     {
       const frozenEnd = Store.frozenHorizonEnd;
       if (frozenEnd) {
-        const frozenNow = new Date();
+        const frozenNow = Timeline._plantNow(plant);
         for (const line of visibleLines) {
           desired.set(`frozen-horizon-zone-${line}`, {
             id:        `frozen-horizon-zone-${line}`,
@@ -1146,9 +1161,8 @@ export const Timeline = {
     // the 1s ticker's coarse 30s scan (below) can diff against a known-good
     // baseline instead of recomputing membership from scratch every tick.
     {
-      const nowForBand = Timeline._rebuildNow || new Date();
       const bandIds = new Set<string>();
-      for (const t of scopedTasks) if (Timeline._inLockBand(t, nowForBand)) bandIds.add(String(t.id));
+      for (const t of scopedTasks) if (Timeline._inLockBand(t)) bandIds.add(String(t.id));
       Timeline._frozenBandIds = bandIds;
     }
 
@@ -1740,6 +1754,16 @@ export function computeTimelineMinBound(i: TimelineMinBoundInput): number | null
   const bound = _navLocalMidnight(Math.min(i.dataMinMs ?? i.nowMs, i.nowMs));
   if (i.maxMs != null && bound >= i.maxMs) return null;
   return bound;
+}
+
+/** OQ1 live veto for the Gantt's left resize handle: a drag that changes an item's start but not its end puts
+ *  the stored start back (the start is derived from the finish, so the left edge is not an input). Any other
+ *  drag (right edge, whole bar, vertical move) is accepted untouched. Returns the item vis should keep. */
+export function lockLeftEdge(item: TimelineVisItem, stored: TimelineVisItem | null): TimelineVisItem {
+  if (!stored || !item.start || !item.end || !stored.start || !stored.end) return item;
+  const sameEnd = new Date(item.end).getTime() === new Date(stored.end).getTime();
+  const movedStart = new Date(item.start).getTime() !== new Date(stored.start).getTime();
+  return sameEnd && movedStart ? { ...item, start: stored.start } : item;
 }
 
 export interface TickerPushInput { nowMs: number; lastPushedMs: number; windowMs: number; centerPx: number; minPx?: number }
@@ -4204,6 +4228,21 @@ export const Interaction = {
     );
   },
 
+  /** A manual placement returned null for the dragged item. A firmed order dropped outside working hours asks
+   *  the planner to confirm overtime first (OQ63) and re-runs the drop with the approval; anything else is
+   *  explained (the engine already toasted `finish_cannot_hold`) and the bar is put back. */
+  _rejectManualPlacement(t: NimbusTask, itemId: string): void {
+    if (Engine.lastManualRefusal === 'needs_overtime_confirm') {
+      void Engine.confirmOvertimePlacement(t).then(ok => {
+        if (ok) Interaction._onDataSetUpdate({ items: [itemId] }, { confirmedOvertime: true });
+        else Timeline._scheduleRebuild();
+      });
+      return;
+    }
+    if (Engine.lastManualRefusal !== 'finish_cannot_hold') Toast.show(Util.t('toast.commit_failed'), 'error');
+    Timeline._scheduleRebuild();
+  },
+
   /** Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): a drag
    *  to a machine with no resolvable routing operation for this task is
    *  rejected before it ever reaches `Engine.manualSchedulePatchFor`. Shows
@@ -4281,7 +4320,7 @@ export const Interaction = {
    *  Firmed orders: only a spurious no-op echo (`noActualChange`) is dropped —
    *  a genuine drag on a firmed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */
-  _onDataSetUpdate(props: InteractionDataSetUpdateProps): void {
+  _onDataSetUpdate(props: InteractionDataSetUpdateProps, opts: ManualPlacementOptions = {}): void {
     for (const rawId of props.items) {
       const itemId = String(rawId);
       const id = Interaction._businessOrderIdForItem(itemId);
@@ -4322,9 +4361,12 @@ export const Interaction = {
       const newEnd   = Util.snap(new Date(v.end));
       const newLine  = v.group || t.MACHINE;
 
-      const moved = newStart.getTime() !== expectedItem.start.getTime()
-                 || newEnd.getTime()   !== expectedItem.end.getTime()
-                 || newLine !== t.MACHINE;
+      // Backward scheduling (OQ1): a drop anchors on the FINISH. The right edge (or the whole bar) moving changes
+      // the finish; the start is always re-derived from the run time. A change of the left edge alone is not a move.
+      const startMoved = newStart.getTime() !== expectedItem.start.getTime();
+      const endMoved   = newEnd.getTime()   !== expectedItem.end.getTime();
+      const lineMoved  = newLine !== t.MACHINE;
+      const moved = startMoved || endMoved || lineMoved;
 
       if (!moved) {
         // vis emitted an update for non-temporal reasons (e.g. zoom relayout).
@@ -4334,6 +4376,14 @@ export const Interaction = {
       }
       // Task was unscheduled (null dates) — skip drag processing to avoid TypeError.
       if (!t.start_date || !t.end_date) continue;
+      if (!endMoved && !lineMoved) {
+        // Only the left edge moved. The start is derived from the finish, so there is nothing to commit:
+        // put the bar back and say why (the onMoving veto below stops most of these before they land).
+        this._log('update:left-edge-locked', { id });
+        Toast.show(Util.t('toast.left_edge_locked'), 'warn', 4000);
+        Timeline._scheduleRebuild();
+        continue;
+      }
 
       this._log('update:commit', { id, newLine });
 
@@ -4343,8 +4393,9 @@ export const Interaction = {
 
       // Multi-order drag: if the dragged item is part of a multi-selection,
       // move all non-firmed selected items by the same time + line delta.
-      const deltaMs  = newStart.getTime() - t.start_date.getTime();
-      const lineMoved = newLine !== t.MACHINE;
+      // The dragged piece's same-edge delta (OQ17 b): for a one-piece order this is the order's own finish delta.
+      const deltaMs  = newEnd.getTime() - expectedItem.end.getTime();
+      const requestedFinish = new Date(t.end_date.getTime() + deltaMs);
 
       // Machine lock (decision C, aggregate_to_detail.md §8): reject a
       // cross-machine drag of a sub-order before either the multi-drag or
@@ -4386,89 +4437,93 @@ export const Interaction = {
           Timeline._scheduleRebuild();
           continue;
         }
-        const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, newLine, newStart);
-        if (!draggedPatch?.start_date || !draggedPatch.end_date) {
-          Toast.show(Util.t('toast.commit_failed'), 'error');
-          Timeline._scheduleRebuild();
-          continue;
-        }
-
-        // Apply the same delta to each companion — routed through
-        // manualSchedulePatchFor (not a hand-rolled {start_date, end_date,
-        // MACHINE} object) so a companion that is itself already split
-        // (>=2 scheduleSegments) has its segments shifted too, instead of
-        // its parent boundaries moving while its child segments go stale at
-        // their old absolute positions. Mirrors the deleted regeneration
-        // branch's own contract: "Companion parents retain the user's
-        // relative drag delta."
-        // (skippedFirmed stays empty today — selIds above already excludes firmed
-        // tasks — but is preserved as-is; not this task's scope to remove.)
-        // This loop only computes and validates each companion's patch — no
-        // Store or Timeline mutation happens here, since a later companion
-        // failing must leave earlier companions (and the dragged item)
-        // untouched too.
-        const skippedFirmed: string[] = [];
-        const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-        const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
-        let companionFailed = false;
-        let companionLockedTask: NimbusTask | null = null;
-        let companionRuntimeIneligible: { task: NimbusTask; line: string } | null = null;
-        for (const sid of selIds) {
-          const st = Store.tasks[sid];
-          if (!st || !st.start_date) continue;
-          const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
-          // Machine lock (decision C): a locked companion fails the whole
-          // multi-drag atomically — nothing has been committed to Store or
-          // Timeline for this drag yet, so breaking here reverts cleanly.
-          if (st.PARENT_ORDER && sNewLine !== st.MACHINE) {
-            companionFailed = true;
-            companionLockedTask = st;
-            break;
+        // Whole-batch placement is derived on one run cache: each walk reads ~90 days of working windows.
+        const batchPlant = t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant;
+        Calendar._beginRun(batchPlant);
+        try {
+          const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, opts);
+          if (!draggedPatch?.start_date || !draggedPatch.end_date) {
+            Interaction._rejectManualPlacement(t, itemId);
+            continue;
           }
-          // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): same
-          // atomic-abort treatment as the machine lock above — the first
-          // ineligible companion fails the whole drag before any patch is
-          // computed for it. Gated by _routingRuntimeEnabled (see its comment).
-          if (Interaction._routingRuntimeEnabled(st.PLANT) && !Runtime.eligible(st, sNewLine)) {
-            companionFailed = true;
-            companionRuntimeIneligible = { task: st, line: sNewLine };
-            break;
+
+          // Apply the same delta to each companion — routed through
+          // manualSchedulePatchFor (not a hand-rolled {start_date, end_date,
+          // MACHINE} object) so a companion that is itself already split
+          // (>=2 scheduleSegments) has its segments shifted too, instead of
+          // its parent boundaries moving while its child segments go stale at
+          // their old absolute positions. Mirrors the deleted regeneration
+          // branch's own contract: "Companion parents retain the user's
+          // relative drag delta."
+          // (skippedFirmed stays empty today — selIds above already excludes firmed
+          // tasks — but is preserved as-is; not this task's scope to remove.)
+          // This loop only computes and validates each companion's patch — no
+          // Store or Timeline mutation happens here, since a later companion
+          // failing must leave earlier companions (and the dragged item)
+          // untouched too.
+          const skippedFirmed: string[] = [];
+          const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+          const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
+          let companionFailed = false;
+          let companionLockedTask: NimbusTask | null = null;
+          let companionRuntimeIneligible: { task: NimbusTask; line: string } | null = null;
+          for (const sid of selIds) {
+            const st = Store.tasks[sid];
+            if (!st || !st.start_date) continue;
+            const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
+            // Machine lock (decision C): a locked companion fails the whole
+            // multi-drag atomically — nothing has been committed to Store or
+            // Timeline for this drag yet, so breaking here reverts cleanly.
+            if (st.PARENT_ORDER && sNewLine !== st.MACHINE) {
+              companionFailed = true;
+              companionLockedTask = st;
+              break;
+            }
+            // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): same
+            // atomic-abort treatment as the machine lock above — the first
+            // ineligible companion fails the whole drag before any patch is
+            // computed for it. Gated by _routingRuntimeEnabled (see its comment).
+            if (Interaction._routingRuntimeEnabled(st.PLANT) && !Runtime.eligible(st, sNewLine)) {
+              companionFailed = true;
+              companionRuntimeIneligible = { task: st, line: sNewLine };
+              break;
+            }
+            const sRequestedFinish = new Date((st.end_date || st.start_date).getTime() + deltaMs);
+            const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedFinish);
+            if (!changes?.start_date || !changes.end_date) {
+              companionFailed = true;
+              break;
+            }
+            companionPatches.push({ id: sid, changes });
+            companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
           }
-          const sRequestedStart = new Date(st.start_date.getTime() + deltaMs);
-          const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedStart);
-          if (!changes?.start_date || !changes.end_date) {
-            companionFailed = true;
-            break;
+          if (companionFailed) {
+            if (companionLockedTask) Interaction._rejectDistMachineMove(companionLockedTask);
+            else if (companionRuntimeIneligible) Interaction._rejectRuntimeMove(companionRuntimeIneligible.task, companionRuntimeIneligible.line);
+            else if (Engine.lastManualRefusal !== 'finish_cannot_hold') Toast.show(Util.t('toast.commit_failed'), 'error');
+            Timeline._scheduleRebuild();
+            continue;
           }
-          companionPatches.push({ id: sid, changes });
-          companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
-        }
-        if (companionFailed) {
-          if (companionLockedTask) Interaction._rejectDistMachineMove(companionLockedTask);
-          else if (companionRuntimeIneligible) Interaction._rejectRuntimeMove(companionRuntimeIneligible.task, companionRuntimeIneligible.line);
-          else Toast.show(Util.t('toast.commit_failed'), 'error');
-          Timeline._scheduleRebuild();
-          continue;
-        }
 
-        // Every patch validated — commit atomically: dragged item, then
-        // companions, then their Timeline item mirrors.
-        Store.updateTask(id, draggedPatch, 'timeline');
-        if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
-        for (const upd of companionItemUpdates) {
-          Timeline._suppressEvents = true;
-          try {
-            Timeline._items!.update({ id: upd.id, start: upd.start, end: upd.end, group: upd.group });
-          } finally { Timeline._suppressEvents = false; }
-        }
-        Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
+          // Every patch validated — commit atomically: dragged item, then
+          // companions, then their Timeline item mirrors.
+          Store.updateTask(id, draggedPatch, 'timeline');
+          if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
+          for (const upd of companionItemUpdates) {
+            Timeline._suppressEvents = true;
+            try {
+              Timeline._items!.update({ id: upd.id, start: upd.start, end: upd.end, group: upd.group });
+            } finally { Timeline._suppressEvents = false; }
+          }
+          Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
 
-        if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
+          if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
 
-        UndoStack.push(`Move ${allIds.length} orders`,
-          () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
-        this._clearGhosts();
-        return;
+          UndoStack.push(`Move ${allIds.length} orders`,
+            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
+          this._clearGhosts();
+          return;
+        } finally { Calendar._endRun(); }
       }
 
       // Single-item drag (original behaviour) — routed through
@@ -4486,10 +4541,9 @@ export const Interaction = {
         Timeline._scheduleRebuild();
         continue;
       }
-      const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, newStart);
+      const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, opts);
       if (!patch?.start_date || !patch.end_date) {
-        Toast.show(Util.t('toast.commit_failed'), 'error');
-        Timeline._scheduleRebuild();
+        Interaction._rejectManualPlacement(t, itemId);
         continue;
       }
       Store.updateTask(id, patch, 'timeline');

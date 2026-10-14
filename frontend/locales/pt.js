@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.select_lines_to_opt':         'Selecione pelo menos uma máquina ou mude para Planta inteira.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraram em execução enquanto a prévia estava aberta e foram mantidos como estão.',
   'toast.plant_no_timezone':  'A planta {{plant}} não tem um fuso horário válido, então o NIMBUS não consegue saber quais pedidos estão em execução ou congelados. Peça a um administrador que defina o fuso horário da planta em Dados mestres.',
+  'toast.finish_cannot_hold':  'O pedido {{order}} não pode terminar nesse horário em {{machine}}: nenhum período de trabalho longo o bastante termina ali. Ele voltou para onde estava.',
+  'toast.left_edge_locked':  'Arraste a borda direita para definir quando o pedido termina. O início é calculado a partir do fim, por isso a borda esquerda não pode ser movida.',
   'toast.opt_applied':                 'Otimização aplicada — Ctrl+Z para desfazer',
   'toast.opt_discarded':               'Otimização descartada — programação restaurada',
   'toast.optimize_missing_setup_summary': 'Otimizado. {{orders}} pedido(s) em {{lines}} máquina(s) foram programados sem dados de setup (sem barra de troca) — veja Alertas.',
@@ -79,7 +81,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.order_moved':                 '"{{name}}" movida para {{date}}',
   'toast.cannot_fix_task':             'Não é possível fixar: tarefa não encontrada',
   'toast.cannot_fix_firmed': 'Não é possível corrigir automaticamente: esta ordem está firme (horizonte congelado ou manual) ou em execução. Remova primeiro o status firme.',
-  'toast.commit_failed':               'Não foi possível confirmar o pedido no início solicitado.',
+  'toast.commit_failed':               'Não foi possível programar o pedido ali.',
   'toast.save_rejected':               'Salvamento rejeitado: {{msg}}',
   'toast.saved_locally':               'Salvo localmente (servidor inacessível)',
   'toast.save_timeout': 'Tempo esgotado ao salvar. Suas alterações ainda não foram salvas aqui - verifique a conexão e salve novamente.',
@@ -185,6 +187,9 @@ window.__NIMBUS_LOCALES.pt = {
   'modal.purge_impact_override':       '{{count}} têm uma programação definida pelo planejador que será perdida — reenviar o arquivo restaura as datas do SAP, mas não a programação manual nem as notas.',
   'modal.remove_color_wheel':          'Remover a roda de cores da planta {{plant}}? Esta ação não pode ser desfeita.',
   'modal.confirm_cancel':              'Cancelar',
+  'modal.confirm_overtime_title':      'Programar fora do horário de trabalho?',
+  'modal.confirm_overtime_msg':        'O pedido {{order}} está firmado. Ele rodaria fora do horário de trabalho desta máquina. Programá-lo ali mesmo assim como hora extra aprovada?',
+  'modal.confirm_overtime_confirm':    'Programar como hora extra',
 
   /* ── AG Grid column headers ──────────────────────────────────────────────── */
   'col.id':                            'ID',

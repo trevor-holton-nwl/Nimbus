@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.select_lines_to_opt':         'Seleccione al menos una máquina para optimizar, o cambie a Planta completa.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraron en ejecución mientras la vista previa estaba abierta y se dejaron sin cambios.',
   'toast.plant_no_timezone':  'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no puede saber qué pedidos están en ejecución o congelados. Pida a un administrador que configure la zona horaria de la planta en Datos maestros.',
+  'toast.finish_cannot_hold':  'El pedido {{order}} no puede terminar a esa hora en {{machine}}: no hay un periodo de trabajo lo bastante largo que termine ahí. Se devolvió a su posición anterior.',
+  'toast.left_edge_locked':  'Arrastre el borde derecho para fijar cuándo termina el pedido. El inicio se calcula a partir del final, por lo que el borde izquierdo no se puede mover.',
   'toast.opt_applied':                 'Optimización aplicada — Ctrl+Z para deshacer',
   'toast.opt_discarded':               'Optimización descartada — programa restaurado',
   'toast.optimize_missing_setup_summary': 'Optimizado. {{orders}} pedido(s) en {{lines}} máquina(s) se programaron sin datos de preparación (sin barra de cambio) — vea Alertas.',
@@ -79,7 +81,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.order_moved':                 'Movido "{{name}}" a {{date}}',
   'toast.cannot_fix_task':             'No se puede fijar: tarea no encontrada',
   'toast.cannot_fix_firmed': 'No se puede corregir automáticamente: esta orden está firme (horizonte congelado o manual) o en curso. Quite primero el estado firme.',
-  'toast.commit_failed':               'No se pudo confirmar el pedido en el inicio solicitado.',
+  'toast.commit_failed':               'No se pudo programar el pedido ahí.',
   'toast.save_rejected':               'Guardado rechazado: {{msg}}',
   'toast.saved_locally':               'Guardado localmente (backend no disponible)',
   'toast.save_timeout': 'Se agotó el tiempo al guardar. Sus cambios siguen sin guardar aquí - revise la conexión y guarde de nuevo.',
@@ -186,6 +188,9 @@ window.__NIMBUS_LOCALES.es = {
   'modal.purge_impact_override':       '{{count}} tienen una programación establecida por el planificador que se perderá — volver a subir el archivo restaura las fechas SAP pero no la programación manual ni las notas.',
   'modal.remove_color_wheel':          '¿Eliminar la rueda de colores de la planta {{plant}}? Esta acción no se puede deshacer.',
   'modal.confirm_cancel':              'Cancelar',
+  'modal.confirm_overtime_title':      '¿Programar fuera del horario de trabajo?',
+  'modal.confirm_overtime_msg':        'El pedido {{order}} está en firme. Se ejecutaría fuera del horario de trabajo de esta máquina. ¿Programarlo ahí de todos modos como horas extra aprobadas?',
+  'modal.confirm_overtime_confirm':    'Programar como horas extra',
 
   /* ── AG Grid column headers ──────────────────────────────────────────────── */
   'col.id':                            'ID',

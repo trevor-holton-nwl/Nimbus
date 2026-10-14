@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.select_lines_to_opt':         'Bitte mindestens eine Maschine auswählen oder auf Gesamtwerk wechseln.',
   'toast.opt_apply_running_skipped':  '{{count}} Auftrag/Aufträge wurden gestartet, während die Vorschau geöffnet war, und blieben unverändert.',
   'toast.plant_no_timezone':  'Für das Werk {{plant}} ist keine gültige Zeitzone hinterlegt, daher kann NIMBUS nicht erkennen, welche Aufträge dort laufen oder eingefroren sind. Bitte einen Administrator, die Zeitzone des Werks in den Stammdaten zu setzen.',
+  'toast.finish_cannot_hold':  'Auftrag {{order}} kann auf {{machine}} nicht zu dieser Zeit enden: Es gibt keinen ausreichend langen Arbeitszeitraum, der dort endet. Er wurde an seinen vorherigen Platz zurückgesetzt.',
+  'toast.left_edge_locked':  'Ziehen Sie den rechten Rand, um das Ende des Auftrags festzulegen. Der Start wird aus dem Ende berechnet, daher lässt sich der linke Rand nicht verschieben.',
   'toast.opt_applied':                 'Optimierung angewendet — Strg+Z zum Rückgängigmachen',
   'toast.opt_discarded':               'Optimierung verworfen — Plan wiederhergestellt',
   'toast.optimize_missing_setup_summary': 'Optimiert. {{orders}} Auftrag/Aufträge auf {{lines}} Maschine(n) wurden ohne Rüstdaten eingeplant (kein Rüstbalken) — siehe Warnungen.',
@@ -79,7 +81,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.order_moved':                 '"{{name}}" verschoben nach {{date}}',
   'toast.cannot_fix_task':             'Fixieren nicht möglich: Aufgabe nicht gefunden',
   'toast.cannot_fix_firmed': 'Automatische Korrektur nicht möglich: Dieser Auftrag ist fixiert (eingefrorener Horizont oder manuell) oder läuft gerade. Zuerst die Fixierung aufheben.',
-  'toast.commit_failed':               'Auftrag konnte nicht zum angeforderten Start übernommen werden.',
+  'toast.commit_failed':               'Der Auftrag konnte dort nicht eingeplant werden.',
   'toast.save_rejected':               'Speichern abgelehnt: {{msg}}',
   'toast.saved_locally':               'Lokal gespeichert (Server nicht erreichbar)',
   'toast.save_timeout': 'Zeitüberschreitung beim Speichern. Ihre Änderungen sind hier weiterhin ungespeichert - Verbindung prüfen und erneut speichern.',
@@ -185,6 +187,9 @@ window.__NIMBUS_LOCALES.de = {
   'modal.purge_impact_override':       '{{count}} haben einen planergesetzten Zeitplan, der verloren geht — ein erneuter Upload stellt SAP-Daten, aber keine manuellen Zeitpläne oder Notizen wieder her.',
   'modal.remove_color_wheel':          'Farbreihe für Werk {{plant}} entfernen? Diese Aktion kann nicht rückgängig gemacht werden.',
   'modal.confirm_cancel':              'Abbrechen',
+  'modal.confirm_overtime_title':      'Außerhalb der Arbeitszeit einplanen?',
+  'modal.confirm_overtime_msg':        'Auftrag {{order}} ist fixiert. Er würde außerhalb der Arbeitszeit dieser Maschine laufen. Trotzdem als genehmigte Mehrarbeit dort einplanen?',
+  'modal.confirm_overtime_confirm':    'Als Mehrarbeit einplanen',
 
   /* ── AG Grid column headers ──────────────────────────────────────────────── */
   'col.id':                            'ID',

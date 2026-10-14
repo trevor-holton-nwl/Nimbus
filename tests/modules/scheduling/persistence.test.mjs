@@ -354,16 +354,11 @@ test('conflict refresh sends identity and API key and reports a failed refresh',
   }
 });
 
-test('Persistence.setCalendarService is settable and Persistence works with a stub before it is wired', () => {
-  assert.equal(typeof Persistence.setCalendarService, 'function');
-  // A snap-affecting path should not throw even with no calendar service wired yet —
-  // it should just skip snapping, not crash the load.
-  const tasks = [{
-    id: 'nosvc1', MACHINE: 'L9', RUN_TIME: '1',
-    start_date: new Date('2026-08-03T00:00:00'),
-    end_date:   new Date('2026-08-03T01:00:00'),
-  }];
-  assert.doesNotThrow(() => Persistence._snapToWorkingHours(tasks, '5512'));
+test('the load-time re-snap of ingested orders is gone: no _snapToWorkingHours, no calendar seam (backward scheduling Task 2.5)', () => {
+  // A row nobody has placed is derived backward from its due date by the reconcile (Task 2.6); loading and the
+  // post-hydration calendar fetch no longer move any bar.
+  assert.equal(Persistence._snapToWorkingHours, undefined);
+  assert.equal(Persistence.setCalendarService, undefined);
 });
 
 test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', async () => {
@@ -559,26 +554,6 @@ test('PR-1: _refreshTasks does not remove or toast when `missing` is absent/empt
     globalThis.fetch = originalFetch; Toast.show = originalToast;
   }
 });
-
-test('a load that needs to snap a task to working hours calls the injected calendar service, not a global', () => {
-  const calls = [];
-  Persistence.setCalendarService({
-    beginRun: (plant) => calls.push(['beginRun', plant]),
-    endRun: () => calls.push(['endRun']),
-    nextAvailable: (line, from, ms) => { calls.push(['nextAvailable', line]); return from; },
-    workWindow: (line, date) => { calls.push(['workWindow', line]); return null; },
-  });
-  const tasks = [{
-    id: 'snap1', MACHINE: 'L9', RUN_TIME: '1',
-    start_date: new Date('2026-08-03T00:00:00'), // midnight -> triggers the snap path
-    end_date:   new Date('2026-08-03T01:00:00'),
-  }];
-  Persistence._snapToWorkingHours(tasks, '5512');
-  assert.ok(calls.some(c => c[0] === 'beginRun'), 'must call the injected beginRun');
-  assert.ok(calls.some(c => c[0] === 'nextAvailable'), 'must call the injected nextAvailable');
-  assert.ok(calls.some(c => c[0] === 'endRun'), 'must call the injected endRun');
-});
-
 
 test('Persistence.loadPriorityRankMaps returns a real awaitable promise and null-clears the cache', async () => {
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });

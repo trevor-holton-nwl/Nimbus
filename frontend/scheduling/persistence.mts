@@ -7,17 +7,16 @@
 // real cross-package dependencies below predate this phase (Phase 2
 // research, schedule-data.mts's original split from app.js) and are
 // preserved exactly as they were:
-//   - Persistence._snapToWorkingHours calls Calendar via an
-//     injected seam, `Persistence.setCalendarService({...})`, wired once
-//     from app.js boot glue after calendar/calendar-engine.mjs's Calendar is
-//     available (see app.js's bridge destructure) — never a direct import.
+//   - (Backward scheduling Task 2.5 removed the former calendar seam,
+//     `Persistence.setCalendarService`: the load-time re-snap of ingested
+//     orders it served is gone; the reconcile derives never-placed rows.)
 //   - Persistence used to call `Alerts.scheduleRecompute()` after every
 //     hydration. It emits a `{ type: 'schedule:hydrated', source }` Store
 //     event instead; optimization/engine.mjs subscribes to it once.
 //
 // `CalendarSync` (calendar/calendar-sync.mjs) is a real cross-file import
 // forming a two-way ESM cycle with that module — CalendarSync's flush path
-// calls back into this file's `_dirtyIds`/`_forceIds`/`_snapToWorkingHours`/
+// calls back into this file's `_dirtyIds`/`_forceIds`/
 // `_saveCache` (see calendar/calendar-sync.mjs's
 // header comment). Safe under the same rule used throughout this split:
 // every cross-reference is inside a method body invoked after both modules
@@ -127,22 +126,6 @@ interface LoadStats {
   errors: number;
 }
 
-/** The injected calendar-capacity seam (Persistence.setCalendarService) —
- *  this file must never import calendar/calendar-engine.mjs directly (see
- *  this file's header comment); this is the whole shape it's allowed to see. */
-interface CalendarService {
-  beginRun(plant: string | null): void;
-  endRun(): void;
-  nextAvailable(line: string, from: Date, durationMs: number): Date | null;
-  workWindow(line: string, date: Date): [Date, Date] | null;
-}
-
-// Injected calendar-capacity seam — replaces the former direct `Calendar.*` references
-// (this file must never import calendar/calendar-engine.mjs). Defaults to a no-op so a
-// snap-affecting load path degrades to "skip snapping" instead of throwing when called
-// before app.js's boot glue wires the real Calendar functions (see
-// Persistence.setCalendarService below).
-let _calendarService: CalendarService | null = null;
 type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
 let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null = null;
 
@@ -288,12 +271,6 @@ export const Persistence = {
     rendered: 0,           // Store.tasksArr.length after load
     errors: 0
   } as LoadStats,
-
-  /** Inject the calendar-capacity seam (`calendar/calendar-engine.mjs`'s `Calendar`). Wired
-   *  once from app.js boot glue right after the calendar/calendar-engine.mjs bridge resolves.
-   *  Until this is called, snap-affecting load paths no-op rather than throw — see
-   *  `_snapToWorkingHours`. */
-  setCalendarService(svc: CalendarService): void { _calendarService = svc; },
 
   /** Setup truth is deliberately outside the schedule cache. This tiny
    * callback seam lets a successful setup write invalidate an open detached
@@ -558,8 +535,7 @@ export const Persistence = {
           Store.lineSettings[line].plant = t.PLANT;
         }
 
-        // Overlay user-explicitly-moved positions from localStorage before snapping so that
-        // _snapToWorkingHours detects them via startMoved and skips re-snap. Only tasks
+        // Overlay user-explicitly-moved positions from localStorage. Only tasks
         // where the cached start differs from the cached original baseline are overlaid.
         let restoredDirtyIds: string[] = [];
         if (!discardLocalEdits && cacheData?.tasks?.length) {
@@ -569,13 +545,8 @@ export const Persistence = {
             !optimizerIds.has(String(task.id)) && (dirtyIds === null || dirtyIds.has(String(task.id)))));
         }
 
-        // SAP ships date-only starts (00:00) — snap each order to the first
-        // feasible working slot on its line so ingest doesn't fire false
-        // out-of-hours alerts and the variance baseline reflects reality.
-        // This pass may run against default/stale hours (CalendarSync's
-        // authoritative fetch hasn't resolved yet); the post-hydration re-snap
-        // in CalendarSync._applyConfig re-runs it against the real hours.
-        Persistence._snapToWorkingHours(tasks, plant);
+        // (No load-time snap of ingested starts any more: a row nobody has placed is derived backward
+        // from its due date by the reconcile, and a placed row keeps the stored edges.)
 
         acceptDiscard();
         const setResult = Store.setTasks(tasks, 'persistence');
@@ -860,8 +831,7 @@ export const Persistence = {
   // Apply user-explicitly-moved positions from the localStorage cache back onto
   // freshly-fetched backend tasks. Only tasks where the cached start_date differs
   // from the cached original_start_date are overlaid — those are the ones the user
-  // has consciously dragged beyond the auto-snap baseline. This prevents
-  // _snapToWorkingHours from re-snapping user placements over blackout blocks.
+  // has consciously dragged beyond the baseline, so a reload keeps their placement.
   _overlayUserMoves(backendTasks: NimbusTask[], cachedTasks: Array<Record<string, unknown>>): string[] {
     const byId = new Map(cachedTasks.map(t => [t.id, t]));
     const restored: string[] = [];
@@ -890,95 +860,6 @@ export const Persistence = {
       restored.push(String(t.id));
     }
     return restored;
-  },
-
-  // SAP gives us date-only `BASIC_START_DATE`s, which parse to 00:00:00. On lines
-  // that don't run nights, every freshly ingested order would trip an
-  // out-of-hours alert and show a misleading "shifted from SAP" variance once
-  // a user (or autoReflow) moved it to a feasible slot. Snap each unfixed task
-  // to the first feasible working window via the injected calendar service's
-  // `nextAvailable`, using the task's OWN raw start_date — never a cursor advanced
-  // past a sibling's end. Multiple orders that all originate at the same raw SAP
-  // midnight therefore snap to the SAME first-working-hour instant and are left
-  // overlapping on purpose: that's a real scheduling conflict, and the existing
-  // Alerts overlap rule surfaces it for a human to resolve deliberately, rather
-  // than this function silently auto-spreading siblings apart. Reset
-  // `original_start_date` to the snapped instant so the variance badge baseline
-  // reflects the feasible plan, not the midnight artifact.
-  // Returns { movedIds }: the task IDs that actually moved (start/end changed).
-  // The SAP due date (`original_end_date`) is never touched here: the server
-  // serves the locked SAP finish as received and the browser reads a
-  // date-only value through NimbusComputeCore.dueDateInstant.
-  _snapToWorkingHours(tasks: NimbusTask[], plant: string | null): { movedIds: string[] } {
-    tasks = tasks.filter(task => task.planning_status !== 'needs_planning');
-    const movedIds: string[] = [];
-    if (!_calendarService) return { movedIds }; // no-op until wired — matches
-                                                // "skip snapping" behavior when
-                                                // the calendar service isn't available
-    _calendarService.beginRun(plant);
-    try {
-      let snappedCount = 0;
-
-      for (const t of tasks) {
-        const line = t.MACHINE;
-        if (!line) continue;
-        if (!(t.start_date instanceof Date) || !(t.end_date instanceof Date)) continue;
-        const durationMs = t.end_date.getTime() - t.start_date.getTime();
-        if (durationMs <= 0) continue;
-
-        if (t.firmed || (t.scheduleSegments?.length ?? 0) >= 2 || t.runtime_schedule_mismatch) continue;
-
-        // Backend has a scheduled_start/end persisted for this task — the user
-        // owns its position. Never re-snap on load; alerts will flag any
-        // blackout overlap so the user can resolve it deliberately.
-        if (t.user_scheduled) continue;
-
-        // User has moved or resized this task since ingest — preserve the deliberate
-        // placement (including intentional overlaps and duration changes).
-        const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
-        // end_date is now derived as start + run_time (see db.py _EFF_END_SQL), so it
-        // legitimately differs from original_end_date (the SAP due date). Detect a real
-        // resize by comparing against the run-time-implied end from the original start,
-        // not the SAP finish — otherwise every fresh order would look "moved" and skip snapping.
-        const oEndRun = oStart ? new Date(oStart.getTime() + Util.runHours(t) * Config.MS_HOUR) : null;
-        const startMoved = oStart  && t.start_date.getTime() !== oStart.getTime();
-        const endMoved   = oEndRun && t.end_date.getTime()   !== oEndRun.getTime();
-        if (startMoved || endMoved) continue;
-
-        // No original baseline on record AND start is already non-midnight → task was
-        // previously snapped or user-placed (e.g. backend returned a user-saved time
-        // but doesn't persist original_start_date). Preserve it; Alerts will flag overlaps.
-        const isMidnight = t.start_date.getHours() === 0 &&
-                           t.start_date.getMinutes() === 0 &&
-                           t.start_date.getSeconds() === 0;
-        if (!oStart && !isMidnight) continue;
-
-        const snappedStart = _calendarService.nextAvailable(line, t.start_date, durationMs);
-        if (!(snappedStart instanceof Date)) continue;
-        const snappedEnd = new Date(snappedStart.getTime() + durationMs);
-
-        const oldStartMs = t.start_date.getTime();
-        const oldEndMs = t.end_date.getTime();
-        const newStartMs = snappedStart.getTime();
-        const newEndMs = snappedEnd.getTime();
-
-        if (newStartMs !== oldStartMs || newEndMs !== oldEndMs) {
-          snappedCount++;
-          movedIds.push(t.id);
-        }
-        t.start_date = snappedStart;
-        t.end_date   = snappedEnd;
-        t.original_start_date = new Date(snappedStart);
-      }
-
-      if (snappedCount) {
-        ErrorLog.info('persistence',
-          `Snapped ${snappedCount} ingested order(s) to first available working slot`);
-      }
-    } finally {
-      _calendarService.endRun();
-    }
-    return { movedIds };
   },
 
   _loadCache(): boolean {

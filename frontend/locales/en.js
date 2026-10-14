@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.select_lines_to_opt':         'Select at least one machine to optimize, or switch to Whole plant.',
   'toast.opt_apply_running_skipped':  '{{count}} order(s) started running while the preview was open and were left as they are.',
   'toast.plant_no_timezone':  'Plant {{plant}} has no valid time zone, so NIMBUS cannot tell which of its orders are running or frozen. Ask an administrator to set the time zone for this plant in Master Data.',
+  'toast.finish_cannot_hold':  'Order {{order}} cannot finish at that time on {{machine}}: no working period long enough ends there. It was put back where it was.',
+  'toast.left_edge_locked':  'Drag the right edge to set when the order finishes. The start is worked out from the finish, so the left edge cannot be moved.',
   'toast.opt_applied':                 'Optimization applied — Ctrl+Z to undo',
   'toast.opt_discarded':               'Optimization discarded — schedule restored',
   'toast.optimize_missing_setup_summary': 'Optimized. {{orders}} order(s) on {{lines}} machine(s) were scheduled without setup data (no changeover bar) — see Alerts.',
@@ -80,7 +82,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.order_moved':                 'Moved "{{name}}" to {{date}}',
   'toast.cannot_fix_task':             'Cannot fix: task not found',
   'toast.cannot_fix_firmed': 'Cannot auto-fix: this order is firmed (frozen horizon or manual) or running. Unfirm it first to move it.',
-  'toast.commit_failed':               'Could not commit the order to the requested start.',
+  'toast.commit_failed':               'Could not place the order there.',
   'toast.dist_machine_locked':         '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.',
   'toast.no_routing_at_workcenter':    '{{order}} has no routing operation at {{machine}} — move blocked.',
   'toast.production_version_runtime_unresolved': '{{order}} — runtime could not be resolved for production version {{pv}}; held for planning.',
@@ -214,6 +216,9 @@ window.__NIMBUS_LOCALES.en = {
   'modal.purge_impact_override':       '{{count}} have a planner-set schedule that will be lost — re-uploading the source file restores SAP dates but not manual schedules or notes.',
   'modal.remove_color_wheel':          'Remove the color wheel for plant {{plant}}? This cannot be undone.',
   'modal.confirm_cancel':              'Cancel',
+  'modal.confirm_overtime_title':      'Place outside working hours?',
+  'modal.confirm_overtime_msg':        'Order {{order}} is firmed. It would run outside this machine\'s working hours. Place it there anyway as approved overtime?',
+  'modal.confirm_overtime_confirm':    'Place as overtime',
 
   /* ── AG Grid column headers ──────────────────────────────────────────────── */
   'col.id':                            'ID',

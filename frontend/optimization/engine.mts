@@ -63,7 +63,7 @@
 // file's `evaluateSchedule` adapter needs that the brief's original 8-type
 // list did not include (the adapter used to live IN setup-scheduler.mts, so
 // it referenced this locally-defined type without an import).
-import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, PerfMonitor, Toast, Modal } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
@@ -122,6 +122,38 @@ export type { PlaceWithSetupRequest, PlacementResult };
 export type RuntimeAllocation =
   | { kind: 'allocated'; start: Date; end: Date; scheduleSegments: OrderScheduleSegment[] }
   | { kind: 'unavailable' | 'exhausted' };
+
+/** Why a finish-anchored placement was refused (nothing is placed, the caller reports it). */
+export type FinishRefusal = 'overlong_never' | 'run_time_zero' | 'plant_no_timezone' | 'no_operating_window';
+
+/** Result of `Engine.finishAnchoredPatchFor`. `placed.changes` always carries BOTH edges (and the
+ *  segments, empty for a continuous bar). `finishMoved` is true when the finish had to move (the walk's own
+ *  answer, or a reversal forward from now); `reversed` marks the reversal. `reached_now` is returned only
+ *  when the caller asked to defer reversals (`opts.deferReversal`) so it can batch them per line. */
+export type FinishAnchoredResult =
+  | { kind: 'placed'; changes: Partial<NimbusTask>; finishMoved: boolean;
+      moveReason?: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout'; reversed?: boolean }
+  | { kind: 'reached_now' }
+  | { kind: 'refuse'; reason: FinishRefusal };
+
+export interface FinishAnchoredOptions {
+  /** Return `{kind:'reached_now'}` unresolved instead of reversing forward from now. */
+  deferReversal?: boolean;
+}
+
+/** Options for a manual (planner) placement. */
+export interface ManualPlacementOptions {
+  /** The planner confirmed an overtime placement for a firmed order (OQ63). */
+  confirmedOvertime?: boolean;
+  /** A run-time, machine or version edit: a RUNNING order holds its START and re-derives its finish forward
+   *  (OQ3) instead of holding the finish. Never set for a drop, a typed finish or the Override dialog. */
+  holdStartIfRunning?: boolean;
+  /** Batch callers (Push +1 hour): do not toast a finish that cannot be held; the caller reports one summary. */
+  quiet?: boolean;
+}
+
+/** Why the last manual placement returned null (read by callers right after the call). */
+export type ManualRefusal = FinishRefusal | 'finish_cannot_hold' | 'needs_overtime_confirm';
 
 /** Deliberately loose (see this plan's "Why Engine gets looser typing" section):
  *  cmp's params are `any` (not `T`) so a heterogeneous array of terms with
@@ -1053,6 +1085,8 @@ export const Engine = {
       start_date: null,
       end_date: null,
       scheduleSegments: [],
+      // Back in the queue the order has no placed bar, so an approved exception (overtime / overlong) goes too.
+      placement_exception: null,
       planning_status: 'needs_planning',
       planning_reason: { code: 'planner_unscheduled', message: 'Unscheduled by planner' },
     };
@@ -1190,67 +1224,194 @@ export const Engine = {
       : null;
   },
 
+  /** Finish-anchored placement (backward scheduling OQ1/OQ7/OQ13): lay the order's run time so it ENDS at
+   * `finish`, walking the line's working time backward (Calendar.allocateRuntimeBackward), and derive the
+   * start. Pure: no Store writes. Both edges are always in `changes` (a continuous bar has empty segments).
+   * - run time <= 0 or missing: `refuse` run_time_zero (nothing is placed).
+   * - a plant with no valid timezone has no clock: `refuse` plant_no_timezone (no derivation on a blocked plant).
+   * - a task carrying `placement_exception` is an approved exception: its stored bar is translated verbatim to
+   *   the requested finish (width kept, calendar ignored), so a later run-time change leaves the bar alone.
+   * - `overlong` (the order cannot be one bar under the plant's policy): `refuse` overlong_never. Under
+   *   overlong_only such an order is split instead, exactly as the forward allocator does.
+   * - the walk reached "now" with minutes left (`reached_now`): by default reverse forward from the plant's now,
+   *   floored to the minute, and report `finishMoved`/`reversed`; with `opts.deferReversal` return
+   *   `{kind:'reached_now'}` unresolved so a batch caller can place reversals per line in finish order. */
+  finishAnchoredPatchFor(task: NimbusTask, line: string, finish: Date,
+                         policy?: SplitOrderPolicy, opts: FinishAnchoredOptions = {}): FinishAnchoredResult {
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const effectivePolicy: SplitOrderPolicy = policy ?? Engine.splitOrderPolicyFor(plant);
+    const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return { kind: 'refuse', reason: 'run_time_zero' };
+
+    if (task.placement_exception && task.start_date && task.end_date) {
+      const deltaMs = finish.getTime() - task.end_date.getTime();
+      const pieces = task.scheduleSegments && task.scheduleSegments.length >= 2
+        ? task.scheduleSegments.map(segment => ({
+          ...segment,
+          startDate: new Date(segment.startDate.getTime() + deltaMs),
+          endDate: new Date(segment.endDate.getTime() + deltaMs),
+        }))
+        : [];
+      return {
+        kind: 'placed', finishMoved: false,
+        changes: {
+          start_date: pieces.length ? pieces[0].startDate : new Date(task.start_date.getTime() + deltaMs),
+          end_date: pieces.length ? pieces[pieces.length - 1].endDate : new Date(finish),
+          scheduleSegments: pieces,
+        },
+      };
+    }
+
+    const now = Store.plantNow(plant);
+    if (!now) return { kind: 'refuse', reason: 'plant_no_timezone' };
+    const floor = Calendar._floorMinute(now);
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const walk = (walkPolicy: SplitOrderPolicy) => Calendar.allocateRuntimeBackward(line, finish, runtimeMinutes, walkPolicy,
+      { floor, minSegmentMinutes: Engine.minProductiveSegmentMinutesFor(plant), plantTz });
+    let result = walk(effectivePolicy);
+    if (result.kind === 'overlong' && effectivePolicy === 'overlong_only') result = walk('partial_allowed');
+
+    if (result.kind === 'placed') {
+      return {
+        kind: 'placed', finishMoved: result.finishMoved,
+        ...(result.moveReason ? { moveReason: result.moveReason } : {}),
+        changes: { start_date: result.start, end_date: result.end, scheduleSegments: result.scheduleSegments },
+      };
+    }
+    if (result.kind === 'overlong') return { kind: 'refuse', reason: 'overlong_never' };
+    if (result.kind === 'unavailable') return { kind: 'refuse', reason: 'no_operating_window' };
+    if (opts.deferReversal) return { kind: 'reached_now' };
+    const forward = Calendar.allocateRuntime(line, floor, runtimeMinutes, effectivePolicy);
+    if (forward.kind !== 'allocated') return { kind: 'refuse', reason: 'no_operating_window' };
+    return {
+      kind: 'placed', finishMoved: true, reversed: true,
+      changes: { start_date: forward.start, end_date: forward.end, scheduleSegments: forward.scheduleSegments },
+    };
+  },
+
   /** Resolve a moved routing-derived order before constructing its schedule.
-   * Manual/order-file runtimes keep their existing authority on machine moves. */
-  manualRoutingSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
+   * Manual/order-file runtimes keep their existing authority on machine moves. The held FINISH is the
+   * anchor (the third argument); the start follows from the resolved run time. */
+  manualRoutingSchedulePatchFor(task: NimbusTask, line: string, requestedFinish: Date,
+                                opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    Engine.lastManualRefusal = null;
     const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
     const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
     if (!enabled || line === task.MACHINE || (task.run_time_source !== 'routing' && task.RUN_TIME != null)) {
-      return Engine.manualSchedulePatchFor(task, line, requestedStart);
+      return Engine.manualSchedulePatchFor(task, line, requestedFinish, undefined, opts);
     }
     const resolved = Runtime.resolve(task, line);
     if (!resolved.ok) return null;
-    const changes = Engine.manualSchedulePatchFor({ ...task, RUN_TIME: resolved.hours }, line, requestedStart);
+    const changes = Engine.manualSchedulePatchFor({ ...task, RUN_TIME: resolved.hours }, line, requestedFinish, undefined, opts);
     return changes ? {
       ...changes, RUN_TIME: resolved.hours, run_time_source: 'routing',
       run_time_basis: resolved.basis as unknown as Record<string, unknown>,
     } : null;
   },
 
-  /** Apply a planner-requested parent start/line edit verbatim while its
-   * productive duration is unchanged (OD-B1a). A task with fewer than two
-   * existing schedule segments commits directly at the requested start; a
-   * task that already has two or more segments (placed there by a prior
-   * optimizer run) has its existing shape translated by the requested delta
-   * rather than destroyed or re-derived. If a runtime edit changes the
-   * productive total, regenerate the segments using the plant split policy. */
-  manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
+  /** Why the most recent `manualSchedulePatchFor` returned null (null when it placed something). Read by the
+   *  caller right after the call: a refusal the engine already toasted (`finish_cannot_hold`) must not be toasted
+   *  again, and `needs_overtime_confirm` means "ask the planner, then call again with confirmedOvertime". */
+  lastManualRefusal: null as ManualRefusal | null,
+
+  /** Ask the planner to approve an overtime placement for a firmed order (OQ63). Resolves true on confirm. */
+  confirmOvertimePlacement(task: NimbusTask): Promise<boolean> {
+    return Modal.confirm({
+      title: Util.t('modal.confirm_overtime_title'),
+      message: Util.t('modal.confirm_overtime_msg', { order: Util.orderNumber(task) }),
+      confirmLabel: Util.t('modal.confirm_overtime_confirm'),
+      tone: 'warn',
+    });
+  },
+
+  /** Apply a planner-requested placement. The third argument is the FINISH the planner wants (backward
+   * scheduling OQ1): a drop, a typed end, a run-time/machine/version edit that holds the finish, or the
+   * Override dialog's finish. The start is derived backward through the working time and the result carries
+   * both edges.
+   * - An order that already has two or more schedule segments of the right total is translated rigidly by the
+   *   finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived and never calendar-checked;
+   *   a changed total (rate or version edit) is re-derived from the held finish under the plant's policy.
+   * - Otherwise `finishAnchoredPatchFor(snap(finish))`. A manual drop whose finish cannot be held (it would
+   *   have to move) returns null with `toast.finish_cannot_hold` and the caller reverts (OQ13 b). A FIRMED order
+   *   in that situation asks for confirmation first (`lastManualRefusal === 'needs_overtime_confirm'`); with
+   *   `opts.confirmedOvertime` it is placed raw (start = finish minus run time, calendar ignored) and marked
+   *   `placement_exception = 'overtime'` (OQ63).
+   * - A row queued as `overlong_never` that is still overlong on the chosen line is released as ONE continuous
+   *   elapsed bar ending at the finish, marked `'overlong'` (OQ50). Queued `overlong_never`/`run_time_over_cap`
+   *   rows that place normally return to `scheduled` in the same patch.
+   * Manual placement deliberately ignores the frozen horizon (OD-C2c). Null on any refusal; the reason is in
+   * `Engine.lastManualRefusal`. */
+  manualSchedulePatchFor(task: NimbusTask, line: string, requestedFinish: Date,
+                         policy?: SplitOrderPolicy, opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    Engine.lastManualRefusal = null;
+    const refuse = (reason: ManualRefusal): null => { Engine.lastManualRefusal = reason; return null; };
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
-    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
+    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return refuse('run_time_zero');
+    const finish = Util.snap(requestedFinish);
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const queuedCode = task.planning_status === 'needs_planning' ? task.planning_reason?.code : undefined;
+    const released: Partial<NimbusTask> = queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap'
+      ? { planning_status: 'scheduled', planning_reason: null } : {};
+
+    if (opts.holdStartIfRunning && task.start_date && Engine.isInProgress(task)) {
+      // OQ3: it is already producing, so its start cannot move; the finish follows from the new run time.
+      const held = Engine.schedulePatchFor(task, line, task.start_date, policy ?? Engine.splitOrderPolicyFor(plant));
+      return held ? { ...held, MACHINE: line } : refuse('no_operating_window');
+    }
+
     const segments = task.scheduleSegments;
     if (segments && segments.length >= 2) {
       const productiveMinutes = Math.round(segments.reduce((sum, segment) =>
         sum + (segment.endDate.getTime() - segment.startDate.getTime()) / Config.MS_MIN, 0));
-      if (productiveMinutes !== runtimeMinutes) {
-        // A rate/PV edit changes the amount of productive time. Translating
-        // old pieces would preserve an invalid aggregate; use the plant's
-        // existing allocation policy while retaining ordinary drag behavior.
-        const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
-        const allocated = Engine.schedulePatchFor(task, line, Util.snap(requestedStart), Engine.splitOrderPolicyFor(plant));
-        return allocated ? { ...allocated, MACHINE: line } : null;
+      if (productiveMinutes === runtimeMinutes) {
+        const deltaMs = finish.getTime() - segments[segments.length - 1].endDate.getTime();
+        const shifted = segments.map(segment => ({
+          ...segment,
+          startDate: new Date(segment.startDate.getTime() + deltaMs),
+          endDate: new Date(segment.endDate.getTime() + deltaMs),
+        }));
+        return {
+          start_date: shifted[0].startDate,
+          end_date: shifted[shifted.length - 1].endDate,
+          MACHINE: line,
+          scheduleSegments: shifted,
+        };
       }
+      // A rate/version edit changes the productive total: translating the old pieces would keep an invalid
+      // aggregate, so re-derive from the held finish under the plant's own policy.
     }
-    if (!segments || segments.length < 2 || !task.start_date) {
-      const start = Util.snap(requestedStart);
-      return {
-        start_date: start,
-        end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN),
-        MACHINE: line,
-        scheduleSegments: [],
-      };
+
+    const result = Engine.finishAnchoredPatchFor(task, line, finish, policy ?? Engine.splitOrderPolicyFor(plant));
+    if (result.kind === 'refuse') {
+      if (result.reason === 'overlong_never' && queuedCode === 'overlong_never') {
+        return {
+          start_date: new Date(finish.getTime() - runtimeMinutes * Config.MS_MIN),
+          end_date: finish,
+          scheduleSegments: [],
+          MACHINE: line,
+          placement_exception: 'overlong',
+          ...released,
+        };
+      }
+      return refuse(result.reason);
     }
-    const deltaMs = Util.snap(requestedStart).getTime() - task.start_date.getTime();
-    const shifted = segments.map(segment => ({
-      ...segment,
-      startDate: new Date(segment.startDate.getTime() + deltaMs),
-      endDate: new Date(segment.endDate.getTime() + deltaMs),
-    }));
-    return {
-      start_date: shifted[0].startDate,
-      end_date: shifted[shifted.length - 1].endDate,
-      MACHINE: line,
-      scheduleSegments: shifted,
-    };
+    if (result.kind === 'reached_now') return refuse('no_operating_window');   // unreachable: reversal is not deferred
+    if (result.finishMoved) {
+      if (result.moveReason && !result.reversed && Store.isFirmed(task.id)) {
+        if (!opts.confirmedOvertime) return refuse('needs_overtime_confirm');
+        return {
+          start_date: new Date(finish.getTime() - runtimeMinutes * Config.MS_MIN),
+          end_date: finish,
+          scheduleSegments: [],
+          MACHINE: line,
+          placement_exception: 'overtime',
+          ...released,
+        };
+      }
+      if (!opts.quiet) Toast.show(Util.t('toast.finish_cannot_hold', { order: Util.orderNumber(task), machine: line }), 'warn', 5000);
+      return refuse('finish_cannot_hold');
+    }
+    return { ...result.changes, MACHINE: line, ...released };
   },
 
   /** Repair schedules whose authoritative runtime changed after their last

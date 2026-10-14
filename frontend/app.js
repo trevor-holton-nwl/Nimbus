@@ -48,8 +48,9 @@
    backend-sync logic — so nothing stayed behind in app.js besides consumers
    of `Persistence.*`/`CalendarSync.*`. The two real data→services dependencies
    found during Phase 2 research (Persistence calling into Calendar's capacity
-   math, and Persistence calling Alerts.scheduleRecompute()) are resolved by
-   an injected seam (`Persistence.setCalendarService`, wired below) and a
+   math, and Persistence calling Alerts.scheduleRecompute()) were resolved by
+   an injected seam (`Persistence.setCalendarService`, removed with the load-time
+   re-snap in backward scheduling Task 2.5) and a
    Store event (`schedule:hydrated`, subscribed to once in schedule-services.mjs)
    respectively — schedule-data.mjs still never imports schedule-services.mjs.
    CQ-1 Phase 2 Task 5 moved Session's pure state/API half into the same
@@ -278,16 +279,6 @@ const NIMBUS = (function () {
   const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, SystemConfig, AdminCockpit, PriorityListMapping, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
-  // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
-  // statically import schedule-services.mjs — see that file's header). Arrow-function
-  // wrappers, not bare method references: Calendar's methods read `this._runCache`/
-  // `this._runBlocks` internally, so they must be invoked with Calendar as the receiver.
-  Persistence.setCalendarService({
-    beginRun: (plant) => Calendar._beginRun(plant),
-    endRun: () => Calendar._endRun(),
-    nextAvailable: (line, from, durationMs) => Calendar.nextAvailable(line, from, durationMs),
-    workWindow: (line, date) => Calendar.workWindow(line, date),
-  });
   // Injected getter seam so plant-and-administration.mjs's Plant/LaborPlanning
   // can ask "am I currently the visible tab/sub-tab?" without a bare reference
   // to `App`. `App` is now imported from application-shell.mjs via the bridge

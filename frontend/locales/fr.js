@@ -42,6 +42,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.select_lines_to_opt':         'Sélectionnez au moins une machine à optimiser, ou passez à Usine entière.',
   'toast.opt_apply_running_skipped':  '{{count}} ordre(s) ont démarré pendant que l’aperçu était ouvert et ont été laissés tels quels.',
   'toast.plant_no_timezone':  'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne peut donc pas savoir quels ordres sont en cours ou gelés. Demandez à un administrateur de définir le fuseau horaire de l’usine dans les Données de base.',
+  'toast.finish_cannot_hold':  'La commande {{order}} ne peut pas se terminer à cette heure sur {{machine}} : aucune période de travail assez longue ne s’y termine. Elle a été remise à sa place précédente.',
+  'toast.left_edge_locked':  'Faites glisser le bord droit pour définir la fin de la commande. Le début est calculé à partir de la fin ; le bord gauche ne peut donc pas être déplacé.',
   'toast.opt_applied':                 'Optimisation appliquée — Ctrl+Z pour annuler',
   'toast.opt_discarded':               'Optimisation annulée — programme restauré',
   'toast.optimize_missing_setup_summary': 'Optimisé. {{orders}} ordre(s) sur {{lines}} machine(s) ont été planifiés sans données de réglage (aucune barre de changement) — voir Alertes.',
@@ -79,7 +81,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.order_moved':                 '"{{name}}" déplacé à {{date}}',
   'toast.cannot_fix_task':             'Impossible de fixer : tâche introuvable',
   'toast.cannot_fix_firmed': 'Correction automatique impossible : cet ordre est ferme (horizon gelé ou manuel) ou en cours. Retirez d\'abord le statut ferme.',
-  'toast.commit_failed':               'Impossible de valider la commande au démarrage demandé.',
+  'toast.commit_failed':               'Impossible de planifier la commande à cet endroit.',
   'toast.save_rejected':               'Sauvegarde refusée : {{msg}}',
   'toast.saved_locally':               'Enregistré localement (serveur inaccessible)',
   'toast.save_timeout': 'Délai d\'enregistrement dépassé. Vos modifications ne sont toujours pas enregistrées ici - vérifiez la connexion, puis réessayez.',
@@ -185,6 +187,9 @@ window.__NIMBUS_LOCALES.fr = {
   'modal.purge_impact_override':       '{{count}} ont une planification définie par le planificateur qui sera perdue — un nouveau téléchargement restaure les dates SAP mais pas la planification manuelle ni les notes.',
   'modal.remove_color_wheel':          'Supprimer la roue de couleurs pour l\'usine {{plant}} ? Cette action est irréversible.',
   'modal.confirm_cancel':              'Annuler',
+  'modal.confirm_overtime_title':      'Planifier hors des heures de travail ?',
+  'modal.confirm_overtime_msg':        'La commande {{order}} est ferme. Elle s’exécuterait en dehors des heures de travail de cette machine. La planifier quand même comme heures supplémentaires approuvées ?',
+  'modal.confirm_overtime_confirm':    'Planifier en heures supplémentaires',
 
   /* ── AG Grid column headers ──────────────────────────────────────────────── */
   'col.id':                            'ID',

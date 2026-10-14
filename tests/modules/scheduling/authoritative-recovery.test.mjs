@@ -7,6 +7,10 @@ import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Table } from '../../../frontend/scheduling/orders.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
+import { createRequire } from 'node:module';
+
+// Placement derives from the plant clock, which projects through the compute core's zone helper (OQ52).
+globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 function fixture(t) {
@@ -19,11 +23,16 @@ function fixture(t) {
   t.mock.method(CalendarSync, 'fetchPlantConfig', async () => {});
   t.mock.method(Persistence, 'loadPriorityRankMaps', async () => {});
   t.mock.method(Persistence, 'loadSetupSnapshot', async () => null);
-  t.mock.method(Persistence, '_snapToWorkingHours', () => {});
   t.mock.method(Runtime, 'load', async () => {});
   t.mock.method(Alerts, 'scheduleRecompute', () => {});
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._conflictedIds.clear();
-  Store.setMasterData({ plants: [{ plant: 'P', routing_runtime_enabled: true }], lines: [] }, 'test');
+  // A placement edit holds the finish on the plant's clock (backward scheduling Task 2.5): the plant needs a zone,
+  // a pinned server clock (the fixture is dated 2026-10-01) and a splitting policy so a 12 h run can end at 14:00.
+  Store.setMasterData({ plants: [{ plant: 'P', routing_runtime_enabled: true, split_order_policy: 'partial_allowed',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }], lines: [] }, 'test');
+  const priorOffset = Store.serverOffsetMs;
+  Store.serverOffsetMs = new Date('2026-09-01T00:00:00').getTime() - Date.now();
+  t.after(() => { Store.serverOffsetMs = priorOffset; Store._blockedPlants.clear(); });
   Store.setSelectedPlant('P', 'test');
   Persistence._currentLoadedPlant = 'P';
   const server = { id: 'A', PLANT: 'P', MATERIAL_NUMBER: 'MAT', MACHINE: 'M1',

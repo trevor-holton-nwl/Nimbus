@@ -977,16 +977,10 @@ dependency (`schedule-data.mjs` calling into `schedule-services.mjs`) is real
 in the pre-Phase-2 code, at two distinct call shapes, both resolved without a
 static import:
 - **`Persistence.setCalendarService({ beginRun, endRun, nextAvailable,
-  workWindow })`** — an injected-callback seam replacing 5 direct
-  `Calendar._beginRun`/`_endRun`/`nextAvailable`/`workWindow` calls inside
-  `Persistence._snapToWorkingHours` (its second caller, a due-end helper, was removed in Phase 1 of the backward-scheduling migration). Wired once in `app.js`
-  boot glue immediately after the `schedule-services.mjs` bridge destructure
-  resolves `Calendar`, using arrow-function wrappers (not bare method
-  references) since `Calendar`'s methods read `this._runCache`/`_runBlocks`
-  and must be invoked with `Calendar` as the receiver. Until wired (e.g. a
-  standalone unit test that imports `schedule-data.mjs` directly),
-  `_snapToWorkingHours` no-ops rather than throwing — snapping is skipped,
-  not the load.
+  workWindow })`** — REMOVED in backward scheduling Task 2.5 together with
+  `Persistence._snapToWorkingHours` (the load-time re-snap it served) and the
+  `CalendarSync` post-hydration re-snap. It was an injected-callback seam wired in `app.js`
+  boot glue; nothing in `schedule-data.mjs` calls the calendar any more.
 - **`{ type: 'schedule:hydrated', source }`** — a new `Store` event replacing
   5 direct `Alerts.scheduleRecompute()` calls inside `Persistence.load()`'s
   two branches, `_loadCache()`, and `_loadDemo()`. `schedule-services.mjs`
