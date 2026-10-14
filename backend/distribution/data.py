@@ -1226,7 +1226,7 @@ def _write_header_facts(cur, parent: dict, batch_id: str) -> None:
            SET sap_workcenter    = %(wc)s,
                order_quantity    = %(qty)s,
                run_time          = %(rt)s,
-               basic_start_date  = %(bs)s,
+               basic_start_date  = COALESCE(%(bs)s, basic_start_date),
                basic_finish_date = %(bf)s,
                original_finish_received = {orig_expr},
                firming_indicator = %(fi)s,
@@ -1237,7 +1237,7 @@ def _write_header_facts(cur, parent: dict, batch_id: str) -> None:
            AND (sap_workcenter    IS DISTINCT FROM %(wc)s
              OR order_quantity    IS DISTINCT FROM %(qty)s
              OR run_time          IS DISTINCT FROM %(rt)s
-             OR basic_start_date  IS DISTINCT FROM %(bs)s
+             OR (%(bs)s::timestamp IS NOT NULL AND basic_start_date IS DISTINCT FROM %(bs)s)
              OR basic_finish_date IS DISTINCT FROM %(bf)s
              OR original_finish_received IS DISTINCT FROM ({orig_expr})
              OR firming_indicator IS DISTINCT FROM %(fi)s
@@ -1415,7 +1415,9 @@ def _child_upsert_sql(*, ingest: bool) -> str:
     baseline (the next upload fills it)."""
     if ingest:
         set_basic = (
-            "        basic_start_date        = EXCLUDED.basic_start_date,\n"
+            "        -- The start is optional: an incoming NULL means \"not sent\" and never erases a stored one\n"
+            "        -- (as db._UPSERT_SQL); the finish is required, so it is always written.\n"
+            "        basic_start_date        = COALESCE(EXCLUDED.basic_start_date, orders.basic_start_date),\n"
             "        basic_finish_date       = EXCLUDED.basic_finish_date,\n")
         set_sap = (
             "        sap_basic_start_date    = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),\n"

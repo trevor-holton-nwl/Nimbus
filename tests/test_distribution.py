@@ -4769,6 +4769,45 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         assert self._state(pg, self.MAT) == before
         assert res["updated"] == 0 and res["unchanged"] == 2
 
+    def test_reupload_without_a_start_keeps_the_stored_basic_start_on_header_and_children(self, pg):
+        """The start is optional at ingest: a NULL start means 'not sent' and must not erase a stored one
+        (db._UPSERT_SQL is COALESCE(EXCLUDED, stored); the distribution child upsert and header write match)."""
+        self._upload(pg, [self._parent(self.MAT)])
+
+        def starts():
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT basic_start_date, basic_finish_date FROM order_distribution"
+                            " WHERE plant=%s AND production_order=%s AND material_number=%s",
+                            (self.PLANT, self.ORD, self.MAT))
+                header = cur.fetchone()
+                cur.execute("SELECT basic_start_date FROM orders WHERE plant=%s AND parent_production_order=%s"
+                            " AND material_number=%s ORDER BY id", (self.PLANT, self.ORD, self.MAT))
+                return header, [r[0] for r in cur.fetchall()]
+
+        (hs, hf), kids = starts()
+        assert hs == self.base and kids == [self.base, self.base]
+        new_finish = self.base + dt.timedelta(hours=14)
+        # a quantity change makes the children's upsert WHERE fire (basic_* alone is not a difference there)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=None, basic_finish_date=new_finish,
+                                       order_quantity=120.0)])
+        (hs2, hf2), kids2 = starts()
+        assert hs2 == self.base, "the header keeps its stored start"
+        assert kids2 == [self.base, self.base], "the children keep their stored start"
+        assert hf2 == new_finish, "the finish is still written"
+        # The ingest seam writes the children through db._UPSERT_SQL first, so drive distribution's own child upsert
+        # directly (apply()'s second pass) with a start-less plan that differs from what is stored.
+        _rows, plan_structure, _w = distribution_data.plan(
+            [self._parent(self.MAT, basic_start_date=None, basic_finish_date=new_finish + dt.timedelta(hours=2),
+                          order_quantity=140.0)], str(uuid.uuid4()))
+        parent = plan_structure["parents"][(self.PLANT, self.ORD, self.MAT)]
+        assert all(c["basic_start_date"] is None for c in parent["child_rows"])
+        parent["_ingest"] = True
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            assert distribution_data._apply_children(cur, parent) == 2, "both children were rewritten"
+            conn.commit()
+        (_hs3, _hf3), kids3 = starts()
+        assert kids3 == [self.base, self.base], "distribution's child upsert never erases a stored start"
+
     def test_child_change_resets_all_siblings_only(self, pg):
         def rows():
             return [self._parent(self.MAT), self._parent(self.MAT2)]
