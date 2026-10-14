@@ -4222,6 +4222,17 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('senior review M1: the never-branch reversal rounds the run time to whole minutes (no fractional-minute finish)', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('frac', { RUN_TIME: '2.33', original_end_date: at(19, 17), start_date: at(10, 6), end_date: at(10, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.frac;
+      assert.equal(t.start_date.getTime(), at(20, 9).getTime(), 'reversed from now');
+      assert.equal(t.end_date.getTime() - t.start_date.getTime(), 140 * 60000, '2.33 h = 140 whole minutes, not 139.8');
+    } finally { fx.restore(); }
+  });
+
   test('gate 4a: the resulting running status of a reversed order is read on the plant clock (X runs from now, Y and Z are queued behind it)', () => {
     const fx = recFixture();
     try {

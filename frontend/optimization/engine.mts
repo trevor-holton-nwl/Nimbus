@@ -1849,7 +1849,7 @@ export const Engine = {
         out.invalidRuntime.push(item);
         continue;
       }
-      const runtimeMs = runtimeHours * Config.MS_HOUR;
+      const runtimeMs = Math.round(runtimeHours * 60) * Config.MS_MIN;   // whole minutes like every other path (senior review M1)
       const candidate = item.notBefore ? new Date(Math.max(item.notBefore.getTime(), cursor.getTime())) : cursor;
       let start: Date;
       let end: Date;
