@@ -199,34 +199,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/tasks/baseline-correct": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Baseline Correct
-         * @description Persist due-date-baseline (basic_finish_date) corrections found by the
-         *     frontend's Persistence._snapToWorkingHours. Fire-and-forget from the
-         *     client's perspective — every row is re-validated server-side
-         *     (db.correct_due_date_baselines) before being written, so a late,
-         *     duplicate, or concurrent call can never overwrite an already-corrected or
-         *     genuinely fresh (re-uploaded) value; a failed re-validation is a safe
-         *     per-row no-op, not an error.
-         *     Payload: { corrections: [{ id, basic_finish_date, base_version }] }
-         *     Response: { status, applied, persisted, skipped, not_matched, versions }
-         */
-        post: operations["baseline_correct_tasks_baseline_correct_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/upload": {
         parameters: {
             query?: never;
@@ -3033,32 +3005,6 @@ export interface components {
             /** Entries */
             entries: components["schemas"]["AuditLogEntry"][];
         };
-        /**
-         * BaselineCorrectResult
-         * @description Response for POST /tasks/baseline-correct — db.correct_due_date_baselines'
-         *     shape (db.py:604+) plus the same status/error_code/cause failure fields as
-         *     BulkUpdateResult.
-         */
-        BaselineCorrectResult: {
-            /** Status */
-            status: string;
-            /** Applied */
-            applied: number;
-            /** Persisted */
-            persisted: number;
-            /** Skipped */
-            skipped: number;
-            /** Not Matched */
-            not_matched: number;
-            /** Versions */
-            versions: {
-                [key: string]: number;
-            };
-            /** Error Code */
-            error_code?: string | null;
-            /** Cause */
-            cause?: string | null;
-        };
         /** Body_sap_stage_upload_sap_staging_upload__object__post */
         Body_sap_stage_upload_sap_staging_upload__object__post: {
             /** File */
@@ -3246,34 +3192,6 @@ export interface components {
         DeleteFilteredResult: {
             /** Deleted */
             deleted: number;
-        };
-        /**
-         * DueDateCorrection
-         * @description One order's due-date-baseline correction, computed client-side by
-         *     Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
-         *     `base_version` is the row's xmin as of the client's last load/save of it —
-         *     used server-side to pin the write against ANY concurrent change to the row
-         *     (a SAP re-upload, a normal scheduling save, or another tab's correction).
-         *     Deliberately not a raw date value: a date round-trips through JS
-         *     Date/JSON.stringify, which would re-label a naive local timestamp as UTC
-         *     and never match Postgres's naive basic_start_date for a non-UTC client.
-         *     See db.correct_due_date_baselines.
-         */
-        DueDateCorrection: {
-            /** Id */
-            id: string;
-            /** Basic Finish Date */
-            basic_finish_date: string;
-            /** Base Version */
-            base_version: number;
-        };
-        /** DueDateCorrectionPayload */
-        DueDateCorrectionPayload: {
-            /**
-             * Corrections
-             * @default []
-             */
-            corrections: components["schemas"]["DueDateCorrection"][];
         };
         /**
          * GridResult
@@ -4265,39 +4183,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TasksRefreshResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    baseline_correct_tasks_baseline_correct_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DueDateCorrectionPayload"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BaselineCorrectResult"];
                 };
             };
             /** @description Validation Error */

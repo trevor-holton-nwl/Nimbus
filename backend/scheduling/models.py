@@ -208,20 +208,6 @@ class TasksRefreshResponse(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
-class BaselineCorrectResult(BaseModel):
-    """Response for POST /tasks/baseline-correct — db.correct_due_date_baselines'
-    shape (db.py:604+) plus the same status/error_code/cause failure fields as
-    BulkUpdateResult."""
-    status: str
-    applied: int
-    persisted: int
-    skipped: int
-    not_matched: int
-    versions: dict[str, int]
-    error_code: str | None = None
-    cause: str | None = None
-
-
 # ---------------------------------------------------------------------------
 # Task date updates — shared model + validation + apply/persist/rollback
 # ---------------------------------------------------------------------------
@@ -296,22 +282,3 @@ class TasksUpdatePayload(BaseModel):
 class TaskRefreshPayload(BaseModel):
     """Ids the client needs to reconcile after a concurrency conflict."""
     ids: list[str] = []
-
-
-class DueDateCorrection(BaseModel):
-    """One order's due-date-baseline correction, computed client-side by
-    Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
-    `base_version` is the row's xmin as of the client's last load/save of it —
-    used server-side to pin the write against ANY concurrent change to the row
-    (a SAP re-upload, a normal scheduling save, or another tab's correction).
-    Deliberately not a raw date value: a date round-trips through JS
-    Date/JSON.stringify, which would re-label a naive local timestamp as UTC
-    and never match Postgres's naive basic_start_date for a non-UTC client.
-    See db.correct_due_date_baselines."""
-    id: str
-    basic_finish_date: str
-    base_version: int
-
-
-class DueDateCorrectionPayload(BaseModel):
-    corrections: list[DueDateCorrection] = []

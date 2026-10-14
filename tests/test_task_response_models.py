@@ -667,7 +667,7 @@ def test_openapi_schema_includes_new_components():
     schema = brain.api.openapi()
     names = set(schema.get("components", {}).get("schemas", {}).keys())
     for expected in ("TasksResponse", "TaskDTO", "LinkDTO", "TaskUpdateResult",
-                     "BulkUpdateResult", "TasksRefreshResponse", "BaselineCorrectResult"):
+                     "BulkUpdateResult", "TasksRefreshResponse"):
         assert expected in names, f"{expected} missing from OpenAPI components.schemas"
 
 

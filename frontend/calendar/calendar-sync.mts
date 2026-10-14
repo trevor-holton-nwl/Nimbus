@@ -9,8 +9,8 @@
 // `Persistence` (scheduling/persistence.mjs) is a real cross-file import
 // forming a two-way ESM cycle with that module — this file's flush path
 // (`_flushLineHours`/`_flushPlantHours`) calls back into
-// `Persistence._dirtyIds`/`_forceIds`/`_snapToWorkingHours`/`_saveCache`/
-// `_relayDueDateCorrections` so a re-snap against freshly-authoritative
+// `Persistence._dirtyIds`/`_forceIds`/`_snapToWorkingHours`/`_saveCache`
+// so a re-snap against freshly-authoritative
 // hours can fold into the SAME dirty/force bookkeeping an in-flight manual
 // edit already established, rather than silently reverting it. Safe under
 // the same rule used throughout this split: every cross-reference is inside
@@ -234,11 +234,8 @@ export const CalendarSync = {
     // Idempotent when hours match; _snapToWorkingHours re-baselines each pass, so a
     // second pass leaves the correct final baseline (no set-once needed). (F7)
     // Deliberately NOT gated on (has.plantHours || has.lineHours): "backend has no
-    // override" is still an authoritative answer (use defaults) that the due-date
-    // correction phase needs in order to relay — gating on has.* left the relay
-    // permanently dead for every plant that has never had custom hours saved to the
-    // backend, which is the common case (CalendarSync never migrates auto-seeded
-    // default hours up), not a rare one.
+    // override" is still an authoritative answer (use defaults), so the re-snap runs
+    // for every plant, including the common one that has never had custom hours saved.
     if (Store.tasksArr.length) {
       try {
         // A slow (8s) fetchPlantConfig can resolve AFTER the user started editing this
@@ -247,7 +244,7 @@ export const CalendarSync = {
         // orders (user moves are startMoved-skipped) and must not drop pending saves.
         const dirtySnapshot  = new Set(Persistence._dirtyIds);
         const forceSnapshot  = new Set(Persistence._forceIds);
-        const { movedIds, corrections } = Persistence._snapToWorkingHours(Store.tasksArr, plant);
+        const { movedIds } = Persistence._snapToWorkingHours(Store.tasksArr, plant);
         Persistence._saveCache();
         // Only emit and re-render if tasks actually moved; idempotent when hours haven't
         // changed (nextAvailable will find the same slots, startMoved-skip user-placed).
@@ -256,14 +253,6 @@ export const CalendarSync = {
         }
         for (const id of dirtySnapshot) Persistence._dirtyIds.add(id);
         for (const id of forceSnapshot) Persistence._forceIds.add(id);
-        // Backend-authoritative hours have now landed — this is the only point
-        // in the session safe to PERSIST due-date-baseline corrections. The
-        // earlier pre-hydration call in Persistence.load may have computed
-        // against Config.DEFAULT_SHIFT / stale cached hours, and this
-        // correction is deliberately freeze-once (see _snapToWorkingHours) —
-        // persisting from that first pass could lock in a wrong value before
-        // the accurate hours ever get a chance to run.
-        Persistence._relayDueDateCorrections(corrections);
       } catch (e) {
         ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${(e as Error).message}`);
       }

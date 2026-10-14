@@ -902,25 +902,6 @@ class TestSapTruthReupload:
         assert after == before, "an unchanged re-upload must not touch the row (xmin included)"
         assert res["inserted"] == 0 and res["updated"] == 0 and res["unchanged"] == 1
 
-    def test_baseline_correct_then_same_file_resets_nothing(self):
-        # The finish is stored as received, so the "raw shape" the baseline correction
-        # accepts (finish == start) is put in place directly; the SAP baseline (not
-        # basic_finish_date) is what a re-upload of the same file is compared against.
-        line = self._line()
-        self._up([line])
-        self._sql("UPDATE orders SET basic_finish_date = basic_start_date WHERE id = %s", (self._oid(),))
-        self._schedule(self.base + dt.timedelta(days=3))
-        row = self._row()
-        corrected = row["basic_start_date"] + dt.timedelta(days=5)
-        out = self.pg.correct_due_date_baselines(
-            [{"id": row["id"], "basic_finish_date": corrected, "base_version": row["version"]}])
-        assert out["persisted"] == 1
-        before = self._row()
-        assert before["basic_finish_date"] == corrected
-        res = self._up([line], "zztest_st_2.xlsx")
-        after = self._row()
-        assert after == before and res["unchanged"] == 1 and res["updated"] == 0
-
     # ---- locked original_*_received (backward-scheduling Task 1.2) ------
     def _orig(self, oid=None):
         with self.pg._pool.connection() as conn, conn.cursor() as cur:

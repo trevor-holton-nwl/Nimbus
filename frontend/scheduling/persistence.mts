@@ -45,7 +45,6 @@ import type { components } from '../types/api-generated.mjs';
 type TasksResponse        = components['schemas']['TasksResponse'];
 type BulkUpdateResult     = components['schemas']['BulkUpdateResult'];
 type TasksRefreshResponse = components['schemas']['TasksRefreshResponse'];
-type BaselineCorrectResult = components['schemas']['BaselineCorrectResult'];
 
 interface RefreshBaseline {
   edits: string;
@@ -571,10 +570,8 @@ export const Persistence = {
         // feasible working slot on its line so ingest doesn't fire false
         // out-of-hours alerts and the variance baseline reflects reality.
         // This pass may run against default/stale hours (CalendarSync's
-        // authoritative fetch hasn't resolved yet) — the due-date-baseline
-        // correction it also computes in-memory is fine to (re-)compute here,
-        // but deliberately not relayed to the backend from this call; only the
-        // post-hydration re-snap in CalendarSync._applyConfig persists it.
+        // authoritative fetch hasn't resolved yet); the post-hydration re-snap
+        // in CalendarSync._applyConfig re-runs it against the real hours.
         Persistence._snapToWorkingHours(tasks, plant);
 
         acceptDiscard();
@@ -887,8 +884,6 @@ export const Persistence = {
       t.end_date   = ce;
       t.original_start_date = cos;
       t.scheduleSegments = Persistence._segmentsFromRaw(cached);
-      const coe = Util.parseDate(cached.original_end_date);
-      if (coe instanceof Date) t.original_end_date = coe;
       restored.push(String(t.id));
     }
     return restored;
@@ -905,38 +900,21 @@ export const Persistence = {
   // overlapping on purpose: that's a real scheduling conflict, and the existing
   // Alerts overlap rule surfaces it for a human to resolve deliberately, rather
   // than this function silently auto-spreading siblings apart. Reset
-  // `original_*_date` to the snapped instant so the variance badge baseline
+  // `original_start_date` to the snapped instant so the variance badge baseline
   // reflects the feasible plan, not the midnight artifact.
-  // Returns { movedIds, corrections }: movedIds are task IDs that actually
-  // moved (start/end changed); corrections are due-date-baseline fixes found
-  // by the phase below (see _relayDueDateCorrections — only the caller in
-  // CalendarSync._applyConfig relays them; the pre-hydration call from
-  // Persistence.load deliberately does not).
-  _snapToWorkingHours(tasks: NimbusTask[], plant: string | null): { movedIds: string[]; corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }> } {
+  // Returns { movedIds }: the task IDs that actually moved (start/end changed).
+  // The SAP due date (`original_end_date`) is never touched here: the server
+  // serves the locked SAP finish as received and the browser reads a
+  // date-only value through NimbusComputeCore.dueDateInstant.
+  _snapToWorkingHours(tasks: NimbusTask[], plant: string | null): { movedIds: string[] } {
     tasks = tasks.filter(task => task.planning_status !== 'needs_planning');
     const movedIds: string[] = [];
-    const corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }> = [];
-    if (!_calendarService) return { movedIds, corrections }; // no-op until wired — matches
-                                                              // "skip snapping" behavior when
-                                                              // the calendar service isn't available
+    if (!_calendarService) return { movedIds }; // no-op until wired — matches
+                                                // "skip snapping" behavior when
+                                                // the calendar service isn't available
     _calendarService.beginRun(plant);
     try {
       let snappedCount = 0;
-
-      // Capture each task's original_start_date BEFORE loop 1 (placement
-      // snap) below can overwrite it. The due-date-baseline correction
-      // phase further down needs the PRISTINE raw value as its
-      // shape-matching anchor — reading the post-snap value would drift
-      // the anchor to the snapped instant (e.g. midnight -> 07:00 on a
-      // line using Config.DEFAULT_SHIFT, the common case, since a fresh
-      // order never has a custom saved calendar) while original_end_date
-      // (never touched by loop 1) is still anchored to the true raw
-      // value — so none of the raw shapes below could ever match, and the
-      // correction would silently never fire for that order.
-      const pristineOriginalStart = new Map<NimbusTask, Date>();
-      for (const t of tasks) {
-        if (t.original_start_date instanceof Date) pristineOriginalStart.set(t, t.original_start_date);
-      }
 
       for (const t of tasks) {
         const line = t.MACHINE;
@@ -994,202 +972,10 @@ export const Persistence = {
         ErrorLog.info('persistence',
           `Snapped ${snappedCount} ingested order(s) to first available working slot`);
       }
-
-      // ---- Due-date-baseline correction ---------------------------------
-      // Runs for EVERY task with a line — deliberately no fixed/user_scheduled/
-      // startMoved guard, because "when is this order due" is orthogonal to
-      // "where is it currently placed" (unlike the placement snap above, which
-      // this loop runs after — so a freshly-snapped order's due day already
-      // reflects the day it actually landed on, matching the prior behavior
-      // this replaces). SAP only ships a day-level due date; ingest hygiene
-      // (db.py's upload hygiene) leaves a raw/uncorrected basic_finish_date in
-      // one of three known shapes (== basic_start_date, == basic_start_date +
-      // RUN_TIME hours, or == basic_start_date + 1 hour — see
-      // db.correct_due_date_baselines). Detect any shape (or a missing value)
-      // and replace it with "due by end of the working day it lands on,"
-      // computed once and then frozen: once original_end_date stops matching
-      // any raw shape, this loop leaves it alone forever, until a fresh SAP
-      // re-upload re-arms detection by overwriting basic_finish_date back
-      // into a raw shape.
-      for (const t of tasks) {
-        const line = t.MACHINE;
-        if (!line) continue;
-        // Guard against a missing/invalid baseline (e.g. an incomplete future
-        // SAP-sync field map) rather than assume original_start_date is always
-        // a valid Date.
-        const oStart = t.original_start_date instanceof Date ? t.original_start_date : null;
-        if (!oStart) continue;
-
-        // Shape-matching anchor: the PRISTINE original_start_date captured
-        // before loop 1 above ran, NOT the (possibly already-reassigned)
-        // t.original_start_date read into `oStart` just above. Loop 1
-        // unconditionally overwrites original_start_date with the snapped
-        // instant for every task it snaps (e.g. midnight -> 07:00 on a line
-        // using Config.DEFAULT_SHIFT, the common case), which would drift
-        // rawShapeStart/rawShapeRun/rawShapeHour1 away from what db.py/SAP
-        // actually wrote and make looksRaw never match — silently skipping
-        // the correction for exactly the fresh, never-individually-saved
-        // orders this phase exists to fix. `oStart` itself is still used
-        // below for the calendar service's workWindow "which day is this due"
-        // lookup — that usage is deliberate (see the comment above loop 1's finish).
-        const pristineStart = pristineOriginalStart.get(t) || oStart;
-
-        const oEnd = t.original_end_date instanceof Date ? t.original_end_date : null;
-        const rawShapeStart = pristineStart.getTime();
-        const rawShapeRun   = pristineStart.getTime() + Util.runHours(t) * Config.MS_HOUR;
-        // Legacy pre-2026-07-06 ingest-hygiene bug shape: the OLD db.py
-        // upload-hygiene "bad" branch hardcoded basic_finish_date =
-        // basic_start_date + 1 hour for any row with a missing/invalid
-        // BASIC_FINISH_DATE. Kept permanently (not a one-off migration) —
-        // old backups/re-imports could still carry this shape even though
-        // new uploads never will after the ingest-hygiene fix. Unlike
-        // rawShapeRun, this shape is unconditional on RUN_TIME, so it can
-        // theoretically clobber a genuine SAP-set due date that happens to
-        // land exactly 1 hour after start — accepted, same
-        // heuristic-ambiguity class already taken on for rawShapeRun.
-        const rawShapeHour1 = pristineStart.getTime() + Config.MS_HOUR;
-        const looksRaw = !oEnd
-          || oEnd.getTime() === rawShapeStart
-          || oEnd.getTime() === rawShapeRun
-          || oEnd.getTime() === rawShapeHour1;
-
-        // Sticky within this session (this function runs twice per load: once
-        // pre-hydration from Persistence.load against default/stale hours,
-        // once post-hydration from CalendarSync._applyConfig against real
-        // backend hours — see the call sites). Once flagged, a task STAYS
-        // flagged even after the pre-hydration pass's own in-memory guess
-        // stops shape-matching raw below — otherwise the post-hydration pass
-        // would see an already-non-raw value (which IT set, against
-        // default/stale hours) and wrongly conclude "nothing to do," so
-        // neither the real-hours recompute nor the relay that depends on it
-        // would ever run for the common case. A brand-new page load starts
-        // with fresh task objects (no flag) and re-derives `looksRaw` from
-        // the DB's actual (still-raw, since nothing was relayed) shape, so a
-        // stale flag can never mask an already-corrected value across
-        // separate loads.
-        if (looksRaw) t._dueDateBaselinePending = true;
-        if (!t._dueDateBaselinePending) continue;
-
-        // "Due by end of the working day it lands on." Guard workWindow's null
-        // return (closed day — e.g. a bare Saturday SAP date on a freshly
-        // onboarded line, which defaults closed Sat/Sun via Config.WEEKEND_OFF)
-        // by walking forward to the next open day instead of assuming [1] exists.
-        const win = _calendarService.workWindow(line, oStart);
-        let dayEnd = win ? win[1] : Persistence._dueEndOfShift(line, oStart);
-        dayEnd = dayEnd instanceof Date
-          ? new Date(dayEnd)
-          // Every day in the search window is closed/misconfigured — fall back
-          // to the run-time-implied end rather than leave it broken.
-          : new Date(rawShapeRun);
-
-        // A continuous/24h-shift line can compute a legitimately-correct dayEnd
-        // that exactly coincides with one of the raw shapes above (RUN_TIME=24
-        // starting exactly at a window's open — the window's close IS
-        // start+24h; or, narrowly, a day whose real shift-close coincidentally
-        // lands exactly 1 hour after midnight). Left alone, that value would
-        // re-match "needs correction" on every future load and re-relay a
-        // no-op correction forever. Nudge by a UI-invisible 1 second (never
-        // rendered by Util.fmtDT / fmtDTReadable; negligible for
-        // Util.latenessHours) so the next pass's shape check no longer
-        // matches — freezing it like every other corrected order.
-        if (dayEnd.getTime() === rawShapeStart || dayEnd.getTime() === rawShapeRun || dayEnd.getTime() === rawShapeHour1) {
-          dayEnd = new Date(dayEnd.getTime() + 1000);
-        }
-
-        t.original_end_date = dayEnd;
-        // Pin the correction to this task's row version (xmin), not a raw date
-        // value: a date round-trips through JS Date/JSON.stringify, which
-        // re-labels a naive local timestamp as UTC — comparing that directly
-        // against Postgres's naive basic_start_date would be off by the
-        // client's UTC offset and would simply never match for any non-UTC
-        // user (i.e. every real user). xmin is an opaque version counter with
-        // no such ambiguity, and — as a bonus — fails safely against ANY
-        // concurrent write to the row (a re-upload, a scheduling save, or
-        // another tab's correction), not just a re-upload specifically.
-        if (t.row_version != null) {
-          corrections.push({ id: t.id, basic_finish_date: dayEnd, base_version: t.row_version });
-        }
-      }
     } finally {
       _calendarService.endRun();
     }
-    return { movedIds, corrections };
-  },
-
-  // Walk forward from `date`'s calendar day until an open working day is
-  // found on `line`, returning that day's close. Used by the due-date-
-  // baseline correction above when `date` itself lands on a closed day.
-  // Bounded to 14 days so a fully closed/misconfigured calendar can't spin
-  // forever; returns null if no open day is found in that window (caller
-  // falls back to the run-time-implied end).
-  _dueEndOfShift(line: string, date: Date): Date | null {
-    let cur = new Date(date);
-    const MAX_DAYS = 14;
-    for (let i = 0; i < MAX_DAYS; i++) {
-      const win = _calendarService!.workWindow(line, cur);
-      if (win) return win[1];
-      cur = new Date(cur);
-      cur.setDate(cur.getDate() + 1);
-      cur.setHours(0, 0, 0, 0);
-    }
-    return null;
-  },
-
-  // Fire-and-forget relay of due-date-baseline corrections found by
-  // _snapToWorkingHours's due-date-baseline phase. Failure just means the
-  // next load retries — the in-memory value set by that phase is already
-  // correct for this session either way. Chunked to bound each POST's row
-  // count: CLAUDE.md's production-scale roadmap anticipates 50+ plants /
-  // 70+ lines, where a plant's one-time backlog could be many thousands of
-  // rows in one shot, risking Postgres's bound-parameter ceiling on the
-  // server's VALUES-join UPDATE. Batches are sent sequentially (not in
-  // parallel) so a struggling backend isn't hit with concurrent bursts.
-  _relayDueDateCorrections(corrections: Array<{ id: string; basic_finish_date: Date; base_version: number }>): void {
-    if (!corrections || !corrections.length) return;
-    const CHUNK = 500;
-    const chunks: Array<Array<{ id: string; basic_finish_date: Date; base_version: number }>> = [];
-    for (let i = 0; i < corrections.length; i += CHUNK) {
-      chunks.push(corrections.slice(i, i + CHUNK));
-    }
-
-    const sendNext = (idx: number): void => {
-      if (idx >= chunks.length) return;
-      const chunk = chunks[idx];
-      const body = JSON.stringify({
-        corrections: chunk.map(c => ({
-          id: c.id,
-          // toLocalSeconds, not the raw Date: JSON.stringify would call
-          // Date.toISOString() (UTC), which the backend's naive-datetime
-          // parser mis-handles for any non-UTC client — see toLocalSeconds.
-          basic_finish_date: Util.toLocalSeconds(c.basic_finish_date) as NaiveLocalTs,
-          base_version: c.base_version,
-        })),
-      });
-      Util.fetchTraced(`${Config.API_BASE}/tasks/baseline-correct`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      })
-        .then(r => r.ok ? r.json() as Promise<BaselineCorrectResult> : Promise.reject(new Error(`HTTP ${r.status}`)))
-        .then(result => {
-          // Re-stamp row_version for corrected rows, mirroring saveAll() — a
-          // stale cached xmin would false-conflict this order's next
-          // unrelated scheduling save this session.
-          const versions = result.versions || {};
-          for (const id of Object.keys(versions)) {
-            const tk = Store.tasks[id];
-            if (tk) tk.row_version = versions[id];
-          }
-          ErrorLog.info('persistence',
-            `Due-date baseline correction: ${result.persisted ?? 0}/${chunk.length} persisted, `
-            + `${result.not_matched ?? 0} not matched (stale version or already corrected) `
-            + `(batch ${idx + 1}/${chunks.length})`);
-        })
-        .catch(e => ErrorLog.warn('persistence',
-          `Due-date baseline correction relay failed (batch ${idx + 1}/${chunks.length}): ${e.message}`))
-        .finally(() => sendNext(idx + 1));
-    };
-    sendNext(0);
+    return { movedIds };
   },
 
   _loadCache(): boolean {

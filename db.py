@@ -1660,139 +1660,6 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             "rejection_reasons": rejection_reasons}
 
 
-def correct_due_date_baselines(corrections: list[dict], allowed_plants: list[str] | None = None) -> dict:
-    """
-    One-time-per-order backfill of the due-date baseline (`basic_finish_date`),
-    computed client-side by Persistence._snapToWorkingHours's due-date-baseline
-    phase in app.js. Not a general task-date write path — every row is
-    re-validated server-side, via a single VALUES-join UPDATE, before it is
-    written:
-
-      1. `xmin` must still equal `base_version` — the row version the client
-         had cached when it computed `basic_finish_date`. Any write to the row
-         since then (a concurrent SAP re-upload, a normal scheduling save, or
-         another tab's correction) bumps xmin regardless of which columns
-         changed, so this fails safely whenever the row moved on since the
-         client read it — including, but not limited to, a re-upload that
-         rewrote basic_start_date/basic_finish_date out from under a stale
-         correction. Deliberately NOT a basic_start_date value comparison: the
-         client-observed value round-trips through JS Date/JSON.stringify,
-         which re-labels a naive local timestamp as UTC — comparing that
-         directly against Postgres's naive (TIMESTAMP WITHOUT TIME ZONE)
-         basic_start_date would be off by the client's UTC offset and would
-         never match for any non-UTC user.
-      2. `basic_finish_date` must still be in a known raw/uncorrected shape
-         (NULL, == basic_start_date, == basic_start_date + run_time hours, or
-         == basic_start_date + 1 hour — the last being the shape left behind
-         by the pre-2026-07-06 ingest-hygiene bug, see below) — i.e. nobody
-         already corrected (or re-uploaded a genuine value for) this row
-         since the client read it.
-
-    Either check failing makes the write a safe no-op for that row (not an
-    error) — the id is simply absent from `versions`.
-
-    Each item: {id, basic_finish_date, base_version} (id: str,
-    basic_finish_date: datetime, base_version: int — the row's xmin as of the
-    client's last load/save of it). Callers are expected to chunk large
-    batches themselves (the frontend relay does, at 500 rows/request — see
-    Persistence._relayDueDateCorrections in app.js); this function does not
-    chunk internally, so a single call is still bounded by Postgres's
-    bound-parameter ceiling (3 params/row here).
-
-    Returns {applied, persisted, skipped, not_matched, versions}. `skipped`
-    counts malformed input rows (missing id/basic_finish_date/base_version)
-    rejected before the SQL runs; `not_matched` counts well-formed rows that
-    reached the UPDATE but failed its WHERE clause (stale version, or already
-    corrected) — surfaced as a distinct count so a systemic 0%-match condition
-    (e.g. a version-pinning bug) is visible in logs rather than
-    indistinguishable from a healthy "nothing left to correct" steady state.
-    `versions` carries the post-write xmin per corrected id (same
-    `xmin::text::bigint` shape as update_task_dates_bulk) so the caller can
-    re-stamp the frontend's cached row_version — otherwise every corrected
-    order would false-conflict on its next unrelated scheduling save this
-    session.
-
-    `allowed_plants` (None for an unrestricted/admin caller) scopes the UPDATE
-    to the caller's assigned plants via the WHERE clause. This function has no
-    per-row prefetch to piggyback a plant check on (unlike update_task_dates_bulk)
-    — an out-of-scope row simply fails to match the WHERE clause and lands in
-    the existing `not_matched` count, with no separate response field needed.
-    """
-    versions: dict[str, int] = {}
-    if not corrections:
-        return {"applied": 0, "persisted": 0, "skipped": 0, "not_matched": 0, "versions": {}}
-
-    rows = []
-    skipped = 0
-    for c in corrections:
-        cid = c.get("id")
-        new_finish = c.get("basic_finish_date")
-        base_version = c.get("base_version")
-        if not cid or new_finish is None or base_version is None:
-            skipped += 1
-            continue
-        rows.append((cid, new_finish, base_version))
-
-    if not rows:
-        return {"applied": 0, "persisted": 0, "skipped": skipped, "not_matched": 0, "versions": {}}
-
-    applied = persisted = 0
-    with _pool.connection() as conn, conn.cursor() as cur:
-        try:
-            # Explicit casts on the VALUES columns (same reasoning as
-            # update_task_dates_bulk): an all-NULL column would otherwise be of
-            # unknown type. RETURNING o.xmin gives each row's post-write
-            # version, using the identical xmin::text::bigint expression as
-            # the /tasks read path and update_task_dates_bulk.
-            placeholders = ", ".join(["(%s::text, %s::timestamp, %s::bigint)"] * len(rows))
-            params = [v for row in rows for v in row]
-            # allowed_plants is referenced twice in the WHERE clause below
-            # (once for the NULL/unrestricted check, once for the ANY() match) —
-            # this function uses positional %s placeholders throughout, so the
-            # same value is bound twice rather than switching to named params.
-            params.extend([allowed_plants, allowed_plants])
-            sql = f"""
-                UPDATE orders o
-                SET basic_finish_date = v.new_finish,
-                    updated_at        = NOW()
-                FROM (VALUES {placeholders}) AS v(id, new_finish, base_version)
-                WHERE o.id = v.id
-                  AND o.xmin::text::bigint = v.base_version
-                  AND (%s::text[] IS NULL OR o.plant = ANY(%s::text[]))
-                  AND (
-                        o.basic_finish_date IS NULL
-                     OR o.basic_finish_date = o.basic_start_date
-                     OR o.basic_finish_date = o.basic_start_date
-                          + (COALESCE(o.run_time, 0) * INTERVAL '1 hour')
-                     -- Legacy pre-2026-07-06 ingest-hygiene bug shape: the OLD
-                     -- upload-hygiene "bad" branch hardcoded basic_finish_date
-                     -- = basic_start_date + 1 hour for any row with a
-                     -- missing/invalid BASIC_FINISH_DATE. Kept permanently
-                     -- (not a one-off migration) since old backups/re-imports
-                     -- could still carry this shape even though new uploads
-                     -- never will after the ingest-hygiene fix. Unlike the
-                     -- run_time-based shape above, this one is unconditional
-                     -- on run_time, so it can theoretically also match (and
-                     -- allow overwriting) a genuine SAP-set due date that
-                     -- happens to land exactly 1 hour after start — accepted,
-                     -- same heuristic-ambiguity class already taken on above.
-                     OR o.basic_finish_date = o.basic_start_date + INTERVAL '1 hour'
-                  )
-                RETURNING o.id, o.xmin::text::bigint AS new_version
-            """
-            cur.execute(sql, params)
-            for rid, rver in cur.fetchall():
-                versions[rid] = int(rver)
-            conn.commit()
-            persisted = applied = len(versions)
-        except Exception:
-            conn.rollback()
-            raise
-    not_matched = len(rows) - len(versions)
-    return {"applied": applied, "persisted": persisted, "skipped": skipped,
-            "not_matched": not_matched, "versions": versions}
-
-
 def get_order_plant(task_id: str) -> str | None:
     """Return a single order's plant, or None if the row doesn't exist.
     Standalone lookup for routes that need a plant-scoping check before a
@@ -2805,8 +2672,8 @@ _RESOLVED_MACHINE_SQL = """CASE
 # "SAP sent something different" (D15/P12): every SAP-owned column the upload
 # carries EXCEPT the ones re-stamped from master data (color, prt_01/prt_02,
 # production_version), upload_batch_id, updated_at and machine. SAP's dates are
-# compared against the stored SAP baseline (never basic_*: baseline-correct
-# rewrites basic_finish_date). A NULL incoming baseline value means "not sent"
+# compared against the stored SAP baseline (never basic_*, which a planner move
+# can change). A NULL incoming baseline value means "not sent"
 # and a NULL stored baseline means "unknown": neither is a difference here.
 _SAP_DIFFERS_SQL = f"""(
            orders.production_order IS DISTINCT FROM EXCLUDED.production_order
@@ -2904,7 +2771,7 @@ _UPSERT_SQL = f"""
         sap_production_version = COALESCE(EXCLUDED.sap_production_version, orders.sap_production_version),
         sap_basic_start_date  = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),
         sap_basic_finish_date = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),
-        -- Locked "as SAP first sent it" dates (never moved by a planner, a drag or baseline-correct).
+        -- Locked "as SAP first sent it" dates (never moved by a planner or a drag).
         -- The row tuple already carries the STORED values on an echo of NIMBUS's own sent finish and the
         -- incoming SAP dates otherwise (upsert_orders decides, one rule: finish_echoes), so this SET never
         -- reads EXCLUDED.basic_*: a NULL (not decided) keeps what is stored.
@@ -3644,7 +3511,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 sap_pv = _zero_pad(sap_pv.upper(), 4)
         row["sap_production_version"] = sap_pv
         # SAP's own dates, written to the baseline columns by the upsert only
-        # (never by baseline-correct or a drag). A caller that knows the finish SAP
+        # (never by a drag). A caller that knows the finish SAP
         # actually sent (the Excel ingest: None = not sent) passes it as
         # `sap_basic_finish_date`; otherwise the row's finish is SAP's.
         row["sap_basic_start_date"] = row.get("basic_start_date")

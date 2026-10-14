@@ -20,9 +20,7 @@ from backend.admin_ops.diagnostics_state import DIAGNOSTICS
 from backend.admin_ops.logbuffer import _current_rid, _log_event
 from backend.priority_lists import cache as plcache
 from backend.scheduling.models import (
-    BaselineCorrectResult,
     BulkUpdateResult,
-    DueDateCorrectionPayload,
     HorizonsResponse,
     TaskDateUpdate,
     TaskRefreshPayload,
@@ -616,40 +614,3 @@ def tasks_refresh(payload: TaskRefreshPayload,
         row["PLANT"] = row.pop("plant", None)
         row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
     return {"data": rows, "missing": missing}
-
-
-@router.post("/tasks/baseline-correct", response_model=BaselineCorrectResult,
-             dependencies=[Depends(auth.require_authenticated)])
-def baseline_correct(payload: DueDateCorrectionPayload,
-                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """
-    Persist due-date-baseline (basic_finish_date) corrections found by the
-    frontend's Persistence._snapToWorkingHours. Fire-and-forget from the
-    client's perspective — every row is re-validated server-side
-    (db.correct_due_date_baselines) before being written, so a late,
-    duplicate, or concurrent call can never overwrite an already-corrected or
-    genuinely fresh (re-uploaded) value; a failed re-validation is a safe
-    per-row no-op, not an error.
-    Payload: { corrections: [{ id, basic_finish_date, base_version }] }
-    Response: { status, applied, persisted, skipped, not_matched, versions }
-    """
-    items = [
-        {
-            "id": c.id,
-            "basic_finish_date": _to_pydt(c.basic_finish_date),
-            "base_version": c.base_version,
-        }
-        for c in payload.corrections
-        if c.id and c.basic_finish_date and c.base_version is not None
-    ]
-    try:
-        res = db.correct_due_date_baselines(items, allowed_plants=allowed_plants)
-    except Exception as e:
-        error_code = (db.translate_db_error(e).get("error_code")
-                      if isinstance(e, psycopg.Error) else "db.error")
-        _log_event("error", "db", "Due-date baseline correction failed (transaction rolled back)",
-                   exc=e, error_code=error_code, count=len(items))
-        return {"status": "error", "applied": 0, "persisted": 0, "skipped": len(items),
-                "not_matched": 0, "versions": {}, "error_code": error_code,
-                "cause": "Due-date baseline correction failed (transaction rolled back)"}
-    return {"status": "ok", **res}
