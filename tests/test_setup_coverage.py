@@ -192,12 +192,12 @@ class _CoverageCursor:
     """Deterministic PostgreSQL boundary double for the bounded coverage helpers."""
 
     ORDER_ROWS = [
-        ("L1", datetime(2026, 9, 1, 8), "RED"),
-        ("L1", datetime(2026, 9, 1, 9), "BLUE"),
-        ("L1", datetime(2026, 9, 1, 10), "GREEN"),
-        ("L2", datetime(2026, 9, 1, 8), "RED"),
-        ("L2", datetime(2026, 9, 1, 9), "BLUE"),
-        ("L2", datetime(2026, 9, 1, 10), "GREEN"),
+        ("L1", False, "RED"),
+        ("L1", False, "BLUE"),
+        ("L1", False, "GREEN"),
+        ("L2", False, "RED"),
+        ("L2", False, "BLUE"),
+        ("L2", False, "GREEN"),
     ]
 
     def __init__(self):
@@ -419,3 +419,28 @@ def _insert_real_coverage_matrix(pg, plant, rows):
                  Jsonb(row["to_key"]), row["setup_min"]),
             )
         conn.commit()
+
+
+def test_coverage_orders_on_stored_edges_and_excludes_queued_rows_from_transitions(monkeypatch):
+    """U3: adjacency sorts scheduled_start -> scheduled_end -> basic_start_date (a finish-only placement sorts
+    where it sits), and a queued (Needs Planning) order contributes its state but never an observed transition."""
+    monkeypatch.setattr(setup_data, "_definition", lambda cur, plant: {**DEFINITION, "plant": plant})
+
+    class Cur:
+        def __init__(self):
+            self.sql = None
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            # (machine, queued, colorWheel) in the order the SQL sorts them: RED placed, BLUE queued, GREEN placed
+            return [("L1", False, "RED"), ("L1", True, "BLUE"), ("L1", False, "GREEN")]
+
+    cur = Cur()
+    result = setup_data._load_setup_coverage(cur, "5512")
+    assert setup_data._COVERAGE_ORDER_SQL in cur.sql
+    assert "COALESCE(seg.first_start, o.scheduled_start, o.scheduled_end, o.basic_start_date)" in cur.sql
+    # the queued BLUE order is a known state, but RED -> GREEN is the only adjacency
+    assert len(result["states"]) == 3
+    assert [(r["from_key"], r["to_key"]) for r in result["observed"]] == [(RED, GREEN)]

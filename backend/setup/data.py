@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg.types.json import Jsonb
 
-from db import _pool, _EFF_END_SQL, _EFF_START_SQL, _SCHEDULE_SEGMENTS_LATERAL_SQL
+from db import _pool, _EFF_END_SQL, _SCHEDULE_SEGMENTS_LATERAL_SQL
 from master_data import CONFIGURABLE_PRIORITY_FIELDS, RANKABLE_FIELDS
 
 
@@ -968,6 +968,10 @@ def page_matrix_rows(plant: str, machine: str, signature_version: int, *, from_k
             "meta": {"total": total, "offset": offset, "limit": limit}}
 
 
+# U3: the coverage adjacency order. The stored edges first (first segment start, stored start, stored finish),
+# the SAP start only for a never-placed row, so a finish-only placement sorts where it sits instead of at the tail.
+_COVERAGE_ORDER_SQL = "COALESCE(seg.first_start, o.scheduled_start, o.scheduled_end, o.basic_start_date)"
+
 _COVERAGE_PAGE_LIMIT = 500
 _COVERAGE_SCAN_SIZE = 500
 
@@ -984,15 +988,16 @@ def _load_setup_coverage(cur, plant: str) -> dict:
     columns = [RANKABLE_FIELDS[field]["orders_column"] for field in definition["fields"]]
     select_attributes = ", ".join(columns)
     cur.execute(
-        f"""SELECT o.machine, {_EFF_START_SQL},
+        f"""SELECT o.machine, (o.planning_status = 'needs_planning') AS queued,
                    {select_attributes}
               FROM orders o
               {_SCHEDULE_SEGMENTS_LATERAL_SQL}
              WHERE o.plant = %s AND o.machine IS NOT NULL
-             ORDER BY o.machine, {_EFF_START_SQL}, o.id""",
+             ORDER BY o.machine, {_COVERAGE_ORDER_SQL}, o.id""",
         (plant,),
     )
     by_machine: dict[str, list[list[dict[str, str]]]] = {}
+    sequenced: dict[str, list[list[dict[str, str]]]] = {}   # non-queued rows only: the transition sequence
     for row in cur.fetchall():
         machine = row[0]
         if not machine:
@@ -1001,6 +1006,8 @@ def _load_setup_coverage(cur, plant: str) -> dict:
         state = _coverage_state(definition, values)
         if state is not None:
             by_machine.setdefault(machine, []).append(state)
+            if not row[1]:
+                sequenced.setdefault(machine, []).append(state)
 
     state_rows: list[dict] = []
     observed_rows: list[dict] = []
@@ -1015,9 +1022,10 @@ def _load_setup_coverage(cur, plant: str) -> dict:
                                "machine_order": machine_order, "state_order": state_order})
 
         seen_pairs: set[tuple[str, str]] = set()
-        for index in range(1, len(scheduled_states)):
-            from_key = scheduled_states[index - 1]
-            to_key = scheduled_states[index]
+        transition_states = sequenced.get(machine, [])   # U3: a queued order has no slot, so no adjacency
+        for index in range(1, len(transition_states)):
+            from_key = transition_states[index - 1]
+            to_key = transition_states[index]
             token = (_state_token(from_key), _state_token(to_key))
             if token in seen_pairs:
                 continue
