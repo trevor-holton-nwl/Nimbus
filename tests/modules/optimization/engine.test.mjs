@@ -4518,6 +4518,117 @@ describe('reconcile (finish-anchored)', () => {
       } finally { restore(); }
     } finally { fx.restore(); }
   });
+
+  // -------------------------------------------------------------------------
+  // Task 3.2 (OQ2 V1, OQ40): the reconcile reserves the required changeover ahead of the productive start
+  // -------------------------------------------------------------------------
+  const colorState = value => [{ fieldKey: 'colorWheel', value }];
+  function withSetup(fx, { overrides = [], minutes = 60 } = {}, fn) {
+    const prior = Store.setupSnapshot;
+    Store.replaceSetupSnapshot({
+      plant: fx.plant,
+      definition: { plant: fx.plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1, from_key: colorState('RED'), to_key: colorState('BLUE'), setup_min: minutes }],
+      machine_rows: [], machine_states: [], overrides,
+    }, 'unit-test');
+    try { fn(); } finally { Store.replaceSetupSnapshot(prior, 'unit-test'); }
+  }
+  const fmtLocal = d => `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+  test('Task 3.2: the reconcile reserves the predecessor-pair changeover before the earliest piece (same window)', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      withSetup(fx, {}, () => {
+        // Window 07-19. A (RED) ran Tue 25 07-09; B (BLUE, 4 h) is held to a Wed 26 11:00 finish. The 60-minute
+        // changeover cannot sit before 07:00 on Wednesday, so Wednesday's piece is clipped to 08:00-11:00 and the
+        // last production hour moves to Tuesday 18:00-19:00 with the changeover Tue 17:00-18:00.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const t = Store.tasks.pb;
+        assert.equal(fmtLocal(t.start_date), '8/25 18:00');
+        assert.equal(fmtLocal(t.end_date), '8/26 11:00', 'the finish is held');
+        assert.deepEqual(t.scheduleSegments.map(seg => `${fmtLocal(seg.startDate)}-${fmtLocal(seg.endDate)}`), ['8/25 18:00-8/25 19:00', '8/26 08:00-8/26 11:00']);
+        assert.equal(t.derivationIssue ?? null, null);
+      });
+    } finally { fx.restore(); }
+  });
+
+  test('Task 3.2: no changeover is reserved when the predecessor is unplaced, the pair has no rule, or there is no setup snapshot', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      const run = extra => {
+        let out;
+        withSetup(fx, {}, () => {
+          Store.setTasks([
+            fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9), ...extra }),
+            fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+          ], 'unit-test');
+          Engine.reconcileRuntimeSchedules(fx.plant);
+          out = fmtLocal(Store.tasks.pb.start_date);
+        });
+        return out;
+      };
+      assert.equal(run({ planning_status: 'needs_planning', start_date: null, end_date: null, user_scheduled: false }), '8/26 07:00', 'queued predecessor: unknown, 0');
+      assert.equal(run({ COLOR: 'GREEN' }), '8/26 07:00', 'no rule for GREEN -> BLUE: 0, no invented default');
+      const prior = Store.setupSnapshot;
+      Store.replaceSetupSnapshot(null, 'unit-test');
+      try {
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00', 'no setup snapshot: 0');
+      } finally { Store.replaceSetupSnapshot(prior, 'unit-test'); }
+    } finally { fx.restore(); }
+  });
+
+  test('Task 3.2 (OQ40): a manual drop reserves no changeover; finishAnchoredPatchFor honours an explicit setupMinutes', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      withSetup(fx, {}, () => {
+        Store.setTasks([fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) })], 'unit-test');
+        const task = fx.task('pb', { COLOR: 'BLUE', user_scheduled: true, start_date: at(26, 7), end_date: at(26, 11) });
+        const manual = Engine.manualSchedulePatchFor(task, fx.line, at(26, 11), 'partial_allowed');
+        assert.equal(fmtLocal(manual.start_date), '8/26 07:00', 'alert-only: the manual placement is not clipped');
+        const asked = Engine.finishAnchoredPatchFor(task, fx.line, at(26, 11), 'partial_allowed', { setupMinutes: 60 });
+        assert.equal(asked.kind, 'placed');
+        assert.equal(fmtLocal(asked.changes.start_date), '8/25 18:00');
+      });
+    } finally { fx.restore(); }
+  });
+
+  test('Task 3.2: an active override whose pair no longer sits adjacent after a re-derive is recorded on the successor', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      const override = { id: 'ov1', machine: fx.line, signature_version: 1, predecessor_order_id: 'pa', successor_order_id: 'pb',
+        predecessor_state_key: colorState('RED'), successor_state_key: colorState('BLUE'), standard_min: 60, remaining_min: 20, status: 'active', reason: 'started' };
+      withSetup(fx, { overrides: [override] }, () => {
+        // pz (RED) now sits between pa and pb, so pa -> pb is no longer an adjacent pair.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pz', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 10), end_date: at(25, 12) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(Store.tasks.pb.derivationIssue.code, 'setup_override_orphaned');
+        assert.equal(Store.tasks.pa.derivationIssue ?? null, null, 'only the successor carries it');
+      });
+      withSetup(fx, { overrides: [override] }, () => {
+        // Still adjacent: no note, and the override's remaining minutes (20) are what is reserved.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(Store.tasks.pb.derivationIssue ?? null, null);
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/25 18:30', 'the 20 remaining setup minutes (not the 60 standard) end before a 30-minute minimum piece');
+      });
+    } finally { fx.restore(); }
+  });
 });
 
 test('Task 2.5 carry-in: only a releasable queue code takes the release-reversal path', () => {
@@ -4531,4 +4642,28 @@ test('Task 2.5 carry-in: only a releasable queue code takes the release-reversal
     assert.equal(patch, null);
     assert.equal(Engine.lastManualRefusal, 'finish_cannot_hold');
   } finally { fx.restore(); }
+});
+
+test('Task 3.2 (A.3 #9): setup availability counts across midnight on merged 24/7 intervals', () => {
+  // The previous order ends 23:50 and the successor starts 00:10 the next day: 20 minutes are free before the
+  // 30-minute changeover, not the 10 minutes since midnight.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const all = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-MID',
+    definition: { plant: 'P-MID', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 30 }],
+    machine_rows: [], machine_states: [], overrides: [],
+  }, [
+    { id: 'mid-a', PLANT: 'P-MID', MACHINE: 'L-MID', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T22:50:00'), end_date: new Date('2026-08-03T23:50:00') },
+    { id: 'mid-b', PLANT: 'P-MID', MACHINE: 'L-MID', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-04T00:10:00'), end_date: new Date('2026-08-04T01:10:00') },
+  ], undefined, {
+    calendars: { 'L-MID': { workHours: all } }, plants: { 'P-MID': { workHours: all } },
+    lineSettings: { 'L-MID': { plant: 'P-MID' } }, masterData: { lines: [{ machine: 'L-MID', plant: 'P-MID' }] },
+    blocks: [], plantBlocks: [],
+  });
+  const interval = observation.intervals.find(entry => entry.successorOrderId === 'mid-b');
+  assert.equal(interval.requiredMinutes, 30);
+  assert.equal(interval.availableMinutes, 20);
+
 });

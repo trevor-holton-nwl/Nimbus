@@ -656,6 +656,7 @@ window.__NIMBUS_LOCALES.pt = {
 
   'tip.fix_alert':                     'Resolver este alerta automaticamente',
   'alert.tool_conflict':               'A ferramenta "{{tool}}" é necessária ao mesmo tempo por "{{a}}" em {{lineA}} e "{{b}}" em {{lineB}}.',
+  'alert.setup_violated':              'Tempo de troca insuficiente antes da ordem "{{order}}" em {{line}}: precisa de {{required}} min, só há {{available}} min disponíveis (faltam {{short}} min).',
   'alert.distribution_separation':     'Subpedidos de {{parent}} começam em diferentes {{scope}}s',
   // Staging SAP (área de recebimento Mulesoft) — Admin > Interface > Staging
   'ui.sap_staging':                    'Staging',

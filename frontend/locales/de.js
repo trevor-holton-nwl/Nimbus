@@ -656,6 +656,7 @@ window.__NIMBUS_LOCALES.de = {
 
   'tip.fix_alert':                     'Diese Warnung automatisch beheben',
   'alert.tool_conflict':               'Werkzeug "{{tool}}" wird gleichzeitig von "{{a}}" auf {{lineA}} und "{{b}}" auf {{lineB}} benötigt.',
+  'alert.setup_violated':              'Zu wenig Umrüstzeit vor Auftrag "{{order}}" auf {{line}}: benötigt {{required}} Min., nur {{available}} Min. verfügbar ({{short}} Min. zu wenig).',
   'alert.distribution_separation':     'Teilaufträge von {{parent}} beginnen in verschiedenen {{scope}}s',
   // SAP-Staging (Mulesoft-Landezone) — Admin > Schnittstelle > Staging
   'ui.sap_staging':                    'Staging',

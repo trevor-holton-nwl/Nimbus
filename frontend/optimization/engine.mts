@@ -141,7 +141,8 @@ export type FinishAnchoredResult =
 export interface FinishAnchoredOptions {
   /** Return `{kind:'reached_now'}` unresolved instead of reversing forward from now. */
   deferReversal?: boolean;
-  /** Minutes of setup to reserve before the start (Task 3.2 fills this; ignored until then). */
+  /** Minutes of changeover to reserve immediately before the earliest productive piece, in the same operating
+   *  fragment (OQ2 V1). The reconcile fills it from the setup domain; a manual drop leaves it 0 (OQ40). */
   setupMinutes?: number;
 }
 
@@ -380,6 +381,9 @@ function buildLineIntervalIndex(orders: ReadonlyArray<{ task: NimbusTask }>): Li
   return { starts, prefixMaxEnd };
 }
 
+/** How many days back the free-time scan follows touching windows (the predecessor's end usually stops it sooner). */
+const SETUP_AVAILABILITY_MERGE_DAYS = 14;
+
 function setupAvailabilityMinutes(
   context: SetupAvailabilityContext | undefined,
   line: string,
@@ -394,18 +398,30 @@ function setupAvailabilityMinutes(
   const mappedPlant = plant;
   const probe = new Date(end.getTime() - 1);
   const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
-  const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, probe);
-  if (!lineWindow) return 0;
   const plantHours = context.plants[mappedPlant]?.workHours ?? setupDefaultWorkHours();
-  const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, probe);
-  if (!plantWindow) return 0;
-  const window = [
-    new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
-    new Date(Math.min(lineWindow[1].getTime(), plantWindow[1].getTime())),
-  ] as const;
-  if (window[0] >= window[1]) return 0;
+  /** The line and plant working windows intersected for the day holding `day`, or null when closed. */
+  const windowOf = (day: Date): readonly [Date, Date] | null => {
+    const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, day);
+    if (!lineWindow) return null;
+    const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, day);
+    if (!plantWindow) return null;
+    const both = [
+      new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
+      new Date(Math.min(lineWindow[1].getTime(), plantWindow[1].getTime())),
+    ] as const;
+    return both[0] < both[1] ? both : null;
+  };
+  const window = windowOf(probe);
+  if (!window) return 0;
   if (end > window[1] || end <= window[0]) return 0;
   let lower = window[0].getTime();
+  // Touching windows merge across midnight (a 24/7 line is one continuous interval, OQ47), so the free time
+  // before this window's opening continues back through every window that ends exactly where this one opens.
+  for (let back = 1; back <= SETUP_AVAILABILITY_MERGE_DAYS; back++) {
+    const earlier = windowOf(new Date(probe.getFullYear(), probe.getMonth(), probe.getDate() - back, 12));
+    if (!earlier || earlier[1].getTime() !== lower) break;
+    lower = earlier[0].getTime();
+  }
   const applyBlock = (block: NimbusBlock | NimbusPlantBlock): boolean => {
     const start = globalThis.NimbusComputeCore!.parseDate(block.start);
     const blockEnd = globalThis.NimbusComputeCore!.parseDate(block.end);
@@ -1300,7 +1316,7 @@ export const Engine = {
     const floor = Calendar._floorMinute(now);
     const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
     const walk = (walkPolicy: SplitOrderPolicy) => Calendar.allocateRuntimeBackward(line, finish, runtimeMinutes, walkPolicy,
-      { floor, minSegmentMinutes: Engine.minProductiveSegmentMinutesFor(plant), plantTz });
+      { floor, minSegmentMinutes: Engine.minProductiveSegmentMinutesFor(plant), plantTz, setupMinutes: opts.setupMinutes ?? 0 });
     let result = walk(effectivePolicy);
     if (result.kind === 'overlong' && effectivePolicy === 'overlong_only') result = walk('partial_allowed');
 
@@ -1584,6 +1600,54 @@ export const Engine = {
       patches.push({ id: task.id, changes: full, dirty: stale });
     };
 
+    // OQ2 V1 / OQ40: the changeover the derivation reserves ahead of the earliest piece is the one the setup
+    // domain requires for the (predecessor -> this order) pair on the line. Adjacency is by start, exactly as the
+    // setup observation reads it: the predecessor is the latest-starting scheduled row on the line that starts
+    // before this order's start. Built once per pass, per line, so the lookup is a binary search.
+    const setup = Store.setupSnapshot;
+    const setupDefinition = setup?.definition;
+    const setupLive = !!(setup && setupDefinition && setup.plant_active && setup.plant === plant);
+    const lineSchedule = new Map<string, NimbusTask[]>();
+    const scheduleOf = (line: string): NimbusTask[] => {
+      let rows = lineSchedule.get(line);
+      if (!rows) {
+        rows = Store.tasksByPlant(plant).filter(row => row.MACHINE === line && row.planning_status !== 'needs_planning'
+          && row.start_date && row.end_date);
+        rows.sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime() || String(a.id).localeCompare(String(b.id)));
+        lineSchedule.set(line, rows);
+      }
+      return rows;
+    };
+    /** The changeover minutes to reserve before `task` starting at `start` (0 when it is unknown: the predecessor
+     *  is not placed, the pair has no rule or an attribute is missing; the unknown-setup alert covers those), and
+     *  whether an active override of this order no longer names the row that now sits before it. */
+    const setupBefore = (task: NimbusTask, line: string, start: Date): { minutes: number; orphaned: boolean } => {
+      if (!setupLive || !setup || !setupDefinition) return { minutes: 0, orphaned: false };
+      const rows = scheduleOf(line);
+      let lo = 0, hi = rows.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (rows[mid].start_date!.getTime() < start.getTime()) lo = mid + 1; else hi = mid; }
+      let predecessor: NimbusTask | null = null;
+      for (let i = lo - 1; i >= 0; i--) { if (String(rows[i].id) !== String(task.id)) { predecessor = rows[i]; break; } }
+      const predecessorId = predecessor ? String(predecessor.id) : null;
+      const orphaned = setup.overrides.some(override => override.status === 'active' && override.machine === line
+        && String(override.successor_order_id) === String(task.id) && (override.predecessor_order_id == null ? null : String(override.predecessor_order_id)) !== predecessorId);
+      let predecessorState: SetupStateKey | null = null;
+      if (predecessor) {
+        if (!predecessor.user_scheduled) return { minutes: 0, orphaned };   // not placed: the required changeover is unknown
+        predecessorState = stateForOrder(predecessor, setupDefinition);
+      } else {
+        predecessorState = setup.machine_states.find(state => state.machine === line
+          && state.signature_version === setupDefinition.signature_version)?.state_key ?? null;
+      }
+      const successorState = stateForOrder(task, setupDefinition);
+      if (!predecessorState || !successorState) return { minutes: 0, orphaned };
+      const resolved = resolveSetup({
+        definition: setupDefinition, machine: line, predecessorState, successorState, predecessorOrderId: predecessorId,
+        successorOrderId: String(task.id), plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+      });
+      return { minutes: resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0, orphaned };
+    };
+
     interface Reversal { task: NimbusTask; anchor: Date; stale: boolean }
     const reversals = new Map<string, Reversal[]>();
     Calendar._beginRun(plant);
@@ -1617,7 +1681,13 @@ export const Engine = {
 
         const anchor = placed ? task.end_date : Util.dueInstant(task);
         if (!anchor) { noteOnly(task, { code: 'no_anchor' }); continue; }   // no finish to hold, so nothing can be derived
-        const result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: 0 });
+        let result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: 0 });
+        if (result.kind === 'placed' && setupLive) {
+          // The first walk shows where the order starts, which names its predecessor; walk again with that
+          // pair's changeover so the earliest piece also holds it (only the start can move, never the finish).
+          const { minutes } = setupBefore(task, line, result.changes.start_date!);
+          if (minutes > 0) result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: minutes });
+        }
         if (result.kind === 'reached_now') {
           (reversals.get(line) ?? reversals.set(line, []).get(line)!).push({ task, anchor, stale });
           continue;
@@ -1640,7 +1710,9 @@ export const Engine = {
         // Placed. Several findings can apply to one row; the most important one is recorded.
         const derivedStart = result.changes.start_date!;
         let issue: Issue | null = null;
+        const orphaned = setupLive && setupBefore(task, line, derivedStart).orphaned;
         if (result.finishMoved) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
+        else if (orphaned) issue = { code: 'setup_override_orphaned' };   // an active override no longer names the row before it (recorded only, Task 3.3 alerts)
         else if (Store.isFirmed(task.id) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart }, plantNow)) {
           issue = { code: 'frozen_window_crossed' };   // OQ4: alert only, nothing is un-firmed
         } else {

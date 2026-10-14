@@ -472,6 +472,53 @@ describe('backward calendar primitives', () => {
     });
   });
 
+  describe('allocateRuntimeBackward: changeover reserved ahead of the productive start (OQ2 V1)', () => {
+    // Window 06-18 daily. Order A occupies Mon 08-16 (the setup predecessor); B is 8 h held at Tue 14:00 with a
+    // 30-minute changeover. The setup must sit in the same operating window right before B's earliest piece.
+    const v1 = name => plain(name, everyDay([6, 18]));
+
+    it('partial_allowed: clips the Tue fragment and continues into Mon, the setup sitting Mon 17:00-17:30', () => {
+      const line = v1('BW-S1');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'partial_allowed', bopts({ setupMinutes: 30 }));
+      assert.equal(summary(r), '2026-10-19 17:30 -> 2026-10-20 14:00 [2026-10-19 17:30-2026-10-19 18:00 | 2026-10-20 06:30-2026-10-20 14:00]');
+      assert.equal(r.finishMoved, false);
+    });
+
+    it('never: no window holds run time plus changeover ending at the finish, so the finish moves (no_slot_at_finish)', () => {
+      const line = v1('BW-S2');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'never', bopts({ setupMinutes: 30 }));
+      assert.equal(summary(r), '2026-10-19 10:00 -> 2026-10-19 18:00 moved:no_slot_at_finish');
+    });
+
+    it('zero or absent setup minutes change nothing', () => {
+      const line = v1('BW-S3');
+      for (const extra of [{}, { setupMinutes: 0 }, { setupMinutes: -5 }, { setupMinutes: NaN }]) {
+        assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'partial_allowed', bopts(extra))),
+          '2026-10-20 06:00 -> 2026-10-20 14:00', JSON.stringify(extra));
+      }
+    });
+
+    it('a window that holds the run time and the changeover keeps the finish (never)', () => {
+      const line = v1('BW-S4');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 420, 'never', bopts({ setupMinutes: 30 }))),
+        '2026-10-20 07:00 -> 2026-10-20 14:00');
+    });
+
+    it('a fragment too small to hold the changeover is skipped and the walk continues into the previous one', () => {
+      const line = v1('BW-S5');
+      Store.replaceBlocks([blk('s5', line, at(D.mon, '15:00'), at(D.mon, '17:30'))], 'unit-test');
+      // Mon 17:30-18:00 (30 min) cannot hold the last 30 production minutes plus a 60-minute changeover.
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '06:30'), 60, 'partial_allowed', bopts({ setupMinutes: 60 }));
+      assert.equal(summary(r), '2026-10-19 14:30 -> 2026-10-20 06:30 [2026-10-19 14:30-2026-10-19 15:00 | 2026-10-20 06:00-2026-10-20 06:30]');
+    });
+
+    it('the setup sits across midnight on a 24/7 line (touching windows merge, OQ47)', () => {
+      const line = plain('BW-S6', everyDay([0, 24]));
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '00:30'), 60, 'never', bopts({ setupMinutes: 30 }));
+      assert.equal(summary(r), '2026-10-19 23:30 -> 2026-10-20 00:30');
+    });
+  });
+
   describe('purity and caches', () => {
     it('does not mutate Store state or the inputs, and returns the same answer through the per-run caches', () => {
       const line = sim1('BW-H1');

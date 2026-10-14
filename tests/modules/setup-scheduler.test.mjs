@@ -5484,6 +5484,16 @@ function referenceAvailability(core, ctx, line, plant, successorId, end, orders)
   const win = [Math.max(+lineWin[0], +plantWin[0]), Math.min(+lineWin[1], +plantWin[1])];
   if (win[0] >= win[1] || +end > win[1] || +end <= win[0]) return 0;
   let lower = win[0];
+  // Touching windows merge across midnight (OQ47): continue back through every window ending where this one opens.
+  for (let back = 1; back <= 14; back++) {
+    const day = new Date(probe.getFullYear(), probe.getMonth(), probe.getDate() - back, 12);
+    const l = core._dayWindow(ctx.calendars[line]?.workHours ?? defaultHours, day);
+    const p = core._dayWindow(ctx.plants[plant]?.workHours ?? defaultHours, day);
+    if (!l || !p) break;
+    const earlier = [Math.max(+l[0], +p[0]), Math.min(+l[1], +p[1])];
+    if (earlier[0] >= earlier[1] || earlier[1] !== lower) break;
+    lower = earlier[0];
+  }
   const blocked = (b) => {
     const s = core.parseDate(b.start), e = core.parseDate(b.end);
     if (!s || !e || +s >= +end || +e <= lower) return false;

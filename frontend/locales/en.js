@@ -980,6 +980,7 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Additional tooltip text ─────────────────────────────────────────────── */
   'tip.fix_alert':                     'Automatically resolve this alert',
   'alert.tool_conflict':               'Tool "{{tool}}" is needed by "{{a}}" on {{lineA}} and "{{b}}" on {{lineB}} at the same time.',
+  'alert.setup_violated':              'Not enough changeover time before order "{{order}}" on {{line}}: needs {{required}} min, only {{available}} min available ({{short}} min short).',
   'alert.distribution_separation':     'Sub-orders of {{parent}} start in different {{scope}}s',
   'ui.alert_headline_tool_conflict':   'Shared tool conflict',
 

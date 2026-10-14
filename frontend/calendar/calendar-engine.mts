@@ -111,6 +111,10 @@ export interface BackwardAllocationOptions extends BackwardLookupOptions {
   floor: Date;
   minSegmentMinutes: number;
   plantTz: string | null;
+  /** Minutes of changeover that must sit immediately before the earliest productive piece, inside the same
+   *  operating fragment (OQ2 V1). Absent, zero or invalid means none. It only decides where the earliest piece
+   *  may start; it never changes the run time or the finish. */
+  setupMinutes?: number;
 }
 
 interface MsSpan { s: number; e: number }
@@ -802,13 +806,16 @@ export const Calendar = {
     if (!splitting && runMs > frame.longestMs) return { kind: 'overlong' };
     const { spans, finishMs } = frame;
     if (!spans.length) return { kind: 'reached_now' };
+    const setupMs = Number.isFinite(opts.setupMinutes) && (opts.setupMinutes as number) > 0
+      ? Math.round(opts.setupMinutes as number) * Config.MS_MIN : 0;
     const latestEnd = spans[spans.length - 1].e;   // the finish clamped to operating time
 
     const picked: MsSpan[] = [];   // latest first
     let moveReason: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout' | undefined;
     if (!splitting) {
       for (let i = spans.length - 1; i >= 0; i--) {
-        if (spans[i].e - spans[i].s >= runMs) { picked.push({ s: spans[i].e - runMs, e: spans[i].e }); break; }
+        // OQ2 V1: the one window must hold the changeover right before the productive start as well.
+        if (spans[i].e - spans[i].s >= runMs + setupMs) { picked.push({ s: spans[i].e - runMs, e: spans[i].e }); break; }
       }
       if (!picked.length) return { kind: 'reached_now' };
       if (picked[0].e !== latestEnd) moveReason = 'no_slot_at_finish';
@@ -819,6 +826,12 @@ export const Calendar = {
         const capacity = Math.floor((spans[i].e - spans[i].s) / Config.MS_MIN);
         if (capacity <= 0) continue;
         let take = Math.min(remaining, capacity);
+        // OQ2 V1: the earliest piece also needs the changeover before it in this same fragment. When the
+        // fragment cannot hold both, it is clipped to leave room for the changeover and the walk continues back.
+        if (setupMs && take === remaining && take * Config.MS_MIN + setupMs > capacity * Config.MS_MIN) {
+          take = capacity - Math.ceil(setupMs / Config.MS_MIN);
+          if (take <= 0) continue;
+        }
         // Leave at least a minimum piece for the fragments still to come.
         if (remaining > take && remaining - take < minSegment) take = remaining - minSegment;
         // A partial piece is never below the minimum (a whole order shorter than it is the one exception);

@@ -982,6 +982,8 @@
       alerts.push({
         id: `setup-violated-${key}`, sev: setupActiveForLine(interval.line) ? 'err' : 'warn', type: 'setup-violated',
         msg: `Not enough changeover time before order "${orderNumberForId(interval.successorOrderId)}" on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
+        msgKey: 'alert.setup_violated',
+        msgVars: { order: orderNumberForId(interval.successorOrderId), line: interval.line, required: requiredMinutes, available: availableMinutes, short: shortMinutes },
         taskId: interval.successorOrderId, line: interval.line, time: interval.start,
         requiredMinutes, availableMinutes, shortMinutes,
       });
