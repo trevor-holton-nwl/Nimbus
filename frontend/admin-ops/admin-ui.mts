@@ -1310,7 +1310,7 @@ export const AdminCockpit = {
       const r = await Util.fetchTraced(`${Config.API_BASE}/purge/preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plant, start_date: startStr, end_date: endStr }),
+        body: JSON.stringify({ plant, start_date: startStr + 'T00:00:00', end_date: endStr + 'T23:59:59' }),
       });
       const body = await r.json().catch(() => ({})) as AdminPurgePreview;
       if (seq !== AdminCockpit._purgePreviewSeq) return; // superseded by a newer request
