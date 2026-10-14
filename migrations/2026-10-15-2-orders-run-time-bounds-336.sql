@@ -1,4 +1,7 @@
 -- migrations/2026-10-15-2-orders-run-time-bounds-336.sql
+-- NAMING NOTE: the file name says 336 (the application-enforced scheduling cap), but the constraint this
+-- file installs is the 8760-hour REPRESENTATION bound (run_time < 8760). The name stays because the deploy
+-- ledger (migration_files_applied) is keyed by file name; the schema_migrations id says 8760.
 -- Run-time cap (backward-scheduling OQ28). Destructive by text (DROP CONSTRAINT, then re-ADD).
 --
 -- chk_orders_run_time_bounds changes meaning: it was the 168-hour LIMIT on an order's run time
