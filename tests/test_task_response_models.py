@@ -721,6 +721,7 @@ def test_tasks_endpoint_response_validates_live(client):
     assert r.status_code == 200
     body = r.json()
     assert "data" in body and "links" in body and "meta" in body
+    assert body["meta"]["server_now"].endswith("Z")   # backward scheduling Task 2.4: one clock
     if body["data"]:
         row = body["data"][0]
         assert "id" in row and "start_date" in row and "row_version" in row
@@ -940,3 +941,20 @@ def test_update_task_dates_bulk_rejects_an_unknown_machine_with_a_reason(monkeyp
     assert result["invalid_ids"] == ["r-ghost"]
     assert result["rejection_reasons"] == {"r-ghost": "machine_unknown"}
     assert result["persisted"] == 0
+
+
+def test_tasks_meta_carries_server_now_as_iso_utc_on_the_empty_envelope(monkeypatch):
+    """Backward scheduling Task 2.4 (OQ52): `server_now` travels in `/tasks` `meta` (never on the DTO) so
+    the browser derives one plant-zone clock from the server's instant. Pinned on the empty-result
+    envelope (no DB rows needed) and on the helper the full path shares."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(scheduling_routes.db, "query_orders", lambda **kw: (None, None, None))
+    body = scheduling_routes.get_tasks(plant="5512", machine=None, limit=None, offset=None, allowed_plants=None)
+    stamp = body["meta"]["server_now"]
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    assert stamp.endswith("Z") and parsed.tzinfo is not None
+    assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 5
+    assert "server_now" not in brain.TaskDTO.model_fields  # envelope meta, not a DTO field
+    assert scheduling_routes._server_now_iso().endswith("Z")
+

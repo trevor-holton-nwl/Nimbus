@@ -1463,3 +1463,45 @@ test('backward scheduling: saveAll sends the marker held on the task', async () 
     assert.equal(calls[0].body.tasks[0].placement_exception, 'overlong');
   } finally { globalThis.fetch = original; Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
 });
+
+// Backward scheduling Task 2.4 (OQ52, one clock): every /tasks load reads meta.server_now and keeps the
+// offset between the server's instant and this browser's clock, so Store.plantNow is the server's "now".
+test('Persistence.load captures the server clock offset from /tasks meta.server_now', async () => {
+  const originalFetch = globalThis.fetch;
+  const priorMasterData = Store.masterData;
+  const priorLoadsInFlight = Persistence._loadsInFlight;
+  const priorOffset = Store.serverOffsetMs;
+  const aheadMs = 3_600_000;           // the server clock runs an hour ahead of this browser
+  const respond = meta => async (url) => {
+    const u = String(url);
+    if (u.includes('/tasks?')) return { ok: true, json: async () => ({ data: [], meta }) };
+    if (u.includes('/master-data/')) return { ok: true, json: async () => ({ rows: [] }) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  try {
+    Store.serverOffsetMs = 0;
+    globalThis.fetch = respond({ server_now: new Date(Date.now() + aheadMs).toISOString() });
+    await Persistence.load({ plant: 'PLANT-CLOCK' });
+    assert.ok(Math.abs(Store.serverOffsetMs - aheadMs) < 2000, `offset ~ +1h, got ${Store.serverOffsetMs}`);
+    assert.ok(Math.abs(Store.serverNow().getTime() - (Date.now() + aheadMs)) < 2000, 'serverNow() is the projected server instant');
+
+    // A later load recomputes it (the browser clock was corrected, or the server moved).
+    globalThis.fetch = respond({ server_now: new Date(Date.now() - aheadMs).toISOString() });
+    await Persistence.load({ plant: 'PLANT-CLOCK', force: true });
+    assert.ok(Math.abs(Store.serverOffsetMs + aheadMs) < 2000, `offset recomputed to ~ -1h, got ${Store.serverOffsetMs}`);
+
+    // A response without a usable server_now leaves the last good offset alone.
+    const kept = Store.serverOffsetMs;
+    globalThis.fetch = respond({ server_now: 'not-a-date' });
+    await Persistence.load({ plant: 'PLANT-CLOCK', force: true });
+    assert.equal(Store.serverOffsetMs, kept);
+    globalThis.fetch = respond({});
+    await Persistence.load({ plant: 'PLANT-CLOCK', force: true });
+    assert.equal(Store.serverOffsetMs, kept);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Store.serverOffsetMs = priorOffset;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Persistence._loadsInFlight = priorLoadsInFlight;
+  }
+});

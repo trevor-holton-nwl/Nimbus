@@ -432,6 +432,9 @@ export const Persistence = {
         stats.source = 'backend';
         stats.raw_received = payload?.data?.length ?? 0;
         stats.backend_meta = payload?.meta ?? null;
+        // OQ52 (one clock): keep the server-vs-browser offset so Store.plantNow is the server's "now".
+        // Every /tasks load refreshes it; a response without a usable server_now keeps the last one.
+        Store.setServerNow(payload?.meta?.server_now);
         // Lift per-request color stats out of meta so the pipeline panel
         // can read them without digging into backend_meta.
         stats.color_merge_misses = (payload?.meta?.color_merge_misses as number | undefined) ?? 0;

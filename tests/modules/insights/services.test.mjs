@@ -517,8 +517,12 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
   const priorFirmed = new Set(Store.firmedIds);
   const runStart = new Date(Date.now() - 3600_000);
   const runEnd = new Date(Date.now() + 3600_000);
+  let priorMasterData;
   try {
     Store.setSelectedPlant(plant, 'unit-test');
+    // A plant needs a valid zone to have a clock (OQ52); the running order is judged against it.
+    priorMasterData = Store.masterData;
+    Store.setMasterData({ lines: [], ...Store.masterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'unit-test');
     Store.setTasks([
       { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, ecc_firmed: true },
       { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
@@ -543,5 +547,6 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
     for (const id of priorFirmed) Store.setFirmed([id], true, 'unit-test');
     Store.setAlerts(priorAlerts, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
+    if (priorMasterData !== undefined) Store.setMasterData(priorMasterData, 'unit-test');
   }
 });

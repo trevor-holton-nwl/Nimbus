@@ -47,6 +47,10 @@ globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') globalThis.document = { getElementById: () => null };
 
+// These fixtures build dates from the real clock as naive local values, so their plant's clock is this machine's
+// own zone (a plant with no valid zone has no clock: OQ52, see the one-clock tests at the end of this file).
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 test('Engine derives a due-date-day pull-forward floor using calendar days', () => {
   Store.setMasterData({ plants: [{ plant: 'PULL', max_pull_forward_days: 7 }], lines: [] }, 'unit-test');
   const floor = Engine.earliestAllowedStart(
@@ -489,7 +493,7 @@ test('Engine.autoReflow leaves a frozen-window peer exactly in place even when i
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot(null, 'unit-test');
   Store.setMasterData({
-    plants: [{ plant, split_order_policy: 'never' }],
+    plants: [{ plant, split_order_policy: 'never', timezone: LOCAL_TZ }],
     lines: [{ machine: line, plant }],
   }, 'unit-test');
   Store.setCalendar(line, ALL_DAY, 'unit-test');
@@ -985,7 +989,7 @@ test('running orders never move: legacy walk, changeover and autoReflow leave an
   try {
     Store.setSelectedPlant(plant, 'unit-test');
     Store.setFrozenHorizonEnd(null, 'unit-test');
-    Store.setMasterData({ plants: [{ plant, split_order_policy: 'never' }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setMasterData({ plants: [{ plant, split_order_policy: 'never', timezone: LOCAL_TZ }], lines: [{ plant, machine: line }] }, 'unit-test');
     Store.setCalendar(line, ALL_DAY, 'unit-test');
     Store.replaceSetupSnapshot(null, 'unit-test');
     const runStart = new Date('2035-08-06T07:00:00');
@@ -3757,4 +3761,96 @@ test('Delete -> Needs Planning order is re-placed by a following Due Date optimi
   const patch = _runDeletedOrderThrough('duedate');
   assert.ok(patch, 'the planner-unscheduled order must receive a placement');
   assert.ok(patch.changes.start_date instanceof Date && patch.changes.end_date instanceof Date);
+});
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 2.4 (OQ52): one clock. The running and frozen tests default to the
+// plant's wall clock projected from the SERVER instant (Store.serverOffsetMs), not the viewer's.
+// ---------------------------------------------------------------------------
+
+function withServerClock(serverInstantIso, plants, fn) {
+  const priorOffset = Store.serverOffsetMs;
+  const priorMaster = Store.masterData;
+  const priorToast = Toast.show;
+  const priorFrozenEnd = Store.frozenHorizonEnd;
+  const toasts = [];
+  Toast.show = (...args) => { toasts.push(args); };
+  Store.setMasterData({ plants, lines: [] }, 'unit-test');
+  Store.serverOffsetMs = new Date(serverInstantIso).getTime() - Date.now();
+  Store._blockedPlants.clear();
+  try { return fn(toasts); }
+  finally {
+    Toast.show = priorToast;
+    Store.serverOffsetMs = priorOffset;
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store.setFrozenHorizonEnd(priorFrozenEnd, 'unit-test');
+    Store._blockedPlants.clear();
+  }
+}
+
+test('Store.plantNow projects the server instant into the plant zone as a naive wall-clock Date', () => {
+  withServerClock('2026-08-20T12:00:00Z', [
+    { plant: 'NY', timezone: 'America/New_York' },
+    { plant: 'TK', timezone: 'Asia/Tokyo' },
+  ], () => {
+    const ny = Store.plantNow('NY');
+    const tk = Store.plantNow('TK');
+    const near = (d, y, mo, da, h, mi) => Math.abs(d.getTime() - new Date(y, mo, da, h, mi).getTime()) < 5000;
+    assert.ok(near(ny, 2026, 7, 20, 8, 0), `New York wall clock is 08:00 on the 20th, got ${ny}`);
+    assert.ok(near(tk, 2026, 7, 20, 21, 0), `Tokyo wall clock is 21:00 on the 20th, got ${tk}`);
+  });
+});
+
+test('Engine.isInProgress and isFrozenHorizon default to the plant clock from the server instant', () => {
+  const task = { id: 'oq52-run', PLANT: 'NY', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
+  const tokyoTask = { ...task, id: 'oq52-run-tk', PLANT: 'TK' };
+  withServerClock('2026-08-20T12:00:00Z', [
+    { plant: 'NY', timezone: 'America/New_York' },
+    { plant: 'TK', timezone: 'Asia/Tokyo' },
+  ], () => {
+    // 12:00Z is 08:00 in New York (inside 06:00-10:00) and 21:00 in Tokyo (past it).
+    assert.equal(Engine.isInProgress(task), true);
+    assert.equal(Engine.isInProgress(tokyoTask), false);
+    assert.deepEqual(Engine.firmingStatus(task), { firmed: true, reasons: ['running'] });
+    // Frozen: start at or after the plant's now and before the horizon end.
+    Store.setFrozenHorizonEnd(new Date(2026, 7, 21, 0, 0), 'unit-test');
+    const upcoming = { id: 'oq52-frozen', PLANT: 'NY', start_date: new Date(2026, 7, 20, 9, 0), end_date: new Date(2026, 7, 20, 11, 0) };
+    assert.equal(Engine.isFrozenHorizon(upcoming), true, '09:00 is after the New York now (08:00) and before the horizon end');
+    assert.equal(Engine.isFrozenHorizon({ ...upcoming, PLANT: 'TK' }), false, '09:00 is already past in Tokyo (21:00)');
+    // An explicit now still wins over the clock.
+    assert.equal(Engine.isInProgress(task, new Date(2026, 7, 20, 11, 0)), false);
+  });
+});
+
+test('a plant with no valid timezone is throw-free: not running, not frozen, recorded once with one toast', () => {
+  const task = { id: 'oq52-nozone', PLANT: 'NOZ', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
+  withServerClock('2026-08-20T12:00:00Z', [
+    { plant: 'NOZ' },
+    { plant: 'BAD', timezone: 'Not/AZone' },
+  ], (toasts) => {
+    Store.setFrozenHorizonEnd(new Date(2026, 7, 21, 0, 0), 'unit-test');
+    assert.equal(Store.plantNow('NOZ'), null);
+    assert.equal(Engine.isInProgress(task), false);
+    assert.equal(Engine.isFrozenHorizon(task), false);
+    assert.equal(Engine.isInProgress(task), false);
+    assert.equal(Engine.isInProgress({ ...task, PLANT: 'BAD' }), false, 'an invalid zone blocks like a missing one');
+    assert.deepEqual([...Store._blockedPlants].sort(), ['BAD', 'NOZ']);
+    assert.equal(toasts.length, 2, 'one toast per blocked plant per session, however many reads');
+    // An explicit now still evaluates (callers that carry their own clock are unaffected).
+    assert.equal(Engine.isInProgress(task, new Date(2026, 7, 20, 8, 0)), true);
+  });
+});
+
+test('a task whose plant cannot be resolved is not running and is not recorded as a blocked plant', () => {
+  withServerClock('2026-08-20T12:00:00Z', [{ plant: 'NY', timezone: 'America/New_York' }], () => {
+    assert.equal(Engine.isInProgress({ id: 'x', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) }), false);
+    assert.equal(Store._blockedPlants.size, 0, 'no plant to blame: nothing to record');
+  });
+});
+
+test('Engine._plantWallNow projects through the shared helper and still refuses a blank or invalid zone', () => {
+  const wall = Engine._plantWallNow('America/New_York', new Date('2026-08-20T12:00:30Z'));
+  assert.equal(wall.getTime(), new Date(2026, 7, 20, 8, 0, 0).getTime(), 'plant wall clock, floored to the minute');
+  assert.throws(() => Engine._plantWallNow('', new Date()), /valid IANA timezone/);
+  assert.throws(() => Engine._plantWallNow('Not/AZone', new Date()), /valid IANA timezone/);
 });

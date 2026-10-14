@@ -650,7 +650,7 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
     }
     return null;
   };
-  const runAt = parseAbsolute(opts.runAt) ?? (hasExplicitDate(opts.runAt) ? null : new Date());
+  const runAt = parseAbsolute(opts.runAt) ?? (hasExplicitDate(opts.runAt) ? null : Store.serverNow());
   if (!runAt) throw new Error('Remove Backlog requires a valid runAt timestamp');
   const now = Engine._plantWallNow(timezone, runAt);
   const from = hasExplicitDate(opts.startDate)
@@ -1013,18 +1013,30 @@ export const Engine = {
    *  "pinned" means in their own context (excluded from the free/movable
    *  set, an obstacle for peers, etc). Manual drags never consult this
    *  (OD-C2c): only optimizer/auto-reflow placement code does. */
-  isFrozenHorizon(task: NimbusTask, now: Date = new Date(), frozenHorizonEnd?: Date | null): boolean {
+  isFrozenHorizon(task: NimbusTask, now?: Date, frozenHorizonEnd?: Date | null): boolean {
     const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
     if (!end || !task.start_date) return false;
-    return task.start_date >= now && task.start_date < end;
+    const at = now ?? Engine._clockFor(task);
+    // A plant with no valid timezone has no clock (OQ52): not frozen, never a throw.
+    return !!at && task.start_date >= at && task.start_date < end;
   },
 
   /** True while the order is in progress: start_date <= now < end_date (both set).
    *  Running orders never move (optimizer, autoReflow, alert fixes); Remove Backlog
    *  is the one exemption. Not gated by "Respect firmed". */
-  isInProgress(task: NimbusTask, now: Date = new Date()): boolean {
+  isInProgress(task: NimbusTask, now?: Date): boolean {
     if (!task.start_date || !task.end_date) return false;
-    return task.start_date <= now && now < task.end_date;
+    const at = now ?? Engine._clockFor(task);
+    // A plant with no valid timezone has no clock (OQ52): not running, never a throw.
+    return !!at && task.start_date <= at && at < task.end_date;
+  },
+
+  /** The default "now" for a task: its plant's wall clock projected from the server instant
+   *  (Store.plantNow), or null when that plant is blocked (no valid timezone). The plant is the
+   *  task's own, else its line's, else the selected plant. */
+  _clockFor(task: NimbusTask): Date | null {
+    const plant = task.PLANT || (task.MACHINE ? Store.getPlantForLine(task.MACHINE) : null) || Store.selectedPlant;
+    return Store.plantNow(plant);
   },
 
   /** SAP's firm flag. DISPLAY ONLY — NIMBUS never locks on it. */
@@ -1050,7 +1062,7 @@ export const Engine = {
    *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
    *  fold below, never this. reasons: 'frozen' (horizon band), 'manual' (planner),
    *  'running' (in progress). SAP firm is never a reason. */
-  firmingStatus(task: NimbusTask, now: Date = new Date()): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
+  firmingStatus(task: NimbusTask, now?: Date): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
     const reasons: Array<'frozen'|'manual'|'running'> = [];
     if (Engine.isFrozenHorizon(task, now)) reasons.push('frozen');
     if (Store.isFirmed(task.id)) reasons.push('manual');
@@ -1288,23 +1300,16 @@ export const Engine = {
    * first projects the instant into the plant IANA zone, then recreates those
    * wall-clock components for the existing calendar engine. */
   _plantWallNow(timezone: string, runAt: Date): Date {
-    try {
-      const parts = new Intl.DateTimeFormat('en-US', {
-        timeZone: timezone,
-        year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
-        hourCycle: 'h23',
-      }).formatToParts(runAt);
-      const values: Record<string, number> = {};
-      for (const part of parts) {
-        if (part.type !== 'literal') values[part.type] = Number(part.value);
-      }
-      if (![values.year, values.month, values.day, values.hour, values.minute].every(Number.isFinite)) {
-        throw new Error('could not resolve plant-local clock');
-      }
-      return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, 0, 0);
-    } catch (err) {
-      throw new Error(`Remove Backlog requires a valid IANA timezone for the selected plant (${timezone}): ${err instanceof Error ? err.message : String(err)}`);
+    // The projection is the compute core's shared helper (one implementation for Store.plantNow, the
+    // worker and this); Remove Backlog additionally REQUIRES a real zone, so a blank or invalid one
+    // still throws, with the same message as before.
+    const wall = typeof timezone === 'string' && timezone.trim()
+      ? plantWallClockFromInstant(timezone, runAt) : null;
+    if (!wall) {
+      throw new Error(`Remove Backlog requires a valid IANA timezone for the selected plant (${timezone}): could not resolve plant-local clock`);
     }
+    wall.setSeconds(0, 0);
+    return wall;
   },
 
   /** Planner-invoked, sequence-preserving backlog repair. This deliberately
@@ -2023,9 +2028,14 @@ export const Engine = {
       return parsed;
     };
     const liveClock = (): Date => {
-      const now = new Date();
-      now.setSeconds(0, 0);
-      return plantWallClockFromInstant(plantTimezone, now) ?? now;
+      // One clock (OQ52): the server instant in the plant's zone, floored to the minute. A plant with
+      // no valid zone is blocked (recorded by Store.plantNow); the run keeps its viewer-clock fallback
+      // here and placement-blocking for such plants belongs to the derivation tasks that follow.
+      const now = Store.plantNow(plant);
+      if (now) { now.setSeconds(0, 0); return now; }
+      const fallback = Store.serverNow();
+      fallback.setSeconds(0, 0);
+      return plantWallClockFromInstant(plantTimezone, fallback) ?? fallback;
     };
     const injectedNow = candidateRun ? readDate(opts.now, 'now', true) : null;
     const explicitRunNow = hasExplicitDate(opts.runNow) ? readDate(opts.runNow, 'runNow', true)
@@ -2622,7 +2632,9 @@ export const Engine = {
   autoReflow(changedId: string): void {
     const changed = Store.tasks[changedId];
     if (!changed || !changed.start_date || !changed.end_date) return;
-    const _horizonStart = Util.startOfDay(new Date())!;
+    // "Today" in the order's plant (one clock, OQ52); a blocked plant keeps the server instant read as
+    // wall-clock, which is what this aged-task guard always did with the viewer's clock.
+    const _horizonStart = Util.startOfDay(Engine._clockFor(changed) ?? Store.serverNow())!;
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.MACHINE || 'Unknown';
     const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);

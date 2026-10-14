@@ -126,7 +126,19 @@ let _settingsDefaultsResolver: SettingsDefaultsResolver = () => ({});
    Every mutation goes through here and fans out to subscribers.
    Subscribers tag their own mutations with `source` so they can skip echoes.
    ========================================================================== */
+// Wired at module load (store.mjs imports foundation.mjs, so this is a legal edge, not a cycle): the
+// header clock and greeting read the server's instant through Util without Util importing Store.
+Util.setServerNowResolver(() => Store.serverNow());
+
 export const Store = {
+  /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,
+   *  captured on every /tasks load (`setServerNow`, called from Persistence.load). 0 until the first
+   *  response arrives (so before then "now" is the browser's own clock, as it always was). Everything
+   *  that asks "what time is it at this plant" goes through `plantNow`, never `new Date()`. */
+  serverOffsetMs: 0,
+  /** Plants whose derivations are blocked because they have no valid IANA timezone (OQ52). Session
+   *  only, filled once per plant by `plantNow`; Task 3.3 turns it into the plant_no_timezone alert. */
+  _blockedPlants: new Set<string>(),
   _tasksByPlant: {} as Record<string, NimbusTask[]>,
   _lineToPlant: {} as Record<string, string | null>,
   _linesByPlant: {} as Record<string, string[]>,
@@ -283,6 +295,40 @@ export const Store = {
    *  setVisibilityHorizonEnd above. */
   setFrozenHorizonEnd(end: Date | null, _source?: string): void {
     this._state.frozenHorizonEnd = end;
+  },
+
+  /** Capture the server clock from a /tasks response's `meta.server_now` (ISO-8601 UTC). A missing or
+   *  unparsable value leaves the last good offset in place. `receivedAtMs` is the browser clock at
+   *  receipt (injectable for tests). */
+  setServerNow(serverNowIso: unknown, receivedAtMs: number = Date.now()): void {
+    if (typeof serverNowIso !== 'string' || !serverNowIso) return;
+    const serverMs = new Date(serverNowIso).getTime();
+    if (!Number.isFinite(serverMs)) return;
+    this.serverOffsetMs = serverMs - receivedAtMs;
+  },
+
+  /** The server's current instant, as a real (absolute) Date. */
+  serverNow(): Date {
+    return new Date(Date.now() + this.serverOffsetMs);
+  },
+
+  /** "Now" at a plant: the server instant projected into the plant's IANA zone, as the naive
+   *  wall-clock Date every schedule derivation compares against (same convention as task dates).
+   *  Returns null when the plant has no valid timezone, or when there is no plant to ask about; a
+   *  plant that exists in master data but has no valid zone is also recorded in `_blockedPlants` and
+   *  announced once per session (toast now, alert in Task 3.3). A plant master data does not know yet
+   *  (not loaded) is NOT recorded: that is "not loaded", not "misconfigured". */
+  plantNow(plant: string | null | undefined): Date | null {
+    if (!plant) return null;
+    const row = this._state.masterData?.plants?.find(p => p.plant === plant);
+    const tz = typeof row?.timezone === 'string' ? row.timezone.trim() : '';
+    const wall = tz ? globalThis.NimbusComputeCore!.plantWallClockFromInstant(tz, this.serverNow()) : null;
+    if (wall) return wall;
+    if (row && !this._blockedPlants.has(plant)) {
+      this._blockedPlants.add(plant);
+      Toast.show(Util.t('toast.plant_no_timezone', { plant }), 'warn', 9000);
+    }
+    return null;
   },
 
   /** Replace the one active plant's read-only setup snapshot. Unlike priority

@@ -41,6 +41,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.select_plant_to_opt':         'Select a plant to optimize',
   'toast.select_lines_to_opt':         'Select at least one machine to optimize, or switch to Whole plant.',
   'toast.opt_apply_running_skipped':  '{{count}} order(s) started running while the preview was open and were left as they are.',
+  'toast.plant_no_timezone':  'Plant {{plant}} has no valid time zone, so NIMBUS cannot tell which of its orders are running or frozen. Ask an administrator to set the time zone for this plant in Master Data.',
   'toast.opt_applied':                 'Optimization applied — Ctrl+Z to undo',
   'toast.opt_discarded':               'Optimization discarded — schedule restored',
   'toast.optimize_missing_setup_summary': 'Optimized. {{orders}} order(s) on {{lines}} machine(s) were scheduled without setup data (no changeover bar) — see Alerts.',

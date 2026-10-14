@@ -104,7 +104,8 @@ class TasksResponse(BaseModel):
     key precisely is out of scope for this phase and would need to track
     DIAGNOSTICS's shape by hand forever. The empty-result path also returns a
     smaller `meta` subset (see get_tasks's `empty_meta`), which a strict schema
-    would reject."""
+    would reject. Both paths carry `meta.server_now` (ISO-8601 UTC): the one clock the browser
+    projects into each plant's zone (backward scheduling OQ52); it is not a TaskDTO field."""
     data: list[TaskDTO]
     links: list[LinkDTO]
     meta: dict[str, Any]

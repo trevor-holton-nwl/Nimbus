@@ -469,7 +469,7 @@
   // are already filtered against `dismissed`. Merging the incremental `opts.lines` scope
   // into the retained list is the caller's responsibility.
 
-  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup }) {
+  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup, now }) {
     const t0 = performance.now();
 
     const onlyLines = Array.isArray(opts?.lines) && opts.lines.length
@@ -513,9 +513,22 @@
       return order || 'order number unavailable';
     };
     const orderNumberForId = id => orderNumber(id == null ? undefined : taskById.get(String(id)));
-    const todayStart = startOfDay(new Date());
+    // One clock (OQ52): "today" is the start of the day in the ORDER'S plant, read from the per-plant
+    // wall-clock `now` the caller supplies (the server instant in the plant zone), not this thread's
+    // Date.now(). A plant with no entry (no valid timezone, or a caller that sends none) keeps the
+    // thread's clock, as before.
+    const fallbackToday = startOfDay(new Date());
+    const todayByPlant = new Map();
+    const todayStartFor = task => {
+      const plant = task?.PLANT || plantOf(task?.MACHINE || 'Unknown');
+      const at = plant != null && now ? now[plant] : null;
+      if (!at) return fallbackToday;
+      let day = todayByPlant.get(plant);
+      if (!day) todayByPlant.set(plant, day = startOfDay(at) || fallbackToday);
+      return day;
+    };
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
-    let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStart);
+    let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStartFor(t));
     if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'));
 
     /* 1. OVERLAPS */
@@ -573,7 +586,7 @@
     };
     const byTool = {};
     for (const t of tasks) {
-      if (t.end_date && t.end_date < todayStart) continue;
+      if (t.end_date && t.end_date < todayStartFor(t)) continue;
       for (const tool of toolIds(t)) {
         for (const interval of scheduleIntervals(t)) {
           (byTool[tool] ||= []).push({ task: t, start: interval.start, end: interval.end });

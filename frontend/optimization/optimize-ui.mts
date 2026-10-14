@@ -326,13 +326,13 @@ export const OptimizeDialog = (() => {
   function _backlogNow(): Date {
     const timezone = Store.masterData?.plants?.find(p => p.plant === _plant)?.timezone;
     if (typeof timezone === 'string' && timezone.trim()) {
-      try { return Engine._plantWallNow(timezone, new Date()); }
+      try { return Engine._plantWallNow(timezone, Store.serverNow()); }
       catch { /* Run surfaces the configured-timezone error with an actionable message. */ }
     }
     // The engine still blocks this configuration at Run. This local fallback
     // merely gives the planner usable editable fields while they configure the
     // required plant timezone.
-    const local = new Date(); local.setSeconds(0, 0); return local;
+    const local = Store.serverNow(); local.setSeconds(0, 0); return local;
   }
 
   function _addCalendarMonths(date: Date, months: number): Date {
@@ -415,7 +415,7 @@ export const OptimizeDialog = (() => {
       } else {
         days = PRESET_DAYS[key];
       }
-      const now = new Date();
+      const now = Store.plantNow(_plant) ?? Store.serverNow();
       now.setSeconds(0, 0);
       _start = new Date(now);
       _end   = new Date(now.getTime() + days * Config.MS_DAY);
@@ -738,11 +738,11 @@ export const OptimizeDialog = (() => {
     const optsForEngine: OptimizerRunOptions = {
       plant,
       lines:           linesScope,
-      startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
-      endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
+      startDate:       _start ?? (() => { const d = Store.plantNow(plant) ?? Store.serverNow(); d.setSeconds(0, 0); return d; })(),
+      endDate:         _end   ?? new Date((Store.plantNow(plant) ?? Store.serverNow()).getTime() + 28 * Config.MS_DAY),
       respectFirmed:   sfEl?.checked ?? true,
       respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
-      runAt:           new Date(),
+      runAt:           Store.serverNow(),
       auditDetails: _mode === 'backlog' ? undefined : {
         mode: _mode,
         wheelUsed,
@@ -2112,10 +2112,10 @@ export const OptimizerPreview = {
     // This is the sole schedule-state commit for a preview candidate.
     // A running order never moves, and the preview may have sat open while one started. Drop
     // those patches at apply time (Remove Backlog is the one run that moves running orders).
-    const applyNow = new Date();
+    // The running test at Apply uses each order's own plant clock (Store.plantNow via the default now).
     const keptPatches = mode === 'backlog'
       ? candidate.patches
-      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live, applyNow)); });
+      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
     const skippedRunning = candidate.patches.length - keptPatches.length;
     Engine.applySchedulePatches(keptPatches);
     if (skippedRunning) Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skippedRunning }), 'warn', 7000);

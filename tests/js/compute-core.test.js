@@ -720,3 +720,26 @@ test('dueDateInstant looks back at most 30 days for an open day, then falls to r
   };
   assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), only31Back), +new Date(2026, 6, 8, 23, 59, 59));
 });
+
+// Backward scheduling Task 2.4 (OQ52, one clock): the alert horizon ("active" = ends today or later)
+// reads the per-plant `now` the payload carries (a naive plant wall-clock Date), not the worker's own
+// Date.now(), so a viewer's browser zone or clock skew cannot move which orders count as active.
+test('computeAlerts reads the active-order horizon from the payload now of the order\'s plant, not Date.now()', () => {
+  const day = new Date(2020, 0, 6);   // far in the past by the real clock
+  const at = h => new Date(day.getFullYear(), day.getMonth(), day.getDate(), h);
+  const t1 = { id: 'a', text: 'A', MACHINE: 'L', PLANT: 'P', RUN_TIME: 2, start_date: at(8), end_date: at(12) };
+  const t2 = { id: 'b', text: 'B', MACHINE: 'L', PLANT: 'P', RUN_TIME: 2, start_date: at(10), end_date: at(14) };
+  const payload = now => ({
+    tasks: [t1, t2], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {}, ...(now ? { now } : {}),
+  });
+  // No payload now: the real clock is years later, both orders ended long ago, nothing is active.
+  assert.equal(Core.computeAlerts(payload()).alerts.filter(a => a.type === 'overlap').length, 0);
+  // Payload now for the orders' plant, early on the day: both are still active, the overlap shows.
+  assert.equal(Core.computeAlerts(payload({ P: at(7) })).alerts.filter(a => a.type === 'overlap').length, 1);
+  // A payload now for a DIFFERENT plant does not apply to these orders.
+  assert.equal(Core.computeAlerts(payload({ OTHER: at(7) })).alerts.filter(a => a.type === 'overlap').length, 0);
+  // The clock is per plant: the same orders are past once that plant's day has moved on.
+  const later = new Date(2020, 0, 8, 7);
+  assert.equal(Core.computeAlerts(payload({ P: later })).alerts.filter(a => a.type === 'overlap').length, 0);
+});

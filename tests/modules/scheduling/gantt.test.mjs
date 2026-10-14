@@ -16,6 +16,9 @@ import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
+// Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
+// shared zone helper (OQ52); a real page loads the core before any module, so the tests do the same.
+globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || require('../../../frontend/nimbus-compute-core.js');
 
 test('hierarchy escapes stored machine and order labels', () => {
   const payload = '<img src=x onerror=alert(1)>';
@@ -1522,7 +1525,7 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is a locked sub
 
 function _enableRoutingForPlant(plant) {
   const priorMasterData = Store.masterData;
-  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: true }] }, 'test');
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, routing_runtime_enabled: true }] }, 'test');
   return priorMasterData;
 }
 
@@ -1580,7 +1583,7 @@ test('Interaction._onDataSetUpdate skips the routing eligibility guard on a plan
   const priorScheduleRecompute = Alerts.scheduleRecompute;
   const plant = 'P-ROUTING-DISABLED-DRAG';
   const priorMasterData = Store.masterData;
-  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: false }] }, 'test');
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, routing_runtime_enabled: false }] }, 'test');
   Alerts.scheduleRecompute = () => {};
   let eligibleCalls = 0;
   Runtime.eligible = () => { eligibleCalls++; return false; };
@@ -1879,6 +1882,8 @@ test('#33 Timeline._itemForTask re-applies the active Gantt filter dimming so a 
 // reference) and is refused on manual-firmed, frozen and running orders.
 // ---------------------------------------------------------------------------
 function _unscheduleFixture(extra = []) {
+  // A plant needs a valid zone to have a clock (OQ52): the running order below is judged against it.
+  Store.setMasterData({ lines: [], ...Store.masterData, plants: [{ plant: '5512', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
   const farStart = new Date('2035-03-01T08:00:00');
   const farEnd   = new Date('2035-03-01T12:00:00');
   const mk = (id, over = {}) => ({

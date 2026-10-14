@@ -10,6 +10,8 @@ only the file that owns them changed. `_clean_id`, `_to_pydt`,
 `_schedule_segments_to_wire`, and `_apply_task_date_updates` are private
 helpers used only within this domain and moved along with their callers.
 """
+from datetime import datetime, timezone
+
 import pandas as pd
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -88,6 +90,13 @@ def _schedule_segments_to_wire(raw) -> list[dict]:
     return clean
 
 
+def _server_now_iso() -> str:
+    """The server's instant as ISO-8601 UTC ('...Z'). Rides in `/tasks` `meta.server_now` so the browser
+    derives ONE plant-zone clock (Store.plantNow) from the server instead of each viewer's own clock
+    (backward scheduling OQ52). Never a DTO field."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 @router.get("/tasks", response_model=TasksResponse)
 def get_tasks(plant: str | None = None, machine: str | None = None,
               limit: int | None = Query(default=None, ge=1, le=10000,
@@ -153,7 +162,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                       "loaded_at": DIAGNOSTICS.get("loaded_at"),
                       "source_file": "postgres://nimbus/orders",
                       "visibility_horizon_end": visibility_horizon_end.isoformat() if visibility_horizon_end else None,
-                      "frozen_horizon_end": frozen_horizon_end.isoformat() if frozen_horizon_end else None}
+                      "frozen_horizon_end": frozen_horizon_end.isoformat() if frozen_horizon_end else None,
+                      "server_now": _server_now_iso()}
         return {"data": [], "links": [], "meta": empty_meta}
 
     # Drop rows with no usable start date (query can't enforce this without
@@ -257,6 +267,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     meta["total"] = db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else len(data)
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
+    meta["server_now"] = _server_now_iso()
     return {"data": data, "links": links, "meta": meta}
 
 

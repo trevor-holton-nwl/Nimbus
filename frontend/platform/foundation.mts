@@ -183,6 +183,9 @@ let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
 let _changeoverFieldsResolver: (() => string[]) | null = null;
 let _dueCalendarResolver: DueCalendarResolver | null = null;
+// The server's instant (OQ52, one clock). store.mts wires this to Store.serverNow() when it loads;
+// until then (Node tests that load foundation alone) it is the viewer's own clock, as it always was.
+let _serverNowResolver: (() => Date) | null = null;
 // Day window per (line, calendar date), valid for one Store revision: latenessHours runs per row
 // in grid filters and tile loops, so a midnight due date must not rebuild its window each call.
 let _dueWindowRev = NaN;
@@ -212,6 +215,7 @@ export const Util = {
     _dueCalendarResolver = typeof fn === 'function' ? fn : null;
     _dueWindowCache.clear(); _dueWindowRev = NaN;
   },
+  setServerNowResolver(fn: (() => Date) | null): void { _serverNowResolver = typeof fn === 'function' ? fn : null; },
   setApiKey(key: string): void { _apiKey = key || ''; },
 
   /** The task fields whose change between adjacent orders is a changeover, for
@@ -800,7 +804,9 @@ export const Util = {
   // RangeError on an empty/invalid IANA zone — that catch IS the contract:
   // callers get zoned:false and a viewer-local fallback rather than a crash.
   plantNowParts(tz?: string | null): { hour: number; minute: number; hhmm: string; zoned: boolean } {
-    const now = new Date();
+    // The server's instant (Store.serverNow via the resolver) so the header clock and the greeting
+    // agree with the derivations; the viewer's clock only before the first /tasks response.
+    const now = _serverNowResolver ? _serverNowResolver() : new Date();
     const z = (tz ?? '').trim();
     if (z) {
       try {

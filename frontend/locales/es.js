@@ -41,6 +41,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.select_plant_to_opt':         'Seleccione una planta para optimizar',
   'toast.select_lines_to_opt':         'Seleccione al menos una máquina para optimizar, o cambie a Planta completa.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraron en ejecución mientras la vista previa estaba abierta y se dejaron sin cambios.',
+  'toast.plant_no_timezone':  'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no puede saber qué pedidos están en ejecución o congelados. Pida a un administrador que configure la zona horaria de la planta en Datos maestros.',
   'toast.opt_applied':                 'Optimización aplicada — Ctrl+Z para deshacer',
   'toast.opt_discarded':               'Optimización descartada — programa restaurado',
   'toast.optimize_missing_setup_summary': 'Optimizado. {{orders}} pedido(s) en {{lines}} máquina(s) se programaron sin datos de preparación (sin barra de cambio) — vea Alertas.',

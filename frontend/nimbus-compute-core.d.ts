@@ -174,6 +174,10 @@ declare global {
     dismissed: string[];
     opts?: { lines?: string[] | null };
     setup?: NimbusSetupObservation;
+    /** Per-plant wall-clock "now" (naive Date in the plant zone, from Store.plantNow), keyed by plant.
+     *  The active-order horizon reads it instead of the worker's own clock; a plant with no entry
+     *  falls back to the clock of the thread running the core. */
+    now?: Record<string, Date>;
   }
 
   interface ComputeUtilizationPayload {

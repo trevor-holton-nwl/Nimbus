@@ -14,6 +14,9 @@ import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
+// Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
+// shared zone helper (OQ52); a real page loads the core before any module, so the tests do the same.
+globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || require('../../../frontend/nimbus-compute-core.js');
 
 test('note edits skip unchanged text and restamp the returned row version', async () => {
   const id = 'note-version-test';
@@ -925,7 +928,7 @@ test('Table._orderColumnRenderer appends the letter·count pill for a lettered s
 
 function _enableRoutingForPlant(plant) {
   const priorMasterData = Store.masterData;
-  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: true }] }, 'test');
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, routing_runtime_enabled: true }] }, 'test');
   return priorMasterData;
 }
 
@@ -982,7 +985,7 @@ test('Table._onCellChanged skips the routing eligibility guard on a plant that h
   const priorEligible = Runtime.eligible;
   const plant = 'P-ROUTING-DISABLED';
   const priorMasterData = Store.masterData;
-  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: false }] }, 'test');
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, routing_runtime_enabled: false }] }, 'test');
   let eligibleCalls = 0;
   Runtime.eligible = () => { eligibleCalls++; return false; };
   Table._api = { applyTransaction: () => {}, refreshCells: () => {} };

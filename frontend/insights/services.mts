@@ -95,6 +95,19 @@ interface DayByLineRow {
   pct: number;
 }
 
+/** One clock for alerts (OQ52): each plant's wall-clock "now" (the server instant in the plant's zone,
+ *  via Store.plantNow), keyed by plant, for the compute core's active-order horizon. A plant with no
+ *  valid timezone has no entry (the core then keeps its own clock for that plant; the plant is
+ *  recorded as blocked by Store.plantNow and surfaces as plant_no_timezone in Task 3.3). */
+function _plantClocks(plants: Iterable<string>): Record<string, Date> {
+  const out: Record<string, Date> = {};
+  for (const plant of plants) {
+    const now = Store.plantNow(plant);
+    if (now) out[plant] = now;
+  }
+  return out;
+}
+
 /* =============================================================================
    COMPUTE — singleton Web Worker wrapper for off-main-thread computation.
    Alerts.recompute and Utilization pre-warming post through here.
@@ -256,6 +269,7 @@ export const Compute = (() => {
       const _t0 = performance.now();
       return _post('ALERTS', {
         ..._snap(),
+        now: _plantClocks(Store.selectedPlant ? [Store.selectedPlant] : []),
         dismissed: [...(dismissed || [])],
         opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
       }).then(r => { PerfMonitor.record('Worker.alerts', performance.now() - _t0); return r; });
@@ -340,6 +354,7 @@ export const Alerts = {
         calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
         masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
       }),
+      now:          _plantClocks(Object.keys(Store._tasksByPlant)),
       dismissed:    [...Alerts._dismissed],
       opts:         { lines: onlyLines ? [...onlyLines] : null },
     });
