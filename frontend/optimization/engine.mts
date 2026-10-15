@@ -1288,24 +1288,25 @@ export const Engine = {
   /** OQ3: a started order keeps its real start and only the finish follows the run time. The allocator may move
    * the start (`never` may move it to the next open minute; any policy skips closed time), and a running order never
    * loses its start. In that case (D3, VU1) the remaining run is walked FORWARD through working time from the held
-   * start, so the bar is one continuous piece from the real start to the calendar-aware finish (the old start +
-   * run time as plain elapsed time is gone). Shared by the reconcile's running branch and the manual
-   * (grid/Inspector) edit. Null when no window is found. */
+   * start and the allocation's own start, end and pieces are returned: one piece when the run fits a window, the
+   * calendar pieces when it crosses closed time (the old start + run time as plain elapsed time is gone). When the
+   * recorded start sits in closed time the first piece starts at the next open minute and the stored start follows
+   * it. Shared by the reconcile's running branch and the manual (grid/Inspector) edit. Null when no window is found. */
   heldStartPatchFor(task: NimbusTask, line: string, policy: SplitOrderPolicy): Partial<NimbusTask> | null {
     if (!task.start_date) return null;
     const held = Engine.schedulePatchFor(task, line, task.start_date, policy);
     if (!held?.start_date || !held.end_date) return null;
     if (held.start_date.getTime() === task.start_date.getTime()) return held;
     // D3 (VU1): the allocator could not keep the real start (closed time, or a `never` window too short), so the
-    // remaining run is walked forward through working time from that start. `partial_allowed` is used deliberately
-    // so the remaining minutes are summed across windows; the segments are dropped because the piece boundaries
-    // are not planner placements and the start is held.
+    // remaining run is walked forward through working time from that start. `partial_allowed` is used regardless of
+    // the plant's split policy: a continuous bar across closed time is wider than the run time and fails the server
+    // width check, while pieces are judged by their sum, so the pieces are returned as the bar.
     const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
     const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     const forward = Calendar.allocateRuntime(line, task.start_date, runtimeMinutes, 'partial_allowed', plantTz);
     if (forward.kind !== 'allocated') return null;
-    return { start_date: task.start_date, end_date: forward.end, scheduleSegments: [] };
+    return { start_date: forward.start, end_date: forward.end, scheduleSegments: forward.scheduleSegments ?? [] };
   },
 
   /** Finish-anchored placement (backward scheduling OQ1/OQ7/OQ13): lay the order's run time so it ENDS at

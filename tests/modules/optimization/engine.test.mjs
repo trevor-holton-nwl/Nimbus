@@ -3213,18 +3213,29 @@ test('D2: a typed End or drag on a RUNNING order is refused with running_finish_
   } finally { fx.restore(); }
 });
 
-test('D3: a running order whose start sits in closed time finishes after the next open window, not start + run time', () => {
-  const fx = manualFixture();   // default hours 07:00-19:00 Mon-Fri
-  const restoreClock = pinPlantClock('2026-08-25T17:30:00');
+test('D3: a running order whose remaining run crosses closed time keeps its start and returns calendar pieces', () => {
+  const fx = manualFixture();
+  const restoreClock = pinPlantClock('2026-08-25T21:30:00');
+  const priorPlants = Store.plants;
   try {
-    // started 17:00 Tuesday with 4 h to run: 2 h to the 19:00 close, 2 h after 07:00 Wednesday
-    const start = new Date('2026-08-25T17:00:00');
-    const task = { id: 'm25-held', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4', user_scheduled: true,
-      start_date: start, end_date: new Date(start.getTime() + 4 * Config.MS_HOUR) };
+    const hours = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, [6, 22]]));
+    Store.setCalendar(fx.line, hours, 'unit-test');
+    Store.replacePlants({ ...priorPlants, [fx.plant]: { workHours: hours } }, 'unit-test');
+    const hoursOf = seg => (seg.endDate.getTime() - seg.startDate.getTime()) / Config.MS_HOUR;
+    // started 21:00 with 3 h to run on a 06:00-22:00 line: 1 h to the close, 2 h after 06:00 next day
+    const start = new Date('2026-08-25T21:00:00');
+    const task = { id: 'm25-held', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '3', user_scheduled: true,
+      start_date: start, end_date: new Date(start.getTime() + 3 * Config.MS_HOUR) };
     const patch = Engine.manualSchedulePatchFor(task, fx.line, task.end_date, undefined, { holdStartIfRunning: true });
     assert.equal(patch.start_date.getTime(), start.getTime());
-    assert.equal(patch.end_date.getTime(), new Date('2026-08-26T09:00:00').getTime());
-  } finally { restoreClock(); fx.restore(); }
+    assert.equal(patch.scheduleSegments.length, 2);
+    assert.equal(patch.scheduleSegments.reduce((sum, seg) => sum + hoursOf(seg), 0), 3);
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-26T08:00:00').getTime());
+    // a recorded start inside closed time: the (single) piece starts at the next open minute and the start follows it
+    const late = new Date('2026-08-25T23:00:00');
+    const closed = Engine.heldStartPatchFor({ ...task, start_date: late }, fx.line, 'never');
+    assert.equal(closed.start_date.getTime(), new Date('2026-08-26T06:00:00').getTime());
+  } finally { Store.replacePlants(priorPlants, 'unit-test'); restoreClock(); fx.restore(); }
 });
 
 test('D1: pushFinishPatches moves the finish by exactly the requested milliseconds', () => {
