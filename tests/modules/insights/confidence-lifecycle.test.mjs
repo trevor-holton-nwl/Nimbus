@@ -696,3 +696,41 @@ test('I13: the Confidence and peak-briefing matrix requests start on the plant c
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+// ---- Senior review U31: Time Machine restore keeps a row's earlier unsaved edit dirty ------------------------------
+test('U31: Time Machine restore hands the pre-restore dirty set to the reconcile (a null-start snapshot row keeps its dirty id)', () => {
+  const { TimeMachine, UndoStack } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSnapshots = TimeMachine._snapshots;
+  const priorProbe = UndoStack.dirtyProbe;
+  const priorReconcile = nimbus.Engine.reconcileRestored;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorEntries = UndoStack._entries.slice();
+  const seen = [];
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  UndoStack.dirtyProbe = id => id === 'tm-dirty';           // only this row carried unsaved edits before the restore
+  nimbus.Engine.reconcileRestored = (ids, wasDirty) => { seen.push({ ids: [...ids], wasDirty }); };
+  try {
+    Store.setTasks([{ id: 'tm-dirty', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 3 }, { id: 'tm-clean', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 2 }], 'test');
+    Store.setSelectedPlant('TM-P', 'test');
+    TimeMachine._snapshots = [{ ts: 4242, label: 'snap', tasks: [{ id: 'tm-dirty', start_date: null, end_date: null }, { id: 'tm-clean', start_date: null, end_date: null }] }];
+    TimeMachine.restore(4242);
+    assert.equal(seen.length, 1, 'the restore reconciles once');
+    assert.equal(typeof seen[0].wasDirty?.has, 'function', 'the second argument is the wasDirty set');
+    assert.ok(seen[0].wasDirty.has('tm-dirty'), 'the row that was dirty before the restore is in the set');
+    assert.ok(!seen[0].wasDirty.has('tm-clean'), 'a row that was clean is not');
+  } finally {
+    TimeMachine._snapshots = priorSnapshots;
+    UndoStack.dirtyProbe = priorProbe;
+    nimbus.Engine.reconcileRestored = priorReconcile;
+    Alerts.scheduleRecompute = priorSchedule;
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});

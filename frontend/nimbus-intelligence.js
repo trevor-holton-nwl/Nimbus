@@ -1447,8 +1447,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             runtime_schedule_mismatch: true
           }
         }));
+      // U31: the rows that already carried unsaved edits BEFORE this restore, read before updateMany dirties them,
+      // like UndoStack.afterRestore: a never-placed row with a null snapshot start keeps its dirty id.
+      const wasDirty = new Set(patches.map(p => String(p.id)).filter(id => UndoStack.dirtyProbe?.(id)));
       Store.updateMany(patches, 'time-machine');
-      NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id));
+      NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id), wasDirty);
       Alerts.scheduleRecompute();
       Toast.show(t('toast.restored', { label: snap.label, time: TimeMachine._relTime(ts) }), 'success', 3000);
       if (TimeMachine._panel) TimeMachine._panel.hidden = true;
