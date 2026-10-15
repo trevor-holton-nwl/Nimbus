@@ -152,9 +152,9 @@ window.__NIMBUS_LOCALES.es = {
   'toast.bom_upload_done':             '{{inserted}} agregados, {{updated}} actualizados, {{rejected}} rechazados',
   'toast.bom_upload_failed':           'Error al subir la Lista de Materiales',
   'toast.delete_filtered_needs_plant': 'Seleccione una planta antes de eliminar filas filtradas',
-  'toast.production_version_upload_done': 'Carga de versión de producción completada',
+  'toast.production_version_upload_done': '{{inserted}} insertadas, {{updated}} actualizadas, {{rejected}} rechazadas · {{plants}}',
   'toast.production_version_upload_failed': 'Carga de versión de producción fallida',
-  'toast.routing_operation_upload_done': 'Carga de operación de enrutamiento completada',
+  'toast.routing_operation_upload_done': '{{inserted}} insertadas, {{updated}} actualizadas, {{rejected}} rechazadas · {{plants}}',
   'toast.routing_operation_upload_failed': 'Carga de operación de enrutamiento fallida',
   'toast.horizon_save_failed':         'Error al guardar horizonte: {{msg}}',
   'toast.constraints_save_failed':     'Error al guardar la restricción: {{msg}}',
@@ -322,7 +322,6 @@ window.__NIMBUS_LOCALES.es = {
   'btn.upload_production_version':     'Subir Versiones de Producción',
   'btn.upload_routing_operation':      'Subir Operaciones de Enrutamiento',
   'btn.delete_filtered':               'Eliminar Filas Filtradas…',
-  'btn.change_scope':                  'Cambiar',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Buscar máquinas…',
@@ -1420,7 +1419,6 @@ window.__NIMBUS_LOCALES.es = {
   'ui.excl_optimizer_full':            'Excluir del optimizador',
   'ui.select_placeholder':             '— seleccionar —',
   'ui.no_options':                     'No hay datos disponibles',
-  'hint.bom_pick_scope':               'Seleccione una planta y un material para explorar su Lista de Materiales.',
   'hint.scope_pick_plant':             'Seleccione una planta para cargar esta tabla',
   'err.load_materials_failed':         'No se pudieron cargar los materiales de esta planta',
 
@@ -2067,7 +2065,6 @@ window.__NIMBUS_LOCALES.es = {
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
-  'btn.retry': 'Retry',
   // U28: localized alert-card headline per alert type (AlertsUIAdapter.headlineFor).
   'alert.type.overlap': 'Pedidos solapados',
   'alert.type.overload': 'Sobrecargado',
@@ -2101,4 +2098,20 @@ window.__NIMBUS_LOCALES.es = {
   'alert.type.no_operating_window': 'Sin ventana de trabajo',
   'alert.type.no_anchor': 'Sin fecha de fin',
   'alert.type.derivation_issue': 'Nota de programación',
+  'btn.retry': 'Retry',
+  // Master Data: Paste Rows validation + clipboard fallback box, routing-operations upload confirm
+  'modal.paste_box_title': 'Pegar filas',
+  'hint.paste_box': 'Copie las filas de su hoja de cálculo (con la fila de encabezado, si la tiene) y péguelas aquí.',
+  'btn.paste_box': 'Pegar',
+  'toast.paste_validate_failed': 'No se pudieron comprobar las filas pegadas: {{msg}}',
+  'ui.paste_rejects_heading': 'Estas {{count}} fila(s) no se agregarán:',
+  'ui.paste_rejects_more': '+{{count}} más',
+  'ui.paste_reject_row': 'Fila pegada {{row}}',
+  'ui.upload_reject_row': 'Fila {{row}}',
+  'ui.paste_warnings_heading': 'Revise esto antes de guardar:',
+  'ui.upload_replace_confirm_title': '¿Reemplazar las operaciones de enrutamiento?',
+  'ui.upload_replace_confirm_message': 'Todas las operaciones de cada enrutamiento de este archivo se reemplazarán por las filas del archivo.',
+  'ui.upload_replace_confirm_detail': 'Los enrutamientos que no están en el archivo no se modifican. Para agregar o editar operaciones sueltas, use Pegar filas.',
+  'btn.upload_replace_confirm': 'Cargar y reemplazar',
+  'toast.upload_plants_differ': 'Este archivo abarca varias plantas ({{plants}}). La cuadrícula muestra una planta a la vez; use el filtro de planta para ver las demás.',
 };

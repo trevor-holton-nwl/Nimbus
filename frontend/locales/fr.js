@@ -152,9 +152,9 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.bom_upload_done':             '{{inserted}} ajoutés, {{updated}} mis à jour, {{rejected}} rejetés',
   'toast.bom_upload_failed':           "Échec de l'import de la nomenclature",
   'toast.delete_filtered_needs_plant': 'Sélectionnez une usine avant de supprimer les lignes filtrées',
-  'toast.production_version_upload_done': 'Import de version de production terminé',
+  'toast.production_version_upload_done': '{{inserted}} insérées, {{updated}} mises à jour, {{rejected}} rejetées · {{plants}}',
   'toast.production_version_upload_failed': 'Échec de l\'import de version de production',
-  'toast.routing_operation_upload_done': 'Import d\'opération d\'acheminement terminé',
+  'toast.routing_operation_upload_done': '{{inserted}} insérées, {{updated}} mises à jour, {{rejected}} rejetées · {{plants}}',
   'toast.routing_operation_upload_failed': 'Échec de l\'import d\'opération d\'acheminement',
   'toast.horizon_save_failed':         'Échec de l\'enregistrement de l\'horizon : {{msg}}',
   'toast.constraints_save_failed':     'Échec de l\'enregistrement de la contrainte : {{msg}}',
@@ -318,7 +318,6 @@ window.__NIMBUS_LOCALES.fr = {
   'btn.upload_production_version':     'Importer les Versions de Production',
   'btn.upload_routing_operation':      'Importer les Opérations d\'Acheminement',
   'btn.delete_filtered':               'Supprimer les Lignes Filtrées…',
-  'btn.change_scope':                  'Modifier',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Rechercher des machines…',
@@ -1419,7 +1418,6 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.excl_optimizer_full':            'Exclure de l\'optimiseur',
   'ui.select_placeholder':             '— sélectionner —',
   'ui.no_options':                     'Aucune donnée disponible',
-  'hint.bom_pick_scope':               'Choisissez une usine et un matériau pour parcourir sa nomenclature.',
   'hint.scope_pick_plant':             'Sélectionnez une usine pour charger ce tableau',
   'err.load_materials_failed':         'Impossible de charger les matériaux pour cette usine',
 
@@ -2067,7 +2065,6 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
-  'btn.retry': 'Retry',
   // U28: localized alert-card headline per alert type (AlertsUIAdapter.headlineFor).
   'alert.type.overlap': 'Commandes qui se chevauchent',
   'alert.type.overload': 'Surcharge',
@@ -2101,4 +2098,20 @@ window.__NIMBUS_LOCALES.fr = {
   'alert.type.no_operating_window': 'Aucune plage de travail',
   'alert.type.no_anchor': 'Pas de date de fin',
   'alert.type.derivation_issue': 'Note de planification',
+  'btn.retry': 'Retry',
+  // Master Data: Paste Rows validation + clipboard fallback box, routing-operations upload confirm
+  'modal.paste_box_title': 'Coller des lignes',
+  'hint.paste_box': 'Copiez les lignes de votre tableur (avec la ligne d\'en-tête, le cas échéant), puis collez-les ici.',
+  'btn.paste_box': 'Coller',
+  'toast.paste_validate_failed': 'Impossible de vérifier les lignes collées : {{msg}}',
+  'ui.paste_rejects_heading': 'Ces {{count}} ligne(s) ne seront pas ajoutées :',
+  'ui.paste_rejects_more': '+{{count}} de plus',
+  'ui.paste_reject_row': 'Ligne collée {{row}}',
+  'ui.upload_reject_row': 'Ligne {{row}}',
+  'ui.paste_warnings_heading': 'À vérifier avant d\'enregistrer :',
+  'ui.upload_replace_confirm_title': 'Remplacer les opérations d\'acheminement ?',
+  'ui.upload_replace_confirm_message': 'Toutes les opérations de chaque acheminement de ce fichier seront remplacées par les lignes du fichier.',
+  'ui.upload_replace_confirm_detail': 'Les acheminements absents du fichier ne sont pas modifiés. Pour ajouter ou modifier des opérations isolées, utilisez plutôt Coller des lignes.',
+  'btn.upload_replace_confirm': 'Importer et remplacer',
+  'toast.upload_plants_differ': 'Ce fichier couvre plusieurs sites ({{plants}}). La grille affiche un site à la fois ; utilisez le filtre de site pour voir les autres.',
 };

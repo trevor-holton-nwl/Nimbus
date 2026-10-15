@@ -152,9 +152,9 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.bom_upload_done':             '{{inserted}} adicionados, {{updated}} atualizados, {{rejected}} rejeitados',
   'toast.bom_upload_failed':           'Falha ao enviar a Lista de Materiais',
   'toast.delete_filtered_needs_plant': 'Selecione uma planta antes de excluir linhas filtradas',
-  'toast.production_version_upload_done': 'Upload de versão de produção concluído',
+  'toast.production_version_upload_done': '{{inserted}} inseridas, {{updated}} atualizadas, {{rejected}} rejeitadas · {{plants}}',
   'toast.production_version_upload_failed': 'Falha no upload de versão de produção',
-  'toast.routing_operation_upload_done': 'Upload de operação de roteamento concluído',
+  'toast.routing_operation_upload_done': '{{inserted}} inseridas, {{updated}} atualizadas, {{rejected}} rejeitadas · {{plants}}',
   'toast.routing_operation_upload_failed': 'Falha no upload de operação de roteamento',
   'toast.horizon_save_failed':         'Falha ao salvar horizonte: {{msg}}',
   'toast.constraints_save_failed':     'Falha ao salvar a restrição: {{msg}}',
@@ -318,7 +318,6 @@ window.__NIMBUS_LOCALES.pt = {
   'btn.upload_production_version':     'Enviar Versões de Produção',
   'btn.upload_routing_operation':      'Enviar Operações de Roteamento',
   'btn.delete_filtered':               'Excluir Linhas Filtradas…',
-  'btn.change_scope':                  'Alterar',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Pesquisar máquinas…',
@@ -1418,7 +1417,6 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.excl_optimizer_full':            'Excluir do otimizador',
   'ui.select_placeholder':             '— selecionar —',
   'ui.no_options':                     'Nenhum dado disponível',
-  'hint.bom_pick_scope':               'Selecione uma planta e um material para navegar na Lista de Materiais.',
   'hint.scope_pick_plant':             'Selecione uma planta para carregar esta tabela',
   'err.load_materials_failed':         'Falha ao carregar materiais para esta planta',
 
@@ -2066,7 +2064,6 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
-  'btn.retry': 'Retry',
   // U28: localized alert-card headline per alert type (AlertsUIAdapter.headlineFor).
   'alert.type.overlap': 'Pedidos sobrepostos',
   'alert.type.overload': 'Sobrecarregado',
@@ -2100,4 +2097,20 @@ window.__NIMBUS_LOCALES.pt = {
   'alert.type.no_operating_window': 'Sem janela de trabalho',
   'alert.type.no_anchor': 'Sem data de término',
   'alert.type.derivation_issue': 'Observação de programação',
+  'btn.retry': 'Retry',
+  // Master Data: Paste Rows validation + clipboard fallback box, routing-operations upload confirm
+  'modal.paste_box_title': 'Colar linhas',
+  'hint.paste_box': 'Copie as linhas da sua planilha (com a linha de cabeçalho, se houver) e cole-as aqui.',
+  'btn.paste_box': 'Colar',
+  'toast.paste_validate_failed': 'Não foi possível verificar as linhas coladas: {{msg}}',
+  'ui.paste_rejects_heading': 'Estas {{count}} linha(s) não serão adicionadas:',
+  'ui.paste_rejects_more': '+{{count}} a mais',
+  'ui.paste_reject_row': 'Linha colada {{row}}',
+  'ui.upload_reject_row': 'Linha {{row}}',
+  'ui.paste_warnings_heading': 'Verifique antes de salvar:',
+  'ui.upload_replace_confirm_title': 'Substituir as operações de roteamento?',
+  'ui.upload_replace_confirm_message': 'Todas as operações de cada roteamento deste arquivo serão substituídas pelas linhas do arquivo.',
+  'ui.upload_replace_confirm_detail': 'Os roteamentos que não estão no arquivo não são alterados. Para adicionar ou editar operações isoladas, use Colar linhas.',
+  'btn.upload_replace_confirm': 'Carregar e substituir',
+  'toast.upload_plants_differ': 'Este arquivo abrange várias plantas ({{plants}}). A grade mostra uma planta por vez; use o filtro de planta para ver as outras.',
 };

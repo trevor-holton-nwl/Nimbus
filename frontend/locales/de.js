@@ -152,9 +152,9 @@ window.__NIMBUS_LOCALES.de = {
   'toast.bom_upload_done':             '{{inserted}} hinzugefügt, {{updated}} aktualisiert, {{rejected}} abgelehnt',
   'toast.bom_upload_failed':           'Stücklisten-Upload fehlgeschlagen',
   'toast.delete_filtered_needs_plant': 'Ein Werk auswählen, bevor gefilterte Zeilen gelöscht werden',
-  'toast.production_version_upload_done': 'Upload der Produktionsversion abgeschlossen',
+  'toast.production_version_upload_done': '{{inserted}} eingefügt, {{updated}} aktualisiert, {{rejected}} abgelehnt · {{plants}}',
   'toast.production_version_upload_failed': 'Upload der Produktionsversion fehlgeschlagen',
-  'toast.routing_operation_upload_done': 'Upload der Fertigungsgänge abgeschlossen',
+  'toast.routing_operation_upload_done': '{{inserted}} eingefügt, {{updated}} aktualisiert, {{rejected}} abgelehnt · {{plants}}',
   'toast.routing_operation_upload_failed': 'Upload der Fertigungsgänge fehlgeschlagen',
   'toast.horizon_save_failed':         'Horizont speichern fehlgeschlagen: {{msg}}',
   'toast.constraints_save_failed':     'Speichern der Einschränkung fehlgeschlagen: {{msg}}',
@@ -318,7 +318,6 @@ window.__NIMBUS_LOCALES.de = {
   'btn.upload_production_version':     'Produktionsversionen hochladen',
   'btn.upload_routing_operation':      'Fertigungsgänge hochladen',
   'btn.delete_filtered':               'Gefilterte Zeilen löschen…',
-  'btn.change_scope':                  'Ändern',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Maschinen suchen…',
@@ -1418,7 +1417,6 @@ window.__NIMBUS_LOCALES.de = {
   'ui.excl_optimizer_full':            'Vom Optimierer ausschließen',
   'ui.select_placeholder':             '— auswählen —',
   'ui.no_options':                     'Keine Daten verfügbar',
-  'hint.bom_pick_scope':               'Wählen Sie ein Werk und ein Material aus, um die Stückliste zu durchsuchen.',
   'hint.scope_pick_plant':             'Ein Werk auswählen um diese Tabelle zu laden',
   'err.load_materials_failed':         'Materialien für dieses Werk konnten nicht geladen werden',
 
@@ -2106,7 +2104,6 @@ window.__NIMBUS_LOCALES.de = {
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
-  'btn.retry': 'Retry',
   // U28: localized alert-card headline per alert type (AlertsUIAdapter.headlineFor).
   'alert.type.overlap': 'Auftragsüberschneidung',
   'alert.type.overload': 'Überlastet',
@@ -2140,4 +2137,20 @@ window.__NIMBUS_LOCALES.de = {
   'alert.type.no_operating_window': 'Kein Arbeitsfenster',
   'alert.type.no_anchor': 'Kein Enddatum',
   'alert.type.derivation_issue': 'Planungshinweis',
+  'btn.retry': 'Retry',
+  // Master Data: Paste Rows validation + clipboard fallback box, routing-operations upload confirm
+  'modal.paste_box_title': 'Zeilen einfügen',
+  'hint.paste_box': 'Kopieren Sie die Zeilen in Ihrer Tabelle (mit Kopfzeile, falls vorhanden) und fügen Sie sie hier ein.',
+  'btn.paste_box': 'Einfügen',
+  'toast.paste_validate_failed': 'Die eingefügten Zeilen konnten nicht geprüft werden: {{msg}}',
+  'ui.paste_rejects_heading': 'Diese {{count}} Zeile(n) werden nicht hinzugefügt:',
+  'ui.paste_rejects_more': '+{{count}} weitere',
+  'ui.paste_reject_row': 'Eingefügte Zeile {{row}}',
+  'ui.upload_reject_row': 'Zeile {{row}}',
+  'ui.paste_warnings_heading': 'Bitte vor dem Speichern prüfen:',
+  'ui.upload_replace_confirm_title': 'Fertigungsgänge ersetzen?',
+  'ui.upload_replace_confirm_message': 'Alle Vorgänge jedes Arbeitsplans in dieser Datei werden durch die Zeilen der Datei ersetzt.',
+  'ui.upload_replace_confirm_detail': 'Arbeitspläne, die nicht in der Datei stehen, bleiben unverändert. Zum Hinzufügen oder Bearbeiten einzelner Vorgänge verwenden Sie stattdessen „Zeilen einfügen“.',
+  'btn.upload_replace_confirm': 'Hochladen und ersetzen',
+  'toast.upload_plants_differ': 'Diese Datei betrifft mehrere Werke ({{plants}}). Die Tabelle zeigt jeweils ein Werk; nutzen Sie den Werksfilter, um die anderen zu sehen.',
 };

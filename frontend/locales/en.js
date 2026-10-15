@@ -180,9 +180,9 @@ window.__NIMBUS_LOCALES.en = {
   'toast.bom_upload_done':             '{{inserted}} inserted, {{updated}} updated, {{rejected}} rejected',
   'toast.bom_upload_failed':           'BOM upload failed',
   'toast.delete_filtered_needs_plant': 'Select a plant before deleting filtered rows',
-  'toast.production_version_upload_done': 'Production version upload complete',
+  'toast.production_version_upload_done': '{{inserted}} inserted, {{updated}} updated, {{rejected}} rejected · {{plants}}',
   'toast.production_version_upload_failed': 'Production version upload failed',
-  'toast.routing_operation_upload_done': 'Routing operation upload complete',
+  'toast.routing_operation_upload_done': '{{inserted}} inserted, {{updated}} updated, {{rejected}} rejected · {{plants}}',
   'toast.routing_operation_upload_failed': 'Routing operation upload failed',
   'toast.horizon_save_failed':         'Horizon save failed: {{msg}}',
   'toast.constraints_save_failed':     'Constraint save failed: {{msg}}',
@@ -360,7 +360,6 @@ window.__NIMBUS_LOCALES.en = {
   'btn.upload_production_version':     'Upload Production Versions',
   'btn.upload_routing_operation':      'Upload Routing Operations',
   'btn.delete_filtered':               'Delete Filtered Rows…',
-  'btn.change_scope':                  'Change',
   // Work Centers tab (§4.3).
   'btn.create':                         'Create',
   'btn.load_more':                      'Load more',
@@ -1453,7 +1452,6 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Master data ─────────────────────────────────────────────────────────── */
   'ui.select_placeholder':             '— select —',
   'ui.no_options':                     'No data available',
-  'hint.bom_pick_scope':               'Pick a plant and material to browse its Bill of Materials.',
   'hint.scope_pick_plant':             'Select a plant to load this table',
   'err.load_materials_failed':         'Failed to load materials for this plant',
 
@@ -2315,7 +2313,6 @@ window.__NIMBUS_LOCALES.en = {
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
-  'btn.retry': 'Retry',
   // U28: localized alert-card headline per alert type (AlertsUIAdapter.headlineFor).
   'alert.type.overlap': 'Order overlap',
   'alert.type.overload': 'Overloaded',
@@ -2349,4 +2346,20 @@ window.__NIMBUS_LOCALES.en = {
   'alert.type.no_operating_window': 'No working window',
   'alert.type.no_anchor': 'No finish date',
   'alert.type.derivation_issue': 'Scheduling note',
+  'btn.retry': 'Retry',
+  // Master Data: Paste Rows validation + clipboard fallback box, routing-operations upload confirm
+  'modal.paste_box_title': 'Paste rows',
+  'hint.paste_box': 'Copy the rows in your spreadsheet (include the header row if you have one), then paste them here.',
+  'btn.paste_box': 'Paste',
+  'toast.paste_validate_failed': 'Could not check the pasted rows: {{msg}}',
+  'ui.paste_rejects_heading': 'These {{count}} row(s) will not be added:',
+  'ui.paste_rejects_more': '+{{count}} more',
+  'ui.paste_reject_row': 'Pasted row {{row}}',
+  'ui.upload_reject_row': 'Row {{row}}',
+  'ui.paste_warnings_heading': 'Check these before you save:',
+  'ui.upload_replace_confirm_title': 'Replace routing operations?',
+  'ui.upload_replace_confirm_message': 'Every operation of each routing in this file will be replaced by the file\'s rows.',
+  'ui.upload_replace_confirm_detail': 'Routings not in the file are untouched. To add or edit single operations, use Paste Rows instead.',
+  'btn.upload_replace_confirm': 'Upload and replace',
+  'toast.upload_plants_differ': 'This file covers several plants ({{plants}}). The grid shows one plant at a time; use the Plant filter to see the others.',
 };
