@@ -2097,6 +2097,26 @@ test('Timeline._nowFor judges an order against its own plant clock; the viewer c
   } finally { restoreClock(); }
 });
 
+test('U26: inside a rebuild/scan pass Store.plantNow is read once per plant, not once per order', () => {
+  const restoreClock = pinPlantClock(['TZ-GANTT-MEMO'], '2026-08-05T10:00:00');
+  const realPlantNow = Store.plantNow;
+  let calls = 0;
+  Store.plantNow = function (plant) { calls++; return realPlantNow.call(this, plant); };
+  try {
+    const tasks = Array.from({ length: 50 }, (_, i) => ({ id: `m${i}`, PLANT: 'TZ-GANTT-MEMO', MACHINE: 'L1', text: `m${i}`,
+      user_scheduled: true, start_date: new Date('2026-08-05T09:00:00'), end_date: new Date('2026-08-05T11:00:00') }));
+    for (const t of tasks) Timeline._inLockBand(t);
+    assert.equal(calls, 50, 'sanity: outside a pass every order reads the clock');
+    calls = 0;
+    Timeline._clockMemo = new Map();
+    try {
+      for (const t of tasks) Timeline._inLockBand(t);
+      for (const t of tasks) Timeline._itemForTask(t);
+    } finally { Timeline._clockMemo = null; }
+    assert.equal(calls, 1, 'one clock read for the whole pass');
+  } finally { Store.plantNow = realPlantNow; restoreClock(); }
+});
+
 test('Interaction._onDataSetUpdate: an echo (or a vetoed left-edge drag) on a bar whose derived start is off the 15-minute grid is ignored, with no left-edge toast', () => {
   const id = 'fx-offgrid-1';
   const start = new Date('2026-08-05T08:10:00');   // derived starts are often off the grid

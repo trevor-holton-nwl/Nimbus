@@ -419,12 +419,15 @@ export const Timeline = {
       if (Date.now() - Timeline._lastFirmScanTs > 30_000) {
         Timeline._lastFirmScanTs = Date.now();
         const next = new Set<string>();
-        for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Timeline._inLockBand(t)) next.add(String(t.id));
-        const prev = Timeline._frozenBandIds;
-        if (prev) {
-          for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
-          for (const id of next) if (!prev.has(id)) Timeline._applyTaskPatch(id);
-        }
+        Timeline._clockMemo = new Map();   // U26: one plant clock per plant for the whole scan
+        try {
+          for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Timeline._inLockBand(t)) next.add(String(t.id));
+          const prev = Timeline._frozenBandIds;
+          if (prev) {
+            for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
+            for (const id of next) if (!prev.has(id)) Timeline._applyTaskPatch(id);
+          }
+        } finally { Timeline._clockMemo = null; }
         Timeline._frozenBandIds = next;
       }
       PerfMonitor.record('Timeline.ticker', performance.now() - _pmT0);
@@ -445,8 +448,16 @@ export const Timeline = {
    *  one clock, OQ52). The viewer's own clock only when the plant has no valid zone (it is then blocked and
    *  announced elsewhere; the styling still needs some instant). */
   _plantNow(plant: string | null | undefined): Date {
-    return Store.plantNow(plant) ?? new Date();
+    const memo = Timeline._clockMemo;
+    const key = plant ?? '';
+    const hit = memo?.get(key);
+    if (hit) return new Date(hit.getTime());   // a copy: callers may mutate the instant they were handed
+    const now = Store.plantNow(plant) ?? new Date();
+    memo?.set(key, new Date(now.getTime()));
+    return now;
   },
+  /** Per-plant "now", valid for one rebuild or one band scan (U26); null outside a pass. */
+  _clockMemo: null as Map<string, Date> | null,
 
   /** The instant an order is judged against for firming/lock styling: its own plant's clock. */
   _nowFor(t: NimbusTask): Date {
@@ -961,6 +972,12 @@ export const Timeline = {
    *  and emit minimal add/update/remove operations. Preserves selection and
    *  avoids the clear/add flicker of a wholesale replacement.               */
   rebuild(): void {
+    // U26: every order of this pass reads its plant's clock; resolve each plant once, not once per order.
+    Timeline._clockMemo = new Map();
+    try { Timeline._rebuildPass(); } finally { Timeline._clockMemo = null; }
+  },
+
+  _rebuildPass(): void {
     if (!Timeline._items || !Timeline._groups) return;
     const _pmT0t = performance.now();
     Timeline._renderEmptyOverlay();
