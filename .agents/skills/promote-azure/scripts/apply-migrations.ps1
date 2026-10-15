@@ -33,12 +33,22 @@
        (ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE) unless
        -AllowDestructive is passed -- those need deliberate expand/contract
        sequencing, not a routine roll.
+    2b. SKIPS any migration whose header carries the line
+       `-- nimbus-migration: manual-only` (with a visible log line, in EVERY
+       mode, -AllowDestructive included). A manual-only file runs only when the
+       operator names it with -Only (still subject to the destructive check and
+       the applied ledger). Used by the backward-scheduling snapshot + cutover.
     3. NEVER reads the DB password from Azure. The caller must set
        $env:PGPASSWORD; this script only consumes it.
 
   Each migration + its ledger row are applied in ONE transaction
   (--single-transaction), so a failure leaves nothing half-applied. Migrations
   must therefore be transaction-safe (no CREATE INDEX CONCURRENTLY etc.).
+
+.PARAMETER Only
+  One or more migration file names or id prefixes (e.g. `2026-10-20-0`). Applies
+  EXACTLY the named file(s), in name order, and nothing else; the only way to run
+  a `manual-only` file. Still subject to the destructive check and the ledger.
 
 .PARAMETER DryRun
   Touches NO database. Lists every migrations/*.sql file in order and flags
@@ -59,6 +69,7 @@ param(
   [string] $User          = "TempAdmin",
   [string] $MigrationsDir = (Join-Path (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName "migrations"),
   [string] $PsqlPath      = "C:\Program Files\PostgreSQL\18\bin\psql.exe",
+  [string[]] $Only        = @(),
   [switch] $AllowDestructive,
   [switch] $DryRun
 )
@@ -71,6 +82,23 @@ if (-not (Test-Path $MigrationsDir)) { Write-Error "Migrations dir not found: $M
 $files = Get-ChildItem -Path $MigrationsDir -Filter *.sql -File | Sort-Object Name
 if (-not $files) { Write-Host "No migration files in $MigrationsDir -- nothing to do."; exit 0 }
 
+$MANUAL_ONLY = '(?m)^\s*--\s*nimbus-migration:\s*manual-only'
+function Test-ManualOnly([string]$path) {
+  $text = Get-Content -Raw -LiteralPath $path
+  return [bool]([regex]::IsMatch($text, $MANUAL_ONLY, 'IgnoreCase'))
+}
+function Test-Named($f) {
+  foreach ($o in $Only) {
+    $id = $o -replace '\.sql$',''
+    if ($f.Name -ieq $o -or $f.BaseName -ieq $id -or $f.Name.StartsWith($id, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+  }
+  return $false
+}
+if ($Only.Count -gt 0) {
+  $files = @($files | Where-Object { Test-Named $_ })
+  if (-not $files) { Write-Error "-Only matched no migration file in $MigrationsDir"; exit 2 }
+}
+
 function Test-Destructive([string]$path) {
   $text = Get-Content -Raw -LiteralPath $path
   return [bool]([regex]::IsMatch($text, $DESTRUCTIVE, 'IgnoreCase'))
@@ -82,6 +110,7 @@ if ($DryRun) {
   Write-Host ""
   foreach ($f in $files) {
     if ($f.Name -ieq 'schema.sql') { $tag = 'REFUSED (schema.sql)' }
+    elseif ((Test-ManualOnly $f.FullName) -and $Only.Count -eq 0) { $tag = 'MANUAL-ONLY -> skipped (apply with -Only)' }
     elseif (Test-Destructive $f.FullName) { $tag = 'DESTRUCTIVE -> blocked unless -AllowDestructive' }
     else { $tag = 'additive (auto)' }
     "{0,-40} {1}" -f $f.Name, $tag
@@ -124,10 +153,14 @@ $appliedRaw = & $PsqlPath $conn -t -A -v ON_ERROR_STOP=1 -c "SELECT filename FRO
 if ($LASTEXITCODE -ne 0) { Write-Error "Could not read migration_files_applied ledger."; exit 1 }
 $applied = @($appliedRaw | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 
-$didApply = @(); $blocked = @(); $skipped = @()
+$didApply = @(); $blocked = @(); $skipped = @(); $manual = @()
 foreach ($f in $files) {
   if ($f.Name -ieq 'schema.sql') { Write-Warning "Refusing schema.sql (x1440 data migration) -- skipped."; $blocked += $f.Name; continue }
   if ($applied -contains $f.Name) { $skipped += $f.Name; continue }
+  if ((Test-ManualOnly $f.FullName) -and $Only.Count -eq 0) {
+    Write-Warning "SKIPPED (manual-only): $($f.Name). Apply it deliberately with -Only $($f.BaseName)."
+    $manual += $f.Name; continue
+  }
   if ((Test-Destructive $f.FullName) -and -not $AllowDestructive) {
     Write-Warning "BLOCKED (destructive verb): $($f.Name). Re-run with -AllowDestructive only after deliberate review."
     $blocked += $f.Name; continue
@@ -148,6 +181,7 @@ Write-Host "--- Migration summary ---"
 Write-Host "applied:         $applStr"
 Write-Host "already-applied: $skipStr"
 Write-Host "blocked:         $blockStr"
+if ($manual) { Write-Host "manual-only (skipped, use -Only): $($manual -join ', ')" }
 if ($blocked.Count -gt 0) { Write-Warning "One or more migrations were blocked -- resolve deliberately before the roll."; exit 3 }
 exit 0
 
