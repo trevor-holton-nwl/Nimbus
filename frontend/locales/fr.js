@@ -81,6 +81,8 @@ window.__NIMBUS_LOCALES.fr = {
   'confirm.signout_unsaved': 'Vous avez des modifications non enregistrées (modifications, statuts ferme, suppressions de calendrier en attente ou un What-If ouvert). La déconnexion les supprime de ce navigateur.',
   'confirm.signout_confirm': 'Se déconnecter et supprimer',
   'toast.pushed_orders':               '{{count}} ordres décalés +1h',
+  'toast.pushed_orders_skipped': '{{count}} commandes décalées de +1h ; {{skipped}} sont restées en place (fermes, gelées, en cours ou sans place pour tenir leur fin)',
+  'undo.push_orders_1h': 'Décaler {{count}} commandes de +1h',
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé pour se terminer désormais le {{date}}',
   'toast.cannot_fix_task':             'Impossible de fixer : tâche introuvable',

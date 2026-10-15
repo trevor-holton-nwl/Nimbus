@@ -734,3 +734,61 @@ test('U31: Time Machine restore hands the pre-restore dirty set to the reconcile
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+// ---- Senior review U34: Push +1 h says how many stayed put and labels its undo with the moved count ----------------
+test('U34: Push +1 hour reports moved and skipped counts and the undo label carries the moved count', () => {
+  const { CommandPalette, UndoStack, Selection, Toast } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorEntries = UndoStack._entries.slice();
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
+  const priorShow = Toast.show;
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  const loc = nimbus.Util.locale();
+  const shown = [];
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  CommandPalette.close = () => {};
+  Toast.show = (msg, type) => { shown.push({ msg, type }); };
+  globalThis.window.__NIMBUS_LOCALES = { [loc]: {
+    'toast.pushed_orders': 'Pushed {{count}} orders +1h',
+    'toast.pushed_orders_skipped': 'Pushed {{count}} orders +1h; {{skipped}} stayed in place',
+    'undo.push_orders_1h': 'Push {{count}} orders +1h',
+  } };
+  Store.setMasterData({ ...priorMaster, plants: [{ plant: 'P34-P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
+  Store.serverOffsetMs = new Date(2026, 7, 3, 6, 0).getTime() - Date.now();
+  const mk = (id, h1, h2) => ({ id, PLANT: 'P34-P', MACHINE: 'P34-L', RUN_TIME: h2 - h1,
+    user_scheduled: true, start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
+  try {
+    Store.setTasks([mk('mv', 10, 11), mk('fz1', 12, 13), mk('fz2', 14, 15), mk('fz3', 16, 17)], 'test');
+    Store.setSelectedPlant('P34-P', 'test');
+    Store.setFirmed(['fz1', 'fz2', 'fz3'], true, 'test');
+    Selection.set(['mv', 'fz1', 'fz2', 'fz3']);
+    const depth = UndoStack._entries.length;
+    CommandPalette._buildSelectionCommands().find(c => /push/i.test(c.label)).run();
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].msg, 'Pushed 1 orders +1h; 3 stayed in place', 'one moved, the three firmed ones are counted as skipped');
+    assert.equal(UndoStack._entries.length, depth + 1);
+    assert.equal(UndoStack._entries.at(-1).label, 'Push 1 orders +1h', 'the undo label uses the moved count, not the 4 selected');
+    // Nothing skipped: the plain toast.
+    shown.length = 0;
+    Selection.set(['mv']);
+    CommandPalette._buildSelectionCommands().find(c => /push/i.test(c.label)).run();
+    assert.equal(shown[0].msg, 'Pushed 1 orders +1h');
+  } finally {
+    Selection.clear();
+    Toast.show = priorShow;
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setMasterData(priorMaster, 'test');
+    Store.serverOffsetMs = priorOffset;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    globalThis.NIMBUS = priorNimbus;
+  }
+});

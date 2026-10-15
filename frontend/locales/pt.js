@@ -81,6 +81,8 @@ window.__NIMBUS_LOCALES.pt = {
   'confirm.signout_unsaved': 'Você tem trabalho não salvo (edições, firmes, exclusões de calendário na fila ou um What-If aberto). Sair descarta isso deste navegador.',
   'confirm.signout_confirm': 'Sair e descartar',
   'toast.pushed_orders':               '{{count}} ordens avançadas +1h',
+  'toast.pushed_orders_skipped': '{{count}} pedidos avançados +1h; {{skipped}} ficaram no lugar (firmes, congelados, em execução ou sem espaço para manter o término)',
+  'undo.push_orders_1h': 'Avançar {{count}} pedidos +1h',
   'toast.unscheduled_bulk':            '{{count}} ordens desagendadas',
   'toast.order_moved':                 '"{{name}}" movida para terminar agora em {{date}}',
   'toast.cannot_fix_task':             'Não é possível fixar: tarefa não encontrada',

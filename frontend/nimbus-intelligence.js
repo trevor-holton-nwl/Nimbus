@@ -1234,13 +1234,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           // frozen and running orders stay where they are; an order whose new finish cannot be held on the
           // machine's working hours is skipped too (quiet: the one summary toast below counts what moved).
           const patches = NIMBUS.Engine?.pushFinishPatches?.(ids.map(id => Store.tasks[id]).filter(Boolean), 3600000) || [];
-          if (patches.length) {
-            _pushTaskUndo(`Push ${n} orders +1h`, patches.map(p => p.id));
+          const moved = patches.length;
+          const skipped = Math.max(0, ids.filter(id => Store.tasks[id]).length - moved);   // U34: say why fewer moved than selected
+          if (moved) {
+            _pushTaskUndo(t('undo.push_orders_1h', { count: moved }), patches.map(p => p.id));
             Store.updateMany(patches, 'cmd-palette');
           }
           Alerts.scheduleRecompute();
           Toast.show(
-            patches.length ? t('toast.pushed_orders', { count: patches.length }) :
+            moved ? t(skipped ? 'toast.pushed_orders_skipped' : 'toast.pushed_orders', { count: moved, skipped }) :
               t('cmdp.toast_no_orders_moveable'),
             patches.length ? 'success' : 'warn', patches.length ? 1400 : 3000);
         }

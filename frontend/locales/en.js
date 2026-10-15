@@ -82,6 +82,8 @@ window.__NIMBUS_LOCALES.en = {
   'confirm.signout_unsaved': 'You have unsaved work (edits, firms, queued calendar deletes or an open What-If). Signing out discards it from this browser.',
   'confirm.signout_confirm': 'Sign out and discard',
   'toast.pushed_orders':               'Pushed {{count}} orders +1h',
+  'toast.pushed_orders_skipped': 'Pushed {{count}} orders +1h; {{skipped}} stayed in place (firmed, frozen, running, or no room to hold their finish)',
+  'undo.push_orders_1h': 'Push {{count}} orders +1h',
   'toast.unscheduled_bulk':            'Unscheduled {{count}} orders',
   'toast.order_moved':                 'Moved "{{name}}" so it now finishes {{date}}',
   'toast.cannot_fix_task':             'Cannot fix: task not found',

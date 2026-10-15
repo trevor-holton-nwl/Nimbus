@@ -81,6 +81,8 @@ window.__NIMBUS_LOCALES.es = {
   'confirm.signout_unsaved': 'Tiene trabajo sin guardar (ediciones, estados firmes, eliminaciones de calendario en cola o un What-If abierto). Al cerrar sesión se descarta de este navegador.',
   'confirm.signout_confirm': 'Cerrar sesión y descartar',
   'toast.pushed_orders':               '{{count}} pedidos movidos +1h',
+  'toast.pushed_orders_skipped': '{{count}} pedidos movidos +1h; {{skipped}} se quedaron en su sitio (en firme, congelados, en curso o sin espacio para mantener su fin)',
+  'undo.push_orders_1h': 'Mover {{count}} pedidos +1h',
   'toast.unscheduled_bulk':            '{{count}} pedidos desplanificados',
   'toast.order_moved':                 'Movido "{{name}}" para que ahora termine el {{date}}',
   'toast.cannot_fix_task':             'No se puede fijar: tarea no encontrada',

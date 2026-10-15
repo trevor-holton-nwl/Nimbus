@@ -81,6 +81,8 @@ window.__NIMBUS_LOCALES.de = {
   'confirm.signout_unsaved': 'Sie haben ungespeicherte Änderungen (Bearbeitungen, Festschreibungen, ausstehende Kalender-Löschungen oder ein offenes What-If). Beim Abmelden werden sie aus diesem Browser verworfen.',
   'confirm.signout_confirm': 'Abmelden und verwerfen',
   'toast.pushed_orders':               '{{count}} Aufträge um +1h verschoben',
+  'toast.pushed_orders_skipped': '{{count}} Aufträge um +1h verschoben; {{skipped}} blieben stehen (festgeschrieben, eingefroren, laufend oder ohne Platz für ihr Ende)',
+  'undo.push_orders_1h': '{{count}} Aufträge um +1h verschieben',
   'toast.unscheduled_bulk':            '{{count}} Aufträge abgeplant',
   'toast.order_moved':                 '"{{name}}" verschoben, sodass es nun um {{date}} endet',
   'toast.cannot_fix_task':             'Fixieren nicht möglich: Aufgabe nicht gefunden',
