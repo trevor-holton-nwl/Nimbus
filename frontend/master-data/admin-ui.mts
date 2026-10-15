@@ -5041,6 +5041,37 @@ export const WorkCenters = {
     WorkCenters._maybeFlush();
   },
 
+  /** Master Data "Refresh": re-pulls the work-center list and the machine roster for the
+   *  selected plant from the server, without a page reload. Unlike render()'s same-plant
+   *  branch (which only refreshes the roster to preserve a staged edit), this reloads the
+   *  list too. Keeps the search text and the selected work center (re-staged from the fresh
+   *  row; cleared if it no longer exists). Resolves true once fresh rows are showing, false
+   *  when nothing was reloaded (no plant, or the fetch failed — _loadAll toasts that). */
+  async refresh(): Promise<boolean> {
+    const plant = Store.selectedPlant;
+    if (!plant) return false;
+    // Autosave model: no Save/Discard to confirm. Send any debounced edit first — the same
+    // hazard render()'s plant-switch branch guards against.
+    WorkCenters._flushPending();
+    const keep = WorkCenters._selected;
+    const loaded = await WorkCenters._loadAll(plant, true);
+    if (!loaded) return false; // old rows/selection/staged edit stay as they were
+    if (Store.selectedPlant !== plant) return false; // plant switched while loading; its own render owns the pane
+    // An edit typed during the fetch would be discarded by the reset below.
+    WorkCenters._flushPending();
+    WorkCenters._loadedPlant = plant;
+    WorkCenters._offset = 0;
+    WorkCenters._selected = null;
+    WorkCenters._staged = null;
+    WorkCenters._baseline = null;
+    WorkCenters._dirty = false;
+    WorkCenters._editSeq++; // discontinuity marker — see _write's rollback guard
+    if (keep) WorkCenters._stageRow(keep);
+    WorkCenters._renderPane();
+    WorkCenters._maybeFlush();
+    return true;
+  },
+
   async _refreshMachines(plant: string): Promise<void> {
     try {
       const data = await Util.fetchTraced(`${Config.API_BASE}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
@@ -5054,7 +5085,9 @@ export const WorkCenters = {
     }
   },
 
-  async _loadAll(plant: string, reset: boolean): Promise<void> {
+  // Resolves true when the fetch landed rows, false when it failed (already toasted/logged
+  // here). Existing callers ignore the result; refresh() uses it for its own contract.
+  async _loadAll(plant: string, reset: boolean): Promise<boolean> {
     const API = Config.API_BASE;
     if (reset) WorkCenters._offset = 0;
     try {
@@ -5081,9 +5114,11 @@ export const WorkCenters = {
       WorkCenters._rows = reset ? wcData.rows : WorkCenters._rows.concat(wcData.rows);
       WorkCenters._total = wcData.meta?.total ?? WorkCenters._rows.length;
       if (machData) WorkCenters._machines = machData.rows;
+      return true;
     } catch (e) {
       ErrorLog.error('work-centers', `Failed to load work centers: ${(e as Error).message}`);
       Toast.show(Util.t('toast.wc_load_failed'), 'error');
+      return false;
     }
   },
 
@@ -5095,8 +5130,9 @@ export const WorkCenters = {
   // _renderDetailOnly instead. Rebuilding the whole pane on every keystroke
   // used to destroy #wc-search mid-word the instant its 250ms debounce
   // fired — this split is what fixes that. After this split, _renderPane()
-  // is reachable only from render() (tab activate / plant switch); nothing
-  // else in this file may call it.
+  // is reachable only from render() (tab activate / plant switch) and
+  // refresh() (the Master Data Refresh button); nothing else in this file
+  // may call it.
   _renderPane(): void {
     const pane = document.getElementById('md-master-work-centers-pane');
     if (!pane) return;
@@ -5328,9 +5364,20 @@ export const WorkCenters = {
   _selectRow(code: string): void {
     if (!code || code === WorkCenters._selected) return;
     WorkCenters._flushPending();
+    if (!WorkCenters._stageRow(code)) return;
 
+    document.querySelectorAll<HTMLElement>('#wc-list-body .lines-nav-item').forEach((el) => {
+      el.classList.toggle('active', el.dataset.code === code);
+    });
+    WorkCenters._renderDetailOnly();
+  },
+
+  // The staging half of _selectRow (no flush, no DOM): points _selected/_staged/
+  // _baseline at the loaded row for `code`. Returns false when the row isn't loaded.
+  // refresh() calls it directly because it renders the whole pane itself.
+  _stageRow(code: string): boolean {
     const row = WorkCenters._rows.find((r) => r.sap_workcenter === code);
-    if (!row) return;
+    if (!row) return false;
 
     const members = _wcMembers(WorkCenters._machines, code).map((m) => m.machine);
     const weights: Record<string, number | null> = {};
@@ -5344,11 +5391,7 @@ export const WorkCenters = {
     WorkCenters._baseline = { ...staged, weights: { ...weights } };
     WorkCenters._dirty    = false;
     WorkCenters._editSeq++; // discontinuity marker — see _write's rollback guard
-
-    document.querySelectorAll<HTMLElement>('#wc-list-body .lines-nav-item').forEach((el) => {
-      el.classList.toggle('active', el.dataset.code === code);
-    });
-    WorkCenters._renderDetailOnly();
+    return true;
   },
 
   // Recomputes only the membership table's % cells, total, and the

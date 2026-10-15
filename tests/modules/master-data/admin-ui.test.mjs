@@ -1015,3 +1015,182 @@ test('WorkCenters.render installs the pagehide listener once, and firing it flus
     WorkCenters._queued.clear();
   }
 });
+
+// Master Data sub-tab Refresh (docs/superpowers plan 2026-10-15-master-data-refresh, Task 3).
+// WorkCenters.refresh re-pulls the work-center list even when the plant is unchanged
+// (render() would only refresh the machine roster there), keeping search text and selection.
+function _wcRefreshHarness({ failList = false, rows } = {}) {
+  const urls = [];
+  const fetchTraced = (url) => {
+    urls.push(String(url));
+    if (failList && /\/master-data\/sap_workcenter\?/.test(String(url))) {
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    }
+    if (/\/master-data\/sap_workcenter\?/.test(String(url))) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows, meta: { total: rows.length } }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ machine: 'M1', sap_workcenter: 'WC-1', distribution_weight: null }] }) });
+  };
+  return { urls, fetchTraced };
+}
+const _wcRow = (code, description) => ({
+  sap_workcenter: code, description, distribution_mode: 'single', default_machine: 'M1',
+  max_separation: 'none', review_required: false, distribute_tooled: false,
+});
+const _wcStaged = (description) => ({
+  description, distribution_mode: 'single', default_machine: 'M1', max_separation: 'none',
+  review_required: false, distribute_tooled: false, weights: {},
+});
+
+async function _withWcRefreshState(fn) {
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const priorWindow = globalThis.window;
+  const priorToast = Toast.show;
+  const priorIsAdmin = Session.isAdmin;
+  const priorPlant = Store.selectedPlant;
+  const prior = {
+    rows: WorkCenters._rows, machines: WorkCenters._machines, search: WorkCenters._search,
+    offset: WorkCenters._offset, loadedPlant: WorkCenters._loadedPlant, selected: WorkCenters._selected,
+    staged: WorkCenters._staged, baseline: WorkCenters._baseline, dirty: WorkCenters._dirty,
+    saving: WorkCenters._saving,
+  };
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } }; // Util.t reads it on the load-failed path
+  Session.isAdmin = () => true;
+  const toasts = [];
+  Toast.show = (m, kind) => toasts.push({ m, kind });
+  try {
+    await fn(toasts);
+  } finally {
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+    Toast.show = priorToast;
+    Session.isAdmin = priorIsAdmin;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    WorkCenters._rows = prior.rows; WorkCenters._machines = prior.machines; WorkCenters._search = prior.search;
+    WorkCenters._offset = prior.offset; WorkCenters._loadedPlant = prior.loadedPlant;
+    WorkCenters._selected = prior.selected; WorkCenters._staged = prior.staged;
+    WorkCenters._baseline = prior.baseline; WorkCenters._dirty = prior.dirty; WorkCenters._saving = prior.saving;
+    WorkCenters._queued.clear();
+  }
+}
+
+test('WorkCenters exposes refresh()', () => {
+  assert.equal(typeof WorkCenters.refresh, 'function');
+});
+
+test('WorkCenters.refresh fetches the plant-scoped list even when the plant is unchanged, keeps the search text, and resolves true', async () => {
+  await _withWcRefreshState(async () => {
+    const h = _wcRefreshHarness({ rows: [_wcRow('WC-1', 'fresh')] });
+    Util.fetchTraced = h.fetchTraced;
+    Store.setSelectedPlant('1006', 'test');
+    WorkCenters._loadedPlant = '1006'; // render() would take its same-plant branch and skip the list
+    WorkCenters._search = 'WC';
+    WorkCenters._offset = 50;
+    WorkCenters._rows = [_wcRow('WC-1', 'stale')];
+    const result = await WorkCenters.refresh();
+    assert.equal(result, true);
+    const listUrl = h.urls.find((u) => /\/master-data\/sap_workcenter\?/.test(u));
+    assert.ok(listUrl, `work-center list fetched: ${h.urls}`);
+    assert.match(listUrl, /plant=1006/);
+    assert.match(listUrl, /search=WC/);
+    assert.match(listUrl, /offset=0/);
+    assert.ok(h.urls.some((u) => u.endsWith('/master-data/machine?plant=1006')), 'plant-scoped machine roster fetched');
+    assert.equal(WorkCenters._search, 'WC', 'search text survives');
+    assert.equal(WorkCenters._rows[0].description, 'fresh', 'fresh rows replaced the stale ones');
+  });
+});
+
+test('WorkCenters.refresh keeps the selected work center when it is still in the fresh rows, restaging it from the fresh row', async () => {
+  await _withWcRefreshState(async () => {
+    const h = _wcRefreshHarness({ rows: [_wcRow('WC-1', 'fresh desc'), _wcRow('WC-2', 'other')] });
+    Util.fetchTraced = h.fetchTraced;
+    Store.setSelectedPlant('1006', 'test');
+    WorkCenters._loadedPlant = '1006';
+    WorkCenters._rows = [_wcRow('WC-1', 'stale desc')];
+    WorkCenters._selected = 'WC-1';
+    WorkCenters._staged = _wcStaged('stale desc');
+    WorkCenters._baseline = _wcStaged('stale desc');
+    const seqBefore = WorkCenters._editSeq;
+    assert.equal(await WorkCenters.refresh(), true);
+    assert.equal(WorkCenters._selected, 'WC-1');
+    assert.equal(WorkCenters._staged.description, 'fresh desc', 'staged rebuilt from the fresh row');
+    assert.equal(WorkCenters._baseline.description, 'fresh desc');
+    assert.equal(WorkCenters._dirty, false);
+    assert.ok(WorkCenters._editSeq > seqBefore, 'restaging bumps the edit sequence so a stale in-flight response is ignored');
+  });
+});
+
+test('WorkCenters.refresh clears the selection when the selected work center vanished from the fresh rows', async () => {
+  await _withWcRefreshState(async () => {
+    const h = _wcRefreshHarness({ rows: [_wcRow('WC-2', 'other')] });
+    Util.fetchTraced = h.fetchTraced;
+    Store.setSelectedPlant('1006', 'test');
+    WorkCenters._loadedPlant = '1006';
+    WorkCenters._rows = [_wcRow('WC-1', 'old')];
+    WorkCenters._selected = 'WC-1';
+    WorkCenters._staged = _wcStaged('old');
+    WorkCenters._baseline = _wcStaged('old');
+    assert.equal(await WorkCenters.refresh(), true);
+    assert.equal(WorkCenters._selected, null);
+    assert.equal(WorkCenters._staged, null);
+    assert.equal(WorkCenters._baseline, null);
+  });
+});
+
+test('WorkCenters.refresh resolves false and keeps rows, selection and staged edit when the list fetch fails', async () => {
+  await _withWcRefreshState(async (toasts) => {
+    const h = _wcRefreshHarness({ failList: true, rows: [] });
+    Util.fetchTraced = h.fetchTraced;
+    Store.setSelectedPlant('1006', 'test');
+    WorkCenters._loadedPlant = '1006';
+    const keptRows = [_wcRow('WC-1', 'kept')];
+    WorkCenters._rows = keptRows;
+    WorkCenters._selected = 'WC-1';
+    const staged = _wcStaged('kept');
+    WorkCenters._staged = staged;
+    WorkCenters._baseline = _wcStaged('kept');
+    assert.equal(await WorkCenters.refresh(), false);
+    assert.equal(WorkCenters._rows, keptRows);
+    assert.equal(WorkCenters._selected, 'WC-1');
+    assert.equal(WorkCenters._staged, staged);
+    assert.ok(toasts.some((t) => t.kind === 'error'), 'the existing load-failed toast still shows');
+  });
+});
+
+test('WorkCenters.refresh resolves false and fetches nothing when no plant is selected', async () => {
+  await _withWcRefreshState(async () => {
+    const h = _wcRefreshHarness({ rows: [] });
+    Util.fetchTraced = h.fetchTraced;
+    Store.setSelectedPlant(null, 'test');
+    assert.equal(await WorkCenters.refresh(), false);
+    assert.equal(h.urls.length, 0);
+  });
+});
+
+test('WorkCenters.refresh flushes a pending debounced edit before re-fetching', async () => {
+  await _withWcRefreshState(async () => {
+    const h = _wcRefreshHarness({ rows: [_wcRow('WC-1', 'fresh')] });
+    const calls = [];
+    Util.fetchTraced = (url, opts) => {
+      calls.push({ url: String(url), method: opts?.method || 'GET' });
+      return h.fetchTraced(url, opts);
+    };
+    Store.setSelectedPlant('1006', 'test');
+    WorkCenters._loadedPlant = '1006';
+    WorkCenters._rows = [_wcRow('WC-1', 'old')];
+    WorkCenters._machines = [{ machine: 'M1', sap_workcenter: 'WC-1', distribution_weight: null }];
+    WorkCenters._selected = 'WC-1';
+    WorkCenters._staged = { ..._wcStaged('typed just now'), weights: { M1: null } };
+    WorkCenters._baseline = { ..._wcStaged('old'), weights: { M1: null } };
+    WorkCenters._saving = false;
+    WorkCenters._dirty = true;
+    await WorkCenters.refresh();
+    const putIdx = calls.findIndex((c) => c.method === 'PUT' && /\/workcenters\/WC-1$/.test(c.url));
+    const getIdx = calls.findIndex((c) => /\/master-data\/sap_workcenter\?/.test(c.url));
+    assert.ok(putIdx >= 0, `pending edit was sent: ${JSON.stringify(calls)}`);
+    assert.ok(putIdx < getIdx, 'the write is dispatched before the list re-fetch');
+  });
+});
