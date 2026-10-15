@@ -199,7 +199,7 @@ window.__NIMBUS_LOCALES.de = {
   'modal.override_line_label':        'Produktionslinie',
   'modal.override_apply':             'Übersteuerung anwenden',
   'modal.confirm_overtime_title':      'Außerhalb der Arbeitszeit einplanen?',
-  'modal.confirm_overtime_msg':        'Auftrag {{order}} ist fixiert. Er würde außerhalb der Arbeitszeit dieser Maschine laufen. Trotzdem als genehmigte Mehrarbeit dort einplanen?',
+  'modal.confirm_overtime_msg':        'Auftrag {{order}} ist festgeschrieben. Er würde außerhalb der Arbeitszeit dieser Maschine laufen. Trotzdem als genehmigte Mehrarbeit dort einplanen?',
   'modal.confirm_overtime_confirm':    'Als Mehrarbeit einplanen',
 
   /* ── AG Grid column headers ──────────────────────────────────────────────── */
@@ -785,7 +785,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.sap_outbound_last_sent':         'Zuletzt gesendet',
   'ui.sap_outbound_error_csv':         'Fehlerzeilen als CSV',
   'ui.sap_send_to_sap':                'An SAP senden',
-  'ui.sap_send_confirm':               'An SAP für Werk {{plant}} senden? Nur fixierte Aufträge werden für SAP eingereiht: vom Planer fixierte, in SAP bereits fixierte und Aufträge, die innerhalb des eingefrorenen Horizonts beginnen. Fixierungskennzeichen werden nur gesetzt, nie entfernt.',
+  'ui.sap_send_confirm':               'An SAP für Werk {{plant}} senden? Nur festgeschriebene Aufträge werden für SAP eingereiht: vom Planer festgeschriebene, in SAP bereits festgeschriebene und Aufträge, die innerhalb des eingefrorenen Horizonts beginnen. Festschreibungskennzeichen werden nur gesetzt, nie entfernt.',
   'ui.sap_send_status_ready':          'Bereit',
   'ui.sap_send_status_sent':           'Gesendet',
   'ui.sap_send_status_error':          'Fehler',

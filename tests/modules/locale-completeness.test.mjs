@@ -625,7 +625,6 @@ const localeDict = locale => {
   vm.runInNewContext(readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8'), sandbox);
   return sandbox.window.__NIMBUS_LOCALES[locale];
 };
-
 const placeholdersOf = s => [...String(s).matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]).sort().join(',');
 
 test('U32: every key this branch added exists in all five locales, non-empty, with the same {{placeholder}} set as en.js', () => {
@@ -639,7 +638,6 @@ test('U32: every key this branch added exists in all five locales, non-empty, wi
     }
   }
 });
-
 
 test('U28: every AlertType has a localized alert.type.<type> headline row in all five locales', () => {
   const types = readFileSync(join(__dirname, '..', '..', 'frontend', 'platform', 'types.mts'), 'utf8');
@@ -655,3 +653,14 @@ test('U28: every AlertType has a localized alert.type.<type> headline row in all
   }
 });
 
+test('U33: the new es rows use "pedido" and the new fr rows "commande" (no ordre/orden mix), de uses "festgeschrieben" for firmed, pt "firmadas"', () => {
+  const es = localeDict('es'), fr = localeDict('fr'), de = localeDict('de'), pt = localeDict('pt');
+  for (const key of BRANCH_KEYS) {
+    assert.doesNotMatch(es[key], /\b[Oo]rden(es)?\b/, `es "${key}" must say pedido, not orden`);
+    assert.doesNotMatch(fr[key], /\b[Oo]rdres?\b/, `fr "${key}" must say commande, not ordre`);
+  }
+  assert.doesNotMatch(de['modal.confirm_overtime_msg'], /fixiert/);
+  assert.doesNotMatch(de['ui.sap_send_confirm'], /fixiert|Fixierung/);
+  assert.match(pt['toast.sap_sent_skipped_unfirmed'], /firmadas/);
+  assert.doesNotMatch(es['alert.finish_moved_earlier'], /a las \{\{to\}\}/, 'es: {{to}} is a full date-time, not an hour');
+});

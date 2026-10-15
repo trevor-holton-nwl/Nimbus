@@ -803,7 +803,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.sap_stage_validated':         'Lote validado',
   'toast.sap_poll_done':               'Staging verificado: {{processed}} processados, {{applied}} aplicados, {{held}} retidos',
   'toast.sap_sent_queued':             '{{queued}} ordens enfileiradas para o SAP',
-  'toast.sap_sent_skipped_unfirmed':  '{{count}} ordens foram deixadas de fora porque não estão firmados.',
+  'toast.sap_sent_skipped_unfirmed':  '{{count}} ordens foram deixadas de fora porque não estão firmadas.',
   'toast.sap_archive_restored':        'Ordem restaurada',
   'alert.zero_open_quantity':          'Não resta quantidade em aberto (total menos reduzida é zero): a ordem aguarda em Precisa de planejamento.',
   'ui.alert_headline_tool_conflict':   'Conflito de ferramenta compartilhada',
