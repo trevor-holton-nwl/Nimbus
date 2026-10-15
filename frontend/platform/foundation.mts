@@ -652,6 +652,12 @@ export const Util = {
     return core.dueDateInstant(raw, date => Util._dueWindowForLine(line, date));
   },
 
+  /** True when the SAP finish on the wire is an exact-midnight value, i.e. a date-only due date (OQ23). */
+  isDateOnlyDue(task: Pick<NimbusTask, 'original_end_date'>): boolean {
+    const raw = task.original_end_date;
+    return raw instanceof Date && raw.getHours() === 0 && raw.getMinutes() === 0 && raw.getSeconds() === 0 && raw.getMilliseconds() === 0;
+  },
+
   /** The due instant of an order: the finish a held (unplaced) order anchors on. The finish-anchored name for
    *  `sapDueDate` (same value; the SAP finish as received, a date-only one read as the close of that day). */
   dueInstant(t: NimbusTask): Date | null {

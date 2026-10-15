@@ -4235,7 +4235,7 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
-  test('OQ4: a firmed row is re-derived like any other, stays firmed, and a start inside the frozen window is flagged', () => {
+  test('OQ4 / D19: a firmed row is re-derived like any other, stays firmed, and a start moving from outside to inside the frozen window is flagged', () => {
     const fx = recFixture();
     try {
       Store.setTasks([fx.task('fm', {
@@ -4243,13 +4243,30 @@ describe('reconcile (finish-anchored)', () => {
         start_date: at(26, 13), end_date: at(26, 17),
       })], 'unit-test');
       Store.setFirmed(['fm'], true, 'unit-test');
-      Store.setFrozenHorizonEnd(at(27, 0), 'unit-test');
+      Store.setFrozenHorizonEnd(at(26, 12), 'unit-test');   // the old 13:00 start is outside; the derived 11:00 start is inside
       Engine.reconcileRuntimeSchedules(fx.plant);
       const t = Store.tasks.fm;
       assert.equal(t.start_date.getTime(), at(26, 11).getTime());
       assert.equal(Store.isFirmed('fm'), true, 'nothing is un-firmed');
       assert.equal(t.firmed, true);
       assert.equal(t.derivationIssue.code, 'frozen_window_crossed');
+      assert.equal(t.derivationIssue.from.getTime(), at(26, 13).getTime());
+      assert.equal(t.derivationIssue.to.getTime(), at(26, 11).getTime());
+    } finally { fx.restore(); }
+  });
+
+  test('D19: a firmed row already inside the frozen window gets no frozen_window_crossed note', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('in', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
+        fx.task('np', { RUN_TIME: '4', original_end_date: at(26, 17) }),   // never placed, due inside the window
+      ], 'unit-test');
+      Store.setFirmed(['in', 'np'], true, 'unit-test');
+      Store.setFrozenHorizonEnd(at(27, 0), 'unit-test');   // both the held 13:00 and derived 11:00 starts are inside
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.in.derivationIssue ?? null, null);
+      assert.notEqual(Store.tasks.np.derivationIssue?.code, 'frozen_window_crossed');
     } finally { fx.restore(); }
   });
 
@@ -4703,6 +4720,21 @@ describe('reconcile (finish-anchored)', () => {
       assert.equal(Store.tasks.rz.start_date.getTime(), at(18, 6).getTime(), 'no bar is derived');
       assert.equal(Store.tasks.rz.derivationIssue.code, 'run_time_zero');
     } finally { fx.restore(); }
+  });
+
+  test('D9c: a never-placed order with a date-only due on a full-day blackout resolves silently to the previous working close', () => {
+    const fx = recFixture();
+    // The due-instant seam needs the line's 07:00-19:00 hours so a date-only due reads as that day's 19:00 close.
+    Util.setDueCalendarResolver(() => ({ lineHours: { 0: [7, 19], 1: [7, 19], 2: [7, 19], 3: [7, 19], 4: [7, 19], 5: [7, 19], 6: [7, 19] },
+      plantHours: null, plant: fx.plant, rev: 0 }));
+    try {
+      Store.addBlock({ id: 'd9c-blackout', plant: fx.plant, line: fx.line, start: at(26, 0), end: at(27, 0) }, 'unit-test');
+      Store.setTasks([fx.task('hol', { RUN_TIME: '4', original_end_date: at(26, 0), start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.hol;
+      assert.equal(t.end_date.getTime(), at(25, 19).getTime(), 'finish is the previous working close, before the blackout');
+      assert.equal(t.derivationIssue ?? null, null, 'no finish_moved_earlier for a date-only due resolving');
+    } finally { Util.setDueCalendarResolver(null); Store.removeBlock('d9c-blackout', 'unit-test'); fx.restore(); }
   });
 
   test('finish_moved_earlier is recorded with the held and the derived finish when the walk cannot hold it', () => {

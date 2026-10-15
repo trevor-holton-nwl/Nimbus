@@ -1788,15 +1788,15 @@ export const Engine = {
         const derivedStart = result.changes.start_date!;
         let issue: Issue | null = null;
         const orphaned = setupLive && setupBefore(task, line, derivedStart).orphaned;
-        if (result.finishMoved) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
+        // D9c (VP1): a date-only due that lands on a blackout day is read as that day's close and the walk
+        // moves it before the blackout; that is the due date resolving, not a finish the planner lost. Silent.
+        const dueOnBlackout = !placed && result.moveReason === 'blackout' && Util.isDateOnlyDue(task);
+        if (result.finishMoved && !dueOnBlackout) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
         else if (orphaned) issue = { code: 'setup_override_orphaned' };   // an active override no longer names the row before it (recorded only, Task 3.3 alerts)
-        else if (Store.isFirmed(task.id) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart, user_scheduled: true }, plantNow)) {
-          issue = { code: 'frozen_window_crossed' };   // OQ4: alert only, nothing is un-firmed
-        } else if (placed && !Store.isFirmed(task.id) && task.start_date
+        else if (placed && task.start_date
           && !Engine.isFrozenHorizon(task, plantNow) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart, user_scheduled: true }, plantNow)) {
-          // R26 (gate 14): a PLACED, unfirmed row whose start moves from outside to inside the frozen window in
-          // this reconcile becomes frozen, and a frozen start is sent firm (irreversible in SAP). Warn the planner.
-          // Never-placed, display-only and queued rows stay excluded (no flood).
+          // D19 (VU17) + R26: a row (firmed or not) whose start moves from OUTSIDE to INSIDE the frozen window in
+          // this reconcile is warned; one already inside, or never placed (display-derived dates are no transition), is silent (no cutover-morning flood).
           issue = { code: 'frozen_window_crossed', from: task.start_date, to: derivedStart };
         } else {
           const pullFloor = Engine.earliestAllowedStart(task, plant, null);
