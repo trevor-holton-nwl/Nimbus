@@ -4492,13 +4492,14 @@ describe('reconcile (finish-anchored)', () => {
       Store.setTasks([
         fx.task('a1', { original_end_date: at(26, 17), runtime_schedule_mismatch: true }),
         fx.task('a2', { original_end_date: at(27, 17), runtime_schedule_mismatch: true }),
+        ...[28, 29, 30, 31].map(day => fx.task(`a${day}`, { original_end_date: at(day, 17), runtime_schedule_mismatch: true })),   // U24: the signature needs >= 10 non-queued rows
         fx.task('rv', { original_end_date: at(19, 14), runtime_schedule_mismatch: true }),               // due date already past: reversed from now
         fx.task('run', { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(20, 7), end_date: at(20, 11) }),   // producing now: keeps its start
         fx.task('bl', { MACHINE: lineB, original_end_date: at(26, 17), runtime_schedule_mismatch: true }),   // no server calendar on the line
         fx.task('ok', { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(27, 7), end_date: at(27, 11) }),
       ], 'unit-test');
-      Engine.reconcileRuntimeSchedules(fx.plant);   // 5 of 6 non-queued rows were stale
-      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:2,1,1,1'], 're-anchored 2, reversed 1, kept running start 1, blocked 1');
+      Engine.reconcileRuntimeSchedules(fx.plant);   // 9 of 10 non-queued rows were stale
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:6,1,1,1'], 're-anchored 6, reversed 1, kept running start 1, blocked 1');
       assert.deepEqual(Store.tasks.rv.derivationIssue, { code: 'reversal_forward', detail: 'cutover' }, 'the first-load pass is tagged cutover');
       assert.equal(Store.tasks.bl.derivationIssue.code, 'line_no_calendar', 'the alerts themselves are unchanged');
     } finally { unstub(); fx.restore(); }
@@ -4534,9 +4535,23 @@ describe('reconcile (finish-anchored)', () => {
     const unstub = cutoverToastStub();
     try {
       const queued = id => fx.task(id, { planning_status: 'needs_planning', start_date: null, end_date: null, user_scheduled: false });
-      Store.setTasks([fx.task('s1', { original_end_date: at(26, 17), runtime_schedule_mismatch: true }), queued('q1'), queued('q2'), queued('q3')], 'unit-test');
-      Engine.reconcileRuntimeSchedules(fx.plant);   // the one non-queued row has the cutover signature
-      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:1,0,0,0']);
+      const stale = id => fx.task(id, { original_end_date: at(26, 17), runtime_schedule_mismatch: true });
+      const ten = Array.from({ length: 10 }, (_, i) => stale(`s${i}`));
+      Store.setTasks([...ten, queued('q1'), queued('q2'), queued('q3'), queued('q4'), queued('q5'), queued('q6')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);   // ten non-queued rows, all with the cutover signature
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:10,0,0,0']);
+    } finally { unstub(); fx.restore(); }
+  });
+
+  test('U24: the cutover signature needs at least ten non-queued rows; nine stale rows keep the per-row toast', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    try {
+      const stale = id => fx.task(id, { original_end_date: at(26, 17), runtime_schedule_mismatch: true });
+      Store.setTasks(Array.from({ length: 9 }, (_, i) => stale(`n${i}`)), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.system_moved_n:9']);
+      assert.notEqual(Store.tasks.n0.systemMove?.reason, 'cutover');
     } finally { unstub(); fx.restore(); }
   });
 

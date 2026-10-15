@@ -382,6 +382,8 @@ function buildLineIntervalIndex(orders: ReadonlyArray<{ task: NimbusTask }>): Li
 }
 
 /** How many days back the free-time scan follows touching windows (the predecessor's end usually stops it sooner). */
+/** U24: the cutover data signature needs at least this many non-queued rows, so a tiny plant or a small re-upload keeps its per-row toasts. */
+const CUTOVER_MIN_ROWS = 10;
 const SETUP_AVAILABILITY_MERGE_DAYS = 14;
 
 function setupAvailabilityMinutes(
@@ -1598,7 +1600,7 @@ export const Engine = {
       && (!task.user_scheduled
         || (!!plantNow && !!task.start_date && !!task.end_date && Engine.isInProgress(task, plantNow)))).length;
     const cutover = opts.reason === 'cutover'
-      || (opts.reason === undefined && !opts.ids && nonQueuedCount > 0 && signatureCount * 2 > nonQueuedCount);
+      || (opts.reason === undefined && !opts.ids && nonQueuedCount >= CUTOVER_MIN_ROWS && signatureCount * 2 > nonQueuedCount);
     const cutoverCounts = { anchored: 0, reversed: 0, running: 0, blocked: 0 };
     const tally = (stale: boolean, kind: keyof typeof cutoverCounts): void => { if (stale) cutoverCounts[kind]++; };
     const commit = (): void => {
