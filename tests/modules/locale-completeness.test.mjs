@@ -593,3 +593,24 @@ test('gate 4b: every alert.* message key the compute core can emit exists in all
     for (const locale of LOCALES) assert.ok(perLocale[locale].has(key), `${locale}.js is missing alert key "${key}"`);
   }
 });
+
+const localeDict = locale => {
+  const sandbox = { window: {} };
+  vm.runInNewContext(readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8'), sandbox);
+  return sandbox.window.__NIMBUS_LOCALES[locale];
+};
+
+test('U28: every AlertType has a localized alert.type.<type> headline row in all five locales', () => {
+  const types = readFileSync(join(__dirname, '..', '..', 'frontend', 'platform', 'types.mts'), 'utf8');
+  const union = types.slice(types.indexOf('export type AlertType ='), types.indexOf('export type AlertSev'));
+  const alertTypes = [...union.matchAll(/'([a-z_-]+)'/g)].map(m => m[1]);
+  assert.ok(alertTypes.length >= 30 && alertTypes.includes('finish_moved_earlier'), 'the AlertType union was parsed');
+  for (const locale of LOCALES) {
+    const dict = localeDict(locale);
+    for (const type of alertTypes) {
+      const v = dict[`alert.type.${type}`];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js has no headline row alert.type.${type}`);
+    }
+  }
+});
+

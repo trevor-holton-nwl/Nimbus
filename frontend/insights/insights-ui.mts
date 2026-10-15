@@ -1154,6 +1154,14 @@ const VL_ALERT_ROW_H = 72;
    App._renderSettingsPane, and App's `alerts:change` subscriber).
    ========================================================================== */
 export const AlertsUIAdapter = {
+  /** The alert-card headline for an alert type: the localized `alert.type.<type>` row, falling back to the
+   *  title-cased type only when a locale has no row (U28). Plain text; callers escape it. */
+  headlineFor(type: string): string {
+    const key = `alert.type.${type}`;
+    const row = Util.t(key);
+    if (row && row !== key) return row;
+    return String(type).replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  },
   _drawerVL: null as VirtualList<NimbusAlert> | null,
   // Last plant _drawerVL was populated for (Part A1/A2) — destroyed on an
   // empty alert list (see renderDrawer below), but a plant switch that
@@ -1316,19 +1324,19 @@ export const AlertsUIAdapter = {
 
     const renderCard = (a: NimbusAlert) => {
       // Headline + right-side numeric.
-      let headline = Util.escapeHtml(a.type.replace(/[-_]/g,' ')).replace(/\b\w/g, c => c.toUpperCase());
+      let headline = Util.escapeHtml(AlertsUIAdapter.headlineFor(a.type));   // U28: localized per alert type
       let num = '';
       let chipsHtml = '';
 
       if (a.type === 'overload') {
-        headline = 'Overloaded';
+        headline = AlertsUIAdapter.headlineFor('overload');
         num = `<span class="ac-card-num over">${(utilPct * 100).toFixed(0)}%</span>`;
         // Show the top contributing orders by run hours.
         const top = cellEntries.slice().sort((x, y) => y.scheduledHours - x.scheduledHours)
           .slice(0, 4).map(entry => entry.task);
         if (top.length) chipsHtml = `<div class="ac-chips">${top.map(t => renderChip(t.id)).join('')}</div>`;
       } else if (a.type === 'overlap' || a.type === 'tool-conflict') {
-        headline = a.type === 'overlap' ? 'Order overlap' : Util.t('ui.alert_headline_tool_conflict');
+        headline = a.type === 'overlap' ? AlertsUIAdapter.headlineFor('overlap') : Util.t('ui.alert_headline_tool_conflict');
         const m = a.id.match(/^ovl-(.+)-(.+)$/);
         const peer = a.peerId ?? (m ? m[1] : null);
         const later = a.taskId ?? (m ? m[2] : null);
@@ -1338,7 +1346,7 @@ export const AlertsUIAdapter = {
           chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
         }
       } else if (a.type === 'blackout') {
-        headline = 'Blackout violation';
+        headline = AlertsUIAdapter.headlineFor('blackout');
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'firmed-closed') {
         // These rules fire for ANY order on a closed day, firmed or not — the
@@ -1349,9 +1357,9 @@ export const AlertsUIAdapter = {
         headline = Util.t('ui.alert_headline_out_of_hours');
         if (a.taskId) chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
       } else if (a.type === 'closed') {
-        headline = 'Line closed';
+        headline = AlertsUIAdapter.headlineFor('closed');
       } else if (a.type === 'near-capacity') {
-        headline = 'Near capacity';
+        headline = AlertsUIAdapter.headlineFor('near-capacity');
         num = `<span class="ac-card-num">${(utilPct * 100).toFixed(0)}%</span>`;
       }
 

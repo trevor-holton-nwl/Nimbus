@@ -314,3 +314,17 @@ test('Orders Today counts every order that overlaps today on the plant clock (a 
     Store.setTasks([], 'unit-test');
   }
 });
+
+test('U28: the alert-card headline is the localized alert.type.<type> row, and only a missing row falls back to the title-cased type', () => {
+  const prior = globalThis.window.__NIMBUS_LOCALES;
+  const loc = Util.locale();
+  try {
+    globalThis.window.__NIMBUS_LOCALES = { [loc]: { 'alert.type.pull_floor_crossed': 'Starts before earliest allowed', 'alert.type.late': 'Verspätet' } };
+    assert.equal(AlertsUIAdapter.headlineFor('pull_floor_crossed'), 'Starts before earliest allowed');
+    assert.equal(AlertsUIAdapter.headlineFor('late'), 'Verspätet', 'the locale row wins over the type name');
+    assert.equal(AlertsUIAdapter.headlineFor('no_operating_window'), 'No Operating Window', 'no row: title-case fallback');
+    assert.equal(AlertsUIAdapter.headlineFor('near-capacity'), 'Near Capacity');
+  } finally {
+    globalThis.window.__NIMBUS_LOCALES = prior;
+  }
+});
