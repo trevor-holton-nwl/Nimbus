@@ -1418,7 +1418,7 @@ export const Engine = {
    *   in that situation asks for confirmation first (`lastManualRefusal === 'needs_overtime_confirm'`); with
    *   `opts.confirmedOvertime` it is placed raw (start = finish minus run time, calendar ignored) and marked
    *   `placement_exception = 'overtime'` (OQ63).
-   * - A row queued as `overlong_never` that is still overlong on the chosen line is released as ONE continuous
+   * - A row queued as `overlong_never` or `run_time_over_cap` that is still overlong on the chosen line (D5) is released as ONE continuous
    *   elapsed bar ending at the finish, marked `'overlong'` (OQ50). Queued `overlong_never`/`run_time_over_cap`
    *   rows that place normally return to `scheduled` in the same patch.
    * Manual placement deliberately ignores the frozen horizon (OD-C2c). Null on any refusal; the reason is in
@@ -1481,7 +1481,9 @@ export const Engine = {
 
     const result = Engine.finishAnchoredPatchFor(task, line, finish, policy ?? Engine.splitOrderPolicyFor(plant));
     if (result.kind === 'refuse') {
-      if (result.reason === 'overlong_never' && queuedCode === 'overlong_never') {
+      // D5 (VI6): an approved release of an over-cap order on a never plant has the same shape as an overlong
+      // release: one continuous marked bar. OQ28 says a planner may approve and release it.
+      if (result.reason === 'overlong_never' && (queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap')) {
         // A release has no held finish to protect: a due instant already in the past starts the bar at the
         // plant's now instead (reversal, OQ53) and records why.
         const now = Store.plantNow(plant);

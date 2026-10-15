@@ -3341,6 +3341,32 @@ test('Engine.finishAnchoredPatchFor: placed, refuse and reversal results', () =>
   } finally { fx.restore(); }
 });
 
+test('D5: a queued run_time_over_cap row on a never plant releases as one marked bar', () => {
+  const fx = manualFixture({ split_order_policy: 'never' });
+  try {
+    const task = { id: 'm25-cap', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '400', planning_status: 'needs_planning',
+      planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const finish = new Date('2026-09-30T14:00:00');
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, finish);
+    assert.equal(patch.placement_exception, 'overlong');
+    assert.equal(patch.planning_status, 'scheduled');
+    assert.equal(patch.end_date.getTime(), finish.getTime());
+    assert.equal(patch.end_date.getTime() - patch.start_date.getTime(), 400 * Config.MS_HOUR);
+  } finally { fx.restore(); }
+});
+
+test('Review focus 5: the same release with a past due date reverses from now and keeps the marker', () => {
+  const fx = manualFixture({ split_order_policy: 'never' });
+  try {
+    const task = { id: 'm25-cap-past', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '400', planning_status: 'needs_planning',
+      planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date('2020-01-01T14:00:00'));
+    assert.equal(patch.placement_exception, 'overlong');
+    assert.equal(patch.derivationIssue?.code, 'reversal_forward');
+    assert.equal(patch.derivationIssue?.detail, 'due_date_past');
+  } finally { fx.restore(); }
+});
+
 test('OQ50: a row queued as overlong_never is released as ONE continuous elapsed bar ending at the held finish, marked overlong', () => {
   const fx = manualFixture();
   try {
