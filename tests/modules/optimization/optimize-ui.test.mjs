@@ -1686,7 +1686,7 @@ test('gate 24: preview Apply drops a candidate whose derived bar has started by 
   Store.setMasterData({ ...priorMaster, plants: [{ plant, timezone: tz }], lines: [] }, 'unit-test');
   Store._blockedPlants.clear();
   Store.serverOffsetMs = new Date('2026-08-03T08:00:00').getTime() - Date.now();
-  // The reconcile derived this order's bar to 09:00-12:00: not started at 08:00.
+  // A placed order (user_scheduled) whose bar is 09:00-12:00: not started at 08:00. Running protection needs a real placement (I10).
   const derived = { ...previewTask(derivedId, plant, 3), user_scheduled: true, start_date: new Date('2026-08-10T09:00:00'), end_date: new Date('2026-08-10T12:00:00') };
   const fixture = openTaskBaselinePreview(plant, [derived, previewTask(freeId, plant, 1)]);
   try {

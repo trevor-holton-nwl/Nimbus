@@ -1954,7 +1954,7 @@ function _unscheduleFixture(extra = []) {
   const mk = (id, over = {}) => ({
     id, PRODUCTION_ORDER: id, MATERIAL_NUMBER: 'M', MACHINE: 'L1', plant: '5512', PLANT: '5512',
     user_scheduled: true, start_date: farStart, end_date: farEnd, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
-    original_user_scheduled: true, start_date: new Date('2035-02-27T08:00:00'), original_end_date: new Date('2035-02-27T12:00:00'),
+    original_start_date: new Date('2035-02-27T08:00:00'), original_end_date: new Date('2035-02-27T12:00:00'),
     ...over,
   });
   Store.setTasks([mk('un-ok'), mk('un-manual'), mk('un-frozen'), mk('un-running', {
