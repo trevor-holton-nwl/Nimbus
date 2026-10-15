@@ -1098,7 +1098,7 @@ export const UndoStack = {
       const { firmed: _firmed, ...rest } = s;
       // OQ21: undo restores the FINISH. The restored start is only a placeholder, so the row is flagged stale and
       // the engine re-derives the start from the finish under the current run time (afterRestore below).
-      // A row the reconcile will not process (no machine, no server calendar row for its line, an overtime/overlong
+      // A row the reconcile will not process (no machine, an overtime/overlong
       // marker) keeps its previous flag: nothing would clear a flag set here.
       const mismatch = UndoStack.willRederive && !UndoStack.willRederive(s as NimbusTask)
         ? !!Store.tasks[s.id]?.runtime_schedule_mismatch : true;

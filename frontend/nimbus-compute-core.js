@@ -1035,7 +1035,7 @@
       for (const l of masterData?.lines ?? []) if (l?.plant === plant && l.machine && (first === undefined || l.machine < first)) first = l.machine;
       if (first !== undefined) noteFirstLine(plant, first);
     }
-    const emittedPlants = new Set(), emittedLines = new Set();
+    const emittedPlants = new Set();
     const emitPlantNoTimezone = plant => {
       const line = plantFirstLine.get(plant);
       if (plant == null || line === undefined || emittedPlants.has(plant) || !inScopeLine(line)) return;

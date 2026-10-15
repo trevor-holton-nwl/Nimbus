@@ -1593,7 +1593,7 @@ export const Engine = {
    * session-only `derivationIssue`.
    *
    * Nothing is derived from a plant whose server calendar is `pending` or `failed` (default 07:00-19:00 hours
-   * would be saved as truth), from a plant with no time zone, or on a line with no server calendar row. Rows
+   * would be saved as truth), or from a plant with no time zone (a line with no server calendar row is derived, D14). Rows
    * whose walk reaches "now" are collected per line and placed forward in finish order from now (OQ53 b).
    * No undo entry (OQ57); one Toast counts the dirty patches. `opts.reason === 'cutover'` tags the reversals. */
   reconcileRuntimeSchedules(plant: string | null, opts: ReconcileOptions = {}): void {
