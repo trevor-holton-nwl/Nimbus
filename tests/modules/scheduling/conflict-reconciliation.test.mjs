@@ -152,3 +152,32 @@ test('remote deletion during refresh retains newer local work until explicit rel
   Store.setTasks([{ ...Store.tasks.A, row_version: 9 }], 'persistence');
   edit('12'); Persistence.saveAll(); await tick(); assert.equal(calls, 1);
 });
+
+for (const identical of [true, false]) {
+  test(`U25: a stale reply whose server row ${identical ? 'already holds this client\'s placement reconciles silently' : 'differs is a real conflict with a toast'}`, async () => {
+    const toasts = [];
+    const priorShow = Toast.show;
+    Toast.show = (msg, kind) => { toasts.push(`${msg}|${kind}`); };
+    try {
+      const requests = [];
+      Util.fetchTraced = (url, options) => new Promise(resolve => requests.push({ url, options, resolve }));
+      edit('10');
+      Store.tasks.A.user_scheduled = true;          // a placement is what a cutover reconcile saves
+      Persistence.saveAll();
+      const sent = JSON.parse(requests[0].options.body).tasks[0];
+      assert.equal(sent.start_date, '2026-10-01T10:00:00');
+      requests[0].resolve(response({ stale: ['A'], versions: {}, updated: 1, persisted: 0 }));
+      await tick();
+      const refresh = requests.find(request => request.url.endsWith('/tasks/refresh'));
+      refresh.resolve(response({ data: [{ ...row(), MACHINE: 'L1', PRT_01: 'OLD', PRT_02: 'OLD2', PRODUCTION_VERSION: '0001', RUN_TIME: 1,
+        row_version: 5, user_scheduled: true,
+        start_date: identical ? '2026-10-01T10:00:00' : '2026-10-01T12:00:00',
+        end_date: identical ? '2026-10-01T11:00:00' : '2026-10-01T13:00:00' }], missing: [] }));
+      await tick(); await tick();
+      assert.equal(Store.tasks.A.row_version, 5, 'the server row is applied either way');
+      assert.equal(Persistence._conflictedIds.has('A'), false);
+      const conflictToasts = toasts.filter(x => x.startsWith('toast.concurrent_edit_conflict'));
+      assert.equal(conflictToasts.length, identical ? 0 : 1);
+    } finally { Toast.show = priorShow; }
+  });
+}

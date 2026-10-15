@@ -1122,6 +1122,28 @@ export const Persistence = {
     };
   },
 
+  /** U25: does the server row already hold exactly what this client sent (same start, end, segments and the edited
+   *  attributes)? A display-only send (no dates) never matches: it proves nothing about the placement. */
+  _sameAsSent(row: Record<string, unknown>, sentJson: string | undefined): boolean {
+    if (!sentJson) return false;
+    let sent: Record<string, unknown>;
+    try { sent = JSON.parse(sentJson); } catch { return false; }
+    if (!sent.start_date || !sent.end_date || !Array.isArray(sent.schedule_segments)) return false;
+    const same = (a: unknown, b: unknown): boolean => {
+      const x = Util.parseDate(a as string), y = Util.parseDate(b as string);
+      return x instanceof Date && y instanceof Date && x.getTime() === y.getTime();
+    };
+    if (!same(sent.start_date, row.start_date) || !same(sent.end_date, row.end_date)) return false;
+    const serverSegments = Persistence._segmentsFromRaw(row);
+    const sentSegments = sent.schedule_segments as Array<{ start_date: string; end_date: string }>;
+    if (serverSegments.length !== sentSegments.length
+      || sentSegments.some((seg, i) => !same(seg.start_date, serverSegments[i].startDate) || !same(seg.end_date, serverSegments[i].endDate))) return false;
+    const text = (v: unknown): string => (v == null ? '' : String(v));
+    return text(sent.MACHINE) === text(row.MACHINE) && text(sent.PRT_01) === text(row.PRT_01)
+      && text(sent.PRT_02) === text(row.PRT_02) && text(sent.PRODUCTION_VERSION) === text(row.PRODUCTION_VERSION)
+      && (sent.RUN_TIME == null ? null : Number(sent.RUN_TIME)) === (row.RUN_TIME == null ? null : Number(row.RUN_TIME));
+  },
+
   _refreshBaseline(t: NimbusTask): RefreshBaseline {
     return { edits: JSON.stringify(Persistence._taskEditSnapshot(t)),
       generation: taskEditGenerations.get(String(t.id)) ?? 0,
@@ -1307,8 +1329,11 @@ export const Persistence = {
         }
         if (stale.length) {
           ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
-          Persistence._refreshTasks(stale, refreshBaselines);
-          if (!runtimePreviewChanged) Toast.show(Util.t('toast.concurrent_edit_conflict', { count: stale.length }), 'warn', 7000);
+          // U25: a stale row whose server copy already holds this client's exact placement is reconciled silently;
+          // the conflict toast counts only the real conflicts (known once the refresh answers).
+          Persistence._refreshTasks(stale, refreshBaselines, { sent: sentSnapshot, onConflicts: count => {
+            if (count > 0 && !runtimePreviewChanged) Toast.show(Util.t('toast.concurrent_edit_conflict', { count }), 'warn', 7000);
+          } });
         }
         // N3: the server scanned the written machines inside the save
         // transaction. Advisory — rows are persisted; surface the overlaps now
@@ -1379,7 +1404,11 @@ export const Persistence = {
    *  old version and stay unresolved until explicit reload/discard. Emits once with source
    *  'refresh' — the dirty/autosave subscribers ignore that source so we don't
    *  re-dirty or write the rows we just pulled (see project_store_fanout). */
-  _refreshTasks(ids: string[], savedBaselines?: Map<string, RefreshBaseline>): void {
+  /** `opts.sent` (U25): what the rejected save sent per id (the `_taskEditSnapshot` JSON). A server row that already
+   *  carries exactly those dates, segments and attributes (two planners' browsers derived the same placement) is
+   *  reconciled silently; `opts.onConflicts` receives how many ids were a REAL conflict, for the caller's toast. */
+  _refreshTasks(ids: string[], savedBaselines?: Map<string, RefreshBaseline>,
+                opts: { sent?: ReadonlyMap<string, string>; onConflicts?: (count: number) => void } = {}): void {
     if (!ids || !ids.length) return;
     const collection = taskCollectionGeneration;
     const baselines = savedBaselines ?? new Map(ids.flatMap(id => {
@@ -1410,10 +1439,12 @@ export const Persistence = {
         if (collection !== taskCollectionGeneration) return;
         const applied: string[] = [];
         let retained = false;
+        let silent = 0;
         for (const row of (data || [])) {
           const tk = Store.tasks[String(row.id)];
           if (!tk) continue;
           if (!unchanged(String(row.id))) { retained = true; continue; }
+          if (Persistence._sameAsSent(row as unknown as Record<string, unknown>, opts.sent?.get(String(row.id)))) silent++;
           tk.MACHINE = row.MACHINE ?? '';
           tk.PRT_01 = row.PRT_01 ?? '';
           tk.PRT_02 = row.PRT_02 ?? '';
@@ -1472,8 +1503,10 @@ export const Persistence = {
           }
         }
         if (retained) Persistence._warnUnresolvedConflict();
+        opts.onConflicts?.(Math.max(0, ids.length - silent));
       })
       .catch(e => {
+        opts.onConflicts?.(ids.length);
         ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids);
         Toast.show(Util.t('toast.conflict_refresh_failed'), 'error', 8000);
       })
