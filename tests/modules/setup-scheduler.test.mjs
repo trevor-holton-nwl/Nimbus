@@ -5843,3 +5843,12 @@ test('F2 run-level: candidate count, patches and objective are identical with th
     assert.deepEqual(on.score, off.score, `${mode} score`);
   }
 });
+
+test('fillPlanningGaps default budget comes from bounds.gapFillBudgetMs and the message names Exhaustive', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')]);
+  const starved = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, gapFillBudgetMs: 0 }, candidate);
+  assert.equal(starved.gapFill.complete, false);
+  assert.match(starved.dispositions[0].reason.message, /Exhaustive/);
+  const generous = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, gapFillBudgetMs: 60000 }, candidate);
+  assert.equal(generous.gapFill.complete, true);
+});

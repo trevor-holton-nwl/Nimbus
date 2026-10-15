@@ -641,6 +641,17 @@ const SETUP_AWARE_ITERATION_CAP = 20000;
 // deferred Plan B comparison run (a fraction of this budget) instead of
 // duplicating the number.
 export const SETUP_AWARE_DEADLINE_MS = 5000;
+export const SETUP_AWARE_NORMAL_BUDGET_MS = 8000;
+export const SETUP_AWARE_EXHAUSTIVE_BUDGET_MS = 180000;
+const SETUP_AWARE_EXHAUSTIVE_EXACT_SEARCH_THRESHOLD = 10;
+const SETUP_AWARE_EXHAUSTIVE_EXACT_LEAF_CAP = 5000;
+const SETUP_AWARE_EXHAUSTIVE_CONVERGENCE_WINDOW = 10000;
+function gapFillBudgetFor(searchBudgetMs: number | undefined): number {
+  if (searchBudgetMs === undefined) return 1000;
+  if (searchBudgetMs >= SETUP_AWARE_EXHAUSTIVE_BUDGET_MS) return 36000;
+  if (searchBudgetMs >= SETUP_AWARE_NORMAL_BUDGET_MS) return 2000;
+  return 1000;
+}
 
 function parseDateOnlyAsWallClock(value: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
@@ -972,7 +983,7 @@ export const Engine = {
       const candidate = mode === 'min-changeover' ? evaluateMinChangeoverPure(snapshot, bounds)
         : mode === 'spt' ? evaluateSptWithSetupPure(snapshot, bounds)
           : evaluateDueDateFirstPure(snapshot, bounds, mode);
-      return fillPlanningGaps(snapshot, bounds, candidate);
+      return fillPlanningGaps(snapshot, bounds, candidate, bounds.gapFillBudgetMs);
     }
     return evaluateThroughputPure(snapshot, bounds, thresholds ?? {
       throughputMinSavingsMin: 60,
@@ -2735,18 +2746,24 @@ export const Engine = {
       .filter(t => resolveTaskPlant(t, snapshot) === plant)
       .map(t => String(t.MACHINE ?? ''))
       .filter(Boolean)).size;
+    const budgetMs = typeof opts.searchBudgetMs === 'number' && Number.isFinite(opts.searchBudgetMs) && opts.searchBudgetMs > 0
+      ? opts.searchBudgetMs : SETUP_AWARE_DEADLINE_MS;
+    const scale = Math.max(1, budgetMs / SETUP_AWARE_DEADLINE_MS);
+    const exhaustive = opts.exhaustive === true;
     const bounds: DueDateFirstBounds = {
       // Non-null by construction: this branch is only reached when either
       // mode is one of the setup-aware modes, so effectiveSetupSnapshot is
       // always the real active-and-matching snapshot or the synthetic
       // fallback.
       setup: effectiveSetupSnapshot,
-      exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+      exactSearchThreshold: exhaustive ? SETUP_AWARE_EXHAUSTIVE_EXACT_SEARCH_THRESHOLD : SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+      ...(exhaustive ? { exactSearchLeafCap: SETUP_AWARE_EXHAUSTIVE_EXACT_LEAF_CAP } : {}),
       // F4: Scale iteration cap per line. The cap is a stack-safety net; after
       // F2 a shared 20,000 iterations starved later lines on big plants. With
       // F1 no exact fragment exceeds ~500 leaves and greedy tops ~165 candidates
       // per fragment, so per-line scaling keeps the pool usable for every line.
-      iterationCap: SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope),
+      iterationCap: Math.round(SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope) * scale),
+      gapFillBudgetMs: gapFillBudgetFor(opts.searchBudgetMs as number | undefined),
       clock: () => performance.now(),
       // Phase 2 (Pkg D): an absolute deadline the caller already computed
       // (e.g. the preview's one-shot primary budget, or the deferred Plan B
@@ -2754,7 +2771,7 @@ export const Engine = {
       // SETUP_AWARE_DEADLINE_MS window here. A past `opts.deadlineAt` is
       // not special-cased: the search just terminates immediately with
       // tail placement, which is the existing, safe deadline-exceeded path.
-      deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
+      deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + budgetMs,
       now: placementStart,
       planningStart,
       runNow,
@@ -2766,7 +2783,7 @@ export const Engine = {
       // must never read the ambient _candidateSnapshot or the realm's Store.
       notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData, baseSnapshot),
       notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData, baseSnapshot),
-      convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
+      convergenceWindow: exhaustive ? SETUP_AWARE_EXHAUSTIVE_CONVERGENCE_WINDOW : SETUP_AWARE_CONVERGENCE_WINDOW,
     };
     let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
     if (result.validationContext) result.validationContext = { ...result.validationContext, baselineSnapshot: baseSnapshot };

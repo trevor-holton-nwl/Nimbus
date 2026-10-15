@@ -5321,3 +5321,66 @@ test('sync preview bounds stay snapshot-bound after the run: a later live-Store 
     if (priorPlant === undefined) delete Store.plants.DW; else Store.plants.DW = priorPlant;
   }
 });
+
+test('search budget: opts.searchBudgetMs / exhaustive scale the bounds the engine builds', () => {
+  const plant = 'ENGINE-BUDGET-A';
+  const lines = ['ENGINE-BUDGET-A1', 'ENGINE-BUDGET-A2'];
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMasterData = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const original = Engine.evaluateSetupAware;
+  try {
+    Store.setSelectedPlant(plant, 'unit-test');
+    Store.setMasterData({ plants: [{ plant }], lines: lines.map(machine => ({ plant, machine })) }, 'unit-test');
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    Store.setTasks(lines.map((line, i) => ({
+      id: `engine-budget-${line}`, PLANT: plant, MACHINE: line, COLOR: 'GREEN', RUN_TIME: 2,
+      original_end_date: new Date(`2035-08-0${i + 1}T18:00:00`), start_date: null, end_date: null,
+    })), 'unit-test');
+    const base = {
+      plant, planningStart: new Date('2035-08-01T08:00:00'),
+      runNow: new Date('2035-08-01T08:00:00'), endDate: new Date('2035-08-20T12:00:00'),
+    };
+    const capture = (extra) => {
+      let seen = null;
+      Engine.evaluateSetupAware = function (mode, bounds, snapshot, thresholds) {
+        seen = bounds;
+        return original.call(this, mode, { ...bounds, deadline: -1 }, snapshot, thresholds);
+      };
+      const before = performance.now();
+      Engine.evaluateSchedule('changeover', { ...base, ...extra }, snapshotSchedule(plant));
+      return { bounds: seen, before };
+    };
+
+    const normal = capture({ searchBudgetMs: 8000 });
+    assert.equal(normal.bounds.iterationCap, 64000);
+    assert.equal(normal.bounds.gapFillBudgetMs, 2000);
+    assert.equal(normal.bounds.exactSearchThreshold, 8);
+    assert.equal(normal.bounds.exactSearchLeafCap, undefined);
+    assert.equal(normal.bounds.convergenceWindow, 2000);
+    assert.ok(Math.abs(normal.bounds.deadline - normal.before - 8000) < 500);
+
+    const exhaustive = capture({ searchBudgetMs: 180000, exhaustive: true });
+    assert.equal(exhaustive.bounds.iterationCap, 1440000);
+    assert.equal(exhaustive.bounds.gapFillBudgetMs, 36000);
+    assert.equal(exhaustive.bounds.exactSearchThreshold, 10);
+    assert.equal(exhaustive.bounds.exactSearchLeafCap, 5000);
+    assert.equal(exhaustive.bounds.convergenceWindow, 10000);
+    assert.ok(Math.abs(exhaustive.bounds.deadline - exhaustive.before - 180000) < 500);
+
+    const dflt = capture({});
+    assert.equal(dflt.bounds.iterationCap, 40000);
+    assert.equal(dflt.bounds.gapFillBudgetMs, 1000);
+    assert.equal(dflt.bounds.exactSearchThreshold, 8);
+    assert.equal(dflt.bounds.exactSearchLeafCap, undefined);
+    assert.equal(dflt.bounds.convergenceWindow, 2000);
+    assert.ok(Math.abs(dflt.bounds.deadline - dflt.before - 5000) < 500);
+  } finally {
+    Engine.evaluateSetupAware = original;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+  }
+});
