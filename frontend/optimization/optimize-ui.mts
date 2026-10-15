@@ -13,12 +13,12 @@
 // now", so it belongs with ColorWheelViewer, not here; neither OptimizeDialog
 // nor OptimizerPreview ever referenced it.
 /* global NIMBUS */
-import { Config, Util, PerfMonitor, Toast, Modal } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, PerfMonitor, Toast, Modal } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Sandbox } from './sandbox.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
-import { Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
+import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidateForApply } from './setup-scheduler.mjs';
@@ -66,6 +66,9 @@ interface OptimizationAuditDetails {
   activePriorityFields: string[];
   unrankedPriorityFields: string[];
   splitOrderPolicy: SplitOrderPolicy;
+  /** Search budget the planner chose (ms) and whether it was the Exhaustive background run. */
+  searchBudgetMs?: number;
+  exhaustive?: boolean;
 }
 
 interface OptimizerRunOptions {
@@ -76,6 +79,9 @@ interface OptimizerRunOptions {
   respectFirmed?: boolean;
   respectCalendar?: boolean;
   auditDetails?: OptimizationAuditDetails;
+  /** Primary search budget in ms (Normal 8 s / Exhaustive 3 min); alternates always use the normal budget. */
+  searchBudgetMs?: number;
+  exhaustive?: boolean;
   [key: string]: unknown;
 }
 
@@ -96,6 +102,8 @@ function previewEvaluationRequest(
     planningStart: opts.planningStart as EvaluationRequest['planningStart'],
     placementStart: opts.placementStart as EvaluationRequest['placementStart'],
     deadlineAt,
+    searchBudgetMs: opts.searchBudgetMs,
+    exhaustive: opts.exhaustive,
   };
 }
 
@@ -453,6 +461,9 @@ export const OptimizeDialog = (() => {
     const hint = document.getElementById('opt-strategy-hint');
     if (hint) hint.textContent = Util.t('tip.' + mode + '_mode');
     _applyModeOptions();
+    // Remove Backlog is not a search; the Search time option only applies to the three setup-aware strategies.
+    const budgetSel = document.getElementById('opt-search-budget') as HTMLSelectElement | null;
+    if (budgetSel) { budgetSel.disabled = mode === 'backlog'; if (mode === 'backlog') budgetSel.value = '8'; }
     if (mode === 'backlog') _applyBacklogDefaults();
     else _updatePlantBadge();
   }
@@ -611,6 +622,14 @@ export const OptimizeDialog = (() => {
     // "Optimizing…" state (e.g., Cancel mid-fetch).
     const runBtn = document.getElementById('opt-run-btn');
     if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+    // Search time always opens on Normal; the planner opts into Exhaustive per run.
+    const budgetSelect = document.getElementById('opt-search-budget') as HTMLSelectElement | null;
+    if (budgetSelect) budgetSelect.value = '8';
+    // A background run holds the optimizer: show that instead of an enabled Run.
+    if (runBtn && OptimizerPreview._backgroundRun) {
+      (runBtn as HTMLButtonElement).disabled = true;
+      runBtn.textContent = Util.t('btn.opt_run_bg_busy');
+    }
     _updatePlantBadge();
     // Default scope to whole-plant on each open; clear stale line selection.
     _selectedLines.clear();
@@ -637,6 +656,11 @@ export const OptimizeDialog = (() => {
   }
 
   async function run() {
+    const bgRun = OptimizerPreview._backgroundRun;
+    if (bgRun) {
+      Toast.show(Util.t('toast.opt_bg_running', { plant: bgRun.plant }), 'warn');
+      return;
+    }
     const plant = _plant;
     if (!plant) {
       Toast.show(Util.t('toast.select_plant_to_opt'), 'warn');
@@ -654,6 +678,9 @@ export const OptimizeDialog = (() => {
     }
     const sfEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const scEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
+    const budgetEl = document.getElementById('opt-search-budget') as HTMLSelectElement | null;
+    // Exhaustive runs in the background: no preview spinner, the planner keeps working.
+    const exhaustive = budgetEl?.value === '180' && _mode !== 'backlog';
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer
@@ -683,7 +710,7 @@ export const OptimizeDialog = (() => {
     // freshness fetch below and the config-modal close transition. Otherwise
     // the user stares at a blurry frozen page for ~1–2s with no visible
     // response to their click.
-    OptimizerPreview.showLoading(_mode, plant);
+    if (!exhaustive) OptimizerPreview.showLoading(_mode, plant);
     // Hide the config modal RIGHT NOW (no 230ms fade). Its backdrop sits at
     // z-index 3000 with blur(12px) and would cover the preview spinner
     // (z=2000) for the entire await + fade duration. Hiding immediately is
@@ -750,7 +777,7 @@ export const OptimizeDialog = (() => {
       const ok = await Modal.confirm({
         title: Util.t('modal.no_priority_ranks_confirm_msg', { plant, fields: names }),
       });
-      if (!ok) { OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+      if (!ok) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
     }
 
     const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
@@ -762,6 +789,8 @@ export const OptimizeDialog = (() => {
       respectFirmed:   sfEl?.checked ?? true,
       respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
       runAt:           Store.serverNow(),
+      searchBudgetMs:  exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
+      exhaustive,
       auditDetails: _mode === 'backlog' ? undefined : {
         mode: _mode,
         wheelUsed,
@@ -771,8 +800,16 @@ export const OptimizeDialog = (() => {
         activePriorityFields: Engine.activeConstraintKeys(plant),
         unrankedPriorityFields: unrankedFields,
         splitOrderPolicy: Engine.splitOrderPolicyFor(plant),
+        searchBudgetMs: exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS,
+        exhaustive,
       },
     };
+
+    if (exhaustive) {
+      restoreRunBtn();
+      void OptimizerPreview.runInBackground(_mode, optsForEngine);
+      return;
+    }
 
     // Config modal was already hidden (close(true) above) before the rank-map
     // freshness guard — no second close() needed here.
@@ -1107,6 +1144,10 @@ export const OptimizerPreview = {
   _taskBaseline: null as Map<string, string> | null,
   _taskWatchUnsubscribe: null as (() => void) | null,
   _applying: false,
+  /** True for a result opened from the background-finished popup: when local edits stale it, Apply becomes
+   *  "apply what still fits" (`applyPartial`) instead of being disabled. Reset by `_clear`. */
+  _partialApplyAllowed: false,
+  _applyLabelChanged: false,
   active:    false,  // true while detached candidate details await Apply/Discard
   _abandonGuardInstalled: false,
   /** Phase 2 (Pkg D): monotonic token, incremented at the top of every
@@ -1272,6 +1313,15 @@ export const OptimizerPreview = {
     return OptimizerPreview._revalidateTaskBaseline();
   },
 
+  /** Partial apply is open only for a background result that local task edits staled; setup writes and
+   *  engine re-derivations keep their own banner and still block Apply. */
+  _canApplyPartial(): boolean {
+    const pv = OptimizerPreview;
+    return pv._partialApplyAllowed && pv.stale && pv._staleMessageKey === 'ui.opt_preview_task_stale'
+      && pv.active && !!pv._candidate && !!pv._snapshot && !!pv._taskBaseline
+      && !pv._candidate.validationFindings?.some(finding => finding.severity === 'error' && !finding.taskId);
+  },
+
   _staleMessage(): string {
     return Util.t(OptimizerPreview._staleMessageKey || 'ui.opt_stale_banner');
   },
@@ -1336,7 +1386,16 @@ export const OptimizerPreview = {
   _syncApplyButton(): void {
     const button = typeof document === 'undefined' ? null : document.getElementById('opt-preview-apply-btn') as HTMLButtonElement | null;
     if (!button) return;
-    const applyable = OptimizerPreview.canApply();
+    const fullApply = OptimizerPreview.canApply();
+    const partial = !fullApply && OptimizerPreview._canApplyPartial();
+    const applyable = fullApply || partial;
+    if (partial) {
+      button.textContent = Util.t('ui.opt_pv_apply_fits');
+      OptimizerPreview._applyLabelChanged = true;
+    } else if (OptimizerPreview._applyLabelChanged) {
+      button.textContent = Util.t('btn.opt_pv_apply');
+      OptimizerPreview._applyLabelChanged = false;
+    }
     button.disabled = !applyable;
     button.title = applyable ? '' : (OptimizerPreview.stale
       ? OptimizerPreview._staleMessage()
@@ -1535,7 +1594,7 @@ export const OptimizerPreview = {
     // budget, no behavior change, but the option now exists so the
     // (deferred) alt run below no longer inherits a full fresh one.
     const _evalPrimaryT0 = performance.now();
-    const deadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+    const deadlineAt = performance.now() + (opts.searchBudgetMs ?? SETUP_AWARE_NORMAL_BUDGET_MS);
     const primaryEvaluation = runOptimizerPreview({
       runId: `optimizer-preview-${runSeq}-primary`, mode, snapshot: candidateSnapshot,
       request: previewEvaluationRequest(mode, opts, plant, deadlineAt),
@@ -1647,10 +1706,10 @@ export const OptimizerPreview = {
       const altMode = altModes[idx];
       try {
         const _evalAltT0 = performance.now();
-        const altDeadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+        const altDeadlineAt = performance.now() + SETUP_AWARE_NORMAL_BUDGET_MS;
         const altEvaluation = runOptimizerPreview({
           runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
-          request: previewEvaluationRequest(altMode, opts, plant, altDeadlineAt),
+          request: previewEvaluationRequest(altMode, { ...opts, searchBudgetMs: SETUP_AWARE_NORMAL_BUDGET_MS, exhaustive: false }, plant, altDeadlineAt),
         }, {
           signal,
           syncEvaluator: evaluateSchedule,
@@ -2189,12 +2248,16 @@ export const OptimizerPreview = {
     OptimizerPreview._syncApplyButton();
   },
 
-  apply() {
+  async apply(): Promise<void> {
     const snap = OptimizerPreview._snapshot;
     const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
+    // A background result viewed after local edits: Apply becomes "apply what still fits".
+    if (!OptimizerPreview.canApply() && OptimizerPreview._canApplyPartial() && plant) {
+      return OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial({ plant, candidate, snapshot: snap, taskBaseline: OptimizerPreview._taskBaseline! }));
+    }
     if (!OptimizerPreview.canApply()) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
       return;
@@ -2216,7 +2279,14 @@ export const OptimizerPreview = {
       : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
     const runningSkippedIds = candidate.patches
       .filter(patch => !keptPatches.includes(patch)).map(patch => String(patch.id));
-    void OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap);
+    await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
+  },
+
+  /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
+  async _runGuardedCommit(commit: Promise<void>): Promise<void> {
+    try { await commit; } catch (err) {
+      ErrorLog.error('optimizer', `Apply failed: ${err instanceof Error ? err.message : String(err)}`, err);
+    }
   },
 
   /** Commit a (possibly filtered) set of preview patches: audit, apply, undo
@@ -2248,6 +2318,7 @@ export const OptimizerPreview = {
             active_priority_fields: auditDetails.activePriorityFields,
             unranked_priority_fields: auditDetails.unrankedPriorityFields,
             split_order_policy: auditDetails.splitOrderPolicy,
+            ...(auditDetails.searchBudgetMs !== undefined ? { search_budget_ms: auditDetails.searchBudgetMs, exhaustive: auditDetails.exhaustive === true } : {}),
           },
         }),
       }).catch(() => {});
@@ -2279,8 +2350,9 @@ export const OptimizerPreview = {
       if (skipped.reason === 'running') {
         Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
       } else {
-        // 'changed' (stale-skipped): Task 3 supplies the toast key; same toast until then.
-        Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
+        const shown = skipped.ids.slice(0, 5).join(', ');
+        const list = skipped.ids.length > 5 ? `${shown} (+${skipped.ids.length - 5} more)` : shown;
+        Toast.show(Util.t('toast.opt_bg_partial_applied', { applied: kept.length, skipped: skipped.ids.length, list }), 'warn', 9000);
       }
     }
     Store.setLastOptimize(new Date(), 'engine');
@@ -2344,6 +2416,291 @@ export const OptimizerPreview = {
     }
   },
 
+  /* ---------------------------------------------------------------------
+     BACKGROUND (EXHAUSTIVE) RUN
+     The Exhaustive search runs through `computePreview` with no `onPrimary`
+     hook, so it touches no preview state and no DOM until the planner opens
+     the finish popup and chooses View / Apply / Dismiss.
+     --------------------------------------------------------------------- */
+  _backgroundRun: null as null | {
+    plant: string; mode: OptimizerMode; startedAt: number;
+    controller: AbortController | null; result: PreviewResult | null; error: string | null;
+  },
+  _leaveGuard: null as ((e: BeforeUnloadEvent) => void) | null,
+  _bgDoneBound: false,
+
+  async runInBackground(mode: OptimizerMode, opts: OptimizerRunOptions): Promise<void> {
+    const plant = opts.plant ?? Store.selectedPlant;
+    if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
+    if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
+    if (OptimizerPreview._backgroundRun) {
+      Toast.show(Util.t('toast.opt_bg_running', { plant: OptimizerPreview._backgroundRun.plant }), 'warn');
+      return;
+    }
+    const controller = new AbortController();
+    OptimizerPreview._backgroundRun = { plant, mode, startedAt: performance.now(), controller, result: null, error: null };
+    OptimizerPreview._syncToolbarRunning();
+    OptimizerPreview._installLeaveGuard();
+    Toast.show(Util.t('toast.opt_bg_started', { plant }), 'info', 6000,
+      { label: Util.t('btn.cancel'), run: () => OptimizerPreview.cancelBackground() });
+    try {
+      const result = await OptimizerPreview.computePreview(mode, { ...opts, plant }, {
+        signal: controller.signal,
+        tick: () => new Promise<void>(resolve => { setTimeout(resolve, 0); }),
+        shouldStop: () => false,
+        runSeq: ++OptimizerPreview._runSeq,
+      });
+      const run = OptimizerPreview._backgroundRun;
+      if (!run || run.controller !== controller) return;   // cancelled meanwhile
+      run.result = result;
+      OptimizerPreview._showBackgroundDone();
+    } catch (err) {
+      const run = OptimizerPreview._backgroundRun;
+      if (!run || run.controller !== controller) return;
+      if ((err as Error)?.name === 'AbortError') {
+        OptimizerPreview._backgroundRun = null;
+        Toast.show(Util.t('toast.opt_bg_cancelled'), 'info');
+      } else {
+        run.error = String((err as Error)?.message ?? err);
+        ErrorLog.error('optimizer', `Exhaustive optimization failed: ${run.error}`, err);
+        OptimizerPreview._showBackgroundDone();
+      }
+    } finally {
+      OptimizerPreview._syncToolbarRunning();
+      OptimizerPreview._removeLeaveGuard();
+    }
+  },
+
+  cancelBackground(): void {
+    const run = OptimizerPreview._backgroundRun;
+    if (!run) return;
+    run.controller?.abort();
+    OptimizerPreview._backgroundRun = null;
+    OptimizerPreview._syncToolbarRunning();
+    OptimizerPreview._removeLeaveGuard();
+    Toast.show(Util.t('toast.opt_bg_cancelled'), 'info');
+  },
+
+  /** True while the search is still computing (not yet finished or failed). */
+  _backgroundComputing(): boolean {
+    const run = OptimizerPreview._backgroundRun;
+    return !!run && !run.result && !run.error;
+  },
+
+  /** Toolbar Optimize button: pulsing dot + cancel-on-click while a background run computes. */
+  _syncToolbarRunning(): void {
+    const btn = typeof document === 'undefined' ? null : document.getElementById('btn-optimize') as HTMLButtonElement | null;
+    if (!btn) return;
+    const running = OptimizerPreview._backgroundComputing();
+    btn.classList.toggle('is-running', running);
+    btn.title = running ? Util.t('btn.opt_run_bg_busy') : Util.t('tip.smart_optimize');
+    btn.onclick = running ? () => { void OptimizerPreview._askCancelBackground(); } : () => { OptimizeDialog.open(); };
+  },
+
+  async _askCancelBackground(): Promise<void> {
+    const run = OptimizerPreview._backgroundRun;
+    if (!run || !OptimizerPreview._backgroundComputing()) return;
+    const secs = Math.round((performance.now() - run.startedAt) / 1000);
+    const elapsed = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    const ok = await Modal.confirm({ title: Util.t('modal.opt_bg_cancel_confirm', { plant: run.plant, elapsed }), tone: 'warn' });
+    if (ok && OptimizerPreview._backgroundRun === run && OptimizerPreview._backgroundComputing()) OptimizerPreview.cancelBackground();
+  },
+
+  /** One beforeunload listener while the search computes: leaving the page would lose it. */
+  _installLeaveGuard(): void {
+    if (OptimizerPreview._leaveGuard || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    const guard = (e: BeforeUnloadEvent): void => {
+      if (!OptimizerPreview._backgroundComputing()) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    OptimizerPreview._leaveGuard = guard;
+    window.addEventListener('beforeunload', guard);
+  },
+
+  _removeLeaveGuard(): void {
+    const guard = OptimizerPreview._leaveGuard;
+    if (!guard) return;
+    OptimizerPreview._leaveGuard = null;
+    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') window.removeEventListener('beforeunload', guard);
+  },
+
+  /** Which of the result's proposed orders no longer match the state the search ran on. */
+  _changedSinceBaseline(result: Pick<PreviewResult, 'candidate' | 'taskBaseline'>): { changed: string[]; missing: string[] } {
+    const changed: string[] = [];
+    const missing: string[] = [];
+    for (const patch of result.candidate.patches) {
+      const id = String(patch.id);
+      const live = Store.tasks[id];
+      if (!live) missing.push(id);
+      else if (taskBaseline([live]).get(id) !== result.taskBaseline.get(id)) changed.push(id);
+    }
+    return { changed, missing };
+  },
+
+  _renderBackgroundDone(): void {
+    const run = OptimizerPreview._backgroundRun;
+    const body = typeof document === 'undefined' ? null : document.getElementById('opt-bg-done-body');
+    const applyBtn = typeof document === 'undefined' ? null : document.getElementById('opt-bg-apply-btn') as HTMLButtonElement | null;
+    const viewBtn = typeof document === 'undefined' ? null : document.getElementById('opt-bg-view-btn') as HTMLButtonElement | null;
+    if (!run) return;
+    const esc = (value: string): string => Util.escapeHtml(value);
+    const warn = (text: string): string => `<div class="opt-pv-stale" style="margin-top:10px;">${esc(text)}</div>`;
+    const result = run.result;
+    if (!result) {
+      if (body) body.innerHTML = warn(Util.t('ui.opt_bg_done_failed', { error: run.error ?? '' }));
+      if (applyBtn) applyBtn.disabled = true;
+      if (viewBtn) viewBtn.disabled = true;
+      return;
+    }
+    const patches = result.candidate.patches;
+    const placed = patches.filter(patch => patch.changes.start_date != null).length;
+    const queued = patches.filter(patch => patch.changes.planning_status === 'needs_planning').length;
+    const seconds = Math.round(result.runtimeMs / 1000);
+    let html = `<p style="margin:0;">${esc(Util.t('ui.opt_bg_done_summary', { plant: result.plant, placed, queued, seconds }))}</p>`;
+    if (result.candidate.diagnostics?.limitReached) {
+      html += `<p class="opt-strategy-hint">${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>`;
+    }
+    const { changed, missing } = OptimizerPreview._changedSinceBaseline(result);
+    if (changed.length + missing.length > 0) {
+      html += warn(Util.t('ui.opt_bg_done_changed', { count: changed.length + missing.length }));
+    }
+    let blocked = false;
+    if (Store.selectedPlant !== result.plant) {
+      html += warn(Util.t('ui.opt_bg_done_other_plant', { current: Store.selectedPlant ?? '', plant: result.plant }));
+      blocked = true;
+    }
+    if (result.candidate.validationFindings?.some(finding => finding.severity === 'error' && !finding.taskId)) {
+      html += warn(Util.t('ui.opt_bg_done_blocked'));
+      blocked = true;
+    }
+    if (body) body.innerHTML = html;
+    if (applyBtn) applyBtn.disabled = blocked;
+    if (viewBtn) viewBtn.disabled = false;
+  },
+
+  _showBackgroundDone(): void {
+    OptimizerPreview._installBackgroundDoneGuard();
+    OptimizerPreview._renderBackgroundDone();
+    Modal.open('modal-opt-background-done');
+  },
+
+  /** The finish popup's backdrop closes on an outside click without calling a handler; treat that as Dismiss
+   *  so the finished run never stays stuck holding the optimizer. */
+  _installBackgroundDoneGuard(): void {
+    if (OptimizerPreview._bgDoneBound || typeof document === 'undefined') return;
+    const el = document.getElementById('modal-opt-background-done');
+    if (!el) return;
+    OptimizerPreview._bgDoneBound = true;
+    // The popup's buttons are bound here, not with inline handlers (legacy-surface ratchet).
+    document.getElementById('opt-bg-close-btn')?.addEventListener('click', () => OptimizerPreview.backgroundDismiss());
+    document.getElementById('opt-bg-view-btn')?.addEventListener('click', () => OptimizerPreview.backgroundView());
+    document.getElementById('opt-bg-apply-btn')?.addEventListener('click', () => { void OptimizerPreview.backgroundApply(); });
+    if (typeof MutationObserver !== 'function') return;
+    new MutationObserver(() => {
+      const run = OptimizerPreview._backgroundRun;
+      if (el.hidden && run && !OptimizerPreview._backgroundComputing()) {
+        OptimizerPreview._backgroundRun = null;
+        Toast.show(Util.t('toast.opt_discarded'), 'info');
+      }
+    }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
+  },
+
+  backgroundDismiss(): void {
+    OptimizerPreview._backgroundRun = null;
+    Modal.close('modal-opt-background-done');
+    Toast.show(Util.t('toast.opt_discarded'), 'info');
+  },
+
+  backgroundView(): void {
+    const run = OptimizerPreview._backgroundRun;
+    const result = run?.result;
+    if (!run || !result) return;
+    OptimizerPreview._backgroundRun = null;
+    Modal.close('modal-opt-background-done');
+    OptimizerPreview._partialApplyAllowed = true;
+    OptimizerPreview.present(result, { open: true });
+    const { changed, missing } = OptimizerPreview._changedSinceBaseline(result);
+    if (changed.length + missing.length > 0) {
+      OptimizerPreview._markTaskStale('background result predates local edits', 'ui.opt_preview_task_stale');
+    }
+  },
+
+  async backgroundApply(): Promise<void> {
+    const run = OptimizerPreview._backgroundRun;
+    const result = run?.result;
+    if (!run || !result) return;
+    if (Store.selectedPlant !== result.plant) {
+      Toast.show(Util.t('toast.opt_bg_other_plant', { plant: result.plant }), 'warn');
+      return;
+    }
+    OptimizerPreview._backgroundRun = null;
+    Modal.close('modal-opt-background-done');
+    OptimizerPreview.present(result, { open: false });
+    await OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial(result));
+  },
+
+  /** Apply the part of a result that still matches the live schedule. An order that was edited, deleted, started
+   *  running, or whose distributed sub-order siblings were dropped is skipped; everything else is committed as one
+   *  Undo entry through `_commitPatches`. */
+  async applyPartial(result: Pick<PreviewResult, 'plant' | 'candidate' | 'snapshot' | 'taskBaseline'>): Promise<void> {
+    const pv = OptimizerPreview;
+    if (Store.selectedPlant !== result.plant) {
+      Toast.show(Util.t('toast.opt_bg_other_plant', { plant: result.plant }), 'warn');
+      return;
+    }
+    if (pv._candidate !== result.candidate) pv.present(result as PreviewResult, { open: false });
+    const refuse = (): void => {
+      Toast.show(Util.t('ui.opt_preview_task_stale'), 'warn');
+      pv._clear();
+      Modal.close('modal-opt-preview');
+    };
+    const candidate = result.candidate;
+    const patches = candidate.patches;
+    const plant = result.plant;
+    const live = (id: string): NimbusTask | undefined => Store.tasks[id];
+    const atCompute = new Map(result.snapshot.map(task => [String(task.id), task]));
+    // Distributed sub-orders (siblings sharing PARENT_ORDER, the field distribution_separation groups on) must
+    // land together, so one dropped sibling drops its whole family.
+    const parentKey = (task: NimbusTask | undefined): string | null =>
+      task?.PARENT_ORDER ? `${task.PARENT_ORDER}\u0000${task.MATERIAL_NUMBER ?? ''}` : null;
+    const familyOf = new Map<string, string[]>();
+    for (const patch of patches) {
+      const id = String(patch.id);
+      const key = parentKey(atCompute.get(id) ?? live(id));
+      if (key) familyOf.set(key, [...(familyOf.get(key) ?? []), id]);
+    }
+    const drop = new Set<string>();
+    const dropWithFamily = (id: string): void => {
+      drop.add(id);
+      const key = parentKey(atCompute.get(id) ?? live(id));
+      if (key) for (const sibling of familyOf.get(key) ?? []) drop.add(sibling);
+    };
+    for (const patch of patches) {
+      const id = String(patch.id);
+      const task = live(id);
+      if (!task || Engine.isInProgress(task) || taskBaseline([task]).get(id) !== result.taskBaseline.get(id)) dropWithFamily(id);
+    }
+    // Re-validate the kept subset; a task-level error drops that order (and family), a candidate-wide error refuses.
+    let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
+    for (let pass = 0; pass < 3; pass++) {
+      const findings = validateCandidateForApply({ ...candidate, patches: kept }, snapshotSchedule(plant))
+        // A dropped order keeps its live state, so the candidate's own accounting for it (disposition, queue shape)
+        // no longer describes anything this apply touches: ignore its findings, judge only what is still applied.
+        .filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate'
+          && !(finding.taskId && drop.has(String(finding.taskId))));
+      if (!findings.length) break;
+      if (pass === 2 || findings.some(finding => !finding.taskId)) { refuse(); return; }
+      for (const finding of findings) dropWithFamily(String(finding.taskId));
+      kept = patches.filter(patch => !drop.has(String(patch.id)));
+    }
+    if (!kept.length) { refuse(); return; }
+    const undoSnapshot = structuredClone(snapshotSchedule(plant).tasks
+      .filter(task => resolveTaskPlant(task, { lineSettings: Store.lineSettings, masterData: Store.masterData }) === plant));
+    pv._applying = true;
+    await pv._commitPatches(kept, { ids: [...drop], reason: 'changed' }, undoSnapshot);
+  },
+
   discard() {
     if (OptimizerPreview._candidate) {
       Toast.show(Util.t('toast.opt_discarded'), 'info');
@@ -2376,6 +2733,7 @@ export const OptimizerPreview = {
     OptimizerPreview._staleReason = null;
     OptimizerPreview._staleMessageKey = null;
     OptimizerPreview._applying = false;
+    OptimizerPreview._partialApplyAllowed = false;
     if (!keepPreviewDiagnostics) OptimizerPreview._previewDiagnostics = [];
     OptimizerPreview.active       = false;
   },

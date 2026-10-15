@@ -10,7 +10,11 @@ import {
   evaluateOptimizerWorkerRequest,
   localizeOptimizerDeadline,
 } from '../../../frontend/optimization/optimizer-worker.mjs';
-import { rehydrateOptimizerCandidate } from '../../../frontend/optimization/engine.mjs';
+import {
+  rehydrateOptimizerCandidate,
+  SETUP_AWARE_NORMAL_BUDGET_MS,
+  SETUP_AWARE_EXHAUSTIVE_BUDGET_MS,
+} from '../../../frontend/optimization/engine.mjs';
 import { validateCandidateForApply } from '../../../frontend/optimization/setup-scheduler.mjs';
 
 const require = createRequire(import.meta.url);
@@ -131,6 +135,27 @@ test('worker transport sends remaining budget and rejects missing or malformed v
   assert.throws(() => rehydrateOptimizerCandidate(candidate('missing-calendar-flag'), snapshot, {
     ...validation, respectCalendar: undefined,
   }), /validation metadata/, 'worker validation must carry the explicit calendar contract');
+});
+
+test('worker transport carries the chosen search budget as the remaining deadline duration', () => {
+  const post = (budgetMs, exhaustive) => {
+    let posted;
+    const pending = runOptimizerPreview({
+      runId: `budget-${budgetMs}`, mode: 'spt', snapshot,
+      request: { mode: 'spt', deadlineAt: performance.now() + budgetMs, searchBudgetMs: budgetMs, exhaustive },
+    }, {
+      workerFactory: () => ({ onmessage: null, onerror: null, postMessage(message) { posted = message; }, terminate() {} }),
+    });
+    pending.catch(() => {});
+    return posted;
+  };
+  const exhaustive = post(SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, true);
+  assert.ok(exhaustive.deadlineDurationMs > 170000 && exhaustive.deadlineDurationMs <= 180000,
+    'the Exhaustive primary posts its 180 s budget');
+  assert.equal(exhaustive.request.searchBudgetMs, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS);
+  assert.equal(exhaustive.request.exhaustive, true);
+  const normal = post(SETUP_AWARE_NORMAL_BUDGET_MS, false);
+  assert.ok(normal.deadlineDurationMs > 7000 && normal.deadlineDurationMs <= 8000, 'a Normal request posts its 8 s budget');
 });
 
 test('real optimizer worker boundary localizes its deadline and round-trips effective firming', () => {

@@ -5,15 +5,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { OptimizeDialog, OptimizerPreview, SandboxAdapter } from '../../../frontend/optimization/optimize-ui.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
-import { Util, ErrorLog, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Util, ErrorLog, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Alerts, Compute, Utilization } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { buildOptimizerWorkerResponse } from '../../../frontend/optimization/optimizer-worker.mjs';
 
 const require = createRequire(import.meta.url);
 // engine.mts reads the compute-core global at call time (plantWallClockFromInstant), so Node tests must bootstrap it.
@@ -1799,5 +1801,231 @@ test('senior review U21: the Optimize dialog refuses to run on a plant with no v
     Store.setMasterData(priorMaster, 'unit-test');
     Store.setTasks(priorTasks, 'unit-test');
     if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+/* ---------------------------------------------------------------------------
+   Task 3: Search time option, background (Exhaustive) run, finish popup, partial apply
+   ------------------------------------------------------------------------- */
+const enLocaleSource = readFileSync(new URL('../../../frontend/locales/en.js', import.meta.url), 'utf8');
+const enString = key => enLocaleSource.match(new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'((?:[^'\\\\]|\\\\.)*)'`))?.[1];
+
+// Single-reveal fixture plus the Task 3 elements, a Modal recorder, a Toast recorder and an UndoStack spy.
+function openBackgroundFixture(plant = 'SR', tasks = singleRevealTasks) {
+  const base = openSingleRevealFixture(plant, structuredClone(tasks));
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'toast.opt_bg_partial_applied': enString('toast.opt_bg_partial_applied'),
+  } };
+  const extra = new Map(['btn-optimize', 'modal-opt-background-done', 'opt-bg-done-body', 'opt-bg-apply-btn',
+    'opt-bg-view-btn', 'opt-search-budget', 'opt-run-btn'].map(id => [id, makeSandboxElement(id)]));
+  extra.get('opt-search-budget').value = '8';
+  const baseGet = globalThis.document.getElementById;
+  globalThis.document.getElementById = id => extra.get(id) || baseGet(id);
+  const priorOpen = Modal.open;
+  const priorClose = Modal.close;
+  const priorShow = Toast.show;
+  const priorPush = UndoStack.push;
+  const modalCalls = [];
+  const toasts = [];
+  const undoPushes = [];
+  Modal.open = id => { modalCalls.push({ op: 'open', id }); };
+  Modal.close = id => { modalCalls.push({ op: 'close', id }); };
+  Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+  UndoStack.push = (label, undo, ids) => { undoPushes.push({ label, ids: [...(ids || [])] }); return priorPush.call(UndoStack, label, undo, ids); };
+  return {
+    ...base, extra, modalCalls, toasts, undoPushes,
+    opts: { plant, respectCalendar: false, now: new Date('2026-08-03T08:00:00') },
+    restore() {
+      OptimizerPreview._backgroundRun?.controller?.abort();
+      OptimizerPreview._backgroundRun = null;
+      OptimizerPreview._removeLeaveGuard();
+      Modal.open = priorOpen; Modal.close = priorClose; Toast.show = priorShow; UndoStack.push = priorPush;
+      globalThis.window.__NIMBUS_LOCALES = priorLocales;
+      base.restore();
+    },
+  };
+}
+
+test('Task 3: runInBackground computes with no preview state, flags the toolbar, then opens the finish popup', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    const pending = OptimizerPreview.runInBackground('spt', fx.opts);
+    assert.ok(OptimizerPreview._backgroundRun, 'the run is registered synchronously');
+    assert.equal(OptimizerPreview.active, false, 'a background compute does not activate the preview');
+    assert.equal(OptimizerPreview._candidate, null);
+    assert.equal(OptimizerPreview._taskBaseline, null, 'no task baseline is installed by compute');
+    assert.ok(fx.extra.get('btn-optimize').classList.contains('is-running'), 'the toolbar button shows the running state');
+    await pending;
+
+    assert.ok(OptimizerPreview._backgroundRun.result, 'the result is held on the run');
+    assert.equal(OptimizerPreview.active, false, 'the popup alone installs nothing');
+    assert.equal(OptimizerPreview._taskBaseline, null, '_taskBaseline stays null after computePreview');
+    assert.ok(fx.modalCalls.some(c => c.op === 'open' && c.id === 'modal-opt-background-done'), 'the finish popup opens');
+    assert.ok(!fx.extra.get('btn-optimize').classList.contains('is-running'), 'the running state clears at completion');
+    assert.notEqual(fx.extra.get('opt-bg-apply-btn').disabled, true);
+
+    const { result } = OptimizerPreview._backgroundRun;
+    OptimizerPreview.present(result, { open: false });
+    assert.ok(OptimizerPreview._taskBaseline instanceof Map, '_taskBaseline is set after present');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3: backgroundApply skips an order edited while the search ran, applies the rest, and names the skipped id', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    const patchFor = id => result.candidate.patches.find(p => p.id === id);
+    assert.ok(patchFor('sr-long') && patchFor('sr-short'), 'both orders are proposed');
+    Store.updateTask('sr-short', { RUN_TIME: 2 }, 'user');
+    const changes = OptimizerPreview._changedSinceBaseline(result);
+    assert.deepEqual(changes.changed, ['sr-short']);
+    assert.deepEqual(changes.missing, []);
+    const shortBefore = Store.tasks['sr-short'].start_date;
+    const pushesBefore = fx.undoPushes.length;
+
+    await OptimizerPreview.backgroundApply();
+
+    assert.equal(Store.tasks['sr-short'].start_date, shortBefore, 'the edited order is untouched');
+    assert.equal(Store.tasks['sr-long'].start_date.getTime(), patchFor('sr-long').changes.start_date.getTime(),
+      'the unedited order matches the candidate');
+    assert.equal(fx.undoPushes.length - pushesBefore, 1, 'one Undo entry');
+    assert.ok(fx.toasts.some(t => t.msg.includes('sr-short') && t.msg.startsWith('Applied 1 orders; 1 skipped')),
+      `the toast names the skipped id, got ${JSON.stringify(fx.toasts)}`);
+    assert.equal(OptimizerPreview._backgroundRun, null);
+    assert.equal(OptimizerPreview._candidate, null, 'the apply tail clears the installed preview');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3: a result for another plant disables Apply and backgroundApply applies nothing', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    const pending = OptimizerPreview.runInBackground('spt', fx.opts);
+    Store.setSelectedPlant('OTHER-PLANT', 'unit-test');
+    await pending;
+    assert.equal(fx.extra.get('opt-bg-apply-btn').disabled, true, 'Apply is disabled while viewing another plant');
+    const before = JSON.stringify(Store.tasksArr.map(t => [t.id, t.start_date]));
+    await OptimizerPreview.backgroundApply();
+    assert.ok(fx.toasts.some(t => t.msg === Util.t('toast.opt_bg_other_plant', { plant: 'SR' })), 'toasts the switch-plant message');
+    assert.equal(JSON.stringify(Store.tasksArr.map(t => [t.id, t.start_date])), before, 'nothing was applied');
+    assert.equal(fx.undoPushes.length, 0);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3: cancelBackground aborts the controller; backgroundDismiss drops a finished result', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    const pending = OptimizerPreview.runInBackground('spt', fx.opts);
+    const { controller } = OptimizerPreview._backgroundRun;
+    OptimizerPreview.cancelBackground();
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(OptimizerPreview._backgroundRun, null);
+    await pending;
+    assert.equal(fx.modalCalls.some(c => c.op === 'open'), false, 'a cancelled run never opens the popup');
+    assert.ok(fx.toasts.some(t => t.msg === Util.t('toast.opt_bg_cancelled')));
+
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    assert.ok(OptimizerPreview._backgroundRun?.result);
+    OptimizerPreview.backgroundDismiss();
+    assert.equal(OptimizerPreview._backgroundRun, null);
+    assert.ok(fx.toasts.some(t => t.msg === Util.t('toast.opt_discarded')));
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3: viewing a background result after local edits keeps "Apply what still fits" enabled and routes to applyPartial', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    const applyBtn = makeSandboxElement('opt-preview-apply-btn');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'opt-preview-apply-btn' ? applyBtn : baseGet(id));
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    Store.updateTask('sr-short', { RUN_TIME: 2 }, 'user');
+    OptimizerPreview.backgroundView();
+    assert.equal(OptimizerPreview.stale, true);
+    assert.equal(applyBtn.disabled, false, 'partial apply keeps the button enabled');
+    assert.equal(applyBtn.textContent, Util.t('ui.opt_pv_apply_fits'));
+    await OptimizerPreview.apply();
+    assert.equal(Store.tasks['sr-short'].start_date, null, 'the edited order is skipped');
+    assert.ok(Store.tasks['sr-long'].start_date instanceof Date, 'the rest is applied');
+    assert.equal(fx.undoPushes.length, 1);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3: a running background run blocks OptimizeDialog.run with a toast and starts nothing', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    fx.extra.get('opt-search-budget').value = '180';
+    const stub = { plant: 'SR', mode: 'spt', startedAt: 0, controller: new AbortController(), result: null, error: null };
+    OptimizerPreview._backgroundRun = stub;
+    const seq = OptimizerPreview._runSeq;
+    await OptimizeDialog.run();
+    assert.ok(fx.toasts.some(t => t.type === 'warn' && t.msg === Util.t('toast.opt_bg_running', { plant: 'SR' })));
+    assert.equal(OptimizerPreview._backgroundRun, stub, 'no new controller replaced the running one');
+    assert.equal(OptimizerPreview._runSeq, seq);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3: OptimizeDialog.open resets Search time to Normal', async () => {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  try {
+    globalThis.requestAnimationFrame = () => 1;
+    // The date pickers are a browser library; every call on the stub is a no-op.
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    const modal = makeSandboxElement('modal-optimize');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
+    fx.extra.get('opt-search-budget').value = '180';
+    OptimizeDialog.open();
+    assert.equal(fx.extra.get('opt-search-budget').value, '8');
+  } finally {
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+  }
+});
+
+test('Task 3: the background driver finishes when the evaluator returns a Promise (worker path) and scales the primary deadline', async () => {
+  const fx = openBackgroundFixture();
+  const OriginalWorker = globalThis.Worker;
+  const posted = [];
+  class FakeWorker {
+    constructor() { this.onmessage = null; this.onerror = null; }
+    postMessage(message) {
+      posted.push(message);
+      const response = buildOptimizerWorkerResponse(message);
+      setTimeout(() => this.onmessage?.({ data: response }), 0);
+    }
+    terminate() {}
+  }
+  try {
+    globalThis.Worker = FakeWorker;
+    await OptimizerPreview.runInBackground('spt', { ...fx.opts, searchBudgetMs: 180000, exhaustive: true });
+    const run = OptimizerPreview._backgroundRun;
+    assert.ok(run?.result, `the async path produced a result, error: ${run?.error}`);
+    assert.ok(posted.length > 1, 'the primary and the alternates all went through the worker');
+    assert.ok(posted[0].deadlineDurationMs > 170000 && posted[0].deadlineDurationMs <= 180000, 'primary carries the Exhaustive budget');
+    for (const alt of posted.slice(1)) {
+      assert.ok(alt.deadlineDurationMs > 7000 && alt.deadlineDurationMs <= 8000, 'alternates keep the Normal budget');
+      assert.equal(alt.request.exhaustive, false);
+    }
+    assert.equal(posted[0].request.exhaustive, true);
+    assert.equal(OptimizerPreview.active, false, 'still no preview state');
+  } finally {
+    if (OriginalWorker === undefined) delete globalThis.Worker; else globalThis.Worker = OriginalWorker;
+    fx.restore();
   }
 });
