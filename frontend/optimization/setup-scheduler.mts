@@ -7186,7 +7186,8 @@ export function fillPlanningGaps(
     // the primary search refused because its setup transition is unrecorded (N8
     // excludeFromSearch) — keep that actionable reason instead of the generic "No slot found".
     const prior = dispositions.get(id)?.reason;
-    const overlong = complete && prior?.code !== 'setup_transition_unrecorded' ? neverOverlongReason(snapshot, bounds, task) : null;
+    // VI10: overlong is a calendar fact, not a search result; a budget expiry must not relabel it.
+    const overlong = prior?.code !== 'setup_transition_unrecorded' ? neverOverlongReason(snapshot, bounds, task) : null;
     const reason = complete && prior?.code === 'setup_transition_unrecorded'
       ? prior
       : overlong ?? (complete

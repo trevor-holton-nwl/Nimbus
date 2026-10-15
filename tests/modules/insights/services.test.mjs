@@ -346,6 +346,8 @@ test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the opti
   const day = new Date('2026-08-25T00:00:00');
   const aStart = new Date('2026-08-25T08:00:00'), aEnd = new Date('2026-08-25T12:00:00');
   Store.setSelectedPlant(plant, 'unit-test');
+  const priorMasterData = Store.masterData;
+  Store.setMasterData({ plants: [{ plant, timezone: 'America/Chicago' }], lines: [{ machine: line, plant }] }, 'unit-test');   // VM6: the fix needs a plant clock
   Store.setTasks([{ id: 'ov-a', PLANT: plant, MACHINE: line, RUN_TIME: '4', start_date: aStart, end_date: aEnd }], 'unit-test');
   Store.setAlerts([{ id: 'ov-alert', type: 'overload', line, time: day }], 'unit-test');
   UndoStack._entries.length = 0;
@@ -365,6 +367,28 @@ test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the opti
     Engine.runAndApply = priorRun; Toast.show = priorShow;
     Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
     Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
+    Store.setMasterData(priorMasterData, 'unit-test');
+  }
+});
+
+test('VM6: the overload auto-fix refuses a plant with no valid time zone and runs no optimizer', () => {
+  const plant = 'NOTZ-PLANT', line = 'NOTZ-LINE';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorMasterData = Store.masterData;
+  const priorRun = Engine.runAndApply, priorShow = Toast.show;
+  const shown = [];
+  Toast.show = (msg, type) => { shown.push(type); };
+  let ran = false;
+  Engine.runAndApply = () => { ran = true; };
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setMasterData({ plants: [{ plant }], lines: [{ machine: line, plant }] }, 'unit-test');
+  Store.setAlerts([{ id: 'notz-alert', type: 'overload', line, time: new Date('2026-08-25T00:00:00') }], 'unit-test');
+  try {
+    Alerts.applyFix('notz-alert');
+    assert.equal(ran, false);
+    assert.ok(shown.includes('error'), 'the Optimize-dialog refusal toast is shown (plantNow adds its own one-time warn)');
+  } finally {
+    Engine.runAndApply = priorRun; Toast.show = priorShow;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test'); Store.setMasterData(priorMasterData, 'unit-test');
   }
 });
 

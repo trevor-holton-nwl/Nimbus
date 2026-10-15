@@ -1007,7 +1007,9 @@ export const Calendar = {
         let take = Math.min(remaining, capacity);
         // OQ2 V1: the earliest piece also needs the changeover before it in this same fragment. When the
         // fragment cannot hold both, it is clipped to leave room for the changeover and the walk continues back.
-        if (setupMs && take === remaining && take * Config.MS_MIN + setupMs > capacity * Config.MS_MIN) {
+        // D6 (VM9): the clip applies only when the order is already split; an order that fits this one fragment
+        // stays whole and the setup is simply not reserved (the setup alert reports it).
+        if (setupMs && picked.length > 0 && take === remaining && take * Config.MS_MIN + setupMs > capacity * Config.MS_MIN) {
           take = capacity - Math.ceil(setupMs / Config.MS_MIN);
           if (take <= 0) continue;
         }

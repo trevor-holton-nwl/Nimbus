@@ -2079,7 +2079,8 @@ export const Engine = {
       const movedTask = sourceTask(patch.id);
       for (const protectedTask of scopedTasks) {
         if (protectedTask.MACHINE !== movedTask?.MACHINE || !protectedTask.start_date || !protectedTask.end_date) continue;
-        if (protectedTask.start_date <= to || patchById.has(protectedTask.id)) continue;
+        // VM7: a marked bar inside the window is an obstacle too
+        if ((protectedTask.start_date <= to && !protectedTask.placement_exception) || patchById.has(protectedTask.id)) continue;
         if (movedStart < protectedTask.end_date && movedEnd > protectedTask.start_date) {
           diagnostics.boundaryConflicts.push({ line: movedTask.MACHINE, movedTaskId: patch.id, protectedTaskId: protectedTask.id, type: 'overlap' });
         }

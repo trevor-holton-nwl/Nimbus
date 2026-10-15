@@ -622,10 +622,10 @@ describe('backward calendar primitives', () => {
     // 30-minute changeover. The setup must sit in the same operating window right before B's earliest piece.
     const v1 = name => plain(name, everyDay([6, 18]));
 
-    it('partial_allowed: clips the Tue fragment and continues into Mon, the setup sitting Mon 17:00-17:30', () => {
+    it('partial_allowed: an order that fits the Tue fragment stays whole and the changeover is not reserved (D6, VM9; repaired from the clip-and-split expectation)', () => {
       const line = v1('BW-S1');
       const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'partial_allowed', bopts({ setupMinutes: 30 }));
-      assert.equal(summary(r), '2026-10-19 17:30 -> 2026-10-20 14:00 [2026-10-19 17:30-2026-10-19 18:00 | 2026-10-20 06:30-2026-10-20 14:00]');
+      assert.equal(summary(r), '2026-10-20 06:00 -> 2026-10-20 14:00');
       assert.equal(r.finishMoved, false);
     });
 
@@ -750,5 +750,21 @@ describe('D17: look-back retry and plant-zone nominal window', () => {
       assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-01', '00:00'), nineH), false, 'wall-clock reading sees only 8 h');
       assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-02', '00:00'), nineH, tz), false, 'later Sundays are 8 h');
     });
+  });
+});
+
+describe('D6 (VM9): setup never splits an order that fits one window', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+
+  it('D6: under partial_allowed a run that fits one window is not clipped to make room for the changeover', () => {
+    Store.setCalendar('D6-A', weekdays(6, 22), 'unit-test');
+    Store.replaceBlocks([], 'unit-test');
+    const r = Calendar.allocateRuntimeBackward('D6-A', at(D.tue, '22:00'), 930, 'partial_allowed', bopts({ setupMinutes: 60 }));
+    assert.equal(r.kind, 'placed');
+    assert.equal(r.scheduleSegments.length, 0, 'one piece, not split');
+    assert.equal(fmt(r.start), '2026-10-20 06:30');
+    assert.equal(fmt(r.end), '2026-10-20 22:00');
   });
 });

@@ -5023,17 +5023,18 @@ describe('reconcile (finish-anchored)', () => {
     try {
       withSetup(fx, {}, () => {
         // Window 07-19. A (RED) ran Tue 25 07-09; B (BLUE, 4 h) is held to a Wed 26 11:00 finish. The 60-minute
-        // changeover cannot sit before 07:00 on Wednesday, so Wednesday's piece is clipped to 08:00-11:00 and the
-        // last production hour moves to Tuesday 18:00-19:00 with the changeover Tue 17:00-18:00.
+        // changeover cannot sit before 07:00 on Wednesday. D6 (VM9): B fits that one window, so setup never splits
+        // it: it stays one piece 07:00-11:00 and the unreserved changeover is left to the setup alert (repaired
+        // from the earlier clip-and-split expectation).
         Store.setTasks([
           fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
           fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
         ], 'unit-test');
         Engine.reconcileRuntimeSchedules(fx.plant);
         const t = Store.tasks.pb;
-        assert.equal(fmtLocal(t.start_date), '8/25 18:00');
+        assert.equal(fmtLocal(t.start_date), '8/26 07:00');
         assert.equal(fmtLocal(t.end_date), '8/26 11:00', 'the finish is held');
-        assert.deepEqual(t.scheduleSegments.map(seg => `${fmtLocal(seg.startDate)}-${fmtLocal(seg.endDate)}`), ['8/25 18:00-8/25 19:00', '8/26 08:00-8/26 11:00']);
+        assert.deepEqual(t.scheduleSegments ?? [], [], 'D6: one piece, never split to make room for the changeover');
         assert.equal(t.derivationIssue ?? null, null);
       });
     } finally { fx.restore(); }
@@ -5145,7 +5146,7 @@ describe('reconcile (finish-anchored)', () => {
         assert.equal(fmtLocal(manual.start_date), '8/26 07:00', 'alert-only: the manual placement is not clipped');
         const asked = Engine.finishAnchoredPatchFor(task, fx.line, at(26, 11), 'partial_allowed', { setupMinutes: 60 });
         assert.equal(asked.kind, 'placed');
-        assert.equal(fmtLocal(asked.changes.start_date), '8/25 18:00');
+        assert.equal(fmtLocal(asked.changes.start_date), '8/26 07:00', 'D6: the order fits one window, so the requested changeover does not split it');
       });
     } finally { fx.restore(); }
   });
@@ -5174,7 +5175,7 @@ describe('reconcile (finish-anchored)', () => {
         ], 'unit-test');
         Engine.reconcileRuntimeSchedules(fx.plant);
         assert.equal(Store.tasks.pb.derivationIssue ?? null, null);
-        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/25 18:30', 'the 20 remaining setup minutes (not the 60 standard) end before a 30-minute minimum piece');
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00', 'D6: the order fits one window, so no clip for the 20 remaining setup minutes either');
       });
     } finally { fx.restore(); }
   });

@@ -474,6 +474,11 @@ export const Alerts = {
       // plant over a 35-day horizon while the snapshot only captured one line+day,
       // so undo silently lost every cross-line / cross-day move.)
       const line = a.line, day = Util.dayKey(a.time || new Date());
+      const plant = Store.getPlantForLine(line) || Store.selectedPlant;
+      if (!plant || !Store.plantNow(plant)) {   // VM6 (OQ52): no clock, no placement; same refusal as the Optimize dialog
+        Toast.show(Util.t('toast.optimize_plant_no_timezone', { plant: plant ?? '' }), 'error', 9000);
+        return;
+      }
       const dayStart = Util.startOfDay(a.time || new Date())!;
       const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
       // Snapshot a SUPERSET of what the optimizer can move: every task on this line

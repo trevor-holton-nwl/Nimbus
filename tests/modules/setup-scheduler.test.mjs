@@ -627,6 +627,18 @@ test('gap fill has a separate budget and labels unchecked orders when it expires
   assert.equal(result.patches[0].changes.start_date, null);
 });
 
+test('VI10: fillPlanningGaps with a zero budget keeps overlong_never for an overlong order on a never plant', () => {
+  const snapshot = setupSnapshot([scheduledTask('vi10', 12, 'RED', '2026-08-03T18:00:00')]);   // windows are 10 h
+  snapshot.calendars = { L1: { workHours: OPEN_HOURS } };
+  snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+  const bounds = dueDateBounds(setupTruth({ current: null, definition: null }), { placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-10T18:00:00') });
+  const candidate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
+  assert.equal(candidate.dispositions.find(d => d.id === 'vi10').reason.code, 'overlong_never');
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate, 0);
+  assert.equal(result.gapFill.complete, false, 'the budget did expire');
+  assert.equal(result.dispositions.find(d => d.id === 'vi10').reason.code, 'overlong_never', 'an overlong order is a calendar fact, not a search result');
+});
+
 test('gap fill runs through the shared engine adapter for all three hard-bound strategies', () => {
   for (const mode of ['due-date', 'spt', 'min-changeover']) {
     const { snapshot, bounds } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')], { ...setupTruth(), plant_active: true });
