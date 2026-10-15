@@ -507,7 +507,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Peak utilization — use sync compute, but trigger worker refresh for next call
       let maxUtil = 0, overloadedLine = null;
       try {
-        const now = Util.startOfDay(new Date());
+        // One clock (OQ52 / I13): the plant's today, the same start the Dashboard matrix and the prewarm use.
+        const now = Util.plantToday(Store.selectedPlant);
         const startMs = now.getTime();
         const days = 7;
         const rev = Store.rev();
@@ -1610,7 +1611,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!tasks.length) { Confidence._apply(100); return; }
 
       const hMinutes = _confHorizonMinutes();
-      const horizonStart = new Date();
+      const horizonStart = Util.plantClock(Store.selectedPlant);   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
       // Days-out from now → time-weight multiplier (imminent = more costly)
@@ -1634,7 +1635,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       let matrix = null;
       const days = Math.ceil(hMinutes / 1440);
       const plant = Store.selectedPlant;
-      const startMs = horizonStart.getTime();
+      const startMs = Util.plantToday(plant).getTime();   // same start (and cache key) as computeMatrix / the prewarm
 
       if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
         try {
@@ -1760,7 +1761,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const alerts = Store.alerts || [];
       const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
-      const horizonStart = new Date();
+      const horizonStart = Util.plantClock(Store.selectedPlant);   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
       const tw = date => { if (!date) return 1.0; const d = (date - horizonStart) / 86400000; return d <= 3 ? 1.5 : d <= 7 ? 1.25 : 1.0; };
 
@@ -1773,7 +1774,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
-      const startMs = horizonStart.getTime();
+      const startMs = Util.plantToday(Store.selectedPlant).getTime();   // same start (and cache key) as computeMatrix / the prewarm
       const rev = Store.rev();
       const plant = Store.selectedPlant;
 

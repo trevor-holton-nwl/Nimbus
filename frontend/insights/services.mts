@@ -869,7 +869,7 @@ export const Utilization = {
     // snapshot to the worker for a matrix nothing on screen consumes.
     if (!Compute.available() || !Store.selectedPlant) return;
     const plant   = Store.selectedPlant; // scope key so a global / other-plant consumer never reads this entry
-    const startMs = Util.startOfDay(new Date())!.getTime();
+    const startMs = Util.plantToday(plant).getTime();   // the plant clock (I13), the same start the Dashboard matrix uses
     const rev     = Store.rev();
     Compute.utilization(startMs, 7)
       .then(({ matrix }) => {

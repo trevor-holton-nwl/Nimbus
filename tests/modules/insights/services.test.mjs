@@ -640,3 +640,30 @@ test('Utilization.minutesByDay (the cell-briefing rule): a 14 h order spanning W
     assert.equal(Math.round(byDay['2026-10-15'] / capacityMin * 100), 140);
   } finally { if (priorCalendar) Store.calendars[line] = priorCalendar; else delete Store.calendars[line]; }
 });
+
+test('I13: the worker prewarm starts the matrix on the plant clock and writes the cache key computeMatrix reads', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorAvailable = Compute.available;
+  const priorUtilization = Compute.utilization;
+  const priorCache = Utilization._cache;
+  let askedStart = null;
+  Util.setPlantClockResolver(plant => (plant === 'PW-P' ? new Date(2026, 9, 15, 0, 30) : null));   // plant a day ahead of the viewer
+  Compute.available = () => true;
+  Compute.utilization = (startMs) => { askedStart = startMs; return Promise.resolve({ matrix: {} }); };
+  try {
+    Store.setSelectedPlant('PW-P', 'unit-test');
+    Utilization._cache = null;
+    Utilization._prewarm();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const plantToday = new Date(2026, 9, 15).getTime();
+    assert.equal(askedStart, plantToday, 'the prewarm asks for the plant\'s today, not the viewer\'s');
+    assert.equal(Utilization._cache?.key, `${plantToday}|7|${Store.rev()}|PW-P`,
+      'the cache key carries the plant-today start, so a Dashboard computeMatrix(plantClock) call hits it');
+  } finally {
+    Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
+    Compute.available = priorAvailable;
+    Compute.utilization = priorUtilization;
+    Utilization._cache = priorCache;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
