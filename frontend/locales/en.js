@@ -360,6 +360,7 @@ window.__NIMBUS_LOCALES.en = {
   'btn.upload_production_version':     'Upload Production Versions',
   'btn.upload_routing_operation':      'Upload Routing Operations',
   'btn.delete_filtered':               'Delete Filtered Rows…',
+  'btn.change_scope':                  'Change',
   // Work Centers tab (§4.3).
   'btn.create':                         'Create',
   'btn.load_more':                      'Load more',
@@ -1452,6 +1453,7 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Master data ─────────────────────────────────────────────────────────── */
   'ui.select_placeholder':             '— select —',
   'ui.no_options':                     'No data available',
+  'hint.bom_pick_scope':               'Pick a plant and material to browse its Bill of Materials.',
   'hint.scope_pick_plant':             'Select a plant to load this table',
   'err.load_materials_failed':         'Failed to load materials for this plant',
 

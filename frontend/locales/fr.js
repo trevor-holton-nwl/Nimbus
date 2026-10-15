@@ -318,6 +318,7 @@ window.__NIMBUS_LOCALES.fr = {
   'btn.upload_production_version':     'Importer les Versions de Production',
   'btn.upload_routing_operation':      'Importer les Opérations d\'Acheminement',
   'btn.delete_filtered':               'Supprimer les Lignes Filtrées…',
+  'btn.change_scope':                  'Modifier',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Rechercher des machines…',
@@ -1418,6 +1419,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.excl_optimizer_full':            'Exclure de l\'optimiseur',
   'ui.select_placeholder':             '— sélectionner —',
   'ui.no_options':                     'Aucune donnée disponible',
+  'hint.bom_pick_scope':               'Choisissez une usine et un matériau pour parcourir sa nomenclature.',
   'hint.scope_pick_plant':             'Sélectionnez une usine pour charger ce tableau',
   'err.load_materials_failed':         'Impossible de charger les matériaux pour cette usine',
 

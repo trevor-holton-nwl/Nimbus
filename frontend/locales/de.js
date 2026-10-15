@@ -318,6 +318,7 @@ window.__NIMBUS_LOCALES.de = {
   'btn.upload_production_version':     'Produktionsversionen hochladen',
   'btn.upload_routing_operation':      'Fertigungsgänge hochladen',
   'btn.delete_filtered':               'Gefilterte Zeilen löschen…',
+  'btn.change_scope':                  'Ändern',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Maschinen suchen…',
@@ -1417,6 +1418,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.excl_optimizer_full':            'Vom Optimierer ausschließen',
   'ui.select_placeholder':             '— auswählen —',
   'ui.no_options':                     'Keine Daten verfügbar',
+  'hint.bom_pick_scope':               'Wählen Sie ein Werk und ein Material aus, um die Stückliste zu durchsuchen.',
   'hint.scope_pick_plant':             'Ein Werk auswählen um diese Tabelle zu laden',
   'err.load_materials_failed':         'Materialien für dieses Werk konnten nicht geladen werden',
 

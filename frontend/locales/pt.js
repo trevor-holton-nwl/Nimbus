@@ -318,6 +318,7 @@ window.__NIMBUS_LOCALES.pt = {
   'btn.upload_production_version':     'Enviar Versões de Produção',
   'btn.upload_routing_operation':      'Enviar Operações de Roteamento',
   'btn.delete_filtered':               'Excluir Linhas Filtradas…',
+  'btn.change_scope':                  'Alterar',
 
   /* ── Placeholder text ────────────────────────────────────────────────────── */
   'ph.search_lines':                   'Pesquisar máquinas…',
@@ -1417,6 +1418,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.excl_optimizer_full':            'Excluir do otimizador',
   'ui.select_placeholder':             '— selecionar —',
   'ui.no_options':                     'Nenhum dado disponível',
+  'hint.bom_pick_scope':               'Selecione uma planta e um material para navegar na Lista de Materiais.',
   'hint.scope_pick_plant':             'Selecione uma planta para carregar esta tabela',
   'err.load_materials_failed':         'Falha ao carregar materiais para esta planta',
 
