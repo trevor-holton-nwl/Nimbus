@@ -1183,28 +1183,28 @@ def _header_finish_echo(cur, parent: dict) -> bool:
     this aggregate (the one echo rule, `db._row_finish_echo`, judged in the SAP frame `parent["_sap_tz"]`).
 
     The header has no `order_sap_sent` row of its own: that table is keyed per member CHILD id and every
-    member carries the same roll-up end as `sent_finish`, so the header is judged on the sent finish of any
-    live member (MAX, deterministic). A family with no sent row on any member is not an echo. After a
-    collapse / re-weight the lettered child's sent row cascades away with it; the one-cycle detection gap
-    that leaves (the header then reads as never sent) is the accepted OQ29 gap."""
+    member carries the roll-up end as `sent_finish`, so the header is judged on the sent finish of any live
+    member (U11 rule): a stale larger row on a sibling cannot hide a genuine echo of the latest send (VI11).
+    A family with no sent row on any member is not an echo. After a collapse / re-weight the lettered
+    child's sent row cascades away with it; the one-cycle detection gap that leaves (the header then reads
+    as never sent) is the accepted OQ29 gap."""
     facts = parent["parent_facts"]
     cur.execute(
         """
-        SELECT MAX(s.sent_finish), (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = %s)
+        SELECT s.sent_finish, (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = %s)
           FROM order_distribution_share sh
           JOIN order_sap_sent s ON s.order_id = sh.child_id
          WHERE sh.plant = %s AND sh.production_order = %s AND sh.material_number = %s
         """,
         (parent["plant"], parent["plant"], parent["production_order"], parent["material_number"]),
     )
-    sent, tz = cur.fetchone()
-    if sent is None:
-        return False
-    return db._row_finish_echo(
-        {"sap_sent_finish": sent, "tz": tz},
-        {"sap_basic_finish_date": facts.get("sap_basic_finish_date"),
-         "_finish_date_only": facts.get("_finish_date_only")},
-        parent.get("_sap_tz"), finish_key="sap_basic_finish_date")
+    rows = cur.fetchall()
+    judged = {"sap_basic_finish_date": facts.get("sap_basic_finish_date"),
+              "_finish_date_only": facts.get("_finish_date_only")}
+    return any(
+        db._row_finish_echo({"sap_sent_finish": sent, "tz": tz}, judged, parent.get("_sap_tz"),
+                            finish_key="sap_basic_finish_date")
+        for sent, tz in rows if sent is not None)
 
 
 def _write_header_facts(cur, parent: dict, batch_id: str) -> None:

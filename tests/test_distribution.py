@@ -5227,6 +5227,27 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         header_orig, kids = self._originals(pg, self.MAT)
         assert header_orig == thu and all(k[1] == thu for k in kids.values())
 
+    def test_header_echo_matches_any_member_sent_finish_not_only_the_largest(self, pg):
+        """VI11: a stale, larger sent finish on one member must not hide a genuine echo of the latest send
+        carried by another member; the header keeps its locked original finish."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM orders WHERE plant=%s AND parent_production_order=%s AND material_number=%s"
+                        " ORDER BY id", (self.PLANT, self.ORD, self.MAT))
+            ids = [r[0] for r in cur.fetchall()]
+            assert len(ids) == 2
+            latest = dt.datetime(2026, 10, 28, 16, 0)
+            for oid, sent in ((ids[0], dt.datetime(2026, 11, 30, 10, 0)), (ids[1], latest)):
+                cur.execute("INSERT INTO order_sap_sent (order_id, plant, sent_finish) VALUES (%s, %s, %s)"
+                            " ON CONFLICT (order_id) DO UPDATE SET sent_finish = EXCLUDED.sent_finish",
+                            (oid, self.PLANT, sent))
+            conn.commit()
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=latest)])
+        header_orig, _kids = self._originals(pg, self.MAT)
+        assert header_orig == fri
+
     def test_sap_frame_echo_judged_for_header_and_children(self, pg):
         """sap_tz="UTC" with a Chicago plant: Thu 22 Oct 19:00 plant-local is Fri 23 Oct in the SAP frame, so a
         date-only Fri 23 Oct is an echo (locked originals stay, no slot reset); Sat 24 Oct is a genuine change."""
