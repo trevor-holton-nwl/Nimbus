@@ -2242,30 +2242,36 @@ def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
 
 
 def _working_window_close(cur, plant: str, machine: str | None, day: date) -> datetime:
-    """The close of the plant's working window on `day` (naive plant-local), for a due date SAP sent with no
-    time (D10, VI12). The machine's own calendar wins, else the plant's weekly hours (`{0..6: [open, close] |
-    null}`, day 0 = Sunday, fractional hours). A closed day walks back up to 30 days to the previous open
-    day's close (mirrors `dueDateInstant`). A close at or after the next midnight (a 24:00 close, a 24/7
-    line) sends 23:59:59 of that day; no calendar at all sends 23:59:59 of `day`."""
-    hours = None
+    """The close of the working window on `day` (naive plant-local), for a due date SAP sent with no time
+    (D10, VI12). Weekly hours are `{0..6: [open, close] | null}`, day 0 = Sunday, fractional hours. Like the
+    browser's `workWindow`, the machine's calendar is INTERSECTED with the plant's hours when both exist (a
+    weekday missing from either is closed, an empty intersection is closed); a machine with no calendar uses
+    the plant's hours alone, and a plant with none uses the machine's alone. A closed day walks back up to 30
+    days to the previous open day's close (mirrors `dueDateInstant`). A close at or after the next midnight
+    (a 24:00 close, a 24/7 line) sends 23:59:59 of that day; no calendar at all sends 23:59:59 of `day`."""
+    line_hours = plant_hours = None
     if machine:
         cur.execute("SELECT work_hours FROM machine_calendar WHERE plant = %s AND machine = %s"
                     " AND work_hours IS NOT NULL LIMIT 1", (plant, machine))
         r = cur.fetchone()
-        hours = r[0] if r else None
-    if not hours:
-        cur.execute("SELECT work_hours FROM plants WHERE plant = %s AND work_hours IS NOT NULL LIMIT 1", (plant,))
-        r = cur.fetchone()
-        hours = r[0] if r else None
+        line_hours = r[0] if r else None
+    cur.execute("SELECT work_hours FROM plants WHERE plant = %s AND work_hours IS NOT NULL LIMIT 1", (plant,))
+    r = cur.fetchone()
+    plant_hours = r[0] if r else None
+    line_hours = line_hours if isinstance(line_hours, dict) and line_hours else None
+    plant_hours = plant_hours if isinstance(plant_hours, dict) and plant_hours else None
     end_of_day = lambda d: datetime.combine(d, dt_time(23, 59, 59))  # noqa: E731
-    if not isinstance(hours, dict) or not hours:
+    if line_hours is None and plant_hours is None:
         return end_of_day(day)
     for back in range(31):
         d = day - timedelta(days=back)
-        win = hours.get(str((d.weekday() + 1) % 7))     # stored keys follow JS getDay(): 0 = Sunday
-        if not win:
+        key = str((d.weekday() + 1) % 7)                # stored keys follow JS getDay(): 0 = Sunday
+        wins = [h.get(key) for h in (line_hours, plant_hours) if h is not None]
+        if not all(wins):
             continue
-        close = float(win[1])
+        opened, close = max(float(w[0]) for w in wins), min(float(w[1]) for w in wins)
+        if opened >= close:
+            continue
         if close >= 24:
             return end_of_day(d)
         return datetime.combine(d, dt_time.min) + timedelta(minutes=round(close * 60))

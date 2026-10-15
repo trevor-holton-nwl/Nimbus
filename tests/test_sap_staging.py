@@ -1999,6 +1999,14 @@ def test_a_date_only_due_on_a_never_placed_firmed_order_is_sent_as_the_working_w
         (row,) = st.outbound_rows(PLANT)
         d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 22, 0), "Europe/Berlin")
         assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+        # the plant closes at 20:00: the line window is intersected with it, so Send transmits 20:00
+        with _conn(pg) as (conn, cur):
+            cur.execute("UPDATE plants SET work_hours = %s WHERE plant = %s", (Jsonb({"2": [6, 20]}), PLANT))
+            conn.commit()
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        newest = st.outbound_rows(PLANT)[0]
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 20, 0), "Europe/Berlin")
+        assert newest["pedtr"] == d.isoformat() and newest["pedti"] == t.isoformat()
     finally:
         _clear_outbound(pg)
 
