@@ -328,3 +328,13 @@ test('U28: the alert-card headline is the localized alert.type.<type> row, and o
     globalThis.window.__NIMBUS_LOCALES = prior;
   }
 });
+
+test('U30: the derive-paused banner is a status region and stacks below the concurrency banner when both are up', async () => {
+  const { readFileSync } = await import('node:fs');
+  const root = new URL('../../../frontend/', import.meta.url);
+  const html = readFileSync(new URL('index.html', root), 'utf8');
+  assert.match(html, /<div id="derive-paused-banner"[^>]*role="status"/);
+  const css = readFileSync(new URL('styles.css', root), 'utf8');
+  assert.match(css, /\.concurrency-off #derive-paused-banner\s*\{\s*top:\s*calc\(var\(--chrome-h\) \+ 34px\)/);
+  assert.match(css, /\.concurrency-off\.derive-paused \.tab-panel[^{]*\{\s*margin-top:\s*68px/);
+});

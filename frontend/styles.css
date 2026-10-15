@@ -2565,6 +2565,10 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 #derive-paused-banner[hidden] { display: none; }
 .derive-paused .tab-panel,
 .derive-paused .alert-drawer { margin-top: 34px; }
+/* U30: both banners up at once stack (derive-paused sits below the concurrency banner) and the content clears both. */
+.concurrency-off #derive-paused-banner { top: calc(var(--chrome-h) + 34px); }
+.concurrency-off.derive-paused .tab-panel,
+.concurrency-off.derive-paused .alert-drawer { margin-top: 68px; }
 
 /* =============================================================================
    P7: PRINT / EXPORT
