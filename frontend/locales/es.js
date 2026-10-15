@@ -139,6 +139,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.missing_key_rows':            'Todas las {{count}} fila(s) carecen de clave requerida: {{keys}}',
   'toast.no_valid_rows':               'No hay filas válidas para pegar',
   'toast.no_plant_selected':           'No hay planta seleccionada',
+  'toast.md_refreshed':                'Actualizado desde la base de datos',
+  'toast.md_refresh_failed':           'Error al actualizar: {{msg}}',
   'toast.missing_required_key':        'Faltan campos obligatorios',
   'toast.cascade_preview_failed':      'No se pudo verificar qué afectaría esta eliminación — inténtalo de nuevo.',
   'toast.bom_upload_done':             '{{inserted}} agregados, {{updated}} actualizados, {{rejected}} rechazados',
@@ -1345,6 +1347,7 @@ window.__NIMBUS_LOCALES.es = {
   'tip.changeover_mode':               'Min Changeover agrupa pedidos para minimizar el tiempo total de cambio/preparación; nunca programa un pedido antes del límite pull-forward de la planta y evita superar el límite push-forward; programa tantos pedidos como sea posible; las fechas de entrega no impulsan de otra forma la secuencia; los empates se resuelven mediante listas de prioridades, después menos retrasos.',
   'tip.duedate_mode':                  'Due Date — lateness ranks first: fewest orders over the push-forward limit, then fewest late orders, then least late hours and smallest worst-case lateness. Only then do priority lists and color/setup grouping break ties. Never starts an order before its pull-forward limit.', // MISSING TRANSLATION
   'tip.refresh':                       'Actualizar',
+  'tip.md_refresh':                    'Recargar esta pestaña desde la base de datos',
   'tip.inspect_storage':               'Inspeccionar claves localStorage',
   'tip.diag_export_bundle':            'Descargar paquete de diagnósticos para soporte',
   'tip.diag_clear_cache':              'Borrar caché local y recargar',

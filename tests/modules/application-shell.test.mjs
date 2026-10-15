@@ -359,3 +359,96 @@ test('a firm toggle followed by a reload (tasks:bulk) leaves no stale FIRMED for
     assert.ok(!('FIRMED' in calls[0].tasks[0]));
   } finally { globalThis.fetch = originalFetch; }
 }));
+
+// Master Data "↻ Refresh" button — App.refreshMasterSub dispatches to the active
+// sub-tab's refresh() through the _MASTER_SUBS registry.
+
+test('every App._MASTER_SUBS entry carries a refresh() function', () => {
+  assert.ok(App._MASTER_SUBS.length > 0);
+  for (const entry of App._MASTER_SUBS) {
+    assert.equal(typeof entry.refresh, 'function', `sub '${entry.sub}' is missing refresh()`);
+  }
+});
+
+async function withMasterRefresh(fn) {
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  const priorSub = App._currentMasterSub;
+  const priorPlant = Store.selectedPlant;
+  const priorFlag = App._masterRefreshInFlight;
+  const btn = { disabled: false, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; } };
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  globalThis.document = { getElementById: id => (id === 'md-master-refresh' ? btn : null) };
+  Store.setSelectedPlant('P1', 'unit-test');
+  App._masterRefreshInFlight = false;
+  const entry = App._MASTER_SUBS.find(e => e.sub === 'material');
+  const priorRefresh = entry.refresh;
+  App._currentMasterSub = 'material';
+  try {
+    await fn({ btn, toasts, entry });
+  } finally {
+    entry.refresh = priorRefresh;
+    Toast.show = priorToast;
+    globalThis.document = priorDocument;
+    App._currentMasterSub = priorSub;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    App._masterRefreshInFlight = priorFlag;
+  }
+}
+
+test('refreshMasterSub calls the active sub refresh and toasts success only when it resolves true', () => withMasterRefresh(async ({ toasts, entry }) => {
+  let calls = 0;
+  entry.refresh = async () => { calls++; return true; };
+  await App.refreshMasterSub();
+  assert.equal(calls, 1);
+  assert.deepEqual(toasts, [{ msg: Util.t('toast.md_refreshed'), type: 'success' }]);
+
+  toasts.length = 0;
+  entry.refresh = async () => { calls++; return false; };
+  await App.refreshMasterSub();
+  assert.equal(calls, 2);
+  assert.deepEqual(toasts, [], 'a false result (cancelled / failed, already toasted by the module) shows no toast');
+}));
+
+test('refreshMasterSub disables the button with aria-busy only while in flight and always restores it', () => withMasterRefresh(async ({ btn, toasts, entry }) => {
+  let release;
+  entry.refresh = () => new Promise(resolve => { release = resolve; });
+  const pending = App.refreshMasterSub();
+  assert.equal(btn.disabled, true);
+  assert.equal(btn.attrs['aria-busy'], 'true');
+  release(true);
+  await pending;
+  assert.equal(btn.disabled, false);
+  assert.equal('aria-busy' in btn.attrs, false);
+
+  // A thrown rejection toasts the failure, and the button is still restored.
+  entry.refresh = async () => { throw new Error('boom'); };
+  toasts.length = 0;
+  await App.refreshMasterSub();
+  assert.deepEqual(toasts, [{ msg: Util.t('toast.md_refresh_failed', { msg: 'boom' }), type: 'error' }]);
+  assert.equal(btn.disabled, false);
+  assert.equal('aria-busy' in btn.attrs, false);
+  assert.equal(App._masterRefreshInFlight, false);
+}));
+
+test('refreshMasterSub with no selected plant toasts toast.no_plant_selected and calls no refresh', () => withMasterRefresh(async ({ toasts, entry }) => {
+  let calls = 0;
+  entry.refresh = async () => { calls++; return true; };
+  Store.setSelectedPlant(null, 'unit-test');
+  await App.refreshMasterSub();
+  assert.equal(calls, 0);
+  assert.deepEqual(toasts, [{ msg: Util.t('toast.no_plant_selected'), type: 'warn' }]);
+}));
+
+test('a second refreshMasterSub call while the first is pending is a no-op', () => withMasterRefresh(async ({ entry }) => {
+  let calls = 0;
+  let release;
+  entry.refresh = () => { calls++; return new Promise(resolve => { release = resolve; }); };
+  const first = App.refreshMasterSub();
+  await App.refreshMasterSub();
+  assert.equal(calls, 1, 'the in-flight guard must swallow the second call');
+  release(true);
+  await first;
+  assert.equal(calls, 1);
+}));

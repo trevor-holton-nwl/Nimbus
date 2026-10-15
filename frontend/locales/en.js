@@ -161,6 +161,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.missing_key_rows':            'All {{count}} row(s) missing required key: {{keys}}',
   'toast.no_valid_rows':               'No valid rows to paste',
   'toast.no_plant_selected':           'No plant selected',
+  'toast.md_refreshed':                'Refreshed from the database',
+  'toast.md_refresh_failed':           'Refresh failed: {{msg}}',
   'toast.missing_required_key':        'Missing required field(s)',
   'toast.cascade_preview_failed':      'Could not verify what this delete would affect — try again.',
   // Work Centers tab (§4.3).
@@ -1450,6 +1452,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.diag_client_title':              'Client diagnostics',
   'ui.diag_client_help':               'Client-side health snapshot: JS heap usage, localStorage quota, schema version, and cache state. JS heap near browser limits (~1.5 GB) causes freezes; localStorage above 5 MB risks quota errors. A schema version mismatch means a stale cache — click Reset client state to clear it.',
   'tip.refresh':                       'Refresh',
+  'tip.md_refresh':                    'Reload this tab from the database',
   'tip.inspect_storage':               'Inspect localStorage keys',
   'tip.diag_export_bundle':            'Download diagnostics bundle for support',
   'tip.diag_clear_cache':              'Clear local cache and reload',

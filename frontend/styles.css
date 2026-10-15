@@ -4780,6 +4780,7 @@ body.dark .cw-active-card {
    this ancestor; the other three panes don't need it. */
 #md-master-plant-pane { overflow: hidden; }
 .md-master-subtabs { margin: 0; flex: 0 0 auto; }
+.md-master-refresh { align-self: center; margin: 0 8px 2px 0; }
 /* The Plant pane inner tabs sit flush beneath the master-data sub-tab row —
    same zero-margin treatment as .settings-inner-tabs one level further in. */
 .plant-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }

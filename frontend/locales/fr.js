@@ -139,6 +139,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.missing_key_rows':            'Toutes les {{count}} ligne(s) manquent de clé requise : {{keys}}',
   'toast.no_valid_rows':               'Aucune ligne valide à coller',
   'toast.no_plant_selected':           'Aucune usine sélectionnée',
+  'toast.md_refreshed':                'Actualisé depuis la base de données',
+  'toast.md_refresh_failed':           'Échec de l\'actualisation : {{msg}}',
   'toast.missing_required_key':        'Champs obligatoires manquants',
   'toast.cascade_preview_failed':      'Impossible de vérifier l\'impact de cette suppression — réessayez.',
   'toast.bom_upload_done':             '{{inserted}} ajoutés, {{updated}} mis à jour, {{rejected}} rejetés',
@@ -1344,6 +1346,7 @@ window.__NIMBUS_LOCALES.fr = {
   'tip.changeover_mode':               'Min Changeover regroupe les commandes pour minimiser le temps total de changement de série; il ne programme jamais une commande avant la limite pull-forward de l\'usine et évite de dépasser la limite push-forward; il programme autant de commandes que possible; les dates de livraison ne pilotent pas autrement la séquence; les égalités sont résolues par les listes de priorités, puis moins de retard.',
   'tip.duedate_mode':                  'Due Date — lateness ranks first: fewest orders over the push-forward limit, then fewest late orders, then least late hours and smallest worst-case lateness. Only then do priority lists and color/setup grouping break ties. Never starts an order before its pull-forward limit.', // MISSING TRANSLATION
   'tip.refresh':                       'Actualiser',
+  'tip.md_refresh':                    'Recharger cet onglet depuis la base de données',
   'tip.inspect_storage':               'Inspecter les clés localStorage',
   'tip.diag_export_bundle':            'Télécharger le pack de diagnostics pour le support',
   'tip.diag_clear_cache':              'Effacer le cache local et recharger',

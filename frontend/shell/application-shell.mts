@@ -2074,6 +2074,7 @@ const App = {
     document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(btn => {
       btn.onclick = () => App.gotoMasterSub(btn.dataset.mdMaster as MasterSubTab);
     });
+    document.getElementById('md-master-refresh')?.addEventListener('click', () => void App.refreshMasterSub());
 
     /* Timeline toolbar view buttons */
     document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(btn => {
@@ -2616,13 +2617,43 @@ const App = {
   // old shape silently fell through to ProdLines.render() for any sub not
   // literally 'plant'). Order matches the button order in index.html.
   _MASTER_SUBS: [
-    { sub: 'lines',          paneId: 'md-master-lines-pane',          render: () => ProdLines.render() },
-    { sub: 'plant',          paneId: 'md-master-plant-pane',          render: () => Plant.render() },
-    { sub: 'material',       paneId: 'md-master-material-pane',       render: () => MaterialGrids.render('material') },
-    { sub: 'material-plant', paneId: 'md-master-material-plant-pane', render: () => MaterialGrids.render('material-plant') },
-    { sub: 'routing-pv',     paneId: 'md-master-routing-pv-pane',     render: () => MaterialGrids.render('routing-pv') },
-    { sub: 'work-centers',   paneId: 'md-master-work-centers-pane',   render: () => void WorkCenters.render() },
-  ] as Array<{ sub: MasterSubTab; paneId: string; render(): void }>,
+    { sub: 'lines',          paneId: 'md-master-lines-pane',          render: () => ProdLines.render(),                   refresh: () => ProdLines.refresh() },
+    { sub: 'plant',          paneId: 'md-master-plant-pane',          render: () => Plant.render(),                       refresh: () => Plant.refresh() },
+    { sub: 'material',       paneId: 'md-master-material-pane',       render: () => MaterialGrids.render('material'),       refresh: () => MaterialGrids.refresh('material') },
+    { sub: 'material-plant', paneId: 'md-master-material-plant-pane', render: () => MaterialGrids.render('material-plant'), refresh: () => MaterialGrids.refresh('material-plant') },
+    { sub: 'routing-pv',     paneId: 'md-master-routing-pv-pane',     render: () => MaterialGrids.render('routing-pv'),     refresh: () => MaterialGrids.refresh('routing-pv') },
+    { sub: 'work-centers',   paneId: 'md-master-work-centers-pane',   render: () => void WorkCenters.render(),            refresh: () => WorkCenters.refresh() },
+  ] as Array<{ sub: MasterSubTab; paneId: string; render(): void; refresh(): Promise<boolean> }>,
+
+  _masterRefreshInFlight: false,
+
+  // The "↻ Refresh" button at the right end of the Master Data sub-tab strip:
+  // re-pulls the active sub-tab from Postgres. Each module's refresh() resolves
+  // true only when fresh data is now showing, and toasts its own cancel/fetch
+  // error — so a false result is silent here.
+  async refreshMasterSub(): Promise<void> {
+    const entry = App._MASTER_SUBS.find(e => e.sub === App._currentMasterSub);
+    if (!entry) return;
+    if (!Store.selectedPlant) {
+      Toast.show(Util.t('toast.no_plant_selected'), 'warn');
+      return;
+    }
+    if (App._masterRefreshInFlight) return;
+    App._masterRefreshInFlight = true;
+    const btn = document.getElementById('md-master-refresh') as HTMLButtonElement | null;
+    if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+    try {
+      const reloaded = await entry.refresh();
+      if (reloaded) Toast.show(Util.t('toast.md_refreshed'), 'success');
+    } catch (e) {
+      const msg = (e as Error).message;
+      ErrorLog.error('master-data', `Refresh failed: ${msg}`);
+      Toast.show(Util.t('toast.md_refresh_failed', { msg }), 'error');
+    } finally {
+      App._masterRefreshInFlight = false;
+      if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+    }
+  },
 
   gotoMasterSub(sub: MasterSubTab): void {
     const entry = App._MASTER_SUBS.find(e => e.sub === sub);
