@@ -197,24 +197,32 @@ def translate_db_error(exc) -> dict:
 # =========================
 # QUERIES — read
 # =========================
-# Effective finish for an order, as one shared SQL fragment so every read path agrees.
-# The Gantt bar's WIDTH must always represent run_time (a 12h order = half a day wide),
-# so run_time is the source of truth for duration:
-#   1. run-time-derived end (effective start + run_time hours) takes precedence — even
-#      over a persisted scheduled_end — so bars, utilization, and alerts all reflect the
-#      order's actual run time in elapsed calendar hours. (Most stored scheduled ends
-#      hold a flat ~SAP-window duration that does NOT match run_time.) The order's START
-#      still comes from scheduled_start (see BASIC_START_DATE below), so the user's
-#      placement is preserved — only the width is normalized to run_time;
-#   2. else scheduled_end — used only when run_time is unknown (NULL);
-#   3. else the raw SAP finish, as a last-resort fallback (no zero-width bar).
+# One start and one end for an order, as shared SQL fragments, so every read path agrees (backward
+# scheduling, Task 2.2). The server NEVER computes a finish from `start + run_time` (the one exception is the
+# distribution collapse carry, backend/distribution/data.py `_collapse_to_survivor`, G-0.28): it only reads what
+# was stored, in this order.
+#   Finish (_EFF_END_SQL):   the last segment end, else the stored `scheduled_end` (the planner's placed
+#                            finish), else the locked SAP finish as received, else `basic_finish_date`.
+#                            A never-placed order therefore reads the due date; a placed order's bar width
+#                            is whatever was stored, whatever its run time says.
+#   Start (_EFF_START_SQL):  NULL for a queued (Needs Planning) order, else the first segment start, else
+#                            `scheduled_start`, else `basic_start_date` (the display start until the
+#                            browser derives one).
+#   SAP start (_SAP_START_RECEIVED_SQL): the key the visibility horizon and the vanish rule read: the SAP
+#                            start as first received (locked), never where a planner placed the order.
+#   Placed (_PLACED_SQL):    the one definition of "someone placed this order".
+# Every fragment is qualified with the `o` alias of `orders` and the `seg` alias of
+# `_SCHEDULE_SEGMENTS_LATERAL_SQL`, so every caller must alias its orders table `o` and join the lateral.
 # Static SQL, no user input, so it is safe to interpolate.
-_EFF_END_SQL = (
-    "COALESCE("
-    "COALESCE(scheduled_start, basic_start_date) + (run_time * INTERVAL '1 hour'), "
-    "scheduled_end, "
-    "basic_finish_date)"
+_EFF_START_SQL = (
+    "CASE WHEN o.planning_status = 'needs_planning' THEN NULL "
+    "ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END"
 )
+_EFF_END_SQL = "COALESCE(seg.last_end, o.scheduled_end, o.original_finish_received, o.basic_finish_date)"
+# A queued order has no window at all (both edges NULL on the wire).
+_EFF_END_UNLESS_QUEUED_SQL = f"CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE {_EFF_END_SQL} END"
+_SAP_START_RECEIVED_SQL = "COALESCE(o.original_start_received, o.basic_start_date, o.original_finish_received)"
+_PLACED_SQL = "(seg.segment_count >= 2 OR o.scheduled_start IS NOT NULL OR o.scheduled_end IS NOT NULL)"
 
 # A parent order owns a complete, ordered segment aggregate.  The lateral
 # projection keeps the hot /tasks read path to one query and, importantly,
@@ -251,18 +259,47 @@ _SCHEDULE_RUNTIME_MISMATCH_SQL = """
          AND seg.productive_minutes <> ROUND(o.run_time * 60)))
 """
 
-# When an ingest just changed RUN_TIME, retain the pre-existing scheduled end
-# while the browser either regenerates the authoritative parent aggregate or
-# exposes the mismatch. Outside that narrow state, retain the established
-# runtime-derived effective-end behavior for legacy continuous orders.
-_EFF_END_WITH_RUNTIME_MISMATCH_SQL = (
-    "COALESCE("
-    "CASE WHEN COALESCE(o.runtime_schedule_mismatch, FALSE) "
-    "THEN o.scheduled_end END, "
-    f"{_EFF_END_SQL})"
-)
-
 MIN_SEGMENT_MINUTES = 30
+
+# Run-time length limits (backward-scheduling OQ28). The DATABASE bound is only a representation
+# bound (hours in a year: keeps NaN/Infinity/garbage out of interval arithmetic); the LIMIT an order
+# is scheduled with is a flat 336 h (14 days) on every plant (U5: the backward walk looks back ~90
+# days, so a plant's visibility horizon no longer buys derivability). A longer order is not an error:
+# it waits in Needs Planning.
+RUN_TIME_REPRESENTATION_BOUND_HOURS = 8760.0
+RUN_TIME_MAX_HOURS = 336.0
+RUN_TIME_OVER_CAP_CODE = "run_time_over_cap"
+
+
+def cap_hours(plant_row=None) -> float:
+    """The longest run time (hours) an order may be scheduled with: the flat RUN_TIME_MAX_HOURS (336 h).
+    `plant_row` is accepted (and ignored) so every caller keeps one place to change if the owner later
+    names a per-plant setting."""
+    return RUN_TIME_MAX_HOURS
+
+
+def _fmt_hours(value) -> str:
+    return f"{float(value):,.1f}".rstrip("0").rstrip(".")
+
+
+def run_time_over_cap_reason(run_time, cap: float) -> dict:
+    """The Needs Planning reason for an order whose run time is over the cap (same {code, message}
+    shape as every other planning_reason; the extra numbers feed the localised label in the grid)."""
+    return {
+        "code": RUN_TIME_OVER_CAP_CODE,
+        "message": (f"Run time of {_fmt_hours(run_time)} h is longer than the {_fmt_hours(cap)} h limit. "
+                    f"Shorten the run time or split the order, then schedule it."),
+        "run_time": float(run_time),
+        "cap_hours": float(cap),
+    }
+
+
+def _plant_caps(cur, plants) -> dict[str, float]:
+    """{plant: cap_hours} for a distinct plant set (flat 336 h; kept as one seam for a future per-plant cap)."""
+    clean_plants = sorted({p for p in plants if p})
+    if not clean_plants:
+        return {}
+    return {p: cap_hours() for p in clean_plants}
 
 
 def _min_segment_minutes_by_plant(cur, plants) -> dict[str, int]:
@@ -550,13 +587,15 @@ _ORDERS_SELECT = f"""
         material_description  AS "MATERIAL_DESCRIPTION",
         o.machine              AS "MACHINE",
         o.plant                AS "PLANT",
-        CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.first_start, scheduled_start, basic_start_date) END AS "BASIC_START_DATE",
-        CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS "BASIC_FINISH_DATE",
+        {_EFF_START_SQL} AS "BASIC_START_DATE",
+        {_EFF_END_UNLESS_QUEUED_SQL} AS "BASIC_FINISH_DATE",
         o.planning_status AS "PLANNING_STATUS",
         o.planning_reason AS "PLANNING_REASON",
-        basic_start_date      AS "ORIGINAL_START_DATE",
-        basic_finish_date     AS "ORIGINAL_END_DATE",
-        (seg.segment_count >= 2 OR scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS "USER_SCHEDULED",
+        -- The wire "original" dates are the LOCKED SAP values as received; basic_* is the
+        -- fallback for a row with no locked copy yet (backward scheduling, Phase 1).
+        COALESCE(o.original_start_received,  o.basic_start_date)  AS "ORIGINAL_START_DATE",
+        COALESCE(o.original_finish_received, o.basic_finish_date) AS "ORIGINAL_END_DATE",
+        {_PLACED_SQL} AS "USER_SCHEDULED",
         run_time              AS "RUN_TIME",
         -- Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13): server-computed
         -- provenance for run_time. Deliberately snake_case, unmatched to this
@@ -591,7 +630,8 @@ _ORDERS_SELECT = f"""
         -- xmin's native type (xid) has no direct bigint cast.
         o.xmin::text::bigint  AS "ROW_VERSION",
         seg.schedule_segments AS "SCHEDULE_SEGMENTS",
-        {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS "RUNTIME_SCHEDULE_MISMATCH"
+        {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS "RUNTIME_SCHEDULE_MISMATCH",
+        o.placement_exception AS "PLACEMENT_EXCEPTION"
     FROM orders o
     {_SCHEDULE_SEGMENTS_LATERAL_SQL}
 """
@@ -618,10 +658,10 @@ def query_orders(plant: str | None = None, line: str | None = None,
 
     C1 (2026-08-20): when `plant` is a single plant, the plant's visibility
     horizon (plants.visibility_horizon_days/horizon_roll_hour_utc) is resolved
-    and applied to the SAME three-way coalesce the endpoint reports as
-    BASIC_START_DATE — gating on start only (OD-C1d) — so a plant with a
+    and applied to the SAP start as first received (`_SAP_START_RECEIVED_SQL`,
+    backward scheduling OQ27) — gating on start only (OD-C1d) — so a plant with a
     configured horizon never has to rely on the frontend to hide rows that
-    were never sent. Unscoped (`plant=None`) calls are not horizon-bounded:
+    were never sent, and a planner's placement never moves an order across it. Unscoped (`plant=None`) calls are not horizon-bounded:
     the horizon is a per-plant setting and every real caller of this path
     already scopes by plant (the frontend always does; unscoped pulls are the
     documented coarse tooling guard rail, a different use case).
@@ -651,11 +691,11 @@ def query_orders(plant: str | None = None, line: str | None = None,
         horizon_end, frozen_end = _horizon_bounds_for_plant(cur, plant) if plant else (None, None)
         if horizon_end is not None:
             where.append("(o.planning_status = 'needs_planning' OR "
-                         "COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s)")
+                         f"{_SAP_START_RECEIVED_SQL} <= %s)")
             params.append(horizon_end)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date)'
+        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.scheduled_end, o.basic_start_date)'
         if limit is not None:
             sql += " LIMIT %s"
             params.append(int(limit))
@@ -698,7 +738,7 @@ def count_orders(plant: str | None = None, line: str | None = None,
         horizon_end, _frozen_end = _horizon_bounds_for_plant(cur, plant) if plant else (None, None)
         if horizon_end is not None:
             where.append("(o.planning_status = 'needs_planning' OR "
-                         "COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) <= %s)")
+                         f"{_SAP_START_RECEIVED_SQL} <= %s)")
             params.append(horizon_end)
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -838,15 +878,20 @@ def get_task_versions(ids: list[str]) -> list[dict]:
         return []
     sql = f"""
         SELECT o.id,
-               CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END AS eff_start,
-               CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_WITH_RUNTIME_MISMATCH_SQL}) END AS eff_end,
+               {_EFF_START_SQL} AS eff_start,
+               {_EFF_END_UNLESS_QUEUED_SQL} AS eff_end,
                o.xmin::text::bigint AS row_version,
                seg.schedule_segments,
                {_SCHEDULE_RUNTIME_MISMATCH_SQL} AS runtime_schedule_mismatch,
                o.plant, o.planning_status, o.planning_reason,
                o.run_time_source, o.run_time_basis,
                o.machine, o.prt_01, o.prt_02, o.production_version, o.run_time,
-               o.order_quantity, o.material_number, o.basic_start_date, o.manual_firmed
+               o.order_quantity, o.material_number,
+               COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
+               o.manual_firmed,
+               COALESCE(o.original_finish_received, o.basic_finish_date) AS original_end,
+               o.placement_exception,
+               {_PLACED_SQL} AS user_scheduled
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -876,6 +921,9 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "MATERIAL_NUMBER": r[17],
             "original_start_date": r[18].strftime("%Y-%m-%dT%H:%M:%S") if r[18] else None,
             "firmed": bool(r[19]),
+            "original_end_date": r[20].strftime("%Y-%m-%dT%H:%M:%S") if r[20] else None,
+            "placement_exception": r[21],
+            "user_scheduled": bool(r[22]),
         }
         for r in rows
     ]
@@ -969,7 +1017,7 @@ def _detect_interval_conflicts(intervals: list[tuple], touched: set[str]) -> lis
             for (m, a, b), v in sorted(totals.items())]
 
 
-# Longest run time (hours) the conflict scan's start-indexed lookback will widen by.
+# How far (hours) before the window the conflict scan's start-indexed lookback reaches: a fixed cap.
 _CONFLICT_LOOKBACK_CAP_HOURS = 30 * 24
 
 
@@ -1028,34 +1076,37 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
         return []
     lo = min(starts) - timedelta(days=1)
     hi = max(ends) + timedelta(days=1)
-    # A long order can start well before `lo` and still run into the window, so
-    # widen the start-indexed lookback by the touched machines' longest run time
-    # (capped) and keep the true-overlap test on the effective END.
-    # Bounded by the same indexable eff-start range (idx_orders_machine_eff_start):
-    # nothing starting more than the lookback cap before `lo` can matter, so never
-    # scan the machine's whole history just to size the lookback.
-    cur.execute(
-        "SELECT COALESCE(MAX(run_time), 0) FROM orders WHERE machine = ANY(%s) AND plant = ANY(%s)"
-        " AND COALESCE(scheduled_start, basic_start_date) BETWEEN %s AND %s",
-        (machines, plants, lo - timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS), hi),
-    )
-    lookback_hours = min(float(cur.fetchone()[0] or 0), _CONFLICT_LOOKBACK_CAP_HOURS)
-    wide_lo = lo - timedelta(hours=lookback_hours)
+    # A long order can start well before `lo` and still run into the window, so the start-indexed
+    # lookback is widened by the fixed 30-day cap (OQ27 e) -- no longer sized from the machines' run
+    # times, because a bar's drawn span is its stored finish, not start + run time -- and the
+    # true-overlap test stays on the effective END (the shared stored-finish fragment). Only PLACED
+    # neighbours are scanned: a never-placed order has no server-side placement (its "window" is the whole
+    # SAP window), so it cannot conflict here; the client overlap alert covers display overlaps. Bounded by the
+    # same indexable eff-start range (idx_orders_machine_eff_start): nothing starting more than the cap
+    # before `lo` can matter, so the scan never reads a machine's whole history.
+    wide_lo = lo - timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS)
     cur.execute(
         f"""
         SELECT o.machine, o.plant, o.id,
                COALESCE(seg.schedule_segments, '[]'::jsonb) AS segments,
-               COALESCE(o.scheduled_start, o.basic_start_date) AS eff_start,
+               COALESCE(o.scheduled_start,
+                        CASE WHEN o.scheduled_end IS NOT NULL
+                             THEN o.scheduled_end - make_interval(secs => COALESCE(o.run_time, 0) * 3600) END,
+                        o.basic_start_date) AS eff_start,
                {_EFF_END_SQL} AS eff_end
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.machine = ANY(%s)
           AND o.plant = ANY(%s)
           AND o.planning_status <> 'needs_planning'
-          AND COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
+          AND {_PLACED_SQL}
+          AND (COALESCE(o.scheduled_start, o.basic_start_date) BETWEEN %s AND %s
+               -- a finish-only placement (a distribution carry: stored end, no stored start) matches on its
+               -- stored end too (U2); its start is derived as end - run time for the overlap test
+               OR o.scheduled_end BETWEEN %s AND %s)
           AND {_EFF_END_SQL} > %s
         """,
-        (machines, plants, wide_lo, hi, lo),
+        (machines, plants, wide_lo, hi, lo, hi + timedelta(hours=_CONFLICT_LOOKBACK_CAP_HOURS), lo),
     )
     # Plant-qualified key so _detect_interval_conflicts (grouped by its
     # `machine` field only) never pools two different plants' same-named
@@ -1078,6 +1129,46 @@ def _scan_conflicts_for_rows(cur, update_rows: list[dict], eff: dict) -> list[di
                           "order_a": c["order_a"], "order_b": c["order_b"],
                           "overlap_minutes": c["overlap_minutes"]})
     return conflicts
+
+
+# Width tolerance of the continuous-bar check, in seconds (the stored bar and its run time are both whole
+# minutes; a minute of slack absorbs a browser rounding the finish up to its minute).
+WIDTH_TOLERANCE_SECONDS = 60
+PLACEMENT_EXCEPTIONS = ("overtime", "overlong")
+
+
+def _elapsed_seconds_readings(start: datetime, end: datetime, plant_tz: str | None) -> list[float]:
+    """Every real duration two NAIVE plant-local edges can mean. With a zone, each edge is read as the instant
+    it names there; inside the repeated fall-back hour a naive wall time names two instants (fold 0 and 1), so
+    the readings are returned for every fold pair and the caller accepts a bar that fits under any of them
+    (VI2). Outside that hour all readings are equal. No zone: the plain wall-clock difference."""
+    zone = None
+    if plant_tz:
+        try:
+            zone = ZoneInfo(plant_tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            zone = None
+    if zone is None:
+        return [(end - start).total_seconds()]
+    out: list[float] = []
+    for fs in (0, 1):
+        for fe in (0, 1):
+            s = start.replace(tzinfo=zone, fold=fs).astimezone(timezone.utc)
+            e = end.replace(tzinfo=zone, fold=fe).astimezone(timezone.utc)
+            out.append((e - s).total_seconds())
+    return sorted(set(out))
+
+
+def _validate_continuous_width(start: datetime, end: datetime, run_time, placement_exception: str | None,
+                               plant_tz: str | None) -> bool | None:
+    """Does a continuous (non-segmented) bar's elapsed width equal its run time, within
+    WIDTH_TOLERANCE_SECONDS? Returns None when the check does not apply (the bar carries a
+    placement exception, or its run time is unknown: nothing to compare), else True / False.
+    The server never derives an edge from the other; it only judges the pair it was sent."""
+    if placement_exception is not None or run_time is None or float(run_time) <= 0:
+        return None   # (a zero run time has no width to compare; its bar must still be non-empty)
+    target = float(run_time) * 3600.0
+    return any(abs(v - target) <= WIDTH_TOLERANCE_SECONDS for v in _elapsed_seconds_readings(start, end, plant_tz))
 
 
 _ORDER_ATTR_COLUMNS = {
@@ -1103,7 +1194,11 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
         pars.append(("planning_reason", "jsonb", "{v}"))
         vals.append(Jsonb(row["planning_reason"]) if row["planning_reason"] else None)
     if row["queued"]:
-        lits.extend(["scheduled_start = NULL", "scheduled_end = NULL"])
+        # A queued order has no bar, so it has no marker for one either.
+        lits.extend(["scheduled_start = NULL", "scheduled_end = NULL", "placement_exception = NULL"])
+    elif row["has_exception"]:
+        pars.append(("placement_exception", "text", "{v}"))   # a None value clears the marker
+        vals.append(row["placement_exception"])
     if row["start"] is not None and not row["queued"]:
         pars.append(("scheduled_start", "timestamp", "{v}"))
         vals.append(row["start"])
@@ -1125,7 +1220,11 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
         lits.append("run_time_source = 'routing'")
         pars.append(("run_time_basis", "jsonb", "{v}"))
         vals.append(Jsonb(row["resolved_runtime"]["basis"]))
-    if row["clear_runtime_mismatch"]:
+    if row.get("force_mismatch") or row.get("stale_runtime"):
+        # An untrusted start (trust_start=False, backward scheduling OQ59): the stored bar's start is a
+        # guess, so the row is flagged for the browser to re-derive it. Takes precedence over any clearing.
+        lits.append("runtime_schedule_mismatch = TRUE")
+    elif row["clear_runtime_mismatch"]:
         lits.append("runtime_schedule_mismatch = FALSE")
     for field, column in _ORDER_ATTR_COLUMNS.items():
         if field in row["attrs"]:
@@ -1189,9 +1288,20 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     of that parent's child set; its parent row's xmin is the only concurrency
     token.  Child rows are never addressed independently.
 
-    Inverted ranges are rejected by validating each edit against the row's
-    *effective* current dates (so updating only start still checks against the
-    existing end). Unknown ids are reported, not written.
+    Save contract (backward scheduling, Task 2.3): a non-segment, non-queued save must
+    carry BOTH edges (a single edge is rejected, `single_edge`: the server never completes
+    one edge from the stored other), and a continuous bar's elapsed plant-zone width must
+    equal its run time within `WIDTH_TOLERANCE_SECONDS` (`width_mismatch`) unless it carries
+    a `placement_exception`. Inverted ranges are rejected. Unknown ids are reported, not
+    written.
+
+    Untrusted start (backward scheduling OQ59, Task 2.7): an item may carry `trust_start: False` (the
+    `/tasks/bulk_update` route forwards the request field). The sent `end` is stored as the placed finish
+    exactly as for any save, but the sent `start` is only a guess: the continuous-width validator is skipped
+    for that item and `runtime_schedule_mismatch` is forced TRUE (this takes precedence over the validator's
+    clearing), so the browser re-derives the start from the finish on its next load. Both edges (or
+    segments) are still required and an inverted range is still rejected. The ids saved this way come back
+    in `start_derived` ({id: True}).
 
     A MACHINE edit is rejected as invalid whenever the row's PARENT_ORDER
     (parent_production_order) is set — a distribution child order may only move
@@ -1235,20 +1345,21 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     `atomic_optimizer`: a non-empty scan rolls the whole batch back and returns
     status 'error' / error_code 'schedule.conflicts'; a scan failure under strict
     mode propagates instead of being swallowed. The window is bounded on the
-    neighbour's effective START (index-servable) widened by the touched
-    machines' longest run time (capped at 30 days) and filtered on effective
-    END, so a long order that began before the window and runs into it is
-    found; an order longer than the cap can still be missed, so
+    neighbour's effective START (index-servable) widened by a fixed 30-day
+    lookback and filtered on effective END (the stored finish), so a long
+    order that began before the window and runs into it is found; an order
+    drawn over more than the cap can still be missed, so
     `conflicts == []` is not absolute proof of no overlap. In strict mode the
     save first takes per-(plant, machine) advisory locks in sorted order.
 
     Returns {applied, persisted, failed, invalid, not_found, invalid_ids,
-    not_found_ids, stale, versions, rejection_reasons}. invalid_ids / not_found_ids
+    not_found_ids, stale, versions, rejection_reasons, start_derived}. invalid_ids / not_found_ids
     carry the actual ids (not just counts) so the client can stop retrying
     terminally-rejected rows while still keeping genuinely-unpersisted rows dirty
     for a retry. `rejection_reasons` is a purely additive, sparse {id: reason}
     map -- populated ONLY for the routing-eligibility rejection below
-    (ROUTING_RUNTIME_DESIGN.md §8.5); every other rejection in this function's
+    (ROUTING_RUNTIME_DESIGN.md §8.5), `machine_unknown`, `run_time_over_cap`,
+    `single_edge` and `width_mismatch`; every other rejection in this function's
     validation loop keeps its existing plain-id-only invalid_ids/not_found_ids
     behavior unchanged, so an id absent from this map carries no reason.
     """
@@ -1262,7 +1373,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
     if not items:
         return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
-                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
+                "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}, "start_derived": {}}
 
     # Deferred import (never module-level -- avoids a backend.routing <->
     # db.py import cycle, matching this codebase's established convention;
@@ -1278,8 +1389,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
         cur.execute(
             f"""
             SELECT o.id,
-                   CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.first_start, o.scheduled_start, o.basic_start_date) END AS eff_start,
-                   CASE WHEN o.planning_status = 'needs_planning' THEN NULL ELSE COALESCE(seg.last_end, {_EFF_END_SQL}) END AS eff_end,
+                   {_EFF_START_SQL} AS eff_start,
+                   {_EFF_END_UNLESS_QUEUED_SQL} AS eff_end,
                    o.run_time,
                    o.xmin::text::bigint AS row_version,
                    seg.segment_count,
@@ -1292,8 +1403,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                    o.run_time_source,
                    o.material_number,
                    o.order_quantity,
-                   o.basic_start_date,
-                   o.production_version
+                   COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
+                   o.production_version,
+                   o.placement_exception,
+                   p.timezone,
+                   o.scheduled_start,
+                   o.scheduled_end
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             LEFT JOIN plants p ON p.plant = o.plant
@@ -1315,12 +1430,20 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 # ROUTING_RUNTIME_DESIGN.md §8.5's eligibility gate reads these
                 # five straight from the row -- material/quantity/start date are
                 # never edited by this endpoint, so the CANDIDATE check always
-                # uses the row's own current values for them.
+                # uses the row's own current values for them. The start is the SAP
+                # start as first received (locked, OQ26), so an echo that moved
+                # basic_start_date never changes a production version's validity.
                 "run_time_source": r[12],
                 "material_number": r[13],
                 "order_quantity": r[14],
-                "basic_start_date": r[15],
+                "original_start": r[15],
                 "production_version": r[16],
+                "placement_exception": r[17],
+                "timezone": r[18],
+                # The RAW stored columns (never the effective edges, which fall back to the SAP window):
+                # "unmoved" below means equal to what a planner stored.
+                "stored_start": r[19],
+                "stored_end": r[20],
             }
             for r in cur.fetchall()
         }
@@ -1336,6 +1459,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
         seen_ids: set[str] = set()
         known_machines_by_plant: dict[str, dict[str, str]] = {}
         eligibility_cache: dict = {}   # per-call plant lookups for check_eligibility (P7)
+        plant_caps: dict[str, float] = {}   # per-call run-time cap by plant (OQ28), loaded lazily
         for it in items:
             tid = it.get("id")
             start, end = it.get("start"), it.get("end")
@@ -1348,11 +1472,17 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             has_runtime = "RUN_TIME" in it
             has_firmed = it.get("FIRMED") is not None
             has_planning = "planning_status" in it
+            has_exception = "placement_exception" in it
+            exception_value = it.get("placement_exception")
             planning_status = it.get("planning_status")
             planning_reason = it.get("planning_reason")
             queued = planning_status == "needs_planning"
             if (not tid or tid in seen_ids or
-                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_firmed and not has_planning)):
+                    (start is None and end is None and not attrs and not has_segments and not has_runtime and not has_firmed and not has_planning
+                     and not has_exception)):
+                invalid_ids.append(tid)
+                continue
+            if has_exception and exception_value is not None and exception_value not in PLACEMENT_EXCEPTIONS:
                 invalid_ids.append(tid)
                 continue
             seen_ids.add(tid)
@@ -1441,7 +1571,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 candidate_pv = attrs.get("PRODUCTION_VERSION", current["production_version"])
                 eligibility = routing_resolver.check_eligibility(
                     current["plant"], current["material_number"], candidate_pv,
-                    candidate_machine, current["order_quantity"], current["basic_start_date"],
+                    candidate_machine, current["order_quantity"], current["original_start"],
                     conn=conn, cache=eligibility_cache,
                 )
                 if not eligibility["ok"]:
@@ -1490,9 +1620,11 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     continue
                 manual_runtime_release = True
 
-            cur_start, cur_end = current["start"], current["end"]
-            new_start = start if start is not None else cur_start
-            new_end   = end   if end   is not None else cur_end
+            # Both edges or segments, always (backward scheduling OQ50): a save never completes one
+            # edge from the stored other (the server cannot know which edge the planner meant to hold).
+            # A single-edge write to a non-segment, non-queued row is rejected; the edges the browser
+            # sends are the edges stored.
+            new_start, new_end = start, end
             if has_planning and (planning_status not in ("scheduled", "needs_planning") or
                     (queued and (not isinstance(planning_reason, dict) or
                                  not isinstance(planning_reason.get("code"), str) or
@@ -1508,7 +1640,19 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                                  else it.get("RUN_TIME") if has_runtime else current["run_time"])
             requested_runtime_minutes = _canonical_runtime_minutes(requested_runtime)
             runtime_changed = has_runtime and requested_runtime_minutes != current_runtime_minutes
+            # Run-time cap (OQ28): a new or changed run time longer than the plant's cap is rejected
+            # for this id alone (200 envelope, rejection_reasons[id]); nothing is written for it. An
+            # unchanged over-cap value (has_runtime was cleared above) never blocks an unrelated save.
+            if has_runtime and requested_runtime is not None:
+                if current["plant"] not in plant_caps:
+                    plant_caps.update(_plant_caps(cur, [current["plant"]]))
+                cap_for_plant = plant_caps.get(current["plant"], RUN_TIME_MAX_HOURS)
+                if float(requested_runtime) > cap_for_plant:
+                    rejection_reasons[tid] = RUN_TIME_OVER_CAP_CODE
+                    invalid_ids.append(tid)
+                    continue
             segment_rows: list[dict] | None = None
+            width_passed = False   # True only when the continuous-width check ran and held
 
             if queued:
                 new_start = new_end = None
@@ -1548,14 +1692,63 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 invalid_ids.append(tid)
                 continue
 
+            # (a save carrying a non-empty aggregate may omit an edge: the aggregate supplies both)
+            if (not queued and not segment_rows and not (has_segments and it.get("schedule_segments"))
+                    and (start is None) != (end is None)):
+                rejection_reasons[tid] = "single_edge"
+                invalid_ids.append(tid)
+                continue
+
+            # VI2 gap: a bar whose wall edges coincide (01:30 first reading to 01:30 second) is a real hour,
+            # but chk_orders_sched_range (scheduled_end > scheduled_start on naive columns) cannot store it,
+            # so the wall-clock rule stays here and the width check below is what became fold-tolerant.
             if new_start is not None and new_end is not None and new_end <= new_start:
                 invalid_ids.append(tid)
                 continue
 
-            if (not queued and (has_planning or start is not None or end is not None or has_segments)
+            if (not queued and (start is not None or end is not None or has_segments)
                     and (new_start is None or new_end is None)):
                 invalid_ids.append(tid)
                 continue
+            if (not queued and has_planning and not has_segments and start is None and end is None
+                    and current["stored_start"] is None and current["stored_end"] is None
+                    and current["segment_count"] < 2):
+                # A status-only save to 'scheduled' (no edges sent) writes no edges, so the row must already hold a
+                # stored placement. A queued row and a never-placed row (both stored edges NULL, no segments) have
+                # none: the SAP window the read path falls back to is not a placement and is never stamped from here.
+                # Rejected as `single_edge` (the planner must save both edges together; no new wire reason).
+                rejection_reasons[tid] = "single_edge"
+                invalid_ids.append(tid)
+                continue
+
+            # Continuous (non-segment) bar: its elapsed width must equal its run time, unless the planner
+            # marked the placement as a deliberate exception or the run time is unknown. The server only
+            # judges the pair of edges it was sent. A marker sent with this save wins over the stored one
+            # (an explicit null clears it, so the check applies again). Segments (>= 2 pieces) are judged
+            # by _validate_schedule_segments above; an item that must not trust its sent start
+            # (`trust_start: False`, Task 2.7) bypasses this gate and has the flag forced instead.
+            # A save that does not move the bar (both sent edges equal the stored RAW placement, run time
+            # unchanged) is not judged: the browser resends the full snapshot on an attribute-only edit, and a
+            # stale bar the engine could not re-derive must stay savable. The flag is then left untouched
+            # (width_passed stays False). A never-placed order has NULL stored edges, so it is always judged.
+            # D12 (VM15): changing or clearing the marker is a move; the width gate must see it
+            marker_changed = has_exception and exception_value != current["placement_exception"]
+            unmoved = (new_start is not None and new_end is not None
+                       and current["stored_start"] is not None and current["stored_end"] is not None
+                       and new_start == current["stored_start"] and new_end == current["stored_end"]
+                       and not runtime_changed and not marker_changed)
+            # An untrusted start (OQ59): the pair of edges is stored but not judged; the flag is forced below.
+            trusted = it.get("trust_start", True) is not False
+            if (trusted and not queued and not segment_rows and new_start is not None and new_end is not None
+                    and not unmoved):
+                effective_exception = exception_value if has_exception else current["placement_exception"]
+                width_ok = _validate_continuous_width(
+                    new_start, new_end, requested_runtime, effective_exception, current["timezone"])
+                if width_ok is False:
+                    rejection_reasons[tid] = "width_mismatch"
+                    invalid_ids.append(tid)
+                    continue
+                width_passed = width_ok is True
 
             row_planning_status = planning_status if has_planning else (
                 "scheduled" if start is not None or end is not None or has_segments else None)
@@ -1567,8 +1760,17 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 row_planning_status = "scheduled"
                 row_planning_reason = None
 
+            # The start is a guess only when this save really writes a bar (a queued row has none, and a
+            # status-only/attribute-only save writes no edges).
+            force_mismatch = (not trusted and not queued
+                              and (start is not None or end is not None or bool(segment_rows)))
             update_rows.append({
                 "id": tid,
+                "force_mismatch": force_mismatch,
+                # D13 (VM2): a run time changed with no edges leaves the stored bar wrong; flag it so the browser re-derives
+                "stale_runtime": (runtime_changed and not queued and start is None and end is None
+                                  and not segment_rows and current["stored_start"] is not None
+                                  and current["stored_end"] is not None),
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,
@@ -1582,7 +1784,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 "manual_runtime_release": manual_runtime_release,
                 "resolved_runtime": resolved_runtime,
                 "segments": segment_rows,
-                "clear_runtime_mismatch": has_segments or start is not None or end is not None,
+                # The stale flag clears only when the stored bar was actually checked against the run time:
+                # a validated segment aggregate, or a continuous bar whose width check ran and held. A bar
+                # with a placement exception (or no known run time) leaves the flag untouched.
+                "clear_runtime_mismatch": (queued or bool(segment_rows) or width_passed) and not force_mismatch,
+                "has_exception": has_exception and not queued,
+                "placement_exception": exception_value,
                 # The conflict scan below (_scan_conflicts_for_rows) filters by
                 # this value to find overlaps on the machine the order actually
                 # ends up on — use the NEW machine when this edit moves it,
@@ -1597,7 +1804,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                     "invalid": len(invalid_ids), "not_found": len(not_found_ids),
                     "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
                     "stale": stale, "versions": {}, "conflicts": [],
-                    "rejection_reasons": rejection_reasons}
+                    "rejection_reasons": rejection_reasons, "start_derived": {}}
 
         if update_rows:
             try:
@@ -1636,7 +1843,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                             "stale": stale, "versions": {}, "conflicts": conflicts,
                             "status": "error", "error_code": "schedule.conflicts",
                             "cause": f"{len(conflicts)} schedule conflict(s) on the written machines (strict mode)",
-                            "rejection_reasons": rejection_reasons}
+                            "rejection_reasons": rejection_reasons, "start_derived": {}}
                 conn.commit()
                 persisted = applied = len(versions)
             except Exception:
@@ -1651,140 +1858,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             "invalid": len(invalid_ids), "not_found": len(not_found_ids),
             "invalid_ids": invalid_ids, "not_found_ids": not_found_ids,
             "stale": stale, "versions": versions, "conflicts": conflicts,
-            "rejection_reasons": rejection_reasons}
-
-
-def correct_due_date_baselines(corrections: list[dict], allowed_plants: list[str] | None = None) -> dict:
-    """
-    One-time-per-order backfill of the due-date baseline (`basic_finish_date`),
-    computed client-side by Persistence._snapToWorkingHours's due-date-baseline
-    phase in app.js. Not a general task-date write path — every row is
-    re-validated server-side, via a single VALUES-join UPDATE, before it is
-    written:
-
-      1. `xmin` must still equal `base_version` — the row version the client
-         had cached when it computed `basic_finish_date`. Any write to the row
-         since then (a concurrent SAP re-upload, a normal scheduling save, or
-         another tab's correction) bumps xmin regardless of which columns
-         changed, so this fails safely whenever the row moved on since the
-         client read it — including, but not limited to, a re-upload that
-         rewrote basic_start_date/basic_finish_date out from under a stale
-         correction. Deliberately NOT a basic_start_date value comparison: the
-         client-observed value round-trips through JS Date/JSON.stringify,
-         which re-labels a naive local timestamp as UTC — comparing that
-         directly against Postgres's naive (TIMESTAMP WITHOUT TIME ZONE)
-         basic_start_date would be off by the client's UTC offset and would
-         never match for any non-UTC user.
-      2. `basic_finish_date` must still be in a known raw/uncorrected shape
-         (NULL, == basic_start_date, == basic_start_date + run_time hours, or
-         == basic_start_date + 1 hour — the last being the shape left behind
-         by the pre-2026-07-06 ingest-hygiene bug, see below) — i.e. nobody
-         already corrected (or re-uploaded a genuine value for) this row
-         since the client read it.
-
-    Either check failing makes the write a safe no-op for that row (not an
-    error) — the id is simply absent from `versions`.
-
-    Each item: {id, basic_finish_date, base_version} (id: str,
-    basic_finish_date: datetime, base_version: int — the row's xmin as of the
-    client's last load/save of it). Callers are expected to chunk large
-    batches themselves (the frontend relay does, at 500 rows/request — see
-    Persistence._relayDueDateCorrections in app.js); this function does not
-    chunk internally, so a single call is still bounded by Postgres's
-    bound-parameter ceiling (3 params/row here).
-
-    Returns {applied, persisted, skipped, not_matched, versions}. `skipped`
-    counts malformed input rows (missing id/basic_finish_date/base_version)
-    rejected before the SQL runs; `not_matched` counts well-formed rows that
-    reached the UPDATE but failed its WHERE clause (stale version, or already
-    corrected) — surfaced as a distinct count so a systemic 0%-match condition
-    (e.g. a version-pinning bug) is visible in logs rather than
-    indistinguishable from a healthy "nothing left to correct" steady state.
-    `versions` carries the post-write xmin per corrected id (same
-    `xmin::text::bigint` shape as update_task_dates_bulk) so the caller can
-    re-stamp the frontend's cached row_version — otherwise every corrected
-    order would false-conflict on its next unrelated scheduling save this
-    session.
-
-    `allowed_plants` (None for an unrestricted/admin caller) scopes the UPDATE
-    to the caller's assigned plants via the WHERE clause. This function has no
-    per-row prefetch to piggyback a plant check on (unlike update_task_dates_bulk)
-    — an out-of-scope row simply fails to match the WHERE clause and lands in
-    the existing `not_matched` count, with no separate response field needed.
-    """
-    versions: dict[str, int] = {}
-    if not corrections:
-        return {"applied": 0, "persisted": 0, "skipped": 0, "not_matched": 0, "versions": {}}
-
-    rows = []
-    skipped = 0
-    for c in corrections:
-        cid = c.get("id")
-        new_finish = c.get("basic_finish_date")
-        base_version = c.get("base_version")
-        if not cid or new_finish is None or base_version is None:
-            skipped += 1
-            continue
-        rows.append((cid, new_finish, base_version))
-
-    if not rows:
-        return {"applied": 0, "persisted": 0, "skipped": skipped, "not_matched": 0, "versions": {}}
-
-    applied = persisted = 0
-    with _pool.connection() as conn, conn.cursor() as cur:
-        try:
-            # Explicit casts on the VALUES columns (same reasoning as
-            # update_task_dates_bulk): an all-NULL column would otherwise be of
-            # unknown type. RETURNING o.xmin gives each row's post-write
-            # version, using the identical xmin::text::bigint expression as
-            # the /tasks read path and update_task_dates_bulk.
-            placeholders = ", ".join(["(%s::text, %s::timestamp, %s::bigint)"] * len(rows))
-            params = [v for row in rows for v in row]
-            # allowed_plants is referenced twice in the WHERE clause below
-            # (once for the NULL/unrestricted check, once for the ANY() match) —
-            # this function uses positional %s placeholders throughout, so the
-            # same value is bound twice rather than switching to named params.
-            params.extend([allowed_plants, allowed_plants])
-            sql = f"""
-                UPDATE orders o
-                SET basic_finish_date = v.new_finish,
-                    updated_at        = NOW()
-                FROM (VALUES {placeholders}) AS v(id, new_finish, base_version)
-                WHERE o.id = v.id
-                  AND o.xmin::text::bigint = v.base_version
-                  AND (%s::text[] IS NULL OR o.plant = ANY(%s::text[]))
-                  AND (
-                        o.basic_finish_date IS NULL
-                     OR o.basic_finish_date = o.basic_start_date
-                     OR o.basic_finish_date = o.basic_start_date
-                          + (COALESCE(o.run_time, 0) * INTERVAL '1 hour')
-                     -- Legacy pre-2026-07-06 ingest-hygiene bug shape: the OLD
-                     -- upload-hygiene "bad" branch hardcoded basic_finish_date
-                     -- = basic_start_date + 1 hour for any row with a
-                     -- missing/invalid BASIC_FINISH_DATE. Kept permanently
-                     -- (not a one-off migration) since old backups/re-imports
-                     -- could still carry this shape even though new uploads
-                     -- never will after the ingest-hygiene fix. Unlike the
-                     -- run_time-based shape above, this one is unconditional
-                     -- on run_time, so it can theoretically also match (and
-                     -- allow overwriting) a genuine SAP-set due date that
-                     -- happens to land exactly 1 hour after start — accepted,
-                     -- same heuristic-ambiguity class already taken on above.
-                     OR o.basic_finish_date = o.basic_start_date + INTERVAL '1 hour'
-                  )
-                RETURNING o.id, o.xmin::text::bigint AS new_version
-            """
-            cur.execute(sql, params)
-            for rid, rver in cur.fetchall():
-                versions[rid] = int(rver)
-            conn.commit()
-            persisted = applied = len(versions)
-        except Exception:
-            conn.rollback()
-            raise
-    not_matched = len(rows) - len(versions)
-    return {"applied": applied, "persisted": persisted, "skipped": skipped,
-            "not_matched": not_matched, "versions": versions}
+            "rejection_reasons": rejection_reasons,
+            # the ids whose untrusted start was stored (and flagged) -- only those that actually persisted
+            "start_derived": {r["id"]: True for r in update_rows if r["force_mismatch"] and r["id"] in versions}}
 
 
 def get_order_plant(task_id: str) -> str | None:
@@ -1817,8 +1893,8 @@ def update_task_note(task_id: str, notes) -> dict:
     return {"status": "ok", "updated": updated, "versions": versions}
 
 
-# Purge selector: plant-scoped, on the order's effective end date (scheduled_end,
-# falling back to basic_finish_date). Shared verbatim between preview_purge_orders
+# Purge selector: plant-scoped, on the order's effective end date (scheduled_end, then the
+# locked SAP finish, then basic_finish_date; segments are not joined here, as before). Shared verbatim between preview_purge_orders
 # and purge_orders_by_date so the two can never describe different row sets —
 # that divergence (a client-side preview count disagreeing with the real DELETE)
 # was the original defect this pair of functions replaces. Measured against the
@@ -1826,7 +1902,8 @@ def update_task_note(task_id: str, notes) -> dict:
 # predicate, _EFF_END_SQL, and the full /tasks read-path expression all agreed
 # exactly, so the predicate itself is intentionally left unchanged — only the
 # scoping is new. See docs/architecture (purge hardening) for the measurement.
-_PURGE_WHERE_SQL = "plant = %(plant)s AND COALESCE(scheduled_end, basic_finish_date) BETWEEN %(start)s AND %(end)s"
+_PURGE_WHERE_SQL = ("plant = %(plant)s AND COALESCE(scheduled_end, original_finish_received, basic_finish_date)"
+                    " BETWEEN %(start)s AND %(end)s")
 
 
 def _purge_scope_sql_params(plant, start, end, machines=None):
@@ -1843,11 +1920,12 @@ def preview_purge_orders(plant, start, end, machines=None) -> dict:
     fully-seeded, stable-shape dict (the md.cascade_preview discipline) so the
     caller never has to distinguish "0" from "absent". `total` is the count the
     real DELETE will remove; `planner_overridden` counts orders with a
-    scheduled_start (a planner-set schedule the ingest upsert never restores on
+    stored start or finish (a planner-set schedule the ingest upsert never restores on
     re-upload — see schema.sql's orders comment), which is the number that
     matters most for an honest confirmation prompt."""
     where, params = _purge_scope_sql_params(plant, start, end, machines)
-    sql = (f"SELECT COUNT(*), COUNT(scheduled_start) FROM orders WHERE {where}")
+    sql = (f"SELECT COUNT(*), COUNT(*) FILTER (WHERE scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL)"
+           f" FROM orders WHERE {where}")
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         total, planner_overridden = cur.fetchone()
@@ -2128,7 +2206,8 @@ def get_health_stats() -> dict:
             cur.execute("""
                 SELECT
                     COUNT(*)                 AS total_orders,
-                    COUNT(scheduled_start)   AS user_overrides
+                    -- a planner placement is either stored edge (U10): a finish-only row counts too
+                    COUNT(*) FILTER (WHERE scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS user_overrides
                 FROM orders
             """)
             row = cur.fetchone()
@@ -2186,7 +2265,7 @@ def get_db_deep_stats() -> dict:
                                OR  material_description = '' THEN 1 END)       AS null_desc,
                     COUNT(CASE WHEN run_time IS NULL THEN 1 END)               AS null_runtime,
                     MIN(COALESCE(scheduled_start, basic_start_date))           AS min_date,
-                    MAX(COALESCE(scheduled_end,   basic_finish_date))          AS max_date
+                    MAX(COALESCE(scheduled_end, original_finish_received, basic_finish_date)) AS max_date
                 FROM orders
             """)
             r = cur.fetchone()
@@ -2599,18 +2678,86 @@ def _naive_dt(value):
     return value
 
 
-def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None) -> set[str]:
+def _frame_zone(name: str | None):
+    """IANA name -> ZoneInfo, or None when blank/unknown (no conversion)."""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+
+
+def finish_echoes(incoming_finish_plant_local: datetime | None, incoming_date_only: bool,
+                  sent_finish_plant_local: datetime | None, sap_tz: str | None,
+                  plant_tz: str | None) -> bool:
+    """True when SAP's incoming finish is the finish NIMBUS last sent, judged in the SAP frame.
+
+    The one echo rule (backward-scheduling Task 1.2); `sap_changed_fields` and the locked
+    `original_*_received` columns both use it, and `backend/integration/sap_staging.py` re-exports it.
+    Both finishes are naive plant-local values; the SAP frame is `sap_tz`.
+      - date_only (SAP sent no time, which the staging parser keeps at plant-local midnight WITHOUT zone
+        conversion): the incoming date already IS the SAP date, so compare it with the SAP-frame calendar
+        date of the sent value (19:00 Chicago = 00:00 UTC the next day, so a date-only echo of that send
+        carries the next day's date).
+      - timed: convert both to the SAP frame and compare to the minute.
+    An unknown or blank `sap_tz` (the Excel path has no SAP zone of its own) means the SAP frame is the
+    plant's frame; an unknown `plant_tz` means no conversion (both values are read as the same frame).
+    A missing incoming or sent finish never echoes.
+    """
+    inc, sent = _naive_dt(incoming_finish_plant_local), _naive_dt(sent_finish_plant_local)
+    if not isinstance(inc, datetime) or not isinstance(sent, datetime):
+        return False
+    plant_zone = _frame_zone(plant_tz)
+    sap_zone = _frame_zone(sap_tz) or plant_zone
+
+    def to_sap(v: datetime) -> datetime:
+        if plant_zone is None or sap_zone is None:
+            return v
+        return v.replace(tzinfo=plant_zone).astimezone(sap_zone).replace(tzinfo=None)
+
+    sent_sap = to_sap(sent)
+    if incoming_date_only:
+        return inc.date() == sent_sap.date()
+    return (to_sap(inc).replace(second=0, microsecond=0)
+            == sent_sap.replace(second=0, microsecond=0))
+
+
+def _row_finish_echo(before: dict, row: dict, sap_tz: str | None, *,
+                     finish_key: str = "basic_finish_date") -> bool:
+    """True when `row`'s finish is an echo of the finish NIMBUS last sent for `before`'s order.
+
+    The one row-level echo decision (`sap_changed_fields`, `_patch_locked_originals` and the distribution
+    writers all call it): `before["sap_sent_finish"]` is the remembered sent finish (no sent row = never an
+    echo), `row[finish_key]` the SAP finish just received (an ingest row carries it as
+    `sap_basic_finish_date`; `sap_changed_fields`' `incoming` dict as `basic_finish_date`), and
+    `row["_finish_date_only"]` says SAP sent no time (the staging parser sets it). A row with no such flag
+    (the Excel path cannot tell a date-only cell from an exact midnight) is date only when the finish is at
+    exactly 00:00:00. `sap_tz=None` means the SAP frame is the plant's frame (`before["tz"]`)."""
+    sent_f = before.get("sap_sent_finish") if before else None
+    if sent_f is None:
+        return False
+    in_f = row.get(finish_key)
+    date_only = row.get("_finish_date_only")
+    if date_only is None:
+        n = _naive_dt(in_f)
+        date_only = isinstance(n, datetime) and n.time() == dt_time.min
+    return finish_echoes(in_f, bool(date_only), sent_f, sap_tz, before.get("tz"))
+
+
+def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | None, *,
+                       sap_tz: str | None = None) -> set[str]:
     """Which SAP-owned fields did this upload change vs SAP's previous upload?
 
     Pure (no DB). `before` is the stored orders row (SAP baselines
-    `sap_basic_start_date`/`sap_basic_finish_date`/`sap_workcenter`/
-    `sap_production_version`, plus `order_quantity`, `production_version`,
-    `scheduled_start`/`scheduled_end`); `incoming` is the parsed upload row.
-    A field counts as changed only when its baseline is non-NULL, the incoming
-    value differs from it, and the incoming value is not an echo of NIMBUS's
-    own current value (SAP sending back what a planner set). An incoming None means "column/cell
-    not sent or unparseable" and is never a change for that field (each date is
-    judged individually); an incoming "" (blank cell present) is a real value.
+    `sap_basic_finish_date`/`sap_workcenter`/`sap_production_version`, plus
+    `order_quantity`, `production_version`, `scheduled_end`); `incoming` is the
+    parsed upload row. A field counts as changed only when its baseline is non-NULL,
+    the incoming value differs from it, and the incoming value is not an echo of
+    NIMBUS's own current value (SAP sending back what a planner set). An incoming
+    None means "column/cell not sent or unparseable" and is never a change for that
+    field; an incoming "" (blank cell present) is a real value. `dates` is judged
+    on the finish alone: a start-only change is never "dates" (the placement keeps).
     Returns a subset
     of {"dates", "workcenter", "quantity", "production_version"}.
 
@@ -2619,44 +2766,40 @@ def sap_changed_fields(before: dict, incoming: dict, current_machine_wc: str | N
     shrinks the open quantity is not a change.
 
     Echo suppression (D20): when `before["sap_sent_finish"]` is set and the
-    incoming finish equals it at minute precision, "dates" is not reported; the
+    incoming finish is an echo of it (`finish_echoes`, judged in the SAP frame:
+    `sap_tz` is the SAP system zone, `before["tz"]` the plant zone; a date-only
+    finish compares the SAP-frame date of the sent value, a timed one compares
+    to the minute), "dates" is not reported; the
     version is likewise not a change when `sap_sent_version` is unset or equals
     the incoming version. A different version than was sent still reports
     "production_version" (dates stay suppressed by the matching finish).
-    A finish SAP returned as a date only (time 000000, kept at plant-local midnight)
-    also echoes when its date equals the sent finish's date (L1).
+    `incoming["_finish_date_only"]` says SAP sent no time (the staging parser
+    sets it); when absent, a finish at exactly 00:00:00 is treated as date only
+    (the Excel path cannot tell the two apart). `sap_tz=None` means the SAP frame
+    is the plant's frame.
     The sent values are NOT cleared by a planner edit (D20 refinement); only the
     next Send to SAP overwrites them, so an old echo cannot wipe a newer planner edit
     unless the planner's edit happens to produce the very finish that was sent.
     """
     changed: set[str] = set()
 
-    # dates: either baseline non-NULL and differing, unless both incoming dates
-    # echo NIMBUS's current scheduled_start AND scheduled_end (both non-NULL).
-    base_s, base_f = before.get("sap_basic_start_date"), before.get("sap_basic_finish_date")
-    in_s, in_f = incoming.get("basic_start_date"), incoming.get("basic_finish_date")
-    sched_s, sched_e = before.get("scheduled_start"), before.get("scheduled_end")
-    dates_differ = ((base_s is not None and in_s is not None and in_s != base_s)
-                    or (base_f is not None and in_f is not None and in_f != base_f))
-    dates_echo = (sched_s is not None and sched_e is not None
-                  and in_s == sched_s and in_f == sched_e)
+    # dates: the FINISH decides (backward scheduling OQ25 c, Task 2.7). A start-only SAP change keeps the
+    # placement, because the planner's placed finish is the anchor and the start is derived from it; the
+    # finish changing (baseline non-NULL and differing) counts unless it echoes NIMBUS's own placed finish.
+    # The incoming start is not read here on purpose: it never decides, and may not even be sent.
+    base_f = before.get("sap_basic_finish_date")
+    in_f = incoming.get("basic_finish_date")
+    sched_e = before.get("scheduled_end")
+    dates_differ = base_f is not None and in_f is not None and in_f != base_f
+    dates_echo = sched_e is not None and in_f == sched_e
 
     # D20 echo suppression: NIMBUS remembers the finish/version it last sent to
     # SAP (side table order_sap_sent, joined into the before-image). SAP echoing that finish back is not an SAP change
     # even when SAP back-scheduled the start; the new SAP baselines are still
     # written by the upsert. Only a finish, version or work center that differs
     # from what was sent re-plans the order.
-    def _minute(v):
-        v = _naive_dt(v)
-        return v.replace(second=0, microsecond=0) if isinstance(v, datetime) else v
-    sent_f, sent_v = before.get("sap_sent_finish"), before.get("sap_sent_version")
-    finish_echo = sent_f is not None and in_f is not None and _minute(in_f) == _minute(sent_f)
-    in_n, sent_n = _naive_dt(in_f), _naive_dt(sent_f)
-    if (not finish_echo and isinstance(in_n, datetime) and isinstance(sent_n, datetime)
-            and in_n.time() == dt_time.min and in_n.date() == sent_n.date()):
-        # L1: a finish SAP returned as a date only (time 000000) is kept at midnight, not
-        # zone-converted; it echoes our sent finish when the dates agree.
-        finish_echo = True
+    sent_v = before.get("sap_sent_version")
+    finish_echo = _row_finish_echo(before, incoming, sap_tz)
     in_pv_raw = incoming.get("sap_production_version")
     # An incoming version of None means "column not sent": it cannot contradict.
     version_echo = finish_echo and (sent_v is None or in_pv_raw is None
@@ -2735,8 +2878,8 @@ _RESOLVED_MACHINE_SQL = """CASE
 # "SAP sent something different" (D15/P12): every SAP-owned column the upload
 # carries EXCEPT the ones re-stamped from master data (color, prt_01/prt_02,
 # production_version), upload_batch_id, updated_at and machine. SAP's dates are
-# compared against the stored SAP baseline (never basic_*: baseline-correct
-# rewrites basic_finish_date). A NULL incoming baseline value means "not sent"
+# compared against the stored SAP baseline (never basic_*, which a planner move
+# can change). A NULL incoming baseline value means "not sent"
 # and a NULL stored baseline means "unknown": neither is a difference here.
 _SAP_DIFFERS_SQL = f"""(
            orders.production_order IS DISTINCT FROM EXCLUDED.production_order
@@ -2798,9 +2941,9 @@ _UPSERT_SQL = f"""
         bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
         parent_production_order, distribution_letter,
         sap_workcenter, sap_production_version, sap_basic_start_date, sap_basic_finish_date,
-        upload_batch_id, updated_at
+        upload_batch_id, original_start_received, original_finish_received, updated_at
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
     ON CONFLICT (id) DO UPDATE SET
         production_order      = EXCLUDED.production_order,
         material_number       = EXCLUDED.material_number,
@@ -2825,7 +2968,9 @@ _UPSERT_SQL = f"""
             WHEN EXCLUDED.plant IS NOT NULL AND EXCLUDED.plant IS DISTINCT FROM orders.plant THEN NULL
             ELSE orders.machine_key
         END,
-        basic_start_date      = EXCLUDED.basic_start_date,
+        -- The start is optional (backward scheduling Task 2.7): an incoming NULL means "not sent" and
+        -- never erases a stored start (the finish below is required, so it is always written).
+        basic_start_date      = COALESCE(EXCLUDED.basic_start_date, orders.basic_start_date),
         basic_finish_date     = EXCLUDED.basic_finish_date,
         -- SAP baselines: the last SAP-sent values, written ONLY here (and by
         -- distribution's child upsert). An incoming NULL means "not sent" and
@@ -2834,19 +2979,28 @@ _UPSERT_SQL = f"""
         sap_production_version = COALESCE(EXCLUDED.sap_production_version, orders.sap_production_version),
         sap_basic_start_date  = COALESCE(EXCLUDED.sap_basic_start_date, orders.sap_basic_start_date),
         sap_basic_finish_date = COALESCE(EXCLUDED.sap_basic_finish_date, orders.sap_basic_finish_date),
+        -- Locked "as SAP first sent it" dates (never moved by a planner or a drag).
+        -- The row tuple already carries the STORED values on an echo of NIMBUS's own sent finish and the
+        -- incoming SAP dates otherwise (upsert_orders decides, one rule: finish_echoes), so this SET never
+        -- reads EXCLUDED.basic_*: a NULL (not decided) keeps what is stored.
+        original_start_received  = COALESCE(EXCLUDED.original_start_received, orders.original_start_received),
+        original_finish_received = COALESCE(EXCLUDED.original_finish_received, orders.original_finish_received),
         -- Ingest itself no longer flags this on every re-upload regardless of
         -- whether the value moved (ROUTING_RUNTIME_DESIGN.md §4 item 6) — plain
         -- carry-forward. Only the resolver (backend/routing/resolver.py) is
         -- allowed to set this flag now, and only when the number it writes
         -- actually differs from what's stored.
         runtime_schedule_mismatch = CASE
-            -- Exception (H10/D33): a SCHEDULED distribution child (parent link set)
-            -- whose effective run time actually moves is flagged here, because the
-            -- ingest writes children through THIS statement before distribution's
-            -- own child upsert runs (whose identical CASE would then see no change).
-            WHEN orders.parent_production_order IS NOT NULL
-                 AND {_RUN_TIME_AFTER_UPLOAD_SQL} IS DISTINCT FROM orders.run_time
+            -- Any PLACED order (a stored start, a stored finish, or segments: the _PLACED_SQL
+            -- meaning, written here against the `orders` table name) whose effective run time
+            -- actually moves is flagged: its stored bar no longer matches its run time, and the
+            -- browser, not the server, re-derives the start from the held finish (backward
+            -- scheduling OQ34). This was children-only (H10/D33: the ingest writes children
+            -- through THIS statement before distribution's own child upsert runs, whose identical
+            -- CASE would then see no change); the general rule subsumes that case.
+            WHEN {_RUN_TIME_AFTER_UPLOAD_SQL} IS DISTINCT FROM orders.run_time
                  AND (orders.scheduled_start IS NOT NULL
+                      OR orders.scheduled_end IS NOT NULL
                       OR EXISTS (SELECT 1 FROM order_schedule_segments g WHERE g.order_id = orders.id))
             THEN TRUE
             ELSE COALESCE(orders.runtime_schedule_mismatch, FALSE) END,
@@ -2948,7 +3102,8 @@ _UPSERT_SQL_SAP = _sap_source_sql(_UPSERT_SQL)
 # planned_order_initial_quantity, reduced_quantity, order_category, order_type,
 # bom_alternative, bom_usage, labor_hours, machine_hours, no_of_fte,
 # parent_production_order, distribution_letter, sap_workcenter,
-# sap_production_version, sap_basic_start_date, sap_basic_finish_date, upload_batch_id.
+# sap_production_version, sap_basic_start_date, sap_basic_finish_date, upload_batch_id,
+# original_start_received, original_finish_received (the last two are patched per chunk).
 _UPSERT_ROW_COLS = (
     "production_order", "material_number", "material_description",
     "machine", "plant", "basic_start_date", "basic_finish_date",
@@ -3163,7 +3318,8 @@ _CHUNK_READ_COLS = (
     "sap_production_version", "production_version", "scheduled_start", "scheduled_end",
     "basic_start_date", "basic_finish_date", "run_time", "planning_status",
     "machine_wc", "first_start", "last_end", "tz", "sap_sent_finish", "sap_sent_version",
-    "planned_order_initial_quantity",
+    "planned_order_initial_quantity", "original_start_received", "original_finish_received",
+    "original_finish_date_only",
 )
 _CHUNK_READ_SQL = f"""
     SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
@@ -3175,7 +3331,8 @@ _CHUNK_READ_SQL = f"""
            seg.first_start, seg.last_end,
            (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz,
            ss.sent_finish AS sap_sent_finish, ss.sent_version AS sap_sent_version,
-           o.planned_order_initial_quantity
+           o.planned_order_initial_quantity, o.original_start_received, o.original_finish_received,
+           o.original_finish_date_only
       FROM orders o
       LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
@@ -3195,6 +3352,21 @@ _CHUNK_READ_SQL = f"""
 """
 
 
+def _duplicate_id_sort_key(row: dict) -> tuple:
+    """Order key for rows sharing one ORDER|MATERIAL id: (start, quantity, raw machine). A row with no
+    usable start orders by its finish instead (the shared end rule, in Python: last segment end, stored
+    end, locked SAP finish, then the SAP finish as sent), so a missing start never ties it with every
+    other startless row. Rows with a start sort exactly as before, so no id is permuted."""
+    start, qty = row.get("basic_start_date"), row.get("order_quantity")
+    when = start
+    if when is None:
+        when = (row.get("last_end") or row.get("scheduled_end") or row.get("original_finish_received")
+                or row.get("basic_finish_date"))
+    return (start is None, when if when is not None else datetime.min,
+            qty is None, float(qty) if qty is not None else 0.0,
+            str(row.get("sap_workcenter") or row.get("machine") or ""))
+
+
 def _plant_local_now(tz_name: str | None) -> datetime:
     """Naive plant-local wall-clock now (orders' timestamps are plant-local and
     naive); an unknown/missing timezone falls back to UTC like the horizon math."""
@@ -3207,23 +3379,15 @@ def _plant_local_now(tz_name: str | None) -> datetime:
 
 
 def _order_is_running(b: dict, now: datetime) -> bool:
-    """Running = effective start <= now < effective end, using the same
-    effective-window rule as the /tasks read path (first segment, else
-    scheduled_*, else the SAP dates; run_time-derived end first). An order in
-    Needs Planning has no window, so it is never running."""
+    """Running = stored start <= now < stored end. Only STORED edges count: the first/last segment, else
+    `scheduled_start`/`scheduled_end` (backward scheduling, Task 2.2). Both must exist; a never-placed order
+    is never running even when its SAP window covers now, and an order in Needs Planning has no window at
+    all. The SAP dates and `start + run_time` are never consulted."""
     if b.get("planning_status") == "needs_planning":
         return False
-    start = b.get("first_start") or b.get("scheduled_start") or b.get("basic_start_date")
-    if start is None:
-        return False
-    end = b.get("last_end")
-    if end is None:
-        base = b.get("scheduled_start") or b.get("basic_start_date")
-        if base is not None and b.get("run_time") is not None:
-            end = base + timedelta(hours=float(b["run_time"]))
-        else:
-            end = b.get("scheduled_end") or b.get("basic_finish_date")
-    return end is not None and start <= now < end
+    start = b.get("first_start") or b.get("scheduled_start")
+    end = b.get("last_end") or b.get("scheduled_end")
+    return start is not None and end is not None and start <= now < end
 
 
 # A stored attribute is NULL (or blank, for the production version) while its
@@ -3318,12 +3482,164 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
     return result
 
 
+def _locked_originals(b: dict | None, row: dict, sap_tz: str | None) -> tuple:
+    """(original_start_received, original_finish_received, original_finish_date_only) to write for one
+    incoming row.
+
+    `b` is the stored before-image (None = brand-new row), `row` the ingest row (`basic_*` are SAP's dates as
+    received, `sap_basic_finish_date` the finish judged for the echo). On an echo of the finish NIMBUS last
+    sent, BOTH locked columns keep their STORED values (a start-only SAP change whose finish echoes must not
+    refresh `original_start_received`); a column with no stored value yet takes the incoming one, so a first
+    write still populates it. Not an echo (never-sent order, or a genuine finish change): both carry the
+    incoming SAP start / finish. Only the finish decides (OQ31). Shared by the order upsert and the
+    distribution child writer.
+
+    The third value says whether the locked finish arrived as a date with no time (D10, VI12): on an echo the
+    stored flag stands (None = nothing stored to keep); otherwise it is the staging parser's
+    `_finish_date_only` when the row carries it, else True when the finish sits at exact midnight (the
+    Excel path, where a date-only cell is midnight)."""
+    in_s, in_f = row.get("basic_start_date"), row.get("basic_finish_date")
+    # the finish SAP actually sent (`sap_basic_finish_date`), judged exactly as sap_changed_fields does
+    if b and _row_finish_echo(b, row, sap_tz, finish_key="sap_basic_finish_date"):
+        orig_s = b.get("original_start_received") if b.get("original_start_received") is not None else in_s
+        orig_f = b.get("original_finish_received") if b.get("original_finish_received") is not None else in_f
+        return orig_s, orig_f, b.get("original_finish_date_only")
+    flag = row.get("_finish_date_only")
+    if flag is None:
+        flag = isinstance(in_f, datetime) and in_f.time() == dt_time.min
+    return in_s, in_f, bool(flag)
+
+
+def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
+                            sap_tz: str | None) -> tuple[list[tuple], list[tuple]]:
+    """Fill the trailing (original_start_received, original_finish_received) of each upsert tuple from
+    `_locked_originals`. The upsert SETs `COALESCE(EXCLUDED.original_*, orders.original_*)`, never from
+    `EXCLUDED.basic_*`. Returns (chunk, flag_pairs): `flag_pairs` are the (order id, original_finish_date_only)
+    values the caller writes after the upsert, only where they differ from what is stored, so an unchanged
+    row keeps its xmin."""
+    out: list[tuple] = []
+    pairs: list[tuple] = []
+    for t in chunk:
+        row = row_by_id.get(t[0])
+        if row is None:
+            out.append(t)
+            continue
+        b = before.get(t[0])
+        if b is not None and b.get("sap_sent_finish") is None and b.get("parent_production_order"):
+            # U11: a distribution child with no sent row of its own (a re-weight / collapse replaced the one that
+            # had it) inherits the family's echo decision: when any live member's sent finish matches the
+            # incoming finish, this child keeps its locked originals as well.
+            fam_sent = max((m["sap_sent_finish"] for m in before.values()
+                            if m.get("sap_sent_finish") is not None
+                            and m.get("plant") == b.get("plant")
+                            and m.get("parent_production_order") == b.get("parent_production_order")
+                            and m.get("material_number") == b.get("material_number")
+                            and _row_finish_echo(m, row, sap_tz, finish_key="sap_basic_finish_date")),
+                           default=None)
+            if fam_sent is not None:
+                b = {**b, "sap_sent_finish": fam_sent}
+        orig_s, orig_f, flag = _locked_originals(b, row, sap_tz)
+        out.append((*t[:-2], orig_s, orig_f))
+        stored = bool(b.get("original_finish_date_only")) if b is not None else False
+        if flag is not None and bool(flag) != stored:
+            pairs.append((t[0], bool(flag)))
+    return out, pairs
+
+
+def cap_requeue_decision(placed: bool, prior_run_time, run_time, *, prior_known: bool = True) -> bool:
+    """Should an order whose run time is over the cap be (re)queued? (ruling R-I5)
+    Yes when it holds no placement, or when its resolved run time changed versus the stored one. A placed
+    order whose over-cap run time is UNCHANGED (a planner released it) keeps its slot and firm flags.
+    `prior_known=False` (no before-image for the row) reads as unchanged."""
+    if not placed:
+        return True
+    if not prior_known:
+        return False
+    return _canonical_runtime_minutes(prior_run_time) != _canonical_runtime_minutes(run_time)
+
+
+def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None = None, *,
+                        prior_run_times: dict | None = None, commit: bool = True) -> dict:
+    """The ingest side of the run-time cap (OQ28), over the orders an upload just wrote.
+
+    An order whose stored run time is over its plant's `cap_hours` is queued exactly like a routing
+    hold (planning_status 'needs_planning', reason {code 'run_time_over_cap', message}, both dates
+    NULL, firm cleared, segments deleted -- the shape `orders_planning_state_check` requires, written
+    by the resolver's `_write_holds`). The symmetric release: a queued order whose reason is
+    'run_time_over_cap' and whose run time is now within the cap goes back to 'scheduled' (never
+    touches any other queued reason). A RUNNING order (and any id in `protect_ids`) keeps its slot:
+    the SAP-truth rule that a running order is never un-scheduled by an upload. A PLACED order whose
+    over-cap run time did not change versus `prior_run_times[id]` (the stored value before this write)
+    also keeps its slot and firm flags (R-I5); an id absent from `prior_run_times` reads as unchanged.
+    Commits when it wrote anything unless `commit=False` (a caller inside its own transaction, e.g. the
+    distribution planner). Returns {queued, released, running_kept}."""
+    out = {"queued": 0, "released": 0, "running_kept": 0}
+    ids = sorted(set(ids or ()))
+    if not ids:
+        return out
+    cur.execute(
+        "SELECT o.id, o.run_time, o.planning_status, o.planning_reason->>'code', o.plant, p.timezone,"
+        " NULL, o.scheduled_start, o.scheduled_end, o.basic_start_date,"
+        " o.basic_finish_date, seg.first_start, seg.last_end"
+        " FROM orders o LEFT JOIN plants p ON p.plant = o.plant " + _SCHEDULE_SEGMENTS_LATERAL_SQL +
+        " WHERE o.id = ANY(%s) AND o.run_time IS NOT NULL ORDER BY o.id",
+        (ids,),
+    )
+    protect = set(protect_ids or ())
+    to_queue: list[tuple] = []
+    to_release: list[str] = []
+    for (oid, run_time, status, reason_code, plant, tz, horizon, sched_start, sched_end,
+         basic_start, basic_finish, first_start, last_end) in cur.fetchall():
+        cap = cap_hours()
+        if float(run_time) > cap:
+            if status == "needs_planning" and reason_code not in (None, RUN_TIME_OVER_CAP_CODE, "runtime_pending"):
+                continue   # another subsystem's hold keeps its own reason
+            b = {"planning_status": status, "first_start": first_start, "last_end": last_end,
+                 "scheduled_start": sched_start, "scheduled_end": sched_end, "basic_start_date": basic_start,
+                 "basic_finish_date": basic_finish, "run_time": run_time}
+            # Only an order that really holds a slot can be "running" (`_order_is_running` reads stored edges
+            # only), so a never-scheduled order whose SAP window covers now has no slot to protect.
+            if oid in protect or _order_is_running(b, _plant_local_now(tz)):
+                out["running_kept"] += 1
+                continue
+            placed = ((sched_start is not None or sched_end is not None or first_start is not None)
+                      and status != "needs_planning")
+            if not cap_requeue_decision(placed, (prior_run_times or {}).get(oid), run_time,
+                                        prior_known=oid in (prior_run_times or {})):
+                continue   # a placed order whose over-cap run time did not change keeps its slot and firm
+            to_queue.append((oid, Jsonb(run_time_over_cap_reason(run_time, cap))))
+        elif status == "needs_planning" and reason_code == RUN_TIME_OVER_CAP_CODE:
+            to_release.append(oid)
+    if to_queue:
+        # Deferred import: backend.routing.resolver imports db (never the reverse at module scope).
+        import backend.routing.resolver as routing_resolver
+        routing_resolver._write_holds(cur, to_queue)
+        out["queued"] = len(to_queue)
+    if to_release:
+        cur.execute(
+            "UPDATE orders SET planning_status = 'scheduled', planning_reason = NULL, updated_at = NOW()"
+            " WHERE id = ANY(%s) AND planning_status = 'needs_planning'"
+            " AND planning_reason->>'code' = %s",
+            (to_release, RUN_TIME_OVER_CAP_CODE),
+        )
+        out["released"] = len(to_release)
+    if (to_queue or to_release) and commit:
+        conn.commit()
+    return out
+
+
 def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str = "excel",
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None,
                   plan_fn: Callable | None = None, apply_fn: Callable | None = None,
-                  resolve_fn: Callable | None = None) -> dict:
+                  resolve_fn: Callable | None = None, sap_tz: str | None = None) -> dict:
     """Shared orders upsert for both the Excel and SAP ingest paths.
+
+    `sap_tz` is the SAP system zone the finish echo rule (`finish_echoes`) judges in; the SAP staging
+    apply passes it. None (the Excel path, which has no SAP zone of its own) means the plant's own zone.
+    The echo rule also decides the locked `original_start_received` / `original_finish_received` columns:
+    the per-row tuple carries the STORED values for both on an echo, the incoming dates otherwise, and the
+    upsert only ever writes them as COALESCE(EXCLUDED.original_*, orders.original_*).
 
     `rows` is a list of dicts keyed by orders columns (production_order,
     material_number, material_description, machine, plant,
@@ -3466,11 +3782,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
         group_members.setdefault(rid, []).append(i)
 
     def _dup_sort_key(i: int):
-        r = rows[i]
-        start, qty = r.get("basic_start_date"), r.get("order_quantity")
-        return (start is None, start if start is not None else datetime.min,
-                qty is None, float(qty) if qty is not None else 0.0,
-                str(r.get("sap_workcenter") or r.get("machine") or ""))
+        return _duplicate_id_sort_key(rows[i])
 
     n_suffixed = 0
     for rid, idxs in group_members.items():
@@ -3527,7 +3839,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 sap_pv = _zero_pad(sap_pv.upper(), 4)
         row["sap_production_version"] = sap_pv
         # SAP's own dates, written to the baseline columns by the upsert only
-        # (never by baseline-correct or a drag). A caller that knows the finish SAP
+        # (never by a drag). A caller that knows the finish SAP
         # actually sent (the Excel ingest: None = not sent) passes it as
         # `sap_basic_finish_date`; otherwise the row's finish is SAP's.
         row["sap_basic_start_date"] = row.get("basic_start_date")
@@ -3536,11 +3848,15 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
 
     # ---------- Build row tuples in _UPSERT_SQL column order ----------
     tuples = []
+    # The trailing two slots are the locked original_start_received / original_finish_received: they
+    # depend on the stored originals and the sent finish, which are only known once a chunk's
+    # before-image is read, so `_patch_locked_originals` fills them per chunk right before the execute.
     for row in rows:
         tuples.append((
             row["id"],
             *(row.get(col) for col in _UPSERT_ROW_COLS),
             batch_id,
+            None, None,
         ))
     row_by_id = {row["id"]: row for row in rows}
     all_ids = [row["id"] for row in rows]
@@ -3583,6 +3899,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
+    prior_run_times: dict[str, object] = {}   # stored run_time before this upload (R-I5: cap re-queue judges change)
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             for i in range(0, len(tuples), _UPSERT_CHUNK):
@@ -3591,6 +3908,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # (a) lock first (rows to be written + every sibling of a distribution child)
                 cur.execute(_CHUNK_READ_SQL, {"ids": chunk_ids})
                 before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
+                prior_run_times.update({rid: b["run_time"] for rid, b in before.items()})
+                # (a') the locked original_*_received per row, from the stored originals + the sent finish
+                chunk, flag_pairs = _patch_locked_originals(chunk, before, row_by_id, sap_tz)
                 # (b) upsert (rows SAP did not change return nothing)
                 cur.executemany(_UPSERT_SQL_SAP if source == "sap" else _UPSERT_SQL,
                                 chunk, returning=True)
@@ -3608,6 +3928,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                             written_existing.append(row_id)
                     if not cur.nextset():
                         break
+                if flag_pairs:
+                    # D10 (VI12): whether the locked finish arrived as a date with no time; only differing values
+                    cur.executemany("UPDATE orders SET original_finish_date_only = %s WHERE id = %s",
+                                    [(flag, oid) for oid, flag in flag_pairs])
                 # (c) which written orders did SAP actually change?
                 changed: set[str] = set()
                 for rid in written_existing:
@@ -3624,6 +3948,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         "planned_order_initial_quantity": r.get("planned_order_initial_quantity"),
                         "sap_production_version": r.get("sap_production_version"),
                         "parent_production_order": r.get("parent_production_order"),
+                        # SAP sent no time on the finish (staging parser); None = infer from midnight
+                        "_finish_date_only": r.get("_finish_date_only"),
                     }
                     pkey = (b["plant"], b["parent_production_order"], b["material_number"])
                     # Judged on the parent's quantity when the header knows it; a child with no
@@ -3631,7 +3957,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                     is_child = bool(b["parent_production_order"]) and pkey in parent_quantity_judged
                     if is_child:
                         incoming["order_quantity"] = None
-                    fields = sap_changed_fields(b, incoming, b["machine_wc"])
+                    fields = sap_changed_fields(b, incoming, b["machine_wc"], sap_tz=sap_tz)
                     if is_child and pkey in parent_quantity_changed:
                         fields.add("quantity")
                     if fields:
@@ -3650,10 +3976,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                     reset_ids: list[str] = []
                     for rid in sorted(candidates):
                         if _order_is_running(before[rid], _plant_local_now(before[rid]["tz"])):
-                            # Only a really scheduled order has a slot/firm that was "kept"; a
-                            # never-scheduled order whose SAP window covers now has nothing to protect.
-                            if before[rid]["scheduled_start"] is not None or before[rid]["first_start"] is not None:
-                                running_changed_ids.append(rid)
+                            # Running implies stored edges (`_order_is_running`), i.e. a slot that was kept.
+                            running_changed_ids.append(rid)
                         else:
                             reset_ids.append(rid)
                     # (f) slot + firm back to SAP's dates
@@ -3663,6 +3987,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         cur.execute(
                             "UPDATE orders SET manual_firmed = FALSE, scheduled_start = NULL,"
                             " scheduled_end = NULL, planning_status = 'scheduled', planning_reason = NULL,"
+                            " runtime_schedule_mismatch = FALSE, placement_exception = NULL,"
                             " updated_at = NOW()"
                             " WHERE id = ANY(%(ids)s) RETURNING id",
                             {"ids": reset_ids},
@@ -3771,7 +4096,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # planned parent — an empty plan (no distribute-mode rows this
             # batch) is a no-op plan_fn already accounted for.
             if apply_fn is not None and distribution_plan.get("parents"):
-                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=filename or "system")
+                # apply() judges the distribution header's echo in the SAP frame the chunks used (the Excel path
+                # has none: its apply_fn call stays exactly as before)
+                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=filename or "system",
+                                     **({"sap_tz": sap_tz} if sap_tz else {}))
                 # Same insertion style as the missing_master_data entry above —
                 # one dict, `level`/`msg` are the two fields the cockpit's
                 # warning list actually reads.
@@ -3794,6 +4122,27 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 # mode machine-code rewrite), never by itself a reason to
                 # surface this entry.
                 warnings.append(distribution_plan["warnings_entry"])
+            # ---------- Run-time cap (OQ28): over-cap orders wait in Needs Planning ----------
+            # After the last write (plant fully resolved, distribution children written) and before
+            # the routing resolve (which owns run time on routing plants and applies the same cap).
+            over_cap_result = _apply_run_time_cap(cur, conn, touched_ids, running_changed_ids,
+                                                  prior_run_times=prior_run_times)
+            if over_cap_result["queued"] or over_cap_result["released"] or over_cap_result["running_kept"]:
+                parts = []
+                if over_cap_result["queued"]:
+                    parts.append(f"{over_cap_result['queued']} order(s) with a run time over the length limit "
+                                 f"were put in Needs Planning")
+                if over_cap_result["released"]:
+                    parts.append(f"{over_cap_result['released']} order(s) now within the limit were released "
+                                 f"from Needs Planning")
+                if over_cap_result["running_kept"]:
+                    parts.append(f"{over_cap_result['running_kept']} running order(s) over the limit were left "
+                                 f"on the schedule")
+                warnings.append({
+                    "level": "warn" if over_cap_result["queued"] or over_cap_result["running_kept"] else "info",
+                    "category": RUN_TIME_OVER_CAP_CODE, **over_cap_result,
+                    "msg": "; ".join(parts) + ".",
+                })
             # ---------- Routing runtime: resolve() seam (ROUTING_RUNTIME_DESIGN.md §4 item 4) ----------
             # Runs after Order Distribution's plan/apply step (so each sub-order
             # resolves at its own machine/quantity), after the SAP-change reset
@@ -3938,40 +4287,76 @@ def extract_upload_plants(file_bytes: bytes) -> list[str] | None:
     return plants or None
 
 
+def _count_dropped_order_rows(counter: str, n: int) -> None:
+    """Bump a process-level load-diagnostics counter for rows the order date
+    rules dropped (or, for `unreadable_start_date`, loaded without a start).
+    Best-effort: the Admin Cockpit counter never breaks an ingest."""
+    try:
+        from backend.admin_ops.diagnostics_state import DIAGNOSTICS
+        DIAGNOSTICS[counter] = int(DIAGNOSTICS.get(counter, 0)) + int(n)
+    except Exception:
+        log.warning("Could not update diagnostics counter %s", counter, extra={"category": "upload"})
+
+
+def _dropped_rows_label(df, mask) -> str:
+    """` (order A, B, +N more)` naming the dropped rows when the frame carries
+    PRODUCTION_ORDER values; empty string when it carries none."""
+    if "PRODUCTION_ORDER" not in df.columns:
+        return ""
+    names = [str(v).strip() for v in df.loc[mask, "PRODUCTION_ORDER"].tolist()
+             if pd.notna(v) and str(v).strip()]
+    if not names:
+        return ""
+    shown = ", ".join(names[:5])
+    return f" (order {shown}{f', +{len(names) - 5} more' if len(names) > 5 else ''})"
+
+
+def _parse_finish_dates(col):
+    """Parse the finish column; a blank or unreadable value becomes NaT.
+
+    A finish is now rejected when it parses to NaT instead of being quietly
+    filled, so a text column mixing date formats (pandas infers ONE format from
+    the first value and NaTs the rest) must not lose rows to that inference: the
+    values the first pass missed get a second, per-value parse."""
+    out = pd.to_datetime(col, errors="coerce")
+    missed = out.isna() & col.notna()
+    if missed.any():
+        retry = pd.to_datetime(col[missed], errors="coerce", format="mixed")
+        out = out.copy()
+        out.loc[missed] = retry.astype(out.dtype)
+    return out
+
+
 def _date_hygiene_df(df, warnings: list):
     """Order date rules shared by the Excel ingest and the SAP staging path.
 
-    Expects BASIC_START_DATE (required), BASIC_FINISH_DATE and RUN_TIME
-    (both optional) columns. Returns the frame with: BASIC_START_DATE and
-    BASIC_FINISH_DATE parsed; `_SAP_FINISH_DATE` = the finish as SENT (NaT when
-    absent/blank/unparseable, captured before any derivation); a missing finish
-    filled with the start; RUN_TIME numeric with 1.0 default and
-    `_RUN_TIME_DEFAULTED` flagged; finish <= start or an exact-midnight finish
-    re-derived as start + RUN_TIME hours; rows with an unparseable start
-    dropped (index reset) with one `error` warning appended.
+    Expects BASIC_FINISH_DATE (required) and an optional BASIC_START_DATE and RUN_TIME column. The
+    finish is stored exactly as received: a date-only (exact midnight) finish is kept, and a finish
+    earlier than the start on the SAME calendar date is kept; neither is rewritten. The start is
+    optional (backward scheduling OQ24/OQ25): a blank or missing start leaves the row with no start, an
+    unreadable one does too with one `warn` warning, and a row with no start is never dropped for it (the
+    browser derives its start from the finish). Returns the frame with: BASIC_START_DATE (NaT when none) and
+    BASIC_FINISH_DATE parsed; `_SAP_FINISH_DATE` = the finish as sent (equal to BASIC_FINISH_DATE for every
+    surviving row); RUN_TIME numeric with 1.0 default and `_RUN_TIME_DEFAULTED` flagged. Dropped with one
+    `error` warning each (naming the rows when PRODUCTION_ORDER is present), index reset: rows with a blank
+    or unparseable finish, and rows whose finish date is earlier than their start date.
     """
+    if "BASIC_START_DATE" not in df.columns:
+        df["BASIC_START_DATE"] = pd.NaT
+    raw_start = df["BASIC_START_DATE"].copy()
     df["BASIC_START_DATE"] = pd.to_datetime(df["BASIC_START_DATE"], errors="coerce")
     if "BASIC_FINISH_DATE" not in df.columns:
         df["BASIC_FINISH_DATE"] = pd.NaT
-    df["BASIC_FINISH_DATE"] = pd.to_datetime(df["BASIC_FINISH_DATE"], errors="coerce")
-    # The finish date SAP actually SENT (NaT = column absent / blank / unparseable), kept
-    # before any NIMBUS derivation below: it is what the SAP baseline and the
-    # SAP-change detection compare, so a RUN_TIME change can never look like SAP
-    # moving the dates.
+    df["BASIC_FINISH_DATE"] = _parse_finish_dates(df["BASIC_FINISH_DATE"])
+    # The finish SAP actually SENT, kept for the SAP baseline and the SAP-change
+    # detection. Nothing derives or rewrites the finish any more, so this always
+    # equals BASIC_FINISH_DATE for a surviving row.
     df["_SAP_FINISH_DATE"] = df["BASIC_FINISH_DATE"]
-    df["BASIC_FINISH_DATE"] = df["BASIC_FINISH_DATE"].fillna(df["BASIC_START_DATE"])
 
-    # RUN_TIME must be parsed BEFORE the "bad" (missing/corrupt finish) branch
-    # below so that branch can resolve to start + RUN_TIME hours instead of a
-    # hardcoded bump. A hardcoded +1h produced a THIRD, undetected raw shape
-    # whenever RUN_TIME != 1 — one that app.js's due-date-baseline correction
-    # heuristic (which only recognizes "== start" or "== start + RUN_TIME
-    # hours") never matched, permanently misclassifying those orders as
-    # already-correct.
     # D54: capture whether RUN_TIME was genuinely absent/unparseable BEFORE the
     # fillna(1.0) default overwrites that absence — as a column (not a boolean
-    # mask) because the dropna().reset_index(drop=True) a few lines below would
-    # misalign a mask built against the pre-dropna index.
+    # mask) because the dropna().reset_index(drop=True) below would misalign a
+    # mask built against the pre-dropna index.
     _rt = pd.to_numeric(
         df["RUN_TIME"] if "RUN_TIME" in df.columns else pd.Series(float("nan"), index=df.index),
         errors="coerce",
@@ -3979,37 +4364,42 @@ def _date_hygiene_df(df, warnings: list):
     df["_RUN_TIME_DEFAULTED"] = _rt.isna()
     df["RUN_TIME"] = _rt.fillna(1.0)
 
-    bad = df["BASIC_FINISH_DATE"] <= df["BASIC_START_DATE"]
-    # pandas 3 no longer upcasts silently: the sum can be datetime64[ns] while the
-    # column is [us] (read_excel resolution), so cast to the column's own dtype.
-    df.loc[bad, "BASIC_FINISH_DATE"] = (
-        df.loc[bad, "BASIC_START_DATE"]
-        + pd.to_timedelta(df.loc[bad, "RUN_TIME"], unit="h")
-    ).astype(df["BASIC_FINISH_DATE"].dtype)
+    # The start is optional: a value that was there but could not be read keeps its row (with no start) and
+    # warns; a blank cell is just absent. Nothing is dropped, so nothing is counted as dropped.
+    unreadable_start = (df["BASIC_START_DATE"].isna() & raw_start.notna()
+                        & (raw_start.astype(str).str.strip() != ""))
+    if unreadable_start.any():
+        _count_dropped_order_rows("unreadable_start_date", int(unreadable_start.sum()))
+        warnings.append({
+            "level": "warn",
+            "msg": (f"{int(unreadable_start.sum())} row(s) loaded with no start — BASIC_START_DATE is not a "
+                    f"readable date{_dropped_rows_label(df, unreadable_start)}"),
+        })
 
-    bad_start = df["BASIC_START_DATE"].isna()
-    if bad_start.any():
+    # The finish is required and stored as received (owner rule): blank or
+    # unparseable is rejected, never filled with the start or a derived value.
+    no_finish = df["BASIC_FINISH_DATE"].isna()
+    if no_finish.any():
         warnings.append({
             "level": "error",
-            "msg": f"{int(bad_start.sum())} row(s) dropped — unparseable BASIC_START_DATE",
+            "msg": (f"{int(no_finish.sum())} row(s) dropped — blank or unparseable BASIC_FINISH_DATE"
+                    f"{_dropped_rows_label(df, no_finish)}"),
         })
-    df = df.dropna(subset=["BASIC_START_DATE"]).reset_index(drop=True)
+        _count_dropped_order_rows("dropped_no_finish_date", int(no_finish.sum()))
+    df = df.loc[~no_finish].reset_index(drop=True)
 
-    # A genuinely date-only (but not "bad") finish — SAP supplied a real
-    # calendar date with no time-of-day — is likewise re-derived from
-    # RUN_TIME rather than trusted as a bare midnight, mirroring app.js's
-    # date-only-start handling (Persistence._snapToWorkingHours).
-    # Only an EXACT midnight can be date-only: read_excel yields 00:00:00 for a
-    # bare date cell, whereas a real 00:01-00:59 finish carries minutes/seconds
-    # (the old `.dt.hour == 0` test rewrote those as start + RUN_TIME).
-    _fin = df["BASIC_FINISH_DATE"]
-    mask_notime = _fin.notna() & (_fin == _fin.dt.normalize())
-    # pandas 3 no longer upcasts silently: the sum can be datetime64[ns] while the
-    # column is [us] (read_excel resolution), so cast to the column's own dtype.
-    df.loc[mask_notime, "BASIC_FINISH_DATE"] = (
-        df.loc[mask_notime, "BASIC_START_DATE"]
-        + pd.to_timedelta(df.loc[mask_notime, "RUN_TIME"], unit="h")
-    ).astype(df["BASIC_FINISH_DATE"].dtype)
+    # A finish on an earlier CALENDAR DATE than the start is a corrupt row; a
+    # finish earlier on the same date (or at exact midnight) is kept as received.
+    # A row with no start has nothing to be earlier than (NaT compares False).
+    before_start = df["BASIC_FINISH_DATE"].dt.normalize() < df["BASIC_START_DATE"].dt.normalize()
+    if before_start.any():
+        warnings.append({
+            "level": "error",
+            "msg": (f"{int(before_start.sum())} row(s) dropped — BASIC_FINISH_DATE is earlier than "
+                    f"BASIC_START_DATE{_dropped_rows_label(df, before_start)}"),
+        })
+        _count_dropped_order_rows("dropped_no_finish_date", int(before_start.sum()))
+    df = df.loc[~before_start].reset_index(drop=True)
 
     return df
 
@@ -4017,17 +4407,20 @@ def _date_hygiene_df(df, warnings: list):
 def apply_order_date_hygiene_rows(rows: list[dict], warnings: list) -> list[dict]:
     """Row-dict twin of the Excel date hygiene, for the SAP staging path.
 
-    Reads `basic_start_date`, `basic_finish_date`, `run_time` from each row
-    dict and returns the surviving rows (a row with an unparseable start is
-    dropped, with the same warning the Excel path emits), each updated in place
-    with the repaired `basic_start_date` / `basic_finish_date` / `run_time` plus
-    `sap_basic_finish_date` (the finish as sent, or None) and
-    `_run_time_was_defaulted`. Other keys pass through untouched.
+    Reads `production_order` (optional, only to name dropped rows),
+    `basic_start_date`, `basic_finish_date`, `run_time` from each row dict and
+    returns the surviving rows (a blank or unparseable finish, or a finish on an
+    earlier date than the start, drops the row; a missing or unreadable start keeps it
+    with `basic_start_date = None`; same warnings as the Excel path), each updated in
+    place with the parsed `basic_start_date` / `basic_finish_date` (stored as received) /
+    `run_time` plus `sap_basic_finish_date` and `_run_time_was_defaulted`.
+    Other keys pass through untouched.
     """
     if not rows:
         return []
     df = pd.DataFrame({
         "_i": range(len(rows)),
+        "PRODUCTION_ORDER": [r.get("production_order") for r in rows],
         "BASIC_START_DATE": [r.get("basic_start_date") for r in rows],
         "BASIC_FINISH_DATE": [r.get("basic_finish_date") for r in rows],
         "RUN_TIME": [r.get("run_time") for r in rows],
@@ -4115,7 +4508,8 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
     if "PRODUCTION_LINE" in df.columns and "MACHINE" not in df.columns:
         df = df.rename(columns={"PRODUCTION_LINE": "MACHINE"})
 
-    required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_START_DATE"}
+    # The finish is the one required date (backward scheduling OQ24/OQ25); the start is optional.
+    required = {"PRODUCTION_ORDER", "MATERIAL_NUMBER", "BASIC_FINISH_DATE"}
     missing = required - set(df.columns)
     if missing:
         msg = f"Uploaded file is missing required columns: {sorted(missing)}"
@@ -4140,8 +4534,8 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
 
     # Manual Excel upload only: Machine Hours (MEINH) wins over RUN_TIME when
     # present and > 0 (0 is treated as blank, matching resolver._fallback). Done
-    # before date hygiene so finish-date derivation and _RUN_TIME_DEFAULTED
-    # follow the chosen value. Routing-on plants are unaffected because
+    # before date hygiene so _RUN_TIME_DEFAULTED follows the chosen value (the
+    # finish itself is stored as received and never derived). Routing-on plants are unaffected because
     # upsert_orders nulls run_time for them; SAP staging never passes through
     # this function. Owner decision 2026-10-13.
     _mh_col = "MACHINE_HOURS_(MEINH)"
@@ -4156,6 +4550,44 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
                 "level": "info",
                 "msg": f"{_mh_n} row(s): run time taken from Machine Hours (MEINH)",
             })
+
+    # A run time outside the database's representation bound (negative, 8,760 h or more, or not a
+    # finite number) would fail the whole upsert chunk at the CHECK constraint. Reject that ROW, by
+    # its spreadsheet row number, instead; everything else (including a run time over the 336 h cap,
+    # which only queues the order) goes on to the upsert. Done before date hygiene resets the index,
+    # so the row number is still the file's (the header is row 1).
+    if "RUN_TIME" in df.columns:
+        _rt_num = pd.to_numeric(df["RUN_TIME"], errors="coerce")
+        _rt_bad = _rt_num.notna() & ~((_rt_num >= 0) & (_rt_num < RUN_TIME_REPRESENTATION_BOUND_HOURS))
+        # U12: a routing-enabled plant ignores the file's RUN_TIME (upsert_orders nulls it; the resolver prices
+        # the order), so a junk value there must not drop the row: it loads and the resolver prices it.
+        if _rt_bad.any() and "PLANT" in df.columns:
+            _bad_plants = sorted({_str_id(p) for p in df.loc[_rt_bad, "PLANT"].dropna().unique() if _str_id(p)})
+            if _bad_plants:
+                with _pool.connection() as _conn, _conn.cursor() as _cur:
+                    _cur.execute("SELECT plant FROM plants WHERE plant = ANY(%s) AND routing_runtime_enabled = TRUE",
+                                 (_bad_plants,))
+                    _routing_plants = {r[0] for r in _cur.fetchall()}
+                if _routing_plants:
+                    _on_routing = df["PLANT"].map(lambda v: _str_id(v) in _routing_plants if pd.notna(v) else False)
+                    _rt_bad = _rt_bad & ~_on_routing
+        if _rt_bad.any():
+            _bad_rows = df.index[_rt_bad].tolist()
+            for _i in _bad_rows[:25]:
+                _who = (_str_id(df.at[_i, "PRODUCTION_ORDER"]) if "PRODUCTION_ORDER" in df.columns else "")
+                warnings.append({
+                    "level": "error",
+                    "msg": (f"Row {int(_i) + 2}{f' (order {_who})' if _who else ''} not loaded — run time "
+                            f"{_rt_num.at[_i]:g} h is not between 0 and "
+                            f"{RUN_TIME_REPRESENTATION_BOUND_HOURS:,.0f} hours."),
+                })
+            if len(_bad_rows) > 25:
+                warnings.append({
+                    "level": "error",
+                    "msg": f"{len(_bad_rows) - 25} more row(s) not loaded — run time outside 0 to "
+                           f"{RUN_TIME_REPRESENTATION_BOUND_HOURS:,.0f} hours.",
+                })
+            df = df.loc[~_rt_bad]
 
     diag["stage"] = "date_hygiene"
     df = _date_hygiene_df(df, warnings)

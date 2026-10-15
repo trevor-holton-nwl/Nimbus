@@ -8,7 +8,7 @@
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
-import { candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
+import { candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
@@ -589,6 +589,13 @@ export interface SetupRunContext {
    *  memo — plant is folded into the key for the same reuse-across-plants
    *  reason as `_lineBlocks`. */
   _dayWindow: Map<string, PlacementInterval | null>;
+  /** Lazy per-(plant, line, dayStartMs) work-window memo for reading a date-only SAP due date
+   *  (see `dueWindowForDay`); distinct from `_dayWindow` because a missing calendar row means
+   *  "no calendar" here, not default hours. */
+  _dueWindow: Map<string, PlacementInterval | null>;
+  /** Per-task memo of the due instant (see `dueInstantMs`); each entry carries the inputs it
+   *  was computed from and is ignored when any of them differ. Weak so tasks can be collected. */
+  _dueInstant: WeakMap<NimbusTask, DueInstantEntry>;
   /** F2: lazy per-(plant, line) index of the line's free intervals over
    *  `freeIndexSpan`, built once by running the day-walk over the whole span.
    *  Null caches "this line's walk output is not sorted/disjoint, never
@@ -664,6 +671,8 @@ export function buildRunContext(
     _staticDefect: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
+    _dueWindow: new Map(),
+    _dueInstant: new WeakMap(),
     _freeIndex: new Map(),
     freeIndexSpan: freeIndexSpanFor(bounds),
     _overridesByLine: new Map(),
@@ -1007,6 +1016,26 @@ function noFitReason(
   return { code: 'no_fit_found', message: completeMessage };
 }
 
+/** OQ50 c: under the `never` split policy an order whose run time exceeds every contiguous operating window on its
+ * line (while the line does have windows) is queued as `overlong_never`, the code the planner's release path keys
+ * on. A line with no window at all, or an order that merely failed to find room, keeps its existing reason. */
+function neverOverlongReason(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
+): { code: string; message: string } | null {
+  const plant = bounds.setup.plant;
+  if (splitOrderPolicyForSnapshot(snapshot, plant) !== 'never') return null;
+  const minutes = Math.round(Number(task.RUN_TIME) * 60);
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  const line = String(task.MACHINE);
+  const from = bounds.placementStart ?? bounds.now;
+  if (hasNominalWindow(snapshot, line, plant, from, minutes, bounds.runContext)) return null;
+  if (!hasNominalWindow(snapshot, line, plant, from, 1, bounds.runContext)) return null;
+  return {
+    code: 'overlong_never',
+    message: 'Longer than any single working period on this machine, and this plant does not split orders.',
+  };
+}
+
 /** Severity ranking used to aggregate multiple line/fragment `SearchRun`
  * terminations into one overall value: the WORST (most severe) one wins,
  * never simply "the last one seen". Without this, a later line/fragment that
@@ -1193,9 +1222,87 @@ function timestamp(value: unknown): Date | null {
   return null;
 }
 
-function dueTimestamp(task: NimbusTask): number {
-  return (timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE))?.getTime()
-    ?? Number.MAX_SAFE_INTEGER;
+/** What a due-date read needs beyond the task: the snapshot's calendars (a date-only SAP
+ * finish arrives as exact midnight and reads as the end of that date's working window), the
+ * run's plant when known (else resolved per task), and the run context for memoization. */
+export interface DueScope {
+  snapshot: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'>;
+  plant?: string | null;
+  ctx?: SetupRunContext;
+}
+
+interface DueInstantEntry {
+  rawMs: number;
+  snapshot: DueScope['snapshot'];
+  plant: string | null | undefined;
+  line: string;
+  core: unknown;
+  ms: number;
+}
+
+function dueScopeFor(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): DueScope {
+  return { snapshot, plant: bounds.setup.plant, ctx: bounds.runContext };
+}
+
+/** The order's SAP due as an instant: a timed value as received; an exact-midnight (date-only)
+ * value as the close of that date's (line ∩ plant) working window via the compute core's
+ * `dueDateInstant`. A line with no calendar row in the snapshot reads as "no calendar"
+ * (raw + 23:59:59), matching `Util.sapDueDate` on the main thread. Null when the order has no
+ * SAP due date. */
+export function dueInstant(task: NimbusTask, scope: DueScope): Date | null {
+  const ms = dueInstantMs(task, scope);
+  return ms === null ? null : new Date(ms);
+}
+
+/** The due instant as epoch milliseconds (null = no SAP due date), memoized per task on the
+ * run context. The memo entry is served only while the raw due value, the snapshot, the
+ * scope's plant, the task's line and the compute core all still match, so a changed due, a
+ * moved order or a different run never reads a stale instant. A scope with no run context
+ * (ad-hoc callers) is never memoized. */
+function dueInstantMs(task: NimbusTask, scope: DueScope): number | null {
+  const raw = timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE);
+  if (!raw) return null;
+  const rawMs = raw.getTime();
+  const core = globalThis.NimbusComputeCore;
+  if (!core?.dueDateInstant) return rawMs;
+  const line = task.MACHINE ? String(task.MACHINE) : '';
+  const memo = scope.ctx?._dueInstant;
+  const hit = memo?.get(task);
+  if (hit && hit.rawMs === rawMs && hit.snapshot === scope.snapshot && hit.plant === scope.plant
+    && hit.line === line && hit.core === core) return hit.ms;
+  const plant = scope.plant ?? resolveTaskPlant(task, scope.snapshot, scope.ctx);
+  const ms = core.dueDateInstant(raw, day => {
+    const win = line ? dueWindowForDay(scope, line, plant, day) : null;
+    return win ? { open: win.start, close: win.end } : null;
+  }).getTime();
+  memo?.set(task, { rawMs, snapshot: scope.snapshot, plant: scope.plant, line, core, ms });
+  return ms;
+}
+
+/** (line ∩ plant) work window of one calendar day for due-date reading, or null when closed or
+ * when the snapshot holds no calendar row for the line. Memoized per (plant, line, day) on the
+ * run context (a separate memo from `_dayWindow`: that one falls back to default hours). */
+function dueWindowForDay(scope: DueScope, line: string, plant: string | null, day: Date): PlacementInterval | null {
+  const dayStart = new Date(day);
+  dayStart.setHours(0, 0, 0, 0);
+  const key = `${plant ?? ''}${CTX_KEY_SEP}${line}|${dayStart.getTime()}`;
+  const memo = scope.ctx?._dueWindow;
+  if (memo?.has(key)) return memo.get(key)!;
+  const lineRow = scope.snapshot.calendars[line];
+  let result: PlacementInterval | null = null;
+  if (lineRow) {
+    const lineWin = localWindow(lineRow.workHours, dayStart);
+    const plantRow = plant ? scope.snapshot.plants[plant] : undefined;
+    const plantWin = plantRow ? localWindow(plantRow.workHours, dayStart) : lineWin;
+    result = lineWin && plantWin ? intersectWindows(lineWin, plantWin) : null;
+    if (result && result.start >= result.end) result = null;
+  }
+  memo?.set(key, result);
+  return result;
+}
+
+function dueTimestamp(task: NimbusTask, scope: DueScope): number {
+  return dueInstantMs(task, scope) ?? Number.MAX_SAFE_INTEGER;
 }
 
 function taskId(task: NimbusTask): string {
@@ -1424,10 +1531,11 @@ function orderedByPolicyThenDue(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
   ctx?: SetupRunContext,
 ): NimbusTask[] {
+  const scope: DueScope = { snapshot, plant, ctx };
   const decorated = tasks.map(task => ({ task, key: policyKeyForTask(snapshot, plant, line, task, ctx) }));
   decorated.sort((left, right) => (
     ordinalCompare(left.key, right.key)
-    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || dueTimestamp(left.task, scope) - dueTimestamp(right.task, scope)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   return decorated.map(entry => entry.task);
@@ -1443,9 +1551,10 @@ function orderedByDueThenPolicy(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string, tasks: ReadonlyArray<NimbusTask>,
   ctx?: SetupRunContext,
 ): NimbusTask[] {
+  const scope: DueScope = { snapshot, plant, ctx };
   const decorated = tasks.map(task => ({ task, key: policyKeyForTask(snapshot, plant, line, task, ctx) }));
   decorated.sort((left, right) => (
-    dueTimestamp(left.task) - dueTimestamp(right.task)
+    dueTimestamp(left.task, scope) - dueTimestamp(right.task, scope)
     || ordinalCompare(left.key, right.key)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
@@ -2041,8 +2150,9 @@ function orderedBySlack(
   line: string,
   tasks: ReadonlyArray<NimbusTask>,
 ): NimbusTask[] {
+  const scope = dueScopeFor(snapshot, bounds);
   const decorated = tasks.map(task => {
-    const deadline = notAfterFor(bounds, task)?.getTime() ?? dueTimestamp(task);
+    const deadline = notAfterFor(bounds, task)?.getTime() ?? dueTimestamp(task, scope);
     const slack = Number.isFinite(deadline)
       ? deadline - productiveRuntimeMinutes(task) * 60 * 1000
       : Number.MAX_SAFE_INTEGER;
@@ -2051,7 +2161,7 @@ function orderedBySlack(
   decorated.sort((left, right) => (
     left.slack - right.slack
     || ordinalCompare(left.policy, right.policy)
-    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || dueTimestamp(left.task, scope) - dueTimestamp(right.task, scope)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   return decorated.map(entry => entry.task);
@@ -2071,6 +2181,7 @@ function orderedBySetupNearest(
   const definition = bounds.setup.definition;
   if (!definition) return [...tasks];
   const remaining = [...tasks];
+  const dueScope = dueScopeFor(snapshot, bounds);
   const result: NimbusTask[] = [];
   let predecessorState = fragment.predecessorState;
   let predecessorOrderId = fragment.predecessorOrderId;
@@ -2102,7 +2213,7 @@ function orderedBySetupNearest(
       left.covered - right.covered
       || left.minutes - right.minutes
       || ordinalCompare(left.policy, right.policy)
-      || dueTimestamp(left.task) - dueTimestamp(right.task)
+      || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
       || taskId(left.task).localeCompare(taskId(right.task))
     ));
     const next = ranked[0].task;
@@ -2650,19 +2761,22 @@ function hasNominalWindow(
   const requiredMs = Math.round(runtimeMinutes) * 60 * 1000;
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
-  for (let offset = 0; offset < 90; offset += 1) {
-    const date = new Date(day);
-    date.setDate(day.getDate() + offset);
-    // `lineHours`/`plantHours` are already confirmed present above, so the
-    // memo's own defaulting (for a missing calendar) never triggers here —
-    // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
-    const joint = ctx
-      ? jointWindowForDay(ctx, snapshot, line, plant, date)
-      : intersectWindows(localWindow(lineHours, date), localWindow(plantHours, date));
-    if (!joint) continue;
-    if (joint.end.getTime() - joint.start.getTime() >= requiredMs) return true;
-  }
-  return false;
+  // Senior review I9 (OQ47): windows that touch at midnight are one contiguous span, the same definition the
+  // backward walk and Calendar.hasNominalWindow use (calendar-engine's fitsMergedSpan).
+  const windows = function* (): Generator<{ s: number; e: number } | null> {
+    for (let offset = 0; offset < 90; offset += 1) {
+      const date = new Date(day);
+      date.setDate(day.getDate() + offset);
+      // `lineHours`/`plantHours` are already confirmed present above, so the
+      // memo's own defaulting (for a missing calendar) never triggers here —
+      // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
+      const joint = ctx
+        ? jointWindowForDay(ctx, snapshot, line, plant, date)
+        : intersectWindows(localWindow(lineHours, date), localWindow(plantHours, date));
+      yield joint ? { s: joint.start.getTime(), e: joint.end.getTime() } : null;
+    }
+  };
+  return fitsMergedSpan(windows(), requiredMs);
 }
 
 /** `'due-date'` mode (2026-09-09): lateness outranks BOTH the priority-list
@@ -2790,6 +2904,7 @@ function candidateForSequence(
   suppressExplanations = false,
 ): DueDateCandidate {
   const definition = bounds.setup.definition!;
+  const dueScope = dueScopeFor(snapshot, bounds);
   let predecessorState = fragment.predecessorState;
   let predecessorOrderId = fragment.predecessorOrderId;
   let cursor = new Date(fragment.start);
@@ -2996,10 +3111,12 @@ function candidateForSequence(
           : [],
       },
     });
-    const priorStart = timestamp(task.start_date);
-    if (priorStart) instabilityMinutes += Math.abs(first.start.getTime() - priorStart.getTime()) / 60000;
+    // Instability is keyed on the finish (Reading A): the placed finish is the anchor, so a task whose
+    // finish held but whose start moved because its run time changed is not unstable.
+    const priorFinish = timestamp(task.end_date);
+    if (priorFinish) instabilityMinutes += Math.abs(last.end.getTime() - priorFinish.getTime()) / 60000;
     setupMinutes += effectiveSetupMinutes;
-    const due = dueTimestamp(task);
+    const due = dueTimestamp(task, dueScope);
     if (Number.isFinite(due) && last.end.getTime() > due) {
       const lateMinutes = Math.ceil((last.end.getTime() - due) / (60 * 1000));
       lateCount += 1;
@@ -3439,12 +3556,13 @@ function greedySearch(
   // once rather than up to twice per comparator call, and compare it
   // ordinally (see `ordinalCompare` — identical order to `localeCompare` for
   // this zero-padded-digit alphabet, without the ICU collation cost).
+  const dueScope = dueScopeFor(snapshot, bounds);
   const decoratedTasks = groups.flatMap(group => group.tasks).map(task => (
     { task, key: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext) }
   ));
   decoratedTasks.sort((left, right) => (
     ordinalCompare(left.key, right.key)
-    || dueTimestamp(left.task) - dueTimestamp(right.task)
+    || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
     || taskId(left.task).localeCompare(taskId(right.task))
   ));
   const orderedTasks = decoratedTasks.map(entry => entry.task);
@@ -4154,8 +4272,8 @@ function inactiveOutOfHorizonFirmedOverrideReasons(
   }));
 }
 
-function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary, mode: FragmentMode): boolean {
-  if (mode === 'due-date-first' || mode === 'due-date') return dueTimestamp(task) <= boundary.start.getTime();
+function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary, mode: FragmentMode, scope: DueScope): boolean {
+  if (mode === 'due-date-first' || mode === 'due-date') return dueTimestamp(task, scope) <= boundary.start.getTime();
   // Pure SPT is ordered only by productive runtime. A stale or null planned
   // date must not pre-partition work behind the next firmed order; bounded
   // fragment placement decides what capacity can actually be admitted first.
@@ -5097,7 +5215,7 @@ function evaluateLineWithFirmedBoundaries(
         }
         if (needsThisFragment) return true;
         if (reservedForFutureFragment) return false;
-        return members.some(member => belongsBeforeFirmedBoundary(freeById.get(member)!, boundary, mode));
+        return members.some(member => belongsBeforeFirmedBoundary(freeById.get(member)!, boundary, mode, dueScopeFor(snapshot, bounds)));
       });
     if (componentConflict) {
       return unchangedLineResult(
@@ -5975,12 +6093,13 @@ function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
  * every entry's `overCap` there is simply `false`. */
 function lateOrderFacts(
   tasks: ReadonlyArray<NimbusTask>,
+  scope: DueScope,
   notAfter?: (task: NimbusTask) => Date | null,
 ): Map<string, { late: boolean; end: number | null; overCap: boolean }> {
   const facts = new Map<string, { late: boolean; end: number | null; overCap: boolean }>();
   for (const task of tasks) {
     const end = scheduledEndMinutes(task);
-    const due = dueTimestamp(task);
+    const due = dueTimestamp(task, scope);
     const ceiling = notAfter ? notAfter(task) ?? null : null;
     const overCap = end !== null && ceiling !== null && end * 60 * 1000 > ceiling.getTime();
     facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end, overCap });
@@ -6042,9 +6161,10 @@ export function selectThroughputCandidate(
   candidate: Readonly<CandidateResult>,
   thresholds: Readonly<SetupPolicyThresholds>,
 ): CandidateResult {
-  const before = lateOrderFacts(snapshot.tasks);
+  const dueScope: DueScope = { snapshot };
+  const before = lateOrderFacts(snapshot.tasks, dueScope);
   const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
-  const after = lateOrderFacts(afterTasks);
+  const after = lateOrderFacts(afterTasks, dueScope);
   const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
   const slips = [...after.entries()].flatMap(([id, fact]) => {
     const prior = before.get(id)?.end;
@@ -6220,10 +6340,10 @@ export function allowedPlanningWindow(snapshot: Readonly<ScheduleSnapshot>, boun
   const push = plant?.max_push_forward_days;
   const hasPull = Number.isInteger(pull) && Number(pull) >= 0;
   const hasPush = Number.isInteger(push) && Number(push) >= 0;
-  const due = timestamp(task.original_end_date) ?? timestamp(task.ORIGINAL_END_DATE);
+  const due = dueInstant(task, dueScopeFor(snapshot, bounds));
   const day = (offset: number): Date | null => {
     if (!due) return null;
-    const value = new Date(due); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + offset); return value;
+    const value = new Date(+due - 1); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + offset); return value;
   };
   return { floor: hasPull ? day(-Number(pull)) : null, ceiling: hasPush ? day(Number(push) + 1) : null, missingDue: (hasPull || hasPush) && !due };
 }
@@ -6300,6 +6420,7 @@ interface UrgencyKey {
 
 function urgencyKeyFor(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, task: NimbusTask,
+  dueScope: DueScope,
 ): UrgencyKey {
   const effectiveLine = line || String(task.MACHINE);
   const ctx = bounds.runContext;
@@ -6314,7 +6435,7 @@ function urgencyKeyFor(
     task,
     deadline: notAfterFor(bounds, task)?.getTime() ?? Infinity,
     policy: policyKeyForSequence(snapshot, bounds.setup.plant, effectiveLine, [task], ctx),
-    due: dueTimestamp(task),
+    due: dueTimestamp(task, dueScope),
     start: timestamp(task.start_date)?.getTime() ?? Number.MAX_SAFE_INTEGER,
     id: taskId(task),
   };
@@ -6323,7 +6444,8 @@ function urgencyKeyFor(
 }
 
 function urgencyOrder(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, tasks: ReadonlyArray<NimbusTask>): NimbusTask[] {
-  const keyed = tasks.map(task => ({ task, key: urgencyKeyFor(snapshot, bounds, line, task) }));
+  const dueScope = dueScopeFor(snapshot, bounds);
+  const keyed = tasks.map(task => ({ task, key: urgencyKeyFor(snapshot, bounds, line, task, dueScope) }));
   keyed.sort((a, b) => {
     const deadline = a.key.deadline - b.key.deadline;
     if (deadline && !Number.isNaN(deadline)) return deadline;
@@ -6672,8 +6794,10 @@ function retainCompatiblePlacements(
  * condition is sev 'err' - a validation 'error' would block Apply on a condition the
  * optimizer cannot always repair, whereas the alert is the planner-facing red flag.
  * when a SAP aggregate order's distributed sub-orders (siblings sharing
- * `PARENT_ORDER`) start further apart than their work center's configured
- * `max_separation` policy allows. A future alignment pass may actually fix
+ * `PARENT_ORDER`) finish further apart than their work center's configured
+ * `max_separation` policy allows (judged on the FINISH, backward scheduling OQ38:
+ * siblings share the finish, so a family that finishes together raises nothing).
+ * Hand-mirrored by nimbus-compute-core.js `computeAlerts` rule 1c - keep the two in step. A future alignment pass may actually fix
  * these; this only surfaces them.
  */
 function checkDistributionSeparation(
@@ -6717,17 +6841,17 @@ function checkDistributionSeparation(
     if (!maxSeparation || maxSeparation === 'none') continue;
     // D50: mirror nimbus-compute-core.js's computeAlerts — an undated sibling
     // (no start_date yet, e.g. still mid-placement) is not yet part of the
-    // "do these siblings start together" question and must not be bucketed at
+    // "do these siblings finish together" question and must not be bucketed at
     // all, let alone bucketed as its own mismatching group of one.
-    const dated = group.filter(task => task.start_date);
+    const dated = group.filter(task => task.end_date);
     if (dated.length < 2) continue;
-    const buckets = dated.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.start_date, maxSeparation));
+    const buckets = dated.map(task => globalThis.NimbusComputeCore!.separationBucketKey(task.end_date, maxSeparation));
     if (buckets.some(bucket => bucket !== buckets[0])) {
       findings.push({
         code: 'distribution_separation',
         severity: 'warning',
         parents: dated.map(taskId),
-        message: `Sub-orders of ${dated[0].PARENT_ORDER} start in different ${maxSeparation} buckets.`,
+        message: `Sub-orders of ${dated[0].PARENT_ORDER} finish in different ${maxSeparation} buckets.`,
       });
     }
   }
@@ -6763,7 +6887,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
       dispositions.push({ id, line, status: 'scheduled' });
     } else {
-      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? noFitReason(candidate);
+      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? neverOverlongReason(snapshot, bounds, task) ?? noFitReason(candidate);
       patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
@@ -6783,7 +6907,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     if (baselineWithinWindow(snapshot, bounds, original)) {
       return { id: patch.id, changes: { start_date: original.start_date, end_date: original.end_date, scheduleSegments: original.scheduleSegments ?? [], planning_status: 'scheduled', planning_reason: null } };
     }
-    const reason = planningDefect(snapshot, bounds, original) ?? noFitReason(candidate);
+    const reason = planningDefect(snapshot, bounds, original) ?? neverOverlongReason(snapshot, bounds, original) ?? noFitReason(candidate);
     return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
   });
   const baselineById = new Map(baselinePatches.map(patch => [patch.id, patch.changes]));
@@ -7062,11 +7186,13 @@ export function fillPlanningGaps(
     // the primary search refused because its setup transition is unrecorded (N8
     // excludeFromSearch) — keep that actionable reason instead of the generic "No slot found".
     const prior = dispositions.get(id)?.reason;
+    // VI10: overlong is a calendar fact, not a search result; a budget expiry must not relabel it.
+    const overlong = prior?.code !== 'setup_transition_unrecorded' ? neverOverlongReason(snapshot, bounds, task) : null;
     const reason = complete && prior?.code === 'setup_transition_unrecorded'
       ? prior
-      : complete
+      : overlong ?? (complete
       ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
-      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' };
+      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' });
     patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
     dispositions.set(id, { id, line, status: 'needs_planning', reason });
   }
@@ -7181,9 +7307,10 @@ export function objectiveFactsForCandidate(
   const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
   let lateCount = 0; let lateness = 0; let maxLateness = 0; let setupMinutes = 0; let instability = 0;
   let overCap = 0;
+  const dueScope = dueScopeFor(snapshot, bounds);
   const original = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   for (const task of tasks) {
-    const end = timestamp(task.end_date); const due = dueTimestamp(task);
+    const end = timestamp(task.end_date); const due = dueTimestamp(task, dueScope);
     if (task.planning_status === 'needs_planning') {
       lateCount++;
       if (Number.isFinite(due)) {
@@ -7199,7 +7326,7 @@ export function objectiveFactsForCandidate(
     }
     const ceiling = notAfterFor(bounds, task);
     if (end && ceiling && +end > +ceiling) overCap++;
-    const before = timestamp(original.get(taskId(task))?.start_date); const after = timestamp(task.start_date);
+    const before = timestamp(original.get(taskId(task))?.end_date); const after = timestamp(task.end_date);
     if (before && after) instability += Math.abs(+after - +before) / 60000;
   }
   const definition = bounds.setup.definition;

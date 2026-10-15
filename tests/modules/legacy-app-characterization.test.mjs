@@ -76,7 +76,6 @@ test('Alerts.recompute is callable and Utilization.computeMatrix returns structu
 
   // Utilization.computeMatrix accepts a task list, start ms, and day count.
   assert.ok(typeof Utilization.computeMatrix === 'function', 'Utilization.computeMatrix must be a function');
-  assert.ok(typeof Utilization.dayByLine === 'function', 'Utilization.dayByLine must be a function');
 
   // Signature only — computeMatrix needs seeded calendars to run without error;
   // the compute-core.test.js suite covers the algorithm itself.
@@ -94,7 +93,7 @@ test('Persistence.saveAll posts to /tasks/update with expected payload shape', a
     start_date: new Date('2026-07-02T06:00:00'),
     end_date:   new Date('2026-07-02T14:00:00'),
     RUN_TIME: 8, COLOR: 'GREEN', FORM_SIZE: 'S',
-    row_version: 12345,
+    row_version: 12345, user_scheduled: true,
   };
   Store.setTasks([task], 'test');
   Store.setSelectedPlant('5512', 'test');

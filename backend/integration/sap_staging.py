@@ -43,6 +43,7 @@ import db
 import master_data as md
 from backend.integration import sap_sync
 from db import _pool
+from db import finish_echoes  # noqa: F401 -- the one echo rule lives in db.py beside sap_changed_fields
 
 log = logging.getLogger("nimbus.sap")
 
@@ -393,8 +394,11 @@ def build_order_rows(stage_rows: list[dict], plant_tz: str | None, field_map: li
                 row["basic_start_date"] = sap_to_plant_local(
                     sr.get("psttr"), sr.get("pstti") if "pstti" in amap else None, plant_tz)
             if "pedtr" in amap:
-                row["basic_finish_date"] = sap_to_plant_local(
-                    sr.get("pedtr"), sr.get("pedti") if "pedti" in amap else None, plant_tz)
+                finish_time = sr.get("pedti") if "pedti" in amap else None
+                row["basic_finish_date"] = sap_to_plant_local(sr.get("pedtr"), finish_time, plant_tz)
+                # SAP sent no time (date only): the echo rule compares dates, not minutes. Transient row
+                # attribute: never an orders column, never reaches the INSERT.
+                row["_finish_date_only"] = _parse_sap_time(finish_time) is None
             zero_open = False
             if "gsmng" in amap:
                 total = _dec(sr.get("gsmng"))
@@ -501,7 +505,8 @@ def validate_material_plant_rows(rows: list[dict], header_plant: str, known_plan
 
 def validate_planned_order_rows(rows: list[dict], header_plant: str, known_plants: set) -> list[dict]:
     """Row verdicts for a planned-order batch. Reasons: missing_key (incl. an all-zero order number),
-    plant_mismatch, unknown_plant, invalid_date (also a missing start), invalid_time, invalid_number,
+    plant_mismatch, unknown_plant, invalid_date (a missing or malformed finish, or a malformed start; a missing
+    start is valid), invalid_time, invalid_number,
     invalid_int, duplicate_key. `resolved` always carries what could be resolved, even for a rejected
     row, so the vanish guard can still protect an order SAP did send."""
     results = []
@@ -520,9 +525,9 @@ def validate_planned_order_rows(rows: list[dict], header_plant: str, known_plant
             reason = "key_too_long"         # `orders.material_number` is TEXT, but no master row can ever match it
         if reason is None:
             try:
-                if _parse_sap_date(r.get("psttr")) is None:
-                    reason = "invalid_date"
-                _parse_sap_date(r.get("pedtr"))
+                _parse_sap_date(r.get("psttr"))     # the start is optional: absent is fine, malformed is not
+                if _parse_sap_date(r.get("pedtr")) is None:
+                    reason = "invalid_date"     # a missing finish (the finish is required, stored as received)
             except ValueError:
                 reason = "invalid_date"
         if reason is None:
@@ -707,7 +712,9 @@ def _write_row_results(cur, table: str, results: list[dict], resolved_cols: tupl
 
 
 def _in_horizon_predicate() -> str:
-    return "COALESCE(sap_basic_start_date, basic_start_date) <= %s"
+    """The vanish key (backward scheduling OQ26/OQ27): the SAP start as first received, locked against
+    echoes. Callers alias `orders` as `o`."""
+    return db._SAP_START_RECEIVED_SQL + " <= %s"
 
 
 def _absent_predicate(column: str, values) -> tuple[str, tuple]:
@@ -744,7 +751,7 @@ def _planned_order_gates(cur, plant: str, order_numbers: set) -> tuple[dict, lis
         absent_sql, absent_params = _absent_predicate("COALESCE(parent_production_order, production_order)",
                                                       order_numbers)
         cur.execute(
-            f"SELECT count(*), count(*) FILTER (WHERE {absent_sql}) FROM orders WHERE plant = %s AND "
+            f"SELECT count(*), count(*) FILTER (WHERE {absent_sql}) FROM orders o WHERE plant = %s AND "
             + _in_horizon_predicate(),
             (*absent_params, plant, bound))
         live, cand = (int(x or 0) for x in cur.fetchone())
@@ -769,7 +776,7 @@ def _vanish_candidates(cur, plant: str, order_numbers: set, visibility_end: date
     absent_sql, absent_params = _absent_predicate("COALESCE(parent_production_order, production_order)",
                                                   order_numbers)
     cur.execute(
-        "SELECT id, parent_production_order FROM orders WHERE plant = %s AND " + _in_horizon_predicate()
+        "SELECT id, parent_production_order FROM orders o WHERE plant = %s AND " + _in_horizon_predicate()
         + f" AND {absent_sql}",
         (plant, bound, *absent_params))
     cand = cur.fetchall()
@@ -1745,7 +1752,12 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         audit_taken = bool(cur.fetchone()[0])
     conn.commit()
     warnings: list = []
-    rows, problems = build_order_rows(stage, tz, None, warnings)
+    if _zone(tz) is None:
+        # VI13: a plant with no valid time zone cannot place SAP's times; its rows are rejected, never guessed
+        rows, problems = [], [(int(sr["id"]), "plant has no valid time zone") for sr in stage
+                              if sr.get("id") is not None]
+    else:
+        rows, problems = build_order_rows(stage, tz, None, warnings)
     _mark_rejected_at_apply(conn, table, bid, problems)         # B7: not built -> rejected, never `applied`
     zero_keys = zero_open_keys(rows)
     for r in rows:
@@ -1763,7 +1775,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         result = db.upsert_orders(rows, source="sap", batch_id=upsert_batch, raw_row_count=len(stage),
                                   warnings=warnings,
                                   plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
-                                  resolve_fn=routing_resolver.resolve_orders)
+                                  resolve_fn=routing_resolver.resolve_orders, sap_tz=SAP_SYSTEM_TZ)
     else:
         result = {"status": "ok", "inserted": 0, "updated": 0, "unchanged": 0}
     if result.get("status") not in (None, "ok"):
@@ -1796,7 +1808,8 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
                 cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", (ids,))
                 cur.execute(
                     "UPDATE orders SET planning_status = 'needs_planning', planning_reason = %s,"
-                    " scheduled_start = NULL, scheduled_end = NULL, manual_firmed = FALSE, updated_at = NOW()"
+                    " scheduled_start = NULL, scheduled_end = NULL, manual_firmed = FALSE,"
+                    " runtime_schedule_mismatch = FALSE, placement_exception = NULL, updated_at = NOW()"
                     " WHERE id = ANY(%s)", (Jsonb(_ZERO_OPEN_REASON), ids))
                 flagged = len(ids)
         conn.commit()
@@ -1818,7 +1831,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
             ids = reviewed
         if visibility_end is not None:
             bound = visibility_end + timedelta(days=1)
-            cur.execute("SELECT count(*) FROM orders WHERE plant = %s AND " + _in_horizon_predicate(),
+            cur.execute("SELECT count(*) FROM orders o WHERE plant = %s AND " + _in_horizon_predicate(),
                         (plant, bound))
             info["in_horizon_live"] = int(cur.fetchone()[0])
     conn.commit()
@@ -2158,7 +2171,7 @@ def firm_flag(manual_firmed, firming_indicator, eff_start, frozen_end) -> str:
     return ""
 
 
-def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int]:
+def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int, int]:
     """Roll candidate order rows up to one outbound row per planned order (D9 / D17). Pure.
 
     `rows`: dicts with id, production_order, parent_production_order, material_number, manual_firmed,
@@ -2167,7 +2180,10 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
     counted as skipped. Rows group by (parent order or own order number, material): the group's end is
     the latest member end, its firm flag is 'X' when ANY candidate member qualifies (`firm_flag`), its
     version is the smallest non-blank member version (children of one parent carry the same one).
-    Returns (groups, skipped_no_end); a group carries `member_ids` (every row of the group, skipped
+    Only FIRMED planned orders are sent (OQ61, D9): a group whose firm flag would be blank is dropped and
+    counted in `skipped_unfirmed` (one per planned order, not per child). An aggregate stays when ANY candidate
+    member is firmed, and its end is still the latest end over ALL its candidate members, firmed or not.
+    Returns (groups, skipped_no_end, skipped_unfirmed); a group carries `member_ids` (every row of the group, skipped
     members included), `sent_ids` (only the members that had an effective end and were not in Needs
     Planning -- the ones whose sent values are remembered) and `rolled_up` (true when it stands for
     distribution children)."""
@@ -2193,26 +2209,73 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
         if v:
             g["versions"].append(v)
     out = []
+    skipped_unfirmed = 0
     for g in groups.values():
         if g["end"] is None:
+            continue
+        if not g["firm"]:                       # OQ61: unfirmed planned orders are not transmitted
+            skipped_unfirmed += 1
             continue
         out.append({"plnum": g["plnum"], "matnr": g["matnr"], "end": g["end"],
                     "auffx": "X" if g["firm"] else "", "verid": min(g["versions"]) if g["versions"] else None,
                     "member_ids": g["member_ids"], "sent_ids": g["sent_ids"], "rolled_up": g["rolled_up"],
                     "nimbus_order_id": None if g["rolled_up"] else g["single_id"]})
-    return out, skipped
+    return out, skipped, skipped_unfirmed
 
 
 def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
     cur.execute(
-        "SELECT id, production_order, parent_production_order, material_number, manual_firmed,"
-        " firming_indicator, production_version, planning_status,"
-        " COALESCE(seg.first_start, scheduled_start, basic_start_date),"
-        " COALESCE(seg.last_end, " + db._EFF_END_WITH_RUNTIME_MISMATCH_SQL + ")"      # the Gantt's effective end (M3)
-        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE plant = %s ORDER BY id", (plant,))
+        "SELECT o.id, o.production_order, o.parent_production_order, o.material_number, o.manual_firmed,"
+        " o.firming_indicator, o.production_version, o.planning_status,"
+        # The frozen-horizon half of the firm rule reads the LOCKED start (OQ26/OQ27): first segment, else the stored
+        # start, else the SAP start as first received. `basic_start_date` is echo-movable for a never-placed order, so
+        # an SAP echo must not be able to flip the firm flag (db._EFF_START_SQL would fall back to it).
+        " CASE WHEN o.planning_status = 'needs_planning' THEN NULL"
+        " ELSE COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date) END,"
+        " " + db._EFF_END_SQL + ","            # the stored finish: what Send transmits (backward scheduling)
+        " o.machine, o.scheduled_end, seg.segment_count, o.original_finish_date_only"
+        " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE o.plant = %s ORDER BY o.id", (plant,))
     names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",
-             "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end")
+             "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end",
+             "machine", "scheduled_end", "segment_count", "date_only")
     return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+
+
+def _working_window_close(cur, plant: str, machine: str | None, day: date) -> datetime:
+    """The close of the working window on `day` (naive plant-local), for a due date SAP sent with no time
+    (D10, VI12). Weekly hours are `{0..6: [open, close] | null}`, day 0 = Sunday, fractional hours. Like the
+    browser's `workWindow`, the machine's calendar is INTERSECTED with the plant's hours when both exist (a
+    weekday missing from either is closed, an empty intersection is closed); a machine with no calendar uses
+    the plant's hours alone, and a plant with none uses the machine's alone. A closed day walks back up to 30
+    days to the previous open day's close (mirrors `dueDateInstant`). A close at or after the next midnight
+    (a 24:00 close, a 24/7 line) sends 23:59:59 of that day; no calendar at all sends 23:59:59 of `day`."""
+    line_hours = plant_hours = None
+    if machine:
+        cur.execute("SELECT work_hours FROM machine_calendar WHERE plant = %s AND machine = %s"
+                    " AND work_hours IS NOT NULL LIMIT 1", (plant, machine))
+        r = cur.fetchone()
+        line_hours = r[0] if r else None
+    cur.execute("SELECT work_hours FROM plants WHERE plant = %s AND work_hours IS NOT NULL LIMIT 1", (plant,))
+    r = cur.fetchone()
+    plant_hours = r[0] if r else None
+    line_hours = line_hours if isinstance(line_hours, dict) and line_hours else None
+    plant_hours = plant_hours if isinstance(plant_hours, dict) and plant_hours else None
+    end_of_day = lambda d: datetime.combine(d, dt_time(23, 59, 59))  # noqa: E731
+    if line_hours is None and plant_hours is None:
+        return end_of_day(day)
+    for back in range(31):
+        d = day - timedelta(days=back)
+        key = str((d.weekday() + 1) % 7)                # stored keys follow JS getDay(): 0 = Sunday
+        wins = [h.get(key) for h in (line_hours, plant_hours) if h is not None]
+        if not all(wins):
+            continue
+        opened, close = max(float(w[0]) for w in wins), min(float(w[1]) for w in wins)
+        if opened >= close:
+            continue
+        if close >= 24:
+            return end_of_day(d)
+        return datetime.combine(d, dt_time.min) + timedelta(minutes=round(close * 60))
+    return end_of_day(day)
 
 
 def queue_send_to_sap(plant: str, *, actor: str) -> dict:
@@ -2220,7 +2283,8 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
 
     Still-`ready` rows from an earlier click are retired first (row_status='error',
     error_text='requeued', so history survives; the poll sweeps them after 30 days). Every
-    scheduled order of the plant is queued (D9); distribution children roll up to their parent
+    firmed order of the plant is queued (D9, OQ61: planner-firmed, SAP-firmed or starting inside the frozen
+    horizon; the rest are counted in `skipped_unfirmed`); distribution children roll up to their parent
     order with the latest child end (D17); the end is converted plant-local -> SAP system zone
     (D34); the firm flag is add-only (D10). NIMBUS also remembers what it sent on each member order
     (side table `order_sap_sent`, D20) so SAP's echo of that finish is not read as an SAP change. Only member
@@ -2229,7 +2293,7 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
     `orders` row is ever written by a Send: xmin (the optimistic-concurrency `base_version`) is untouched
     and a planner's unsaved edit survives the click.
     Everything -- retire, insert, remember, audit -- is one transaction.
-    Returns {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}."""
+    Returns {send_batch_id, queued, skipped_no_end, skipped_unfirmed, firmed, rolled_up_groups}."""
     plant = (plant or "").strip()
     if not plant:
         raise ValueError("plant is required")
@@ -2240,8 +2304,19 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
         try:
             with conn.cursor() as cur:
                 tz = _plant_info(cur, plant)["timezone"]
+                if _zone(tz) is None:
+                    raise ValueError(f"plant {plant} has no valid time zone; set it in Master Data before "
+                                     "sending to SAP (VI13)")
                 _vis, frozen_end = db._horizon_bounds_for_plant(cur, plant)
-                groups, skipped = build_outbound_groups(_outbound_candidate_rows(cur, plant), frozen_end)
+                candidates = _outbound_candidate_rows(cur, plant)
+                for row in candidates:
+                    # D10 (VI12): a never-placed order's finish is SAP's own date with no time; send the close of
+                    # the plant's working window on that date, not a zone-converted midnight (which moves the date)
+                    if (row["planning_status"] != "needs_planning" and row["scheduled_end"] is None
+                            and (row["segment_count"] or 0) < 2 and row["date_only"]
+                            and row["eff_end"] is not None):
+                        row["eff_end"] = _working_window_close(cur, plant, row["machine"], row["eff_end"].date())
+                groups, skipped, skipped_unfirmed = build_outbound_groups(candidates, frozen_end)
                 cur.execute("UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued',"
                             " sent_at = now() WHERE plant = %s AND row_status = 'ready'", (plant,))
                 firmed = rolled = 0
@@ -2276,15 +2351,16 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                     "INSERT INTO admin_audit (table_name, action, details, user_email)"
                     " VALUES ('sap_stage_planned_order_out', 'send_to_sap', %s, %s)",
                     (Jsonb({"plant": plant, "send_batch_id": send_batch_id, "queued": len(groups),
-                            "skipped_no_end": skipped, "firmed": firmed}), actor))
+                            "skipped_no_end": skipped, "skipped_unfirmed": skipped_unfirmed,
+                            "firmed": firmed}), actor))
             conn.commit()
         except Exception:
             conn.rollback()
             raise
     _log("info", "SAP send queued", plant=plant, send_batch_id=send_batch_id, queued=len(groups),
-         skipped_no_end=skipped, firmed=firmed, user=actor)
+         skipped_no_end=skipped, skipped_unfirmed=skipped_unfirmed, firmed=firmed, user=actor)
     return {"send_batch_id": send_batch_id, "queued": len(groups), "skipped_no_end": skipped,
-            "firmed": firmed, "rolled_up_groups": rolled}
+            "skipped_unfirmed": skipped_unfirmed, "firmed": firmed, "rolled_up_groups": rolled}
 
 
 def outbound_status(plant: str) -> dict:

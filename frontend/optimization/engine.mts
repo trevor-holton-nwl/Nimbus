@@ -63,10 +63,12 @@
 // file's `evaluateSchedule` adapter needs that the brief's original 8-type
 // list did not include (the adapter used to live IN setup-scheduler.mts, so
 // it referenced this locally-defined type without an import).
-import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, PerfMonitor, Toast, Modal } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
+import { CalendarSync } from '../calendar/calendar-sync.mjs';
+import { Persistence } from '../scheduling/persistence.mjs';
 import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
   placeWithSetup as placeWithSetupPure,
@@ -78,6 +80,7 @@ import {
   attachDetachedValidationContext,
   SETUP_AWARE_CONVERGENCE_WINDOW,
   resolveTaskPlant,
+  dueInstant,
 } from './setup-scheduler.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type {
@@ -92,7 +95,7 @@ import type {
   EvaluationRequest,
 } from './setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
-import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
+import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
 
@@ -121,6 +124,65 @@ export type { PlaceWithSetupRequest, PlacementResult };
 export type RuntimeAllocation =
   | { kind: 'allocated'; start: Date; end: Date; scheduleSegments: OrderScheduleSegment[] }
   | { kind: 'unavailable' | 'exhausted' };
+
+/** Why a finish-anchored placement was refused (nothing is placed, the caller reports it). */
+export type FinishRefusal = 'overlong_never' | 'run_time_zero' | 'plant_no_timezone' | 'no_operating_window';
+
+/** Result of `Engine.finishAnchoredPatchFor`. `placed.changes` always carries BOTH edges (and the
+ *  segments, empty for a continuous bar). `finishMoved` is true when the finish had to move (the walk's own
+ *  answer, or a reversal forward from now); `reversed` marks the reversal. `reached_now` is returned only
+ *  when the caller asked to defer reversals (`opts.deferReversal`) so it can batch them per line. */
+export type FinishAnchoredResult =
+  | { kind: 'placed'; changes: Partial<NimbusTask>; finishMoved: boolean;
+      moveReason?: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout'; reversed?: boolean }
+  | { kind: 'reached_now' }
+  | { kind: 'refuse'; reason: FinishRefusal };
+
+export interface FinishAnchoredOptions {
+  /** Return `{kind:'reached_now'}` unresolved instead of reversing forward from now. */
+  deferReversal?: boolean;
+  /** Minutes of changeover to reserve immediately before the earliest productive piece, in the same operating
+   *  fragment (OQ2 V1). The reconcile fills it from the setup domain; a manual drop leaves it 0 (OQ40). */
+  setupMinutes?: number;
+}
+
+/** One order in a forward sequence: `notBefore` is the earliest it may start (the cursor still wins when later). */
+export interface ForwardSequenceItem { task: NimbusTask; notBefore?: Date }
+
+/** What `Engine.placeForwardSequence` placed, and why it stopped when it did not place everything. */
+export interface ForwardSequenceResult<T extends ForwardSequenceItem> {
+  placed: Array<{ item: T; start: Date; end: Date; scheduleSegments?: OrderScheduleSegment[] }>;
+  /** Items skipped for a missing or non-positive run time. */
+  invalidRuntime: T[];
+  /** Items longer than any single working window under the contiguous policy. They are NOT placed (OQ50 c: no
+   *  continuous elapsed bar on a forward path) and do not advance the cursor; the caller sends them to Needs
+   *  Planning with reason `overlong_never`. */
+  overlong: T[];
+  /** The item the calendar could not place; the walk ends there. */
+  failure: { item: T; reason: 'no-operating-interval' | 'search-exhausted' } | null;
+}
+
+export interface ReconcileOptions {
+  /** `'cutover'` (Task 4.2) tags every reversal `detail: 'cutover'`; `'undo'` marks the re-derivation after an undo. */
+  reason?: string;
+  /** Restrict the pass to these task ids and bypass the unsaved-edit skip for them. The undo path passes the
+   *  rows it just restored: they are dirty by construction, and their start must still follow the run time. */
+  ids?: ReadonlySet<string>;
+}
+
+/** Options for a manual (planner) placement. */
+export interface ManualPlacementOptions {
+  /** The planner confirmed an overtime placement for a firmed order (OQ63). */
+  confirmedOvertime?: boolean;
+  /** A run-time, machine or version edit: a RUNNING order holds its START and re-derives its finish forward
+   *  (OQ3) instead of holding the finish. Never set for a drop, a typed finish or the Override dialog. */
+  holdStartIfRunning?: boolean;
+  /** Batch callers (Push +1 hour): do not toast a finish that cannot be held; the caller reports one summary. */
+  quiet?: boolean;
+}
+
+/** Why the last manual placement returned null (read by callers right after the call). */
+export type ManualRefusal = FinishRefusal | 'finish_cannot_hold' | 'needs_overtime_confirm' | 'running_finish_locked';
 
 /** Deliberately loose (see this plan's "Why Engine gets looser typing" section):
  *  cmp's params are `any` (not `T`) so a heterogeneous array of terms with
@@ -212,7 +274,9 @@ export function effectiveFirmedIdSet(
   const ids = new Set<string>(respectFirmed ? Array.from(baseFirmedIds, String) : []);
   const frozenEnd = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
   for (const t of tasks) {
-    if (Engine.isInProgress(t, runNow) || Engine.isFrozenHorizon(t, runNow, frozenEnd)) ids.add(String(t.id));
+    // G-0.25: a row carrying an approved placement exception ('overtime' / 'overlong') is fixed exactly like a
+    // firmed row, whatever the "Respect firmed" toggle says.
+    if (t.placement_exception || Engine.isInProgress(t, runNow) || Engine.isFrozenHorizon(t, runNow, frozenEnd)) ids.add(String(t.id));
   }
   return ids;
 }
@@ -317,6 +381,11 @@ function buildLineIntervalIndex(orders: ReadonlyArray<{ task: NimbusTask }>): Li
   return { starts, prefixMaxEnd };
 }
 
+/** How many days back the free-time scan follows touching windows (the predecessor's end usually stops it sooner). */
+/** U24: the cutover data signature needs at least this many non-queued rows, so a tiny plant or a small re-upload keeps its per-row toasts. */
+const CUTOVER_MIN_ROWS = 10;
+const SETUP_AVAILABILITY_MERGE_DAYS = 14;
+
 function setupAvailabilityMinutes(
   context: SetupAvailabilityContext | undefined,
   line: string,
@@ -331,18 +400,30 @@ function setupAvailabilityMinutes(
   const mappedPlant = plant;
   const probe = new Date(end.getTime() - 1);
   const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
-  const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, probe);
-  if (!lineWindow) return 0;
   const plantHours = context.plants[mappedPlant]?.workHours ?? setupDefaultWorkHours();
-  const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, probe);
-  if (!plantWindow) return 0;
-  const window = [
-    new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
-    new Date(Math.min(lineWindow[1].getTime(), plantWindow[1].getTime())),
-  ] as const;
-  if (window[0] >= window[1]) return 0;
+  /** The line and plant working windows intersected for the day holding `day`, or null when closed. */
+  const windowOf = (day: Date): readonly [Date, Date] | null => {
+    const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, day);
+    if (!lineWindow) return null;
+    const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, day);
+    if (!plantWindow) return null;
+    const both = [
+      new Date(Math.max(lineWindow[0].getTime(), plantWindow[0].getTime())),
+      new Date(Math.min(lineWindow[1].getTime(), plantWindow[1].getTime())),
+    ] as const;
+    return both[0] < both[1] ? both : null;
+  };
+  const window = windowOf(probe);
+  if (!window) return 0;
   if (end > window[1] || end <= window[0]) return 0;
   let lower = window[0].getTime();
+  // Touching windows merge across midnight (a 24/7 line is one continuous interval, OQ47), so the free time
+  // before this window's opening continues back through every window that ends exactly where this one opens.
+  for (let back = 1; back <= SETUP_AVAILABILITY_MERGE_DAYS; back++) {
+    const earlier = windowOf(new Date(probe.getFullYear(), probe.getMonth(), probe.getDate() - back, 12));
+    if (!earlier || earlier[1].getTime() !== lower) break;
+    lower = earlier[0].getTime();
+  }
   const applyBlock = (block: NimbusBlock | NimbusPlantBlock): boolean => {
     const start = globalThis.NimbusComputeCore!.parseDate(block.start);
     const blockEnd = globalThis.NimbusComputeCore!.parseDate(block.end);
@@ -577,20 +658,9 @@ function parseDateOnlyAsWallClock(value: string): Date | null {
  * by Calendar and the persisted schedule. Date-only/naive date-time inputs
  * are already wall-clock values and are handled without this projection. */
 function plantWallClockFromInstant(timezone: string | null | undefined, instant: Date): Date | null {
-  if (!timezone) return new Date(instant);
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
-      second: 'numeric', hourCycle: 'h23',
-    }).formatToParts(instant);
-    const values: Record<string, number> = {};
-    for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
-    if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
-    return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, values.second, instant.getMilliseconds());
-  } catch {
-    return null;
-  }
+  // The implementation lives in the compute core (shared with Store.plantNow and the worker).
+  // Reads the global at call time: Node tests must set globalThis.NimbusComputeCore (see engine.test.mjs).
+  return globalThis.NimbusComputeCore!.plantWallClockFromInstant(timezone, instant);
 }
 
 function hasExplicitDate(value: unknown): boolean {
@@ -660,7 +730,7 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
     }
     return null;
   };
-  const runAt = parseAbsolute(opts.runAt) ?? (hasExplicitDate(opts.runAt) ? null : new Date());
+  const runAt = parseAbsolute(opts.runAt) ?? (hasExplicitDate(opts.runAt) ? null : Store.serverNow());
   if (!runAt) throw new Error('Remove Backlog requires a valid runAt timestamp');
   const now = Engine._plantWallNow(timezone, runAt);
   const from = hasExplicitDate(opts.startDate)
@@ -781,6 +851,17 @@ export function sourceLineWorkHours(line: string): WorkHours {
   return _candidateSnapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
 }
 
+/** The order's SAP due as an instant for the date-window bounds below: a date-only (exact
+ *  midnight) value reads as the end of that date's working window, exactly as the detached
+ *  scheduler's own `allowedPlanningWindow` reads it (same `dueInstant`), so the two bounds
+ *  agree. Reads calendar rows without creating defaults. Null when the order has no SAP due. */
+function sourceDueInstant(task: NimbusTask, plant: string | null): Date | null {
+  const view = _candidateSnapshot ?? {
+    calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings, masterData: Store.masterData,
+  };
+  return dueInstant(task, { snapshot: view, plant });
+}
+
 export function sourcePlantWorkHours(plant: string): WorkHours {
   if (!_candidateSnapshot) {
     Store.ensurePlant(plant);
@@ -798,9 +879,9 @@ function detachedCandidateResult(
   return {
     patches,
     // A2: 7th element is the uncovered-edge-count tier (SCORE_UNCOVERED in
-    // setup-scheduler.mts) — a detached legacy result has no coverage concept
+    // setup-scheduler.mts) — a detached placement result has no coverage concept
     // of its own, so it contributes 0.
-    // score[7] = SCORE_OVER_CAP (setup-scheduler), never populated on the legacy path
+    // score[7] = SCORE_OVER_CAP (setup-scheduler), never populated on this detached path
     score: [0, 0, 0, 0, 0, patches.length, 0, 0],
     explanation: [],
     diagnostics: {
@@ -843,7 +924,7 @@ export const Engine = {
    * on-demand, not consumed-and-wiped like `lastBacklogResult`. */
   lastSetupAwareResult: null as CandidateResult | null,
 
-  /** Evaluate the established legacy placement algorithm against a deep,
+  /** Evaluate the detached forward placement path (the optimizer's retained forward placement) against a deep,
    * detached snapshot. This is synchronous, so the private source selector is
    * always cleared before another caller can observe it. */
   evaluateSchedule(
@@ -1012,18 +1093,37 @@ export const Engine = {
    *  "pinned" means in their own context (excluded from the free/movable
    *  set, an obstacle for peers, etc). Manual drags never consult this
    *  (OD-C2c): only optimizer/auto-reflow placement code does. */
-  isFrozenHorizon(task: NimbusTask, now: Date = new Date(), frozenHorizonEnd?: Date | null): boolean {
+  isFrozenHorizon(task: NimbusTask, now?: Date, frozenHorizonEnd?: Date | null): boolean {
     const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
-    if (!end || !task.start_date) return false;
-    return task.start_date >= now && task.start_date < end;
+    if (!end || !task.start_date || !Engine.hasPersistedPlacement(task)) return false;
+    const at = now ?? Engine._clockFor(task);
+    // A plant with no valid timezone has no clock (OQ52): not frozen, never a throw.
+    return !!at && task.start_date >= at && task.start_date < end;
+  },
+
+  /** Senior review I10 (OQ3): running/frozen arithmetic applies only to a row with a real placement, i.e. `user_scheduled`
+   *  (the server sets it for planner placements, legacy placed rows and running rows). A never-placed row's start is
+   *  display-derived or just its basic start, so it is neither running nor frozen. */
+  hasPersistedPlacement(task: NimbusTask): boolean {
+    return task.user_scheduled === true;
   },
 
   /** True while the order is in progress: start_date <= now < end_date (both set).
    *  Running orders never move (optimizer, autoReflow, alert fixes); Remove Backlog
    *  is the one exemption. Not gated by "Respect firmed". */
-  isInProgress(task: NimbusTask, now: Date = new Date()): boolean {
-    if (!task.start_date || !task.end_date) return false;
-    return task.start_date <= now && now < task.end_date;
+  isInProgress(task: NimbusTask, now?: Date): boolean {
+    if (!task.start_date || !task.end_date || !Engine.hasPersistedPlacement(task)) return false;
+    const at = now ?? Engine._clockFor(task);
+    // A plant with no valid timezone has no clock (OQ52): not running, never a throw.
+    return !!at && task.start_date <= at && at < task.end_date;
+  },
+
+  /** The default "now" for a task: its plant's wall clock projected from the server instant
+   *  (Store.plantNow), or null when that plant is blocked (no valid timezone). The plant is the
+   *  task's own, else its line's, else the selected plant. */
+  _clockFor(task: NimbusTask): Date | null {
+    const plant = task.PLANT || (task.MACHINE ? Store.getPlantForLine(task.MACHINE) : null) || Store.selectedPlant;
+    return Store.plantNow(plant);
   },
 
   /** SAP's firm flag. DISPLAY ONLY — NIMBUS never locks on it. */
@@ -1040,8 +1140,20 @@ export const Engine = {
       start_date: null,
       end_date: null,
       scheduleSegments: [],
+      // Back in the queue the order has no placed bar, so an approved exception (overtime / overlong) goes too.
+      placement_exception: null,
       planning_status: 'needs_planning',
       planning_reason: { code: 'planner_unscheduled', message: 'Unscheduled by planner' },
+    };
+  },
+
+  /** The Needs Planning change-set for an order that cannot be one bar under the plant's contiguous policy
+   *  (OQ50): no dates or segments, reason `overlong_never`, no stale marker. Fresh object per call. */
+  overlongNeverChanges(): Partial<NimbusTask> {
+    return {
+      ...Engine.plannerUnscheduleChanges(),
+      planning_reason: { code: 'overlong_never', message: Util.t('planning_reason.overlong_never') },
+      runtime_schedule_mismatch: false, derivationIssue: null, systemMove: null,
     };
   },
 
@@ -1049,7 +1161,7 @@ export const Engine = {
    *  Detached optimizer runs must use the snapshot fold in the fixed/free split + setup-aware
    *  fold below, never this. reasons: 'frozen' (horizon band), 'manual' (planner),
    *  'running' (in progress). SAP firm is never a reason. */
-  firmingStatus(task: NimbusTask, now: Date = new Date()): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
+  firmingStatus(task: NimbusTask, now?: Date): { firmed: boolean; reasons: Array<'frozen'|'manual'|'running'> } {
     const reasons: Array<'frozen'|'manual'|'running'> = [];
     if (Engine.isFrozenHorizon(task, now)) reasons.push('frozen');
     if (Store.isFirmed(task.id)) reasons.push('manual');
@@ -1059,8 +1171,7 @@ export const Engine = {
 
   /** Push `at` forward to the frozen-horizon boundary when it falls short —
    *  the one clamp every OPTIMIZER-side placement call site (autoReflow,
-   *  the legacy walk via earliestAllowedStart below, setup-scheduler's
-   *  bounds.notBefore) applies before committing a NEW start for a task
+   *  earliestAllowedStart below, setup-scheduler's bounds.notBefore) applies before committing a NEW start for a task
    *  that isn't itself frozen-pinned. Manual-path code
    *  (manualSchedulePatchFor, Alerts.applyFix) deliberately never calls
    *  this (OD-C2c). */
@@ -1071,16 +1182,10 @@ export const Engine = {
 
   /** Local due-date calendar-day floor for a plant's optional pull-forward
    *  limit, MAXED with the plant's C2 frozen-horizon floor (Engine.
-   *  frozenHorizonEnd) so every one of this function's existing callers —
-   *  the legacy walk's cursor floor, _dispatchPolicyAware, and setup-scheduler's
-   *  bounds.notBefore seam — gets the frozen floor for free, with no call site
-   *  needing to know a second floor exists. This is the "single shared floor
-   *  helper" the C2 placement-floor fix hangs on: the originally-proposed reuse
-   *  of `bounds.notBefore` didn't generalize (it's per-order, due-date-derived,
-   *  null without a due date), but THIS function is already consulted at every
-   *  legacy-walk placement site, so folding the frozen floor in here — rather
-   *  than a second, parallel check scattered across those same sites — is the
-   *  actual fix. */
+   *  frozenHorizonEnd) so every one of this function's callers — the reconcile's
+   *  pull-floor check and setup-scheduler's bounds.notBefore seam — gets the
+   *  frozen floor for free, with no call site needing to know a second floor
+   *  exists. */
   earliestAllowedStart(
     task: NimbusTask, plant: string | null, frozenHorizonEnd?: Date | null,
     masterDataOverride?: NimbusMasterData | null,
@@ -1089,11 +1194,9 @@ export const Engine = {
     const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
     const value = masterData?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
     if (Number.isInteger(value) && (value as number) >= 0) {
-      const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
-      const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
-      const due = parsedDue && Number.isFinite(+parsedDue) ? parsedDue : null;
+      const due = sourceDueInstant(task, plant);
       if (due) {
-        floor = new Date(due);
+        floor = new Date(+due - 1);   // a due on a 24:00 close is next-day 00:00 exclusive: its due DAY is the day before (R-I6)
         floor.setHours(0, 0, 0, 0);
         floor.setDate(floor.getDate() - (value as number));
       }
@@ -1115,11 +1218,9 @@ export const Engine = {
     const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
     const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
     if (!Number.isInteger(value) || (value as number) < 0) return null;
-    const rawDue = task.original_end_date ?? task.ORIGINAL_END_DATE;
-      const parsedDue = rawDue ? new Date(rawDue as string | number | Date) : null;
-      const due = parsedDue && Number.isFinite(+parsedDue) ? parsedDue : null;
+    const due = sourceDueInstant(task, plant);
     if (!due) return null;
-    const ceiling = new Date(due);
+    const ceiling = new Date(+due - 1);   // due-DAY midnight even when the due is a 24:00 close (R-I6)
     ceiling.setHours(0, 0, 0, 0);
     ceiling.setDate(ceiling.getDate() + (value as number) + 1);
     return ceiling;
@@ -1170,110 +1271,675 @@ export const Engine = {
                    policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(sourceGetPlantForLine(line))): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
-    if (policy === 'never') {
+    // VI3 (D17): the plant's zone, so the run is measured in elapsed plant-zone time across a DST change.
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    if (policy === 'never' && !plantTz) {
       const start = Calendar.nextAvailable(line, requestedStart, runtimeMinutes * Config.MS_MIN);
       if (!start) return null;
       return { start_date: start, end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN), scheduleSegments: [] };
     }
-    const allocation = Calendar.allocateRuntime(line, requestedStart, runtimeMinutes, policy);
+    const allocation = Calendar.allocateRuntime(line, requestedStart, runtimeMinutes, policy, plantTz);
     return allocation.kind === 'allocated'
       ? { start_date: allocation.start, end_date: allocation.end, scheduleSegments: allocation.scheduleSegments }
       : null;
   },
 
+  /** OQ3: a started order keeps its real start and only the finish follows the run time. The allocator may move
+   * the start (`never` may move it to the next open minute; any policy skips closed time), and a running order never
+   * loses its start. In that case (D3, VU1) the remaining run is walked FORWARD through working time from the held
+   * start and the allocation's own start, end and pieces are returned: one piece when the run fits a window, the
+   * calendar pieces when it crosses closed time (the old start + run time as plain elapsed time is gone). When the
+   * recorded start sits in closed time the first piece starts at the next open minute and the stored start follows
+   * it. Shared by the reconcile's running branch and the manual (grid/Inspector) edit. Null when no window is found. */
+  heldStartPatchFor(task: NimbusTask, line: string, policy: SplitOrderPolicy): Partial<NimbusTask> | null {
+    if (!task.start_date) return null;
+    const held = Engine.schedulePatchFor(task, line, task.start_date, policy);
+    if (!held?.start_date || !held.end_date) return null;
+    if (held.start_date.getTime() === task.start_date.getTime()) return held;
+    // D3 (VU1): the allocator could not keep the real start (closed time, or a `never` window too short), so the
+    // remaining run is walked forward through working time from that start. `partial_allowed` is used regardless of
+    // the plant's split policy: a continuous bar across closed time is wider than the run time and fails the server
+    // width check, while pieces are judged by their sum, so the pieces are returned as the bar.
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+    const forward = Calendar.allocateRuntime(line, task.start_date, runtimeMinutes, 'partial_allowed', plantTz);
+    if (forward.kind !== 'allocated') return null;
+    return { start_date: forward.start, end_date: forward.end, scheduleSegments: forward.scheduleSegments ?? [] };
+  },
+
+  /** Finish-anchored placement (backward scheduling OQ1/OQ7/OQ13): lay the order's run time so it ENDS at
+   * `finish`, walking the line's working time backward (Calendar.allocateRuntimeBackward), and derive the
+   * start. Pure: no Store writes. Both edges are always in `changes` (a continuous bar has empty segments).
+   * - run time <= 0 or missing: `refuse` run_time_zero (nothing is placed).
+   * - a plant with no valid timezone has no clock: `refuse` plant_no_timezone (no derivation on a blocked plant).
+   * - a task carrying `placement_exception` is an approved exception: its stored bar is translated verbatim to
+   *   the requested finish (width kept, calendar ignored), so a later run-time change leaves the bar alone.
+   * - `overlong` (the order cannot be one bar under the plant's policy): `refuse` overlong_never. Under
+   *   overlong_only such an order is split instead, exactly as the forward allocator does.
+   * - the walk reached "now" with minutes left (`reached_now`): by default reverse forward from the plant's now,
+   *   floored to the minute, and report `finishMoved`/`reversed`; with `opts.deferReversal` return
+   *   `{kind:'reached_now'}` unresolved so a batch caller can place reversals per line in finish order. */
+  finishAnchoredPatchFor(task: NimbusTask, line: string, finish: Date,
+                         policy?: SplitOrderPolicy, opts: FinishAnchoredOptions = {}): FinishAnchoredResult {
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const effectivePolicy: SplitOrderPolicy = policy ?? Engine.splitOrderPolicyFor(plant);
+    const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return { kind: 'refuse', reason: 'run_time_zero' };
+
+    if (task.placement_exception && task.start_date && task.end_date) {
+      const deltaMs = finish.getTime() - task.end_date.getTime();
+      const pieces = task.scheduleSegments && task.scheduleSegments.length >= 2
+        ? task.scheduleSegments.map(segment => ({
+          ...segment,
+          startDate: new Date(segment.startDate.getTime() + deltaMs),
+          endDate: new Date(segment.endDate.getTime() + deltaMs),
+        }))
+        : [];
+      return {
+        kind: 'placed', finishMoved: false,
+        changes: {
+          start_date: pieces.length ? pieces[0].startDate : new Date(task.start_date.getTime() + deltaMs),
+          end_date: pieces.length ? pieces[pieces.length - 1].endDate : new Date(finish),
+          scheduleSegments: pieces,
+        },
+      };
+    }
+
+    const now = Store.plantNow(plant);
+    if (!now) return { kind: 'refuse', reason: 'plant_no_timezone' };
+    const floor = Calendar._floorMinute(now);
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const walk = (walkPolicy: SplitOrderPolicy) => Calendar.allocateRuntimeBackward(line, finish, runtimeMinutes, walkPolicy,
+      { floor, minSegmentMinutes: Engine.minProductiveSegmentMinutesFor(plant), plantTz, setupMinutes: opts.setupMinutes ?? 0 });
+    let result = walk(effectivePolicy);
+    if (result.kind === 'overlong' && effectivePolicy === 'overlong_only') result = walk('partial_allowed');
+
+    if (result.kind === 'placed') {
+      return {
+        kind: 'placed', finishMoved: result.finishMoved,
+        ...(result.moveReason ? { moveReason: result.moveReason } : {}),
+        changes: { start_date: result.start, end_date: result.end, scheduleSegments: result.scheduleSegments },
+      };
+    }
+    if (result.kind === 'overlong') return { kind: 'refuse', reason: 'overlong_never' };
+    if (result.kind === 'lookback_exhausted') return { kind: 'refuse', reason: 'no_operating_window' };
+    if (result.kind === 'unavailable') return { kind: 'refuse', reason: 'no_operating_window' };
+    if (opts.deferReversal) return { kind: 'reached_now' };
+    const forward = Calendar.allocateRuntime(line, floor, runtimeMinutes, effectivePolicy, plantTz);
+    if (forward.kind !== 'allocated') return { kind: 'refuse', reason: 'no_operating_window' };
+    return {
+      kind: 'placed', finishMoved: true, reversed: true,
+      changes: { start_date: forward.start, end_date: forward.end, scheduleSegments: forward.scheduleSegments },
+    };
+  },
+
   /** Resolve a moved routing-derived order before constructing its schedule.
-   * Manual/order-file runtimes keep their existing authority on machine moves. */
-  manualRoutingSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
+   * Manual/order-file runtimes keep their existing authority on machine moves. The held FINISH is the
+   * anchor (the third argument); the start follows from the resolved run time. */
+  manualRoutingSchedulePatchFor(task: NimbusTask, line: string, requestedFinish: Date,
+                                opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    Engine.lastManualRefusal = null;
     const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
     const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
     if (!enabled || line === task.MACHINE || (task.run_time_source !== 'routing' && task.RUN_TIME != null)) {
-      return Engine.manualSchedulePatchFor(task, line, requestedStart);
+      return Engine.manualSchedulePatchFor(task, line, requestedFinish, undefined, opts);
     }
     const resolved = Runtime.resolve(task, line);
     if (!resolved.ok) return null;
-    const changes = Engine.manualSchedulePatchFor({ ...task, RUN_TIME: resolved.hours }, line, requestedStart);
+    const changes = Engine.manualSchedulePatchFor({ ...task, RUN_TIME: resolved.hours }, line, requestedFinish, undefined, opts);
     return changes ? {
       ...changes, RUN_TIME: resolved.hours, run_time_source: 'routing',
       run_time_basis: resolved.basis as unknown as Record<string, unknown>,
     } : null;
   },
 
-  /** Apply a planner-requested parent start/line edit verbatim while its
-   * productive duration is unchanged (OD-B1a). A task with fewer than two
-   * existing schedule segments commits directly at the requested start; a
-   * task that already has two or more segments (placed there by a prior
-   * optimizer run) has its existing shape translated by the requested delta
-   * rather than destroyed or re-derived. If a runtime edit changes the
-   * productive total, regenerate the segments using the plant split policy. */
-  manualSchedulePatchFor(task: NimbusTask, line: string, requestedStart: Date): Partial<NimbusTask> | null {
+  /** Why the most recent `manualSchedulePatchFor` returned null (null when it placed something). Read by the
+   *  caller right after the call: a refusal the engine already toasted (`finish_cannot_hold`) must not be toasted
+   *  again, and `needs_overtime_confirm` means "ask the planner, then call again with confirmedOvertime". */
+  lastManualRefusal: null as ManualRefusal | null,
+
+  /** Ask the planner to approve an overtime placement for a firmed order (OQ63). Resolves true on confirm. */
+  confirmOvertimePlacement(task: NimbusTask): Promise<boolean> {
+    return Modal.confirm({
+      title: Util.t('modal.confirm_overtime_title'),
+      message: Util.t('modal.confirm_overtime_msg', { order: Util.orderNumber(task) }),
+      confirmLabel: Util.t('modal.confirm_overtime_confirm'),
+      tone: 'warn',
+    });
+  },
+
+  /** Apply a planner-requested placement. The third argument is the FINISH the planner wants (backward
+   * scheduling OQ1): a drop, a typed end, a run-time/machine/version edit that holds the finish, or the
+   * Override dialog's finish. The start is derived backward through the working time and the result carries
+   * both edges.
+   * - An order that already has two or more schedule segments of the right total is translated rigidly by the
+   *   finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived and never calendar-checked;
+   *   a changed total (rate or version edit) is re-derived from the held finish under the plant's policy.
+   * - Otherwise `finishAnchoredPatchFor(snap(finish))`. A backward start before the plant's now reverses forward
+   *   from now with a `reversal_forward` note (O2, OQ3, OQ7 a, OQ19 c), never a refusal. A manual drop whose finish
+   *   cannot be held (it would have to move EARLIER) returns null with `toast.finish_cannot_hold` and the caller reverts (OQ13 b). A FIRMED order
+   *   in that situation asks for confirmation first (`lastManualRefusal === 'needs_overtime_confirm'`); with
+   *   `opts.confirmedOvertime` it is placed raw (start = finish minus run time, calendar ignored) and marked
+   *   `placement_exception = 'overtime'` (OQ63).
+   * - A row queued as `overlong_never` or `run_time_over_cap` that is still overlong on the chosen line (D5) is released as ONE continuous
+   *   elapsed bar ending at the finish, marked `'overlong'` (OQ50). Queued `overlong_never`/`run_time_over_cap`
+   *   rows that place normally return to `scheduled` in the same patch.
+   * Manual placement deliberately ignores the frozen horizon (OD-C2c). Null on any refusal; the reason is in
+   * `Engine.lastManualRefusal`. */
+  manualSchedulePatchFor(task: NimbusTask, line: string, requestedFinish: Date,
+                         policy?: SplitOrderPolicy, opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    const patch = Engine._manualSchedulePatchForInner(task, line, requestedFinish, policy, opts);
+    // VI5: a manual placement is the planner's own truth; the stale flag is cleared with it (the server clears
+    // it too on a width-checked save; the client copy must not keep the "start may be out of date" alert alive).
+    return patch ? { ...patch, runtime_schedule_mismatch: false } : null;
+  },
+
+  _manualSchedulePatchForInner(task: NimbusTask, line: string, requestedFinish: Date,
+                               policy?: SplitOrderPolicy, opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    Engine.lastManualRefusal = null;
+    const refuse = (reason: ManualRefusal): null => { Engine.lastManualRefusal = reason; return null; };
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
-    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
+    if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return refuse('run_time_zero');
+    // D1 (VI1): a held finish keeps its exact minute; only a horizontal Gantt drag snaps, and it does so before
+    // reaching this function. Floor to the minute so the server's minute-granular width check sees whole minutes.
+    const finish = Calendar._floorMinute(requestedFinish);
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const queuedCode = task.planning_status === 'needs_planning' ? task.planning_reason?.code : undefined;
+    // Only these two queue reasons are releasable by a placement; any other queued row follows the ordinary rule.
+    const releasable = queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap';
+    const released: Partial<NimbusTask> = releasable ? { planning_status: 'scheduled', planning_reason: null } : {};
+
+    if (task.start_date && Engine.isInProgress(task)) {
+      if (!opts.holdStartIfRunning) {
+        // D2 (VI7): a started order's bar is not resized or moved by hand; the run-time edit is the only way to
+        // change its finish, and it holds the real start (below).
+        return refuse('running_finish_locked');
+      }
+      // OQ3: it is already producing, so its start cannot move; the finish follows from the new run time.
+      const held = Engine.heldStartPatchFor(task, line, policy ?? Engine.splitOrderPolicyFor(plant));
+      return held ? { ...held, MACHINE: line } : refuse('no_operating_window');
+    }
+
     const segments = task.scheduleSegments;
     if (segments && segments.length >= 2) {
       const productiveMinutes = Math.round(segments.reduce((sum, segment) =>
         sum + (segment.endDate.getTime() - segment.startDate.getTime()) / Config.MS_MIN, 0));
-      if (productiveMinutes !== runtimeMinutes) {
-        // A rate/PV edit changes the amount of productive time. Translating
-        // old pieces would preserve an invalid aggregate; use the plant's
-        // existing allocation policy while retaining ordinary drag behavior.
-        const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
-        const allocated = Engine.schedulePatchFor(task, line, Util.snap(requestedStart), Engine.splitOrderPolicyFor(plant));
-        return allocated ? { ...allocated, MACHINE: line } : null;
+      if (productiveMinutes === runtimeMinutes) {
+        const deltaMs = finish.getTime() - segments[segments.length - 1].endDate.getTime();
+        const shifted = segments.map(segment => ({
+          ...segment,
+          startDate: new Date(segment.startDate.getTime() + deltaMs),
+          endDate: new Date(segment.endDate.getTime() + deltaMs),
+        }));
+        return {
+          start_date: shifted[0].startDate,
+          end_date: shifted[shifted.length - 1].endDate,
+          MACHINE: line,
+          scheduleSegments: shifted,
+        };
       }
+      // A rate/version edit changes the productive total: translating the old pieces would keep an invalid
+      // aggregate, so re-derive from the held finish under the plant's own policy.
     }
-    if (!segments || segments.length < 2 || !task.start_date) {
-      const start = Util.snap(requestedStart);
-      return {
-        start_date: start,
-        end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN),
-        MACHINE: line,
-        scheduleSegments: [],
-      };
+
+    const result = Engine.finishAnchoredPatchFor(task, line, finish, policy ?? Engine.splitOrderPolicyFor(plant));
+    if (result.kind === 'refuse') {
+      // D5 (VI6): an approved release of an over-cap order on a never plant has the same shape as an overlong
+      // release: one continuous marked bar. OQ28 says a planner may approve and release it.
+      if (result.reason === 'overlong_never' && (queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap')) {
+        // A release has no held finish to protect: a due instant already in the past starts the bar at the
+        // plant's now instead (reversal, OQ53) and records why.
+        const now = Store.plantNow(plant);
+        const floor = now ? Calendar._floorMinute(now) : null;
+        const reversed = !!floor && finish.getTime() < floor.getTime() + runtimeMinutes * Config.MS_MIN;
+        const start = reversed ? floor! : new Date(finish.getTime() - runtimeMinutes * Config.MS_MIN);
+        return {
+          start_date: start,
+          end_date: reversed ? new Date(start.getTime() + runtimeMinutes * Config.MS_MIN) : finish,
+          scheduleSegments: [],
+          MACHINE: line,
+          placement_exception: 'overlong',
+          ...released,
+          ...(reversed ? { derivationIssue: { code: 'reversal_forward', detail: 'due_date_past' } } : {}),
+        };
+      }
+      return refuse(result.reason);
     }
-    const deltaMs = Util.snap(requestedStart).getTime() - task.start_date.getTime();
-    const shifted = segments.map(segment => ({
-      ...segment,
-      startDate: new Date(segment.startDate.getTime() + deltaMs),
-      endDate: new Date(segment.endDate.getTime() + deltaMs),
-    }));
-    return {
-      start_date: shifted[0].startDate,
-      end_date: shifted[shifted.length - 1].endDate,
-      MACHINE: line,
-      scheduleSegments: shifted,
-    };
+    if (result.kind === 'reached_now') return refuse('no_operating_window');   // unreachable: reversal is not deferred
+    if (result.finishMoved) {
+      if (result.reversed) {
+        // OQ3 / OQ7(a) / OQ19(c) / O2: the backward start would be before now, so the order places forward from
+        // the plant's now (late) instead of being refused. Only a finish that would have to move EARLIER is refused.
+        const nowForDetail = Store.plantNow(plant);
+        const detail = nowForDetail && finish.getTime() <= Calendar._floorMinute(nowForDetail).getTime() ? 'due_date_past' : 'run_time_grew';
+        return { ...result.changes, MACHINE: line, ...released,
+          derivationIssue: { code: 'reversal_forward', detail } };
+      }
+      if (result.moveReason && !result.reversed && Store.isFirmed(task.id)) {
+        if (!opts.confirmedOvertime) return refuse('needs_overtime_confirm');
+        return {
+          start_date: new Date(finish.getTime() - runtimeMinutes * Config.MS_MIN),
+          end_date: finish,
+          scheduleSegments: [],
+          MACHINE: line,
+          placement_exception: 'overtime',
+          ...released,
+        };
+      }
+      if (!opts.quiet) Toast.show(Util.t('toast.finish_cannot_hold', { order: Util.orderNumber(task), machine: line }), 'warn', 5000);
+      return refuse('finish_cannot_hold');
+    }
+    return { ...result.changes, MACHINE: line, ...released };
   },
 
-  /** Repair schedules whose authoritative runtime changed after their last
-   * valid aggregate was persisted. The existing parent start is the anchor;
-   * failures intentionally leave the previous valid intervals and their
-   * critical mismatch flag in place. Firmed is parent-level only and does not
-   * suppress this required runtime correction. */
-  reconcileRuntimeSchedules(plant: string | null): void {
-    if (!plant) return;
-    const policy = Engine.splitOrderPolicyFor(plant);
+  /** Push +1 hour (OQ8) for a batch: each placed order's FINISH moves `ms` later and the start is re-derived.
+   *  Firmed, frozen and running orders stay where they are, and so does an order whose new finish cannot be
+   *  held on its machine's working hours (quiet: the caller reports one summary). The walks of one plant share
+   *  one calendar run cache. */
+  pushFinishPatches(tasks: NimbusTask[], ms: number): Array<{ id: string; changes: Partial<NimbusTask> }> {
     const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
+    const byPlant = new Map<string, NimbusTask[]>();
+    for (const task of tasks) {
+      if (!task.start_date || !task.end_date || Engine.firmingStatus(task).firmed) continue;
+      const plant = task.PLANT || Store.getPlantForLine(task.MACHINE || 'Unknown') || Store.selectedPlant || '';
+      (byPlant.get(plant) ?? byPlant.set(plant, []).get(plant)!).push(task);
+    }
+    for (const [plant, group] of byPlant) {
+      Calendar._beginRun(plant || null);
+      try {
+        for (const task of group) {
+          const changes = Engine.manualSchedulePatchFor(task, task.MACHINE || 'Unknown',
+            new Date(task.end_date!.getTime() + ms), undefined, { quiet: true });
+          if (changes) patches.push({ id: task.id, changes });
+        }
+      } finally { Calendar._endRun(); }
+    }
+    return patches;
+  },
+
+  /** Plants whose derive-and-save is paused because their server calendar has not landed (OQ51). Session only;
+   *  `_renderDerivePaused` shows the banner while the set is non-empty. */
+  derivePausedPlants: new Set<string>(),
+
+  _setDerivePaused(plant: string, paused: boolean): void {
+    if (paused) Engine.derivePausedPlants.add(plant); else Engine.derivePausedPlants.delete(plant);
+    Engine._renderDerivePaused();
+  },
+
+  _renderDerivePaused(): void {
+    if (typeof document === 'undefined') return;
+    const banner = document.getElementById('derive-paused-banner');
+    if (!banner) return;
+    const plants = [...Engine.derivePausedPlants];
+    banner.hidden = plants.length === 0;
+    banner.textContent = plants.length ? Util.t('ui.derive_paused', { plant: plants.join(', ') }) : '';
+    document.body?.classList?.toggle('derive-paused', plants.length > 0);
+  },
+
+  /** Re-derive starts from the held finish (backward scheduling OQ3, OQ4, OQ33, OQ34, OQ51, OQ53, OQ62).
+   *
+   * Which rows: `runtime_schedule_mismatch` (the stored start may be out of date) or never placed
+   * (`!user_scheduled`); queued rows and rows carrying `placement_exception` are left alone. The held finish
+   * is the anchor: a placed row's stored end, a never-placed row's due instant. A RUNNING placed row keeps its
+   * start and lets the finish follow the run time (OQ3, no reversal). A firmed row is re-derived like any other
+   * and stays firmed (OQ4); a derived start that lands in the frozen window is only noted.
+   *
+   * Two write kinds. A row the server flagged stale gets a DIRTY patch (the cutover path: the next Save persists
+   * it and the server clears the flag). A never-placed row that is not flagged is derived for DISPLAY only
+   * (source `engine-runtime-reconcile-display`, skipped by the dirty tracker), so Save leaves the server row
+   * never-placed. Every patch carries both edges (and the segments), and every touched or skipped row carries a
+   * session-only `derivationIssue`.
+   *
+   * Nothing is derived from a plant whose server calendar is `pending` or `failed` (default 07:00-19:00 hours
+   * would be saved as truth), or from a plant with no time zone (a line with no server calendar row is derived, D14). Rows
+   * whose walk reaches "now" are collected per line and placed forward in finish order from now (OQ53 b).
+   * No undo entry (OQ57); one Toast counts the dirty patches. `opts.reason === 'cutover'` tags the reversals. */
+  reconcileRuntimeSchedules(plant: string | null, opts: ReconcileOptions = {}): void {
+    if (!plant) return;
+    const candidates = Store.tasksByPlant(plant).filter(task =>
+      (task.runtime_schedule_mismatch || !task.user_scheduled)
+      && task.planning_status !== 'needs_planning' && !task.placement_exception && !!task.MACHINE
+      // A row with unsaved local edits is the planner's own work in progress: never re-derive it.
+      && (opts.ids ? opts.ids.has(String(task.id)) : !Persistence._dirtyIds.has(String(task.id))));
+    if (!candidates.length) { Engine._setDerivePaused(plant, false); return; }
+    // OQ51: only an authoritative (server) calendar may derive a start; otherwise wait for it.
+    if (CalendarSync.calendarState(plant) !== 'hydrated') { Engine._setDerivePaused(plant, true); return; }
+    Engine._setDerivePaused(plant, false);
+
+    interface ReconcilePatch { id: string; changes: Partial<NimbusTask>; dirty: boolean }
+    type Issue = NonNullable<NimbusTask['derivationIssue']>;
+    const patches: ReconcilePatch[] = [];
+    const sameIssue = (a: NimbusTask['derivationIssue'], b: NimbusTask['derivationIssue']): boolean =>
+      (a ?? null) === (b ?? null) || (!!a && !!b && a.code === b.code && a.detail === b.detail
+        && a.from?.getTime() === b.from?.getTime() && a.to?.getTime() === b.to?.getTime());
+    // A note on a row the reconcile did not (or could not) place: session-only, never dirty, and not repeated.
+    const noteOnly = (task: NimbusTask, issue: Issue): void => {
+      if (sameIssue(task.derivationIssue, issue)) return;
+      patches.push({ id: task.id, changes: { derivationIssue: issue }, dirty: false });
+    };
+    const plantNow = Store.plantNow(plant);
+    // OQ53 (Task 4.2): the first load after the backward-scheduling cutover is recognised by the data signature the
+    // cutover SQL leaves: every non-queued row is flagged stale and NEVER PLACED (`!user_scheduled`), except the
+    // running rows, which keep both edges. When those two kinds of stale row are more than half of the plant's
+    // non-queued rows (queued rows count on neither side) the pass is the cutover pass: its reversals are tagged
+    // 'cutover' and one summary Toast, counted over the STALE rows only, replaces the per-row "N moved" Toast.
+    // A stale row that still carries a placement (an ordinary SAP or routing re-upload flagging placed orders) never
+    // counts, so such a load keeps its per-row Toasts and 'run_time_grew'. An undo pass (opts.ids) never is a cutover
+    // pass; an explicit reason wins.
+    const nonQueuedCount = Store.tasksByPlant(plant).filter(task => task.planning_status !== 'needs_planning').length;
+    const signatureCount = candidates.filter(task => task.runtime_schedule_mismatch
+      && (!task.user_scheduled
+        || (!!plantNow && !!task.start_date && !!task.end_date && Engine.isInProgress(task, plantNow)))).length;
+    const cutover = opts.reason === 'cutover'
+      || (opts.reason === undefined && !opts.ids && nonQueuedCount >= CUTOVER_MIN_ROWS && signatureCount * 2 > nonQueuedCount);
+    const cutoverCounts = { anchored: 0, reversed: 0, running: 0, blocked: 0 };
+    const tally = (stale: boolean, kind: keyof typeof cutoverCounts): void => { if (stale) cutoverCounts[kind]++; };
+    const commit = (): void => {
+      const dirty = patches.filter(patch => patch.dirty);
+      const display = patches.filter(patch => !patch.dirty);
+      if (dirty.length) Store.updateMany(dirty.map(({ id, changes }) => ({ id, changes })), 'engine-runtime-reconcile');
+      if (display.length) Store.updateMany(display.map(({ id, changes }) => ({ id, changes })), 'engine-runtime-reconcile-display');
+      // An undo already announces itself ("Undone: ..."), so its re-derivation is not counted again.
+      if (opts.reason === 'undo') return;
+      const counted = cutoverCounts.anchored + cutoverCounts.reversed + cutoverCounts.running + cutoverCounts.blocked;
+      if (cutover && counted > 0) {
+        Toast.show(Util.t('toast.cutover_summary', {
+          n: cutoverCounts.anchored, m: cutoverCounts.reversed, k: cutoverCounts.running, j: cutoverCounts.blocked,
+        }), 'info', 12000);
+      } else if (dirty.length) Toast.show(Util.t('toast.system_moved_n', { count: dirty.length }), 'info', 6000);
+    };
+
+    if (!plantNow) {
+      // OQ52: a plant with no zone has no clock, so nothing is derived (Store.plantNow already announced it once).
+      for (const task of candidates) { noteOnly(task, { code: 'plant_no_timezone' }); tally(!!task.runtime_schedule_mismatch, 'blocked'); }
+      commit();
+      return;
+    }
+    const policy = Engine.splitOrderPolicyFor(plant);
+    const floor = Calendar._floorMinute(plantNow);
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;   // the reversal's forward leg runs on plant-zone instants (U16)
+    const moveReason = (stale: boolean): string => cutover ? 'cutover' : (stale ? 'run_time_changed' : 'due_date_derivation');
+    // A schedule patch always carries both edges, the segments and both session notes (the notes are cleared
+    // by the next edit, Store._clearStaleNotes, unless a change-set carries them).
+    const schedulePatch = (task: NimbusTask, stale: boolean, changes: Partial<NimbusTask>,
+                           issue: Issue | null, reason: string, moved: 'start' | 'end' = 'start'): void => {
+      const before = moved === 'start' ? task.start_date : task.end_date;
+      const after = (moved === 'start' ? changes.start_date : changes.end_date) ?? before;
+      const full: Partial<NimbusTask> = {
+        ...changes, scheduleSegments: changes.scheduleSegments ?? [], runtime_schedule_mismatch: false,
+        derivationIssue: issue,
+        systemMove: after ? { from: before ?? after, to: after, reason } : null,
+      };
+      // A display-only row whose derivation changes nothing is not rewritten on every pass.
+      if (!stale && task.start_date?.getTime() === full.start_date?.getTime()
+        && task.end_date?.getTime() === full.end_date?.getTime()
+        && Engine._sameScheduleSegments(task.scheduleSegments, full.scheduleSegments ?? [])
+        && sameIssue(task.derivationIssue, issue)) return;
+      patches.push({ id: task.id, changes: full, dirty: stale });
+    };
+
+    // OQ2 V1 / OQ40: the changeover the derivation reserves ahead of the earliest piece is the one the setup
+    // domain requires for the (predecessor -> this order) pair on the line. Adjacency is by start, exactly as the
+    // setup observation reads it: the predecessor is the latest-starting scheduled row on the line that starts
+    // before this order's start. Built once per pass, per line, so the lookup is a binary search.
+    const setup = Store.setupSnapshot;
+    const setupDefinition = setup?.definition;
+    const setupLive = !!(setup && setupDefinition && setup.plant_active && setup.plant === plant);
+    const lineSchedule = new Map<string, NimbusTask[]>();
+    const scheduleOf = (line: string): NimbusTask[] => {
+      let rows = lineSchedule.get(line);
+      if (!rows) {
+        rows = Store.tasksByPlant(plant).filter(row => row.MACHINE === line && row.planning_status !== 'needs_planning'
+          && row.start_date && row.end_date);
+        rows.sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime() || String(a.id).localeCompare(String(b.id)));
+        lineSchedule.set(line, rows);
+      }
+      return rows;
+    };
+    /** The changeover minutes to reserve before `task` starting at `start` (0 when it is unknown: the predecessor
+     *  is not placed, the pair has no rule or an attribute is missing; the unknown-setup alert covers those), and
+     *  whether an active override of this order no longer names the row that now sits before it. */
+    const setupBefore = (task: NimbusTask, line: string, start: Date): { minutes: number; orphaned: boolean } => {
+      if (!setupLive || !setup || !setupDefinition) return { minutes: 0, orphaned: false };
+      const rows = scheduleOf(line);
+      let lo = 0, hi = rows.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (rows[mid].start_date!.getTime() < start.getTime()) lo = mid + 1; else hi = mid; }
+      let predecessor: NimbusTask | null = null;
+      for (let i = lo - 1; i >= 0; i--) { if (String(rows[i].id) !== String(task.id)) { predecessor = rows[i]; break; } }
+      const predecessorId = predecessor ? String(predecessor.id) : null;
+      const orphaned = setup.overrides.some(override => override.status === 'active' && override.machine === line
+        && String(override.successor_order_id) === String(task.id) && (override.predecessor_order_id == null ? null : String(override.predecessor_order_id)) !== predecessorId);
+      let predecessorState: SetupStateKey | null = null;
+      if (predecessor) {
+        if (!predecessor.user_scheduled) return { minutes: 0, orphaned };   // not placed: the required changeover is unknown
+        predecessorState = stateForOrder(predecessor, setupDefinition);
+      } else {
+        predecessorState = setup.machine_states.find(state => state.machine === line
+          && state.signature_version === setupDefinition.signature_version)?.state_key ?? null;
+      }
+      const successorState = stateForOrder(task, setupDefinition);
+      if (!predecessorState || !successorState) return { minutes: 0, orphaned };
+      const resolved = resolveSetup({
+        definition: setupDefinition, machine: line, predecessorState, successorState, predecessorOrderId: predecessorId,
+        successorOrderId: String(task.id), plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+      });
+      return { minutes: resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0, orphaned };
+    };
+
+    interface Reversal { task: NimbusTask; anchor: Date; stale: boolean }
+    const reversals = new Map<string, Reversal[]>();
     Calendar._beginRun(plant);
     try {
-      for (const task of Store.tasksByPlant(plant)) {
-        if (!task.runtime_schedule_mismatch || !task.start_date) continue;
-        const line = task.MACHINE || 'Unknown';
-        const changes = Engine.schedulePatchFor(task, line, task.start_date, policy);
-        if (!changes?.start_date || !changes.end_date) {
-          ErrorLog.warn('engine',
-            `Runtime changed for order "${task.text || task.id}", but its schedule could not be regenerated within the 90-day calendar search.`,
-            { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
+      for (const task of candidates) {
+        const line = task.MACHINE;
+        // D14: every line has a calendar (its own row or the plant default), so nothing is blocked here any more.
+        const stale = !!task.runtime_schedule_mismatch;
+        const placed = !!task.user_scheduled;
+
+        if (placed && task.start_date && task.end_date && Engine.isInProgress(task, plantNow)) {
+          // OQ3: it is already producing. The start holds and the finish follows the run time (no reversal).
+          const changes = Engine.heldStartPatchFor(task, line, policy);
+          if (!changes) {
+            ErrorLog.warn('engine',
+              `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the 90-day calendar search.`,
+              { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
+            noteOnly(task, { code: 'no_operating_window' });
+            continue;
+          }
+          schedulePatch(task, stale, changes, null, moveReason(stale), 'end');
+          tally(stale, 'running');
           continue;
         }
-        changes.runtime_schedule_mismatch = false;
-        patches.push({ id: task.id, changes });
+
+        const anchor = placed ? task.end_date : Util.dueInstant(task);
+        if (!anchor) { noteOnly(task, { code: 'no_anchor' }); tally(stale, 'blocked'); continue; }   // no finish to hold, so nothing can be derived
+        let result = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: 0 });
+        if (result.kind === 'placed' && setupLive) {
+          // The first walk shows where the order starts, which names its predecessor; walk again with that
+          // pair's changeover so the earliest piece also holds it (only the start can move, never the finish).
+          const { minutes } = setupBefore(task, line, result.changes.start_date!);
+          if (minutes > 0) {
+            // The reservation alone never sends a row to the forward reversal: when the setup-aware walk cannot
+            // place, the zero-setup placement at the held finish stands and the setup-violated alert fires.
+            const withSetup = Engine.finishAnchoredPatchFor(task, line, anchor, policy, { deferReversal: true, setupMinutes: minutes });
+            // Senior review I8 (ruling 3.2): a second walk that moved the finish (a window too tight for run + changeover)
+            // is discarded too; setup is a preference, never a reason to move a held finish.
+            if (withSetup.kind === 'placed'
+              && (!withSetup.finishMoved || withSetup.changes.end_date?.getTime() === result.changes.end_date?.getTime())) result = withSetup;
+          }
+        }
+        if (result.kind === 'reached_now') {
+          (reversals.get(line) ?? reversals.set(line, []).get(line)!).push({ task, anchor, stale });
+          continue;
+        }
+        if (result.kind === 'refuse') {
+          if (result.reason === 'overlong_never') {
+            // OQ50: it cannot be one bar under this plant's policy. Queue it; the planner releases it by editing it.
+            patches.push({ id: task.id, dirty: stale, changes: Engine.overlongNeverChanges() });
+          } else if (result.reason === 'run_time_zero') noteOnly(task, { code: 'run_time_zero' });   // OQ13: no bar
+          else if (result.reason === 'plant_no_timezone') { noteOnly(task, { code: 'plant_no_timezone' }); tally(stale, 'blocked'); }
+          else {
+            ErrorLog.warn('engine',
+              `Order "${task.text || task.id}" could not be re-derived: no operating window within the 90-day calendar search.`,
+              { line, taskId: task.id, policy, reason: result.reason });
+            noteOnly(task, { code: 'no_operating_window' });
+          }
+          continue;
+        }
+
+        // Placed. Several findings can apply to one row; the most important one is recorded.
+        const derivedStart = result.changes.start_date!;
+        let issue: Issue | null = null;
+        const orphaned = setupLive && setupBefore(task, line, derivedStart).orphaned;
+        // D9c (VP1): a date-only due that lands on a blackout day is read as that day's close and the walk
+        // moves it before the blackout; that is the due date resolving, not a finish the planner lost. Silent.
+        const dueOnBlackout = !placed && result.moveReason === 'blackout' && Util.isDateOnlyDue(task);
+        if (result.finishMoved && !dueOnBlackout) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
+        else if (orphaned) issue = { code: 'setup_override_orphaned' };   // an active override no longer names the row before it (recorded only, Task 3.3 alerts)
+        else if (placed && task.start_date
+          && !Engine.isFrozenHorizon(task, plantNow) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart, user_scheduled: true }, plantNow)) {
+          // D19 (VU17) + R26: a row (firmed or not) whose start moves from OUTSIDE to INSIDE the frozen window in
+          // this reconcile is warned; one already inside, or never placed (display-derived dates are no transition), is silent (no cutover-morning flood).
+          issue = { code: 'frozen_window_crossed', from: task.start_date, to: derivedStart };
+        } else {
+          const pullFloor = Engine.earliestAllowedStart(task, plant, null);
+          if (pullFloor && derivedStart < pullFloor) issue = { code: 'pull_floor_crossed', from: derivedStart, to: pullFloor };   // OQ20
+        }
+        schedulePatch(task, stale, result.changes, issue, moveReason(stale));
+        tally(stale, 'anchored');
+      }
+
+      // OQ53 b: rows whose walk reached "now" go forward from now, per line, in finish order, one after another.
+      for (const [line, rows] of reversals) {
+        rows.sort((a, b) => a.anchor.getTime() - b.anchor.getTime() || String(a.task.id).localeCompare(String(b.task.id)));
+        const sequence = Engine.placeForwardSequence(line, rows.map(row => ({ task: row.task, row })), floor, policy, { plantTz });
+        const placedIds = new Set<string>();
+        for (const { item, start, end, scheduleSegments } of sequence.placed) {
+          placedIds.add(String(item.row.task.id));
+          const detail = cutover ? 'cutover' : (item.row.stale ? 'run_time_grew' : 'due_date_past');
+          schedulePatch(item.row.task, item.row.stale, { start_date: start, end_date: end, scheduleSegments: scheduleSegments ?? [] },
+            { code: 'reversal_forward', detail }, cutover ? 'cutover' : 'reversal_forward');
+          tally(item.row.stale, 'reversed');
+        }
+        const overlongIds = new Set(sequence.overlong.map(item => String(item.row.task.id)));
+        for (const row of rows) {
+          if (placedIds.has(String(row.task.id))) continue;
+          if (overlongIds.has(String(row.task.id))) {
+            // OQ50: it cannot be one bar under this plant's policy, so it is queued exactly like the backward refusal.
+            patches.push({ id: row.task.id, dirty: row.stale, changes: Engine.overlongNeverChanges() });
+            continue;
+          }
+          ErrorLog.warn('engine',
+            `Order "${row.task.text || row.task.id}" could not be placed forward from now: no operating window found.`,
+            { line, taskId: row.task.id, policy, reason: 'reversal-forward' });
+          noteOnly(row.task, { code: 'no_operating_window' });
+        }
       }
     } finally {
       Calendar._endRun();
     }
-    if (patches.length) Store.updateMany(patches, 'engine-runtime-reconcile');
+    commit();
   },
 
+  /** After rows were restored (undo, Time Machine) their stored start is a placeholder: re-derive each plant's
+   *  restored rows from their restored finish under the current run time (OQ21). */
+  reconcileRestored(ids: Iterable<string>, wasDirty: ReadonlySet<string> = new Set()): void {
+    const byPlant = new Map<string, Set<string>>();
+    const neverPlaced: string[] = [];
+    for (const raw of ids) {
+      const id = String(raw);
+      const task = Store.tasks[id];
+      const plant = task ? (task.PLANT || Store.getPlantForLine(task.MACHINE)) : null;
+      if (plant) (byPlant.get(plant) ?? byPlant.set(plant, new Set()).get(plant)!).add(id);
+      // F10: the reconcile's own never-placed test (`!user_scheduled`, the display-only derive of Task 2.6).
+      if (task && !task.user_scheduled) neverPlaced.push(id);
+    }
+    // A row that was never placed server-side stays display-only after an undo / Time Machine restore: restoreTasks
+    // flagged it stale and the undo write dirtied it, and either would route it through the dirty reconcile patch
+    // (`_markPlaced`) so the next Save persisted a placement it never had. Clear both; the pass below derives it
+    // from its due date through the display source, which the dirty tracker skips. A row that was ALREADY dirty
+    // before the undone edit (`wasDirty`, recorded by UndoStack.snapshotTasks) carries an unsaved attribute edit of
+    // its own (run time, text, priority) and stays dirty; Save leaves its derived dates and segments out of the
+    // payload (Persistence._taskEditSnapshot, never-placed rows), so only the placement is dropped.
+    if (neverPlaced.length) {
+      Store.updateMany(neverPlaced.map(id => ({ id, changes: { runtime_schedule_mismatch: false } })), 'engine-runtime-reconcile-display');
+      for (const id of neverPlaced) {
+        if (wasDirty.has(id)) continue;
+        Persistence._dirtyIds.delete(id); Persistence._forceIds.delete(id);
+      }
+    }
+    for (const [plant, restored] of byPlant) Engine.reconcileRuntimeSchedules(plant, { reason: 'undo', ids: restored });
+  },
+
+  /** Place `items` one after another on `line`, each starting at the later of the running cursor and its own
+   *  `notBefore`, walking the calendar forward under `policy` (the cursor loop Remove Backlog and the reversal
+   *  queue share). Pure: nothing is written. `opts.stopWhen` ends the walk before an item (Remove Backlog stops
+   *  when the compressing cursor has caught up with an item that has not started yet); the first item the
+   *  calendar cannot place ends it too, reported in `failure`. Callers own the surrounding calendar run. */
+  placeForwardSequence<T extends ForwardSequenceItem>(
+    line: string, items: ReadonlyArray<T>, from: Date, policy: SplitOrderPolicy,
+    opts: { stopWhen?: (item: T, cursor: Date) => boolean; plantTz?: string | null } = {},
+  ): ForwardSequenceResult<T> {
+    const out: ForwardSequenceResult<T> = { placed: [], invalidRuntime: [], overlong: [], failure: null };
+    let cursor = new Date(from);
+    for (const item of items) {
+      if (opts.stopWhen?.(item, cursor)) break;
+      const runtimeHours = Number(item.task.RUN_TIME);
+      if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
+        out.invalidRuntime.push(item);
+        continue;
+      }
+      const runtimeMs = Math.round(runtimeHours * 60) * Config.MS_MIN;   // whole minutes like every other path (senior review M1)
+      const candidate = item.notBefore ? new Date(Math.max(item.notBefore.getTime(), cursor.getTime())) : cursor;
+      let start: Date;
+      let end: Date;
+      let scheduleSegments: OrderScheduleSegment[] | undefined;
+      if (policy === 'never') {
+        // Preserve the existing continuous-bar contract exactly for legacy
+        // schedules. A split schedule that is explicitly regenerated under
+        // this policy is cleared below as one atomic parent aggregate.
+        const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs, opts.plantTz ?? null);
+        if (slot.kind === 'unavailable' || (!opts.plantTz && !('start' in slot))) {
+          out.failure = { item, reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+          break;
+        }
+        if (slot.kind === 'overlong' && !opts.plantTz) { out.overlong.push(item); continue; }
+        if (opts.plantTz) {
+          // The reversal's forward leg picks the slot AND the end in plant-zone instants (OQ46, U16), so a window
+          // whose edge lies on a DST jump is neither overrun nor skipped. Overlong / unavailable were classified above.
+          const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), 'never', opts.plantTz);
+          if (allocation.kind !== 'allocated') {
+            // Wall-clock said overlong and plant-zone time agrees (no window holds it): the continuous-bar exception.
+            if (slot.kind === 'overlong') { out.overlong.push(item); continue; }
+            out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+            break;
+          }
+          start = allocation.start;
+          end = allocation.end;
+        } else {
+          start = (slot as { start: Date }).start;
+          end = new Date(start.getTime() + runtimeMs);
+        }
+        if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
+      } else {
+        const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy, opts.plantTz ?? null);
+        if (allocation.kind !== 'allocated') {
+          out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+          break;
+        }
+        start = allocation.start;
+        end = allocation.end;
+        // Always include the full child aggregate, including [], so a
+        // regenerated continuous parent removes obsolete child rows.
+        scheduleSegments = allocation.scheduleSegments;
+      }
+      cursor = end;
+      out.placed.push({ item, start, end, ...(scheduleSegments !== undefined ? { scheduleSegments } : {}) });
+    }
+    return out;
+  },
   _sameScheduleSegments(a: OrderScheduleSegment[] | undefined, b: OrderScheduleSegment[]): boolean {
     const left = Array.isArray(a) ? a : [];
     if (left.length !== b.length) return false;
@@ -1291,23 +1957,16 @@ export const Engine = {
    * first projects the instant into the plant IANA zone, then recreates those
    * wall-clock components for the existing calendar engine. */
   _plantWallNow(timezone: string, runAt: Date): Date {
-    try {
-      const parts = new Intl.DateTimeFormat('en-US', {
-        timeZone: timezone,
-        year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
-        hourCycle: 'h23',
-      }).formatToParts(runAt);
-      const values: Record<string, number> = {};
-      for (const part of parts) {
-        if (part.type !== 'literal') values[part.type] = Number(part.value);
-      }
-      if (![values.year, values.month, values.day, values.hour, values.minute].every(Number.isFinite)) {
-        throw new Error('could not resolve plant-local clock');
-      }
-      return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, 0, 0);
-    } catch (err) {
-      throw new Error(`Remove Backlog requires a valid IANA timezone for the selected plant (${timezone}): ${err instanceof Error ? err.message : String(err)}`);
+    // The projection is the compute core's shared helper (one implementation for Store.plantNow, the
+    // worker and this); Remove Backlog additionally REQUIRES a real zone, so a blank or invalid one
+    // still throws, with the same message as before.
+    const wall = typeof timezone === 'string' && timezone.trim()
+      ? plantWallClockFromInstant(timezone, runAt) : null;
+    if (!wall) {
+      throw new Error(`Remove Backlog requires a valid IANA timezone for the selected plant (${timezone}): could not resolve plant-local clock`);
     }
+    wall.setSeconds(0, 0);
+    return wall;
   },
 
   /** Planner-invoked, sequence-preserving backlog repair. This deliberately
@@ -1344,6 +2003,8 @@ export const Engine = {
     const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
     const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.MACHINE || 'Unknown'));
     for (const task of scopedTasks) {
+      // G-0.25: an approved placement exception is fixed; Remove Backlog leaves it where the planner put it.
+      if (task.placement_exception) continue;
       if (!task.start_date) {
         diagnostics.missingStartIds.push(task.id);
         continue;
@@ -1374,54 +2035,23 @@ export const Engine = {
         const firstBacklog = items.findIndex(item => item.snapshotStart < now);
         if (firstBacklog < 0) continue;
         diagnostics.backlogFound += items.filter(item => item.snapshotStart < now).length;
-        let cursor = new Date(now);
-        for (let index = firstBacklog; index < items.length; index++) {
-          const item = items[index];
-          if (item.snapshotStart >= now && cursor <= item.snapshotStart) break;
+        // The compressing cursor walk is shared with the reversal queue (placeForwardSequence).
+        const sequence = Engine.placeForwardSequence(
+          line,
+          items.slice(firstBacklog).map(item => ({ ...item, notBefore: item.snapshotStart >= now ? item.snapshotStart : undefined })),
+          now, splitPolicy,
+          { plantTz: Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null, stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart });
+        for (const item of sequence.invalidRuntime) diagnostics.invalidRuntimeIds.push(item.task.id);
+        // OQ50 c: an order that cannot be one bar under the `never` policy is queued, not stretched over closed time.
+        for (const item of sequence.overlong) {
+          diagnostics.overlongIds.push(item.task.id);
+          patches.push({ id: item.task.id, changes: Engine.overlongNeverChanges() });
+        }
+        if (sequence.failure) {
+          diagnostics.calendarSearchFailures.push({ line, taskId: sequence.failure.item.task.id, reason: sequence.failure.reason });
+        }
+        for (const { item, start, end, scheduleSegments } of sequence.placed) {
           const runtimeHours = Number(item.task.RUN_TIME);
-          if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
-            diagnostics.invalidRuntimeIds.push(item.task.id);
-            continue;
-          }
-          const runtimeMs = runtimeHours * Config.MS_HOUR;
-          const candidate = item.snapshotStart < now
-            ? cursor
-            : new Date(Math.max(item.snapshotStart.getTime(), cursor.getTime()));
-          let start: Date;
-          let end: Date;
-          let scheduleSegments: OrderScheduleSegment[] | undefined;
-          if (splitPolicy === 'never') {
-            // Preserve the existing continuous-bar contract exactly for legacy
-            // schedules. A split schedule that is explicitly regenerated under
-            // this policy is cleared below as one atomic parent aggregate.
-            const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
-            if (!('start' in slot)) {
-              diagnostics.calendarSearchFailures.push({
-                line, taskId: item.task.id,
-                reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
-              });
-              break;
-            }
-            start = slot.start;
-            end = new Date(start.getTime() + runtimeMs);
-            if (slot.kind === 'overlong') diagnostics.overlongIds.push(item.task.id);
-            if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
-          } else {
-            const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), splitPolicy);
-            if (allocation.kind !== 'allocated') {
-              diagnostics.calendarSearchFailures.push({
-                line, taskId: item.task.id,
-                reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted',
-              });
-              break;
-            }
-            start = allocation.start;
-            end = allocation.end;
-            // Always include the full child aggregate, including [], so a
-            // regenerated continuous parent removes obsolete child rows.
-            scheduleSegments = allocation.scheduleSegments;
-          }
-          cursor = end;
           const currentStart = item.snapshotStart.getTime();
           const currentEnd = finiteDate(item.task.end_date)?.getTime() ?? NaN;
           const segmentsChanged = scheduleSegments !== undefined
@@ -1444,12 +2074,14 @@ export const Engine = {
 
     const patchById = new Map(patches.map(patch => [patch.id, patch]));
     for (const patch of patches) {
-      const movedStart = patch.changes.start_date!;
-      const movedEnd = patch.changes.end_date!;
+      const movedStart = patch.changes.start_date;
+      const movedEnd = patch.changes.end_date;
+      if (!movedStart || !movedEnd) continue;   // a queued (overlong_never) row has no bar to conflict
       const movedTask = sourceTask(patch.id);
       for (const protectedTask of scopedTasks) {
         if (protectedTask.MACHINE !== movedTask?.MACHINE || !protectedTask.start_date || !protectedTask.end_date) continue;
-        if (protectedTask.start_date <= to || patchById.has(protectedTask.id)) continue;
+        // VM7: a marked bar inside the window is an obstacle too
+        if ((protectedTask.start_date <= to && !protectedTask.placement_exception) || patchById.has(protectedTask.id)) continue;
         if (movedStart < protectedTask.end_date && movedEnd > protectedTask.start_date) {
           diagnostics.boundaryConflicts.push({ line: movedTask.MACHINE, movedTaskId: patch.id, protectedTaskId: protectedTask.id, type: 'overlap' });
         }
@@ -1864,58 +2496,6 @@ export const Engine = {
     };
   },
 
-  /** Allocate a sequence already selected by an optimizer strategy. The
-   * selection/order remains the strategy's responsibility; this pass only
-   * turns each selected logical parent into its calendar-valid aggregate.
-   * Firmed parents are treated as atomic envelope obstacles so no free order is
-   * interleaved between the productive pieces of another logical order. */
-  _dispatchPolicyAware(
-    line: string,
-    orderedTasks: NimbusTask[],
-    firmedTasks: NimbusTask[],
-    cursorInit: Date,
-    policy: Exclude<SplitOrderPolicy, 'never'>,
-    plant: string | null,
-  ): Array<{ id: string; changes: Partial<NimbusTask> }> {
-    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-    let cursor = new Date(cursorInit);
-
-    for (const task of orderedTasks) {
-      const runtimeMinutes = Math.round(Util.runHours(task) * 60);
-      if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) continue;
-
-      let requested = new Date(cursor);
-      const floor = Engine.earliestAllowedStart(task, plant);
-      if (floor && requested < floor) requested = new Date(floor);
-      let scheduled: Partial<NimbusTask> | null = null;
-      for (let guard = 0; guard < 200; guard++) {
-        const candidate = Engine.schedulePatchFor(task, line, requested, policy);
-        if (!candidate?.start_date || !candidate.end_date) break;
-        const blocker = firmedTasks.find(f => f.start_date && f.end_date
-          && candidate.start_date! < f.end_date && candidate.end_date! > f.start_date);
-        if (!blocker?.end_date) {
-          scheduled = candidate;
-          break;
-        }
-        requested = new Date(blocker.end_date);
-      }
-
-      if (!scheduled?.start_date || !scheduled.end_date) {
-        reportSchedulerDiagnostic(
-          'warn', 'engine', 'engine.allocation-exhausted',
-          `Could not allocate order "${task.text || task.id}" on "${line}" within the 90-day calendar search; subsequent orders were left unchanged.`,
-          { line, taskId: task.id, policy },
-        );
-        // Do not schedule later parents around one that could not be allocated:
-        // doing so would silently break the strategy-selected sequence.
-        break;
-      }
-      patches.push({ id: task.id, changes: scheduled });
-      cursor = new Date(scheduled.end_date);
-    }
-    return patches;
-  },
-
   /** Main optimiser. Groups by line, optionally respects firmed + calendar.
    *  Writes results through Store.
    *  opts.plant restricts to lines belonging to that plant. Priority ranks are
@@ -1929,15 +2509,10 @@ export const Engine = {
   runAndApply(mode: OptimizerMode = 'changeover', opts: Record<string, unknown> = {}): CandidateResult | void {
     const _pmT0e = performance.now();
     const candidateRun = opts.__candidateRun === true;
-    // Candidate runs use the frozen-horizon value captured in their immutable
-    // read model. Live runs intentionally leave this undefined so the normal
-    // Store-backed helper remains authoritative.
-    const detachedFrozenHorizonEnd = candidateRun ? _candidateSnapshot?.frozenHorizonEnd : undefined;
     // Mirrors lastBacklogResult's lifecycle: cleared at the top of every real
     // (non-candidate) run so it never goes stale after a later non-setup-aware
     // run, and always reflects the most recent live apply (F8).
     if (!candidateRun) Engine.lastSetupAwareResult = null;
-    let _pmCalMs = 0; // accumulates Calendar.nextAvailable time for the Engine.calendar breakout
     if (!sourceTasks().length) {
       if (!candidateRun) Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error');
       return candidateRun ? detachedCandidateResult([], _pmT0e) : undefined;
@@ -2010,11 +2585,6 @@ export const Engine = {
     // behavior exactly, while making Engine genuinely DOM-free.
     const respectFirmed   = (opts.respectFirmed as boolean | undefined)   ?? true;
     const respectCalendar = (opts.respectCalendar as boolean | undefined) ?? true;
-    // An explicit "ignore calendar" run remains continuous: there is no
-    // effective availability map from which to derive productive pieces. The
-    // plant setting takes effect on normal calendar-respecting scheduling.
-    const splitPolicy: SplitOrderPolicy = respectCalendar ? Engine.splitOrderPolicyFor(plant) : 'never';
-    const sortTerms = Engine._sortTerms(mode, { plant });
 
     const plantTimezone = sourceMasterData()?.plants?.find(row => row.plant === plant)?.timezone ?? null;
     const invalidDateFields: string[] = [];
@@ -2026,9 +2596,14 @@ export const Engine = {
       return parsed;
     };
     const liveClock = (): Date => {
-      const now = new Date();
-      now.setSeconds(0, 0);
-      return plantWallClockFromInstant(plantTimezone, now) ?? now;
+      // One clock (OQ52): the server instant in the plant's zone, floored to the minute. A plant with
+      // no valid zone is blocked (recorded by Store.plantNow); the run keeps its viewer-clock fallback
+      // here and placement-blocking for such plants belongs to the derivation tasks that follow.
+      const now = Store.plantNow(plant);
+      if (now) { now.setSeconds(0, 0); return now; }
+      const fallback = Store.serverNow();
+      fallback.setSeconds(0, 0);
+      return plantWallClockFromInstant(plantTimezone, fallback) ?? fallback;
     };
     const injectedNow = candidateRun ? readDate(opts.now, 'now', true) : null;
     const explicitRunNow = hasExplicitDate(opts.runNow) ? readDate(opts.runNow, 'runNow', true)
@@ -2050,10 +2625,6 @@ export const Engine = {
     const horizonEnd = explicitHorizonEnd ?? (invalidDateFields.length
       ? invalidDate()
       : addLocalDays(planningStart, 35));
-    // The planning scope lower bound, placement floor, and captured wall
-    // clock are separate facts; only the first scopes existing schedules.
-    const isAged       = (t: NimbusTask) => t.end_date   && t.end_date   < planningStart;
-    const isOutOfWin   = (t: NimbusTask) => t.start_date && t.start_date >= horizonEnd;
     if (invalidDateFields.length) {
       const invalid: CandidateResult = {
         ...detachedCandidateResult([], _pmT0e),
@@ -2091,8 +2662,9 @@ export const Engine = {
     // SetupSnapshot.plant_active — Workstream D2 relocated this off the
     // vestigial per-signature-version setup_definition.active) routes
     // changeover, duedate, and spt through the setup-aware evaluators
-    // (setup-scheduler.mjs). The internal compatibility allocator below is
-    // retained for callers that bypass this dispatch. Search-safety limits are
+    // (setup-scheduler.mjs). This is the only optimizer path: the old
+    // per-line forward walk and its policy-aware allocator are deleted
+    // (backward-scheduling Task 3.1, OQ22). Search-safety limits are
     // hardcoded (see SETUP_AWARE_* above) —
     // the perf-measurement gate this was meant to come from was never run.
     //
@@ -2116,486 +2688,181 @@ export const Engine = {
       : Store.setupSnapshot;
     const setupSnapshotActiveAndMatching = !!(setupSnapshot && setupSnapshot.plant === plant && setupSnapshot.plant_active);
     const baseSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
-    const effectiveSetupSnapshot: SetupSnapshot | null = (mode === 'changeover' || mode === 'duedate' || mode === 'spt') && !setupSnapshotActiveAndMatching
-      ? Engine._syntheticZeroCostSetupSnapshot(plant, baseSnapshot)
-      : setupSnapshot;
-    if (mode === 'changeover' || mode === 'duedate' || mode === 'spt' || setupSnapshotActiveAndMatching) {
-      const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'duedate' ? 'due-date' : 'min-changeover';
-      // Phase 2 (Pkg D): scope the fallback snapshot's calendars to this run's
-      // plant — every consumer of ScheduleSnapshot.calendars in this path
-      // (freeIntervalsFor/jointWindowForDay/hasNominalWindow in
-      // setup-scheduler.mts, sourceLineWorkHours above) only ever looks up a
-      // line that survived this same plant's task filter, so no other
-      // plant's lines are ever needed here.
-      // C2: fold any running or frozen-window order into the SAME firmedIds
-      // set the setup-aware evaluators already treat as immovable — Engine.
-      // isFrozenHorizon carries its own distinct reason for the UI (never
-      // written to Store.isFirmed itself), this is purely an internal input
-      // to the evaluator so it never re-sequences an order it shouldn't touch.
-      // respectFirmed gates only the manual firmed ids. The running and
-      // frozen-horizon folds are unconditional regardless of respectFirmed.
-      // SAP's firm flag never locks. Passes runNow (this run's
-      // own "now", injectedNow-aware for candidate runs) rather than the
-      // real-time default, so a detached preview evaluated at a simulated
-      // instant agrees with itself. Never written back to the Store — this
-      // fold is run-local only (see effectiveFirmedIdSet).
-      const effectiveFirmedIds = effectiveFirmedIdSet(baseSnapshot.tasks, baseSnapshot.firmedIds, runNow, respectFirmed, baseSnapshot.frozenHorizonEnd);
-      const snapshot: ScheduleSnapshot = { ...baseSnapshot, firmedIds: effectiveFirmedIds };
-      // F4: Calculate lines in scope for iteration cap scaling. If opts.lines is
-      // provided, use its length (deduplicated); otherwise count distinct lines
-      // in the snapshot's tasks for this plant.
-      const optsLinesSet = Array.isArray(opts.lines) && opts.lines.length
-        ? new Set(opts.lines as string[])
-        : null;
-      // An injected candidate snapshot may be unscoped (evaluateSchedule's
-      // default is snapshotSchedule()), so count only this plant's non-blank
-      // lines, resolved the same way the evaluator groups them.
-      const linesInScope = optsLinesSet?.size ?? new Set(snapshot.tasks
-        .filter(t => resolveTaskPlant(t, snapshot) === plant)
-        .map(t => String(t.MACHINE ?? ''))
-        .filter(Boolean)).size;
-      const bounds: DueDateFirstBounds = {
-        // Non-null by construction: this branch is only reached when either
-        // mode is one of the setup-aware modes, so effectiveSetupSnapshot is
-        // always the real active-and-matching snapshot or the synthetic
-        // fallback.
-        setup: effectiveSetupSnapshot!,
-        exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
-        // F4: Scale iteration cap per line. The cap is a stack-safety net; after
-        // F2 a shared 20,000 iterations starved later lines on big plants. With
-        // F1 no exact fragment exceeds ~500 leaves and greedy tops ~165 candidates
-        // per fragment, so per-line scaling keeps the pool usable for every line.
-        iterationCap: SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope),
-        clock: () => performance.now(),
-        // Phase 2 (Pkg D): an absolute deadline the caller already computed
-        // (e.g. the preview's one-shot primary budget, or the deferred Plan B
-        // comparison's smaller budget) takes precedence over a fresh
-        // SETUP_AWARE_DEADLINE_MS window here. A past `opts.deadlineAt` is
-        // not special-cased: the search just terminates immediately with
-        // tail placement, which is the existing, safe deadline-exceeded path.
-        deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
-        now: placementStart,
-        planningStart,
-        runNow,
-        placementStart,
-        horizonEnd,
-        lines: Array.isArray(opts.lines) ? opts.lines as string[] : undefined,
-        respectCalendar,
-        notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData),
-        notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData),
-        convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
-      };
-      let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
-      if (result.validationContext) result.validationContext = { ...result.validationContext, baselineSnapshot: baseSnapshot };
-      // The setup-aware evaluators group every line for the plant with no
-      // opts.lines/excludeFromOpt filter of their own (unlike the legacy walk
-      // below) — apply both as a post-filter over the returned patches so a
-      // line-scoped run or an opted-out line still behaves as promised.
-      const optsLines = opts.lines as string[] | undefined;
-      const allowedLines = Array.isArray(optsLines) && optsLines.length ? new Set(optsLines) : null;
-      // Hoisted so an unfiltered run can still resolve a patched/unplaced id
-      // back to its line below (B3/B4) — previously scoped inside the filter
-      // guard, so an unfiltered run had no map to consult.
-      const byId = new Map(snapshot.tasks.map(t => [String(t.id), t]));
-      if (allowedLines || Object.values(sourceLineSettings()).some(setting => setting?.excludeFromOpt)) {
-        result = {
-          ...result,
-          patches: result.patches.filter(patch => {
-            const line = byId.get(String(patch.id))?.MACHINE || 'Unknown';
-            if (allowedLines && !allowedLines.has(line)) return false;
-            if (sourceLineSettings()[line]?.excludeFromOpt) return false;
-            return true;
-          }),
-        };
-      }
-      if (candidateRun) return result;
-      if (result.validationFindings?.some(finding => finding.severity === 'error')) {
-        Engine.lastSetupAwareResult = result;
-        return result;
-      }
-      if (result.patches.length) {
-        const patchIds = new Set(result.patches.map(patch => patch.id));
-        const undoTasks = structuredClone(snapshot.tasks.filter(task => patchIds.has(String(task.id))));
-        UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks), patchIds);
-      }
-      applySchedulePatches(result.patches);
-      Engine.lastSetupAwareResult = result;
-      Store.setLastOptimize(new Date(), 'engine');
-      const hadDismissed = Alerts.clearDismissed();
-      // Phase 3 (Pkg E): scope the recompute to the lines these patches actually
-      // touched instead of a full-plant recompute. `byId` (built above from the
-      // pre-apply snapshot) resolves each patch id to its line/MACHINE; patches
-      // never change MACHINE, so pre- and post-apply line membership match.
-      // If any alert was dismissed before this apply, a scoped merge would
-      // retain untouched lines' stale (dismissal-filtered) alert lists as-is —
-      // those cleared dismissals would never re-surface until some later full
-      // recompute. A pending full recompute already wins over a scoped one by
-      // design, so force it whenever there was something to clear.
-      if (hadDismissed) Alerts.scheduleRecompute();
-      else scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
-      // Surface the never-freeze fallbacks that actually landed in this apply:
-      // orders scheduled without a resolvable setup transition (no changeover
-      // bar) and, separately, any line still guarded off entirely (only
-      // firmed/override protection can do that now — see Part 1f). Both are
-      // derived from the applied patches, never the whole-run diagnostics, so
-      // a line-scoped/excludeFromOpt run only reports what it actually
-      // touched.
-      const patchedIds = new Set(result.patches.filter(patch => patch.changes.planning_status !== 'needs_planning').map(patch => String(patch.id)));
-      const unknownSetupOrderIds = new Set<string>();
-      const unknownSetupLines = new Set<string>();
-      // 'scheduled-without-setup' (F1) is the single dedicated reason for an
-      // order actually placed without a resolvable setup transition — emitted
-      // both by `placeUnknownTail` (tail placement) and, since A1, by
-      // `candidateForSequence`'s in-sequence admission of a known-but-uncovered
-      // transition. Counting this reason instead of the raw
-      // 'successor-state-unknown'/'initial-state-unknown' partition edges
-      // avoids double-counting a rejected permutation's edge that happens to
-      // name the same patched id.
-      for (const edge of result.missingEdges) {
-        if (edge.reason !== 'scheduled-without-setup') continue;
-        if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
-        unknownSetupOrderIds.add(String(edge.successorOrderId));
-        unknownSetupLines.add(edge.line);
-      }
-      // A null successor signature is intentionally kept out of the covered
-      // permutation core. Its deterministic tail placement is a distinct
-      // unresolved-state fact, so include it in the same operator warning
-      // without relabeling the edge as a known uncovered transition.
-      for (const reason of result.explanation) {
-        if (reason.code !== 'unknown-setup-tail-placement' || !reason.taskId || !patchedIds.has(String(reason.taskId))) continue;
-        unknownSetupOrderIds.add(String(reason.taskId));
-        unknownSetupLines.add(reason.line ?? byId.get(String(reason.taskId))?.MACHINE ?? 'Unknown');
-      }
-      // B3a: a synthetic (fabricated zero-cost) snapshot's matrix is always
-      // empty by construction, so its uncovered-but-admitted edges are an
-      // artifact of routing an inactive/never-configured plant through this
-      // evaluator at all — never a real data gap the plant needs to fix.
-      // Suppress ONLY this missing-setup-summary toast for a synthetic run.
-      // The two toasts below (orders left in place / lines guarded) are NOT
-      // setup-specific — they report genuine unplaced orders or untouched
-      // lines for reasons that have nothing to do with setup data (e.g. a
-      // permanently-uncalendarable order), so they must fire regardless of
-      // `synthetic`. Blanket-suppressing them for every setup-inactive plant
-      // would silently violate the never-freeze invariant's own "drops can't
-      // happen silently" guarantee for the majority of NIMBUS plants — those
-      // that haven't activated setup tracking. A genuinely active-and-
-      // matching snapshot (synthetic undefined/false) is unaffected either way.
-      if (unknownSetupOrderIds.size && !effectiveSetupSnapshot!.synthetic) {
-        Toast.show(Util.t('toast.optimize_missing_setup_summary', {
-          orders: unknownSetupOrderIds.size,
-          lines: unknownSetupLines.size,
-        }), 'warn');
-      }
-      // Due-date push-forward limit (plants.max_push_forward_days): report
-      // violations post-hoc from the applied patches, same as the missing-
-      // setup summary above, but NOT gated on `synthetic` — a plant with no
-      // active setup definition can still configure a push-forward cap, and
-      // the never-freeze "minimize violations, always place everything" rule
-      // applies regardless of the synthetic-snapshot mechanism.
-      const overCapSummary = Engine._overCapSummary(result.patches, snapshot.tasks, plant);
-      if (overCapSummary.orders) {
-        Toast.show(Util.t('toast.optimize_over_lateness_cap', {
-          orders: overCapSummary.orders,
-          lines: overCapSummary.lines,
-          // days is never null here: overCapSummary.orders > 0 only when the
-          // plant has a configured limit (see _overCapSummary's null fast-exit).
-          days: overCapSummary.days ?? 0,
-        }), 'warn');
-      }
-      // Sub-order distribution separation (SAP aggregate work center -> per-
-      // machine sub-orders): report parents whose siblings landed in
-      // different calendar buckets, same post-hoc pattern as the push-
-      // forward cap above and NOT gated on `synthetic` — separation is a
-      // scheduling-outcome fact, not a setup-data fact, so it applies to
-      // every plant regardless of setup-tracking activation.
-      const distributionSeparationCount = result.validationFindings?.filter(f => f.code === 'distribution_separation').length ?? 0;
-      if (distributionSeparationCount) {
-        Toast.show(Util.t('toast.optimize_distribution_separation', { parents: distributionSeparationCount }), 'warn');
-      }
-      // B3: derive the unplaced set by difference, in this one place, rather
-      // than threading an unplacedOrderIds field through CandidateResult —
-      // the worst drops (plant/line mismatch, this same opts.lines/
-      // excludeFromOpt post-filter, a firmed order the setup-aware path never
-      // touches) produce no diagnostic object at all, so there is nothing for
-      // a threaded field to collect. An order that places successfully
-      // always yields a patch — even when its dates are unchanged — so
-      // "in scope, not firmed, not patched" is exactly "not scheduled".
-      // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
-      // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
-      // setup-aware evaluators' own scoping agree on which orders exist for
-      // this plant. "Firmed" here means membership in `effectiveFirmedIds` —
-      // the SAME effectively-folded set (manual + ECC-firmed, gated by
-      // respectFirmed, plus the unconditional frozen-horizon fold; see
-      // effectiveFirmedIdSet) actually handed to the evaluator above, not
-      // just a manual `sourceIsFirmed` check — so an ECC-firmed or
-      // frozen-horizon order the evaluator deliberately left untouched is
-      // never miscounted here as "left in place".
-      const unplacedLines = new Set<string>();
-      let unplacedCount = 0;
-      for (const task of snapshot.tasks) {
-        const id = String(task.id);
-        if (patchedIds.has(id)) continue;
-        if (effectiveFirmedIds.has(id)) continue;
-        const taskPlant = task.PLANT || sourceGetPlantForLine(task.MACHINE);
-        if (taskPlant !== plant) continue;
-        const line = task.MACHINE || 'Unknown';
-        if (allowedLines && !allowedLines.has(line)) continue;
-        if (sourceLineSettings()[line]?.excludeFromOpt) continue;
-        unplacedCount += 1;
-        unplacedLines.add(line);
-      }
-      if (unplacedCount) {
-        Toast.show(`${unplacedCount} order(s) on ${unplacedLines.size} line(s) need planning. These orders have no committed schedule dates.`, 'warn');
-      }
-      if (result.unchangedLines.length) {
-        Toast.show(Util.t('toast.optimize_lines_guarded', { count: result.unchangedLines.length }), 'warn');
-      }
-      PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
-      return;
-    }
-
-    // Optional caller-supplied line filter — when present, only these lines are optimized.
-    const optsLines = opts.lines as string[] | undefined;
-    const allowed = Array.isArray(optsLines) && optsLines.length
-      ? new Set<string>(optsLines)
+    const effectiveSetupSnapshot: SetupSnapshot = setupSnapshotActiveAndMatching
+      ? setupSnapshot!
+      : Engine._syntheticZeroCostSetupSnapshot(plant, baseSnapshot);
+    const evaluatorMode = mode === 'spt' ? 'spt' : mode === 'duedate' ? 'due-date' : 'min-changeover';
+    // Phase 2 (Pkg D): scope the fallback snapshot's calendars to this run's
+    // plant — every consumer of ScheduleSnapshot.calendars in this path
+    // (freeIntervalsFor/jointWindowForDay/hasNominalWindow in
+    // setup-scheduler.mts, sourceLineWorkHours above) only ever looks up a
+    // line that survived this same plant's task filter, so no other
+    // plant's lines are ever needed here.
+    // C2: fold any running or frozen-window order into the SAME firmedIds
+    // set the setup-aware evaluators already treat as immovable — Engine.
+    // isFrozenHorizon carries its own distinct reason for the UI (never
+    // written to Store.isFirmed itself), this is purely an internal input
+    // to the evaluator so it never re-sequences an order it shouldn't touch.
+    // respectFirmed gates only the manual firmed ids. The running and
+    // frozen-horizon folds are unconditional regardless of respectFirmed.
+    // SAP's firm flag never locks. Passes runNow (this run's
+    // own "now", injectedNow-aware for candidate runs) rather than the
+    // real-time default, so a detached preview evaluated at a simulated
+    // instant agrees with itself. Never written back to the Store — this
+    // fold is run-local only (see effectiveFirmedIdSet).
+    const effectiveFirmedIds = effectiveFirmedIdSet(baseSnapshot.tasks, baseSnapshot.firmedIds, runNow, respectFirmed, baseSnapshot.frozenHorizonEnd);
+    const snapshot: ScheduleSnapshot = { ...baseSnapshot, firmedIds: effectiveFirmedIds };
+    // F4: Calculate lines in scope for iteration cap scaling. If opts.lines is
+    // provided, use its length (deduplicated); otherwise count distinct lines
+    // in the snapshot's tasks for this plant.
+    const optsLinesSet = Array.isArray(opts.lines) && opts.lines.length
+      ? new Set(opts.lines as string[])
       : null;
-
-    // Group only immutable boundaries and valid intervals intersecting the
-    // half-open planning scope. A malformed historical row must not become
-    // repairable merely because the legacy walk has no setup-aware
-    // `eligibleTasks` call of its own.
-    const legacyProtected = (task: NimbusTask): boolean => (
-      (respectFirmed && sourceIsFirmed(task.id))
-      || Engine.isInProgress(task, runNow)
-      || Engine.isFrozenHorizon(task, runNow, detachedFrozenHorizonEnd)
-    );
-    const legacyEligible = (task: NimbusTask): boolean => {
-      if (legacyProtected(task)) return true;
-      const start = finiteDate(task.start_date);
-      const end = finiteDate(task.end_date);
-      if (!start && !end) return true;
-      if (!start || !end || end <= start) return false;
-      return end > planningStart && start < horizonEnd;
+    // An injected candidate snapshot may be unscoped (evaluateSchedule's
+    // default is snapshotSchedule()), so count only this plant's non-blank
+    // lines, resolved the same way the evaluator groups them.
+    const linesInScope = optsLinesSet?.size ?? new Set(snapshot.tasks
+      .filter(t => resolveTaskPlant(t, snapshot) === plant)
+      .map(t => String(t.MACHINE ?? ''))
+      .filter(Boolean)).size;
+    const bounds: DueDateFirstBounds = {
+      // Non-null by construction: this branch is only reached when either
+      // mode is one of the setup-aware modes, so effectiveSetupSnapshot is
+      // always the real active-and-matching snapshot or the synthetic
+      // fallback.
+      setup: effectiveSetupSnapshot,
+      exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+      // F4: Scale iteration cap per line. The cap is a stack-safety net; after
+      // F2 a shared 20,000 iterations starved later lines on big plants. With
+      // F1 no exact fragment exceeds ~500 leaves and greedy tops ~165 candidates
+      // per fragment, so per-line scaling keeps the pool usable for every line.
+      iterationCap: SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope),
+      clock: () => performance.now(),
+      // Phase 2 (Pkg D): an absolute deadline the caller already computed
+      // (e.g. the preview's one-shot primary budget, or the deferred Plan B
+      // comparison's smaller budget) takes precedence over a fresh
+      // SETUP_AWARE_DEADLINE_MS window here. A past `opts.deadlineAt` is
+      // not special-cased: the search just terminates immediately with
+      // tail placement, which is the existing, safe deadline-exceeded path.
+      deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
+      now: placementStart,
+      planningStart,
+      runNow,
+      placementStart,
+      horizonEnd,
+      lines: Array.isArray(opts.lines) ? opts.lines as string[] : undefined,
+      respectCalendar,
+      notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData),
+      notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData),
+      convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
     };
-    // Skip non-allowed lines at insertion when a line filter is supplied so we don't
-    // pay for grouping work that will just be discarded.
-    const groups: Record<string, { line: string; tasks: NimbusTask[] }> = {};
-    for (const t of sourceTasksByPlant(plant).filter(legacyEligible)) {
-      const line = t.MACHINE || 'Unknown';
-      if (allowed && !allowed.has(line)) continue;
-      (groups[line] ||= { line, tasks: [] }).tasks.push(t);
+    let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
+    if (result.validationContext) result.validationContext = { ...result.validationContext, baselineSnapshot: baseSnapshot };
+    // The setup-aware evaluators group every line for the plant with no
+    // opts.lines/excludeFromOpt filter of their own (unlike the retired per-line walk) — apply both as a post-filter over the returned patches so a
+    // line-scoped run or an opted-out line still behaves as promised.
+    const optsLines = opts.lines as string[] | undefined;
+    const allowedLines = Array.isArray(optsLines) && optsLines.length ? new Set(optsLines) : null;
+    // Hoisted so an unfiltered run can still resolve a patched/unplaced id
+    // back to its line below (B3/B4) — previously scoped inside the filter
+    // guard, so an unfiltered run had no map to consult.
+    const byId = new Map(snapshot.tasks.map(t => [String(t.id), t]));
+    if (allowedLines || Object.values(sourceLineSettings()).some(setting => setting?.excludeFromOpt)) {
+      result = {
+        ...result,
+        patches: result.patches.filter(patch => {
+          const line = byId.get(String(patch.id))?.MACHINE || 'Unknown';
+          if (allowedLines && !allowedLines.has(line)) return false;
+          if (sourceLineSettings()[line]?.excludeFromOpt) return false;
+          return true;
+        }),
+      };
     }
-
-    const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-
-    // Install per-run Calendar caches (workWindow memo + pre-indexed blocks) for the
-    // duration of the scheduling pass. Torn down in finally{} so an exception
-    // mid-loop can't leak the cache into UI/Alerts callers.
-    Calendar._beginRun(plant);
-    try {
-
-    for (const line of Object.keys(groups)) {
-      if ((sourceLineSettings()[line] || {}).excludeFromOpt) continue;
-      const { tasks } = groups[line];
-
-      // C2: an order whose start already falls inside the plant's frozen
-      // window is routed into the SAME obstacle bucket as a genuine manual
-      // pin / aged / out-of-window task — unconditionally (not gated by
-      // respectFirmed, same as isAged/isOutOfWin) — so every dispatcher fed
-      // by this split (_dispatchPolicyAware, the SPT walk below) leaves it
-      // untouched. Engine.isFrozenHorizon carries its
-      // own distinct reason for the UI; this split itself doesn't care why
-      // a task is immovable, only that it is. Passes the captured runNow as
-      // this check's "now" — the SAME reference isAged/isOutOfWin already use —
-      // so all three agree on one clock for this run instead of splitting.
-      // A running (in-progress) order is likewise pinned, not gated by
-      // respectFirmed. SAP's firm flag never pins anything.
-      const firmedTasks = tasks.filter(t =>
-        (respectFirmed && sourceIsFirmed(t.id)) || Engine.isInProgress(t, runNow) || isAged(t) || isOutOfWin(t) || Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
-      );
-      let freeTasks = tasks.filter(t =>
-        !(respectFirmed && sourceIsFirmed(t.id)) && !Engine.isInProgress(t, runNow) && !isAged(t) && !isOutOfWin(t) && !Engine.isFrozenHorizon(t, runNow, detachedFrozenHorizonEnd)
-      );
-
-      firmedTasks.sort((a,b) => (a.start_date?.getTime()||0) - (b.start_date?.getTime()||0));
-
-      // Cursor floor is the derived placementStart (max(planningStart,
-      // runNow)): widening the planning scope backwards never schedules new
-      // work before the captured run clock.
-      const now = new Date(runNow);
-      now.setSeconds(0, 0);
-      const cursorFloor = placementStart.getTime() > now.getTime() ? placementStart : now;
-
-      let cursor: Date;
-      if (respectCalendar) {
-        const win = Calendar.workWindow(line, cursorFloor);
-        cursor = (win && win[0].getTime() > cursorFloor.getTime())
-          ? new Date(win[0])
-          : new Date(cursorFloor);
-      } else {
-        cursor = new Date(cursorFloor);
-      }
-
-      // B3a: public changeover, duedate, and spt runs exit via the setup-aware
-      // branch above and cannot reach the splitPolicy fork or plain walk below.
-      // The compatibility allocator remains available to callers that
-      // explicitly bypass setup-aware dispatch.
-      if (splitPolicy !== 'never') {
-        const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
-        decorated.sort((a, b) => {
-          for (let i = 0; i < sortTerms.length; i++) {
-            const c = sortTerms[i].cmp(a.k[i], b.k[i]);
-            if (c) return c;
-          }
-          return 0;
-        });
-        // Cap-aware resequencing for the plant's due-date push-forward limit
-        // (`plants.max_push_forward_days`): identity when no task on this
-        // line has a ceiling, otherwise pulls an otherwise-savable capped
-        // order ahead of the SPT head when the head would push it past its
-        // latest allowed start.
-        const selectedOrder = capAwareSequence(
-          decorated.map(d => d.t),
-          cursor.getTime(),
-          t => Engine.latestAllowedEnd(t, plant)?.getTime() ?? null,
-          t => Util.runHours(t) * Config.MS_HOUR,
-        );
-        patches.push(...Engine._dispatchPolicyAware(line, selectedOrder, firmedTasks, cursor, splitPolicy, plant));
-        continue;
-      }
-
-      // Schwartzian transform: decorate each task once with its ordered sort
-      // keys (from Engine._sortTerms — the single source of truth, so this can
-      // no longer drift from _comparator), then sort by comparing keys
-      // positionally.
-      const decorated = freeTasks.map(t => ({ t, k: sortTerms.map(tm => tm.get(t)) }));
-      decorated.sort((a, b) => {
-        for (let i = 0; i < sortTerms.length; i++) {
-          const c = sortTerms[i].cmp(a.k[i], b.k[i]);
-          if (c) return c;
-        }
-        return 0;
-      });
-      // Cap-aware resequencing for the plant's due-date push-forward limit
-      // (`plants.max_push_forward_days`): identity when no task on this line
-      // has a ceiling, otherwise pulls an otherwise-savable capped order
-      // ahead of the SPT head when the head would push it past its latest
-      // allowed start.
-      freeTasks = capAwareSequence(
-        decorated.map(d => d.t),
-        cursor.getTime(),
-        t => Engine.latestAllowedEnd(t, plant)?.getTime() ?? null,
-        t => Util.runHours(t) * Config.MS_HOUR,
-      );
-
-      // Walk through free tasks, jumping past each firmed task we encounter.
-      let firmIdx = 0;
-      for (const t of freeTasks) {
-        const durMs = Util.runHours(t) * Config.MS_HOUR;
-        if (durMs <= 0) continue;
-        const floor = Engine.earliestAllowedStart(t, plant, detachedFrozenHorizonEnd);
-        if (floor && cursor < floor) cursor = new Date(floor);
-
-        // Alternate between firmed-task collision check and calendar adjustment
-        // until cursor is stable. This handles the case where a calendar gap
-        // (blackout, closed hours) pushes cursor into a firmed task's window.
-        let guard = 0;
-        for (; guard < 200; guard++) {
-          const prevMs = cursor.getTime();
-
-          // Step 1: jump past any firmed task that cursor + duration would overlap.
-          while (firmIdx < firmedTasks.length) {
-            const f = firmedTasks[firmIdx];
-            if (!f.start_date || !f.end_date) { firmIdx++; continue; }
-            if (cursor >= f.end_date) { firmIdx++; continue; }
-            if (cursor.getTime() + durMs <= f.start_date.getTime()) break;
-            cursor = new Date(f.end_date);
-            firmIdx++;
-          }
-
-          // Step 2: advance past any closed/blackout region.
-          if (respectCalendar) {
-            const _calT0 = performance.now();
-            // null = no single window holds the order (inherently overlong, or none within 90
-            // days). Never keep a cursor that may sit inside a blackout: use the documented
-            // continuous-bar exception's first operating instant, else the snapped cursor.
-            cursor = Calendar.nextAvailable(line, cursor, durMs)
-              ?? Calendar.nextOperatingInstant(line, cursor) ?? Util.snap(cursor);
-            _pmCalMs += performance.now() - _calT0;
-          }
-
-          // If cursor didn't move, both constraints are satisfied — done.
-          if (cursor.getTime() === prevMs) break;
-        }
-        // Guard exhausted without converging: the firmed-task + calendar constraints never
-        // settled on a stable slot. Placement still proceeds at `cursor`, but surface it
-        // so the condition isn't silently swallowed (previously a hard-to-diagnose "why
-        // didn't this order move?" at scale).
-        if (guard >= 200) {
-          reportSchedulerDiagnostic(
-            'warn', 'engine', 'engine.placement-guard',
-            `Placement guard hit 200 iterations on "${line}" for order "${t.text || t.id}" — ` +
-            `schedule may be suboptimal; check firmed orders / blackouts on this line.`,
-            { line, taskId: t.id },
-          );
-        }
-
-        const start = new Date(Math.round(cursor.getTime() / Config.MS_MIN) * Config.MS_MIN);
-        const end   = new Date(start.getTime() + durMs);
-        patches.push({ id: t.id, changes: { start_date: start, end_date: end } });
-        cursor = new Date(end);
-      }
+    if (candidateRun) return result;
+    if (result.validationFindings?.some(finding => finding.severity === 'error')) {
+      Engine.lastSetupAwareResult = result;
+      return result;
     }
-
-    } finally {
-      Calendar._endRun();
+    if (result.patches.length) {
+      const patchIds = new Set(result.patches.map(patch => patch.id));
+      const undoTasks = structuredClone(snapshot.tasks.filter(task => patchIds.has(String(task.id))));
+      UndoStack.push(`Optimization (${mode})`, () => UndoStack.restoreTasks(undoTasks), patchIds);
     }
-
-    if (candidateRun) {
-      // Worker responses for the legacy fallback need the same apply-time
-      // contract as setup-aware candidates. Build it from this detached read
-      // model while the exact run clocks and effective firming decisions are
-      // still in scope; never make the main thread reconstruct these facts
-      // from live Store state after the worker returns.
-      const validationSnapshot = _candidateSnapshot ?? snapshotSchedule(plant);
-      const storedSetup = validationSnapshot.setupSnapshot;
-      const validationSetup = storedSetup?.plant === plant && storedSetup.plant_active
-        ? storedSetup
-        : Engine._syntheticZeroCostSetupSnapshot(plant, validationSnapshot);
-      const validationFirmedIds = effectiveFirmedIdSet(
-        validationSnapshot.tasks,
-        validationSnapshot.firmedIds,
-        runNow,
-        respectFirmed,
-        validationSnapshot.frozenHorizonEnd,
-      );
-      return attachDetachedValidationContext(
-        detachedCandidateResult(patches, _pmT0e),
-        validationSnapshot,
-        {
-          setup: validationSetup,
-          exactSearchThreshold: SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
-          iterationCap: SETUP_AWARE_ITERATION_CAP,
-          clock: () => performance.now(),
-          deadline: (opts.deadlineAt as number | undefined) ?? performance.now() + SETUP_AWARE_DEADLINE_MS,
-          now: placementStart,
-          planningStart,
-          runNow,
-          placementStart,
-          horizonEnd,
-          lines: Array.isArray(opts.lines) ? opts.lines as string[] : undefined,
-          respectCalendar,
-          notBefore: task => Engine.earliestAllowedStart(task, plant, validationSnapshot.frozenHorizonEnd, validationSnapshot.masterData),
-          notAfter: task => Engine.latestAllowedEnd(task, plant, validationSnapshot.masterData),
-        },
-        validationFirmedIds,
-      );
+    applySchedulePatches(result.patches);
+    Engine.lastSetupAwareResult = result;
+    Store.setLastOptimize(new Date(), 'engine');
+    const hadDismissed = Alerts.clearDismissed();
+    // Phase 3 (Pkg E): scope the recompute to the lines these patches actually
+    // touched instead of a full-plant recompute. `byId` (built above from the
+    // pre-apply snapshot) resolves each patch id to its line/MACHINE; patches
+    // never change MACHINE, so pre- and post-apply line membership match.
+    // If any alert was dismissed before this apply, a scoped merge would
+    // retain untouched lines' stale (dismissal-filtered) alert lists as-is —
+    // those cleared dismissals would never re-surface until some later full
+    // recompute. A pending full recompute already wins over a scoped one by
+    // design, so force it whenever there was something to clear.
+    if (hadDismissed) Alerts.scheduleRecompute();
+    else scheduleAlertsForPatches(result.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
+    // Surface the never-freeze fallbacks that actually landed in this apply:
+    // orders scheduled without a resolvable setup transition (no changeover
+    // bar) and, separately, any line still guarded off entirely (only
+    // firmed/override protection can do that now — see Part 1f). Both are
+    // derived from the applied patches, never the whole-run diagnostics, so
+    // a line-scoped/excludeFromOpt run only reports what it actually
+    // touched.
+    const patchedIds = new Set(result.patches.filter(patch => patch.changes.planning_status !== 'needs_planning').map(patch => String(patch.id)));
+    const unknownSetupOrderIds = new Set<string>();
+    const unknownSetupLines = new Set<string>();
+    // 'scheduled-without-setup' (F1) is the single dedicated reason for an
+    // order actually placed without a resolvable setup transition — emitted
+    // both by `placeUnknownTail` (tail placement) and, since A1, by
+    // `candidateForSequence`'s in-sequence admission of a known-but-uncovered
+    // transition. Counting this reason instead of the raw
+    // 'successor-state-unknown'/'initial-state-unknown' partition edges
+    // avoids double-counting a rejected permutation's edge that happens to
+    // name the same patched id.
+    for (const edge of result.missingEdges) {
+      if (edge.reason !== 'scheduled-without-setup') continue;
+      if (!edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
+      unknownSetupOrderIds.add(String(edge.successorOrderId));
+      unknownSetupLines.add(edge.line);
     }
-
-    // Due-date push-forward limit (plants.max_push_forward_days): same
-    // post-hoc reporting as the setup-aware branch above, using this run's
-    // own patches and the plant's pre-apply tasks.
-    const overCapSummary = Engine._overCapSummary(patches, sourceTasksByPlant(plant), plant);
+    // A null successor signature is intentionally kept out of the covered
+    // permutation core. Its deterministic tail placement is a distinct
+    // unresolved-state fact, so include it in the same operator warning
+    // without relabeling the edge as a known uncovered transition.
+    for (const reason of result.explanation) {
+      if (reason.code !== 'unknown-setup-tail-placement' || !reason.taskId || !patchedIds.has(String(reason.taskId))) continue;
+      unknownSetupOrderIds.add(String(reason.taskId));
+      unknownSetupLines.add(reason.line ?? byId.get(String(reason.taskId))?.MACHINE ?? 'Unknown');
+    }
+    // B3a: a synthetic (fabricated zero-cost) snapshot's matrix is always
+    // empty by construction, so its uncovered-but-admitted edges are an
+    // artifact of routing an inactive/never-configured plant through this
+    // evaluator at all — never a real data gap the plant needs to fix.
+    // Suppress ONLY this missing-setup-summary toast for a synthetic run.
+    // The two toasts below (orders left in place / lines guarded) are NOT
+    // setup-specific — they report genuine unplaced orders or untouched
+    // lines for reasons that have nothing to do with setup data (e.g. a
+    // permanently-uncalendarable order), so they must fire regardless of
+    // `synthetic`. Blanket-suppressing them for every setup-inactive plant
+    // would silently violate the never-freeze invariant's own "drops can't
+    // happen silently" guarantee for the majority of NIMBUS plants — those
+    // that haven't activated setup tracking. A genuinely active-and-
+    // matching snapshot (synthetic undefined/false) is unaffected either way.
+    if (unknownSetupOrderIds.size && !effectiveSetupSnapshot.synthetic) {
+      Toast.show(Util.t('toast.optimize_missing_setup_summary', {
+        orders: unknownSetupOrderIds.size,
+        lines: unknownSetupLines.size,
+      }), 'warn');
+    }
+    // Due-date push-forward limit (plants.max_push_forward_days): report
+    // violations post-hoc from the applied patches, same as the missing-
+    // setup summary above, but NOT gated on `synthetic` — a plant with no
+    // active setup definition can still configure a push-forward cap, and
+    // the never-freeze "minimize violations, always place everything" rule
+    // applies regardless of the synthetic-snapshot mechanism.
+    const overCapSummary = Engine._overCapSummary(result.patches, snapshot.tasks, plant);
     if (overCapSummary.orders) {
       Toast.show(Util.t('toast.optimize_over_lateness_cap', {
         orders: overCapSummary.orders,
@@ -2605,17 +2872,56 @@ export const Engine = {
         days: overCapSummary.days ?? 0,
       }), 'warn');
     }
-
-    applySchedulePatches(patches);
-    Store.setLastOptimize(new Date(), 'engine');
-    Alerts.clearDismissed();
-    // Route through the adaptive debounce instead of a direct synchronous recompute:
-    // keeps the heavy alert pass off the tail of the placement loop and lets it
-    // coalesce with the updateMany cascade rather than firing a second worker clone
-    // in the same tick.
-    Alerts.scheduleRecompute();
-    PerfMonitor.record('Engine.calendar', _pmCalMs);
+    // Sub-order distribution separation (SAP aggregate work center -> per-
+    // machine sub-orders): report parents whose siblings landed in
+    // different calendar buckets, same post-hoc pattern as the push-
+    // forward cap above and NOT gated on `synthetic` — separation is a
+    // scheduling-outcome fact, not a setup-data fact, so it applies to
+    // every plant regardless of setup-tracking activation.
+    const distributionSeparationCount = result.validationFindings?.filter(f => f.code === 'distribution_separation').length ?? 0;
+    if (distributionSeparationCount) {
+      Toast.show(Util.t('toast.optimize_distribution_separation', { parents: distributionSeparationCount }), 'warn');
+    }
+    // B3: derive the unplaced set by difference, in this one place, rather
+    // than threading an unplacedOrderIds field through CandidateResult —
+    // the worst drops (plant/line mismatch, this same opts.lines/
+    // excludeFromOpt post-filter, a firmed order the setup-aware path never
+    // touches) produce no diagnostic object at all, so there is nothing for
+    // a threaded field to collect. An order that places successfully
+    // always yields a patch — even when its dates are unchanged — so
+    // "in scope, not firmed, not patched" is exactly "not scheduled".
+    // Scoping uses the SAME plant resolution as B7 (`t.PLANT ||
+    // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
+    // setup-aware evaluators' own scoping agree on which orders exist for
+    // this plant. "Firmed" here means membership in `effectiveFirmedIds` —
+    // the SAME effectively-folded set (manual + ECC-firmed, gated by
+    // respectFirmed, plus the unconditional frozen-horizon fold; see
+    // effectiveFirmedIdSet) actually handed to the evaluator above, not
+    // just a manual `sourceIsFirmed` check — so an ECC-firmed or
+    // frozen-horizon order the evaluator deliberately left untouched is
+    // never miscounted here as "left in place".
+    const unplacedLines = new Set<string>();
+    let unplacedCount = 0;
+    for (const task of snapshot.tasks) {
+      const id = String(task.id);
+      if (patchedIds.has(id)) continue;
+      if (effectiveFirmedIds.has(id)) continue;
+      const taskPlant = task.PLANT || sourceGetPlantForLine(task.MACHINE);
+      if (taskPlant !== plant) continue;
+      const line = task.MACHINE || 'Unknown';
+      if (allowedLines && !allowedLines.has(line)) continue;
+      if (sourceLineSettings()[line]?.excludeFromOpt) continue;
+      unplacedCount += 1;
+      unplacedLines.add(line);
+    }
+    if (unplacedCount) {
+      Toast.show(`${unplacedCount} order(s) on ${unplacedLines.size} line(s) need planning. These orders have no committed schedule dates.`, 'warn');
+    }
+    if (result.unchangedLines.length) {
+      Toast.show(Util.t('toast.optimize_lines_guarded', { count: result.unchangedLines.length }), 'warn');
+    }
     PerfMonitor.record('Engine.runAndApply', performance.now() - _pmT0e);
+    return;
   },
 
   /** After a manual edit to one task, re-flow subsequent unfirmed orders on the
@@ -2625,7 +2931,9 @@ export const Engine = {
   autoReflow(changedId: string): void {
     const changed = Store.tasks[changedId];
     if (!changed || !changed.start_date || !changed.end_date) return;
-    const _horizonStart = Util.startOfDay(new Date())!;
+    // "Today" in the order's plant (one clock, OQ52); a blocked plant keeps the server instant read as
+    // wall-clock, which is what this aged-task guard always did with the viewer's clock.
+    const _horizonStart = Util.startOfDay(Engine._clockFor(changed) ?? Store.serverNow())!;
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.MACHINE || 'Unknown';
     const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
@@ -2667,7 +2975,8 @@ export const Engine = {
           const requiredSetupMinutes = setupMinutes(predecessor, p);
           const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
           if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-          if (Store.isFirmed(p.id) || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+          // G-0.25: a row carrying an approved placement exception is as fixed as a firmed one.
+          if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
             // Firmed, frozen-window, or aged orders don't move — if there's a
             // conflict, an alert will fire — but later unfirmed peers must
             // still be de-overlapped, and the immovable order becomes the
@@ -2723,7 +3032,7 @@ export const Engine = {
       const requiredSetupMinutes = setupMinutes(predecessor, p);
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFirmed(p.id) || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+      if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
         // Firmed, frozen-window, or aged orders don't move — if there's a
         // conflict, an alert will fire — but later unfirmed peers must still
         // be de-overlapped, and the immovable order becomes the setup
@@ -2783,16 +3092,32 @@ Store.subscribe(evt => {
     const plants = new Set<string>();
     for (const id of evt.ids) {
       const task = Store.tasks[String(id)];
-      const plant = task ? Store.getPlantForLine(task.MACHINE) : null;
+      // Only a refreshed row the reconcile could re-derive wakes a plant-wide pass (the same candidate test as
+      // reconcileRuntimeSchedules): a refresh of rows that are all placed and current needs no pass (F16).
+      if (!task || !(task.runtime_schedule_mismatch || !task.user_scheduled)
+        || task.planning_status === 'needs_planning' || task.placement_exception || !task.MACHINE) continue;
+      const plant = Store.getPlantForLine(task.MACHINE);
       if (plant) plants.add(plant);
     }
     for (const plant of plants) Engine.reconcileRuntimeSchedules(plant);
   }
 }, 'engine.runtime-reconcile');
 
+// OQ21: an undo restores the finish, so the start is re-derived under the run time as it is now. The Store cannot
+// import the engine (platform sits below it); the engine registers this hook once at load.
+UndoStack.afterRestore = (ids: string[], wasDirty: ReadonlySet<string>): void => Engine.reconcileRestored(ids, wasDirty);
+// U23: restoreTasks flags a row stale only when the reconcile will process it (the same eligibility its candidate
+// filter applies); any other row would keep the flag, and its error alert, until reload.
+UndoStack.willRederive = (task: NimbusTask): boolean => {
+  // D14: every line derives (own calendar row or the plant default), so the per-line calendar check is gone.
+  return !!task.MACHINE && task.planning_status !== 'needs_planning' && !task.placement_exception;
+};
+// F10: the snapshot records which rows already carried unsaved edits (the platform cannot see Persistence).
+UndoStack.dirtyProbe = (id: string): boolean => Persistence._dirtyIds.has(id);
+
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound
- * to `snapshot`.  This adapter shares the legacy mode implementation; it
+ * to `snapshot`.  This adapter shares the Engine's mode implementation; it
  * emits patches and never applies them while evaluating a candidate.
  *
  * Moved here verbatim from optimization/setup-scheduler.mts (this phase's

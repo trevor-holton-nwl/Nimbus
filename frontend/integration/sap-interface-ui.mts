@@ -1420,8 +1420,13 @@ export const Interface = (() => {
     });
     if (!ok) return;
     btn.disabled = true;
-    const res = await _stagePost<{ queued?: number; firmed?: number }>(`/sap/staging/send/${encodeURIComponent(plant)}`, {}, 'toast.sap_stage_failed');
-    if (res) Toast.show(Util.t('toast.sap_sent_queued', { queued: res.queued ?? 0, firmed: res.firmed ?? 0 }), 'success', 4000);
+    const res = await _stagePost<{ queued?: number; skipped_unfirmed?: number }>(`/sap/staging/send/${encodeURIComponent(plant)}`, {}, 'toast.sap_stage_failed');
+    if (res) {
+      const skipped = res.skipped_unfirmed ?? 0;
+      const text = Util.t('toast.sap_sent_queued', { queued: res.queued ?? 0 })
+        + (skipped > 0 ? ' ' + Util.t('toast.sap_sent_skipped_unfirmed', { count: skipped }) : '');
+      Toast.show(text, 'success', 4000);
+    }
     await _reload();
   }
 

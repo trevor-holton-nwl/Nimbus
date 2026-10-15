@@ -32,7 +32,7 @@ with a single clear owner, bridged into the classic-script world via
 
 `web/app.js` is now 731 lines and contains **no module bodies of its own** —
 only the `NimbusComputeCore` guard, the seven-bridge destructure, the DI-seam
-wiring (`Persistence.setCalendarService`, `setActiveTabResolvers`,
+wiring (`Persistence.setCalendarService` [since removed, backward scheduling Task 2.5], `setActiveTabResolvers`,
 `Util`/`ErrorLog`/`Store` resolver injections), `_bootMain()`/
 `_domReadyGate()` boot orchestration, and the final compatibility `return
 {...}` namespace `index.html`'s inline handlers and `nimbus-intelligence.js`
@@ -96,7 +96,7 @@ Compute, Alerts computation, Utilization, Engine) and `schedule-data.mjs`
 code stays in app.js as `CalendarUI`, `AlertsUIAdapter`, and
 `SessionUIAdapter`, following the Phase 1 `SandboxAdapter` precedent. The
 `schedule:hydrated` and `session:changed` events and the
-`Persistence.setCalendarService` seam resolve the two real
+`Persistence.setCalendarService` seam (removed in backward scheduling Task 2.5) resolve the two real
 data→services dependencies found during Phase 2 research. **Update (Phase 3
 Task 7):** `AlertsUIAdapter` has since moved into `schedule-workbench.mjs`
 (a deliberate, documented scope decision — see its §1 row below); `CalendarUI`
@@ -977,16 +977,10 @@ dependency (`schedule-data.mjs` calling into `schedule-services.mjs`) is real
 in the pre-Phase-2 code, at two distinct call shapes, both resolved without a
 static import:
 - **`Persistence.setCalendarService({ beginRun, endRun, nextAvailable,
-  workWindow })`** — an injected-callback seam replacing 5 direct
-  `Calendar._beginRun`/`_endRun`/`nextAvailable`/`workWindow` calls inside
-  `Persistence._snapToWorkingHours`/`_dueEndOfShift`. Wired once in `app.js`
-  boot glue immediately after the `schedule-services.mjs` bridge destructure
-  resolves `Calendar`, using arrow-function wrappers (not bare method
-  references) since `Calendar`'s methods read `this._runCache`/`_runBlocks`
-  and must be invoked with `Calendar` as the receiver. Until wired (e.g. a
-  standalone unit test that imports `schedule-data.mjs` directly),
-  `_snapToWorkingHours` no-ops rather than throwing — snapping is skipped,
-  not the load.
+  workWindow })`** — REMOVED in backward scheduling Task 2.5 together with
+  `Persistence._snapToWorkingHours` (the load-time re-snap it served) and the
+  `CalendarSync` post-hydration re-snap. It was an injected-callback seam wired in `app.js`
+  boot glue; nothing in `schedule-data.mjs` calls the calendar any more.
 - **`{ type: 'schedule:hydrated', source }`** — a new `Store` event replacing
   5 direct `Alerts.scheduleRecompute()` calls inside `Persistence.load()`'s
   two branches, `_loadCache()`, and `_loadDemo()`. `schedule-services.mjs`

@@ -627,6 +627,18 @@ test('gap fill has a separate budget and labels unchecked orders when it expires
   assert.equal(result.patches[0].changes.start_date, null);
 });
 
+test('VI10: fillPlanningGaps with a zero budget keeps overlong_never for an overlong order on a never plant', () => {
+  const snapshot = setupSnapshot([scheduledTask('vi10', 12, 'RED', '2026-08-03T18:00:00')]);   // windows are 10 h
+  snapshot.calendars = { L1: { workHours: OPEN_HOURS } };
+  snapshot.plants = { P1: { workHours: OPEN_HOURS } };
+  const bounds = dueDateBounds(setupTruth({ current: null, definition: null }), { placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-10T18:00:00') });
+  const candidate = SetupScheduler.evaluateDueDateFirst(snapshot, bounds, 'due-date');
+  assert.equal(candidate.dispositions.find(d => d.id === 'vi10').reason.code, 'overlong_never');
+  const result = SetupScheduler.fillPlanningGaps(snapshot, bounds, candidate, 0);
+  assert.equal(result.gapFill.complete, false, 'the budget did expire');
+  assert.equal(result.dispositions.find(d => d.id === 'vi10').reason.code, 'overlong_never', 'an overlong order is a calendar fact, not a search result');
+});
+
 test('gap fill runs through the shared engine adapter for all three hard-bound strategies', () => {
   for (const mode of ['due-date', 'spt', 'min-changeover']) {
     const { snapshot, bounds } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')], { ...setupTruth(), plant_active: true });
@@ -4604,6 +4616,68 @@ test('hard bounds calendar-day arithmetic uses local setDate across DST', () => 
   } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
 });
 
+test('hard bounds read a date-only SAP due (exact midnight) as the end of its working window; a closed Sunday reads as the previous Friday', () => {
+  const weekdays = { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null };
+  const build = due => {
+    const snapshot = setupSnapshot([scheduledTask('d', 1, 'GREEN', due)]);
+    snapshot.calendars.L1.workHours = weekdays; snapshot.plants.P1.workHours = weekdays;
+    Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 0, max_push_forward_days: 0 });
+    return snapshot;
+  };
+  // Wednesday 5 Aug 2026, midnight: same calendar day as before (floor Wed 00:00, ceiling Thu 00:00).
+  let snapshot = build('2026-08-05T00:00:00');
+  let window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-05T00:00:00').getTime());
+  assert.equal(window.ceiling.getTime(), at('2026-08-06T00:00:00').getTime());
+  // Sunday 9 Aug 2026, midnight (closed day): the due reads as Friday 7 Aug's close, never Sunday midnight.
+  snapshot = build('2026-08-09T00:00:00');
+  window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-07T00:00:00').getTime());
+  assert.equal(window.ceiling.getTime(), at('2026-08-08T00:00:00').getTime());
+  // A timed due is untouched.
+  snapshot = build('2026-08-09T09:00:00');
+  window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-09T00:00:00').getTime());
+});
+
+test('hard bounds on a 06:00-24:00 line: the next-day-00:00 due still gives the due-day floor and ceiling (R-I6)', () => {
+  const open = { 0: [6, 24], 1: [6, 24], 2: [6, 24], 3: [6, 24], 4: [6, 24], 5: [6, 24], 6: [6, 24] };
+  const snapshot = setupSnapshot([scheduledTask('d24', 1, 'GREEN', '2026-08-05T00:00:00')]);
+  snapshot.calendars.L1.workHours = open; snapshot.plants.P1.workHours = open;
+  Object.assign(snapshot.masterData.plants[0], { max_pull_forward_days: 2, max_push_forward_days: 1 });
+  const window = SetupScheduler.allowedPlanningWindow(snapshot, dueDateBounds(setupTruth()), snapshot.tasks[0]);
+  assert.equal(window.floor.getTime(), at('2026-08-03T00:00:00').getTime(), 'due day Wed 5 Aug minus 2 days');
+  assert.equal(window.ceiling.getTime(), at('2026-08-07T00:00:00').getTime(), 'due day Wed 5 Aug plus 1 + 1 days');
+});
+
+test('the memoised due instant follows a changed due or line and matches the unmemoised read', () => {
+  const weekdays = { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null };
+  const snapshot = setupSnapshot([scheduledTask('m', 1, 'GREEN', '2026-08-09T00:00:00')]);
+  snapshot.calendars.L1.workHours = weekdays; snapshot.plants.P1.workHours = weekdays;
+  const bounds = dueDateBounds(setupTruth());
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const memoScope = { snapshot, plant: 'P1', ctx };
+  const plainScope = { snapshot, plant: 'P1' };
+  const subject = snapshot.tasks[0];
+  const read = scope => SetupScheduler.dueInstant(subject, scope).getTime();
+  // Sunday midnight reads as Friday's 18:00 close, twice (second read is memoised).
+  assert.equal(read(memoScope), at('2026-08-07T18:00:00').getTime());
+  assert.equal(read(memoScope), at('2026-08-07T18:00:00').getTime());
+  // A changed due on the same task object is never served from the old entry.
+  subject.original_end_date = at('2026-08-05T00:00:00');
+  assert.equal(read(memoScope), read(plainScope));
+  assert.equal(read(memoScope), at('2026-08-05T18:00:00').getTime());
+  // A timed due is returned as received.
+  subject.original_end_date = at('2026-08-05T09:30:00');
+  assert.equal(read(memoScope), at('2026-08-05T09:30:00').getTime());
+  // A line with no calendar row reads as "no calendar" (raw + 23:59:59), not the old line's window.
+  subject.original_end_date = at('2026-08-05T00:00:00');
+  assert.equal(read(memoScope), at('2026-08-05T18:00:00').getTime());
+  subject.MACHINE = 'NOCAL';
+  assert.equal(read(memoScope), read(plainScope));
+  assert.notEqual(read(memoScope), at('2026-08-05T18:00:00').getTime());
+});
+
 test('hard bounds retry valid work after a fixed boundary instead of queueing an outgoing setup conflict', () => {
   const snapshot = setupSnapshot([
     scheduledTask('retry', 1, 'RED', '2026-08-03T18:00:00'),
@@ -5053,7 +5127,7 @@ test('unknownSetupPolicy plantDefaultMinutes is inert on a synthetic zero-cost s
   assert.deepEqual(b.explanation.map(r => r.code), a.explanation.map(r => r.code));
 });
 
-test('fragment search charges instability for moved starts instead of a hardcoded zero', () => {
+test('fragment search charges instability for moved finishes instead of a hardcoded zero', () => {
   // sequenceKey is deliberately the OPPOSITE of what a pre-fix (hardcoded-0)
   // tie-break would already prefer: with both fragments reporting
   // instabilityMinutes 0, the sequenceKey term alone would pick `shuffled`
@@ -5076,6 +5150,69 @@ test('fragment search charges instability for moved starts instead of a hardcode
     'fragmentObjectiveFacts must surface a non-zero instabilityMinutes from the candidate');
   assert.equal(SetupScheduler.fragmentObjectiveFactsForTest(candidateShape).instabilityMinutes, 0,
     'fragmentObjectiveFacts falls back to 0 when instabilityMinutes is absent');
+});
+
+test('OQ50 c: a never-policy order longer than every operating window queues as overlong_never; no window at all or a plain no-fit keeps its reason', () => {
+  const synthetic = setupTruth({ current: null, definition: null });
+  const run = (hoursByDay, runHours) => {
+    const snapshot = setupSnapshot([scheduledTask('ol-a', runHours, 'RED', '2026-08-03T18:00:00')]);
+    snapshot.calendars = { L1: { workHours: hoursByDay } };
+    snapshot.plants = { P1: { workHours: hoursByDay } };
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(synthetic, { placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-10T18:00:00') }), 'due-date');
+    return result.dispositions.find(d => d.id === 'ol-a');
+  };
+  const overlong = run(OPEN_HOURS, 12);   // windows are 10 h
+  assert.equal(overlong.status, 'needs_planning');
+  assert.equal(overlong.reason.code, 'overlong_never');
+  const closed = run(Object.fromEntries(Array.from({ length: 7 }, (_, d) => [d, null])), 12);   // no window at all
+  assert.equal(closed.status, 'needs_planning');
+  assert.notEqual(closed.reason.code, 'overlong_never');
+  const fits = run(OPEN_HOURS, 4);
+  assert.equal(fits.status, 'scheduled');
+});
+
+test('senior review I9: the optimizer overlong predicate merges windows that touch at midnight (24/7 line, night shift) and counts run == span as fitting', () => {
+  const synthetic = setupTruth({ current: null, definition: null });
+  // A short horizon makes the order fail to place, which is when neverOverlongReason is consulted: the predicate alone
+  // must not call an order overlong that the backward walk (merged spans) would place as one bar.
+  const run = (hoursByDay, runHours, horizonEnd = '2026-08-17T18:00:00') => {
+    const snapshot = setupSnapshot([scheduledTask('ol-a', runHours, 'RED', '2026-08-05T18:00:00')]);
+    snapshot.calendars = { L1: { workHours: hoursByDay } };
+    snapshot.plants = { P1: { workHours: hoursByDay } };
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(synthetic, { placementStart: at('2026-08-03T08:00:00'), horizonEnd: at(horizonEnd) }), 'due-date');
+    return result.dispositions.find(d => d.id === 'ol-a');
+  };
+  const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  assert.equal(run(all([0, 24]), 30).status, 'scheduled', '24/7: a 30 h run is placed as one contiguous bar');
+  assert.notEqual(run(all([0, 24]), 30, '2026-08-03T18:00:00').reason?.code, 'overlong_never', '24/7: 30 h that merely misses the horizon is not overlong');
+  const night = { 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null };   // Mon 22:00 -> Tue 06:00 = 8 h merged
+  assert.equal(run(night, 8).status, 'scheduled', 'run == merged span length is placed, not overlong');
+  assert.notEqual(run(night, 8, '2026-08-03T23:00:00').reason?.code, 'overlong_never', 'night shift: 8 h in an 8 h merged span is never overlong');
+  assert.equal(run(night, 8.5, '2026-08-03T23:00:00').reason?.code, 'overlong_never', 'longer than the merged span is overlong');
+  const equalWindows = all([8, 16]);
+  assert.notEqual(run(equalWindows, 8, '2026-08-03T10:00:00').reason?.code, 'overlong_never', 'U20: run == window length (equal-length windows)');
+  assert.equal(run(equalWindows, 9).reason?.code, 'overlong_never');
+});
+
+test('instability is keyed on the placed finish: a held finish with a moved start is stable, a moved finish is not (Reading A)', () => {
+  const synthetic = setupTruth({ current: null, definition: null });
+  const run = (priorStart, priorEnd) => {
+    const snapshot = setupSnapshot([scheduledTask('fin-a', 1, 'RED', '2026-08-03T18:00:00', priorStart, priorEnd)]);
+    const bounds = dueDateBounds(synthetic, { placementStart: at('2026-08-03T08:00:00') });
+    const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+    result.instabilityMinutes = SetupScheduler.objectiveFactsForCandidate(snapshot, bounds, result).instabilityMinutes;
+    return result;
+  };
+  // The optimizer places the one-hour order at 08:00-09:00. The prior bar ended at 09:00 too (its start
+  // differs because the run time changed since): finish unchanged, so zero instability.
+  const held = run('2026-08-03T07:00:00', '2026-08-03T09:00:00');
+  assert.equal(patchFor(held, 'fin-a').changes.end_date.getTime(), at('2026-08-03T09:00:00').getTime());
+  assert.equal(held.instabilityMinutes ?? 0, 0, 'a task whose finish is unchanged is not unstable even though its start moved');
+  // A prior bar that started where the new one does but ended 30 minutes earlier: the start is
+  // unchanged, the finish moved, so the task is unstable by exactly the finish delta.
+  const moved = run('2026-08-03T08:00:00', '2026-08-03T08:30:00');
+  assert.equal(patchFor(moved, 'fin-a').changes.end_date.getTime(), at('2026-08-03T09:00:00').getTime());
+  assert.equal(moved.instabilityMinutes, 30);
 });
 
 // ── P3a: distribution separation (checkDistributionSeparation / finalizeCandidate) ──
@@ -5259,8 +5396,8 @@ test('checkDistributionSeparation stays silent when siblings share a bucket, the
 test('checkDistributionSeparationForTest ignores an undated sibling: two dated siblings sharing a bucket plus one undated gives no finding', () => {
   const parent = 'PO-DIST-UNDATED';
   const material = 'MAT-DIST-UNDATED';
-  const dated1 = { id: 'dist-undated-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
-  const dated2 = { id: 'dist-undated-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T14:00:00') };
+  const dated1 = { id: 'dist-undated-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00'), end_date: at('2026-08-03T10:00:00') };
+  const dated2 = { id: 'dist-undated-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T14:00:00'), end_date: at('2026-08-03T16:00:00') };
   const undated = { id: 'dist-undated-c', MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
   const snapshot = setupSnapshot([dated1, dated2, undated]);
   snapshot.masterData = distributionMasterData();
@@ -5274,7 +5411,7 @@ test('checkDistributionSeparationForTest ignores an undated sibling: two dated s
 test('checkDistributionSeparationForTest still requires at least two DATED siblings: one dated plus one undated gives no finding', () => {
   const parent = 'PO-DIST-UNDATED-SOLO';
   const material = 'MAT-DIST-UNDATED-SOLO';
-  const dated = { id: 'dist-solo-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
+  const dated = { id: 'dist-solo-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00'), end_date: at('2026-08-03T10:00:00') };
   const undated = { id: 'dist-solo-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
   const snapshot = setupSnapshot([dated, undated]);
   snapshot.masterData = distributionMasterData();
@@ -5288,8 +5425,8 @@ test('checkDistributionSeparationForTest still requires at least two DATED sibli
 test('checkDistributionSeparationForTest still flags dated siblings landing in different buckets with an undated sibling present', () => {
   const parent = 'PO-DIST-UNDATED-MISMATCH';
   const material = 'MAT-DIST-UNDATED-MISMATCH';
-  const dated1 = { id: 'dist-mis-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00') };
-  const dated2 = { id: 'dist-mis-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-05T08:00:00') };
+  const dated1 = { id: 'dist-mis-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-03T08:00:00'), end_date: at('2026-08-03T10:00:00') };
+  const dated2 = { id: 'dist-mis-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: at('2026-08-05T08:00:00'), end_date: at('2026-08-05T10:00:00') };
   const undated = { id: 'dist-mis-c', MACHINE: 'L3', PARENT_ORDER: parent, MATERIAL_NUMBER: material, start_date: null };
   const snapshot = setupSnapshot([dated1, dated2, undated]);
   snapshot.masterData = distributionMasterData();
@@ -5299,6 +5436,28 @@ test('checkDistributionSeparationForTest still flags dated siblings landing in d
   assert.equal(findings.length, 1, 'genuinely different-bucket DATED siblings must still raise the finding');
   assert.deepEqual(findings[0].parents.slice().sort(), ['dist-mis-a', 'dist-mis-b'],
     'the undated sibling must not appear in parents — it was never part of the comparison');
+});
+
+// Backward scheduling OQ38: separation is judged on the FINISH (hand-mirrored in nimbus-compute-core.js computeAlerts).
+// A 70/30 family: the long child starts a day earlier but both end together -> nothing raised. The same starts with
+// finishes on different days -> raised.
+test('checkDistributionSeparationForTest judges the finish: a 70/30 family finishing together raises nothing, different finishes do', () => {
+  const parent = 'PO-DIST-FINISH';
+  const material = 'MAT-DIST-FINISH';
+  const long = { id: 'dist-fin-a', MACHINE: 'L1', PARENT_ORDER: parent, MATERIAL_NUMBER: material,
+    start_date: at('2026-08-03T18:00:00'), end_date: at('2026-08-04T16:00:00') };
+  const short = { id: 'dist-fin-b', MACHINE: 'L2', PARENT_ORDER: parent, MATERIAL_NUMBER: material,
+    start_date: at('2026-08-04T13:00:00'), end_date: at('2026-08-04T16:00:00') };
+  const together = setupSnapshot([long, short]);
+  together.masterData = distributionMasterData();
+  assert.equal(SetupScheduler.checkDistributionSeparationForTest([], together)
+    .filter(f => f.code === 'distribution_separation').length, 0, 'different start days, same finish: no finding');
+
+  const apart = setupSnapshot([long, { ...short, end_date: at('2026-08-05T16:00:00') }]);
+  apart.masterData = distributionMasterData();
+  const findings = SetupScheduler.checkDistributionSeparationForTest([], apart)
+    .filter(f => f.code === 'distribution_separation');
+  assert.equal(findings.length, 1, 'finishes on different days raise the finding');
 });
 
 // Regression: fillPlanningGaps used to silently discard distribution_separation
@@ -5392,6 +5551,16 @@ function referenceAvailability(core, ctx, line, plant, successorId, end, orders)
   const win = [Math.max(+lineWin[0], +plantWin[0]), Math.min(+lineWin[1], +plantWin[1])];
   if (win[0] >= win[1] || +end > win[1] || +end <= win[0]) return 0;
   let lower = win[0];
+  // Touching windows merge across midnight (OQ47): continue back through every window ending where this one opens.
+  for (let back = 1; back <= 14; back++) {
+    const day = new Date(probe.getFullYear(), probe.getMonth(), probe.getDate() - back, 12);
+    const l = core._dayWindow(ctx.calendars[line]?.workHours ?? defaultHours, day);
+    const p = core._dayWindow(ctx.plants[plant]?.workHours ?? defaultHours, day);
+    if (!l || !p) break;
+    const earlier = [Math.max(+l[0], +p[0]), Math.min(+l[1], +p[1])];
+    if (earlier[0] >= earlier[1] || earlier[1] !== lower) break;
+    lower = earlier[0];
+  }
   const blocked = (b) => {
     const s = core.parseDate(b.start), e = core.parseDate(b.end);
     if (!s || !e || +s >= +end || +e <= lower) return false;

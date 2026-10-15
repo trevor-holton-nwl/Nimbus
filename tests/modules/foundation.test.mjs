@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Config, PerfMonitor, VirtualList, Toast, Modal } from '../../frontend/platform/foundation.mjs';
 import { Util, ErrorLog } from '../../frontend/platform/foundation.mjs';
+import { createRequire as makeRequire } from 'node:module';
+
+// Util.scheduleIntervals / sapDueDate delegate to the UMD compute core through this ambient global.
+globalThis.NimbusComputeCore = makeRequire(import.meta.url)('../../frontend/nimbus-compute-core.js');
 
 test('fmtHours carries rounded minutes into hours', () => {
   assert.equal(Util.fmtHours(1.999), '2h');
@@ -589,4 +593,106 @@ test('Modal: Tab stays trapped (including focus on <body> and dialogs with no fo
   } finally {
     globalThis.document = prevDoc;
   }
+});
+
+test('sapDueDate reads a date-only (exact-midnight) due date as the end of that date\'s working window', async () => {
+  const { createRequire } = await import('node:module');
+  const prevCore = globalThis.NimbusComputeCore;
+  globalThis.NimbusComputeCore = createRequire(import.meta.url)('../../frontend/nimbus-compute-core.js');
+  const weekdays = { 0: null, 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: null };
+  let rev = 1;
+  try {
+    const task = (due, machine = 'L1') => ({ id: 't', MACHINE: machine, original_end_date: due });
+    // Not wired: no calendar rows -> raw + 23:59:59.
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 23, 59, 59));
+    Util.setDueCalendarResolver(line => {
+      return line === 'L1' ? { lineHours: weekdays, plantHours: weekdays, plant: 'P1', rev } : null;
+    });
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 22, 0, 0), 'open Wednesday -> window close');
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 9))), +new Date(2026, 7, 7, 22, 0, 0), 'closed Sunday -> previous Friday close');
+    const timed = new Date(2026, 7, 5, 9, 30);
+    assert.equal(Util.sapDueDate(task(timed)), timed, 'timed due returned as-is');
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5), 'NOCAL')), +new Date(2026, 7, 5, 23, 59, 59), 'line without calendar rows');
+    assert.equal(Util.sapDueDate({ id: 'n', MACHINE: 'L1', original_end_date: null }), null);
+    // R-I6: a line closing at 24:00 reads a date-only due as the close of that day (Thu 00:00), not 23:59:59.
+    weekdays[3] = [6, 24];
+    rev = 3;
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 6, 0, 0, 0), '06:00-24:00 line -> next-day 00:00');
+    weekdays[3] = [6, 22];
+    rev = 1;
+    // The per-line+date window cache stays valid until the Store revision moves.
+    rev = 2;
+    weekdays[3] = [8, 12];
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 12, 0, 0), 'revision bump invalidates the window cache');
+  } finally {
+    Util.setDueCalendarResolver(null);
+    globalThis.NimbusComputeCore = prevCore;
+  }
+});
+
+
+/* Task 3.3: "today" is overlap on the plant clock; the queued-order clock is the plant's. */
+test('Util.overlapsDay: a bar crossing midnight counts on both days; one ending exactly at midnight does not count on the next', () => {
+  const crossing = { id: 'x', start_date: new Date(2026, 9, 14, 22), end_date: new Date(2026, 9, 15, 6) };
+  assert.equal(Util.overlapsDay(crossing, '2026-10-14'), true);
+  assert.equal(Util.overlapsDay(crossing, '2026-10-15'), true);
+  assert.equal(Util.overlapsDay(crossing, '2026-10-16'), false);
+  const endsAtMidnight = { id: 'm', start_date: new Date(2026, 9, 14, 20), end_date: new Date(2026, 9, 15, 0) };
+  assert.equal(Util.overlapsDay(endsAtMidnight, '2026-10-14'), true);
+  assert.equal(Util.overlapsDay(endsAtMidnight, '2026-10-15'), false);
+});
+
+test('Util.overlapsDay: split orders are tested piece by piece; a start with no finish counts on its start day; no start never counts', () => {
+  const split = { id: 's', start_date: new Date(2026, 9, 14, 9), end_date: new Date(2026, 9, 16, 12),
+    scheduleSegments: [{ sequence: 1, startDate: new Date(2026, 9, 14, 9), endDate: new Date(2026, 9, 14, 12) },
+      { sequence: 2, startDate: new Date(2026, 9, 16, 9), endDate: new Date(2026, 9, 16, 12) }] };
+  assert.equal(Util.overlapsDay(split, '2026-10-15'), false, 'the gap day between pieces is not a work day');
+  assert.equal(Util.overlapsDay(split, '2026-10-16'), true);
+  assert.equal(Util.overlapsDay({ id: 'n', start_date: new Date(2026, 9, 14, 9) }, '2026-10-14'), true);
+  assert.equal(Util.overlapsDay({ id: 'z' }, '2026-10-14'), false);
+});
+
+test('Util.overlapsDay (U29): a finish-only row (end set, start null) counts on every day of [end - run_time, end]; without a run time or finish it never counts', () => {
+  const fo = { id: 'fo', RUN_TIME: 3, start_date: null, end_date: new Date(2026, 9, 15, 1, 0) };   // 22:00 Wed -> 01:00 Thu
+  assert.equal(Util.overlapsDay(fo, '2026-10-14'), true, 'the derived bar starts on Wednesday');
+  assert.equal(Util.overlapsDay(fo, '2026-10-15'), true);
+  assert.equal(Util.overlapsDay(fo, '2026-10-16'), false);
+  assert.equal(Util.overlapsDay({ id: 'x', RUN_TIME: 0, start_date: null, end_date: new Date(2026, 9, 15, 1) }, '2026-10-15'), false);
+  assert.equal(Util.overlapsDay({ id: 'y', RUN_TIME: 3, start_date: null, end_date: null }, '2026-10-15'), false);
+});
+
+test('Util.plantClock reads the wired plant clock (by plant, else by line), and falls back when it returns nothing', () => {
+  const pinned = new Date(2026, 9, 15, 3, 30);
+  Util.setPlantClockResolver((plant, line) => (plant === 'P' || line === 'L-P') ? pinned : null);
+  try {
+    assert.equal(Util.plantClock('P'), pinned);
+    assert.equal(Util.plantClock(undefined, 'L-P'), pinned);
+    assert.ok(Math.abs(Util.plantClock('OTHER').getTime() - Date.now()) < 5000, 'no plant clock: the server / viewer instant');
+    assert.equal(Util.dayKey(Util.plantToday('P')), '2026-10-15');
+  } finally { Util.setPlantClockResolver(null); }
+});
+
+test('Util.latenessHours: a queued order is as late as the plant clock says, not the viewer clock', () => {
+  const due = new Date(2026, 9, 15, 12, 0, 0);
+  const queued = { id: 'q', PLANT: 'P', MACHINE: 'L', planning_status: 'needs_planning', original_end_date: due };
+  Util.setPlantClockResolver(plant => plant === 'P' ? new Date(2026, 9, 15, 15, 0, 0) : null);
+  try {
+    assert.equal(Util.latenessHours(queued), 3);
+    Util.setPlantClockResolver(() => new Date(2026, 9, 15, 9, 0, 0));
+    assert.equal(Util.latenessHours(queued), 0, 'before the due instant on the plant clock');
+  } finally { Util.setPlantClockResolver(null); }
+});
+
+test('Util.alertMessage prefers the localized key and falls back to the English text', () => {
+  assert.equal(Util.alertMessage({ msg: 'English only' }), 'English only');
+  assert.equal(Util.alertMessage({ msg: 'fallback', msgKey: 'no.such.key', msgVars: {} }), 'no.such.key', 'Util.t returns the key for an unknown key');
+});
+
+test('Util.scheduleKpis counts late orders on the due instant (the same reading the late alert uses)', () => {
+  const dueFriMidnight = new Date(2026, 9, 16, 0, 0, 0);
+  const mk = (id, end) => ({ id, MACHINE: 'L', RUN_TIME: 1, original_end_date: dueFriMidnight, start_date: new Date(end.getTime() - 3600000), end_date: end });
+  // No calendar wired: a date-only due date reads as 23:59:59 of that date.
+  const kpis = Util.scheduleKpis([mk('ok', new Date(2026, 9, 16, 23, 0, 0)), mk('late', new Date(2026, 9, 17, 1, 0, 0))], 1);
+  assert.equal(kpis.late_count, 1);
+  assert.equal(Math.round(kpis.late_h * 10) / 10, 1);
 });

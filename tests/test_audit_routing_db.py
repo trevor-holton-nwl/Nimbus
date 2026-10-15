@@ -187,6 +187,31 @@ class TestRoutingEditTransactions:
         assert result["persisted"] == 1 and result["rejection_reasons"] == {}
         assert self._row(pg)["run_time"] == Decimal(12)
 
+    def test_refresh_and_tasks_serve_the_locked_original_dates(self, pg):
+        """original_start_date/original_end_date are COALESCE(original_*_received, basic_*): the locked SAP
+        value wins once recorded; an order without one (NULL) still serves its basic dates."""
+        locked_start, locked_finish = dt.datetime(2026, 9, 1, 6), dt.datetime(2026, 9, 20, 22)
+        basic_start, basic_finish = dt.datetime(2026, 10, 7, 8), dt.datetime(2026, 10, 12, 8)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET basic_start_date=%s, basic_finish_date=%s,"
+                        " original_start_received=%s, original_finish_received=%s WHERE id=%s",
+                        (basic_start, basic_finish, locked_start, locked_finish, self.ids[0]))
+            cur.execute("UPDATE orders SET basic_start_date=%s, basic_finish_date=%s,"
+                        " original_start_received=NULL, original_finish_received=NULL WHERE id=%s",
+                        (basic_start, basic_finish, self.ids[1]))
+            conn.commit()
+        rows = {r["id"]: r for r in self._refresh_route(ids=self.ids)["data"]}
+        assert rows[self.ids[0]]["original_start_date"] == locked_start.isoformat()
+        assert rows[self.ids[0]]["original_end_date"] == locked_finish.isoformat()
+        assert rows[self.ids[1]]["original_start_date"] == basic_start.isoformat()
+        assert rows[self.ids[1]]["original_end_date"] == basic_finish.isoformat()
+        df, _, _ = pg.query_orders(plant=self.PLANT)
+        by_id = {r["id"]: r for r in df.to_dict("records")}
+        assert by_id[self.ids[0]]["ORIGINAL_END_DATE"] == locked_finish
+        assert by_id[self.ids[0]]["ORIGINAL_START_DATE"] == locked_start
+        assert by_id[self.ids[1]]["ORIGINAL_END_DATE"] == basic_finish
+        assert by_id[self.ids[1]]["ORIGINAL_START_DATE"] == basic_start
+
     def test_refresh_changed_baseline_controls_pv_validity(self, pg):
         baseline = dt.datetime(2028, 1, 1, 8)
         with pg._pool.connection() as conn, conn.cursor() as cur:

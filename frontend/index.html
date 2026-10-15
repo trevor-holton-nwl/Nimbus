@@ -2325,20 +2325,20 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="modal-backdrop" id="modal-override" hidden>
   <div class="modal">
     <header class="modal-head">
-      <h3>Override order date</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')" aria-label="Close">✕</button>
+      <h3 data-i18n="modal.override_title">Override planned finish</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-override')" aria-label="Close" data-i18n-title="btn.close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row">
-        <label>Order</label>
+        <label data-i18n="ui.insp_order">Order</label>
         <div class="readonly" id="ovr-order"></div>
       </div>
       <div class="form-row">
-        <label>New start date / time</label>
-        <input type="text" id="ovr-start" readonly>
+        <label data-i18n="modal.override_finish_label">New finish date / time</label>
+        <input type="text" id="ovr-finish" readonly>
       </div>
       <div class="form-row">
-        <label>New production line</label>
+        <label data-i18n="modal.override_line_label">Production line</label>
         <select id="ovr-line" data-autofocus></select>
       </div>
       <div class="form-row chk-row">
@@ -2347,13 +2347,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <span data-i18n="ui.ovr_also_firm">Also firm this order (lock from optimizer)</span>
         </label>
       </div>
-      <div class="hint">
-        The duration (run time) is preserved. End time is computed from the run-time value.
+      <div class="hint" data-i18n="modal.override_finish_hint">
+        The finish stays exactly as you set it. The start is worked out backward from it, using the run time and the machine's working hours.
       </div>
     </div>
     <footer class="modal-foot">
-      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-override')">Cancel</button>
-      <button class="btn btn-primary" onclick="NIMBUS.Table.applyOverride()">Apply override</button>
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-override')" data-i18n="btn.cancel">Cancel</button>
+      <button class="btn btn-primary" onclick="NIMBUS.Table.applyOverride()" data-i18n="modal.override_apply">Apply override</button>
     </footer>
   </div>
 </div>
@@ -2977,6 +2977,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
 <!-- Last-write-wins warning (shown by app.js _bootMain when Config.CONCURRENCY_CHECK is false) -->
 <div id="concurrency-banner" hidden></div>
+
+<!-- Derivation paused: a plant's server calendar has not loaded, so no start is recalculated (shown by Engine.reconcileRuntimeSchedules) -->
+<div id="derive-paused-banner" role="status" hidden></div>
 
 <!-- =========================================================
      CONFIRM MODAL (reusable, driven by Modal.confirm())

@@ -257,7 +257,7 @@ is a stopgap that reuses the `roles`/`user_security` seam above, not a replaceme
     (list + bulk + reset-password), the SAP interface write/sync/test-connection endpoints, and
     `/maintenance/vacuum-analyze`, `/maintenance/analyze`, `/logs/backend/clear`.
   - **Left untouched, explicitly** — app-wide/ops-critical/pre-auth-by-construction endpoints:
-    `GET /tasks`, all three task-update endpoints, `/tasks/refresh`, `/tasks/baseline-correct`,
+    `GET /tasks`, all three task-update endpoints, `/tasks/refresh`, the due-date correction route (removed in Phase 1 of the backward-scheduling migration),
     `GET /health`, `/livez`, labor-plan read/write, `GET /master-data/{table}`,
     `GET /plant-calendar`, `GET /color-wheel(s)`, `POST /audit/log`, `POST /logs/frontend`, and
     the two new login endpoints. Gating any of these would break the app for non-admin users or
@@ -844,7 +844,7 @@ Implications for a hosted plant pilot:
   - The upload route's size check (413) runs after the file body is read, matching the existing `/upload` and `/bom/upload` routes.
   - A plant with no `timezone` gets no SAP-zone conversion in either direction (both sides stay consistent, no warning).
   - Requeueing outbound rows can race a Mulesoft read, so Mulesoft may send both queues; SAP last-write-wins makes it benign.
-  - The midnight-echo acceptance compares dates in the plant frame; a sent finish that crosses midnight when converted into the SAP zone (e.g. 19:00 Chicago to 00:00 UTC next day) is not recognised as an echo and causes one unnecessary re-plan for that order. Fix would need the plant timezone inside `sap_changed_fields`; deferred.
+  - Resolved by backward-scheduling Phase 1 (2026-10-14): the echo rule now compares in the SAP time frame (see `docs/SAP_STAGING_DESIGN.md`, echo suppression), so a sent finish that crosses midnight when converted into the SAP zone is recognised as an echo.
 
 ### SAP sync skeleton — discrepancies found while building staging (not fixed)
 
@@ -885,15 +885,13 @@ here because they are at-scale/multi-user hardening or product decisions, not pi
   persistence silently disabled for it). Full fix: send `subnetwork` on the write path (the frontend
   already knows it from `Store.masterData`) and scope `_resolve_subnetwork` / the UPDATE by it, instead
   of relying on global plant uniqueness.
-- **Gantt bar-width vs. explicit resize (F12 — product decision).** `db.py._EFF_END_SQL` derives the
-  Gantt bar width as `scheduled_start + run_time` (intentional: bar width must always represent
-  run-time, since stored SAP `scheduled_end` durations rarely match). A user's **edge-resize** (drag
-  the right edge to a duration ≠ run_time) persists `scheduled_end` but silently reverts to a
-  run-time-wide bar on reload. Decide one of: (a) honor an explicit user resize (distinguish a
-  user-set `scheduled_end` from the SAP window and prefer it in the read), or (b) lock the timeline to
-  move-only so the UI never lets the user create a width the reload discards. Left intact pending the
-  ruling — do **not** silently change `_EFF_END_SQL` (it would revert the deliberate run-time
-  normalization for SAP orders).
+- **Gantt bar-width vs. explicit resize (F12 — resolved by backward scheduling, 2026-10-14).** The
+  read no longer derives the bar width from `scheduled_start + run_time`: `db.py._EFF_END_SQL` is
+  the STORED finish (last segment end, else `scheduled_end`, else the SAP finish: `original_finish_received`, then `basic_finish_date`), so a saved bar
+  reloads as saved. A right-edge resize sets the finish; the start is re-derived backward from it. The
+  server's width check (`width_mismatch`, 60 s tolerance, skipped for a bar carrying a
+  `placement_exception` or one that was not moved) is what keeps a stored bar and its run time in
+  step. See `backend/scheduling/CLAUDE.md` (Task 2.2 and 2.3 bullets).
 
 ## Optimizer — deferred enhancements (post-review, 2026-07-03)
 
@@ -976,7 +974,7 @@ parses as **local** — so a save→reload round-trip shifted every task's start
 UTC offset (e.g. +4/+5 h for US Eastern). Silent, and on the primary save path.
 
 *The fix:* `saveAll` now routes `start_date`/`end_date` through `Util.toLocalSeconds` (naive-local, no `Z`),
-mirroring the already-correct `_relayDueDateCorrections` path. `brain.py:_to_pydt` then parses tz-naive and
+mirroring the due-date rewrite path that Phase 1 of the backward-scheduling migration retired. `brain.py:_to_pydt` then parses tz-naive and
 stores the local clock digits verbatim, round-tripping correctly. The blackout/plant-calendar path is a
 **separate, self-consistent UTC scheme** (`_blockPayload` sends `toISOString()`, `master_data.py:_parse_ts`
 parses Z-aware, the read path re-appends `Z`) and was deliberately left unchanged — do not unify the two.
@@ -1327,6 +1325,8 @@ turning it on for a real plant is a product decision, not an engineering one.
 
 ## `orders.run_time` bound constraint — pre-deploy data check needed (2026-09-25, H8)
 
+> **Superseded for the bound itself (2026-10-14).** `migrations/2026-10-15-2-orders-run-time-bounds-336.sql` replaces the 168-hour limit below with a pure representation bound (`< 8760` hours; the file name says 336 for the application cap, but the ledger id is `orders_run_time_bounds_8760`, and the name stays because the deploy ledger is keyed by file name); the 336-hour scheduling limit now lives in the application (`db.cap_hours`). The text below is the history of the original constraint.
+
 `migrations/2026-09-25-orders-run-time-bounds.sql` adds a `NOT VALID` CHECK constraint bounding
 `orders.run_time` to `[0, 168)` hours and rejecting `NaN`/`Infinity`. The constraint exists
 specifically because an unvalidated `RUN_TIME` was reaching SQL interval arithmetic as `NaN`/
@@ -1387,3 +1387,129 @@ resolver's `_round_to_minute`/hours-computation path has the same latent exposur
 rejection/warning — instead of whole-batch/whole-chunk failure — should eventually be added to both
 paths so one bad row doesn't abort an entire upload or resolve batch. Not implemented here; recorded
 as follow-up work for whoever picks up ingest/resolver hardening next.
+
+## Backward scheduling — Phase 1 shipped / Phases 2–4 pending
+
+> **Cutover files (Task 4.1):** `migrations/2026-10-20-0-orders-precutover-snapshot.sql` (ledger id `backward_cutover_snapshot`, read-only copies of order dates/flags, segments and sent rows) and `migrations/2026-10-20-1-backward-cutover.sql` (ledger id `backward_scheduling_cutover`, destructive by text) are mirrored in `schema.sql` in the same guarded form. Both carry the header marker `-- nimbus-migration: manual-only`: the deploy runner (`apply-migrations.ps1`) skips them in every mode, `-AllowDestructive` included, and applies them only when named with `-Only` (new parameter); the rollback script is `migrations/manual/2026-10-20-restore-precutover-snapshot.sql`. The cutover keeps schedule segments for running rows, refuses to run (raises an error, writes nothing) when the snapshot ledger id `backward_cutover_snapshot` is absent, and its running test falls back to the UTC clock when an order's plant is NULL or has no `plants` row. A developer database that re-applies `schema.sql` therefore runs the cutover once and nulls its local placed finishes and segments (running rows keep start and stored end); later re-applies do nothing.
+
+Phases 1 to 4 of the backward-scheduling migration are built and committed on `feature/backward-scheduling` (Phase 1 originally on `feature/backward-scheduling-phase1`, code commits `3169a08` to `643b7eb`; the run completed 2026-10-14 and the branch then took a senior regression review and fix wave). It is not merged to `main` and not deployed; the stored-finish contract, the backward calendar and optimizer output, and the global cutover ship as one release from a single merge of `feature/backward-scheduling` into `main` (one image, one cutover window; the retired `feature/backward-scheduling-phase1` branch is never merged on its own), and the cutover runbook is in `docs/DEPLOYMENT.md` ("Backward-scheduling cutover"). The plan is `docs/superpowers/plans/2026-10-13-backward-scheduling-implementation.md`; the spec is `BACKWARD_SCHEDULING_MIGRATION.md` (section 7.3 covers Phase 1).
+
+### (a) Owner list: sent orders whose SAP original may be lost
+
+`migrations/2026-10-15-1-orders-original-dates.sql` adds the locked SAP start and finish columns (`orders.original_start_received`, `orders.original_finish_received`, `order_distribution.original_finish_received`) and backfills them once, guarded by the `schema_migrations` id `orders_original_dates_backfill`. An order that was never sent still holds what SAP last sent, so the backfill copies its SAP baseline (`sap_basic_start_date` and `sap_basic_finish_date`) when there is one, else its `basic_*` date. An order that NIMBUS has already sent to SAP (it has an `order_sap_sent` row) has no recoverable SAP original: the backfill copies its current `basic_start_date` and `basic_finish_date`. A distribution header copies its `basic_finish_date`. The backfill rewrites no `basic_*` or `sap_basic_*` column. Review the sent orders before relying on their due dates. The query below is read-only (SELECT only; agents never run it). It lists the sent orders whose basic finish differs from the SAP baseline or from the finish NIMBUS sent:
+
+```sql
+SELECT o.id, o.plant, o.production_order, o.basic_finish_date, o.sap_basic_finish_date, s.sent_finish
+FROM orders o
+JOIN order_sap_sent s ON s.order_id = o.id
+WHERE o.basic_finish_date IS DISTINCT FROM o.sap_basic_finish_date
+   OR o.basic_finish_date IS DISTINCT FROM s.sent_finish
+ORDER BY o.plant, o.production_order;
+```
+
+### (b) Owner deploy runbook
+
+Every step is run by the owner. Agents run none of them. Stop at any step whose check fails.
+
+**Before the window (plan §0.2, owner items a to c):**
+
+1. Item a: identify the live image. Run `az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.template.containers[0].image" -o tsv`, check the `NIMBUS_BUILD_ID` in the served page, and confirm whether any Send to SAP has already happened on the pilot. Record the image tag: it is the rollback target.
+2. Item b: snapshot `basic_finish_date`, `sap_basic_start_date`, `sap_basic_finish_date` and `order_sap_sent` before the backfill runs on the pilot. The snapshot must be restorable.
+3. Item c: take a pilot `pg_dump`, restore it locally, run the profile queries Q0 to Q17 (spec §8.12) on the copy, and review Q1, Q8, Q13, Q15, Q16 and Q17. Only Q1 (orders with no run time and no stored end) and Q8 (the repairable set, joined to the sent table) gate the Phase 1 deploy; the rest gate the cutover.
+   - **Rehearse both Phase 1 migration files on that restored copy before the real run.** Apply `2026-10-15-1-orders-original-dates.sql`, then `2026-10-15-2-orders-run-time-bounds-336.sql`, to the local restore with `psql` (one file per run, in that order), read each result, and stop on any error. Why this matters: the first file rewrites every `orders` row, and the table's date check (`chk_orders_sched_range` in `schema.sql`, created `NOT VALID`) is skipped for old rows but still enforced on every row that gets rewritten. One pilot row whose scheduled end is not after its scheduled start therefore makes the whole migration fail and roll back, and without a rehearsal that would only show up on the deploy day.
+   - **Pre-check, on the restored copy and then on the live pilot (SELECT only):** `SELECT count(*) FROM orders WHERE scheduled_start IS NOT NULL AND scheduled_end IS NOT NULL AND scheduled_end <= scheduled_start;` The count must be 0. If it is not 0, list those rows (the same query with the order id and both dates instead of `count(*)`), have the owner fix the dates on those orders first (either correct them in NIMBUS, or clear both dates so the order returns to the queue), and run the pre-check again until it reads 0. Do not start the window with a non-zero count.
+
+**Merge:**
+
+4. Merge `feature/backward-scheduling` into `main` by pull request (one merge; the retired `feature/backward-scheduling-phase1` branch is not merged on its own: it predates the fix waves).
+
+**Planner notice (send before the window):**
+
+5. Pick a quiet window from profile Q12 (plant time). Tell planners to save and close their NIMBUS tabs before the migration, because the backfill rewrites every order row and an unsaved edit goes stale. Tell them lateness figures will change. Tell them no bar moves, except rows with no run time and no stored end, whose right edge can move.
+
+**Migrations (two destructive runs, one file each):**
+
+6. Both files are destructive by text. The runner blocks each one unless `-AllowDestructive` is passed, and that flag releases every pending destructive file that is not manual-only. So each file gets its own run, and each run names exactly that file with `-Only <file>`. Before each run, read the ledger: `SELECT filename FROM migration_files_applied ORDER BY filename;` (admin login, SELECT only). Neither Phase 1 file should be listed yet.
+   - `-DryRun` never connects to the database: it lists every file (or, with `-Only`, just the named ones), pending or not. The ledger query is the only way to see what is pending. Both runs below use the runner from the `promote-azure` skill (step 1; it prompts for the database password). Its defaults point at the live pilot host and user. `-Only` is what limits what `-AllowDestructive` can release.
+   - Check first: `2026-10-08-sap-staging-tables.sql` (creates `order_sap_sent`, which the backfill reads) must already be in the ledger.
+   - Run 1: only `2026-10-15-1-orders-original-dates.sql`. Run the runner with `-Only 2026-10-15-1 -DryRun`, read the file and the output, then run it for real with `-Only 2026-10-15-1 -AllowDestructive`. The backfill `UPDATE` bumps xmin on every `orders` row.
+   - Run 2: after run 1, read the ledger again: it must now list the run 1 file and still not list `2026-10-15-2-orders-run-time-bounds-336.sql`. Then repeat with only that file (`-Only 2026-10-15-2 -DryRun`, read the file, then `-Only 2026-10-15-2 -AllowDestructive`).
+   - A runner exit code of 3 means a file was blocked: stop and read the output.
+   - If the ledger shows other pending files in `migrations/` (anything merged to `main` since the last deploy), apply them with the ordinary `promote-azure` step 1 run (no `-AllowDestructive`, so additive files apply and destructive ones are blocked) and sequence any blocked file as its own deliberate run, before the image roll.
+
+**Image:**
+
+7. After both runs, build and roll the image with the `promote-azure` skill (steps 2 to 4, after its step 1b gate). The migrations go first so the new code never serves against missing columns. Once the roll is verified, tell planners to reload NIMBUS.
+
+**Send to SAP (not started by this release):**
+
+8. Before any admin presses Send to SAP, the owner check in spec §7.1.2 must be signed, item by item, by one named person. Until then, tell every admin who can press Send that the button stays off limits. Phase 1 starts no Send by itself: the route runs only when an admin presses the button.
+
+**Rollback:**
+
+9. Roll back to the previous image: `az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.azurecr.io/nimbus:<previous-tag>`. This is safe for the schema: the locked columns are nullable and old code neither reads nor writes them, and the widened run-time CHECK (`< 8760`) is looser than the old `< 168`. The old image does bring the old behaviour back: it fills or rewrites a finish at upload, re-runs the client due-date rewrite, and overwrites the due date on an SAP echo. Rows written under the new image keep their locked originals, which the old image ignores. Caveat: once any Send has happened, a rollback makes the old due-date overwrite apply to those orders again (spec §7.3), so re-check §7.1.2 before rolling back.
+
+### (c) What planners and admins will notice
+
+- **Lateness and due figures change for date-only due dates.** A date-only due date (exact midnight) now means the end of that day's working window. An order that ends during that day's working hours is no longer shown as late. The grid's Due Date column and the Inspector still show the raw midnight.
+- **Optimizer bounds on a closed due day move back to the previous open day.** For example, a Sunday due date with zero pull-forward days now sets the earliest start at Friday 00:00 instead of Sunday 00:00.
+- **Orders over the run-time cap go to Needs Planning** with reason `run_time_over_cap`. The cap is a flat 336 hours on every plant (a plant's visibility horizon no longer lowers it; senior review U5). A planner edit that sets a run time over the cap is rejected for that order.
+- **Send to SAP transmits firmed orders only.** An unfirmed order is skipped and counted as `skipped_unfirmed` in the Send result and the audit log. The Send result on screen shows that count, so a Send with nothing firmed sends nothing.
+- **Rows with no usable finish are not loaded.** A blank or unreadable finish, or a finish on an earlier calendar date than the start, is no longer filled in or rewritten; the finish is stored exactly as SAP sent it. An upload drops such a row with an error warning that names the order (the SAP staging check marks it `invalid_date`), and the count appears in the Admin Cockpit's DB Load step as "Dropped (no finish)".
+- **Admins:** the purge preview now counts the whole last day of the chosen range.
+
+### (d) Validation fix wave (2026-10-15): residuals and owed checks
+
+Tip 261d9cb on `feature/backward-scheduling`, still unmerged and undeployed. Full status table: section 9 of `docs/superpowers/plans/2026-10-15-backward-scheduling-validation-findings.md`. Still owed before or at the release:
+
+- VM10: deferred, not fixed in this wave (distribution minor, see section 3 line VM10).
+- VM11: deferred, not fixed in this wave (distribution test gap, see section 3 line VM11).
+- VM25: deferred, not fixed in this wave (stale roadmap and architecture docs, see section 3 line VM25).
+- VM18, VM19, VM20, VP2, VP3: deferred minors from section 3 that the plan did not include (plant-clock nonexistent times, a sync comment, a calendar performance note, the due-day window resolver, a calendar doc line).
+- VU2: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU2).
+- VU3: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU3).
+- VU4: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU4).
+- VU5: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU5).
+- VU6: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU6).
+- VU7: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU7).
+- VU8: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU8).
+- VU10: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU10).
+- VU11: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU11).
+- VU12: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU12).
+- VU13: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU13).
+- VU14: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU14).
+- VU15: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU15).
+- VU16: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU16).
+- VU18: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU18).
+- VU19: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU19).
+- VU20: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU20).
+- VU21: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU21).
+- VU22: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU22).
+- VU23: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU23).
+- VU24: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU24).
+- VU26: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU26).
+- VU27: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU27).
+- VU28: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU28).
+- VU29: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU29).
+- Optimizer evaluators still measure elapsed time in the viewer zone: an optimizer placement that straddles the plant spring-forward gap, viewed from a browser in a different daylight-saving calendar, is rejected at Save with a width toast and re-runs correctly (scope cut 1).
+- Zero-wall-width bar in the repeated hour (ruled): an order of exactly one hour that ends inside the repeated hour at the same wall time cannot be saved during that hour once a year, because the stored-range constraint needs the end after the start; fixing it needs a schema change.
+- No pytest feeds the running-order piece payloads (two pieces, or no pieces plus both edges) through the bulk date update route; the server acceptance was checked by reading only.
+- The date-only backfill for pre-existing rows is a midnight heuristic: a genuine midnight due date on an existing row reads as date-only until SAP next sends it.
+- Browser check 1: left-handle veto on a bar drag.
+- Browser check 2: derive-paused banner appearance and stacking under the concurrency banner.
+- Browser check 3: overtime confirm when a firmed order finish is moved outside working hours.
+- Browser check 4: display-only never-placed rows after cutover show a derived bar and are not saved until a planner acts or the first-load Save runs.
+- Browser check 5: Gantt lock and today bands on the plant clock for a viewer in a different time zone.
+- Browser check 6: Override window and hover card, including the explain-the-move line.
+- Browser check 7: multi-drag ghost preview on a right-edge resize.
+- Browser check 8: cutover summary toast in all five languages.
+- Browser check 9: reversal toast and alert on a run-time edit of a late order, alert cards and glossary in five languages, distribution separation wording.
+- Browser check 10 (G-10): rehearse the whole cutover on a restored copy of the pilot database, timing the first-load reconcile at real plant size.
+- Browser check, added: the running-order finish toast (a typed End or a drag on a running order is refused, the run-time edit is the only resize), in five languages.
+- Browser check, added: minute-held finishes show and edit at the exact minute in the grid, the Inspector and the Override window; only a horizontal drag lands on the 15-minute grid.
+- Browser check, added: the amber placement-exception card and its tile count (not counted in the blocking tile or the Orders Conflicting chip; the marker stays on the bar).
+- Browser check, added: the derived bar on a line without its own calendar row (plant default calendar), including the reconcile after undo.
+- Cutover rehearsal on a restored pilot copy (G-10): the full runbook in `docs/DEPLOYMENT.md`, never executed end to end.
+- SAP echo test against a real SAP system (A9): confirms how SAP returns seconds before the echo compare (kept truncated to the minute, D11) is revisited.
+- External callers of the bulk task update route (`/tasks/bulk_update`): the owner must list them, because the route now requires both edges and carries start-derived reasons.
+- Two stale `.git/worktrees` admin directories (`bisect-wt`, `merged`) need `git worktree prune`, to be run outside OneDrive.

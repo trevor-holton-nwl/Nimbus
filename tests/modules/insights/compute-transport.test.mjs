@@ -150,7 +150,7 @@ for (const [scope, expected] of [[undefined, null], [new Set(), []], [new Set(['
 
 test('selected plant scopes tasks, calendars, line settings and blackouts together', async t => {
   const { Compute, workers } = await transport(t);
-  Store.setMasterData({ plants: [{ plant: 'P1' }, { plant: 'P2' }], lines: [
+  Store.setMasterData({ plants: [{ plant: 'P1', timezone: 'UTC' }, { plant: 'P2', timezone: 'UTC' }], lines: [
     { machine: 'L1', plant: 'P1' }, { machine: 'L2', plant: 'P2' },
   ] }, 'test');
   Store.setTasks([

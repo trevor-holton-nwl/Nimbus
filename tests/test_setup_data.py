@@ -349,6 +349,7 @@ def test_ingest_orders_from_excel_normalizes_plant_and_flags_defaulted_run_time(
         "PRODUCTION_ORDER": ["PO-1"],
         "MATERIAL_NUMBER": ["MAT-1"],
         "BASIC_START_DATE": pd.to_datetime(["2026-01-01"]),
+        "BASIC_FINISH_DATE": pd.to_datetime(["2026-01-01 06:00"]),
         "PLANT": [1000],
         "RUN_TIME": [5.0],
     })
@@ -364,6 +365,7 @@ def test_ingest_orders_from_excel_normalizes_plant_and_flags_defaulted_run_time(
         "PRODUCTION_ORDER": ["PO-2", "PO-3"],
         "MATERIAL_NUMBER": ["MAT-2", "MAT-3"],
         "BASIC_START_DATE": pd.to_datetime(["2026-01-02", "2026-01-03"]),
+        "BASIC_FINISH_DATE": pd.to_datetime(["2026-01-02 06:00", "2026-01-03 06:00"]),
         "PLANT": [1000.0, None],
         "RUN_TIME": [None, 3.0],
     })
@@ -380,8 +382,8 @@ def test_ingest_orders_from_excel_normalizes_plant_and_flags_defaulted_run_time(
 def test_ingest_orders_from_excel_machine_hours_override_run_time(monkeypatch):
     """Manual Excel upload only (owner decision 2026-10-13): Machine Hours (MEINH)
     wins over RUN_TIME when present and > 0; 0/blank falls back to RUN_TIME, then
-    the 1 h default. The swap happens before date hygiene, so the derived finish
-    and the defaulted flag follow the chosen value."""
+    the 1 h default. The swap happens before date hygiene, so the defaulted flag
+    follows the chosen value; the finish is stored as received either way."""
     import io
 
     import pandas as pd
@@ -404,7 +406,7 @@ def test_ingest_orders_from_excel_machine_hours_override_run_time(monkeypatch):
         "MATERIAL_NUMBER": ["M-A", "M-B", "M-C", "M-D"],
         "BASIC_START_DATE": pd.to_datetime(["2026-01-05 08:00"] * 4),
         "BASIC_FINISH_DATE": pd.to_datetime(
-            ["2026-01-06 00:00", "2026-01-05 15:45", None, None]),
+            ["2026-01-06 00:00", "2026-01-05 15:45", "2026-01-05 12:00", "2026-01-05 12:00"]),
         "MACHINE_HOURS_(MEINH)": [2.5, None, 0, 1.75],
         "RUN_TIME": [4.0, 3.0, None, None],
     }).to_excel(buf, index=False)
@@ -416,7 +418,7 @@ def test_ingest_orders_from_excel_machine_hours_override_run_time(monkeypatch):
     a, b, c, d = by_po["PO-A"], by_po["PO-B"], by_po["PO-C"], by_po["PO-D"]
 
     assert a["run_time"] == 2.5 and a["_run_time_was_defaulted"] is False
-    assert pd.Timestamp(a["basic_finish_date"]) == pd.Timestamp("2026-01-05 10:30")
+    assert pd.Timestamp(a["basic_finish_date"]) == pd.Timestamp("2026-01-06 00:00")  # as received
     assert a["machine_hours"] == 2.5
     assert b["run_time"] == 3.0 and b["_run_time_was_defaulted"] is False
     assert c["run_time"] == 1.0 and c["_run_time_was_defaulted"] is True
@@ -427,10 +429,11 @@ def test_ingest_orders_from_excel_machine_hours_override_run_time(monkeypatch):
     assert len(infos) == 1
 
 
-def test_ingest_orders_from_excel_rederives_finish_when_not_after_start(monkeypatch):
-    """Regression: finish <= start and an exact-midnight finish are re-derived as
-    start + RUN_TIME hours. pandas 3 raised TypeError when the timedelta sum
-    (datetime64[ns]) was assigned into the read_excel datetime64[us] column."""
+def test_ingest_orders_from_excel_stores_finish_as_received_and_drops_unusable_finish(monkeypatch):
+    """The finish is stored exactly as received: an exact-midnight finish and a
+    same-date finish earlier than the start are kept untouched (no start +
+    RUN_TIME rewrite); a blank finish and a finish on an earlier date than the
+    start are dropped with an error warning."""
     import io
 
     import pandas as pd
@@ -441,6 +444,7 @@ def test_ingest_orders_from_excel_rederives_finish_when_not_after_start(monkeypa
 
     def _fake_upsert_orders(rows, **kwargs):
         captured["rows"] = rows
+        captured["warnings"] = kwargs.get("warnings")
         return {"status": "ok", "batch_id": kwargs.get("batch_id"),
                 "inserted": len(rows), "updated": 0, "warnings": [], "lines": []}
 
@@ -448,18 +452,23 @@ def test_ingest_orders_from_excel_rederives_finish_when_not_after_start(monkeypa
 
     buf = io.BytesIO()
     pd.DataFrame({
-        "PRODUCTION_ORDER": ["PO-A", "PO-B"],
-        "MATERIAL_NUMBER": ["M-A", "M-B"],
-        "BASIC_START_DATE": pd.to_datetime(["2026-01-05 08:00", "2026-01-05 08:00"]),
-        "BASIC_FINISH_DATE": pd.to_datetime(["2026-01-05 06:00", "2026-01-06 00:00"]),
-        "RUN_TIME": [2.5, 4.0],
+        "PRODUCTION_ORDER": ["PO-A", "PO-B", "PO-C", "PO-D"],
+        "MATERIAL_NUMBER": ["M-A", "M-B", "M-C", "M-D"],
+        "BASIC_START_DATE": pd.to_datetime(["2026-01-05 08:00"] * 4),
+        "BASIC_FINISH_DATE": pd.to_datetime(
+            ["2026-01-05 06:00", "2026-01-06 00:00", None, "2026-01-04 12:00"]),
+        "RUN_TIME": [2.5, 4.0, 1.0, 1.0],
     }).to_excel(buf, index=False)
 
     result = db.ingest_orders_from_excel(buf.getvalue(), "hygiene.xlsx")
     assert result["status"] == "ok"
     by_po = {r["production_order"]: r for r in captured["rows"]}
-    assert pd.Timestamp(by_po["PO-A"]["basic_finish_date"]) == pd.Timestamp("2026-01-05 10:30")
-    assert pd.Timestamp(by_po["PO-B"]["basic_finish_date"]) == pd.Timestamp("2026-01-05 12:00")
+    assert sorted(by_po) == ["PO-A", "PO-B"]
+    assert pd.Timestamp(by_po["PO-A"]["basic_finish_date"]) == pd.Timestamp("2026-01-05 06:00")
+    assert pd.Timestamp(by_po["PO-B"]["basic_finish_date"]) == pd.Timestamp("2026-01-06 00:00")
+    errors = [w["msg"] for w in captured["warnings"] if w.get("level") == "error"]
+    assert any("blank or unparseable BASIC_FINISH_DATE" in m and "PO-C" in m for m in errors), errors
+    assert any("earlier than BASIC_START_DATE" in m and "PO-D" in m for m in errors), errors
 
 
 async def _async_bytes(value):
@@ -987,3 +996,32 @@ def test_metadata_only_stale_replace_is_rejected(pg):
             cur.execute("DELETE FROM setup_matrix WHERE plant = %s", (plant,))
             cur.execute("DELETE FROM setup_definition WHERE plant = %s", (plant,))
             conn.commit()
+
+
+class _ObserverCursor(_DefinitionCursor):
+    """Scripts the pre-replacement observer's reads; the completed-order lookup finds nothing."""
+
+    def fetchone(self):
+        query = self.executed[-1][0]
+        if "SELECT 1 FROM machine" in query:
+            return (1,)
+        if "FROM setup_definition" in query:
+            return (["colorWheel"], 1, True, True)
+        return None
+
+
+def test_pre_replacement_observer_reads_the_shared_end_fragment_and_skips_queued_orders(monkeypatch):
+    """Backward scheduling: a completed order is judged on the same effective end every other reader uses
+    (last segment, stored finish, locked SAP finish) -- never start + run time -- and a Needs Planning
+    order has no window, so it never counts as the last completed one."""
+    import db
+    cursor = _ObserverCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.derive_machine_state_before_replacement(
+        "5512", "LINE-1", captured_at=datetime(2026, 8, 13, 10, 0))
+    assert result["accepted"] is False and result["reason"] == "no_completed_order"
+    orders_sql = next(sql for sql, _p in cursor.executed if "completed_at" in sql)
+    assert db._EFF_END_SQL in orders_sql
+    assert db._SCHEDULE_SEGMENTS_LATERAL_SQL in orders_sql
+    assert "INTERVAL" not in orders_sql
+    assert "o.planning_status <> 'needs_planning'" in orders_sql

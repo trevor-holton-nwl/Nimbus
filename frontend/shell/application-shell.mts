@@ -2117,7 +2117,7 @@ const App = {
 
     /* Autosave on store mutations. Skip 'refresh' — those rows came FROM the server
        during conflict reconciliation, so writing them back would be a pointless echo. */
-    Store.subscribe(evt => { if (evt.source !== 'refresh') Persistence._autosave(); }, 'Persistence.autosave');
+    Store.subscribe(evt => { if (evt.source !== 'refresh' && evt.source !== 'engine-runtime-reconcile-display') Persistence._autosave(); }, 'Persistence.autosave');
 
     /* Optimizer and undo edits are dependent: mark them for atomic version-checked save.
        'refresh' is ignored because those rows have already been reconciled. */
@@ -2253,9 +2253,13 @@ const App = {
   // This is deliberately NOT the same as 'engine-runtime-reconcile'
   // (Engine.reconcileRuntimeSchedules' own Store.updateMany source): a
   // reconcile-resized bar genuinely still needs saving through the normal
-  // schedule save path, so that source stays un-skipped here.
+  // schedule save path, so that source stays un-skipped here. Its sibling
+  // 'engine-runtime-reconcile-display' IS skipped: that is a never-placed row
+  // the reconcile only derived for display (backward scheduling Task 2.6), and
+  // Save must leave the server row never-placed.
   _trackDirty(evt: StoreEvent): void {
-    if (evt.source === 'refresh' || evt.source === 'note' || evt.source === 'distribution') return;
+    if (evt.source === 'refresh' || evt.source === 'note' || evt.source === 'distribution'
+      || evt.source === 'engine-runtime-reconcile-display') return;
     const force = evt.source === 'engine' || evt.source === 'undo';
     if (evt.type === 'task:update') {
       Persistence._dirtyIds.add(String(evt.id));

@@ -1,3 +1,4 @@
+> Superseded by the finish anchor (2026-10): starts are derived backward from the placed finish; see BACKWARD_SCHEDULING_MIGRATION.md.
 # NIMBUS Routing & Production Version Runtime — Design
 
 Status: **DRAFT for review** · rev. 2, 2026-09-24 · Author: Trevor Holton with Claude

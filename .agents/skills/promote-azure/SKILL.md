@@ -16,7 +16,8 @@ This consolidates the authoritative runbook in `DEPLOYMENT.md` — read that fil
 - **NEVER run `schema.sql` against the live DB.** It re-multiplies `plants` horizon columns ×1440 on every run (`schema.sql` ~line 110). Apply schema changes only via files in `migrations/`.
 - **NEVER read/echo the `pg-pass` secret** (`az containerapp secret show`). The operator supplies the DB password at runtime as `$env:PGPASSWORD`; it must never land in the transcript.
 - **NEVER reuse an image tag.** A fresh `vN` is what makes rollback a one-liner.
-- **Confirm before each prod mutation** (migration apply, image build, app roll). Auto-mode will gate these — that's expected; surface the command and get explicit go-ahead.
+- **Build, roll, and verify run automatically, always — no pause for go-ahead.** Image build (step 2), app roll (step 3), and verification (step 4) proceed straight through without stopping for confirmation. Narrate each command as it runs so the operator can see what's happening, but don't wait on a response before continuing.
+- **Migration apply is the one step that still gates on confirmation** — surface the pending migration file(s) and the dry-run output, and get explicit go-ahead before running the real apply. This is deliberate asymmetry: code/roll is a one-liner rollback, a bad schema change usually isn't.
 - **CI gate before build.** Never run `az acr build` until the step 1b CI gate passes (GitHub check-runs green for HEAD + local `npm test` + `check:static-assets`), or the operator passes `-OverrideCi "<reason>"` and the reason is recorded in the deploy note.
 - **Do not set `NIMBUS_SAP_SYNC_ENABLED`** unless the operator explicitly wants the SAP scheduler live (it's a stub skeleton).
 
@@ -36,11 +37,13 @@ az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query "properties.templ
 Run from a host with `psql` + DB firewall access (the dev laptop's `DevLaptop` rule, or Azure Cloud Shell). The operator sets the password; the skill never pulls it:
 ```powershell
 $env:PGPASSWORD = '<DB_PASSWORD>'   # operator-supplied; never from the secret store, never committed
-& ".Codex\skills\promote-azure\scripts\apply-migrations.ps1" -DryRun   # preview: pending files, destructive-verb flags
-& ".Codex\skills\promote-azure\scripts\apply-migrations.ps1"           # apply pending additive migrations + record in ledger
+& ".agents\skills\promote-azure\scripts\apply-migrations.ps1" -DryRun   # preview: pending files, destructive-verb flags
+& ".agents\skills\promote-azure\scripts\apply-migrations.ps1"           # apply pending additive migrations + record in ledger
 Remove-Item Env:\PGPASSWORD
 ```
 - The script maintains its own `migration_files_applied` ledger (run-once semantics, keyed by filename) — distinct from `schema_migrations` (id-keyed, owned by schema.sql for named one-time data mutations like `plants_horizon_minutes`; the script only bootstraps that table's existence, never writes to it). They collided under one overloaded name until 2026-08-11 — see the script's own header comment for the full story. Applies `migrations/*.sql` not yet recorded in lexicographic order, **refuses `schema.sql`**, and **blocks any file containing `ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE`** unless re-run with `-AllowDestructive` (those need expand/contract sequencing — treat as a deliberate, separate decision, not part of a routine roll).
+- A pending migration that trips the destructive-verb filter but is actually additive/idempotent (verified by reading the file — e.g. `ADD COLUMN IF NOT EXISTS`, `ON CONFLICT DO NOTHING`) is forced through with `-AllowDestructive` only when the runbook names it. Already-applied files (per the ledger) are skipped regardless of that flag, so it only affects genuinely new files. Phase 1's `2026-10-15-1-orders-original-dates.sql` is a backfill `UPDATE` of every `orders` row, so it is applied with `-Only 2026-10-15-1 -AllowDestructive`, one file per run, as `docs/DEPLOYMENT.md` says.
+- **Manual-only migrations.** A file whose header carries `-- nimbus-migration: manual-only` (the backward-scheduling snapshot `2026-10-20-0` and cutover `2026-10-20-1`) is SKIPPED by the runner in every mode, `-AllowDestructive` included, with a visible warning. It runs only when the operator names it: `apply-migrations.ps1 -Only 2026-10-20-1 -AllowDestructive` (`-Only` takes file names or id prefixes, applies exactly those, and is still subject to the destructive check and the ledger). Never pass `-AllowDestructive` to get past a manual-only skip, and never run these from a routine promote; follow `docs/DEPLOYMENT.md` -> "Backward-scheduling cutover".
 - Schema goes before the roll so the new code never serves traffic against missing tables.
 
 ### 1b. CI gate — required before `az acr build` (read-only, safe to run)

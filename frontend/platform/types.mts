@@ -83,6 +83,14 @@ export interface NimbusTask {
   /** Backend-derived diagnostic after a runtime ingest changes a persisted
    *  schedule aggregate; the planner regenerates it from the current parent start. */
   runtime_schedule_mismatch?: boolean;
+  /** Why the planner's bar deliberately differs from its run-time width: 'overtime' (non-working time) or
+   *  'overlong' (wider than the run time). null/absent = a normal bar; the server skips its width check for a
+   *  marked bar. Sent on save (an explicit null clears it). */
+  placement_exception?: 'overtime' | 'overlong' | null;
+  /** Session-only note from the engine about a derivation it made or refused (never persisted). */
+  derivationIssue?: { code: string; from?: Date; to?: Date; detail?: string } | null;
+  /** Session-only note: the start the engine moved this row from/to on its own (reconcile) and why. Never persisted. */
+  systemMove?: { from: Date; to: Date; reason: string } | null;
   /** Server-computed field describing where an order's RUN_TIME value came from (routing runtime feature). */
   run_time_source?: string | null;
   /** Server-computed metadata sidecar for the RUN_TIME source determination. */
@@ -472,7 +480,10 @@ export type AlertType =
   | 'runtime-schedule-mismatch' | 'tool-conflict'
   | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged'
   | 'override-inactive' | 'predecessor-state-unknown' | 'successor-state-unknown' | 'distribution-separation'
-  | 'runtime-unknown' | 'pv-lot-size';
+  | 'runtime-unknown' | 'pv-lot-size'
+  | 'late' | 'finish_moved_earlier' | 'reversal_forward' | 'plant_no_timezone' | 'line_no_calendar'
+  | 'placement_exception' | 'setup_override_orphaned' | 'pull_floor_crossed' | 'frozen_window_crossed'
+  | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue';
 
 export type AlertSev = 'err' | 'warn';
 

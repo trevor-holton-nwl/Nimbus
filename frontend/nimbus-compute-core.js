@@ -77,6 +77,87 @@
     return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
   }
 
+  // Previous local calendar midnight, the backward twin of nextCalendarDay: calendar-date
+  // arithmetic, never `- MS_DAY` (a local day is 23 or 25 hours across a DST change).
+  function prevCalendarDay(d) {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1);
+  }
+
+  // One Intl.DateTimeFormat per zone: constructing it dominates the cost of a conversion and a
+  // backward walk converts every free interval it touches.
+  const _tzFormatters = new Map();
+  function _tzFormatter(timezone) {
+    let fmt = _tzFormatters.get(timezone);
+    if (!fmt) {
+      fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
+        second: 'numeric', hourCycle: 'h23',
+      });
+      _tzFormatters.set(timezone, fmt);
+    }
+    return fmt;
+  }
+
+  // The plant-zone wall-clock components of an instant, as a UTC-epoch number
+  // (Date.UTC of y/m/d/h/mi/s). Null when the zone is invalid or a part is missing.
+  function _wallAsUtcMs(timezone, instantMs) {
+    try {
+      const values = {};
+      for (const part of _tzFormatter(timezone).formatToParts(new Date(instantMs))) {
+        if (part.type !== 'literal') values[part.type] = Number(part.value);
+      }
+      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
+      return Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute, values.second);
+    } catch {
+      return null;
+    }
+  }
+
+  // Project an absolute instant into the naive wall-clock Date convention used by Calendar and
+  // the persisted schedule (the plant zone's y/m/d/h/mi/s read through the local constructor).
+  // No timezone: the instant is returned as-is. Invalid zone: null.
+  function plantWallClockFromInstant(timezone, instant) {
+    if (!timezone) return new Date(instant);
+    try {
+      const parts = _tzFormatter(timezone).formatToParts(instant);
+      const values = {};
+      for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
+      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
+      return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, values.second, instant.getMilliseconds());
+    } catch {
+      return null;
+    }
+  }
+
+  // The inverse of plantWallClockFromInstant: read a naive wall-clock Date's local y/m/d/h/mi/s
+  // as plant-zone wall time and return the absolute instant. Disambiguation follows the usual
+  // "compatible" rule: a wall time that does not exist (spring-forward gap) resolves to the
+  // instant after the gap; an ambiguous one (fall-back hour) to the earlier occurrence.
+  // No timezone: the Date itself. Invalid zone: null.
+  function plantInstantFromWallClock(timezone, wall) {
+    if (!timezone) return new Date(wall);
+    const asUtc = Date.UTC(wall.getFullYear(), wall.getMonth(), wall.getDate(), wall.getHours(),
+      wall.getMinutes(), wall.getSeconds(), wall.getMilliseconds());
+    if (!Number.isFinite(asUtc)) return null;
+    // Zone offset (ms) in force at an instant; the wall reading drops sub-second precision.
+    const offsetAt = ms => {
+      const w = _wallAsUtcMs(timezone, ms);
+      return w === null ? null : w - Math.floor(ms / 1000) * 1000;
+    };
+    const before = offsetAt(asUtc - MS_DAY);
+    const after = offsetAt(asUtc + MS_DAY);
+    if (before === null || after === null) return null;
+    if (before === after) return new Date(asUtc - before);   // no transition within a day either side
+    const candBefore = asUtc - before, candAfter = asUtc - after;
+    const okBefore = offsetAt(candBefore) === before;
+    const okAfter = offsetAt(candAfter) === after;
+    if (okBefore && okAfter) return new Date(Math.min(candBefore, candAfter));   // fall-back: earlier
+    if (okBefore) return new Date(candBefore);
+    if (okAfter) return new Date(candAfter);
+    return new Date(Math.max(candBefore, candAfter));                            // spring-forward gap: after it
+  }
+
   // Buckets a date into a separation-window key at the given granularity
   // ('hour' | 'day' | 'week'); 'none' (or anything unrecognized) returns null,
   // meaning no bucket constraint applies. Local wall-clock components throughout —
@@ -301,6 +382,82 @@
     return result;
   }
 
+  // THE day-attribution rule (OQ12/OQ41): which calendar days an order's work lands on, in minutes. The
+  // utilization matrix, the overload alert and the cell briefing all read this one function, so they can never
+  // disagree about the same order. `dayWindowFor(date)` -> {open, close} | null is the working window of that
+  // calendar date (null when closed).
+  //  - A split order (two or more explicit pieces) is attributed exactly: each piece's wall-clock overlap per day.
+  //  - A single bar spreads its run time across the days it spans in proportion to each day's WORKING-time overlap
+  //    with [start, end], so a bar that starts after one day's close puts nothing on that day and a closed day takes
+  //    no share. A bar with no working overlap at all (an order sitting wholly in closed time) falls back to
+  //    wall-clock overlap, so its hours stay visible and the closed-day alert can fire.
+  //  - A start with no finish puts the whole run time on the start day.
+  // Returns { [dayKey]: minutes }; days with no work are absent.
+  function workingMinutesByDay(task, dayWindowFor) {
+    const out = {};
+    const add = (key, minutes) => { if (minutes > 0) out[key] = (out[key] || 0) + minutes; };
+    const intervals = scheduleIntervals(task);
+    if (intervals.length >= 2) {
+      for (const interval of intervals) {
+        let cursor = startOfDay(new Date(+interval.start));   // startOfDay mutates a Date argument
+        while (cursor < interval.end) {
+          const next = nextCalendarDay(cursor);
+          add(dayKey(cursor), (Math.min(+interval.end, +next) - Math.max(+interval.start, +cursor)) / 60000);
+          cursor = next;
+        }
+      }
+      return out;
+    }
+    let start = parseDate(task?.start_date);
+    const runMin = runHours(task) * 60;
+    const end = parseDate(task?.end_date);
+    // A finish-only row (end set, start null: a freshly distributed child before the reconcile derives its start)
+    // is the bar [end - run_time, end] (U29), so it is visible to the matrix and the briefing before the derive.
+    if (!start) {
+      if (!end || runMin <= 0) return out;
+      start = new Date(+end - runMin * 60000);
+    }
+    if (!end) { add(dayKey(start), runMin); return out; }
+    if (end <= start || runMin <= 0) return out;
+    const days = [];
+    let working = 0, wall = 0;
+    for (let cursor = startOfDay(new Date(+start)); cursor <= end; cursor = nextCalendarDay(cursor)) {
+      const next = nextCalendarDay(cursor);
+      const wallMin = Math.max(0, (Math.min(+end, +next) - Math.max(+start, +cursor)) / 60000);
+      const win = dayWindowFor ? dayWindowFor(cursor) : null;
+      const workMin = win && win.open && win.close
+        ? Math.max(0, (Math.min(+end, +win.close) - Math.max(+start, +win.open)) / 60000) : 0;
+      days.push({ key: dayKey(cursor), wallMin, workMin });
+      working += workMin; wall += wallMin;
+    }
+    const weight = working > 0 ? d => d.workMin / working : (wall > 0 ? d => d.wallMin / wall : () => 0);
+    for (const d of days) add(d.key, runMin * weight(d));
+    return out;
+  }
+
+  // A date-only SAP finish reaches the browser as an exact-midnight timestamp (the server no
+  // longer rewrites it). Read such a value as the end of that date's working window (OQ23).
+  // `raw`: Date (naive plant wall-clock). `dayWindowFor(date)` -> {open, close} | null for that
+  // calendar date. A timed raw is returned unchanged. For exact midnight: the close of that
+  // date's window; a date with no window (closed day) resolves to the close of the latest open
+  // date before it (looking back at most 30 days); no window at all -> raw + 23:59:59. A window
+  // that closes at/after the next midnight (a 24:00 close, a 24/7 line) resolves to that exclusive
+  // next-day 00:00 instant, i.e. the close of the day itself (R-I6): a bar ending exactly at the
+  // close is on time (`end > due` is the lateness rule) and the backward anchor is the close.
+  function dueDateInstant(raw, dayWindowFor) {
+    if (!(raw instanceof Date) || isNaN(raw)) return raw;
+    if (raw.getHours() !== 0 || raw.getMinutes() !== 0 || raw.getSeconds() !== 0 || raw.getMilliseconds() !== 0) return raw;
+    const endOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 0);
+    for (let back = 0; back <= 30; back++) {
+      const day = new Date(raw.getFullYear(), raw.getMonth(), raw.getDate() - back);
+      const win = dayWindowFor(day);
+      if (!win || !win.close) continue;
+      const cap = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1, 0, 0, 0, 0);
+      return win.close > cap ? cap : new Date(+win.close);
+    }
+    return endOfDay(raw);
+  }
+
   // Pre-parse + bucket blocks once so a tight (line × day) loop reuses parsed Date
   // objects instead of re-parsing each cell. Line-block recs carry `plant` so line:null
   // (globalLine) blocks and reused line codes are scoped to the line's own plant.
@@ -367,7 +524,7 @@
   // are already filtered against `dismissed`. Merging the incremental `opts.lines` scope
   // into the retained list is the caller's responsibility.
 
-  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup }) {
+  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup, now, blockedPlants }) {
     const t0 = performance.now();
 
     const onlyLines = Array.isArray(opts?.lines) && opts.lines.length
@@ -402,6 +559,16 @@
     _plantMemo = new Map();
     _taskPlantFallback = _buildTaskPlantFallback(tasks);
     const plantOf = line => getPlantForLine(line, lineSettings, masterData);
+    // The line's working window on a calendar date as {open, close} (the shape dueDateInstant and
+    // workingMinutesByDay read), or null when closed. A line with NO calendar row sent in the payload has no
+    // window at all (Util.dueInstant reads it the same way), so the late rule agrees with the Store-side KPIs.
+    const inScopeLine = line => !onlyLines || onlyLines.has(line || 'Unknown');
+    const calendarLines = new Set(Object.keys(calendars || {}));
+    const dayWindowForLine = (line, requireRow = false) => date => {
+      if (requireRow && !calendarLines.has(line)) return null;
+      const win = workWindow(line, date, calendars, plants, lineSettings, masterData);
+      return win ? { open: win[0], close: win[1] } : null;
+    };
     const setupActiveForLine = line => masterData?.plants?.find(p => p.plant === plantOf(line))?.setup_active !== false;
 
     const alerts = [];
@@ -411,9 +578,22 @@
       return order || 'order number unavailable';
     };
     const orderNumberForId = id => orderNumber(id == null ? undefined : taskById.get(String(id)));
-    const todayStart = startOfDay(new Date());
+    // One clock (OQ52): "today" is the start of the day in the ORDER'S plant, read from the per-plant
+    // wall-clock `now` the caller supplies (the server instant in the plant zone), not this thread's
+    // Date.now(). A plant with no entry (no valid timezone, or a caller that sends none) keeps the
+    // thread's clock, as before.
+    const fallbackToday = startOfDay(new Date());
+    const todayByPlant = new Map();
+    const todayStartFor = task => {
+      const plant = task?.PLANT || plantOf(task?.MACHINE || 'Unknown');
+      const at = plant != null && now ? now[plant] : null;
+      if (!at) return fallbackToday;
+      let day = todayByPlant.get(plant);
+      if (!day) todayByPlant.set(plant, day = startOfDay(at instanceof Date ? new Date(+at) : at) || fallbackToday);
+      return day;
+    };
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
-    let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStart);
+    let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStartFor(t));
     if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'));
 
     /* 1. OVERLAPS */
@@ -471,7 +651,7 @@
     };
     const byTool = {};
     for (const t of tasks) {
-      if (t.end_date && t.end_date < todayStart) continue;
+      if (t.end_date && t.end_date < todayStartFor(t)) continue;
       for (const tool of toolIds(t)) {
         for (const interval of scheduleIntervals(t)) {
           (byTool[tool] ||= []).push({ task: t, start: interval.start, end: interval.end });
@@ -513,7 +693,9 @@
        separation it did not create. Same condition, two severity scales - keep both.
     1c. DISTRIBUTION SEPARATION — siblings of a SAP-distributed order share a
        PARENT_ORDER; a per-work-center policy (max_separation: 'hour'|'day'|'week')
-       caps how far apart their scheduled starts may drift. Grouped by
+       caps how far apart their scheduled FINISHES may drift (backward scheduling OQ38: the siblings share
+       the finish, so a 70/30 family that finishes together raises nothing even though the long child starts
+       earlier). Hand-mirrored by setup-scheduler.mts checkDistributionSeparation - keep the two in step. Grouped by
        (plant, PARENT_ORDER, MATERIAL_NUMBER) so an unlikely parent-order-number
        collision across two different materials never conflates two distinct
        distributions. Queued (needs_planning) siblings have no dates yet and are
@@ -538,11 +720,11 @@
         if (policy?.max_separation) { maxSeparation = policy.max_separation; break; }
       }
       if (!maxSeparation || maxSeparation === 'none') continue;
-      const dated = g.tasks.filter(t => t.start_date);
+      const dated = g.tasks.filter(t => t.end_date);
       if (dated.length < 2) continue;
-      const buckets = new Set(dated.map(t => separationBucketKey(t.start_date, maxSeparation)));
+      const buckets = new Set(dated.map(t => separationBucketKey(t.end_date, maxSeparation)));
       if (buckets.size <= 1) continue;
-      const sortedDated = dated.slice().sort((a, b) => a.start_date.getTime() - b.start_date.getTime());
+      const sortedDated = dated.slice().sort((a, b) => a.end_date.getTime() - b.end_date.getTime());
       const earliest = sortedDated[0];
       const earliestLine = earliest.MACHINE || 'Unknown';
       // Mirrors the tool-conflict rule's own onlyLines gate above: the peer pool
@@ -553,38 +735,22 @@
       alerts.push({
         id: `dist-sep:${g.plant ?? ''}:${g.parent}:${g.material}`,
         sev: 'err', type: 'distribution-separation',
-        msg: `Sub-orders of "${g.parent}" start in different ${maxSeparation}s.`,
+        msg: `Sub-orders of "${g.parent}" finish in different ${maxSeparation}s.`,
         msgKey: 'alert.distribution_separation', msgVars: vars,
-        taskId: earliest.id, line: earliestLine, time: earliest.start_date,
+        taskId: earliest.id, line: earliestLine, time: earliest.start_date || earliest.end_date,
       });
     }
 
     /* 2. OVERLOAD / CLOSED */
     const byLineDay = {};
+    // One attribution rule (workingMinutesByDay): the same days and hours the utilization matrix and the cell
+    // briefing use, so the overload alert can never contradict the heatmap for one order.
     for (const t of activeTasks) {
       const line = t.MACHINE || 'Unknown';
-      const intervals = scheduleIntervals(t);
-      if (intervals.length >= 2) {
-        for (const interval of intervals) {
-          let cursor = startOfDay(new Date(interval.start));
-          while (cursor && cursor < interval.end) {
-            const nextDay = new Date(cursor); nextDay.setDate(nextDay.getDate() + 1);
-            const overlapHours = (Math.min(+interval.end, +nextDay) - Math.max(+interval.start, +cursor)) / MS_HOUR;
-            if (overlapHours > 0) {
-              const day = dayKey(cursor);
-              const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
-              row.hours += overlapHours;
-              row.tasks.push(t);
-            }
-            cursor = nextDay;
-          }
-        }
-      } else if (t.start_date) {
-        // Preserve the legacy continuous-order accounting exactly under the
-        // default policy; only explicit child schedules use productive pieces.
-        const day = dayKey(t.start_date);
+      const windowFor = dayWindowForLine(line);
+      for (const [day, minutes] of Object.entries(workingMinutesByDay(t, windowFor))) {
         const row = (byLineDay[`${line}|${day}`] ||= { line, day, hours: 0, tasks: [] });
-        row.hours += runHours(t);
+        row.hours += minutes / 60;
         row.tasks.push(t);
       }
     }
@@ -782,10 +948,151 @@
       const line = t.MACHINE || 'Unknown';
       alerts.push({
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
-        msg: `Order "${orderNumber(t)}" has a runtime that no longer matches its saved schedule.`,
+        msg: `The start of order "${orderNumber(t)}" may be out of date: its run time changed after the schedule was saved.`,
+        msgKey: 'alert.start_may_be_stale', msgVars: { order: orderNumber(t) },
         taskId: t.id, line, time: t.start_date || new Date(),
       });
     }
+
+    /* LATE (OQ6) - the placed finish is after the due instant. Data-only: it needs no clock, so it is fresh on
+       every store event. Warning for any positive lateness; error when the finish is also beyond the plant's
+       push-forward ceiling (the due date's local midnight + N + 1 days, the same ceiling the optimizer honours).
+       A queued order has no placed finish and gets none (its lateness shows through Util.latenessHours). The due
+       instant is the SAP finish as received, a date-only one read as the close of that day's window. */
+    const pushCapDays = plant => {
+      const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
+      return Number.isInteger(value) && value >= 0 ? value : null;
+    };
+    // Is a placed finish beyond the plant's push-forward ceiling? A due on a 24:00 close is the exclusive next-day
+    // 00:00: the due DAY is the one before it (R-I6). Shared by the late alert and the reversal_forward severity (D9b).
+    const beyondPushCap = (t, end, due) => {
+      const cap = pushCapDays(t.PLANT || plantOf(t.MACHINE || 'Unknown'));
+      if (cap === null || !end || !due) return false;
+      const ceiling = new Date(+due - 1); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
+      return end > ceiling;
+    };
+    for (const t of activeTasks) {
+      if (t.planning_status === 'needs_planning') continue;
+      const end = parseDate(t.end_date), rawDue = parseDate(t.original_end_date);
+      if (!end || !rawDue) continue;
+      const line = t.MACHINE || 'Unknown';
+      // D14: a line with no row of its own reads the default window, so a date-only due resolves instead of staying silent.
+      const due = dueDateInstant(rawDue, dayWindowForLine(line, false));
+      if (!(end > due)) continue;
+      const hours = (end - due) / MS_HOUR;
+      const cap = pushCapDays(t.PLANT || plantOf(line));
+      const beyondCap = beyondPushCap(t, end, due);
+      const vars = { order: orderNumber(t), hours: hours.toFixed(1), days: cap ?? '' };
+      alerts.push({
+        id: `late-${t.id}`, sev: beyondCap ? 'err' : 'warn', type: 'late',
+        msg: beyondCap
+          ? `Order "${vars.order}" finishes ${vars.hours} h after its due date, beyond the plant limit of ${cap} day(s) late.`
+          : `Order "${vars.order}" finishes ${vars.hours} h after its due date.`,
+        msgKey: beyondCap ? 'alert.late_beyond_cap' : 'alert.late', msgVars: vars,
+        taskId: t.id, line, time: end,
+      });
+    }
+
+    /* PLACEMENT EXCEPTION - the marker the server stores when an order was placed outside the normal rules
+       (overtime or overlong). One alert per marked order. */
+    const PLACEMENT_KEYS = { overtime: 'alert.placement_exception_overtime', overlong: 'alert.placement_exception_overlong' };
+    for (const t of activeTasks) {
+      const marker = t.placement_exception;
+      if (marker !== 'overtime' && marker !== 'overlong') continue;
+      const line = t.MACHINE || 'Unknown';
+      const vars = { order: orderNumber(t), line };
+      alerts.push({
+        id: `placement-exception-${t.id}`, sev: 'warn',   // D20 (VM14): approved by the planner; visible, not blocking
+        type: 'placement_exception',
+        msg: marker === 'overtime'
+          ? `Order "${vars.order}" is placed outside working hours on ${line}.`
+          : `Order "${vars.order}" is longer than any working window on ${line} and is placed as one long bar.`,
+        msgKey: PLACEMENT_KEYS[marker], msgVars: vars,
+        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || new Date(),
+      });
+    }
+
+    /* ENGINE FINDINGS - every note the schedule engine leaves on a task (task.derivationIssue, session-only) is
+       rendered here, in the same pass as every other alert, so nothing is computed on the main thread. Keyed by
+       task id + code so a re-render replaces rather than accumulates. Plant-level findings (no time zone) and
+       line-level ones (no server calendar) are de-duplicated to ONE alert per plant / per line; a plant alert sits
+       on the plant's first affected line (stable across incremental runs) and is emitted when that line is in
+       scope. An unknown code still renders a generic alert. */
+    const ISSUE_SEV_ERR = new Set(['plant_no_timezone', 'line_no_calendar', 'no_anchor']);   // D9b: reversal_forward is 'err' only beyond the push cap (below)
+    const readable = d => { const v = parseDate(d); return v ? fmtDTReadable(v) : ''; };
+    const plantFirstLine = new Map();   // plant -> smallest affected line (all tasks, scope-independent)
+    const noteFirstLine = (plant, line) => {
+      if (plant == null) return;
+      const cur = plantFirstLine.get(plant);
+      if (cur === undefined || line < cur) plantFirstLine.set(plant, line);
+    };
+    for (const t of tasks) {
+      if (t.derivationIssue?.code === 'plant_no_timezone') noteFirstLine(t.PLANT || plantOf(t.MACHINE || 'Unknown'), t.MACHINE || 'Unknown');
+    }
+    const blockedSet = new Set(Array.isArray(blockedPlants) ? blockedPlants : []);
+    for (const plant of blockedSet) {
+      let first;
+      for (const l of masterData?.lines ?? []) if (l?.plant === plant && l.machine && (first === undefined || l.machine < first)) first = l.machine;
+      if (first !== undefined) noteFirstLine(plant, first);
+    }
+    const emittedPlants = new Set();
+    const emitPlantNoTimezone = plant => {
+      const line = plantFirstLine.get(plant);
+      if (plant == null || line === undefined || emittedPlants.has(plant) || !inScopeLine(line)) return;
+      emittedPlants.add(plant);
+      alerts.push({
+        id: `plant-no-timezone-${plant}`, sev: 'err', type: 'plant_no_timezone',
+        msg: `Plant ${plant} has no valid time zone, so NIMBUS cannot derive start times for its orders.`,
+        msgKey: 'alert.plant_no_timezone', msgVars: { plant },
+        line, time: now?.[plant] || new Date(),
+      });
+    };
+    for (const t of tasks) {
+      const issue = t.derivationIssue;
+      if (!issue || !issue.code) continue;
+      const line = t.MACHINE || 'Unknown';
+      const plant = t.PLANT || plantOf(line);
+      const code = issue.code;
+      if (code === 'plant_no_timezone') { emitPlantNoTimezone(plant); continue; }
+      if (!inScopeLine(line)) continue;
+      // D14: line_no_calendar is no longer emitted (a line without its own row reads the default window).
+      const order = orderNumber(t);
+      const vars = { order, line, from: readable(issue.from), to: readable(issue.to) };
+      let key = `alert.${code}`, type = code, msg;
+      let sev = ISSUE_SEV_ERR.has(code) ? 'err' : 'warn';
+      switch (code) {
+        case 'finish_moved_earlier':
+          msg = `Order "${order}" could not hold its finish and now ends earlier, at ${vars.to} (was ${vars.from}).`; break;
+        case 'reversal_forward': {
+          const detail = issue.detail;
+          if (beyondPushCap(t, parseDate(t.end_date), dueDateInstant(parseDate(t.original_end_date), dayWindowForLine(line, false)))) sev = 'err';
+          if (detail === 'run_time_grew' || detail === 'due_date_past' || detail === 'cutover') key = `alert.reversal_forward_${detail}`;
+          msg = detail === 'run_time_grew'
+            ? `Order "${order}" was placed forward from now because its run time grew and its start would fall in the past.`
+            : detail === 'cutover'
+              ? `Order "${order}" was placed forward from now when scheduling switched to the finish date, because its start would fall in the past.`
+              : detail === 'due_date_past'
+                ? `Order "${order}" was placed forward from now because its due date has already passed; it will finish late.`
+                : `Order "${order}" was placed forward from now because its start would fall in the past; it will finish after its held finish.`;
+          break;
+        }
+        case 'no_anchor': msg = `Order "${order}" has no finish date to schedule from.`; break;
+        case 'no_operating_window': msg = `Order "${order}" could not be placed: no working window was found for ${line} in the next 90 days.`; break;
+        case 'run_time_zero': msg = `Order "${order}" has no run time, so it has no bar to place.`; break;
+        case 'setup_override_orphaned': msg = `A manual changeover override for order "${order}" on ${line} no longer matches the order before it.`; break;
+        case 'pull_floor_crossed': msg = `Order "${order}" now starts ${vars.from}, before the earliest start the plant allows (${vars.to}).`; break;
+        case 'frozen_window_crossed': msg = `Order "${order}" now starts inside the frozen window.`; break;
+        default:
+          type = 'derivation_issue'; key = 'alert.derivation_issue'; vars.code = String(code);
+          msg = `Order "${order}" has a scheduling note (${code}).`;
+      }
+      alerts.push({
+        id: `derivation-${t.id}-${code}`, sev, type, msg, msgKey: key, msgVars: vars,
+        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || now?.[plant] || new Date(),
+      });
+    }
+    // A plant announced as blocked by the clock (Store.plantNow) alerts even when none of its orders carry a note.
+    for (const plant of blockedSet) emitPlantNoTimezone(plant);
 
     // RUNTIME-UNKNOWN (ROUTING_RUNTIME_DESIGN.md §8.6) — a task held in Needs
     // Planning specifically because the routing resolver (backend/routing/resolver.py
@@ -867,6 +1174,8 @@
       alerts.push({
         id: `setup-violated-${key}`, sev: setupActiveForLine(interval.line) ? 'err' : 'warn', type: 'setup-violated',
         msg: `Not enough changeover time before order "${orderNumberForId(interval.successorOrderId)}" on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
+        msgKey: 'alert.setup_violated',
+        msgVars: { order: orderNumberForId(interval.successorOrderId), line: interval.line, required: requiredMinutes, available: availableMinutes, short: shortMinutes },
         taskId: interval.successorOrderId, line: interval.line, time: interval.start,
         requiredMinutes, availableMinutes, shortMinutes,
       });
@@ -955,78 +1264,21 @@
       }
     }
 
+    // One attribution rule (workingMinutesByDay), shared with the overload alert and the cell briefing.
     for (const t of tasks) {
-      if (!t.start_date) continue;
+      if (!t.start_date && !t.end_date) continue;   // VM12: a finish-only row is the bar [end - run time, end]
       const line = t.MACHINE || 'Unknown';
-      if (!matrix[line]) continue;
-
-      const intervals = scheduleIntervals(t);
-      if (intervals.length >= 2) {
-        const lineRows = matrix[line];
-        for (const interval of intervals) {
-          const intervalStartMs = interval.start.getTime();
-          const intervalEndMs = interval.end.getTime();
-          // Optimize: only iterate days this interval actually spans, not all days in the horizon.
-          const dayStart = startOfDay(new Date(intervalStartMs));
-          const dayEnd = startOfDay(new Date(intervalEndMs));
-          let currentDay = new Date(dayStart);
-          while (currentDay <= dayEnd) {
-            const key = dayKey(currentDay);
-            const row = lineRows[key];
-            if (row) {
-              const dayStartMs = row.date.getTime();
-              const dayEndMs = nextCalendarDay(row.date).getTime();
-              const contribution = (Math.min(intervalEndMs, dayEndMs) - Math.max(intervalStartMs, dayStartMs)) / MS_HOUR;
-              if (contribution > 0) {
-                row.scheduled += contribution;
-                if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
-              }
-            }
-            currentDay = nextCalendarDay(currentDay);
-          }
-        }
-        continue;
-      }
-
-      if (!t.end_date) {
-        const key = dayKey(t.start_date);
-        if (matrix[line][key]) {
-          matrix[line][key].scheduled += runHours(t);
-          matrix[line][key].tasks.push(t.id);
-        }
-        continue;
-      }
-
-      const tStartMs   = t.start_date.getTime();
-      const tEndMs     = t.end_date.getTime();
-      if (tEndMs <= tStartMs) continue;
-      const taskRunHrs = runHours(t);
-      if (taskRunHrs <= 0) continue;
-      const totalTaskMs = tEndMs - tStartMs;
-
       const lineRows = matrix[line];
-      // Optimize: only iterate days this task actually spans, not all days in the horizon.
-      const dayStart = startOfDay(new Date(tStartMs));
-      const dayEnd = startOfDay(new Date(tEndMs));
-      let currentDay = new Date(dayStart);
-      while (currentDay <= dayEnd) {
-        const key = dayKey(currentDay);
+      if (!lineRows) continue;
+      const windowFor = date => {
+        const win = workWindow(line, date, calendars, plants, lineSettings, masterData);
+        return win ? { open: win[0], close: win[1] } : null;
+      };
+      for (const [key, minutes] of Object.entries(workingMinutesByDay(t, windowFor))) {
         const row = lineRows[key];
-        if (row) {
-          if (!workWindow(line, row.date, calendars, plants, lineSettings, masterData)) {
-            currentDay = nextCalendarDay(currentDay);
-            continue;
-          }
-          const dayStartMs = row.date.getTime();
-          const dayEndMs   = nextCalendarDay(row.date).getTime();
-          const overlapMs    = Math.min(tEndMs, dayEndMs) - Math.max(tStartMs, dayStartMs);
-          const contribution = taskRunHrs * (overlapMs / totalTaskMs);
-          if (contribution > 0) {
-            row.scheduled += contribution;
-            row.tasks.push(t.id);
-          }
-        }
-        currentDay = nextCalendarDay(currentDay);
+        if (!row) continue;
+        row.scheduled += minutes / 60;
+        if (!row.tasks.includes(t.id)) row.tasks.push(t.id);
       }
     }
 
@@ -1077,7 +1329,7 @@
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
-    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, workWindow,
+    getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization,

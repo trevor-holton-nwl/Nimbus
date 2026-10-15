@@ -16,7 +16,7 @@ import os
 import sys
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -212,9 +212,17 @@ def test_build_order_rows_inactive_map_rows_do_not_flow():
     assert "bom_usage" not in r
 
 
-def test_build_order_rows_unparseable_start_is_dropped_and_reported():
+def test_build_order_rows_missing_start_is_kept_with_a_null_start():
+    """Backward scheduling Task 2.7: the start is optional, the finish is not."""
     rows, problems = st.build_order_rows([_planned_stage(id=7, psttr="00000000")], None, _fmap(_PLANNED_MAP))
-    assert rows == [] and problems == [(7, "invalid_date")]
+    assert problems == [] and len(rows) == 1
+    assert rows[0]["basic_start_date"] is None and rows[0]["basic_finish_date"] is not None
+    assert rows[0]["sap_basic_finish_date"] == rows[0]["basic_finish_date"]
+
+
+def test_build_order_rows_missing_finish_is_dropped_and_reported():
+    rows, problems = st.build_order_rows([_planned_stage(id=8, pedtr="00000000")], None, _fmap(_PLANNED_MAP))
+    assert rows == [] and problems == [(8, "invalid_date")]
 
 
 def test_build_order_rows_int_cast_failure_is_a_problem_not_a_crash():
@@ -284,12 +292,12 @@ def test_validate_planned_order_rows_reasons():
         {**ok, "id": 2, "plnum": "000000000"},                      # all-zero order number -> missing_key
         {**ok, "id": 3, "plnum": "300", "plwrk": "OTHER"},          # plant_mismatch
         {**ok, "id": 4, "plnum": "400", "psttr": "20269999"},       # invalid_date
-        {**ok, "id": 5, "plnum": "500", "psttr": "00000000"},       # missing start -> invalid_date
+        {**ok, "id": 5, "plnum": "500", "psttr": "00000000"},       # missing start: valid, the start is optional
         {**ok, "id": 6, "plnum": "600", "pstti": "250000"},         # invalid_time
         {**ok, "id": 7, "plnum": "700", "gsmng": None},             # invalid_number
         {**ok, "id": 8, "plnum": "800", "abmng": Decimal("-1")},    # invalid_number
         {**ok, "id": 9, "plnum": "900", "stalt": "x"},              # invalid_int
-        {**ok, "id": 10, "plnum": "1000", "pedtr": "00000000"},     # no finish: fine (hygiene fills it)
+        {**ok, "id": 10, "plnum": "1000", "pedtr": "00000000"},     # no finish: rejected, the finish is required
         {**ok, "id": 11, "plnum": "0000001100"},                    # duplicate order+material ...
         {**ok, "id": 12, "plnum": "1100"},                          # ... after strip_zeros
     ]
@@ -298,11 +306,12 @@ def test_validate_planned_order_rows_reasons():
     assert res[1]["resolved"] == {"production_order": "123", "material_id": "12345", "plant": "ZZP1"}
     assert res[2]["reason"] == "missing_key"
     assert res[3]["reason"] == "plant_mismatch"
-    assert res[4]["reason"] == "invalid_date" and res[5]["reason"] == "invalid_date"
+    assert res[4]["reason"] == "invalid_date"                               # a malformed start is not a missing one
+    assert res[5]["status"] == "valid" and res[5]["reason"] is None         # no start at all is fine
     assert res[6]["reason"] == "invalid_time"
     assert res[7]["reason"] == "invalid_number" and res[8]["reason"] == "invalid_number"
     assert res[9]["reason"] == "invalid_int"
-    assert res[10]["status"] == "valid"
+    assert res[10]["reason"] == "invalid_date"
     assert res[11]["reason"] == res[12]["reason"] == "duplicate_key"
     # A rejected row still resolves its order number (the vanish guard protects it).
     assert res[4]["resolved"]["production_order"] == "400"
@@ -573,10 +582,17 @@ def test_header_dict_hides_the_stored_deletion_key_list():
     assert d["counts"] == {"vanish_candidates": 2}
 
 
-def test_outbound_candidate_rows_use_the_gantt_effective_end():
+def test_outbound_candidate_rows_read_the_shared_stored_finish_not_start_plus_run_time():
+    """Backward scheduling: what Send transmits is the order's stored finish (last segment, stored end, locked
+    SAP finish), the same fragment the Gantt reads; the start is the first segment, else the stored start."""
     cur = _RecCursor()
     st._outbound_candidate_rows(cur, "ZZP1")
-    assert "runtime_schedule_mismatch" in cur.executed[0][0]
+    sql = cur.executed[0][0]
+    assert st.db._EFF_END_SQL in sql
+    # F15: the firm rule's start is the LOCKED start (never the echo-movable basic start ahead of the received one)
+    assert "COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date)" in sql
+    assert st.db._EFF_START_SQL not in sql
+    assert "INTERVAL" not in sql and "run_time" not in sql
 
 
 # ===========================================================================
@@ -613,28 +629,52 @@ def test_build_outbound_groups_rolls_children_up_with_max_end_and_any_firm():
         _o("c1", "PAR1-A", parent="PAR1", end=datetime(2026, 11, 1, 8), version=None),
         _o("c2", "PAR1-B", parent="PAR1", end=datetime(2026, 11, 2, 9), manual=True, version="V2"),
         _o("c3", "PAR1-C", parent="PAR1", end=None, status="needs_planning"),           # skipped member, still a member
-        _o("p1", "1001", end=datetime(2026, 11, 3, 6)),
+        _o("p1", "1001", end=datetime(2026, 11, 3, 6), manual=True),
         _o("n1", "1002", end=None),
         _o("n2", "1003", status="needs_planning"),
     ]
-    groups, skipped = st.build_outbound_groups(rows, None)
+    groups, skipped, unfirmed = st.build_outbound_groups(rows, None)
     by = {g["plnum"]: g for g in groups}
-    assert sorted(by) == ["1001", "PAR1"] and skipped == 3
+    assert sorted(by) == ["1001", "PAR1"] and skipped == 3 and unfirmed == 0
     par = by["PAR1"]
     assert par["end"] == datetime(2026, 11, 2, 9)                                       # max child end
     assert par["auffx"] == "X" and par["rolled_up"] is True and par["verid"] == "V2"
     assert par["member_ids"] == ["c1", "c2", "c3"] and par["nimbus_order_id"] is None
     assert par["sent_ids"] == ["c1", "c2"]                                              # L9: skipped member not remembered
     plain = by["1001"]
-    assert plain["auffx"] == "" and plain["rolled_up"] is False and plain["nimbus_order_id"] == "p1"
+    assert plain["auffx"] == "X" and plain["rolled_up"] is False and plain["nimbus_order_id"] == "p1"
     assert plain["verid"] == "V1"
 
 
 def test_build_outbound_groups_groups_by_material_and_applies_frozen_firming():
     rows = [_o("a", "9", mat="M1", start=datetime(2026, 10, 9)), _o("b", "9", mat="M2", start=datetime(2026, 10, 20))]
-    groups, skipped = st.build_outbound_groups(rows, _FROZEN)
-    assert skipped == 0 and len(groups) == 2
-    assert {g["matnr"]: g["auffx"] for g in groups} == {"M1": "X", "M2": ""}
+    groups, skipped, unfirmed = st.build_outbound_groups(rows, _FROZEN)
+    assert skipped == 0 and unfirmed == 1 and len(groups) == 1           # M2 starts after the frozen end: not firmed
+    assert {g["matnr"]: g["auffx"] for g in groups} == {"M1": "X"}
+
+
+def test_send_skips_unfirmed_orders():
+    """OQ61: only firmed planned orders are sent -- planner-firmed, SAP-firmed or inside the frozen horizon."""
+    rows = [
+        _o("u1", "U1"),                                                  # nothing qualifies -> dropped
+        _o("m1", "M1", manual=True),                                     # planner-firmed
+        _o("s1", "S1", ind="X"),                                         # SAP-firmed
+        _o("f1", "F1", start=datetime(2026, 10, 9)),                     # starts inside the frozen horizon
+        _o("n1", "N1", end=None, manual=True),                           # firmed but no end: counted as no-end, not unfirmed
+        # an aggregate with one firmed child stays; its end is the latest over ALL children (the unfirmed one too)
+        _o("c1", "AG-A", parent="AG", end=datetime(2026, 11, 1, 8), manual=True),
+        _o("c2", "AG-B", parent="AG", end=datetime(2026, 11, 5, 8)),
+        # an aggregate with no firmed child is dropped as ONE planned order
+        _o("d1", "DG-A", parent="DG"),
+        _o("d2", "DG-B", parent="DG"),
+    ]
+    groups, no_end, unfirmed = st.build_outbound_groups(rows, _FROZEN)
+    by = {g["plnum"]: g for g in groups}
+    assert sorted(by) == ["AG", "F1", "M1", "S1"]
+    assert all(g["auffx"] == "X" for g in groups)
+    assert by["AG"]["end"] == datetime(2026, 11, 5, 8) and by["AG"]["member_ids"] == ["c1", "c2"]
+    assert no_end == 1 and unfirmed == 2                                 # unfirmed planned orders: U1 and the DG aggregate
+
 
 
 def test_outbound_end_is_converted_plant_local_to_sap_system_zone():
@@ -765,7 +805,7 @@ def test_planned_order_batch_is_held_when_routing_is_off(pg, stg_plant):
     _set_plant(pg, routing=False, horizon_days=30)
     start = (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%d")
     bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order",
-                      [{"plnum": "000000001", "matnr": "777", "plwrk": PLANT, "psttr": start, "gsmng": 10}])
+                      [{"plnum": "000000001", "matnr": "777", "plwrk": PLANT, "psttr": start, "pedtr": start, "gsmng": 10}])
     res = st.validate_batch(bid)
     assert res["status"] == "held" and "routing_required" in res["held_reasons"]
     assert any(w.get("code") == "routing_required" for w in res["warnings"])
@@ -809,6 +849,28 @@ def test_planned_order_apply_holds_at_over_25_percent_then_confirm_archives_and_
 
 
 @pytest.mark.pg
+def test_vanish_key_is_the_locked_sap_start_not_the_echoed_planning_copy(pg, stg_plant):
+    """Backward scheduling OQ26/OQ27: the in-horizon (vanish) key reads the start SAP first sent, so an echo that
+    moved `basic_start_date` or `sap_basic_start_date` never moves an order across the horizon."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    soon, far = now + timedelta(days=1), now + timedelta(days=200)
+    with _conn(pg) as (conn, cur):
+        for oid, basic, sap_basic, locked in (
+                ("zzstg-vk-in", soon, soon, soon),            # locked start inside -> a vanish candidate
+                ("zzstg-vk-echo-out", soon, soon, far),       # echo pulled the planning copy in; locked start is out
+                ("zzstg-vk-echo-in", far, far, soon)):        # echo pushed the planning copy out; locked start is in
+            cur.execute("INSERT INTO orders (id, production_order, material_number, plant, basic_start_date,"
+                        " basic_finish_date, sap_basic_start_date, original_start_received)"
+                        " VALUES (%s, %s, '777', %s, %s, %s, %s, %s)",
+                        (oid, oid.upper(), PLANT, basic, basic + timedelta(hours=4), sap_basic, locked))
+        conn.commit()
+    with _conn(pg) as (_c, cur):
+        visibility_end, _frozen = pg._horizon_bounds_for_plant(cur, PLANT)
+        assert sorted(st._vanish_candidates(cur, PLANT, set(), visibility_end)) == ["zzstg-vk-echo-in", "zzstg-vk-in"]
+
+
+@pytest.mark.pg
 def test_poll_once_supersedes_older_ready_batches(pg, stg_plant):
     row = {"matnr": "12345", "werks": PLANT}
     old = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row], age_minutes=30)
@@ -832,10 +894,12 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         queued = status == "needs_planning"          # orders_planning_state_check: queued = no slot + an object reason
         cur.execute(
             "INSERT INTO orders (id, production_order, material_number, plant, parent_production_order,"
-            " basic_start_date, basic_finish_date, scheduled_start, run_time, planning_status, planning_reason,"
-            " production_version) VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, %s, 'V1')",
+            " basic_start_date, basic_finish_date, scheduled_start, scheduled_end, run_time, planning_status,"
+            " planning_reason, production_version) VALUES (%s, %s, '777', %s, %s, %s, %s, %s, %s, %s, %s, %s, 'V1')",
+            # the STORED finish (start + 3 h) differs from start + run_time (2 h): Send reads the stored one
             (oid, po, PLANT, parent, start if with_dates else None, start + timedelta(hours=2) if with_dates else None,
-             start if with_dates and not queued else None, run_time if with_dates else None, status,
+             start if with_dates and not queued else None, start + timedelta(hours=3) if with_dates and not queued else None,
+             run_time if with_dates else None, status,
              Jsonb({"code": "test", "message": "test"}) if queued else None))
 
     with _conn(pg) as (conn, cur):
@@ -844,7 +908,8 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         ins(cur, "zzstg-c2", "PAR1-B", parent="PAR1", start=t0 + timedelta(days=1))
         ins(cur, "zzstg-np", "NP", status="needs_planning")
         ins(cur, "zzstg-nd", "ND", with_dates=False)
-        cur.execute("UPDATE orders SET manual_firmed = TRUE WHERE id = 'zzstg-c1'")
+        ins(cur, "zzstg-uf", "UF")                                        # unfirmed plain order: never queued (OQ61)
+        cur.execute("UPDATE orders SET manual_firmed = TRUE WHERE id IN ('zzstg-c1', 'zzstg-p1')")
         conn.commit()
     with _conn(pg) as (_c, cur):
         cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
@@ -854,12 +919,13 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
         with _conn(pg) as (_c, cur):                                      # A2: the FIRST send writes no orders row
             cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
             assert dict(cur.fetchall()) == xmin_initial
-        assert res["queued"] == 2 and res["skipped_no_end"] == 2 and res["firmed"] == 1
+        assert res["queued"] == 2 and res["skipped_no_end"] == 2 and res["firmed"] == 2
+        assert res["skipped_unfirmed"] == 1
         assert res["rolled_up_groups"] == 1 and res["send_batch_id"]
         rows = {r["plnum"]: r for r in st.outbound_rows(PLANT)}
         assert sorted(rows) == ["P1", "PAR1"] and all(r["row_status"] == "ready" for r in rows.values())
-        assert rows["PAR1"]["auffx"] == "X" and rows["P1"]["auffx"] == ""
-        child_end = t0 + timedelta(days=1, hours=2)
+        assert rows["PAR1"]["auffx"] == "X" and rows["P1"]["auffx"] == "X"
+        child_end = t0 + timedelta(days=1, hours=3)
         d, t = st.plant_local_to_sap(child_end, "UTC")
         assert rows["PAR1"]["pedtr"] == d.isoformat() and rows["PAR1"]["pedti"] == t.isoformat()
         assert st.outbound_status(PLANT)["ready"] == 2
@@ -871,8 +937,9 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
             sent = {r[0]: r[1:] for r in cur.fetchall()}
         assert sent["zzstg-c1"] == (child_end, "V1", True, True)         # children remember the rolled-up end
         assert sent["zzstg-c2"] == (child_end, "V1", True, True)
-        assert sent["zzstg-p1"] == (t0 + timedelta(hours=2), "V1", False, True)
+        assert sent["zzstg-p1"] == (t0 + timedelta(hours=3), "V1", True, True)
         assert sent["zzstg-np"][0] is None and sent["zzstg-nd"][0] is None
+        assert sent["zzstg-uf"][0] is None                                # the unfirmed order was not sent, so nothing is remembered
 
         with _conn(pg) as (_c, cur):
             cur.execute("SELECT id, xmin::text FROM orders WHERE plant = %s ORDER BY id", (PLANT,))
@@ -890,6 +957,45 @@ def test_send_to_sap_queues_rolls_up_remembers_and_requeue_retires_old_rows(pg, 
             cur.execute("SELECT count(*) FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
                         " AND action = 'send_to_sap' AND details->>'plant' = %s", (PLANT,))
             assert cur.fetchone()[0] == 2
+    finally:
+        with _conn(pg) as (conn, cur):
+            cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
+            cur.execute("DELETE FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
+                        " AND details->>'plant' = %s", (PLANT,))
+            conn.commit()
+
+
+@pytest.mark.pg
+def test_a_firmed_never_placed_order_is_sent_with_its_sap_finish_and_the_echo_of_it_matches(pg, stg_plant):
+    """Review Focus 2 (backward scheduling Task 2.7): a firmed order nobody placed has no stored placement, so
+    Send transmits the finish SAP gave it (`original_finish_received`), remembers exactly that value, and SAP
+    sending it straight back is an echo (`finish_echoes`) -- it must not read as an SAP change."""
+    _set_plant(pg, routing=False, horizon_days=None)
+    due = datetime(2030, 2, 5, 14, 30)
+    with _conn(pg) as (conn, cur):
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date, basic_finish_date,"
+            " original_start_received, original_finish_received, run_time, firming_indicator)"
+            " VALUES ('zzstg-fnp', 'FNP', '777', %s, NULL, %s, NULL, %s, 3, 'X')", (PLANT, due, due))
+        conn.commit()
+    try:
+        res = st.queue_send_to_sap(PLANT, actor="pytest")
+        assert res["queued"] == 1 and res["firmed"] == 1 and res["skipped_no_end"] == 0
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(due, "UTC")
+        assert row["plnum"] == "FNP" and row["auffx"] == "X"
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT sent_finish FROM order_sap_sent WHERE order_id = 'zzstg-fnp'")
+            assert cur.fetchone()[0] == due
+        # SAP echoes the finish it was sent (date + time in the SAP frame, which is UTC here)
+        assert st.finish_echoes(due, False, due, "UTC", "UTC") is True
+        assert st.finish_echoes(due.replace(minute=45), False, due, "UTC", "UTC") is False
+        before = {"sap_basic_start_date": None, "sap_basic_finish_date": due - timedelta(days=1),
+                  "sap_sent_finish": due, "sap_sent_version": None, "tz": "UTC", "scheduled_start": None,
+                  "scheduled_end": None}
+        echo = {"basic_start_date": due - timedelta(hours=3), "basic_finish_date": due, "_finish_date_only": False}
+        assert st.db.sap_changed_fields(before, echo, None, sap_tz="UTC") == set()
     finally:
         with _conn(pg) as (conn, cur):
             cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
@@ -1023,20 +1129,21 @@ def test_resume_of_an_errored_planned_order_batch_reruns_the_gates(pg, stg_plant
 
 
 @pytest.mark.pg
-def test_send_uses_the_runtime_mismatch_effective_end(pg, stg_plant):
+@pytest.mark.parametrize("mismatch", [True, False])
+def test_send_transmits_the_stored_finish_whatever_the_run_time_or_mismatch_flag(pg, stg_plant, mismatch):
     _set_plant(pg, routing=False, horizon_days=None)
     t0 = datetime(2030, 1, 10, 6, 0)
     with _conn(pg) as (conn, cur):
         cur.execute(
             "INSERT INTO orders (id, production_order, material_number, plant, basic_start_date, basic_finish_date,"
-            " scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch, planning_status)"
-            " VALUES ('zzstg-rm', 'RM1', '777', %s, %s, %s, %s, %s, 2, TRUE, 'scheduled')",
-            (PLANT, t0, t0 + timedelta(hours=9), t0, t0 + timedelta(hours=9)))
+            " scheduled_start, scheduled_end, run_time, runtime_schedule_mismatch, planning_status, manual_firmed)"
+            " VALUES ('zzstg-rm', 'RM1', '777', %s, %s, %s, %s, %s, 2, %s, 'scheduled', TRUE)",
+            (PLANT, t0, t0 + timedelta(hours=9), t0, t0 + timedelta(hours=9), mismatch))
         conn.commit()
     try:
         st.queue_send_to_sap(PLANT, actor="pytest")
         row = st.outbound_rows(PLANT)[0]
-        d, t = st.plant_local_to_sap(t0 + timedelta(hours=9), "UTC")       # the retained scheduled end, not start+run_time
+        d, t = st.plant_local_to_sap(t0 + timedelta(hours=9), "UTC")       # the stored finish, not start+run_time
         assert (row["pedtr"], row["pedti"]) == (d.isoformat(), t.isoformat())
     finally:
         with _conn(pg) as (conn, cur):
@@ -1351,8 +1458,10 @@ def test_same_instant_batches_have_exactly_one_winner(pg, stg_plant):
     a = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
     b = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", [row])
     with _conn(pg) as (conn, cur):
-        cur.execute("UPDATE sap_stage_batch SET received_at = '2026-10-07 08:00:00+00',"
-                    " ready_at = '2026-10-07 08:00:01+00' WHERE batch_id IN (%s, %s)", (a, b))
+        # Relative to now so the shared instant always sits inside the 7-day retention window.
+        cur.execute("UPDATE sap_stage_batch SET received_at = date_trunc('second', now()) - interval '1 hour',"
+                    " ready_at = date_trunc('second', now()) - interval '1 hour' + interval '1 second'"
+                    " WHERE batch_id IN (%s, %s)", (a, b))
         conn.commit()
     out = st.poll_once(actor="pytest")
     winner, loser = (a, b) if str(a) > str(b) else (b, a)
@@ -1487,6 +1596,29 @@ def test_zero_open_reset_leaves_a_planners_reslot_alone_on_an_unchanged_batch(pg
     with _conn(pg) as (_c, cur):
         cur.execute("SELECT planning_status FROM orders WHERE plant = %s AND production_order = 'ZO1'", (PLANT,))
         assert cur.fetchone()[0] == "scheduled"                          # unchanged SAP row: not rewritten
+
+
+@pytest.mark.pg
+def test_zero_open_sweep_clears_the_stale_flag_and_the_placement_marker(pg, stg_plant):
+    """Backward scheduling: an order swept into Needs Planning has no bar, so it keeps neither the stale-run-time
+    flag nor a placement marker."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=3)
+    _live_orders(pg, 1, soon, prefix="ZO")
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s, run_time = 2, run_time_source = 'manual',"
+                    " runtime_schedule_mismatch = TRUE, placement_exception = 'overtime'"
+                    " WHERE plant = %s AND production_order = 'ZO1'",
+                    (soon, soon + timedelta(hours=5), PLANT))
+        conn.commit()
+    row = {**_snapshot_row("ZO1", soon), "gsmng": 10, "abmng": 10}      # open quantity 0
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [row])
+    st.validate_batch(bid)
+    st.apply_batch(bid, actor="pytest")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT planning_status, scheduled_start, runtime_schedule_mismatch, placement_exception"
+                    " FROM orders WHERE plant = %s AND production_order = 'ZO1'", (PLANT,))
+        assert cur.fetchone() == ("needs_planning", None, False, None)
 
 
 @pytest.mark.pg
@@ -1826,3 +1958,119 @@ def test_unreadable_upload_says_so_in_plain_words():
     msg = str(exc.value)
     assert msg.startswith("Could not read the file")
     assert "engine" not in msg.lower()
+
+# ===========================================================================
+# Backward scheduling D10 / VI12 / VI13: date-only finish, working-window close, plant time zone
+# ===========================================================================
+def _date_only_order(pg, oid="zzstg-do", machine="ZZSTG-M1"):
+    """A firmed, never-placed order whose SAP finish arrived as a date with no time (2030-02-05)."""
+    due = datetime(2030, 2, 5, 0, 0)
+    with _conn(pg) as (conn, cur):
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, plant, machine, basic_start_date,"
+            " basic_finish_date, original_start_received, original_finish_received, original_finish_date_only,"
+            " run_time, firming_indicator)"
+            " VALUES (%s, 'DO1', '777', %s, %s, NULL, %s, NULL, %s, TRUE, 3, 'X')", (oid, PLANT, machine, due, due))
+        conn.commit()
+
+
+def _clear_outbound(pg):
+    with _conn(pg) as (conn, cur):
+        cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
+                    " AND details->>'plant' = %s", (PLANT,))
+        conn.commit()
+
+
+@pytest.mark.pg
+def test_a_date_only_due_on_a_never_placed_firmed_order_is_sent_as_the_working_window_close(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    _date_only_order(pg)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = 'Europe/Berlin' WHERE plant = %s", (PLANT,))
+        cur.execute("SELECT subnetwork FROM plants WHERE plant = %s", (PLANT,))
+        sub = cur.fetchone()[0]
+        # 2030-02-05 is a Tuesday: key 2 (0 = Sunday). Closes 22:00.
+        cur.execute("INSERT INTO machine_calendar (subnetwork, plant, machine, work_hours) VALUES (%s, %s, %s, %s)",
+                    (sub, PLANT, "ZZSTG-M1", Jsonb({"2": [6, 22]})))
+        conn.commit()
+    try:
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 22, 0), "Europe/Berlin")
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+        # the plant closes at 20:00: the line window is intersected with it, so Send transmits 20:00
+        with _conn(pg) as (conn, cur):
+            cur.execute("UPDATE plants SET work_hours = %s WHERE plant = %s", (Jsonb({"2": [6, 20]}), PLANT))
+            conn.commit()
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        newest = st.outbound_rows(PLANT)[0]
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 20, 0), "Europe/Berlin")
+        assert newest["pedtr"] == d.isoformat() and newest["pedti"] == t.isoformat()
+    finally:
+        _clear_outbound(pg)
+
+
+@pytest.mark.pg
+def test_review_focus_4_a_24_00_close_sends_23_59_59_of_the_due_date(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    _date_only_order(pg)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = 'Europe/Berlin' WHERE plant = %s", (PLANT,))
+        cur.execute("SELECT subnetwork FROM plants WHERE plant = %s", (PLANT,))
+        sub = cur.fetchone()[0]
+        cur.execute("INSERT INTO machine_calendar (subnetwork, plant, machine, work_hours) VALUES (%s, %s, %s, %s)",
+                    (sub, PLANT, "ZZSTG-M1", Jsonb({str(i): [0, 24] for i in range(7)})))
+        conn.commit()
+    try:
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 23, 59, 59), "Europe/Berlin")
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+    finally:
+        _clear_outbound(pg)
+
+
+@pytest.mark.pg
+def test_send_refuses_a_plant_with_no_time_zone(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = NULL WHERE plant = %s", (PLANT,))
+        conn.commit()
+    with pytest.raises(ValueError, match="time zone"):
+        st.queue_send_to_sap(PLANT, actor="pytest")
+
+
+@pytest.mark.pg
+def test_ingest_marks_rows_of_a_plant_with_no_time_zone_as_errors(pg, stg_plant):
+    """VI13: the rows are rejected at apply (the stage table's own error state) and no orders row is written."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 0, soon)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = NULL WHERE plant = %s", (PLANT,))
+        conn.commit()
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("NZ1", soon)])
+    res = st.validate_batch(bid)
+    st.apply_batch(bid, actor="pytest", confirm_held=res["status"] == "held")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT row_status, reject_reason FROM sap_stage_planned_order WHERE batch_id = %s", (bid,))
+        assert cur.fetchall() == [("rejected", "plant has no valid time zone")]
+        cur.execute("SELECT count(*) FROM orders WHERE plant = %s", (PLANT,))
+        assert cur.fetchone()[0] == 0
+
+
+@pytest.mark.pg
+def test_ingest_stores_the_date_only_flag_from_the_sap_time(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 0, soon)
+    date_only = {**_snapshot_row("DO1", soon), "pedti": "000000"}
+    timed = {**_snapshot_row("TM1", soon), "pedti": "180000"}
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [date_only, timed])
+    res = st.validate_batch(bid)
+    st.apply_batch(bid, actor="pytest", confirm_held=res["status"] == "held")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT production_order, original_finish_date_only FROM orders WHERE plant = %s"
+                    " ORDER BY production_order", (PLANT,))
+        assert cur.fetchall() == [("DO1", True), ("TM1", False)]

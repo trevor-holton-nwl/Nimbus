@@ -74,9 +74,10 @@ export interface paths {
         /**
          * Update Task
          * @description Update a single task's schedule/priority attributes and persist to DB.
-         *     Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
-         *                PRODUCTION_VERSION?, base_version?, force? }
-         *     Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
+         *     Payload: { id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+         *                PRT_01?, PRT_02?, PRODUCTION_VERSION?, base_version?, force? }
+         *     Response: 200 { status, persisted, failed, stale, versions, conflicts, rejection_reasons, start_derived }
+         *               | 400 { error: "invalid", rejection_reasons } | 404 not found.
          *     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
          *     client can refetch and warn uniformly with the bulk path.
          */
@@ -120,7 +121,8 @@ export interface paths {
         /**
          * Tasks Update
          * @description Bulk-update task dates/priority attributes and persist to DB (one transaction).
-         *     Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+         *     Payload: { tasks: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+         *                          PRT_01?, PRT_02?,
          *                          PRODUCTION_VERSION?, base_version?, force? }],
          *                blocks?, calendars? }
          *     Response: { status, updated, persisted, failed, invalid, not_found,
@@ -145,9 +147,18 @@ export interface paths {
         /**
          * Bulk Update
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-         *     Payload: [{ id, start_date?, end_date?, base_version? }]
+         *     Payload: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+         *                 base_version?, trust_start? }]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
-         *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons }
+         *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons, start_derived }
+         *
+         *     Both edges are accepted, and `end_date` is read as the PLACED FINISH (the anchor NIMBUS keeps; the start
+         *     is derived from it). `trust_start` (default true) says whether the sent `start_date` was derived from
+         *     the run time by the caller: an external or integration writer that cannot do that sends
+         *     `trust_start: false`, which skips the width check, forces the row's stale flag so the browser re-derives
+         *     the start from the finish, and lists the id in `start_derived` (backward scheduling OQ59). The default
+         *     stays "trusted" because the browser's own saves send starts it computed; the width check then refuses a
+         *     start that does not fit the run time.
          *
          *     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
          *     external caller may not bypass the base_version check. A stale row is
@@ -193,34 +204,6 @@ export interface paths {
          *     as stale ghosts.
          */
         post: operations["tasks_refresh_tasks_refresh_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/tasks/baseline-correct": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Baseline Correct
-         * @description Persist due-date-baseline (basic_finish_date) corrections found by the
-         *     frontend's Persistence._snapToWorkingHours. Fire-and-forget from the
-         *     client's perspective — every row is re-validated server-side
-         *     (db.correct_due_date_baselines) before being written, so a late,
-         *     duplicate, or concurrent call can never overwrite an already-corrected or
-         *     genuinely fresh (re-uploaded) value; a failed re-validation is a safe
-         *     per-row no-op, not an error.
-         *     Payload: { corrections: [{ id, basic_finish_date, base_version }] }
-         *     Response: { status, applied, persisted, skipped, not_matched, versions }
-         */
-        post: operations["baseline_correct_tasks_baseline_correct_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -867,8 +850,8 @@ export interface paths {
         put?: never;
         /**
          * Sap Stage Send
-         * @description Queue the plant's scheduled orders for Mulesoft (retires any still-ready earlier queue).
-         *     Response: {send_batch_id, queued, skipped_no_end, firmed, rolled_up_groups}.
+         * @description Queue the plant's firmed orders for Mulesoft (retires any still-ready earlier queue).
+         *     Response: {send_batch_id, queued, skipped_no_end, skipped_unfirmed, firmed, rolled_up_groups}.
          */
         post: operations["sap_stage_send_sap_staging_send__plant__post"];
         delete?: never;
@@ -3057,32 +3040,6 @@ export interface components {
             /** Entries */
             entries: components["schemas"]["AuditLogEntry"][];
         };
-        /**
-         * BaselineCorrectResult
-         * @description Response for POST /tasks/baseline-correct — db.correct_due_date_baselines'
-         *     shape (db.py:604+) plus the same status/error_code/cause failure fields as
-         *     BulkUpdateResult.
-         */
-        BaselineCorrectResult: {
-            /** Status */
-            status: string;
-            /** Applied */
-            applied: number;
-            /** Persisted */
-            persisted: number;
-            /** Skipped */
-            skipped: number;
-            /** Not Matched */
-            not_matched: number;
-            /** Versions */
-            versions: {
-                [key: string]: number;
-            };
-            /** Error Code */
-            error_code?: string | null;
-            /** Cause */
-            cause?: string | null;
-        };
         /** Body_sap_stage_upload_sap_staging_upload__object__post */
         Body_sap_stage_upload_sap_staging_upload__object__post: {
             /** File */
@@ -3189,6 +3146,10 @@ export interface components {
             rejection_reasons?: {
                 [key: string]: string;
             };
+            /** Start Derived */
+            start_derived?: {
+                [key: string]: boolean;
+            };
         };
         /**
          * BulkUsersResult
@@ -3270,34 +3231,6 @@ export interface components {
         DeleteFilteredResult: {
             /** Deleted */
             deleted: number;
-        };
-        /**
-         * DueDateCorrection
-         * @description One order's due-date-baseline correction, computed client-side by
-         *     Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
-         *     `base_version` is the row's xmin as of the client's last load/save of it —
-         *     used server-side to pin the write against ANY concurrent change to the row
-         *     (a SAP re-upload, a normal scheduling save, or another tab's correction).
-         *     Deliberately not a raw date value: a date round-trips through JS
-         *     Date/JSON.stringify, which would re-label a naive local timestamp as UTC
-         *     and never match Postgres's naive basic_start_date for a non-UTC client.
-         *     See db.correct_due_date_baselines.
-         */
-        DueDateCorrection: {
-            /** Id */
-            id: string;
-            /** Basic Finish Date */
-            basic_finish_date: string;
-            /** Base Version */
-            base_version: number;
-        };
-        /** DueDateCorrectionPayload */
-        DueDateCorrectionPayload: {
-            /**
-             * Corrections
-             * @default []
-             */
-            corrections: components["schemas"]["DueDateCorrection"][];
         };
         /**
          * GridResult
@@ -3728,6 +3661,8 @@ export interface components {
              * @default false
              */
             runtime_schedule_mismatch: boolean;
+            /** Placement Exception */
+            placement_exception?: ("overtime" | "overlong") | null;
             /**
              * Planning Status
              * @default scheduled
@@ -3745,6 +3680,9 @@ export interface components {
         /**
          * TaskDateUpdate
          * @description One task's optional schedule/attribute edit. Unknown fields are ignored.
+         *
+         *     `start_date` and `end_date` are both-or-neither: a payload carrying only one
+         *     edge is rejected as `single_edge`. `trust_start` semantics are unchanged.
          *
          *     Optimistic concurrency: `base_version` is the xmin the client last saw for this
          *     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
@@ -3775,6 +3713,8 @@ export interface components {
             FIRMED?: boolean | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentInput"][] | null;
+            /** Placement Exception */
+            placement_exception?: ("overtime" | "overlong") | null;
             /** Base Version */
             base_version?: number | null;
             /**
@@ -3782,6 +3722,11 @@ export interface components {
              * @default false
              */
             force: boolean;
+            /**
+             * Trust Start
+             * @default true
+             */
+            trust_start: boolean;
             /** Planning Status */
             planning_status?: string | null;
             /** Planning Reason */
@@ -3821,6 +3766,14 @@ export interface components {
             };
             /** Conflicts */
             conflicts?: components["schemas"]["ScheduleConflict"][];
+            /** Rejection Reasons */
+            rejection_reasons?: {
+                [key: string]: string;
+            };
+            /** Start Derived */
+            start_derived?: {
+                [key: string]: boolean;
+            };
         };
         /**
          * TaskVersionRow
@@ -3858,6 +3811,8 @@ export interface components {
             firmed: boolean;
             /** Original Start Date */
             original_start_date?: string | null;
+            /** Original End Date */
+            original_end_date?: string | null;
             /** Schedule Segments */
             schedule_segments?: components["schemas"]["ScheduleSegmentDTO"][];
             /**
@@ -3865,6 +3820,13 @@ export interface components {
              * @default false
              */
             runtime_schedule_mismatch: boolean;
+            /** Placement Exception */
+            placement_exception?: ("overtime" | "overlong") | null;
+            /**
+             * User Scheduled
+             * @default false
+             */
+            user_scheduled: boolean;
             /**
              * Planning Status
              * @default scheduled
@@ -3904,7 +3866,8 @@ export interface components {
          *     key precisely is out of scope for this phase and would need to track
          *     DIAGNOSTICS's shape by hand forever. The empty-result path also returns a
          *     smaller `meta` subset (see get_tasks's `empty_meta`), which a strict schema
-         *     would reject.
+         *     would reject. Both paths carry `meta.server_now` (ISO-8601 UTC): the one clock the browser
+         *     projects into each plant's zone (backward scheduling OQ52); it is not a TaskDTO field.
          */
         TasksResponse: {
             /** Data */
@@ -4324,39 +4287,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TasksRefreshResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    baseline_correct_tasks_baseline_correct_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DueDateCorrectionPayload"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BaselineCorrectResult"];
                 };
             };
             /** @description Validation Error */

@@ -110,6 +110,41 @@ test('PR-2: _overlayUserMoves still applies the cached override when row_version
     'a same-versioned cached edit is the planner\'s own unsaved move and must still be overlaid');
 });
 
+test('VI9: the cached-edit overlay restores the run time, machine, PRTs and version with the dates', () => {
+  const backendTask = {
+    id: 'vi9', MACHINE: 'L1', RUN_TIME: 4, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'vi9', row_version: 5, RUN_TIME: 6, MACHINE: 'L2', PRT_01: 'P9', PRODUCTION_VERSION: '0002',
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T14:00:00',
+    original_start_date: '2026-09-08T00:00:00',
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.RUN_TIME, 6);
+  assert.equal(backendTask.MACHINE, 'L2');
+  assert.equal(backendTask.PRT_01, 'P9');
+  assert.equal(backendTask.PRODUCTION_VERSION, '0002');
+});
+
+test('D21: the overlay revives a cached run-time-grew note', () => {
+  const backendTask = {
+    id: 'd21', MACHINE: 'L1', RUN_TIME: 4, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'd21', row_version: 5, RUN_TIME: 6,
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T14:00:00', original_start_date: '2026-09-08T00:00:00',
+    derivationIssue: { code: 'reversal_forward', detail: 'run_time_grew', from: '2026-09-01T10:00:00', to: '2026-09-01T12:00:00' },
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.derivationIssue.code, 'reversal_forward');
+  assert.equal(backendTask.derivationIssue.detail, 'run_time_grew');
+  assert.ok(backendTask.derivationIssue.from instanceof Date);
+});
+
 test('PR-2: _overlayUserMoves falls back to applying the override when either side lacks a row_version', () => {
   // Old caches (pre-dating this field) or rows that never got one keep the
   // previous best-effort behavior rather than being silently skipped forever.
@@ -354,21 +389,16 @@ test('conflict refresh sends identity and API key and reports a failed refresh',
   }
 });
 
-test('Persistence.setCalendarService is settable and Persistence works with a stub before it is wired', () => {
-  assert.equal(typeof Persistence.setCalendarService, 'function');
-  // A snap-affecting path should not throw even with no calendar service wired yet —
-  // it should just skip snapping, not crash the load.
-  const tasks = [{
-    id: 'nosvc1', MACHINE: 'L9', RUN_TIME: '1',
-    start_date: new Date('2026-08-03T00:00:00'),
-    end_date:   new Date('2026-08-03T01:00:00'),
-  }];
-  assert.doesNotThrow(() => Persistence._snapToWorkingHours(tasks, '5512'));
+test('the load-time re-snap of ingested orders is gone: no _snapToWorkingHours, no calendar seam (backward scheduling Task 2.5)', () => {
+  // A row nobody has placed is derived backward from its due date by the reconcile (Task 2.6); loading and the
+  // post-hydration calendar fetch no longer move any bar.
+  assert.equal(Persistence._snapToWorkingHours, undefined);
+  assert.equal(Persistence.setCalendarService, undefined);
 });
 
 test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', async () => {
   Store.setTasks([{
-    id: 'pd1', MACHINE: 'L1', RUN_TIME: '1',
+    id: 'pd1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true,
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
     row_version: '5', PRT_01: 'MOLD-A', PRT_02: 'MOLD-B', PRODUCTION_VERSION: '0001',
   }], 'unit-test');
@@ -411,7 +441,7 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
 
 test('Persistence.saveAll sends the full split aggregate in naive-local form', async () => {
   Store.setTasks([{
-    id: 'split-save', MACHINE: 'L1', RUN_TIME: '10',
+    id: 'split-save', MACHINE: 'L1', RUN_TIME: '10', user_scheduled: true,
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-04T10:00:00'),
     row_version: '5',
     scheduleSegments: [
@@ -559,26 +589,6 @@ test('PR-1: _refreshTasks does not remove or toast when `missing` is absent/empt
     globalThis.fetch = originalFetch; Toast.show = originalToast;
   }
 });
-
-test('a load that needs to snap a task to working hours calls the injected calendar service, not a global', () => {
-  const calls = [];
-  Persistence.setCalendarService({
-    beginRun: (plant) => calls.push(['beginRun', plant]),
-    endRun: () => calls.push(['endRun']),
-    nextAvailable: (line, from, ms) => { calls.push(['nextAvailable', line]); return from; },
-    workWindow: (line, date) => { calls.push(['workWindow', line]); return null; },
-  });
-  const tasks = [{
-    id: 'snap1', MACHINE: 'L9', RUN_TIME: '1',
-    start_date: new Date('2026-08-03T00:00:00'), // midnight -> triggers the snap path
-    end_date:   new Date('2026-08-03T01:00:00'),
-  }];
-  Persistence._snapToWorkingHours(tasks, '5512');
-  assert.ok(calls.some(c => c[0] === 'beginRun'), 'must call the injected beginRun');
-  assert.ok(calls.some(c => c[0] === 'nextAvailable'), 'must call the injected nextAvailable');
-  assert.ok(calls.some(c => c[0] === 'endRun'), 'must call the injected endRun');
-});
-
 
 test('Persistence.loadPriorityRankMaps returns a real awaitable promise and null-clears the cache', async () => {
   Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } });
@@ -797,6 +807,57 @@ test('Persistence.load does NOT wipe a still-valid cache when reloading the SAME
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+test('Backward-scheduling cutover (OQ36 / 8.6a a): the cache schema version is 7 and a version-6 cache is discarded on load', () => {
+  assert.equal(Config.SCHEMA_VERSION, 7, 'the cutover bumps the cached snapshot shape version');
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify({
+    _schemaVersion: 6,
+    tasks: [{ id: 'pre-cutover', MACHINE: 'L1', RUN_TIME: 4 }],
+  }));
+  try {
+    assert.equal(Persistence._loadCache(), false, 'a pre-cutover cache (unsaved offline edits included) must not restore');
+    assert.equal(globalThis.localStorage.getItem(Config.LS_KEY), null, 'and it is removed, not just ignored');
+    assert.equal(Store.tasks['pre-cutover'], undefined);
+  } finally {
+    globalThis.localStorage.removeItem(Config.LS_KEY);
+  }
+});
+
+test('F10: a never-placed row saves its attribute edits without dates or segments; a placed row still sends them', () => {
+  const when = new Date(2026, 7, 26, 9);
+  Store.setTasks([
+    { id: 'np', MACHINE: 'L1', RUN_TIME: '5', user_scheduled: false, start_date: when, end_date: new Date(2026, 7, 26, 14) },
+    { id: 'pl', MACHINE: 'L1', RUN_TIME: '5', user_scheduled: true, start_date: when, end_date: new Date(2026, 7, 26, 14) },
+  ], 'unit-test');
+  const display = Persistence._taskEditSnapshot(Store.tasks.np);
+  assert.equal(display.RUN_TIME, '5', 'the attribute edit is sent');
+  for (const key of ['start_date', 'end_date', 'schedule_segments']) assert.equal(key in display, false, `${key} is display-derived and left out`);
+  const placed = Persistence._taskEditSnapshot(Store.tasks.pl);
+  assert.ok(placed.start_date && placed.end_date && Array.isArray(placed.schedule_segments));
+  Store.setTasks([], 'unit-test');
+});
+
+test('VC1: a never-placed (display-only) row sends attributes only: no planning status, no dates, no segments', () => {
+  const t = { id: 'vc1', user_scheduled: false, planning_status: 'scheduled', planning_reason: null,
+    start_date: new Date('2026-09-01T06:00:00'), end_date: new Date('2026-09-01T10:00:00'),
+    PRT_01: 'P1', PRT_02: null, PRODUCTION_VERSION: '0001', RUN_TIME: 4, MACHINE: 'L1', scheduleSegments: [] };
+  const snap = Persistence._taskEditSnapshot(t);
+  assert.equal('planning_status' in snap, false);
+  assert.equal('planning_reason' in snap, false);
+  assert.equal('start_date' in snap, false);
+  assert.equal('end_date' in snap, false);
+  assert.equal('schedule_segments' in snap, false);
+  assert.equal(snap.PRT_01, 'P1');
+  assert.equal(snap.MACHINE, 'L1');
+});
+
+test('VC1: a queued row still sends its planning status and reason', () => {
+  const t = { id: 'vc1q', user_scheduled: false, planning_status: 'needs_planning',
+    planning_reason: { code: 'overlong_never', message: 'x' }, start_date: null, end_date: null, scheduleSegments: [] };
+  const snap = Persistence._taskEditSnapshot(t);
+  assert.equal(snap.planning_status, 'needs_planning');
+  assert.equal(snap.planning_reason.code, 'overlong_never');
 });
 
 test('Persistence._loadCache clears the rank cache — the offline restore hydrates without ever loading rank maps', () => {
@@ -1336,6 +1397,25 @@ test('refresh copy-back updates both t.firmed and firmedIds from the server row'
   } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
 });
 
+test('refresh copy-back applies the locked original_end_date (the due date) from the server row', async () => {
+  Store.setTasks([firmTask('od-a', { original_end_date: new Date('2026-09-12T00:00:00') }),
+    firmTask('od-b', { original_end_date: new Date('2026-09-12T00:00:00') })], 'unit-test');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ missing: [], data: [
+    { id: 'od-a', MACHINE: 'L1', row_version: 9, firmed: false, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00',
+      original_start_date: '2026-09-01T08:00:00', original_end_date: '2026-09-20T22:00:00' },
+    { id: 'od-b', MACHINE: 'L1', row_version: 9, firmed: false, start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T09:00:00',
+      original_start_date: '2026-09-01T08:00:00' },   // an older server that does not send the field
+  ] }) });
+  try {
+    Persistence._refreshTasks(['od-a', 'od-b']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['od-a'].original_end_date.getTime(), new Date('2026-09-20T22:00:00').getTime());
+    assert.equal(Store.tasks['od-b'].original_end_date.getTime(), new Date('2026-09-12T00:00:00').getTime(),
+      'a row without the field keeps the due date the client already holds');
+  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
+});
+
 test('a cache holding firmedIds / fixedIds / tasks[].firmed restores no firms, but cached date edits still restore', () => {
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   const cached = firmTask('old-firm', { firmed: true });
@@ -1370,6 +1450,34 @@ test('_saveCache never writes firmedIds or per-task firmed', () => {
   assert.ok(parsed.tasks.every(t => !('firmed' in t)));
   assert.equal(Store.tasks['wr-a'].firmed, true, 'the live task keeps its mirror');
   globalThis.localStorage.removeItem(Config.LS_KEY);
+});
+
+test('_saveCache never writes systemMove (D21: derivationIssue is now cached); a refreshed row drops both notes', async () => {
+  const task = firmTask('wr-notes', {});
+  task.derivationIssue = { code: 'finish_moved_earlier', from: new Date('2026-09-09T20:00:00'), to: new Date('2026-09-09T19:00:00') };
+  task.systemMove = { from: new Date('2026-09-09T08:00:00'), to: new Date('2026-09-09T07:00:00'), reason: 'run_time_changed' };
+  Store.setTasks([task], 'unit-test');
+  Persistence._saveCache();
+  const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
+  assert.ok(parsed.tasks.every(t => !('systemMove' in t)), 'the session-only systemMove never reaches the browser cache');
+  assert.ok(parsed.tasks.some(t => t.derivationIssue?.code === 'finish_moved_earlier'), 'D21: derivationIssue is cached for the overlay');
+  assert.ok(Store.tasks['wr-notes'].derivationIssue, 'the live task keeps its notes');
+  assert.ok(!('derivationIssue' in Persistence._taskEditSnapshot(Store.tasks['wr-notes'])), 'nor the save payload / refresh baseline');
+  globalThis.localStorage.removeItem(Config.LS_KEY);
+
+  // A server refresh of the row replaces whatever the engine derived, so the notes go with it.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [{
+    id: 'wr-notes', MACHINE: 'L', PLANT: 'P', RUN_TIME: 4, row_version: 7,
+    start_date: '2026-09-09T08:00:00', end_date: '2026-09-09T12:00:00', original_start_date: '2026-09-09T08:00:00',
+    original_end_date: '2026-09-09T12:00:00', runtime_schedule_mismatch: false, firmed: false,
+  }], missing: [] }) });
+  try {
+    Persistence._refreshTasks(['wr-notes']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Store.tasks['wr-notes'].derivationIssue, null);
+    assert.equal(Store.tasks['wr-notes'].systemMove, null);
+  } finally { globalThis.fetch = originalFetch; Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear(); Persistence._firmDirtyIds.clear(); }
 });
 
 test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending calendar deletes and What-If; haltCacheWrites stops _saveCache', async () => {
@@ -1410,5 +1518,79 @@ test('hasPendingWork counts dirty, force, conflicted, firm-dirty ids, pending ca
     Sandbox.active = origActive;
     Persistence._cacheWritesHalted = false;
     globalThis.localStorage = origLS;
+  }
+});
+
+test('backward scheduling: the save payload carries placement_exception, an explicit null clears it, and an unset field stays out', () => {
+  const base = { id: 'pe-1', MACHINE: 'L1', RUN_TIME: 4, row_version: 3, planning_status: 'scheduled',
+    start_date: new Date('2026-10-06T08:00:00'), end_date: new Date('2026-10-06T12:00:00') };
+  const marked = Persistence._taskEditSnapshot({ ...base, placement_exception: 'overtime' });
+  assert.equal(marked.placement_exception, 'overtime');
+  const cleared = Persistence._taskEditSnapshot({ ...base, placement_exception: null });
+  assert.ok(Object.prototype.hasOwnProperty.call(cleared, 'placement_exception'), 'an explicit null is sent');
+  assert.equal(cleared.placement_exception, null);
+  const unset = Persistence._taskEditSnapshot({ ...base });
+  assert.ok(!Object.prototype.hasOwnProperty.call(unset, 'placement_exception'), 'a task that never carried the field omits it');
+  // JSON keeps the explicit null (the server reads it as "clear the marker").
+  assert.match(JSON.stringify(cleared), /"placement_exception":null/);
+});
+
+test('backward scheduling: saveAll sends the marker held on the task', async () => {
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+  Store.setTasks([{ id: 'pe-2', MACHINE: 'L1', RUN_TIME: 4, row_version: 9, placement_exception: 'overlong',
+    start_date: new Date('2026-10-06T08:00:00'), end_date: new Date('2026-10-06T14:00:00') }], 'unit-test');
+  Persistence._dirtyIds.add('pe-2');
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: JSON.parse(opts.body) });
+    return { ok: true, json: async () => ({ status: 'ok', updated: 1, persisted: 1, stale: [], versions: { 'pe-2': 10 } }) };
+  };
+  try {
+    Persistence.saveAll();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(calls[0].body.tasks[0].placement_exception, 'overlong');
+  } finally { globalThis.fetch = original; Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); }
+});
+
+// Backward scheduling Task 2.4 (OQ52, one clock): every /tasks load reads meta.server_now and keeps the
+// offset between the server's instant and this browser's clock, so Store.plantNow is the server's "now".
+test('Persistence.load captures the server clock offset from /tasks meta.server_now', async () => {
+  const originalFetch = globalThis.fetch;
+  const priorMasterData = Store.masterData;
+  const priorLoadsInFlight = Persistence._loadsInFlight;
+  const priorOffset = Store.serverOffsetMs;
+  const aheadMs = 3_600_000;           // the server clock runs an hour ahead of this browser
+  const respond = meta => async (url) => {
+    const u = String(url);
+    if (u.includes('/tasks?')) return { ok: true, json: async () => ({ data: [], meta }) };
+    if (u.includes('/master-data/')) return { ok: true, json: async () => ({ rows: [] }) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  try {
+    Store.serverOffsetMs = 0;
+    globalThis.fetch = respond({ server_now: new Date(Date.now() + aheadMs).toISOString() });
+    await Persistence.load({ plant: 'PLANT-CLOCK' });
+    assert.ok(Math.abs(Store.serverOffsetMs - aheadMs) < 2000, `offset ~ +1h, got ${Store.serverOffsetMs}`);
+    assert.ok(Math.abs(Store.serverNow().getTime() - (Date.now() + aheadMs)) < 2000, 'serverNow() is the projected server instant');
+
+    // A later load recomputes it (the browser clock was corrected, or the server moved).
+    globalThis.fetch = respond({ server_now: new Date(Date.now() - aheadMs).toISOString() });
+    await Persistence.load({ plant: 'PLANT-CLOCK', force: true });
+    assert.ok(Math.abs(Store.serverOffsetMs + aheadMs) < 2000, `offset recomputed to ~ -1h, got ${Store.serverOffsetMs}`);
+
+    // A response without a usable server_now leaves the last good offset alone.
+    const kept = Store.serverOffsetMs;
+    globalThis.fetch = respond({ server_now: 'not-a-date' });
+    await Persistence.load({ plant: 'PLANT-CLOCK', force: true });
+    assert.equal(Store.serverOffsetMs, kept);
+    globalThis.fetch = respond({});
+    await Persistence.load({ plant: 'PLANT-CLOCK', force: true });
+    assert.equal(Store.serverOffsetMs, kept);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Store.serverOffsetMs = priorOffset;
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Persistence._loadsInFlight = priorLoadsInFlight;
   }
 });

@@ -204,6 +204,12 @@ test('computeAlerts reports resolved setup violations and de-duplicates supplied
     { requiredMinutes: violation?.requiredMinutes, availableMinutes: violation?.availableMinutes, shortMinutes: violation?.shortMinutes },
     { requiredMinutes: 60, availableMinutes: 20, shortMinutes: 40 },
   );
+  // Gate 7: the localized message is keyed, with the three numbers its text interpolates.
+  assert.equal(violation.msgKey, 'alert.setup_violated');
+  assert.deepEqual(
+    { required: violation.msgVars.required, available: violation.msgVars.available, short: violation.msgVars.short, line: violation.msgVars.line },
+    { required: 60, available: 20, short: 40, line: 'L' },
+  );
   assert.equal(alerts.filter(alert => alert.type === 'setup-uncovered').length, 1);
   assert.deepEqual(alerts.filter(alert => alert.type !== 'setup-violated' && alert.type !== 'setup-uncovered').map(alert => alert.type).sort(), [
     'current-state-diverged', 'initial-state-unknown', 'override-inactive',
@@ -543,6 +549,27 @@ test('computeAlerts raises exactly one distribution-separation alert per recompu
   assert.equal(hits2[0].id, hits1[0].id);
 });
 
+// Backward scheduling OQ38: the alert is judged on the FINISH (mirrors setup-scheduler checkDistributionSeparation).
+test('computeAlerts distribution-separation: a 70/30 family finishing together raises nothing; different finishes do', () => {
+  const day1 = new Date(Date.now() + 24 * 3600000); day1.setHours(9, 0, 0, 0);
+  const day2 = new Date(day1.getTime() + 24 * 3600000);
+  const finish = new Date(day2.getTime() + 7 * 3600000);
+  const mk = (id, line, start, end) => ({
+    id, MACHINE: line, RUN_TIME: 2, PARENT_ORDER: 'A-2000', MATERIAL_NUMBER: 'MAT-2', start_date: start, end_date: end,
+  });
+  const masterData = {
+    lines: [{ machine: 'L1', plant: 'P1', sap_workcenter: 'WC1' }, { machine: 'L2', plant: 'P1', sap_workcenter: 'WC1' }],
+    workcenters: [{ sap_workcenter: 'WC1', max_separation: 'day' }],
+  };
+  const run = tasks => Core.computeAlerts({
+    tasks, blocks: [], plantBlocks: [], calendars: {}, plants: {}, lineSettings: {}, masterData, dismissed: [], opts: {},
+  }).alerts.filter(a => a.type === 'distribution-separation');
+  // long child starts a day earlier (day1), short child starts day2; both finish together on day2
+  assert.equal(run([mk('a', 'L1', day1, finish), mk('b', 'L2', day2, finish)]).length, 0);
+  // same starts, finishes on different days
+  assert.equal(run([mk('a', 'L1', day1, new Date(day1.getTime() + 2 * 3600000)), mk('b', 'L2', day2, finish)]).length, 1);
+});
+
 // ── computeAlerts routing-runtime kinds (ROUTING_RUNTIME_DESIGN.md §8.6) ────
 
 test('computeAlerts raises runtime-unknown for a task held with planning_reason.code === "runtime_unknown"', () => {
@@ -666,4 +693,424 @@ test('nextCalendarDay always returns a later day, in zones where local midnight 
     console.log(JSON.stringify(out));`;
   const out = execFileSync(process.execPath, ['-e', code], { env: { ...process.env, TZ: 'America/Sao_Paulo' } }).toString().trim();
   assert.deepEqual(JSON.parse(out), [[4, 1], [5, 0], [6, 0], [7, 0]], 'one calendar day per call, landing on midnight (01:00 only on the day midnight is skipped)');
+});
+
+// --- dueDateInstant: a date-only SAP finish arrives as an exact-midnight timestamp (OQ23) ---
+const weekdayWindows = (open, close) => (date) => {
+  const dow = date.getDay();
+  if (dow === 0 || dow === 6) return null;
+  const s = new Date(date); s.setHours(open, 0, 0, 0);
+  const e = new Date(date); e.setHours(close, 0, 0, 0);
+  return { open: s, close: e };
+};
+
+test('dueDateInstant returns a timed due date as-is', () => {
+  const raw = new Date(2026, 6, 8, 15, 30, 0);   // Wed 15:30
+  assert.equal(Core.dueDateInstant(raw, weekdayWindows(6, 22)), raw);
+  const secs = new Date(2026, 6, 8, 0, 0, 1);    // 00:00:01 is not exactly midnight
+  assert.equal(Core.dueDateInstant(secs, weekdayWindows(6, 22)), secs);
+});
+
+test('dueDateInstant reads midnight on an open day as that day\'s window close', () => {
+  const out = Core.dueDateInstant(new Date(2026, 6, 8), weekdayWindows(6, 22));   // Wed
+  assert.equal(+out, +new Date(2026, 6, 8, 22, 0, 0));
+});
+
+test('dueDateInstant reads midnight on a closed Sunday as the previous Friday close, never midnight', () => {
+  const out = Core.dueDateInstant(new Date(2026, 6, 12), weekdayWindows(6, 22));  // Sun 12 Jul
+  assert.equal(+out, +new Date(2026, 6, 10, 22, 0, 0), 'Friday 10 Jul 22:00');
+  assert.ok(out > new Date(2026, 6, 10), 'not the Friday-midnight or Sunday-midnight raw value');
+});
+
+test('dueDateInstant on a 24/7 / 24:00-close line is the close of that day: next-day 00:00 (R-I6)', () => {
+  const allDay = (date) => ({ open: new Date(date), close: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1) });
+  const out = Core.dueDateInstant(new Date(2026, 6, 12), allDay);                 // Sunday, but open 24h
+  assert.equal(+out, +new Date(2026, 6, 13, 0, 0, 0));
+  const clamped = (date) => ({ open: new Date(date), close: new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59) });
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 12), clamped), +new Date(2026, 6, 12, 23, 59, 59), 'a close before midnight is kept as is');
+  // The real window builder: a 06:00-24:00 line (Edit Calendar stores 00:00 end as 24).
+  const win0624 = (date) => { const w = Core._dayWindow(allDays([6, 24]), date); return w ? { open: w[0], close: w[1] } : null; };
+  assert.equal(+Core.dueDateInstant(new Date(2026, 9, 21), win0624), +new Date(2026, 9, 22, 0, 0, 0), 'Wed 21 Oct reads Thu 00:00, not 23:59:59');
+});
+
+test('dueDateInstant with no calendar at all is raw + 23:59:59', () => {
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), () => null), +new Date(2026, 6, 8, 23, 59, 59));
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 12), () => null), +new Date(2026, 6, 12, 23, 59, 59));
+});
+
+test('dueDateInstant looks back at most 30 days for an open day, then falls to raw + 23:59:59', () => {
+  const only30Back = (date) => {
+    const back = Math.round((new Date(2026, 6, 8) - date) / 86400000);
+    return back === 30 ? { open: new Date(2026, 5, 8, 6), close: new Date(2026, 5, 8, 20) } : null;
+  };
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), only30Back), +new Date(2026, 5, 8, 20));
+  const only31Back = (date) => {
+    const back = Math.round((new Date(2026, 6, 8) - date) / 86400000);
+    return back === 31 ? { open: new Date(2026, 5, 7, 6), close: new Date(2026, 5, 7, 20) } : null;
+  };
+  assert.equal(+Core.dueDateInstant(new Date(2026, 6, 8), only31Back), +new Date(2026, 6, 8, 23, 59, 59));
+});
+
+// Backward scheduling Task 2.4 (OQ52, one clock): the alert horizon ("active" = ends today or later)
+// reads the per-plant `now` the payload carries (a naive plant wall-clock Date), not the worker's own
+// Date.now(), so a viewer's browser zone or clock skew cannot move which orders count as active.
+test('computeAlerts reads the active-order horizon from the payload now of the order\'s plant, not Date.now()', () => {
+  const day = new Date(2020, 0, 6);   // far in the past by the real clock
+  const at = h => new Date(day.getFullYear(), day.getMonth(), day.getDate(), h);
+  const t1 = { id: 'a', text: 'A', MACHINE: 'L', PLANT: 'P', RUN_TIME: 2, start_date: at(8), end_date: at(12) };
+  const t2 = { id: 'b', text: 'B', MACHINE: 'L', PLANT: 'P', RUN_TIME: 2, start_date: at(10), end_date: at(14) };
+  const payload = now => ({
+    tasks: [t1, t2], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData: noPlant, dismissed: [], opts: {}, ...(now ? { now } : {}),
+  });
+  // No payload now: the real clock is years later, both orders ended long ago, nothing is active.
+  assert.equal(Core.computeAlerts(payload()).alerts.filter(a => a.type === 'overlap').length, 0);
+  // Payload now for the orders' plant, early on the day: both are still active, the overlap shows.
+  assert.equal(Core.computeAlerts(payload({ P: at(7) })).alerts.filter(a => a.type === 'overlap').length, 1);
+  // A payload now for a DIFFERENT plant does not apply to these orders.
+  assert.equal(Core.computeAlerts(payload({ OTHER: at(7) })).alerts.filter(a => a.type === 'overlap').length, 0);
+  // The clock is per plant: the same orders are past once that plant's day has moved on.
+  const later = new Date(2020, 0, 8, 7);
+  assert.equal(Core.computeAlerts(payload({ P: later })).alerts.filter(a => a.type === 'overlap').length, 0);
+});
+
+
+/* ── Task 3.3: one day-attribution rule, the late alert, engine findings as alerts ─────────────── */
+
+// 2026-10-14 is a Wednesday. Every calendar day open 08:00-18:00.
+const D = (day, hour = 0, minute = 0) => new Date(2026, 9, day, hour, minute);
+const open0818 = { workHours: allDays([8, 18]) };
+const windowFor0818 = (calendar) => (date) => {
+  const win = Core._dayWindow(calendar.workHours, date);
+  return win ? { open: win[0], close: win[1] } : null;
+};
+// The brief's worked example: a 14 h order held to Fri 00:00 whose derived start is Wed 22:00.
+const workedExample = (over = {}) => ({
+  id: 'w', MACHINE: 'L', PLANT: 'P', RUN_TIME: 14, start_date: D(14, 22), end_date: D(16, 0), ...over,
+});
+const alertBase = (tasks, extra = {}) => ({
+  tasks, blocks: [], plantBlocks: [], calendars: { L: open0818 }, plants: {},
+  lineSettings: { L: { plant: 'P' } }, masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P' }] },
+  dismissed: [], opts: {}, now: { P: D(14, 6) }, ...extra,
+});
+
+test('workingMinutesByDay: the worked example puts all 14 h on Thursday (Wed has no working overlap after the 22:00 start)', () => {
+  const byDay = Core.workingMinutesByDay(workedExample(), windowFor0818(open0818));
+  assert.deepEqual(byDay, { '2026-10-15': 14 * 60 });
+});
+
+test('workingMinutesByDay: a closed day takes no share; shares follow working-time overlap', () => {
+  // Fri 14:00 -> Mon 10:00 with the weekend closed: Fri 4 h of window, Mon 2 h of window.
+  const calendar = { workHours: { 0: null, 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: null } };
+  const task = { id: 'f', RUN_TIME: 6, start_date: D(16, 14), end_date: D(19, 10) };
+  const byDay = Core.workingMinutesByDay(task, windowFor0818(calendar));
+  assert.deepEqual(Object.keys(byDay).sort(), ['2026-10-16', '2026-10-19']);
+  assert.equal(byDay['2026-10-16'], 240);   // 4 of 6 working hours
+  assert.equal(byDay['2026-10-19'], 120);
+});
+
+test('workingMinutesByDay: a bar wholly in closed time falls back to wall-clock overlap so its hours stay visible', () => {
+  const task = { id: 'c', RUN_TIME: 2, start_date: D(14, 19), end_date: D(14, 21) };
+  assert.deepEqual(Core.workingMinutesByDay(task, windowFor0818(open0818)), { '2026-10-14': 120 });
+});
+
+test('workingMinutesByDay: split orders are exact by piece; a start with no finish lands on the start day', () => {
+  const split = { id: 's', RUN_TIME: 5, start_date: D(14, 16), end_date: D(15, 11),
+    scheduleSegments: [{ sequence: 1, startDate: D(14, 16), endDate: D(14, 18) }, { sequence: 2, startDate: D(15, 8), endDate: D(15, 11) }] };
+  assert.deepEqual(Core.workingMinutesByDay(split, windowFor0818(open0818)), { '2026-10-14': 120, '2026-10-15': 180 });
+  assert.deepEqual(Core.workingMinutesByDay({ id: 'n', RUN_TIME: 3, start_date: D(14, 9) }, null), { '2026-10-14': 180 });
+});
+
+test('U29: a finish-only row (end set, start null) is the bar [end - run_time, end]; with no run time or no finish it stays absent', () => {
+  // A freshly distributed child: scheduled_start NULL, finish Thu 11:00, 3 h run -> Thu 08:00-11:00, all inside the window.
+  const finishOnly = { id: 'fo', RUN_TIME: 3, start_date: null, end_date: D(15, 11) };
+  assert.deepEqual(Core.workingMinutesByDay(finishOnly, windowFor0818(open0818)), { '2026-10-15': 180 });
+  // The bar is wall-clock [end - run_time, end] (the ruling): finish Thu 09:00, 4 h -> Thu 05:00-09:00, only Thu 08-09 is working time, so all 4 h land on Thu.
+  const crossing = { id: 'fo2', RUN_TIME: 4, start_date: null, end_date: D(15, 9) };
+  const byDay = Core.workingMinutesByDay(crossing, windowFor0818(open0818));
+  assert.deepEqual(byDay, { '2026-10-15': 240 });
+  assert.deepEqual(Core.workingMinutesByDay({ id: 'z', RUN_TIME: 0, start_date: null, end_date: D(15, 11) }, null), {}, 'no run time: no bar');
+  assert.deepEqual(Core.workingMinutesByDay({ id: 'n', RUN_TIME: 3, start_date: null, end_date: null }, null), {}, 'no dates: nothing');
+});
+
+test('worked example: the matrix, the overload alert and the briefing helper all put the 14 h on Thursday', () => {
+  const task = workedExample();
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: { L: { plant: 'P' } }, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }] }, startMs: +D(14), days: 3, lines: ['L'],
+  });
+  assert.equal(matrix.L['2026-10-14'].scheduled, 0);
+  assert.equal(matrix.L['2026-10-15'].scheduled, 14);
+  assert.equal(matrix.L['2026-10-16'].scheduled, 0);
+
+  const { alerts } = Core.computeAlerts(alertBase([task]));
+  const overloads = alerts.filter(a => a.type === 'overload');
+  assert.deepEqual(overloads.map(a => a.id), ['ovl-day-L-2026-10-15'], 'overload lands on Thursday, not the start day');
+  assert.match(overloads[0].msg, /14\.0h scheduled/);
+
+  // The briefing reads the same function (Utilization.minutesByDay wraps it with the line's working windows).
+  assert.equal(Core.workingMinutesByDay(task, windowFor0818(open0818))['2026-10-15'] / 60, 14);
+});
+
+test('overload rule no longer buckets a multi-day bar wholly on its start day', () => {
+  // 10 h order Wed 17:00 -> Thu 13:00 on 08-18: 1 h of Wed window, 5 h of Thu window -> 1/6 and 5/6 of 10 h.
+  const task = { id: 'm', MACHINE: 'L', PLANT: 'P', RUN_TIME: 12, start_date: D(14, 17), end_date: D(15, 13) };
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: {}, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [] }, startMs: +D(14), days: 2, lines: ['L'],
+  });
+  assert.equal(matrix.L['2026-10-14'].scheduled, 2);
+  assert.equal(matrix.L['2026-10-15'].scheduled, 10);
+  const { alerts } = Core.computeAlerts(alertBase([task]));
+  assert.ok(!alerts.some(a => a.type === 'overload' && a.id.endsWith('2026-10-14')), 'Wed holds 2 h, not 12 h');
+});
+
+const dueFri = (over = {}) => ({
+  id: 'late1', MACHINE: 'L', PLANT: 'P', RUN_TIME: 4, ORDER: '5001',
+  original_end_date: D(16, 0),                       // SAP finish: Fri, date only
+  start_date: D(16, 13), end_date: D(16, 17), ...over,
+});
+
+test('late alert: a finish after the due instant is a warning; on or before it there is none', () => {
+  // Date-only due Fri reads as the close of Fri's window (18:00).
+  assert.deepEqual(Core.computeAlerts(alertBase([dueFri()])).alerts.filter(a => a.type === 'late'), [], 'Fri 17:00 is before the 18:00 close');
+  const late = Core.computeAlerts(alertBase([dueFri({ start_date: D(16, 16), end_date: D(16, 20) })])).alerts.filter(a => a.type === 'late');
+  assert.equal(late.length, 1);
+  assert.equal(late[0].sev, 'warn');
+  assert.equal(late[0].id, 'late-late1');
+  assert.equal(late[0].msgKey, 'alert.late');
+  assert.equal(late[0].msgVars.hours, '2.0');
+  assert.equal(late[0].taskId, 'late1');
+  assert.equal(late[0].line, 'L');
+});
+
+test('late alert (R-I6): on a 06:00-24:00 line a bar ending exactly at the close is on time, one minute later is late', () => {
+  const cal = { L: { workHours: allDays([6, 24]) } };
+  const mk = (end) => dueFri({ original_end_date: D(16, 0), start_date: D(16, 10), end_date: end });
+  const lateOf = (task) => Core.computeAlerts(alertBase([task], { calendars: cal, plants: { P: { workHours: allDays([0, 24]) } } })).alerts.filter(a => a.type === 'late');
+  assert.equal(lateOf(mk(D(17, 0))).length, 0, 'ends exactly at the 24:00 close of its due day: on time');
+  const late = lateOf(mk(D(17, 0, 1)));
+  assert.equal(late.length, 1, 'one minute past the close is late');
+  assert.equal(late[0].sev, 'warn');
+});
+
+test('late alert (R-I6): the push ceiling on a 06:00-24:00 line is the due DAY midnight + N + 1, not shifted by the next-day-00:00 due', () => {
+  const cal = { L: { workHours: allDays([6, 24]) } };
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P', max_push_forward_days: 0 }] };
+  const lateOf = (end) => Core.computeAlerts(alertBase([dueFri({ start_date: D(16, 10), end_date: end })],
+    { calendars: cal, plants: { P: { workHours: allDays([0, 24]) } }, masterData })).alerts.filter(a => a.type === 'late');
+  // Due Fri 16 Oct (read as Sat 00:00), cap 0 => ceiling Sat 00:00: a finish a minute after it is beyond the cap.
+  const over = lateOf(D(17, 0, 1));
+  assert.equal(over.length, 1);
+  assert.equal(over[0].sev, 'err', 'beyond the ceiling (due day + 1 day), not warn');
+});
+
+test('late alert: a timed due date compares exactly, and a line with no calendar row reads a date-only due as 23:59:59', () => {
+  const timed = dueFri({ original_end_date: D(16, 12, 30), start_date: D(16, 9), end_date: D(16, 12, 31) });
+  assert.equal(Core.computeAlerts(alertBase([timed])).alerts.filter(a => a.type === 'late').length, 1);
+  // D14 (repaired from the earlier 'no row reads 23:59:59' expectation): a line with no row of its own reads the
+  // default window, so a date-only due resolves on it and is judged, not silently skipped.
+  const bare = alertBase([dueFri({ start_date: D(16, 20), end_date: D(16, 23, 0) })], { calendars: {} });
+  assert.equal(Core.computeAlerts(bare).alerts.filter(a => a.type === 'late').length, 1, 'a finish after the default window close is late');
+  const bareOk = alertBase([dueFri({ start_date: D(16, 8), end_date: D(16, 10, 0) })], { calendars: {} });
+  assert.equal(Core.computeAlerts(bareOk).alerts.filter(a => a.type === 'late').length, 0, 'a finish inside the day is on time');
+});
+
+test('late alert: beyond the plant push-forward ceiling it is an error', () => {
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P', max_push_forward_days: 1 }] };
+  // Due Fri; N = 1 gives a ceiling of Sun 00:00 (Fri midnight + 2 days).
+  const within = Core.computeAlerts(alertBase([dueFri({ start_date: D(17, 9), end_date: D(17, 13) })], { masterData })).alerts.find(a => a.type === 'late');
+  assert.equal(within.sev, 'warn');
+  const beyond = Core.computeAlerts(alertBase([dueFri({ start_date: D(18, 9), end_date: D(18, 13) })], { masterData })).alerts.find(a => a.type === 'late');
+  assert.equal(beyond.sev, 'err');
+  assert.equal(beyond.msgKey, 'alert.late_beyond_cap');
+  assert.equal(beyond.msgVars.days, 1);
+});
+
+test('late alert: a queued order and an order with no due date get none', () => {
+  const queued = dueFri({ planning_status: 'needs_planning', start_date: null, end_date: null });
+  const noDue = dueFri({ id: 'nd', original_end_date: null, start_date: D(16, 16), end_date: D(16, 20) });
+  assert.deepEqual(Core.computeAlerts(alertBase([queued, noDue])).alerts.filter(a => a.type === 'late'), []);
+});
+
+const issueTask = (id, issue, over = {}) => ({ id, MACHINE: 'L', PLANT: 'P', ORDER: `ORD-${id}`, RUN_TIME: 2,
+  start_date: D(15, 9), end_date: D(15, 11), derivationIssue: issue, ...over });
+const issueAlerts = (tasks, extra = {}) => Core.computeAlerts(alertBase(tasks, extra)).alerts
+  .filter(a => !['overlap', 'overload', 'late'].includes(a.type));
+
+test('every engine derivationIssue code renders an alert with a locale key, the ruled severity and a task+code id', () => {
+  const table = {
+    finish_moved_earlier:   { sev: 'warn', key: 'alert.finish_moved_earlier', extra: { from: D(15, 17), to: D(15, 11) } },
+    setup_override_orphaned:{ sev: 'warn', key: 'alert.setup_override_orphaned' },
+    frozen_window_crossed:  { sev: 'warn', key: 'alert.frozen_window_crossed' },
+    pull_floor_crossed:     { sev: 'warn', key: 'alert.pull_floor_crossed', extra: { from: D(15, 9), to: D(16, 8) } },
+    run_time_zero:          { sev: 'warn', key: 'alert.run_time_zero' },
+    no_operating_window:    { sev: 'warn', key: 'alert.no_operating_window' },
+    no_anchor:              { sev: 'err',  key: 'alert.no_anchor' },
+  };
+  const codes = Object.keys(table);
+  const tasks = codes.map((code, i) => issueTask(`i${i}`, { code, ...(table[code].extra || {}) }, { start_date: D(15, 9 + i % 3), end_date: D(15, 10 + i % 3) }));
+  const alerts = issueAlerts(tasks);
+  for (const [i, code] of codes.entries()) {
+    const alert = alerts.find(a => a.id === `derivation-i${i}-${code}`);
+    assert.ok(alert, `${code} renders`);
+    assert.equal(alert.type, code);
+    assert.equal(alert.sev, table[code].sev, `${code} severity`);
+    assert.equal(alert.msgKey, table[code].key);
+    assert.equal(alert.taskId, `i${i}`);
+    assert.equal(alert.msgVars.order, `ORD-i${i}`);
+    assert.ok(alert.msg.length > 10, 'carries an English fallback');
+  }
+});
+
+test('reversal_forward renders one key per detail and is a warning inside the push cap; an unrecorded detail takes the generic key', () => {
+  const tasks = ['run_time_grew', 'due_date_past', 'cutover', undefined].map((detail, i) => issueTask(`r${i}`, { code: 'reversal_forward', ...(detail ? { detail } : {}) }));
+  const byId = Object.fromEntries(issueAlerts(tasks).map(a => [a.taskId, a]));
+  assert.equal(byId.r0.msgKey, 'alert.reversal_forward_run_time_grew');
+  assert.equal(byId.r1.msgKey, 'alert.reversal_forward_due_date_past');
+  assert.equal(byId.r2.msgKey, 'alert.reversal_forward_cutover');
+  assert.equal(byId.r3.msgKey, 'alert.reversal_forward');
+  for (const alert of Object.values(byId)) { assert.equal(alert.sev, 'warn', 'D9b: no push cap set, so never an error'); assert.equal(alert.type, 'reversal_forward'); }
+});
+
+test('D9b: reversal_forward is a warning unless the reversed finish is beyond the plant push cap', () => {
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P', max_push_forward_days: 1 }] };
+  const due = D(15, 0);   // date-only due Thu 15 Oct, 08:00-18:00 line: due day plus one day = ceiling Sat 00:00
+  const within = issueTask('w1', { code: 'reversal_forward', detail: 'due_date_past' }, { original_end_date: due, start_date: D(15, 9), end_date: D(16, 11) });
+  const beyond = issueTask('w2', { code: 'reversal_forward', detail: 'due_date_past' }, { original_end_date: due, start_date: D(17, 9), end_date: D(17, 11) });
+  const byId = Object.fromEntries(issueAlerts([within, beyond], { masterData }).filter(a => a.type === 'reversal_forward').map(a => [a.taskId, a.sev]));
+  assert.deepEqual(byId, { w1: 'warn', w2: 'err' });
+});
+
+test('gate 14: pull_floor_crossed renders, and an unfirmed order whose start flips into the frozen window renders frozen_window_crossed', () => {
+  const unfirmed = issueTask('uf', { code: 'frozen_window_crossed' }, { firmed: false, start_date: D(14, 9), end_date: D(14, 11) });
+  const floor = issueTask('pf', { code: 'pull_floor_crossed', from: D(15, 7), to: D(15, 9) });
+  const alerts = issueAlerts([unfirmed, floor]);
+  assert.ok(alerts.some(a => a.id === 'derivation-uf-frozen_window_crossed' && a.type === 'frozen_window_crossed' && a.sev === 'warn'));
+  assert.ok(alerts.some(a => a.id === 'derivation-pf-pull_floor_crossed' && a.type === 'pull_floor_crossed' && a.sev === 'warn'));
+});
+
+test('plant-level and line-level findings de-duplicate to one alert per plant / per line', () => {
+  const tasks = [
+    issueTask('a', { code: 'plant_no_timezone' }, { MACHINE: 'L2' }),
+    issueTask('b', { code: 'plant_no_timezone' }, { MACHINE: 'L1' }),
+    issueTask('c', { code: 'plant_no_timezone' }, { MACHINE: 'L1' }),
+    issueTask('d', { code: 'line_no_calendar' }, { MACHINE: 'L1' }),
+    issueTask('e', { code: 'line_no_calendar' }, { MACHINE: 'L1' }),
+    issueTask('f', { code: 'line_no_calendar' }, { MACHINE: 'L2' }),
+  ];
+  const masterData = { lines: [{ machine: 'L1', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const alerts = issueAlerts(tasks, { masterData, calendars: { L1: open0818, L2: open0818 }, lineSettings: { L1: { plant: 'P' }, L2: { plant: 'P' } } });
+  const plantAlerts = alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(plantAlerts.length, 1);
+  assert.equal(plantAlerts[0].id, 'plant-no-timezone-P');
+  assert.equal(plantAlerts[0].line, 'L1', 'sits on the plant\'s first affected line');
+  assert.equal(plantAlerts[0].sev, 'err');
+  assert.deepEqual(plantAlerts[0].msgVars, { plant: 'P' });
+  // D14/VM13: line_no_calendar is retired; it is no longer emitted, one per line or otherwise.
+  assert.equal(alerts.filter(a => a.type === 'line_no_calendar').length, 0, 'line_no_calendar is no longer emitted');
+});
+
+test('computeAlerts never mutates now[plant]; derivation alerts carry the real now as their time (U15)', () => {
+  const nowP = D(14, 15, 42);
+  const before = +nowP;
+  const masterData = { lines: [{ machine: 'L1', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const alerts = issueAlerts([issueTask('n1', { code: 'plant_no_timezone' }, { MACHINE: 'L1' })], {
+    masterData, calendars: {}, lineSettings: { L1: { plant: 'P' } }, now: { P: nowP },
+  });
+  assert.equal(+nowP, before, 'the now Date passed in is left alone');
+  const alert = alerts.find(x => x.type === 'plant_no_timezone');   // repaired: line_no_calendar is retired (D14); same time rule on the plant alert
+  assert.ok(alert, 'plant_no_timezone alert present');
+  assert.equal(+alert.time, before, 'alert time is the real now, not 00:00');
+});
+
+test('a plant the clock refused (blockedPlants) alerts even when no order carries a note; a scoped run stays on its own line', () => {
+  const masterData = { lines: [{ machine: 'L1', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const payload = { masterData, blockedPlants: ['P'], calendars: {}, lineSettings: {} };
+  const full = Core.computeAlerts(alertBase([], payload)).alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(full.length, 1);
+  assert.equal(full[0].line, 'L1');
+  const scopedOther = Core.computeAlerts(alertBase([], { ...payload, opts: { lines: ['L2'] } })).alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(scopedOther.length, 0, 'an incremental run for L2 does not duplicate the L1-anchored alert');
+  const scopedOwn = Core.computeAlerts(alertBase([], { ...payload, opts: { lines: ['L1'] } })).alerts.filter(a => a.type === 'plant_no_timezone');
+  assert.equal(scopedOwn.length, 1);
+});
+
+test('an unknown derivationIssue code still renders a generic alert (never silently dropped)', () => {
+  const alerts = issueAlerts([issueTask('u', { code: 'brand_new_code' })]);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].type, 'derivation_issue');
+  assert.equal(alerts[0].msgKey, 'alert.derivation_issue');
+  assert.equal(alerts[0].msgVars.code, 'brand_new_code');
+  assert.equal(alerts[0].sev, 'warn');
+});
+
+test('placement_exception markers render as warnings (D20); a normal row or a cleared marker does not', () => {
+  const tasks = [
+    issueTask('o', null, { placement_exception: 'overtime' }),
+    issueTask('l', null, { placement_exception: 'overlong' }),
+    issueTask('n', null, { placement_exception: null }),
+  ];
+  const alerts = issueAlerts(tasks).filter(a => a.type === 'placement_exception');
+  assert.deepEqual(alerts.map(a => [a.taskId, a.msgKey, a.sev]).sort(), [
+    ['l', 'alert.placement_exception_overlong', 'warn'], ['o', 'alert.placement_exception_overtime', 'warn'],
+  ]);
+});
+
+test('the runtime/schedule mismatch alert is reworded through alert.start_may_be_stale', () => {
+  const alert = Core.computeAlerts(alertBase([issueTask('s', null, { runtime_schedule_mismatch: true })])).alerts
+    .find(a => a.type === 'runtime-schedule-mismatch');
+  assert.equal(alert.msgKey, 'alert.start_may_be_stale');
+  assert.deepEqual(alert.msgVars, { order: 'ORD-s' });
+  assert.match(alert.msg, /may be out of date/);
+});
+
+test('engine findings respect the incremental line scope and the dismissed set', () => {
+  const tasks = [issueTask('a', { code: 'run_time_zero' }, { MACHINE: 'L' }), issueTask('b', { code: 'run_time_zero' }, { MACHINE: 'L2' })];
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }, { machine: 'L2', plant: 'P' }], plants: [{ plant: 'P' }] };
+  const base = { masterData, calendars: { L: open0818, L2: open0818 }, lineSettings: { L: { plant: 'P' }, L2: { plant: 'P' } } };
+  const scoped = issueAlerts(tasks, { ...base, opts: { lines: ['L2'] } });
+  assert.deepEqual(scoped.map(a => a.id), ['derivation-b-run_time_zero']);
+  const dismissed = issueAlerts(tasks, { ...base, dismissed: ['derivation-a-run_time_zero'] });
+  assert.deepEqual(dismissed.map(a => a.id), ['derivation-b-run_time_zero']);
+});
+
+test('the alert horizon reads the payload per-plant clock: an order that ended before the plant\'s today is ignored', () => {
+  const yesterday = dueFri({ id: 'y', start_date: D(13, 9), end_date: D(13, 13), original_end_date: D(13, 0) });
+  const stale = Core.computeAlerts(alertBase([yesterday, { ...yesterday, id: 'y2', end_date: D(13, 20), original_end_date: D(13, 12) }])).alerts;
+  assert.equal(stale.filter(a => a.type === 'late').length, 0, 'finished before today on the plant clock: past the horizon');
+});
+
+test('U16: the plant-zone conversion pair the forward and backward legs share keeps Chicago spring-forward elapsed time exact', () => {
+  const tz = 'America/Chicago';
+  // Sun 8 Mar 2026: wall 00:00 -> 06:00 is 5 elapsed hours (02:00-03:00 does not exist).
+  const a = Core.plantInstantFromWallClock(tz, new Date(2026, 2, 8, 0, 0));
+  const b = Core.plantInstantFromWallClock(tz, new Date(2026, 2, 8, 6, 0));
+  assert.equal((b - a) / 3600000, 5);
+  // And 5 h after 00:00 reads back as wall 06:00 (what the forward allocator returns for a 5 h bar).
+  const back = Core.plantWallClockFromInstant(tz, new Date(+a + 5 * 3600000));
+  assert.deepEqual([back.getHours(), back.getMinutes(), back.getDate()], [6, 0, 8]);
+});
+
+test('D20: an approved placement exception is a warning, not an error', () => {
+  const alerts = issueAlerts([issueTask('pe', null, { placement_exception: 'overtime' })]).filter(a => a.type === 'placement_exception');
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].sev, 'warn');
+});
+
+test('VM13: line_no_calendar is no longer emitted for a line without a calendar row', () => {
+  const alerts = issueAlerts([issueTask('lc', { code: 'line_no_calendar' }, { MACHINE: 'L1' })], {
+    masterData: { lines: [{ machine: 'L1', plant: 'P' }], plants: [{ plant: 'P' }] }, calendars: {}, lineSettings: { L1: { plant: 'P' } },
+  });
+  assert.equal(alerts.filter(a => a.type === 'line_no_calendar').length, 0);
+});
+
+test('VM12: a finish-only row contributes its hours to computeUtilization', () => {
+  const task = { id: 'fo', MACHINE: 'L', PLANT: 'P', RUN_TIME: 4, start_date: null, end_date: D(15, 12) };
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: { L: { plant: 'P' } }, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P' }] }, startMs: +D(15, 0), days: 1, lines: ['L'],
+  });
+  const row = Object.values(matrix.L)[0];
+  assert.equal(row.scheduled * 60, 240);
 });

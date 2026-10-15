@@ -25,8 +25,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Compute, Alerts, Utilization, scheduleAlertsForPatches, loadDistributionSummary } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
-import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
+import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 const require = createRequire(import.meta.url);
@@ -174,14 +174,6 @@ test('Utilization.computeMatrix memoizes on (startMs, days, Store.rev(), plant s
 });
 
 
-test('Utilization.dayByLine is unmemoized — two calls with the same args recompute independently', () => {
-  const a = Utilization.dayByLine(new Date());
-  const b = Utilization.dayByLine(new Date());
-  assert.deepEqual(a, b);
-  assert.notEqual(a, b, 'must not be the same cached object reference — dayByLine has no memo');
-});
-
-
 test('Alerts publishes scoped setup observations without invoking Engine, including Fix It', () => {
   // This fails if alerts bypass the shared setup projection, resolve matrices in
   // the core, or make a setup diagnostic recursively optimize on Fix It.
@@ -296,6 +288,107 @@ test('Alerts.applyFix still calls Engine.autoReflow for blackout alerts (Task 3:
     Engine.autoReflow = priorAutoReflow;
     Store.setAlerts(priorAlerts, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('gate 33: the auto-fix "order moved" toast reads the FINISH of the moved order, not its start', () => {
+  const plant = '5512', line = 'ORDERMOVED-TOAST-LINE', taskId = 'ordermoved-toast-task';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts);
+  const priorShow = Toast.show, priorT = Util.t;
+  const shown = [];
+  Toast.show = () => {};
+  Util.t = (key, vars) => { if (key === 'toast.order_moved') shown.push(vars); return priorT.call(Util, key, vars); };
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([{ id: taskId, PLANT: plant, MACHINE: line, RUN_TIME: '2',
+    start_date: new Date('2026-08-25T08:00:00'), end_date: new Date('2026-08-25T10:00:00') }], 'unit-test');
+  Store.setAlerts([{ id: 'ordermoved-alert', type: 'blackout', taskId }], 'unit-test');
+  try {
+    Alerts.applyFix('ordermoved-alert');
+    assert.equal(shown.length, 1, 'the toast was raised once');
+    const moved = Store.tasks[taskId];
+    assert.equal(shown[0].date, Util.fmtDT(moved.end_date), 'the date is the finish of the moved order');
+    assert.notEqual(shown[0].date, Util.fmtDT(moved.start_date), 'and not its start');
+  } finally {
+    Toast.show = priorShow; Util.t = priorT;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
+  }
+});
+
+test('G-0.25: Alerts.applyFix never moves a row carrying a placement exception (overtime / overlong); it toasts cannot_fix_firmed', () => {
+  const plant = '5512', line = 'MARKED-FIX-LINE', taskId = 'marked-fix-task';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+  const start = new Date('2026-08-25T08:00:00'), end = new Date('2026-08-25T10:00:00');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([{ id: taskId, PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, placement_exception: 'overtime' }], 'unit-test');
+  Store.setAlerts([{ id: 'marked-fix-alert', type: 'blackout', taskId }], 'unit-test');
+  const entries = UndoStack._entries.length;
+  try {
+    Alerts.applyFix('marked-fix-alert');
+    assert.equal(Store.tasks[taskId].start_date.getTime(), start.getTime(), 'the marked bar did not move');
+    assert.equal(Store.tasks[taskId].end_date.getTime(), end.getTime());
+    assert.equal(UndoStack._entries.length, entries, 'no undo entry: nothing happened');
+    assert.deepEqual(toasts.map(t => t.type), ['warn']);
+    assert.equal(toasts[0].msg, String(Util.t('toast.cannot_fix_firmed')));
+  } finally {
+    Toast.show = priorShow;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test'); Store.setTasks([], 'unit-test');
+  }
+});
+
+test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the optimizer and the fix) and one Ctrl+Z restores the line', () => {
+  const plant = '5512', line = 'OVERLOAD-UNDO-LINE';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts);
+  const priorRun = Engine.runAndApply, priorShow = Toast.show;
+  Toast.show = () => {};
+  const day = new Date('2026-08-25T00:00:00');
+  const aStart = new Date('2026-08-25T08:00:00'), aEnd = new Date('2026-08-25T12:00:00');
+  Store.setSelectedPlant(plant, 'unit-test');
+  const priorMasterData = Store.masterData;
+  Store.setMasterData({ plants: [{ plant, timezone: 'America/Chicago' }], lines: [{ machine: line, plant }] }, 'unit-test');   // VM6: the fix needs a plant clock
+  Store.setTasks([{ id: 'ov-a', PLANT: plant, MACHINE: line, RUN_TIME: '4', start_date: aStart, end_date: aEnd }], 'unit-test');
+  Store.setAlerts([{ id: 'ov-alert', type: 'overload', line, time: day }], 'unit-test');
+  UndoStack._entries.length = 0;
+  // Stand in for the optimizer: it moves the order and pushes its own entry, exactly as Engine.runAndApply does.
+  Engine.runAndApply = () => {
+    const snap = UndoStack.snapshotTasks(['ov-a']);
+    Store.updateTask('ov-a', { start_date: new Date('2026-08-25T14:00:00'), end_date: new Date('2026-08-25T18:00:00') }, 'engine');
+    UndoStack.push('Optimization (changeover)', () => UndoStack.restoreTasks(snap), ['ov-a']);
+  };
+  try {
+    Alerts.applyFix('ov-alert');
+    assert.equal(UndoStack._entries.length, 2, 'the optimizer entry plus the auto-fix entry');
+    assert.match(UndoStack._entries[1].label, /Auto-fix overload/);
+    UndoStack.pop();                                         // one Ctrl+Z: the fix's snapshot predates the optimizer
+    assert.equal(Store.tasks['ov-a'].end_date.getTime(), aEnd.getTime(), 'the finish is back where it was before the auto-fix');
+  } finally {
+    Engine.runAndApply = priorRun; Toast.show = priorShow;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
+    Store.setMasterData(priorMasterData, 'unit-test');
+  }
+});
+
+test('VM6: the overload auto-fix refuses a plant with no valid time zone and runs no optimizer', () => {
+  const plant = 'NOTZ-PLANT', line = 'NOTZ-LINE';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorMasterData = Store.masterData;
+  const priorRun = Engine.runAndApply, priorShow = Toast.show;
+  const shown = [];
+  Toast.show = (msg, type) => { shown.push(type); };
+  let ran = false;
+  Engine.runAndApply = () => { ran = true; };
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setMasterData({ plants: [{ plant }], lines: [{ machine: line, plant }] }, 'unit-test');
+  Store.setAlerts([{ id: 'notz-alert', type: 'overload', line, time: new Date('2026-08-25T00:00:00') }], 'unit-test');
+  try {
+    Alerts.applyFix('notz-alert');
+    assert.equal(ran, false);
+    assert.ok(shown.includes('error'), 'the Optimize-dialog refusal toast is shown (plantNow adds its own one-time warn)');
+  } finally {
+    Engine.runAndApply = priorRun; Toast.show = priorShow;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test'); Store.setMasterData(priorMasterData, 'unit-test');
   }
 });
 
@@ -517,12 +610,16 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
   const priorFirmed = new Set(Store.firmedIds);
   const runStart = new Date(Date.now() - 3600_000);
   const runEnd = new Date(Date.now() + 3600_000);
+  let priorMasterData;
   try {
     Store.setSelectedPlant(plant, 'unit-test');
+    // A plant needs a valid zone to have a clock (OQ52); the running order is judged against it.
+    priorMasterData = Store.masterData;
+    Store.setMasterData({ lines: [], ...Store.masterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'unit-test');
     Store.setTasks([
-      { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, ecc_firmed: true },
-      { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
-      { id: 'ff-run', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: runStart, end_date: runEnd },
+      { id: 'ff-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: start, end_date: end, ecc_firmed: true },
+      { id: 'ff-man', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: start, end_date: end },
+      { id: 'ff-run', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: runStart, end_date: runEnd },
     ], 'unit-test');
     Store.setFirmed(['ff-man'], true, 'unit-test');
     // SAP firm is display-only: the fix goes ahead and moves the order.
@@ -542,6 +639,59 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
     Store.setFirmed(['ff-man'], false, 'unit-test');
     for (const id of priorFirmed) Store.setFirmed([id], true, 'unit-test');
     Store.setAlerts(priorAlerts, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    if (priorMasterData !== undefined) Store.setMasterData(priorMasterData, 'unit-test');
+  }
+});
+
+
+test('Utilization.minutesByDay (the cell-briefing rule): a 14 h order spanning Wed 22:00 - Fri 00:00 (14-16 Oct 2026) puts all 14 h on Thursday, the only day with working time, and that 10 h window is overloaded', () => {
+  const line = 'L-BRIEF';
+  const priorCalendar = Store.calendars[line];
+  const wh = {}; for (let i = 0; i < 7; i++) wh[i] = [8, 18];
+  Store.calendars[line] = { workHours: wh };
+  try {
+    const task = { id: 'brief', MACHINE: line, RUN_TIME: 14, start_date: new Date(2026, 9, 14, 22), end_date: new Date(2026, 9, 16, 0) };
+    const byDay = Utilization.minutesByDay(task, line);
+    // The rule is intentional: the bar is attributed in proportion to each day's WORKING overlap, and Wed 22:00 and
+    // Fri 00:00 are both outside the 08:00-18:00 window, so Thursday takes the whole run time.
+    assert.deepEqual(byDay, { '2026-10-15': 840 });
+    // Thursday's calendar window is 08:00-18:00 = 600 minutes, so the attributed 840 is 140% of that day's capacity:
+    // the matrix flags it as overload instead of spreading it onto Wed/Fri.
+    const capacityMin = (18 - 8) * 60;
+    assert.equal(capacityMin, 600);
+    assert.ok(byDay['2026-10-15'] > capacityMin, 'the attributed minutes exceed the 600-minute window');
+    assert.equal(Math.round(byDay['2026-10-15'] / capacityMin * 100), 140);
+  } finally { if (priorCalendar) Store.calendars[line] = priorCalendar; else delete Store.calendars[line]; }
+});
+
+test('I13: the worker prewarm starts the matrix on the plant clock and writes the cache key computeMatrix reads', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorAvailable = Compute.available;
+  const priorUtilization = Compute.utilization;
+  const priorCache = Utilization._cache;
+  let askedStart = null;
+  Util.setPlantClockResolver(plant => (plant === 'PW-P' ? new Date(2026, 9, 15, 0, 30) : null));   // plant a day ahead of the viewer
+  Compute.available = () => true;
+  Compute.utilization = (startMs) => { askedStart = startMs; return Promise.resolve({ matrix: {} }); };
+  try {
+    Store.setSelectedPlant('PW-P', 'unit-test');
+    Utilization._cache = null;
+    // A debounced alert recompute left by an earlier test can bump the store revision while the prewarm is in flight,
+    // and the prewarm (correctly) drops a stale reply: retry until one lands.
+    for (let attempt = 0; attempt < 5 && !Utilization._cache; attempt++) {
+      Utilization._prewarm();
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const plantToday = new Date(2026, 9, 15).getTime();
+    assert.equal(askedStart, plantToday, 'the prewarm asks for the plant\'s today, not the viewer\'s');
+    assert.match(Utilization._cache?.key ?? '', new RegExp(String.raw`^${plantToday}\|7\|\d+\|PW-P$`),
+      'the cache key carries the plant-today start, so a Dashboard computeMatrix(plantClock) call hits it');
+  } finally {
+    Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
+    Compute.available = priorAvailable;
+    Compute.utilization = priorUtilization;
+    Utilization._cache = priorCache;
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });

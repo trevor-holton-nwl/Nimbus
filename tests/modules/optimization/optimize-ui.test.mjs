@@ -16,6 +16,8 @@ import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 const require = createRequire(import.meta.url);
+// engine.mts reads the compute-core global at call time (plantWallClockFromInstant), so Node tests must bootstrap it.
+globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
 test('preview separates scheduled demand, new queue, protected exceptions and incomplete search', () => {
   const candidate = { dispositions: [
@@ -460,6 +462,23 @@ test('Task 1: server task refresh events invalidate row-version and full-reload 
     Store.setTasks([{ ...previewTask('task-reload', plant), row_version: 2 }], 'backend');
     assert.equal(OptimizerPreview.stale, true, 'a tasks:bulk reload mismatch stales the preview');
     assert.equal(OptimizerPreview.canApply(), false);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('Group 26: an engine re-derivation of the preview plant stales the open preview with its own banner; another plant does not', () => {
+  const plant = 'TASK-PREVIEW-RECONCILE';
+  const fixture = openTaskBaselinePreview(plant, [previewTask('task-rec', plant)]);
+  try {
+    Store.emit({ type: 'tasks:bulkUpdate', ids: ['task-not-in-preview'], source: 'engine-runtime-reconcile' });
+    assert.equal(OptimizerPreview.stale, false, 'a reconcile of rows outside the preview plant is not a reason to stale it');
+    // No field of the previewed row changes: the field-level baseline comparison alone would not catch this.
+    Store.emit({ type: 'tasks:bulkUpdate', ids: ['task-rec'], source: 'engine-runtime-reconcile' });
+    assert.equal(OptimizerPreview.stale, true, 'the reconcile marks the preview stale');
+    assert.equal(OptimizerPreview.canApply(), false, 'Apply is disabled');
+    assert.equal(OptimizerPreview._staleMessageKey, 'ui.preview_stale');
+    assert.equal(OptimizerPreview._staleMessage(), Util.t('ui.preview_stale'), 'the banner carries the new key');
   } finally {
     fixture.restore();
   }
@@ -1651,5 +1670,110 @@ test('G6: preview Apply drops candidate patches for orders that are running at a
     Engine.isInProgress = priorIsInProgress;
     Toast.show = priorShow;
     fixture.restore();
+  }
+});
+
+test('gate 24: preview Apply drops a candidate whose derived bar has started by the PLANT clock at Apply time (no isInProgress stub; viewer clock elsewhere)', () => {
+  const plant = 'APPLY-DERIVED';
+  const derivedId = 'apply-derived-1';
+  const freeId = 'apply-derived-free';
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
+  const priorShow = Toast.show;
+  const toasts = [];
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // The plant clock reads Mon 2026-08-03 08:00 (the bar is a week out) when the preview opens; the viewer's own clock is the real today.
+  Store.setMasterData({ ...priorMaster, plants: [{ plant, timezone: tz }], lines: [] }, 'unit-test');
+  Store._blockedPlants.clear();
+  Store.serverOffsetMs = new Date('2026-08-03T08:00:00').getTime() - Date.now();
+  // A placed order (user_scheduled) whose bar is 09:00-12:00: not started at 08:00. Running protection needs a real placement (I10).
+  const derived = { ...previewTask(derivedId, plant, 3), user_scheduled: true, start_date: new Date('2026-08-10T09:00:00'), end_date: new Date('2026-08-10T12:00:00') };
+  const fixture = openTaskBaselinePreview(plant, [derived, previewTask(freeId, plant, 1)]);
+  try {
+    assert.ok(OptimizerPreview._candidate.patches.some(p => p.id === derivedId), 'the preview carries a patch for the order');
+    assert.equal(Engine.isInProgress(Store.tasks[derivedId]), false, 'sanity: not running when the preview opened');
+    // The preview sat open and the PLANT clock advanced to 10:00: the bar is now running.
+    Store.serverOffsetMs = new Date('2026-08-10T10:00:00').getTime() - Date.now();
+    assert.equal(Engine.isInProgress(Store.tasks[derivedId]), true, 'sanity: the plant clock (not the viewer clock) says it is running');
+    Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+    OptimizerPreview.apply();
+    assert.equal(Store.tasks[derivedId].start_date.getTime(), new Date('2026-08-10T09:00:00').getTime(), 'the running order keeps its derived start');
+    assert.equal(Store.tasks[derivedId].end_date.getTime(), new Date('2026-08-10T12:00:00').getTime());
+    assert.ok(toasts.some(t => t.type === 'warn' && t.msg === String(Util.t('toast.opt_apply_running_skipped', { count: 1 }))),
+      'counted in toast.opt_apply_running_skipped');
+  } finally {
+    Toast.show = priorShow;
+    fixture.restore();
+    Store.serverOffsetMs = priorOffset;
+    Store._blockedPlants.clear();
+    Store.setMasterData(priorMaster, 'unit-test');
+  }
+});
+
+test('OQ56 a: the Remove Backlog dialog names how many orders are backlog only because their run time grew', async () => {
+  const priorDocument = globalThis.document;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const hintEl = makeSandboxElement('opt-strategy-hint');
+  const elements = new Map([
+    ['opt-strategy-select', makeSandboxElement('opt-strategy-select', 'changeover')],
+    ['opt-strategy-hint', hintEl],
+    ['opt-run-btn', makeSandboxElement('opt-run-btn')],
+    ['opt-wheel-badge', makeSandboxElement('opt-wheel-badge')],
+  ]);
+  globalThis.document = {
+    getElementById(id) { return elements.get(id) || null; },
+    addEventListener() {}, removeEventListener() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    createElement() { return makeSandboxElement('created'); },
+    body: { appendChild() {}, classList: { add() {}, remove() {} } },
+  };
+  try {
+    const mk = (id, issue) => ({ id, PLANT: 'NOTE-P', MACHINE: 'NOTE-L', RUN_TIME: 2,
+      start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T10:00:00'), derivationIssue: issue });
+    Store.setTasks([
+      mk('n1', { code: 'reversal_forward', detail: 'run_time_grew' }),
+      mk('n2', { code: 'reversal_forward', detail: 'run_time_grew' }),
+      mk('n3', { code: 'reversal_forward', detail: 'due_date_past' }),   // late for another reason: not counted
+      mk('n4', null),
+    ], 'unit-test');
+    await OptimizeDialog.selectPlant('NOTE-P');
+    OptimizeDialog.selectMode('backlog');
+    assert.ok(hintEl.textContent.includes(Util.t('ui.opt_backlog_runtime_grew', { count: 2 })),
+      `the hint carries the run-time-grew count (2), got: ${hintEl.textContent}`);
+    OptimizeDialog.selectMode('changeover');
+    assert.ok(!hintEl.textContent.includes(Util.t('ui.opt_backlog_runtime_grew', { count: 2 })), 'other strategies show no backlog note');
+  } finally {
+    globalThis.document = priorDocument;
+    OptimizeDialog.selectMode('changeover');
+    Store.setTasks(priorTasks, 'unit-test');
+    if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('senior review U21: the Optimize dialog refuses to run on a plant with no valid timezone, with a localized message', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorMaster = Store.masterData;
+  const priorShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  try {
+    Store.setMasterData({ plants: [{ plant: 'NTZ-P', split_order_policy: 'never' }], lines: [{ machine: 'NTZ-L', plant: 'NTZ-P' }] }, 'unit-test');
+    Store._blockedPlants.clear();
+    Store.setTasks([{ id: 'z1', PLANT: 'NTZ-P', MACHINE: 'NTZ-L', RUN_TIME: 2,
+      start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T10:00:00') }], 'unit-test');
+    await OptimizeDialog.selectPlant('NTZ-P');
+    const seqBefore = OptimizerPreview._runSeq;
+    await OptimizeDialog.run();
+    assert.equal(OptimizerPreview._runSeq, seqBefore, 'no optimizer run was started');
+    assert.ok(toasts.some(t => t.type === 'error' && t.msg === Util.t('toast.optimize_plant_no_timezone', { plant: 'NTZ-P' })),
+      `the refusal is the localized toast, got ${JSON.stringify(toasts)}`);
+  } finally {
+    Toast.show = priorShow;
+    Store._blockedPlants.clear();
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });

@@ -126,7 +126,20 @@ let _settingsDefaultsResolver: SettingsDefaultsResolver = () => ({});
    Every mutation goes through here and fans out to subscribers.
    Subscribers tag their own mutations with `source` so they can skip echoes.
    ========================================================================== */
+// Wired at module load (store.mjs imports foundation.mjs, so this is a legal edge, not a cycle): the
+// header clock and greeting read the server's instant through Util without Util importing Store.
+Util.setServerNowResolver(() => Store.serverNow());
+Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
+
 export const Store = {
+  /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,
+   *  captured on every /tasks load (`setServerNow`, called from Persistence.load). 0 until the first
+   *  response arrives (so before then "now" is the browser's own clock, as it always was). Everything
+   *  that asks "what time is it at this plant" goes through `plantNow`, never `new Date()`. */
+  serverOffsetMs: 0,
+  /** Plants whose derivations are blocked because they have no valid IANA timezone (OQ52). Session
+   *  only, filled once per plant by `plantNow`; pruned when the plant resolves; the compute core renders it as plant_no_timezone. */
+  _blockedPlants: new Set<string>(),
   _tasksByPlant: {} as Record<string, NimbusTask[]>,
   _lineToPlant: {} as Record<string, string | null>,
   _linesByPlant: {} as Record<string, string[]>,
@@ -285,6 +298,40 @@ export const Store = {
     this._state.frozenHorizonEnd = end;
   },
 
+  /** Capture the server clock from a /tasks response's `meta.server_now` (ISO-8601 UTC). A missing or
+   *  unparsable value leaves the last good offset in place. `receivedAtMs` is the browser clock at
+   *  receipt (injectable for tests). */
+  setServerNow(serverNowIso: unknown, receivedAtMs: number = Date.now()): void {
+    if (typeof serverNowIso !== 'string' || !serverNowIso) return;
+    const serverMs = new Date(serverNowIso).getTime();
+    if (!Number.isFinite(serverMs)) return;
+    this.serverOffsetMs = serverMs - receivedAtMs;
+  },
+
+  /** The server's current instant, as a real (absolute) Date. */
+  serverNow(): Date {
+    return new Date(Date.now() + this.serverOffsetMs);
+  },
+
+  /** "Now" at a plant: the server instant projected into the plant's IANA zone, as the naive
+   *  wall-clock Date every schedule derivation compares against (same convention as task dates).
+   *  Returns null when the plant has no valid timezone, or when there is no plant to ask about; a
+   *  plant that exists in master data but has no valid zone is also recorded in `_blockedPlants` and
+   *  announced once per session (toast now, alert in Task 3.3). A plant master data does not know yet
+   *  (not loaded) is NOT recorded: that is "not loaded", not "misconfigured". */
+  plantNow(plant: string | null | undefined): Date | null {
+    if (!plant) return null;
+    const row = this._state.masterData?.plants?.find(p => p.plant === plant);
+    const tz = typeof row?.timezone === 'string' ? row.timezone.trim() : '';
+    const wall = tz ? globalThis.NimbusComputeCore!.plantWallClockFromInstant(tz, this.serverNow()) : null;
+    if (wall) { this._blockedPlants.delete(plant); return wall; }   // a plant that resolves is no longer blocked
+    if (row && !this._blockedPlants.has(plant)) {
+      this._blockedPlants.add(plant);
+      Toast.show(Util.t('toast.plant_no_timezone', { plant }), 'warn', 9000);
+    }
+    return null;
+  },
+
   /** Replace the one active plant's read-only setup snapshot. Unlike priority
    * maps this publishes a dedicated event so later observation-only setup views
    * can render promptly; Persistence deliberately never serializes it into the
@@ -358,6 +405,28 @@ export const Store = {
     return { inserted: Object.keys(this._state.tasks).length, collisions };
   },
 
+  /** `user_scheduled` is the server's "a planner placed this row" wire flag and nothing else updates it on the
+   *  client. A client write that gives the row both edges (a drop, a grid/Inspector edit, Override, an optimizer
+   *  apply, a release, Push +1 hour, a dirty reconcile patch) is a placement, so the row is placed locally from
+   *  then on; display-only derivations, server refreshes, undo/What-If restores and distribution's own saves are
+   *  not. Without this a dirty, planner-placed row would read as never-placed and be re-derived from its due date. */
+  _markPlaced(task: NimbusTask, changes: Partial<NimbusTask>, source?: string): void {
+    if (!changes.start_date || !changes.end_date || task.user_scheduled) return;
+    if (source === 'refresh' || source === 'engine-runtime-reconcile-display' || source === 'undo'
+      || source === 'sandbox' || source === 'distribution' || source === 'note' || source === 'time-machine') return;
+    // VI8: a Time Machine restore replays display-derived dates; reconcileRestored decides what is a placement.
+    task.user_scheduled = true;
+  },
+
+  /** The session-only derivation notes (`derivationIssue`, `systemMove`) describe the engine's last derivation of
+   *  a row. The next edit of its dates, machine or run time makes them stale, so a change-set that touches
+   *  those fields and does not itself carry a note clears them (the reconcile always carries both). */
+  _clearStaleNotes(task: NimbusTask, changes: Partial<NimbusTask>): void {
+    if (!('start_date' in changes || 'end_date' in changes || 'MACHINE' in changes || 'RUN_TIME' in changes)) return;
+    if (!('derivationIssue' in changes) && task.derivationIssue) task.derivationIssue = null;
+    if (!('systemMove' in changes) && task.systemMove) task.systemMove = null;
+  },
+
   // Update one task with a partial change-set.
   // NOTE: we replace the task *reference* (prev → next) rather than mutating
   // in place, so subscribers (e.g. AG Grid, diff-rebuild) can diff by identity.
@@ -371,6 +440,8 @@ export const Store = {
       next.planning_status = 'scheduled';
       next.planning_reason = null;
     }
+    Store._clearStaleNotes(next, changes);
+    Store._markPlaced(next, changes, source);
     Store._normalizeDates(next);
     this._state.tasks[id] = next;
     // Keep the _tasksByPlant index coherent with this reference swap. That index caches
@@ -426,6 +497,8 @@ export const Store = {
       const task = this._state.tasks[p.id];
       if (!task) continue;
       Object.assign(task, p.changes);
+      Store._clearStaleNotes(task, p.changes);
+      Store._markPlaced(task, p.changes, source);
       if (p.changes.planning_status === undefined && p.changes.start_date && p.changes.end_date) {
         task.planning_status = 'scheduled';
         task.planning_reason = null;
@@ -999,9 +1072,22 @@ export const UndoStack = {
   snapshotTasks(ids: string[]): NimbusTask[] {
     return ids.map(id => {
       const t = Store.tasks[id];
-      return t ? structuredClone(t) : null;
+      if (!t) return null;
+      const clone = structuredClone(t);
+      // F10: remember whether the row already carried unsaved edits before the edit this snapshot guards.
+      if (UndoStack.dirtyProbe?.(String(id))) UndoStack._wasDirty.add(clone);
+      return clone;
     }).filter(Boolean) as NimbusTask[];
   },
+  /** Registered by the engine (platform cannot import persistence): true when the row has unsaved edits. */
+  dirtyProbe: null as null | ((id: string) => boolean),
+  _wasDirty: new WeakSet<NimbusTask>(),
+  /** Registered by the engine (platform cannot import it): re-derive the start of just-restored rows from their
+   *  restored finish and the CURRENT run time (OQ21). Receives the restored ids. */
+  afterRestore: null as null | ((ids: string[], wasDirty: ReadonlySet<string>) => void),
+  /** Registered by the engine: true when the post-restore reconcile will process this (restored) row. Only such a
+   *  row is flagged stale by restoreTasks, because only the reconcile ever clears the flag (U23). Null = every row. */
+  willRederive: null as null | ((task: NimbusTask) => boolean),
   restoreTasks(snapshot: NimbusTask[]): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
@@ -1010,8 +1096,19 @@ export const UndoStack = {
     // flipped a firm without a marker, so the save sent no FIRMED and the UI diverged from the server.
     const patches = snapshot.map(s => {
       const { firmed: _firmed, ...rest } = s;
-      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
+      // OQ21: undo restores the FINISH. The restored start is only a placeholder, so the row is flagged stale and
+      // the engine re-derives the start from the finish under the current run time (afterRestore below).
+      // A row the reconcile will not process (no machine, an overtime/overlong
+      // marker) keeps its previous flag: nothing would clear a flag set here.
+      const mismatch = UndoStack.willRederive && !UndoStack.willRederive(s as NimbusTask)
+        ? !!Store.tasks[s.id]?.runtime_schedule_mismatch : true;
+      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, runtime_schedule_mismatch: mismatch,
+        row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
     });
     Store.updateMany(patches, 'undo');
+    if (patches.length) {
+      const wasDirty = new Set(snapshot.filter(s => UndoStack._wasDirty.has(s)).map(s => String(s.id)));
+      UndoStack.afterRestore?.(patches.map(p => String(p.id)), wasDirty);
+    }
   },
 };

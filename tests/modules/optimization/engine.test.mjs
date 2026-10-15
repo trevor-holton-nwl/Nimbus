@@ -23,7 +23,7 @@
 // ./frontend/optimization/engine.mjs) — a plain string inside a template
 // literal, not a static import, so `npm run build` cannot catch a stale path
 // there; only a whole-tree text grep for the old filenames would.
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -32,8 +32,12 @@ import {
   MIN_PRODUCTIVE_SEGMENT_MINUTES, effectiveFirmedIdSet,
 } from '../../../frontend/optimization/engine.mjs';
 import { capAwareSequence } from '../../../frontend/optimization/scheduler-contract.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
+import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
+import { App } from '../../../frontend/shell/application-shell.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
@@ -46,6 +50,26 @@ globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js
 // instead of throwing "document/window is not defined".
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') globalThis.document = { getElementById: () => null };
+
+// These fixtures build dates from the real clock as naive local values, so their plant's clock is this machine's
+// own zone (a plant with no valid zone has no clock: OQ52, see the one-clock tests at the end of this file).
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Manual placement derives from the plant's clock (backward scheduling Task 2.5): pin the server instant so a
+// fixture dated in August never reads as "in the past", and give the plant a zone. The naive string is read in
+// this machine's zone, which is also the plant's zone, so the plant's wall clock is exactly that string.
+function pinPlantClock(nowNaive) {
+  const priorOffset = Store.serverOffsetMs;
+  Store.serverOffsetMs = new Date(nowNaive).getTime() - Date.now();
+  Store._blockedPlants.clear();
+  return () => { Store.serverOffsetMs = priorOffset; Store._blockedPlants.clear(); };
+}
+function captureToasts() {
+  const prior = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg, type }); };
+  return { toasts, restore: () => { Toast.show = prior; } };
+}
 
 test('Engine derives a due-date-day pull-forward floor using calendar days', () => {
   Store.setMasterData({ plants: [{ plant: 'PULL', max_pull_forward_days: 7 }], lines: [] }, 'unit-test');
@@ -66,6 +90,21 @@ test('Engine derives a due-date-day pull-forward floor using calendar days', () 
     'crossing daylight saving still subtracts seven calendar dates and lands at local midnight');
 });
 
+
+test('Engine floor and ceiling on a 06:00-24:00 line use the due DAY, not the next-day-00:00 close (R-I6)', () => {
+  const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  Store.setMasterData({ plants: [{ plant: 'P24', max_pull_forward_days: 3, max_push_forward_days: 1 }], lines: [{ machine: 'L24', plant: 'P24' }] }, 'unit-test');
+  const hours = all([6, 24]);
+  Util.setDueCalendarResolver(line => (line === 'L24' ? { lineHours: hours, plantHours: hours, plant: 'P24', rev: 1 } : null));
+  try {
+  const task = { PLANT: 'P24', MACHINE: 'L24', original_end_date: new Date(2026, 7, 17, 0, 0, 0) };
+  assert.equal(+Util.sapDueDate(task), +new Date(2026, 7, 18, 0, 0, 0), 'precondition: the due is the exclusive close');
+  const floor = Engine.earliestAllowedStart(task, 'P24');
+  assert.deepEqual([floor.getMonth(), floor.getDate(), floor.getHours()], [7, 14, 0], 'due day 17 Aug minus 3 days');
+  const ceiling = Engine.latestAllowedEnd(task, 'P24');
+  assert.deepEqual([ceiling.getMonth(), ceiling.getDate(), ceiling.getHours()], [7, 19, 0], 'due day 17 Aug + 1 + 1 days');
+  } finally { Util.setDueCalendarResolver(null); }
+});
 
 test('Engine leaves undated orders and disabled pull-forward limits unrestricted', () => {
   Store.setMasterData({ plants: [{ plant: 'OPEN', max_pull_forward_days: null }], lines: [] }, 'unit-test');
@@ -213,25 +252,25 @@ test('Engine.isFrozenHorizon/frozenHorizonEnd/applyFrozenFloor read Store.frozen
   try {
     Store.setFrozenHorizonEnd(null, 'unit-test');
     assert.equal(Engine.frozenHorizonEnd(), null);
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }, now), false);
-    assert.equal(Engine.isFrozenHorizon({ start_date: null }, now), false, 'an order with no start is never frozen');
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }, now), false);
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: null }, now), false, 'an order with no start is never frozen');
     assert.deepEqual(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')), new Date('2026-08-22T09:00:00'));
 
     const frozenEnd = new Date('2026-08-25T00:00:00');
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
     assert.equal(Engine.frozenHorizonEnd().getTime(), frozenEnd.getTime());
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-22T09:00:00') }, now), true,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }, now), true,
       'start inside [now, end) is frozen (OD-C2a)');
-    assert.equal(Engine.isFrozenHorizon({ start_date: now }, now), true, 'start exactly AT now is frozen -- inclusive lower bound');
-    assert.equal(Engine.isFrozenHorizon({ start_date: frozenEnd }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: now }, now), true, 'start exactly AT now is frozen -- inclusive lower bound');
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: frozenEnd }, now), false,
       'start AT the boundary is not frozen -- it is the earliest allowed instant');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-26T00:00:00') }, now), false);
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-26T00:00:00') }, now), false);
     // C2 fix (regression this closes): an already-overdue order -- however
     // long ago -- must NOT read as frozen just because it's also before the
     // upper bound. The frozen window is [now, end), not (-infinity, end).
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-18T00:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-18T00:00:00') }, now), false,
       'already-overdue (before now) is not frozen even though it is before the boundary too');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2020-01-01T00:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2020-01-01T00:00:00') }, now), false,
       'an order overdue by years is still not frozen -- no lower bound would wrongly pin it forever');
     assert.equal(Engine.applyFrozenFloor(new Date('2026-08-22T09:00:00')).getTime(), frozenEnd.getTime(),
       'a candidate before the boundary is pushed forward to it');
@@ -256,11 +295,11 @@ test('Engine.isFrozenHorizon requires BOTH bounds — an already-overdue order i
   const frozenEnd = new Date('2026-08-23T00:00:00');
   try {
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-19T09:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-19T09:00:00') }, now), false,
       'yesterday is not frozen');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-01T00:00:00') }, now), false,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-01T00:00:00') }, now), false,
       'three weeks overdue is not frozen');
-    assert.equal(Engine.isFrozenHorizon({ start_date: new Date('2026-08-21T09:00:00') }, now), true,
+    assert.equal(Engine.isFrozenHorizon({ user_scheduled: true, start_date: new Date('2026-08-21T09:00:00') }, now), true,
       'tomorrow, genuinely inside [now, end), IS frozen -- the lower bound does not overcorrect into never firing');
   } finally {
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
@@ -307,18 +346,22 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
   const plant = 'FZ-MANUAL-PLANT';
   const line = 'FZ-MANUAL-LINE';
   Store.setMasterData({
-    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
+    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never', timezone: LOCAL_TZ }],
     lines: [{ machine: line, plant }],
   }, 'unit-test');
   Store.setFrozenHorizonEnd(new Date('2026-08-25T00:00:00'), 'unit-test');
+  const restoreClock = pinPlantClock('2026-08-20T09:00:00');
   try {
-    const requestedStart = new Date('2026-08-22T09:00:00'); // inside the frozen window
+    // The drop is a FINISH now (Monday 10:00, inside the frozen window); the 1 h run time puts the start at 09:00.
+    const requestedFinish = new Date('2026-08-24T10:00:00');
     const task = { id: 'manual-drag-task', PLANT: plant, MACHINE: line, RUN_TIME: '1' };
-    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
-    assert.ok(patch, 'a manual drag must still produce a patch even though the target start is inside the frozen window');
-    assert.equal(patch.start_date.getTime(), requestedStart.getTime(),
-      'the manual drag lands EXACTLY where requested, unfloored -- proving OD-C2c');
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedFinish);
+    assert.ok(patch, 'a manual drag must still produce a patch even though the target finish is inside the frozen window');
+    assert.equal(patch.end_date.getTime(), requestedFinish.getTime(),
+      'the manual drag holds the requested finish EXACTLY, unfloored -- proving OD-C2c');
+    assert.equal(patch.start_date.getTime(), new Date('2026-08-24T09:00:00').getTime(), 'the start is derived');
   } finally {
+    restoreClock();
     Store.setMasterData(priorMasterData, 'unit-test');
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
@@ -326,34 +369,33 @@ test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c
 
 
 test('Engine.manualSchedulePatchFor is NOT blocked by the frozen horizon (OD-C2c: manual drags are always free) -- dragging OUT of the window', () => {
-  // Whole-branch review companion to the INTO case above: the C2 brief asked for
-  // coverage "dragging a task into/out of the frozen window", and the exemption
-  // is direction-agnostic -- manualSchedulePatchFor never reads the task's
-  // CURRENT start_date at all (only RUN_TIME/PLANT), so a task that is already
-  // sitting inside the frozen window must land exactly at a requested start
-  // OUTSIDE the window too, with no special-casing either way.
+  // Whole-branch review companion to the INTO case above: the exemption is direction-agnostic --
+  // manualSchedulePatchFor never reads the frozen horizon at all, so a task that is already sitting
+  // inside the frozen window must land exactly at a requested finish OUTSIDE the window too.
   const priorMasterData = Store.masterData;
   const priorEnd = Store.frozenHorizonEnd;
   const plant = 'FZ-MANUAL-PLANT-OUT';
   const line = 'FZ-MANUAL-LINE-OUT';
   Store.setMasterData({
-    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never' }],
+    plants: [{ plant, max_pull_forward_days: null, split_order_policy: 'never', timezone: LOCAL_TZ }],
     lines: [{ machine: line, plant }],
   }, 'unit-test');
   const frozenEnd = new Date('2026-08-25T00:00:00');
   Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
+  const restoreClock = pinPlantClock('2026-08-20T09:00:00');
   try {
-    const currentStart = new Date('2026-08-22T09:00:00'); // currently inside the frozen window
-    const requestedStart = new Date('2026-08-27T09:00:00'); // requested drag target OUTSIDE the window
+    const currentStart = new Date('2026-08-24T09:00:00'); // currently inside the frozen window
+    const requestedFinish = new Date('2026-08-27T10:00:00'); // requested finish OUTSIDE the window
     const task = {
       id: 'manual-drag-task-out', PLANT: plant, MACHINE: line, RUN_TIME: '1',
       start_date: currentStart, end_date: new Date(currentStart.getTime() + 60 * 60 * 1000),
     };
-    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedFinish);
     assert.ok(patch, 'a manual drag out of the frozen window must still produce a patch');
-    assert.equal(patch.start_date.getTime(), requestedStart.getTime(),
-      'the manual drag lands EXACTLY where requested, unfloored -- same unconditional exemption as the into-window case');
+    assert.equal(patch.end_date.getTime(), requestedFinish.getTime(),
+      'the manual drag holds the requested finish exactly -- same unconditional exemption as the into-window case');
   } finally {
+    restoreClock();
     Store.setMasterData(priorMasterData, 'unit-test');
     Store.setFrozenHorizonEnd(priorEnd, 'unit-test');
   }
@@ -371,33 +413,33 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
     Store.setFrozenHorizonEnd(null, 'unit-test');
 
     // No reasons at all.
-    Store.setTasks([{ id: 'firming-none', RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-none', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-none'], now), { firmed: false, reasons: [] });
 
     // SAP firm is display-only: never a reason, never firmed.
-    Store.setTasks([{ id: 'firming-ecc', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-ecc', RUN_TIME: '1', ecc_firmed: true, user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-ecc'], now), { firmed: false, reasons: [] });
     assert.equal(Engine.isSapFirmed(Store.tasks['firming-ecc']), true);
     assert.equal(Engine.isSapFirmed({ id: 'plain' }), false);
 
     // 'running' alone -- start <= now < end, both set; boundaries are half-open.
     const runStart = new Date('2026-08-20T06:00:00'), runEnd = new Date('2026-08-20T10:00:00');
-    Store.setTasks([{ id: 'firming-run', RUN_TIME: '4', ecc_firmed: true, start_date: runStart, end_date: runEnd }], 'unit-test');
+    Store.setTasks([{ id: 'firming-run', RUN_TIME: '4', ecc_firmed: true, user_scheduled: true, start_date: runStart, end_date: runEnd }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-run'], now), { firmed: true, reasons: ['running'] });
     assert.equal(Engine.isInProgress(Store.tasks['firming-run'], runStart), true, 'start boundary is inclusive');
     assert.equal(Engine.isInProgress(Store.tasks['firming-run'], runEnd), false, 'end boundary is exclusive');
-    assert.equal(Engine.isInProgress({ id: 'x', start_date: runStart, end_date: null }, now), false, 'missing end is never running');
-    assert.equal(Engine.isInProgress({ id: 'x', start_date: null, end_date: runEnd }, now), false, 'missing start is never running');
+    assert.equal(Engine.isInProgress({ id: 'x', user_scheduled: true, start_date: runStart, end_date: null }, now), false, 'missing end is never running');
+    assert.equal(Engine.isInProgress({ id: 'x', user_scheduled: true, start_date: null, end_date: runEnd }, now), false, 'missing start is never running');
 
     // 'frozen' alone -- inside the horizon band, not manually firmed, not ECC-firmed.
     const frozenEnd = new Date('2026-08-25T00:00:00');
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
-    Store.setTasks([{ id: 'firming-frozen', RUN_TIME: '1', start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-frozen', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-frozen'], now), { firmed: true, reasons: ['frozen'] });
     Store.setFrozenHorizonEnd(null, 'unit-test');
 
     // 'manual' alone -- reflects Store.isFirmed (set via setFirmed), not a stale task.firmed property.
-    Store.setTasks([{ id: 'firming-manual', RUN_TIME: '1', firmed: false, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-manual', RUN_TIME: '1', firmed: false, user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') }], 'unit-test');
     Store.setFirmed('firming-manual', true, 'unit-test');
     assert.equal(Store.tasks['firming-manual'].firmed, true, 'setFirmed also mirrors onto task.firmed');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-manual'], now), { firmed: true, reasons: ['manual'] });
@@ -411,7 +453,7 @@ test('Engine.firmingStatus reports each reason alone, a combination, and none', 
 
     // Combination -- frozen + manual + running at once (frozen needs start >= now, so use a later "now" for running via end).
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
-    Store.setTasks([{ id: 'firming-all', RUN_TIME: '1', ecc_firmed: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
+    Store.setTasks([{ id: 'firming-all', RUN_TIME: '1', ecc_firmed: true, user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }], 'unit-test');
     Store.setFirmed('firming-all', true, 'unit-test');
     assert.deepEqual(Engine.firmingStatus(Store.tasks['firming-all'], now), { firmed: true, reasons: ['frozen', 'manual'] });
     const atStart = new Date('2026-08-22T09:00:00');
@@ -452,8 +494,8 @@ test('Engine.runAndApply("spt") leaves an order starting inside the frozen windo
   const frozenStart = new Date('2026-08-22T09:00:00'); // inside [horizonStart, frozenEnd)
   const frozenTaskEnd = new Date('2026-08-22T10:00:00');
   Store.setTasks([
-    { id: 'spt-frozen-in-place', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
-    { id: 'spt-movable-free', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: new Date('2026-08-30T09:00:00'), end_date: new Date('2026-08-30T10:00:00') },
+    { id: 'spt-frozen-in-place', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: frozenStart, end_date: frozenTaskEnd },
+    { id: 'spt-movable-free', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00'), end_date: new Date('2026-08-30T10:00:00') },
   ], 'unit-test');
 
   try {
@@ -489,7 +531,7 @@ test('Engine.autoReflow leaves a frozen-window peer exactly in place even when i
   Store.setSelectedPlant(plant, 'unit-test');
   Store.replaceSetupSnapshot(null, 'unit-test');
   Store.setMasterData({
-    plants: [{ plant, split_order_policy: 'never' }],
+    plants: [{ plant, split_order_policy: 'never', timezone: LOCAL_TZ }],
     lines: [{ machine: line, plant }],
   }, 'unit-test');
   Store.setCalendar(line, ALL_DAY, 'unit-test');
@@ -515,9 +557,9 @@ test('Engine.autoReflow leaves a frozen-window peer exactly in place even when i
     // frozen peer below -- without the C2 pinning check, autoReflow's
     // "already fits" shortcut would not apply and the peer would be pushed.
     { id: 'reflow-changed', PLANT: plant, MACHINE: line, RUN_TIME: '1.5',
-      start_date: changedStart, end_date: changedEnd },
+      user_scheduled: true, start_date: changedStart, end_date: changedEnd },
     { id: 'reflow-frozen-peer', PLANT: plant, MACHINE: line, RUN_TIME: '1',
-      start_date: peerStart, end_date: peerEnd },
+      user_scheduled: true, start_date: peerStart, end_date: peerEnd },
   ], 'unit-test');
 
   try {
@@ -935,44 +977,7 @@ test('Engine.evaluateSchedule keeps planningStart separate from runNow and place
   }
 });
 
-test('legacy optimizer never lands an inherently overlong order inside a blackout (nextAvailable null fallback)', () => {
-  const plant = 'LEGACY-OVERLONG';
-  const line = 'LEGACY-OVERLONG-L1';
-  const priorPlant = Store.selectedPlant;
-  const priorTasks = structuredClone(Store.tasksArr);
-  const priorMasterData = structuredClone(Store.masterData);
-  const priorSetup = Store.setupSnapshot;
-  const priorCalendar = Store.calendars[line];
-  const priorBlocks = structuredClone(Store.blocks);
-  try {
-    Store.setSelectedPlant(plant, 'unit-test');
-    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }] }, 'unit-test');
-    Store.setCalendar(line, { 1: [8, 18] }, 'unit-test'); // 10h window; the 12h order can never fit one window
-    Store.addBlock({ id: 'legacy-overlong-blackout', plant, line, start: new Date('2035-08-06T08:00:00'), end: new Date('2035-08-06T10:00:00') }, 'unit-test');
-    Store.replaceSetupSnapshot(null, 'unit-test');
-    Store.setTasks([{ id: 'legacy-overlong-order', PLANT: plant, MACHINE: line, RUN_TIME: 12, start_date: null, end_date: null }], 'unit-test');
-    // Only a non-public mode string with no active setup snapshot reaches the compatibility walk.
-    const result = Engine.evaluateSchedule('legacy-compat', {
-      plant, respectFirmed: true, respectCalendar: true,
-      planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'),
-      endDate: new Date('2035-08-08T00:00:00'),
-    });
-    const patch = result.patches.find(item => item.id === 'legacy-overlong-order');
-    assert.ok(patch?.changes.start_date, 'the overlong order is placed (continuous-bar exception)');
-    assert.ok(patch.changes.start_date.getTime() >= new Date('2035-08-06T10:00:00').getTime(),
-      'it must start at the first operating instant after the blackout, never inside it');
-  } finally {
-    Store.setTasks(priorTasks, 'unit-test');
-    Store.setMasterData(priorMasterData, 'unit-test');
-    Store.setSelectedPlant(priorPlant, 'unit-test');
-    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
-    Store.replaceBlocks(priorBlocks, 'unit-test');
-    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
-    else delete Store.calendars[line];
-  }
-});
-
-test('running orders never move: legacy walk, changeover and autoReflow leave an in-progress order in place, even with respectFirmed off', () => {
+test('running orders never move: changeover and autoReflow leave an in-progress order in place, even with respectFirmed off', () => {
   const plant = 'RUN-LOCK-PLANT';
   const line = 'RUN-LOCK-LINE';
   const priorPlant = Store.selectedPlant;
@@ -985,22 +990,17 @@ test('running orders never move: legacy walk, changeover and autoReflow leave an
   try {
     Store.setSelectedPlant(plant, 'unit-test');
     Store.setFrozenHorizonEnd(null, 'unit-test');
-    Store.setMasterData({ plants: [{ plant, split_order_policy: 'never' }], lines: [{ plant, machine: line }] }, 'unit-test');
+    Store.setMasterData({ plants: [{ plant, split_order_policy: 'never', timezone: LOCAL_TZ }], lines: [{ plant, machine: line }] }, 'unit-test');
     Store.setCalendar(line, ALL_DAY, 'unit-test');
     Store.replaceSetupSnapshot(null, 'unit-test');
     const runStart = new Date('2035-08-06T07:00:00');
     const runEnd = new Date('2035-08-06T09:00:00');
     const runNow = new Date('2035-08-06T08:00:00');
     const base = () => ([
-      { id: 'run-sap', PLANT: plant, MACHINE: line, RUN_TIME: 2, ecc_firmed: true, start_date: runStart, end_date: runEnd },
-      { id: 'run-free', PLANT: plant, MACHINE: line, RUN_TIME: 1, start_date: new Date('2035-08-06T08:30:00'), end_date: new Date('2035-08-06T09:30:00') },
+      { id: 'run-sap', PLANT: plant, MACHINE: line, RUN_TIME: 2, ecc_firmed: true, user_scheduled: true, start_date: runStart, end_date: runEnd },
+      { id: 'run-free', PLANT: plant, MACHINE: line, RUN_TIME: 1, user_scheduled: true, start_date: new Date('2035-08-06T08:30:00'), end_date: new Date('2035-08-06T09:30:00') },
     ]);
     const runOpts = { plant, respectFirmed: false, respectCalendar: true, planningStart: runNow, runNow, endDate: new Date('2035-08-10T00:00:00') };
-
-    // Legacy compatibility walk (non-public mode string, no setup snapshot).
-    Store.setTasks(base(), 'unit-test');
-    const legacy = Engine.evaluateSchedule('legacy-compat', runOpts);
-    assert.equal(legacy.patches.find(p => p.id === 'run-sap'), undefined, 'legacy walk must not patch a running order');
 
     // Setup-aware changeover path.
     Store.setTasks(base(), 'unit-test');
@@ -1016,8 +1016,8 @@ test('running orders never move: legacy walk, changeover and autoReflow leave an
     const liveEnd = new Date(nowSnapped + HOUR);
     const dragStart = new Date(nowSnapped - 2 * HOUR);
     Store.setTasks([
-      { id: 'drag', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: dragStart, end_date: new Date(dragStart.getTime() + 2.5 * HOUR) },
-      { id: 'live-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: liveStart, end_date: liveEnd },
+      { id: 'drag', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: dragStart, end_date: new Date(dragStart.getTime() + 2.5 * HOUR) },
+      { id: 'live-peer', PLANT: plant, MACHINE: line, RUN_TIME: '2', user_scheduled: true, start_date: liveStart, end_date: liveEnd },
     ], 'unit-test');
     Engine.autoReflow('drag');
     assert.equal(Store.tasks['live-peer'].start_date.getTime(), liveStart.getTime(), 'autoReflow must not move a running peer');
@@ -1164,7 +1164,7 @@ test('Engine rejects invalid date inputs, parses date-only bounds as local wall 
   }
 });
 
-test('legacy optimizer scopes malformed historical intervals before repair eligibility', () => {
+test('optimizer scopes malformed historical intervals before repair eligibility', () => {
   const plant = 'LEGACY-HORIZON-SCOPE';
   const line = 'LEGACY-HORIZON-L1';
   const priorPlant = Store.selectedPlant;
@@ -1188,7 +1188,7 @@ test('legacy optimizer scopes malformed historical intervals before repair eligi
       endDate: new Date('2035-08-07T00:00:00'),
     });
     assert.equal(result.patches.some(patch => patch.id === historical.id), false,
-      'a malformed interval before the half-open planning scope must remain immutable on the legacy route');
+      'a malformed interval before the half-open planning scope must remain immutable');
   } finally {
     Store.setTasks(priorTasks, 'unit-test');
     Store.setMasterData(priorMasterData, 'unit-test');
@@ -1299,7 +1299,8 @@ test('deriveSetupObservation resolves one scoped override interval without invok
     availableMinutes: interval.availableMinutes,
   })), [{
     line: 'L-OBSERVE', predecessorOrderId: 'red', successorOrderId: 'blue',
-    start: '2026-08-03T13:40:00.000Z', end: '2026-08-03T14:00:00.000Z', requiredMinutes: 20, availableMinutes: 60,
+    // Zone-independent (M3): the fixtures are naive local wall-clock times, so the expected instants are parsed the same way.
+    start: new Date('2026-08-03T09:40:00').toISOString(), end: new Date('2026-08-03T10:00:00').toISOString(), requiredMinutes: 20, availableMinutes: 60,
   }]);
   assert.deepEqual(observation.diagnostics, []);
 });
@@ -2416,7 +2417,6 @@ test('_sortTerms: an EMPTY line-scoped map falls through to the plant-wide list'
 test('Engine.runAndApply surfaces lastSetupAwareResult and a missing-setup toast for a live setup-aware run', () => {
   const plant = 'SETUP-LIVE-PLANT';
   const line = 'SETUP-LIVE-LINE';
-  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
   const state = value => [{ fieldKey: 'colorWheel', value }];
   const priorPlant = Store.selectedPlant;
   const priorTasks = structuredClone(Store.tasksArr);
@@ -3148,59 +3148,269 @@ test('B4: priority rank wins over a cheaper setup reorder under a REAL active-an
 });
 
 // ---------------------------------------------------------------------------
-// Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
-// manual commit path. manualSchedulePatchFor no longer branches on
-// split_order_policy at all -- only on whether the task already carries
-// >=2 scheduleSegments (placed there by a prior optimizer run).
+// Workstream B1 (2026-08-21), rewritten for backward scheduling Task 2.5 (OQ1, OQ13 b, OQ15, OQ17, OQ63).
+// manualSchedulePatchFor's third argument is the FINISH. A drop holds that finish and derives the start
+// backward through the line's working time; an order that already carries >=2 scheduleSegments is
+// translated rigidly by the same-edge delta and never touches the calendar.
 // ---------------------------------------------------------------------------
 
-
-test('Engine.manualSchedulePatchFor is policy-independent: a non-"never" plant with an all-closed calendar still commits verbatim, no calendar lookup at all', () => {
-  // Before this task, a non-"never" split_order_policy routed through
-  // Engine.schedulePatchFor -> Calendar.allocateRuntime, a real
-  // calendar-aware regeneration. An all-closed calendar makes that
-  // regeneration path provably fail (Calendar.allocateRuntime can never find
-  // an open slot), so if manualSchedulePatchFor still produced a clean patch
-  // landing exactly at the requested (snapped) start, that proves no
-  // calendar lookup happened at all -- policy is truly ignored.
-  const plant = 'B1-POLICY-PLANT';
-  const line = 'B1-POLICY-LINE';
+function manualFixture(plantOverrides = {}) {
+  const plant = `M25-${Math.random().toString(36).slice(2, 8)}`;
+  const line = `${plant}-LINE`;
   const priorMasterData = Store.masterData;
-  const priorCalendar = Store.calendars[line];
-  const ALL_CLOSED = { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null };
-
   Store.setMasterData({
-    plants: [{ plant, split_order_policy: 'overlong_only' }],
+    plants: [{ plant, split_order_policy: 'never', timezone: LOCAL_TZ, ...plantOverrides }],
     lines: [{ machine: line, plant }],
   }, 'unit-test');
-  Store.setCalendar(line, ALL_CLOSED, 'unit-test');
+  const restoreClock = pinPlantClock('2026-08-20T09:00:00');
+  const toasts = captureToasts();
+  return {
+    plant, line, toasts: toasts.toasts,
+    restore() {
+      toasts.restore(); restoreClock();
+      Store.setMasterData(priorMasterData, 'unit-test');
+      delete Store.calendars[line];
+    },
+  };
+}
 
+test('Engine.manualSchedulePatchFor holds the requested finish and derives the start backward (policy-independent)', () => {
+  const fx = manualFixture({ split_order_policy: 'overlong_only' });
   try {
-    const requestedStart = new Date('2026-08-24T09:00:00');
-    const task = { id: 'b1-policy-task', PLANT: plant, MACHINE: line, RUN_TIME: '4' };
-
-    // Sanity check: the OLD regeneration path (still reachable directly via
-    // schedulePatchFor, which stays in place for reconcileRuntimeSchedules)
-    // genuinely fails against this all-closed calendar under the non-"never"
-    // policy -- proving the calendar-lookup path really would have blocked
-    // this edit before this task.
-    const wouldHaveRegenerated = Engine.schedulePatchFor(task, line, requestedStart, 'overlong_only');
-    assert.equal(wouldHaveRegenerated, null,
-      'sanity check: the old calendar-aware regeneration path cannot allocate on an all-closed calendar');
-
-    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
-    assert.ok(patch, 'manualSchedulePatchFor must still produce a patch despite the all-closed calendar and non-"never" policy');
-    assert.equal(patch.start_date.getTime(), Util.snap(requestedStart).getTime(),
-      'the new start lands EXACTLY at the snapped requested start -- no calendar lookup, policy ignored');
-    assert.equal(patch.end_date.getTime(), Util.snap(requestedStart).getTime() + 4 * Config.MS_HOUR);
-    assert.deepEqual(patch.scheduleSegments, [], 'a task with fewer than two existing segments always collapses to a clean continuous block');
-    assert.equal(patch.MACHINE, line);
-  } finally {
-    Store.setMasterData(priorMasterData, 'unit-test');
-    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
-    else delete Store.calendars[line];
-  }
+    const finish = new Date('2026-08-24T14:00:00'); // Monday, inside the default 07:00-19:00 day
+    const task = { id: 'm25-hold', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4' };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, finish);
+    assert.ok(patch, 'a drop whose finish fits produces a patch');
+    assert.equal(patch.end_date.getTime(), finish.getTime(), 'the finish is held exactly');
+    assert.equal(patch.start_date.getTime(), new Date('2026-08-24T10:00:00').getTime(), 'the start is finish minus the run time');
+    assert.deepEqual(patch.scheduleSegments, [], 'a task with fewer than two segments is a clean continuous bar');
+    assert.equal(patch.MACHINE, fx.line);
+    assert.equal(Engine.lastManualRefusal, null);
+    assert.equal(fx.toasts.length, 0);
+  } finally { fx.restore(); }
 });
+
+test('D1: Engine.manualSchedulePatchFor holds an off-grid finish to the minute (no 15-minute snap)', () => {
+  const fx = manualFixture();
+  try {
+    const task = { id: 'm25-minute', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2' };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date('2026-08-24T14:07:30'));
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-24T14:07:00').getTime());   // floored to the minute
+    assert.equal(patch.end_date.getTime() - patch.start_date.getTime(), 2 * Config.MS_HOUR);
+    assert.equal(patch.runtime_schedule_mismatch, false);   // VI5: a manual placement is not stale
+  } finally { fx.restore(); }
+});
+
+test('D2: a typed End or drag on a RUNNING order is refused with running_finish_locked', () => {
+  const fx = manualFixture();   // plant clock pinned to 2026-08-20T09:00 by the fixture
+  try {
+    const now = new Date('2026-08-20T09:00:00');
+    const task = { id: 'm25-run', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4', user_scheduled: true,
+      start_date: new Date(now.getTime() - Config.MS_HOUR), end_date: new Date(now.getTime() + 3 * Config.MS_HOUR) };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date(now.getTime() + 5 * Config.MS_HOUR));
+    assert.equal(patch, null);
+    assert.equal(Engine.lastManualRefusal, 'running_finish_locked');
+  } finally { fx.restore(); }
+});
+
+test('D3: a running order whose remaining run crosses closed time keeps its start and returns calendar pieces', () => {
+  const fx = manualFixture();
+  const restoreClock = pinPlantClock('2026-08-25T21:30:00');
+  const priorPlants = Store.plants;
+  try {
+    const hours = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, [6, 22]]));
+    Store.setCalendar(fx.line, hours, 'unit-test');
+    Store.replacePlants({ ...priorPlants, [fx.plant]: { workHours: hours } }, 'unit-test');
+    const hoursOf = seg => (seg.endDate.getTime() - seg.startDate.getTime()) / Config.MS_HOUR;
+    // started 21:00 with 3 h to run on a 06:00-22:00 line: 1 h to the close, 2 h after 06:00 next day
+    const start = new Date('2026-08-25T21:00:00');
+    const task = { id: 'm25-held', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '3', user_scheduled: true,
+      start_date: start, end_date: new Date(start.getTime() + 3 * Config.MS_HOUR) };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, task.end_date, undefined, { holdStartIfRunning: true });
+    assert.equal(patch.start_date.getTime(), start.getTime());
+    assert.equal(patch.scheduleSegments.length, 2);
+    assert.equal(patch.scheduleSegments.reduce((sum, seg) => sum + hoursOf(seg), 0), 3);
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-26T08:00:00').getTime());
+    // a recorded start inside closed time: the (single) piece starts at the next open minute and the start follows it
+    const late = new Date('2026-08-25T23:00:00');
+    const closed = Engine.heldStartPatchFor({ ...task, start_date: late }, fx.line, 'never');
+    assert.equal(closed.start_date.getTime(), new Date('2026-08-26T06:00:00').getTime());
+  } finally { Store.replacePlants(priorPlants, 'unit-test'); restoreClock(); fx.restore(); }
+});
+
+test('D1: pushFinishPatches moves the finish by exactly the requested milliseconds', () => {
+  const fx = manualFixture();
+  try {
+    const task = { id: 'm25-push', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2',
+      start_date: new Date('2026-08-24T12:07:00'), end_date: new Date('2026-08-24T14:07:00'), user_scheduled: true };
+    const [p] = Engine.pushFinishPatches([task], 3600000);
+    assert.equal(p.changes.end_date.getTime(), new Date('2026-08-24T15:07:00').getTime());
+  } finally { fx.restore(); }
+});
+
+test('OQ13 b: a manual drop whose finish cannot be held returns null, toasts toast.finish_cannot_hold and records the refusal', () => {
+  const fx = manualFixture();
+  try {
+    // 08:00 finish with a 4 h run: the day opens at 07:00, so no contiguous slot ends at 08:00 (it would have to
+    // start on Friday). The walk's own answer would leap; the manual rule refuses and the Gantt reverts.
+    const task = { id: 'm25-cannot', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4' };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date('2026-08-24T08:00:00'));
+    assert.equal(patch, null);
+    assert.equal(Engine.lastManualRefusal, 'finish_cannot_hold');
+    assert.deepEqual(fx.toasts.map(t => t.type), ['warn']);
+    assert.match(fx.toasts[0].msg, /finish_cannot_hold/, 'the toast is routed through the locale key');
+  } finally { fx.restore(); }
+});
+
+test('a manual drop on an all-closed line, an unusable run time or a plant with no zone returns null and never throws', () => {
+  const fx = manualFixture();
+  try {
+    Store.setCalendar(fx.line, { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null }, 'unit-test');
+    const task = { id: 'm25-closed', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4' };
+    assert.equal(Engine.manualSchedulePatchFor(task, fx.line, new Date('2026-08-24T14:00:00')), null);
+    assert.equal(Engine.lastManualRefusal, 'no_operating_window');
+    delete Store.calendars[fx.line];
+    assert.equal(Engine.manualSchedulePatchFor({ ...task, RUN_TIME: 0 }, fx.line, new Date('2026-08-24T14:00:00')), null);
+    assert.equal(Engine.lastManualRefusal, 'run_time_zero');
+    Store.setMasterData({ plants: [{ plant: fx.plant, split_order_policy: 'never' }], lines: [{ machine: fx.line, plant: fx.plant }] }, 'unit-test');
+    assert.equal(Engine.manualSchedulePatchFor(task, fx.line, new Date('2026-08-24T14:00:00')), null);
+    assert.equal(Engine.lastManualRefusal, 'plant_no_timezone');
+  } finally { fx.restore(); }
+});
+
+test('OQ63: a firmed order dropped outside working hours asks for confirmation first, then stores a raw placement with the overtime marker', () => {
+  const fx = manualFixture();
+  try {
+    const task = { id: 'm25-overtime', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4' };
+    Store.setTasks([task], 'unit-test');
+    Store.setFirmed(['m25-overtime'], true, 'unit-test');
+    const finish = new Date('2026-08-24T22:00:00'); // after the 19:00 close
+    assert.equal(Engine.manualSchedulePatchFor(task, fx.line, finish), null, 'unconfirmed: nothing is committed');
+    assert.equal(Engine.lastManualRefusal, 'needs_overtime_confirm');
+    assert.equal(fx.toasts.length, 0, 'the confirm dialog asks, no refusal toast');
+
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, finish, undefined, { confirmedOvertime: true });
+    assert.ok(patch);
+    assert.equal(patch.end_date.getTime(), finish.getTime());
+    assert.equal(patch.start_date.getTime(), new Date('2026-08-24T18:00:00').getTime(), 'raw elapsed placement, calendar ignored');
+    assert.equal(patch.placement_exception, 'overtime');
+    assert.deepEqual(patch.scheduleSegments, []);
+    assert.equal(Engine.lastManualRefusal, null);
+
+    // An UNfirmed order gets the plain refusal instead.
+    Store.setFirmed(['m25-overtime'], false, 'unit-test');
+    assert.equal(Engine.manualSchedulePatchFor(task, fx.line, finish), null);
+    assert.equal(Engine.lastManualRefusal, 'finish_cannot_hold');
+  } finally { fx.restore(); Store.setTasks([], 'unit-test'); }
+});
+
+test('a marked order is translated verbatim: a run-time shrink leaves the bar, a drop moves it by the finish delta (Review Focus 5)', () => {
+  const fx = manualFixture();
+  try {
+    const start = new Date('2026-08-24T08:00:00');
+    const end = new Date('2026-08-28T08:00:00');            // 96 h elapsed, far wider than a 5 h run time
+    const marked = { id: 'm25-marked', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '5',
+      start_date: start, end_date: end, placement_exception: 'overlong' };
+    // A run-time edit anchors on the stored finish: the bar must not change.
+    const same = Engine.finishAnchoredPatchFor(marked, fx.line, end, 'never');
+    assert.equal(same.kind, 'placed');
+    assert.equal(same.finishMoved, false);
+    assert.equal(same.changes.start_date.getTime(), start.getTime());
+    assert.equal(same.changes.end_date.getTime(), end.getTime());
+    // A manual drop translates the bar; the marker stays (the patch does not touch it).
+    const dropped = Engine.manualSchedulePatchFor(marked, fx.line, new Date('2026-08-31T08:00:00'));
+    assert.equal(dropped.start_date.getTime(), new Date('2026-08-27T08:00:00').getTime());
+    assert.equal(dropped.end_date.getTime(), new Date('2026-08-31T08:00:00').getTime());
+    assert.ok(!('placement_exception' in dropped) || dropped.placement_exception === 'overlong');
+  } finally { fx.restore(); }
+});
+
+test('Engine.finishAnchoredPatchFor: placed, refuse and reversal results', () => {
+  const fx = manualFixture();
+  try {
+    const task = { id: 'm25-fa', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4' };
+    const placed = Engine.finishAnchoredPatchFor(task, fx.line, new Date('2026-08-24T14:00:00'), 'never');
+    assert.equal(placed.kind, 'placed');
+    assert.equal(placed.finishMoved, false);
+    assert.equal(placed.changes.start_date.getTime(), new Date('2026-08-24T10:00:00').getTime());
+
+    assert.deepEqual(Engine.finishAnchoredPatchFor({ ...task, RUN_TIME: 0 }, fx.line, new Date('2026-08-24T14:00:00'), 'never'),
+      { kind: 'refuse', reason: 'run_time_zero' });
+    assert.deepEqual(Engine.finishAnchoredPatchFor({ ...task, RUN_TIME: 20 }, fx.line, new Date('2026-08-24T14:00:00'), 'never'),
+      { kind: 'refuse', reason: 'overlong_never' }, 'a 20 h run on a 12 h day cannot be one bar under the never policy');
+
+    // A finish in the past: the walk reaches "now" (Thu 09:00) with minutes left, so it reverses forward from now.
+    const reversed = Engine.finishAnchoredPatchFor(task, fx.line, new Date('2026-08-20T10:00:00'), 'never');
+    assert.equal(reversed.kind, 'placed');
+    assert.equal(reversed.reversed, true);
+    assert.equal(reversed.finishMoved, true);
+    assert.equal(reversed.changes.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime(), 'forward from now, floored to the minute');
+    assert.equal(reversed.changes.end_date.getTime(), new Date('2026-08-20T13:00:00').getTime());
+    // The reconcile batches reversals itself.
+    assert.deepEqual(Engine.finishAnchoredPatchFor(task, fx.line, new Date('2026-08-20T10:00:00'), 'never', { deferReversal: true }),
+      { kind: 'reached_now' });
+  } finally { fx.restore(); }
+});
+
+test('D5: a queued run_time_over_cap row on a never plant releases as one marked bar', () => {
+  const fx = manualFixture({ split_order_policy: 'never' });
+  try {
+    const task = { id: 'm25-cap', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '400', planning_status: 'needs_planning',
+      planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const finish = new Date('2026-09-30T14:00:00');
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, finish);
+    assert.equal(patch.placement_exception, 'overlong');
+    assert.equal(patch.planning_status, 'scheduled');
+    assert.equal(patch.end_date.getTime(), finish.getTime());
+    assert.equal(patch.end_date.getTime() - patch.start_date.getTime(), 400 * Config.MS_HOUR);
+  } finally { fx.restore(); }
+});
+
+test('Review focus 5: the same release with a past due date reverses from now and keeps the marker', () => {
+  const fx = manualFixture({ split_order_policy: 'never' });
+  try {
+    const task = { id: 'm25-cap-past', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '400', planning_status: 'needs_planning',
+      planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date('2020-01-01T14:00:00'));
+    assert.equal(patch.placement_exception, 'overlong');
+    assert.equal(patch.derivationIssue?.code, 'reversal_forward');
+    assert.equal(patch.derivationIssue?.detail, 'due_date_past');
+  } finally { fx.restore(); }
+});
+
+test('OQ50: a row queued as overlong_never is released as ONE continuous elapsed bar ending at the held finish, marked overlong', () => {
+  const fx = manualFixture();
+  try {
+    const queued = { id: 'm25-release', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '20',
+      planning_status: 'needs_planning', planning_reason: { code: 'overlong_never', message: 'x' },
+      start_date: null, end_date: null, scheduleSegments: [] };
+    const due = new Date('2026-08-26T17:00:00');
+    const patch = Engine.manualSchedulePatchFor(queued, fx.line, due);
+    assert.ok(patch);
+    assert.equal(patch.end_date.getTime(), due.getTime());
+    assert.equal(patch.end_date.getTime() - patch.start_date.getTime(), 20 * Config.MS_HOUR, 'elapsed, calendar ignored');
+    assert.deepEqual(patch.scheduleSegments, []);
+    assert.equal(patch.placement_exception, 'overlong');
+    assert.equal(patch.planning_status, 'scheduled');
+    assert.equal(patch.planning_reason, null);
+
+    // run_time_over_cap rows release through the ordinary finish-anchored path (no marker).
+    const overCap = { ...queued, id: 'm25-cap', RUN_TIME: '4', planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const capPatch = Engine.manualSchedulePatchFor(overCap, fx.line, due);
+    assert.equal(capPatch.end_date.getTime(), due.getTime());
+    assert.equal(capPatch.start_date.getTime(), new Date('2026-08-26T13:00:00').getTime());
+    assert.ok(!capPatch.placement_exception);
+    assert.equal(capPatch.planning_status, 'scheduled');
+  } finally { fx.restore(); }
+});
+
+test('Engine.plannerUnscheduleChanges also clears the placement marker', () => {
+  const changes = Engine.plannerUnscheduleChanges();
+  assert.equal(changes.placement_exception, null);
+  assert.equal(changes.planning_status, 'needs_planning');
+});
+
+
 
 
 test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegments) task by the requested delta, preserving segment count and relative spacing', () => {
@@ -3232,11 +3442,12 @@ test('Engine.manualSchedulePatchFor shifts an already-split (>=2 scheduleSegment
       ],
     };
 
-    // Requested start is 2 calendar days later than the current start.
-    const requestedStart = new Date('2026-08-22T08:00:00');
-    const deltaMs = Util.snap(requestedStart).getTime() - seg1Start.getTime();
+    // Requested finish is 2 calendar days later than the current finish: a rigid translation by the
+    // same-edge delta (OQ17 b), with no calendar lookup (this plant has no timezone and needs none).
+    const requestedFinish = new Date(seg3End.getTime() + 2 * 24 * Config.MS_HOUR);
+    const deltaMs = Util.snap(requestedFinish).getTime() - seg3End.getTime();
 
-    const patch = Engine.manualSchedulePatchFor(task, line, requestedStart);
+    const patch = Engine.manualSchedulePatchFor(task, line, requestedFinish);
     assert.ok(patch, 'a shift patch must be produced');
     assert.equal(patch.scheduleSegments.length, 3, 'segment count is preserved -- never collapsed, never re-derived');
 
@@ -3314,11 +3525,11 @@ test('effectiveFirmedIdSet = manual (gated) + frozen + running (not gated); SAP 
   try {
     Store.setFrozenHorizonEnd(frozenEnd, 'unit-test');
 
-    const manualTask = { id: 'manual-id', start_date: new Date('2026-08-30T09:00:00') };
-    const eccTask = { id: 'ecc-id', ecc_firmed: true, start_date: new Date('2026-08-30T09:00:00') };
-    const frozenTask = { id: 'frozen-id', start_date: new Date('2026-08-22T09:00:00') }; // inside [now, frozenEnd)
-    const plainTask = { id: 'plain-id', start_date: new Date('2026-08-30T09:00:00') };
-    const runningTask = { id: 'running-id', start_date: new Date('2026-08-20T06:00:00'), end_date: new Date('2026-08-20T10:00:00') };
+    const manualTask = { id: 'manual-id', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') };
+    const eccTask = { id: 'ecc-id', ecc_firmed: true, user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') };
+    const frozenTask = { id: 'frozen-id', user_scheduled: true, start_date: new Date('2026-08-22T09:00:00') }; // inside [now, frozenEnd)
+    const plainTask = { id: 'plain-id', user_scheduled: true, start_date: new Date('2026-08-30T09:00:00') };
+    const runningTask = { id: 'running-id', user_scheduled: true, start_date: new Date('2026-08-20T06:00:00'), end_date: new Date('2026-08-20T10:00:00') };
     const tasks = [manualTask, eccTask, frozenTask, plainTask, runningTask];
     const baseFirmedIds = new Set(['manual-id']);
 
@@ -3387,8 +3598,8 @@ test('Engine.runAndApply("changeover") never locks on SAP firm: an SAP-firmed or
   const frozenTaskEnd = new Date('2026-08-21T10:00:00');
 
   const baseTasks = [
-    { id: 'co-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '1', ecc_firmed: true, start_date: eccOriginalStart, end_date: eccOriginalEnd },
-    { id: 'co-frozen', PLANT: plant, MACHINE: line, RUN_TIME: '1', start_date: frozenStart, end_date: frozenTaskEnd },
+    { id: 'co-ecc', PLANT: plant, MACHINE: line, RUN_TIME: '1', ecc_firmed: true, user_scheduled: true, start_date: eccOriginalStart, end_date: eccOriginalEnd },
+    { id: 'co-frozen', PLANT: plant, MACHINE: line, RUN_TIME: '1', user_scheduled: true, start_date: frozenStart, end_date: frozenTaskEnd },
   ];
 
   try {
@@ -3753,8 +3964,1281 @@ function _runDeletedOrderThrough(mode) {
   }
 }
 
-test('Delete -> Needs Planning order is re-placed by a following Due Date optimizer run (setup-aware path; Due Date has no legacy path — only Remove Backlog reaches the legacy walk)', () => {
+test('Delete -> Needs Planning order is re-placed by a following Due Date optimizer run (setup-aware path)', () => {
   const patch = _runDeletedOrderThrough('duedate');
   assert.ok(patch, 'the planner-unscheduled order must receive a placement');
   assert.ok(patch.changes.start_date instanceof Date && patch.changes.end_date instanceof Date);
+});
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 2.4 (OQ52): one clock. The running and frozen tests default to the
+// plant's wall clock projected from the SERVER instant (Store.serverOffsetMs), not the viewer's.
+// ---------------------------------------------------------------------------
+
+function withServerClock(serverInstantIso, plants, fn) {
+  const priorOffset = Store.serverOffsetMs;
+  const priorMaster = Store.masterData;
+  const priorToast = Toast.show;
+  const priorFrozenEnd = Store.frozenHorizonEnd;
+  const toasts = [];
+  Toast.show = (...args) => { toasts.push(args); };
+  Store.setMasterData({ plants, lines: [] }, 'unit-test');
+  Store.serverOffsetMs = new Date(serverInstantIso).getTime() - Date.now();
+  Store._blockedPlants.clear();
+  try { return fn(toasts); }
+  finally {
+    Toast.show = priorToast;
+    Store.serverOffsetMs = priorOffset;
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store.setFrozenHorizonEnd(priorFrozenEnd, 'unit-test');
+    Store._blockedPlants.clear();
+  }
+}
+
+test('Store.plantNow projects the server instant into the plant zone as a naive wall-clock Date', () => {
+  withServerClock('2026-08-20T12:00:00Z', [
+    { plant: 'NY', timezone: 'America/New_York' },
+    { plant: 'TK', timezone: 'Asia/Tokyo' },
+  ], () => {
+    const ny = Store.plantNow('NY');
+    const tk = Store.plantNow('TK');
+    const near = (d, y, mo, da, h, mi) => Math.abs(d.getTime() - new Date(y, mo, da, h, mi).getTime()) < 5000;
+    assert.ok(near(ny, 2026, 7, 20, 8, 0), `New York wall clock is 08:00 on the 20th, got ${ny}`);
+    assert.ok(near(tk, 2026, 7, 20, 21, 0), `Tokyo wall clock is 21:00 on the 20th, got ${tk}`);
+  });
+});
+
+test('Engine.isInProgress and isFrozenHorizon default to the plant clock from the server instant', () => {
+  const task = { id: 'oq52-run', PLANT: 'NY', user_scheduled: true, start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
+  const tokyoTask = { ...task, id: 'oq52-run-tk', PLANT: 'TK' };
+  withServerClock('2026-08-20T12:00:00Z', [
+    { plant: 'NY', timezone: 'America/New_York' },
+    { plant: 'TK', timezone: 'Asia/Tokyo' },
+  ], () => {
+    // 12:00Z is 08:00 in New York (inside 06:00-10:00) and 21:00 in Tokyo (past it).
+    assert.equal(Engine.isInProgress(task), true);
+    assert.equal(Engine.isInProgress(tokyoTask), false);
+    assert.deepEqual(Engine.firmingStatus(task), { firmed: true, reasons: ['running'] });
+    // Frozen: start at or after the plant's now and before the horizon end.
+    Store.setFrozenHorizonEnd(new Date(2026, 7, 21, 0, 0), 'unit-test');
+    const upcoming = { id: 'oq52-frozen', PLANT: 'NY', user_scheduled: true, start_date: new Date(2026, 7, 20, 9, 0), end_date: new Date(2026, 7, 20, 11, 0) };
+    assert.equal(Engine.isFrozenHorizon(upcoming), true, '09:00 is after the New York now (08:00) and before the horizon end');
+    assert.equal(Engine.isFrozenHorizon({ ...upcoming, PLANT: 'TK' }), false, '09:00 is already past in Tokyo (21:00)');
+    // An explicit now still wins over the clock.
+    assert.equal(Engine.isInProgress(task, new Date(2026, 7, 20, 11, 0)), false);
+  });
+});
+
+test('a plant with no valid timezone is throw-free: not running, not frozen, recorded once with one toast', () => {
+  const task = { id: 'oq52-nozone', PLANT: 'NOZ', user_scheduled: true, start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) };
+  withServerClock('2026-08-20T12:00:00Z', [
+    { plant: 'NOZ' },
+    { plant: 'BAD', timezone: 'Not/AZone' },
+  ], (toasts) => {
+    Store.setFrozenHorizonEnd(new Date(2026, 7, 21, 0, 0), 'unit-test');
+    assert.equal(Store.plantNow('NOZ'), null);
+    assert.equal(Engine.isInProgress(task), false);
+    assert.equal(Engine.isFrozenHorizon(task), false);
+    assert.equal(Engine.isInProgress(task), false);
+    assert.equal(Engine.isInProgress({ ...task, PLANT: 'BAD' }), false, 'an invalid zone blocks like a missing one');
+    assert.deepEqual([...Store._blockedPlants].sort(), ['BAD', 'NOZ']);
+    assert.equal(toasts.length, 2, 'one toast per blocked plant per session, however many reads');
+    // An explicit now still evaluates (callers that carry their own clock are unaffected).
+    assert.equal(Engine.isInProgress(task, new Date(2026, 7, 20, 8, 0)), true);
+  });
+});
+
+test('a blocked plant is pruned from Store._blockedPlants once it resolves, and is announced again if it is blocked again', () => {
+  withServerClock('2026-08-20T12:00:00Z', [{ plant: 'FIXME' }], (toasts) => {
+    assert.equal(Store.plantNow('FIXME'), null);
+    assert.deepEqual([...Store._blockedPlants], ['FIXME']);
+    Store.setMasterData({ plants: [{ plant: 'FIXME', timezone: 'America/New_York' }], lines: [] }, 'unit-test');
+    assert.ok(Store.plantNow('FIXME') instanceof Date, 'the zone is now valid');
+    assert.equal(Store._blockedPlants.size, 0, 'a plant that resolves is no longer blocked');
+    Store.setMasterData({ plants: [{ plant: 'FIXME' }], lines: [] }, 'unit-test');
+    assert.equal(Store.plantNow('FIXME'), null);
+    assert.equal(toasts.length, 2, 'blocked again after being fixed: announced again');
+  });
+});
+
+test('a task whose plant cannot be resolved is not running and is not recorded as a blocked plant', () => {
+  withServerClock('2026-08-20T12:00:00Z', [{ plant: 'NY', timezone: 'America/New_York' }], () => {
+    assert.equal(Engine.isInProgress({ id: 'x', start_date: new Date(2026, 7, 20, 6, 0), end_date: new Date(2026, 7, 20, 10, 0) }), false);
+    assert.equal(Store._blockedPlants.size, 0, 'no plant to blame: nothing to record');
+  });
+});
+
+test('Engine._plantWallNow projects through the shared helper and still refuses a blank or invalid zone', () => {
+  const wall = Engine._plantWallNow('America/New_York', new Date('2026-08-20T12:00:30Z'));
+  assert.equal(wall.getTime(), new Date(2026, 7, 20, 8, 0, 0).getTime(), 'plant wall clock, floored to the minute');
+  assert.throws(() => Engine._plantWallNow('', new Date()), /valid IANA timezone/);
+  assert.throws(() => Engine._plantWallNow('Not/AZone', new Date()), /valid IANA timezone/);
+});
+
+test('a past-due release has no held finish to protect: overlong starts at now with the marker, over-cap reverses forward from now (reversal_forward)', () => {
+  const fx = manualFixture();   // plant clock: Thu 2026-08-20 09:00
+  try {
+    const pastDue = new Date('2026-08-18T17:00:00');
+    const queued = { id: 'm25-late', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '20', start_date: null, end_date: null,
+      scheduleSegments: [], planning_status: 'needs_planning', planning_reason: { code: 'overlong_never', message: 'x' } };
+    const overlong = Engine.manualSchedulePatchFor(queued, fx.line, pastDue);
+    assert.ok(overlong, 'not refused');
+    assert.equal(overlong.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime(), 'one continuous bar starting now');
+    assert.equal(overlong.end_date.getTime() - overlong.start_date.getTime(), 20 * Config.MS_HOUR);
+    assert.equal(overlong.placement_exception, 'overlong');
+    assert.equal(overlong.planning_status, 'scheduled');
+    assert.deepEqual(overlong.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+
+    const overCap = { ...queued, id: 'm25-late-cap', RUN_TIME: '4', planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+    const forward = Engine.manualSchedulePatchFor(overCap, fx.line, pastDue);
+    assert.ok(forward, 'not refused finish_cannot_hold');
+    assert.equal(forward.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime());
+    assert.equal(forward.end_date.getTime(), new Date('2026-08-20T13:00:00').getTime());
+    assert.equal(forward.planning_status, 'scheduled');
+    assert.ok(!forward.placement_exception);
+    assert.deepEqual(forward.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+    assert.equal(fx.toasts.length, 0);
+    assert.equal(Engine.lastManualRefusal, null);
+  } finally { fx.restore(); }
+});
+
+test('Engine.pushFinishPatches moves finishes, skips firmed and unholdable orders, and leaves the calendar run cache torn down', () => {
+  const fx = manualFixture();
+  try {
+    const mk = (id, h1, h2) => ({ id, PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: h2 - h1,
+      start_date: new Date(2026, 7, 24, h1), end_date: new Date(2026, 7, 24, h2) });
+    const tasks = [mk('a', 10, 12), mk('b', 17, 19)];
+    const patches = Engine.pushFinishPatches(tasks, 3600000);
+    assert.deepEqual(patches.map(p => p.id), ['a'], '19:00 + 1 h is past closing, so b is skipped quietly');
+    assert.equal(patches[0].changes.end_date.getHours(), 13);
+    assert.equal(patches[0].changes.start_date.getHours(), 11);
+    assert.equal(fx.toasts.length, 0);
+    assert.equal(Calendar._runCache, null);
+  } finally { fx.restore(); }
+});
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 2.6 (OQ3, OQ4, OQ33, OQ34, OQ51, OQ53, OQ62): the reconcile derives starts from the
+// held finish. A never-placed row is derived for DISPLAY only (a non-dirty write, Save leaves the server row
+// never-placed); a stale-flagged row gets a DIRTY patch the next Save persists (the cutover path).
+// ---------------------------------------------------------------------------
+describe('reconcile (finish-anchored)', () => {
+  const REC_SOURCE = 'engine-runtime-reconcile';
+  const DISPLAY_SOURCE = 'engine-runtime-reconcile-display';
+
+  /** One plant on a hydrated server calendar (default Mon-Fri 07:00-19:00), clock pinned to Thu 20 Aug 09:00. */
+  function recFixture({ policy = 'never', timezone = LOCAL_TZ, state = 'hydrated', lineNames = ['A'], serverLineNames } = {}) {
+    const plant = `R26-${Math.random().toString(36).slice(2, 8)}`;
+    const lines = lineNames.map(name => `${plant}-${name}`);
+    const priorMasterData = Store.masterData;
+    Store.setMasterData({
+      plants: [{ plant, split_order_policy: policy, ...(timezone ? { timezone } : {}) }],
+      lines: lines.map(machine => ({ machine, plant })),
+    }, 'unit-test');
+    const restoreClock = pinPlantClock('2026-08-20T09:00:00');
+    const toasts = captureToasts();
+    CalendarSync._setHydration(plant, state, serverLineNames ? serverLineNames.map(name => `${plant}-${name}`) : lines);
+    const writes = [];
+    const unsubscribe = Store.subscribe(evt => {
+      if (evt.type === 'tasks:bulkUpdate' && String(evt.source).startsWith(REC_SOURCE)) writes.push({ source: evt.source, ids: [...evt.ids] });
+    }, 'reconcile-test');
+    const priorFrozen = Store.frozenHorizonEnd;
+    return {
+      plant, line: lines[0], lines, toasts: toasts.toasts, writes,
+      task(id, over = {}) {
+        return { id, PLANT: plant, plant, MACHINE: lines[0], RUN_TIME: '4', user_scheduled: false, ...over };
+      },
+      restore() {
+        unsubscribe(); toasts.restore(); restoreClock();
+        Store.setMasterData(priorMasterData, 'unit-test');
+        Store.setFrozenHorizonEnd(priorFrozen, 'unit-test');
+        Store.setTasks([], 'unit-test');
+        for (const line of lines) delete Store.calendars[line];
+        delete CalendarSync._hydration[plant];
+        Engine.derivePausedPlants.delete(plant);
+      },
+    };
+  }
+  const at = (day, hour) => new Date(2026, 7, day, hour);
+
+  test('a never-placed row derives backward from its due instant and is a display-only (non-dirty) write', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('np', {
+        original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10), runtime_schedule_mismatch: false,
+      })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.np;
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'due 17:00 minus 4 h');
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime());
+      assert.deepEqual(fx.writes, [{ source: DISPLAY_SOURCE, ids: ['np'] }], 'committed through the non-dirty source only');
+      assert.equal(t.user_scheduled, false, 'a display derivation never claims the row is placed');
+      assert.equal(t.derivationIssue ?? null, null);
+      assert.equal(t.systemMove.reason, 'due_date_derivation');
+      assert.equal(fx.toasts.length, 0, 'no batch toast for display-only rows');
+    } finally { fx.restore(); }
+  });
+
+  test('a stale placed row holds its stored finish and gets a dirty patch carrying both edges', () => {
+    const fx = recFixture();
+    try {
+      // Run time grew from 4 h to 6 h: the 17:00 finish holds, the start moves earlier.
+      Store.setTasks([fx.task('st', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      const sawMismatch = [];
+      const stop = Store.subscribe(evt => { if (String(evt.source) === REC_SOURCE) sawMismatch.push(Store.tasks.st.runtime_schedule_mismatch); }, 'rec-flag');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      stop();
+      const t = Store.tasks.st;
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime(), 'the finish is held');
+      assert.equal(t.start_date.getTime(), at(26, 11).getTime());
+      assert.deepEqual(t.scheduleSegments ?? [], []);
+      assert.equal(t.runtime_schedule_mismatch, false, 'display state until the server clears it on Save');
+      assert.deepEqual(sawMismatch, [false]);
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['st'] }]);
+      assert.equal(t.user_scheduled, true);
+      assert.deepEqual([t.systemMove.from.getTime(), t.systemMove.to.getTime()], [at(26, 13).getTime(), at(26, 11).getTime()]);
+      assert.equal(t.systemMove.reason, 'run_time_changed');
+      assert.equal(fx.toasts.length, 1, 'one batch toast');
+    } finally { fx.restore(); }
+  });
+
+  test('a dirty stale row (unsaved local edits) is left untouched; once saved the same row is re-derived', () => {
+    const fx = recFixture();
+    try {
+      // Identical to the stale-row case above, which IS re-derived: only the dirty mark differs.
+      Store.setTasks([fx.task('dt', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      Persistence._dirtyIds.add('dt');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.dt;
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'a dirty row keeps the planner\'s unsaved start');
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime());
+      assert.equal(t.runtime_schedule_mismatch, true, 'the stale flag is not cleared');
+      assert.equal(t.systemMove ?? null, null);
+      assert.deepEqual(fx.writes, [], 'no display write for a dirty row');
+      Persistence._dirtyIds.delete('dt');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.dt.start_date.getTime(), at(26, 11).getTime(), 'saved: re-derived from the held finish');
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['dt'] }]);
+    } finally { Persistence._dirtyIds.delete('dt'); fx.restore(); }
+  });
+
+  test('Review Focus 3: a running stale row keeps its start and moves its finish later', () => {
+    const fx = recFixture();
+    try {
+      // Now is Thu 09:00: started 08:00, was due to end 12:00 (4 h); the run time grew to 6 h.
+      Store.setTasks([fx.task('run', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(20, 8), end_date: at(20, 12),
+      })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.run;
+      assert.equal(t.start_date.getTime(), at(20, 8).getTime(), 'a running order never loses its start');
+      assert.equal(t.end_date.getTime(), at(20, 14).getTime(), 'the finish follows the new run time');
+      assert.equal(t.runtime_schedule_mismatch, false);
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['run'] }]);
+      assert.equal(t.derivationIssue ?? null, null, 'no reversal, no overlap repair');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ4 / D19: a firmed row is re-derived like any other, stays firmed, and a start moving from outside to inside the frozen window is flagged', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('fm', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      Store.setFirmed(['fm'], true, 'unit-test');
+      Store.setFrozenHorizonEnd(at(26, 12), 'unit-test');   // the old 13:00 start is outside; the derived 11:00 start is inside
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.fm;
+      assert.equal(t.start_date.getTime(), at(26, 11).getTime());
+      assert.equal(Store.isFirmed('fm'), true, 'nothing is un-firmed');
+      assert.equal(t.firmed, true);
+      assert.equal(t.derivationIssue.code, 'frozen_window_crossed');
+      assert.equal(t.derivationIssue.from.getTime(), at(26, 13).getTime());
+      assert.equal(t.derivationIssue.to.getTime(), at(26, 11).getTime());
+    } finally { fx.restore(); }
+  });
+
+  test('D19: a firmed row already inside the frozen window gets no frozen_window_crossed note', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('in', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
+        fx.task('np', { RUN_TIME: '4', original_end_date: at(26, 17) }),   // never placed, due inside the window
+      ], 'unit-test');
+      Store.setFirmed(['in', 'np'], true, 'unit-test');
+      Store.setFrozenHorizonEnd(at(27, 0), 'unit-test');   // both the held 13:00 and derived 11:00 starts are inside
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.in.derivationIssue ?? null, null);
+      assert.notEqual(Store.tasks.np.derivationIssue?.code, 'frozen_window_crossed');
+    } finally { fx.restore(); }
+  });
+
+  test('R26 (gate 14): an unfirmed PLACED row whose derived start flips into the frozen window records frozen_window_crossed; staying outside, or never placed, records nothing', () => {
+    const fx = recFixture();
+    try {
+      Store.setFrozenHorizonEnd(at(27, 12), 'unit-test');
+      // Run time grew 4 h -> 6 h with the 17:00 finish held: the start moves 13:00 -> 11:00, from outside the window (ends 12:00) to inside it.
+      Store.setTasks([
+        fx.task('flip', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(27, 13), end_date: at(27, 17) }),
+        fx.task('stay', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(28, 13), end_date: at(28, 17) }),
+        fx.task('never', { RUN_TIME: '6', original_end_date: at(26, 17), start_date: at(27, 13), end_date: at(27, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.isFirmed('flip'), false);
+      assert.equal(Store.tasks.flip.derivationIssue?.code, 'frozen_window_crossed');
+      assert.equal(Store.tasks.flip.derivationIssue.from.getTime(), at(27, 13).getTime());
+      assert.equal(Store.tasks.flip.derivationIssue.to.getTime(), at(27, 11).getTime());
+      assert.equal(Store.tasks.stay.derivationIssue ?? null, null, 'start stays outside the window');
+      assert.equal(Store.tasks.never.derivationIssue ?? null, null, 'never-placed rows are excluded');
+      // End to end: the compute core (the worker's function) renders the recorded note as the alert.
+      const { alerts } = globalThis.NimbusComputeCore.computeAlerts({
+        tasks: Store.tasksArr, blocks: [], plantBlocks: [], calendars: Store.calendars, plants: Store.plants,
+        lineSettings: Store.lineSettings, masterData: Store.masterData, dismissed: [], opts: {}, now: { [fx.plant]: Store.plantNow(fx.plant) },
+      });
+      assert.deepEqual(alerts.filter(a => a.type === 'frozen_window_crossed').map(a => a.id), ['derivation-flip-frozen_window_crossed']);
+    } finally { fx.restore(); }
+  });
+
+  test('OQ53: three reversing orders on one line land X at now, Y after X, Z in the next window (finish order)', () => {
+    const fx = recFixture();
+    try {
+      // Due dates all in the past (now is Thu 09:00), 4 h each on a 07:00-19:00 line with the never-split policy.
+      Store.setTasks([
+        fx.task('z', { original_end_date: at(20, 8) }),
+        fx.task('x', { original_end_date: at(19, 17) }),
+        fx.task('y', { original_end_date: at(19, 18) }),
+      ].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const span = id => [Store.tasks[id].start_date.getTime(), Store.tasks[id].end_date.getTime()];
+      assert.deepEqual(span('x'), [at(20, 9).getTime(), at(20, 13).getTime()], 'X starts at now');
+      assert.deepEqual(span('y'), [at(20, 13).getTime(), at(20, 17).getTime()], 'Y follows X');
+      assert.deepEqual(span('z'), [at(21, 7).getTime(), at(21, 11).getTime()], 'Z does not fit the rest of today and takes the next window');
+      for (const id of ['x', 'y', 'z']) {
+        assert.deepEqual(Store.tasks[id].derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' }, id);
+        assert.equal(Store.tasks[id].systemMove.reason, 'reversal_forward');
+      }
+      assert.deepEqual(fx.writes.map(w => w.source), [DISPLAY_SOURCE], 'never-placed reversals are display-only');
+    } finally { fx.restore(); }
+  });
+
+  test('U16: the reconcile reversal queue hands the plant zone to placeForwardSequence, and the forward leg measures plant-zone elapsed time under never and partial policies', () => {
+    const fx = recFixture();
+    const original = Engine.placeForwardSequence;
+    const seen = [];
+    Engine.placeForwardSequence = function (...args) { seen.push(args[4]); return original.apply(this, args); };
+    try {
+      Store.setTasks([fx.task('u16', { original_end_date: at(19, 17) })].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(seen.length, 1, 'one reversal queue ran');
+      assert.equal(seen[0]?.plantTz, LOCAL_TZ, 'the plant zone is passed on the reversal forward call');
+    } finally { Engine.placeForwardSequence = original; fx.restore(); }
+    // The leg itself: Chicago spring-forward, 24/7 line, 5 h from Sun 00:00 ends 06:00 wall (5 elapsed hours).
+    const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+    Store.setCalendar('U16-247', all([0, 24]), 'unit-test');
+    for (const policy of ['never', 'partial_allowed']) {
+      const out = Engine.placeForwardSequence('U16-247', [{ task: { id: 't', RUN_TIME: '5', MACHINE: 'U16-247' } }],
+        new Date(2026, 2, 8, 0, 0), policy, { plantTz: 'America/Chicago' });
+      assert.equal(out.placed.length, 1, policy);
+      assert.equal(out.placed[0].end.getHours(), 6, `${policy}: wall end 06:00 after the 02:00 jump`);
+    }
+  });
+
+  test('U16 round 2: the never-policy reversal leg picks its slot in plant-zone instants on a Chicago DST night (22:00-06:00 line)', async () => {
+    // A viewer outside the plant zone (UTC): wall-clock windows know nothing of the Chicago jump.
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'UTC';
+    try {
+    const tz = 'America/Chicago';
+    const night = () => ({ 0: [0, 6], 1: null, 2: null, 3: null, 4: null, 5: null, 6: [22, 24] });
+    Store.setCalendar('U16-NIGHT', night(), 'unit-test');
+    const seq = (hours, from) => Engine.placeForwardSequence('U16-NIGHT',
+      [{ task: { id: 't', RUN_TIME: String(hours), MACHINE: 'U16-NIGHT' } }], from, 'never', { plantTz: tz });
+    // Sat 7 Mar 22:00 -> Sun 8 Mar 06:00 is 7 elapsed hours (02:00 does not exist): a 7 h run fits and ends at the close...
+    const fits = seq(7, new Date(2026, 2, 7, 21, 0));
+    assert.equal(fits.placed.length, 1);
+    assert.deepEqual([fits.placed[0].start.getDate(), fits.placed[0].start.getHours()], [7, 22]);
+    assert.deepEqual([fits.placed[0].end.getDate(), fits.placed[0].end.getHours()], [8, 6], 'ends at the 06:00 close, not an hour past it');
+    // ...an 8 h run does not fit the 7 h night (the wall clock reads 8 h): it must not be placed running into closed time.
+    const over = seq(8, new Date(2026, 2, 7, 21, 0));
+    assert.equal(over.placed.length, 1);
+    assert.deepEqual([over.placed[0].start.getDate(), over.placed[0].start.getHours()], [14, 22], 'skips the short night, takes the next Saturday');
+    assert.deepEqual([over.placed[0].end.getDate(), over.placed[0].end.getHours()], [15, 6]);
+    // Fall-back night Sat 31 Oct -> Sun 1 Nov 2026 holds 9 elapsed hours in the same 22:00-06:00 window: a 9 h run fits.
+    const back = seq(9, new Date(2026, 9, 31, 21, 0));
+    assert.equal(back.placed.length, 1, 'the 9 elapsed-hour night holds a 9 h run');
+    assert.deepEqual([back.placed[0].end.getDate(), back.placed[0].end.getHours()], [1, 6]);
+    } finally { process.env.TZ = previousTz ?? LOCAL_TZ; }   // set explicitly: deleting TZ can leave the process on UTC
+  });
+
+  test('VI3: schedulePatchFor measures the run in the plant zone (8 h across the spring-forward gap ends 09:00 wall, not 08:00)', () => {
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'UTC';   // a viewer outside the plant zone: elapsed wall arithmetic knows nothing of the Chicago jump
+    const fx = recFixture({ timezone: 'America/Chicago' });
+    try {
+      const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+      Store.setCalendar(fx.line, all([0, 24]), 'unit-test');
+      for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(fx.plant, dow, [0, 24], 'unit-test');
+      const patch = Engine.schedulePatchFor({ id: 'vi3', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '8' }, fx.line, new Date(2026, 2, 8, 0, 0), 'never');
+      assert.ok(patch, 'a patch is produced');
+      assert.deepEqual([patch.start_date.getDate(), patch.start_date.getHours()], [8, 0]);
+      assert.deepEqual([patch.end_date.getDate(), patch.end_date.getHours(), patch.end_date.getMinutes()], [8, 9, 0], 'the walk ran on instants: 09:00 wall');
+    } finally { fx.restore(); process.env.TZ = previousTz ?? LOCAL_TZ; }
+  });
+
+  test('senior review M1: the never-branch reversal rounds the run time to whole minutes (no fractional-minute finish)', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('frac', { RUN_TIME: '2.33', original_end_date: at(19, 17), start_date: at(10, 6), end_date: at(10, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.frac;
+      assert.equal(t.start_date.getTime(), at(20, 9).getTime(), 'reversed from now');
+      assert.equal(t.end_date.getTime() - t.start_date.getTime(), 140 * 60000, '2.33 h = 140 whole minutes, not 139.8');
+    } finally { fx.restore(); }
+  });
+
+  test('gate 4a: the resulting running status of a reversed order is read on the plant clock (X runs from now, Y and Z are queued behind it)', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('x', { original_end_date: at(19, 17) }),
+        fx.task('y', { original_end_date: at(19, 18) }),
+        fx.task('z', { original_end_date: at(20, 8) }),
+      ].map(task => ({ ...task, start_date: at(10, 6), end_date: at(10, 10) })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      // Plant now is Thu 09:00: the first reversal starts exactly now, so it is running; the others start later.
+      // Senior review I10: a never-placed (display-derived) reversal is NOT running even though its bar straddles now.
+      assert.equal(Engine.isInProgress(Store.tasks.x), false, 'X is display-derived, never placed: not running');
+      assert.equal(Engine.isInProgress({ ...Store.tasks.x, user_scheduled: true }), true, 'the same bar on a placed row is running');
+      assert.deepEqual(Engine.firmingStatus(Store.tasks.x).reasons, []);
+      assert.equal(Engine.isInProgress(Store.tasks.y), false, 'Y starts after X ends');
+      assert.equal(Engine.isInProgress(Store.tasks.z), false, 'Z starts in the next window');
+      assert.equal(Engine.firmingStatus(Store.tasks.z).firmed, false);
+    } finally { fx.restore(); }
+  });
+
+  test('senior review I9: the reversal queue (placeForwardSequence, never) places a 24/7 30 h run as one bar and a night-shift 8 h run in its merged span', () => {
+    const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+    Store.setCalendar('I9-247', all([0, 24]), 'unit-test');
+    Store.setCalendar('I9-NIGHT', { 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null }, 'unit-test');
+    const mk = (line, hours) => [{ task: { id: 't', RUN_TIME: String(hours), MACHINE: line } }];
+    const from = at(17, 8);   // a Monday
+    const long = Engine.placeForwardSequence('I9-247', mk('I9-247', 30), from, 'never');
+    assert.equal(long.overlong.length, 0);
+    assert.equal(long.placed.length, 1);
+    assert.equal(long.placed[0].end.getTime() - long.placed[0].start.getTime(), 30 * 3600000);
+    const fits = Engine.placeForwardSequence('I9-NIGHT', mk('I9-NIGHT', 8), from, 'never');
+    assert.equal(fits.overlong.length, 0);
+    assert.equal(fits.placed.length, 1);
+    const over = Engine.placeForwardSequence('I9-NIGHT', mk('I9-NIGHT', 8.5), from, 'never');
+    assert.equal(over.overlong.length, 1);
+  });
+
+  test('senior review I10: running / frozen / the effective-firmed set apply only to rows with a persisted placement', () => {
+    const fx = recFixture();
+    try {
+      const now = at(20, 15);
+      const frozenEnd = at(23, 0);
+      const derived = fx.task('np', { start_date: at(20, 14), end_date: at(20, 18), systemMove: { from: at(20, 14), to: at(20, 14), reason: 'due_date_derivation' } });
+      const placed = fx.task('pl', { user_scheduled: true, start_date: at(20, 14), end_date: at(20, 18) });
+      const stored = fx.task('st', { start_date: at(20, 14), end_date: at(20, 18) });   // a never-placed server row: basic_start_date as its start, user_scheduled false, no stamp
+      const cleared = fx.task('cl', { start_date: at(20, 14), end_date: at(20, 18), systemMove: null });   // a refreshed row whose derivation stamp was cleared
+      const derivedFuture = fx.task('nf', { start_date: at(21, 8), end_date: at(21, 12), systemMove: { from: at(21, 8), to: at(21, 8), reason: 'due_date_derivation' } });
+      const placedFuture = fx.task('pf', { user_scheduled: true, start_date: at(21, 8), end_date: at(21, 12) });
+      assert.equal(Engine.isInProgress(derived, now), false);
+      assert.equal(Engine.isInProgress(placed, now), true);
+      assert.equal(Engine.isInProgress(stored, now), false);
+      assert.equal(Engine.isInProgress(cleared, now), false);
+      assert.equal(Engine.isFrozenHorizon(derivedFuture, now, frozenEnd), false);
+      assert.equal(Engine.isFrozenHorizon(placedFuture, now, frozenEnd), true);
+      const ids = effectiveFirmedIdSet([derived, placed, stored, cleared, derivedFuture, placedFuture], new Set(), now, false, frozenEnd);
+      assert.deepEqual([...ids].sort(), ['pf', 'pl']);
+    } finally { fx.restore(); }
+  });
+
+  test('a stale reversing row records run_time_grew and is dirty; reason cutover tags every reversal cutover', () => {
+    const fx = recFixture();
+    try {
+      const stale = (id) => fx.task(id, {
+        user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(19, 10), end_date: at(19, 14),
+      });
+      Store.setTasks([stale('g1')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(Store.tasks.g1.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' });
+      assert.equal(Store.tasks.g1.start_date.getTime(), at(20, 9).getTime());
+      assert.deepEqual(fx.writes, [{ source: REC_SOURCE, ids: ['g1'] }], 'a stale row is a dirty write');
+
+      Store.setTasks([stale('g2')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant, { reason: 'cutover' });
+      assert.deepEqual(Store.tasks.g2.derivationIssue, { code: 'reversal_forward', detail: 'cutover' });
+      assert.equal(Store.tasks.g2.systemMove.reason, 'cutover');
+    } finally { fx.restore(); }
+  });
+
+  test('Review Focus 4: a failed or pending calendar derives nothing, moves nothing, and raises the paused banner', () => {
+    const fx = recFixture({ state: 'failed' });
+    const priorDocument = globalThis.document;
+    const banner = { hidden: true, textContent: '' };
+    globalThis.document = { getElementById: id => (id === 'derive-paused-banner' ? banner : null), body: { classList: { add() {}, remove() {}, toggle() {} } } };
+    try {
+      Store.setTasks([fx.task('f1', {
+        original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10),
+      }), fx.task('f2', {
+        RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17),
+      })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.f1.start_date.getTime(), at(18, 6).getTime(), 'nothing moved on the default hours');
+      assert.equal(Store.tasks.f2.start_date.getTime(), at(26, 13).getTime());
+      assert.equal(Store.tasks.f2.runtime_schedule_mismatch, true, 'the flag stays for the next hydrated pass');
+      assert.deepEqual(fx.writes, []);
+      assert.equal(fx.toasts.length, 0);
+      assert.ok(Engine.derivePausedPlants.has(fx.plant));
+      assert.equal(banner.hidden, false);
+      assert.match(banner.textContent, /ui\.derive_paused/);
+
+      CalendarSync._setHydration(fx.plant, 'pending');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.writes, [], 'pending is not hydrated either');
+
+      CalendarSync._setHydration(fx.plant, 'hydrated', fx.lines);
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.ok(fx.writes.length > 0, 'derivation resumes once the server calendar is in');
+      assert.equal(Engine.derivePausedPlants.has(fx.plant), false);
+      assert.equal(banner.hidden, true);
+    } finally { globalThis.document = priorDocument; fx.restore(); }
+  });
+
+  test('D14: a line with no server calendar row derives on the default calendar instead of being blocked', () => {
+    const fx = recFixture({ lineNames: ['A', 'B'], serverLineNames: ['A'] });
+    try {
+      const withRow = fx.task('ok', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) });
+      const noRow = fx.task('nr', { MACHINE: fx.lines[1], original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) });
+      Store.setTasks([withRow, noRow], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.ok.start_date.getTime(), at(26, 13).getTime());
+      assert.equal(Store.tasks.nr.start_date.getTime(), at(26, 13).getTime(), 'derived on the default 07:00-19:00 hours');
+      assert.equal(Store.tasks.nr.end_date.getTime(), at(26, 17).getTime());
+      assert.equal(Store.tasks.nr.derivationIssue ?? null, null);
+    } finally { fx.restore(); }
+  });
+
+  test('OQ52: a plant with no time zone is skipped whole, every row carries plant_no_timezone, nothing is toasted twice', () => {
+    const fx = recFixture({ timezone: null });
+    try {
+      Store.setTasks([
+        fx.task('n1', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('n2', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      for (const id of ['n1', 'n2']) assert.equal(Store.tasks[id].derivationIssue.code, 'plant_no_timezone', id);
+      assert.equal(Store.tasks.n1.start_date.getTime(), at(18, 6).getTime());
+      assert.equal(Store.tasks.n2.start_date.getTime(), at(26, 13).getTime());
+      assert.equal(Store.tasks.n2.runtime_schedule_mismatch, true);
+      assert.equal(fx.toasts.filter(t => /system_moved/.test(t.msg)).length, 0);
+      assert.equal(fx.toasts.length, 1, 'only the one-time plant toast from Store.plantNow');
+    } finally { fx.restore(); }
+  });
+
+  test('a row carrying placement_exception, and a queued row, are left alone', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('pe', { RUN_TIME: '5', user_scheduled: true, runtime_schedule_mismatch: true, placement_exception: 'overlong',
+          start_date: at(24, 8), end_date: at(28, 8) }),
+        fx.task('qd', { planning_status: 'needs_planning', planning_reason: { code: 'planner_unscheduled', message: 'x' },
+          start_date: null, end_date: null, original_end_date: at(26, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.pe.start_date.getTime(), at(24, 8).getTime());
+      assert.equal(Store.tasks.pe.end_date.getTime(), at(28, 8).getTime());
+      assert.equal(Store.tasks.pe.runtime_schedule_mismatch, true);
+      assert.equal(Store.tasks.qd.start_date, null);
+      assert.deepEqual(fx.writes, []);
+    } finally { fx.restore(); }
+  });
+
+  test('the batch toast counts dirty patches only (display-only rows are not counted)', () => {
+    const fx = recFixture();
+    const priorT = Util.t;
+    Util.t = (key, vars) => key === 'toast.system_moved_n' ? `${key}:${vars.count}` : priorT.call(Util, key, vars);
+    try {
+      Store.setTasks([
+        fx.task('d1', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) }),
+        fx.task('d2', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(27, 13), end_date: at(27, 17) }),
+        fx.task('np', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const dirtyCount = fx.writes.filter(w => w.source === REC_SOURCE).reduce((n, w) => n + w.ids.length, 0);
+      assert.equal(dirtyCount, 2);
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.system_moved_n:2']);
+    } finally { Util.t = priorT; fx.restore(); }
+  });
+
+  // Task 4.2 (OQ53): the first load after the cutover finds most of a plant stale; one summary Toast replaces the
+  // per-row batch Toast. The threshold is "more than half of the plant's non-queued rows were stale".
+  const cutoverToastStub = () => {
+    const priorT = Util.t;
+    Util.t = (key, vars) => key === 'toast.cutover_summary' ? `${key}:${vars.n},${vars.m},${vars.k},${vars.j}`
+      : key === 'toast.system_moved_n' ? `${key}:${vars.count}` : priorT.call(Util, key, vars);
+    return () => { Util.t = priorT; };
+  };
+
+  test('OQ53: when more than half of a plant is stale one cutover summary Toast carries the four counts and replaces the per-row Toast', () => {
+    const fx = recFixture({ lineNames: ['A', 'B'], serverLineNames: ['A'] });
+    const unstub = cutoverToastStub();
+    try {
+      const lineB = fx.lines[1];
+      Store.setTasks([
+        fx.task('a1', { original_end_date: at(26, 17), runtime_schedule_mismatch: true }),
+        fx.task('a2', { original_end_date: at(27, 17), runtime_schedule_mismatch: true }),
+        ...[28, 29, 30, 31].map(day => fx.task(`a${day}`, { original_end_date: at(day, 17), runtime_schedule_mismatch: true })),   // U24: the signature needs >= 10 non-queued rows
+        fx.task('rv', { original_end_date: at(19, 14), runtime_schedule_mismatch: true }),               // due date already past: reversed from now
+        fx.task('run', { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(20, 7), end_date: at(20, 11) }),   // producing now: keeps its start
+        fx.task('bl', { MACHINE: lineB, original_end_date: at(26, 17), runtime_schedule_mismatch: true }),   // D14: no server calendar row on the line, derives on the default hours
+        fx.task('ok', { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(27, 7), end_date: at(27, 11) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);   // 9 of 10 non-queued rows were stale
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:7,1,1,0'], 're-anchored 7 (D14: the no-server-row line derives too), reversed 1, kept running start 1, blocked 0');
+      assert.deepEqual(Store.tasks.rv.derivationIssue, { code: 'reversal_forward', detail: 'cutover' }, 'the first-load pass is tagged cutover');
+      assert.equal(Store.tasks.bl.derivationIssue ?? null, null, 'D14: the no-server-row line is no longer blocked');
+    } finally { unstub(); fx.restore(); }
+  });
+
+  test('OQ53: an ordinary re-upload (most of the plant stale but still PLACED) is not a cutover; per-row Toast and run_time_grew stand', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    try {
+      // Three of four rows flagged stale after a re-upload, each still carrying its placement; two have a finish already past.
+      const stale = (id, day, h) => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(day, h), end_date: at(day, h + 4) });
+      const current = id => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(31, 7), end_date: at(31, 11) });
+      Store.setTasks([stale('r1', 19, 10), stale('r2', 18, 10), stale('r3', 26, 13), current('c1')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.toasts.map(x => x.msg), ['toast.system_moved_n:3']);
+      assert.deepEqual(Store.tasks.r1.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' });
+      assert.equal(Store.tasks.r3.systemMove.reason, 'run_time_changed');
+    } finally { unstub(); fx.restore(); }
+  });
+
+  test('OQ53: a one-order plant whose single row is stale and placed is not a cutover either', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    try {
+      Store.setTasks([fx.task('only', { RUN_TIME: '6', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 13), end_date: at(26, 17) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.toasts.map(x => x.msg), ['toast.system_moved_n:1']);
+    } finally { unstub(); fx.restore(); }
+  });
+
+  test('OQ53: queued rows count in neither side of the threshold', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    try {
+      const queued = id => fx.task(id, { planning_status: 'needs_planning', start_date: null, end_date: null, user_scheduled: false });
+      const stale = id => fx.task(id, { original_end_date: at(26, 17), runtime_schedule_mismatch: true });
+      const ten = Array.from({ length: 10 }, (_, i) => stale(`s${i}`));
+      Store.setTasks([...ten, queued('q1'), queued('q2'), queued('q3'), queued('q4'), queued('q5'), queued('q6')], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);   // ten non-queued rows, all with the cutover signature
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:10,0,0,0']);
+    } finally { unstub(); fx.restore(); }
+  });
+
+  test('U24: the cutover signature needs at least ten non-queued rows; nine stale rows keep the per-row toast', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    try {
+      const stale = id => fx.task(id, { original_end_date: at(26, 17), runtime_schedule_mismatch: true });
+      Store.setTasks(Array.from({ length: 9 }, (_, i) => stale(`n${i}`)), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.system_moved_n:9']);
+      assert.notEqual(Store.tasks.n0.systemMove?.reason, 'cutover');
+    } finally { unstub(); fx.restore(); }
+  });
+
+  // F10 (Phase 3 whole-branch ruling): undo of rows that were never placed server-side leaves them display-only.
+  test('F10: undoing an Apply on never-placed rows leaves them neither dirty nor placed; a placed row\'s undo still is', () => {
+    const fx = recFixture();
+    const unsubscribe = Store.subscribe(evt => App._trackDirty(evt), 'f10-dirty');
+    const priorDirty = new Set(Persistence._dirtyIds), priorForce = new Set(Persistence._forceIds);
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    try {
+      Store.setTasks([
+        fx.task('np1', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('np2', { original_end_date: at(27, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('pl', { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(26, 13), end_date: at(26, 17) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);   // the display derivation: never-placed rows get bars, stay unplaced
+      assert.equal(Store.tasks.np1.user_scheduled, false);
+      const ids = ['np1', 'np2', 'pl'];
+      const snapshot = UndoStack.snapshotTasks(ids);
+      // An Apply (optimizer / drop) writes new dates: each row becomes placed and dirty.
+      Store.updateMany(ids.map(id => ({ id, changes: { start_date: at(21, 7), end_date: at(21, 11) } })), 'engine');
+      assert.ok(ids.every(id => Store.tasks[id].user_scheduled && Persistence._dirtyIds.has(id)), 'precondition: the Apply placed and dirtied all three');
+      UndoStack.restoreTasks(snapshot);
+      for (const id of ['np1', 'np2']) {
+        assert.equal(Store.tasks[id].user_scheduled, false, `${id} is not marked placed`);
+        assert.equal(Persistence._dirtyIds.has(id), false, `${id} is not dirty, so Save cannot persist a placement it never had`);
+        assert.equal(Persistence._forceIds.has(id), false);
+        assert.equal(Store.tasks[id].end_date.getTime(), id === 'np1' ? at(26, 17).getTime() : at(27, 17).getTime(), 'still displayed from its due date');
+      }
+      assert.equal(Store.tasks.pl.user_scheduled, true);
+      assert.equal(Persistence._dirtyIds.has('pl'), true, 'a placed row\'s undo is still a saveable edit');
+    } finally {
+      unsubscribe();
+      Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+      priorDirty.forEach(id => Persistence._dirtyIds.add(id)); priorForce.forEach(id => Persistence._forceIds.add(id));
+      fx.restore();
+    }
+  });
+
+  test('F10 (I2): undo of an Apply on a never-placed row keeps its earlier unsaved attribute edit dirty and sends no dates', () => {
+    const fx = recFixture();
+    const unsubscribe = Store.subscribe(evt => App._trackDirty(evt), 'f10-dirty2');
+    const priorDirty = new Set(Persistence._dirtyIds), priorForce = new Set(Persistence._forceIds);
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+    try {
+      Store.setTasks([
+        fx.task('ed', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('cl', { original_end_date: at(27, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      // The planner edits the run time of 'ed' (unsaved, no dates written), then an Apply touches both rows.
+      Store.updateMany([{ id: 'ed', changes: { RUN_TIME: '3' } }], 'engine');
+      assert.ok(Persistence._dirtyIds.has('ed') && !Persistence._dirtyIds.has('cl'), 'precondition');
+      const snapshot = UndoStack.snapshotTasks(['ed', 'cl']);
+      Store.updateMany(['ed', 'cl'].map(id => ({ id, changes: { start_date: at(21, 7), end_date: at(21, 10) } })), 'engine');
+      UndoStack.restoreTasks(snapshot);
+      assert.equal(Persistence._dirtyIds.has('ed'), true, 'the earlier unsaved RUN_TIME edit stays saveable');
+      assert.equal(Persistence._dirtyIds.has('cl'), false, 'a row with no earlier edit is not dirty');
+      assert.equal(Store.tasks.ed.user_scheduled, false);
+      assert.equal(Store.tasks.ed.RUN_TIME, '3');
+      const sent = Persistence._taskEditSnapshot(Store.tasks.ed);
+      assert.equal(sent.RUN_TIME, '3');
+      for (const key of ['start_date', 'end_date', 'schedule_segments']) assert.equal(key in sent, false, `Save sends no ${key}`);
+    } finally {
+      unsubscribe();
+      Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
+      priorDirty.forEach(id => Persistence._dirtyIds.add(id)); priorForce.forEach(id => Persistence._forceIds.add(id));
+      fx.restore();
+    }
+  });
+
+  test('overlong under a never-split plant queues the row (overlong_never); run time zero places nothing and says so', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('ol', { RUN_TIME: '20', original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        fx.task('rz', { RUN_TIME: '0', original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+      ], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const ol = Store.tasks.ol;
+      assert.equal(ol.planning_status, 'needs_planning');
+      assert.equal(ol.planning_reason.code, 'overlong_never');
+      assert.equal(ol.start_date, null);
+      assert.deepEqual(ol.scheduleSegments, []);
+      assert.equal(Store.tasks.rz.start_date.getTime(), at(18, 6).getTime(), 'no bar is derived');
+      assert.equal(Store.tasks.rz.derivationIssue.code, 'run_time_zero');
+    } finally { fx.restore(); }
+  });
+
+  test('D9c: a never-placed order with a date-only due on a full-day blackout resolves silently to the previous working close', () => {
+    const fx = recFixture();
+    // The due-instant seam needs the line's 07:00-19:00 hours so a date-only due reads as that day's 19:00 close.
+    Util.setDueCalendarResolver(() => ({ lineHours: { 0: [7, 19], 1: [7, 19], 2: [7, 19], 3: [7, 19], 4: [7, 19], 5: [7, 19], 6: [7, 19] },
+      plantHours: null, plant: fx.plant, rev: 0 }));
+    try {
+      Store.addBlock({ id: 'd9c-blackout', plant: fx.plant, line: fx.line, start: at(26, 0), end: at(27, 0) }, 'unit-test');
+      Store.setTasks([fx.task('hol', { RUN_TIME: '4', original_end_date: at(26, 0), start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.hol;
+      assert.equal(t.end_date.getTime(), at(25, 19).getTime(), 'finish is the previous working close, before the blackout');
+      assert.equal(t.derivationIssue ?? null, null, 'no finish_moved_earlier for a date-only due resolving');
+    } finally { Util.setDueCalendarResolver(null); Store.removeBlock('d9c-blackout', 'unit-test'); fx.restore(); }
+  });
+
+  test('finish_moved_earlier is recorded with the held and the derived finish when the walk cannot hold it', () => {
+    const fx = recFixture();
+    try {
+      // 20:00 is after the 19:00 close: the walk lands on the latest operating instant before it.
+      Store.setTasks([fx.task('fe', { RUN_TIME: '4', user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: at(26, 16), end_date: at(26, 20) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const t = Store.tasks.fe;
+      assert.equal(t.end_date.getTime(), at(26, 19).getTime());
+      assert.equal(t.derivationIssue.code, 'finish_moved_earlier');
+      assert.equal(t.derivationIssue.from.getTime(), at(26, 20).getTime());
+      assert.equal(t.derivationIssue.to.getTime(), at(26, 19).getTime());
+    } finally { fx.restore(); }
+  });
+
+  test('a planner-placed never-placed row is marked scheduled, survives a second reconcile untouched (dirty), and keeps its placement once saved', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('dr', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      // The planner drops it on Fri 21 Aug 15:00-19:00 (any non-display client write is a placement).
+      Store.updateMany([{ id: 'dr', changes: { start_date: at(21, 15), end_date: at(21, 19) } }], 'engine');
+      Persistence._dirtyIds.add('dr');
+      assert.equal(Store.tasks.dr.user_scheduled, true, 'the client marks a placed row as scheduled');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.dr.start_date.getTime(), at(21, 15).getTime(), 'a dirty placement is never re-derived');
+      assert.equal(Store.tasks.dr.end_date.getTime(), at(21, 19).getTime());
+      assert.deepEqual(fx.writes, [], 'and is absent from the display writes');
+      // Saved: no longer dirty. A hydration event must still leave it where the planner put it.
+      Persistence._dirtyIds.delete('dr');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.dr.start_date.getTime(), at(21, 15).getTime());
+      assert.deepEqual(fx.writes, []);
+      // A display derivation never claims placement.
+      Store.setTasks([fx.task('dp', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.notEqual(Store.tasks.dp.user_scheduled, true);
+    } finally { Persistence._dirtyIds.delete('dr'); fx.restore(); }
+  });
+
+  test('a candidate with no finish to hold carries no_anchor and is left as it is', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('na', { start_date: at(18, 6), end_date: at(18, 10) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.na.start_date.getTime(), at(18, 6).getTime());
+      assert.equal(Store.tasks.na.derivationIssue.code, 'no_anchor');
+    } finally { fx.restore(); }
+  });
+
+  test('the next edit of a task clears its session-only derivation notes', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('cl', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10), RUN_TIME: '0' })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.cl.derivationIssue.code, 'run_time_zero');
+      Store.updateMany([{ id: 'cl', changes: { start_date: at(26, 9), end_date: at(26, 13) } }], 'unit-test');
+      assert.equal(Store.tasks.cl.derivationIssue ?? null, null);
+      assert.equal(Store.tasks.cl.systemMove ?? null, null);
+    } finally { fx.restore(); }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 3.1 (OQ21, OQ20, G-0.25, OQ50 c, OQ56 a, group 21)
+  // -------------------------------------------------------------------------
+  test('OQ21: an undo restores the finish and re-derives the start from the current run time, quietly, even for a dirty row', () => {
+    const fx = recFixture();
+    try {
+      // The recorded start (10:00) does not belong to the 4 h run time; the finish (17:00) does.
+      Store.setTasks([fx.task('u', { user_scheduled: true, start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false })], 'unit-test');
+      const snap = UndoStack.snapshotTasks(['u']);
+      snap[0].start_date = at(26, 10);
+      Persistence._dirtyIds.add('u');   // restored rows are dirty by construction; the reconcile must not skip them
+      UndoStack.restoreTasks(snap);
+      const t = Store.tasks.u;
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime(), 'the restored finish holds');
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'the start follows the current run time (17:00 minus 4 h)');
+      assert.equal(t.runtime_schedule_mismatch, false, 'derived, so the stale flag is cleared');
+      assert.equal(fx.toasts.length, 0, 'an undo announces itself; the re-derivation adds no "N moved" toast');
+      assert.ok(fx.writes.some(w => w.source === REC_SOURCE && w.ids.includes('u')));
+    } finally { Persistence._dirtyIds.delete('u'); fx.restore(); }
+  });
+
+  test('group 15: Ctrl+Z of a task edit after a calendar edit re-derives against the CURRENT calendar and leaves the calendar edit alone', () => {
+    const fx = recFixture({ policy: 'never' });
+    try {
+      Store.setTasks([fx.task('cz', { RUN_TIME: '4', user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(26, 13), end_date: at(26, 17) })], 'unit-test');
+      const snap = UndoStack.snapshotTasks(['cz']);           // the state before the task edit (finish Wed 17:00, plant window 07-19)
+      Store.updateMany([{ id: 'cz', changes: { start_date: at(27, 9), end_date: at(27, 13) } }], 'unit-test');   // the task edit
+      // Between the snapshot and the undo the planner shortens the line's day: it now closes at 16:00.
+      const shortWeek = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [7, 16] : null]));
+      Store.setCalendar(fx.line, shortWeek, 'unit-test');
+      UndoStack.restoreTasks(snap);
+      const t = Store.tasks.cz;
+      assert.equal(fmtLocal(t.end_date), '8/26 16:00', 'the restored 17:00 finish cannot be held on the shortened day: the end lands on the new close');
+      assert.equal(fmtLocal(t.start_date), '8/26 12:00', 'and the 4 h start follows from it, not from the stale 13:00');
+      assert.equal(t.derivationIssue?.code, 'finish_moved_earlier', 'the move is recorded, not silent');
+      assert.deepEqual(Store.calendars[fx.line].workHours[3], [7, 16], 'the undo restored the task only; the calendar edit stands');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ21: restoreTasks flags every restored row stale before the engine derives', () => {
+    const fx = recFixture({ state: 'pending' });   // nothing is derived, so the flag is still visible
+    try {
+      Store.setTasks([fx.task('u2', { user_scheduled: true, start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false })], 'unit-test');
+      UndoStack.restoreTasks(UndoStack.snapshotTasks(['u2']));
+      assert.equal(Store.tasks.u2.runtime_schedule_mismatch, true);
+    } finally { fx.restore(); }
+  });
+
+  test('U23: restoreTasks flags only the rows the reconcile will process (overtime marker and a calendar-less line keep their flag)', () => {
+    const fx = recFixture({ lineNames: ['A', 'B'], serverLineNames: ['A'] });
+    try {
+      const placed = { user_scheduled: true, start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false };
+      Store.setTasks([
+        fx.task('plain', placed),
+        fx.task('ot', { ...placed, placement_exception: 'overtime' }),
+        fx.task('nocal', { ...placed, MACHINE: fx.lines[1] }),
+      ], 'unit-test');
+      UndoStack.restoreTasks(UndoStack.snapshotTasks(['plain', 'ot', 'nocal']));
+      assert.equal(Store.tasks.ot.runtime_schedule_mismatch, false, 'an overtime-marked bar is never re-derived, so it is never flagged');
+      assert.equal(Store.tasks.nocal.runtime_schedule_mismatch, false, 'a line with no server calendar row is never re-derived');
+      assert.equal(Store.tasks.plain.runtime_schedule_mismatch, false, 'a processed row ends derived and clear');
+      assert.equal(Store.tasks.plain.end_date.getTime(), at(26, 17).getTime());
+    } finally { fx.restore(); }
+  });
+
+  test('gate 23 a / gate 16: restoring an Apply snapshot brings back the finish AND the run time of a row whose run time changed after the Apply', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([fx.task('ap', { user_scheduled: true, RUN_TIME: '4', start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false })], 'unit-test');
+      const snap = UndoStack.snapshotTasks(['ap']);              // what OptimizerPreview.apply / runAndApply push
+      // After the Apply the planner (or a routing change) edits the run time and the finish moves with the new bar.
+      Store.updateMany([{ id: 'ap', changes: { RUN_TIME: '6', start_date: at(26, 14), end_date: at(26, 20) } }], 'unit-test');
+      assert.equal(String(Store.tasks.ap.RUN_TIME), '6', 'sanity: the edit landed');
+      UndoStack.restoreTasks(snap);
+      const t = Store.tasks.ap;
+      assert.equal(String(t.RUN_TIME), '4', 'the run time is restored together with the finish');
+      assert.equal(t.end_date.getTime(), at(26, 17).getTime(), 'the finish is restored');
+      assert.equal(t.start_date.getTime(), at(26, 13).getTime(), 'and the start is re-derived from them (17:00 minus 4 h)');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ20 (verified): a derived start below the pull floor records pull_floor_crossed', () => {
+    const fx = recFixture();
+    try {
+      Store.setMasterData({ plants: [{ plant: fx.plant, split_order_policy: 'never', timezone: LOCAL_TZ, max_pull_forward_days: 0 }],
+        lines: [{ machine: fx.line, plant: fx.plant }] }, 'unit-test');
+      // Due 26 Aug with a pull limit of 0 days: the floor is 26 Aug 00:00. A 4 h run held to an 11:00 finish on
+      // the 25th starts at 07:00 on the 25th, below that floor.
+      Store.setTasks([fx.task('pf', { RUN_TIME: '4', user_scheduled: true, runtime_schedule_mismatch: true,
+        original_end_date: at(26, 17), start_date: at(25, 8), end_date: at(25, 11) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.pf.derivationIssue?.code, 'pull_floor_crossed');
+    } finally { fx.restore(); }
+  });
+
+  test('G-0.25: a marked, unfirmed row keeps its edges through runAndApply with respectFirmed off; Remove Backlog leaves it too', () => {
+    const fx = recFixture();
+    try {
+      const marked = fx.task('mk', { RUN_TIME: '2', user_scheduled: true, placement_exception: 'overtime',
+        start_date: at(20, 6), end_date: at(20, 8), original_end_date: at(20, 8) });
+      const free = fx.task('fr', { RUN_TIME: '2', user_scheduled: true, start_date: at(20, 9), end_date: at(20, 11), original_end_date: at(21, 17) });
+      Store.setTasks([marked, free], 'unit-test');
+      const before = [Store.tasks.mk.start_date.getTime(), Store.tasks.mk.end_date.getTime()];
+      Engine.runAndApply('changeover', { plant: fx.plant, respectFirmed: false, respectCalendar: true,
+        planningStart: at(20, 0), runNow: at(20, 9), endDate: at(27, 0) });
+      assert.deepEqual([Store.tasks.mk.start_date.getTime(), Store.tasks.mk.end_date.getTime()], before, 'the marked row is fixed whatever the toggle says');
+      assert.equal(Store.tasks.mk.placement_exception, 'overtime');
+      const backlog = Engine.removeBacklog({ plant: fx.plant, startDate: at(19, 0), endDate: at(27, 0), runAt: at(20, 9) });
+      assert.equal(backlog.patches.some(p => p.id === 'mk'), false, 'Remove Backlog does not move a marked row');
+      const detached = Engine.evaluateSchedule('changeover', { plant: fx.plant, respectFirmed: false, respectCalendar: true,
+        planningStart: at(20, 0), runNow: at(20, 9), endDate: at(27, 0) });
+      assert.equal(detached.patches.some(p => p.id === 'mk'), false, 'the detached candidate leaves it alone too');
+    } finally { fx.restore(); }
+  });
+
+  test('G-0.25: autoReflow on a never-split plant leaves a marked peer where it is', () => {
+    const fx = recFixture();
+    try {
+      Store.setTasks([
+        fx.task('drag', { RUN_TIME: '3', user_scheduled: true, start_date: at(20, 9), end_date: at(20, 12) }),
+        fx.task('mkp', { RUN_TIME: '14', user_scheduled: true, placement_exception: 'overlong', start_date: at(20, 10), end_date: at(21, 0) }),
+      ], 'unit-test');
+      const before = [Store.tasks.mkp.start_date.getTime(), Store.tasks.mkp.end_date.getTime()];
+      Engine.autoReflow('drag');
+      assert.deepEqual([Store.tasks.mkp.start_date.getTime(), Store.tasks.mkp.end_date.getTime()], before);
+    } finally { fx.restore(); }
+  });
+
+  test('OQ50 c: Remove Backlog queues a never-policy overlong order as overlong_never; overlongIds still reports it; the cursor does not advance', () => {
+    const fx = recFixture();
+    try {
+      // 07:00-19:00 line: a 14 h order cannot be one bar. It is backlog (started in the past).
+      Store.setTasks([
+        fx.task('ol', { RUN_TIME: '14', user_scheduled: true, start_date: at(19, 7), end_date: at(19, 21) }),
+        fx.task('ok', { RUN_TIME: '2', user_scheduled: true, start_date: at(19, 22), end_date: at(20, 0) }),
+      ], 'unit-test');
+      const result = Engine.removeBacklog({ plant: fx.plant, startDate: at(19, 0), endDate: at(27, 0), runAt: at(20, 9) });
+      assert.deepEqual(result.diagnostics.overlongIds, ['ol']);
+      const queued = result.patches.find(p => p.id === 'ol').changes;
+      assert.equal(queued.planning_status, 'needs_planning');
+      assert.equal(queued.planning_reason.code, 'overlong_never');
+      assert.equal(queued.start_date, null);
+      assert.deepEqual(queued.scheduleSegments, []);
+      const next = result.patches.find(p => p.id === 'ok').changes;
+      assert.equal(next.start_date.getTime(), at(20, 9).getTime(), 'the refused order took no time from the compressing cursor');
+    } finally { fx.restore(); }
+  });
+
+  test('OQ56 a: the Remove Backlog count is the rows tagged reversal_forward / run_time_grew', () => {
+    const fx = recFixture();
+    try {
+      const stale = id => fx.task(id, { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(19, 10), end_date: at(19, 14) });
+      Store.setTasks([stale('g1'), stale('g2'), fx.task('d', { original_end_date: at(19, 17) })], 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const grew = Store.tasksByPlant(fx.plant).filter(t => t.derivationIssue?.code === 'reversal_forward' && t.derivationIssue.detail === 'run_time_grew');
+      assert.deepEqual(grew.map(t => t.id).sort(), ['g1', 'g2'], 'due_date_past reversals are not counted');
+    } finally { fx.restore(); }
+  });
+
+  test('group 21: the optimizer, the reconcile and the manual path place a reversal at the same floored minute, never after now', () => {
+    const fx = recFixture();
+    try {
+      // Plant now 09:00:30; every path floors it to 09:00 so the start is at or before now.
+      const restore = pinPlantClock('2026-08-20T09:00:30');
+      try {
+        const now = Store.plantNow(fx.plant);
+        assert.ok(now.getSeconds() === 30, 'the pinned clock carries seconds');
+        const floored = Calendar._floorMinute(now).getTime();
+        Store.setTasks([fx.task('rv', { RUN_TIME: '2', original_end_date: at(19, 12), start_date: at(10, 6), end_date: at(10, 8) })], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const reconcileStart = Store.tasks.rv.start_date.getTime();
+        Store.setTasks([fx.task('rv', { RUN_TIME: '2', original_end_date: at(19, 12) })], 'unit-test');
+        const result = Engine.evaluateSchedule('duedate', { plant: fx.plant, respectFirmed: true, respectCalendar: true,
+          planningStart: at(20, 0), endDate: at(27, 0) });
+        const optimizerStart = result.patches.find(p => p.id === 'rv')?.changes.start_date?.getTime();
+        // The manual path: a release whose finish is already past reverses forward from the same floored now.
+        const queued = { id: 'rv-manual', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2', start_date: null, end_date: null,
+          scheduleSegments: [], planning_status: 'needs_planning', planning_reason: { code: 'run_time_over_cap', message: 'x' } };
+        const manual = Engine.manualSchedulePatchFor(queued, fx.line, at(19, 12));
+        assert.ok(manual, 'the manual release is not refused');
+        assert.equal(manual.start_date.getTime(), floored, 'manual reversal starts at the floored minute (no 15-minute snap)');
+        assert.equal(reconcileStart, floored, 'reconcile reversal starts at the floored minute');
+        assert.equal(optimizerStart, floored, 'optimizer reversal starts at the same floored minute');
+        assert.equal(optimizerStart, manual.start_date.getTime(), 'optimizer and manual snap agree to the minute');
+        assert.ok(optimizerStart <= now.getTime(), 'the order is running the instant it is placed');
+      } finally { restore(); }
+    } finally { fx.restore(); }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 3.2 (OQ2 V1, OQ40): the reconcile reserves the required changeover ahead of the productive start
+  // -------------------------------------------------------------------------
+  const colorState = value => [{ fieldKey: 'colorWheel', value }];
+  function withSetup(fx, { overrides = [], minutes = 60 } = {}, fn) {
+    const prior = Store.setupSnapshot;
+    Store.replaceSetupSnapshot({
+      plant: fx.plant,
+      definition: { plant: fx.plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1, from_key: colorState('RED'), to_key: colorState('BLUE'), setup_min: minutes }],
+      machine_rows: [], machine_states: [], overrides,
+    }, 'unit-test');
+    try { fn(); } finally { Store.replaceSetupSnapshot(prior, 'unit-test'); }
+  }
+  const fmtLocal = d => `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+  test('Task 3.2: the reconcile reserves the predecessor-pair changeover before the earliest piece (same window)', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      withSetup(fx, {}, () => {
+        // Window 07-19. A (RED) ran Tue 25 07-09; B (BLUE, 4 h) is held to a Wed 26 11:00 finish. The 60-minute
+        // changeover cannot sit before 07:00 on Wednesday. D6 (VM9): B fits that one window, so setup never splits
+        // it: it stays one piece 07:00-11:00 and the unreserved changeover is left to the setup alert (repaired
+        // from the earlier clip-and-split expectation).
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const t = Store.tasks.pb;
+        assert.equal(fmtLocal(t.start_date), '8/26 07:00');
+        assert.equal(fmtLocal(t.end_date), '8/26 11:00', 'the finish is held');
+        assert.deepEqual(t.scheduleSegments ?? [], [], 'D6: one piece, never split to make room for the changeover');
+        assert.equal(t.derivationIssue ?? null, null);
+      });
+    } finally { fx.restore(); }
+  });
+
+  test('Task 3.2: no changeover is reserved when the predecessor is unplaced, the pair has no rule, or there is no setup snapshot', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      const run = extra => {
+        let out;
+        withSetup(fx, {}, () => {
+          Store.setTasks([
+            fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9), ...extra }),
+            fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+          ], 'unit-test');
+          Engine.reconcileRuntimeSchedules(fx.plant);
+          out = fmtLocal(Store.tasks.pb.start_date);
+        });
+        return out;
+      };
+      assert.equal(run({ planning_status: 'needs_planning', start_date: null, end_date: null, user_scheduled: false }), '8/26 07:00', 'queued predecessor: unknown, 0');
+      assert.equal(run({ COLOR: 'GREEN' }), '8/26 07:00', 'no rule for GREEN -> BLUE: 0, no invented default');
+      const prior = Store.setupSnapshot;
+      Store.replaceSetupSnapshot(null, 'unit-test');
+      try {
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00', 'no setup snapshot: 0');
+      } finally { Store.replaceSetupSnapshot(prior, 'unit-test'); }
+    } finally { fx.restore(); }
+  });
+
+  test('Task 3.2 fix round 1: a setup-aware walk that cannot place keeps the zero-setup held-finish placement (no reversal)', () => {
+    const fx = recFixture({ policy: 'never' });
+    try {
+      withSetup(fx, { minutes: 30 }, () => {
+        Store.setCalendar(fx.line, Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [7, 15] : null])), 'unit-test');
+        // 07-15 window (inside the plant's 07-19), 8 h order held to Wed 26 15:00 after a RED -> BLUE 30-minute changeover. No window holds
+        // 8 h + 30 min, so the setup-aware walk fails; the zero-setup bar (07:00-15:00) must stand.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '8', original_end_date: at(26, 15), start_date: at(18, 6), end_date: at(18, 14) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const t = Store.tasks.pb;
+        assert.equal(fmtLocal(t.start_date), '8/26 07:00');
+        assert.equal(fmtLocal(t.end_date), '8/26 15:00');
+        assert.notEqual(t.derivationIssue?.code, 'reversal_forward');
+        assert.equal(t.derivationIssue ?? null, null);
+      });
+    } finally { fx.restore(); }
+  });
+
+  test('senior review I8: a setup-aware walk that would MOVE the held finish is discarded; the zero-setup held-finish bar stands', () => {
+    const fx = recFixture({ policy: 'never' });
+    try {
+      withSetup(fx, { minutes: 90 }, () => {
+        // 07-19 window (12 h), 10 h order held to Wed 26 17:00, RED -> BLUE 90 min. 10 h + 90 min does not fit the 12 h window slack
+        // at the finish, so the setup-aware walk would pick an earlier day (finishMoved). Setup is a preference: the finish holds.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '10', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 7), end_date: at(26, 17) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const t = Store.tasks.pb;
+        assert.equal(fmtLocal(t.end_date), '8/26 17:00', 'the held finish never moves for a changeover');
+        assert.equal(fmtLocal(t.start_date), '8/26 07:00');
+        assert.notEqual(t.derivationIssue?.code, 'finish_moved_earlier');
+      });
+    } finally { fx.restore(); }
+  });
+
+  test('group 7 (pipeline): a reconcile that holds the finish leaves a shrunk changeover gap, and the alerts name it (setup-violated with the available minutes)', async () => {
+    const { Alerts } = await import('../../../frontend/insights/services.mjs');
+    const fx = recFixture({ policy: 'never' });
+    const priorAlerts = Store.alerts;
+    try {
+      withSetup(fx, { minutes: 90 }, () => {
+        // RED ends Tue 25 19:00 (window close). BLUE is 10 h held to Wed 26 17:00, so its zero-setup start is Wed 07:00.
+        // The 90-minute RED -> BLUE changeover would need 05:30-07:00 (before the window opens), so the setup-aware walk is
+        // discarded (I8) and the held bar stands with 0 working minutes of gap: the violation must be raised, not hidden.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 17), end_date: at(25, 19) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '10', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 7), end_date: at(26, 17) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00');
+        assert.equal(fmtLocal(Store.tasks.pb.end_date), '8/26 17:00', 'the finish is held');
+        Alerts._recomputeSync();
+        const violated = Store.alerts.filter(a => a.type === 'setup-violated' && a.taskId === 'pb');
+        assert.equal(violated.length, 1, 'one setup-violated alert on the successor');
+        assert.equal(violated[0].requiredMinutes, 90);
+        assert.ok(violated[0].availableMinutes < 90, `the available gap (${violated[0].availableMinutes} min) is below the 90 required`);
+        assert.equal(violated[0].shortMinutes, 90 - violated[0].availableMinutes);
+      });
+    } finally { Store.setAlerts(priorAlerts, 'unit-test'); fx.restore(); }
+  });
+
+  test('Task 3.2 (OQ40): a manual drop reserves no changeover; finishAnchoredPatchFor honours an explicit setupMinutes', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      withSetup(fx, {}, () => {
+        Store.setTasks([fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) })], 'unit-test');
+        const task = fx.task('pb', { COLOR: 'BLUE', user_scheduled: true, start_date: at(26, 7), end_date: at(26, 11) });
+        const manual = Engine.manualSchedulePatchFor(task, fx.line, at(26, 11), 'partial_allowed');
+        assert.equal(fmtLocal(manual.start_date), '8/26 07:00', 'alert-only: the manual placement is not clipped');
+        const asked = Engine.finishAnchoredPatchFor(task, fx.line, at(26, 11), 'partial_allowed', { setupMinutes: 60 });
+        assert.equal(asked.kind, 'placed');
+        assert.equal(fmtLocal(asked.changes.start_date), '8/26 07:00', 'D6: the order fits one window, so the requested changeover does not split it');
+      });
+    } finally { fx.restore(); }
+  });
+
+  test('Task 3.2: an active override whose pair no longer sits adjacent after a re-derive is recorded on the successor', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      const override = { id: 'ov1', machine: fx.line, signature_version: 1, predecessor_order_id: 'pa', successor_order_id: 'pb',
+        predecessor_state_key: colorState('RED'), successor_state_key: colorState('BLUE'), standard_min: 60, remaining_min: 20, status: 'active', reason: 'started' };
+      withSetup(fx, { overrides: [override] }, () => {
+        // pz (RED) now sits between pa and pb, so pa -> pb is no longer an adjacent pair.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pz', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 10), end_date: at(25, 12) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(Store.tasks.pb.derivationIssue.code, 'setup_override_orphaned');
+        assert.equal(Store.tasks.pa.derivationIssue ?? null, null, 'only the successor carries it');
+      });
+      withSetup(fx, { overrides: [override] }, () => {
+        // Still adjacent: no note, and the override's remaining minutes (20) are what is reserved.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pb', { COLOR: 'BLUE', original_end_date: at(26, 11), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(Store.tasks.pb.derivationIssue ?? null, null);
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00', 'D6: the order fits one window, so no clip for the 20 remaining setup minutes either');
+      });
+    } finally { fx.restore(); }
+  });
+});
+
+test('F1: a planner placement whose backward start falls before now reverses forward from now (reversal_forward), for any queue code; only a finish that would move EARLIER is refused', () => {
+  const fx = manualFixture();   // plant clock: Thu 2026-08-20 09:00
+  try {
+    const queued = { id: 'g-guard', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4',
+      planning_status: 'needs_planning', planning_reason: { code: 'planner_unscheduled', message: 'x' },
+      start_date: null, end_date: null, scheduleSegments: [] };
+    // 10:00 finish, 4 h run: the backward start (06:00) is before now. Reversal: placed 09:00-13:00 from now, late.
+    const patch = Engine.manualSchedulePatchFor(queued, fx.line, new Date('2026-08-20T10:00:00'), 'never');
+    assert.ok(patch, 'not refused');
+    assert.equal(patch.start_date.getTime(), new Date('2026-08-20T09:00:00').getTime());
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-20T13:00:00').getTime());
+    assert.deepEqual(patch.derivationIssue, { code: 'reversal_forward', detail: 'run_time_grew' }, 'the finish is still ahead of now: the run time is what pushed the start back');
+    assert.equal(patch.planning_status, undefined, 'a non-releasable queue code is not released by the engine');
+    assert.equal(Engine.lastManualRefusal, null);
+    assert.equal(fx.toasts.length, 0);
+    // A due date already in the past: the due_date_past detail.
+    const past = Engine.manualSchedulePatchFor(queued, fx.line, new Date('2026-08-18T17:00:00'), 'never');
+    assert.deepEqual(past.derivationIssue, { code: 'reversal_forward', detail: 'due_date_past' });
+    // The other side of the ruling: a future finish on a closed day that the walk would have to move earlier
+    // is still refused and toasted.
+    const closed = Engine.manualSchedulePatchFor({ ...queued, id: 'g-guard2' }, fx.line, new Date('2026-08-24T08:00:00'), 'never');
+    assert.equal(closed, null);
+    assert.equal(Engine.lastManualRefusal, 'finish_cannot_hold');
+    assert.equal(fx.toasts.length, 1);
+  } finally { fx.restore(); }
+});
+
+test('Task 3.2 (A.3 #9): setup availability counts across midnight on merged 24/7 intervals', () => {
+  // The previous order ends 23:50 and the successor starts 00:10 the next day: 20 minutes are free before the
+  // 30-minute changeover, not the 10 minutes since midnight.
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const all = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const observation = deriveSetupObservation({
+    plant: 'P-MID',
+    definition: { plant: 'P-MID', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 30 }],
+    machine_rows: [], machine_states: [], overrides: [],
+  }, [
+    { id: 'mid-a', PLANT: 'P-MID', MACHINE: 'L-MID', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-08-03T22:50:00'), end_date: new Date('2026-08-03T23:50:00') },
+    { id: 'mid-b', PLANT: 'P-MID', MACHINE: 'L-MID', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-08-04T00:10:00'), end_date: new Date('2026-08-04T01:10:00') },
+  ], undefined, {
+    calendars: { 'L-MID': { workHours: all } }, plants: { 'P-MID': { workHours: all } },
+    lineSettings: { 'L-MID': { plant: 'P-MID' } }, masterData: { lines: [{ machine: 'L-MID', plant: 'P-MID' }] },
+    blocks: [], plantBlocks: [],
+  });
+  const interval = observation.intervals.find(entry => entry.successorOrderId === 'mid-b');
+  assert.equal(interval.requiredMinutes, 30);
+  assert.equal(interval.availableMinutes, 20);
+
 });

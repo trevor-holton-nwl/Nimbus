@@ -29,11 +29,14 @@ declare global {
       | 'tool-conflict'
       | 'setup-violated' | 'setup-uncovered' | 'initial-state-unknown' | 'current-state-diverged' | 'override-inactive'
       | 'predecessor-state-unknown' | 'successor-state-unknown'
-      | 'runtime-unknown' | 'pv-lot-size';
+      | 'runtime-unknown' | 'pv-lot-size' | 'distribution-separation'
+      | 'late' | 'finish_moved_earlier' | 'reversal_forward' | 'plant_no_timezone' | 'line_no_calendar'
+      | 'placement_exception' | 'setup_override_orphaned' | 'pull_floor_crossed' | 'frozen_window_crossed'
+      | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue';
     msg: string;
     /** Optional localized form; the drawer prefers Util.t(msgKey, msgVars) when present. */
     msgKey?: string;
-    msgVars?: Record<string, string>;
+    msgVars?: Record<string, string | number>;
     taskId?: string;
     /** The other order in a pairwise alert (overlap, tool-conflict). Prefer this over parsing `id`. */
     peerId?: string;
@@ -49,8 +52,15 @@ declare global {
     text?: string;
     MACHINE?: string;
     RUN_TIME?: number | string | null;
+    PLANT?: string;
     start_date?: Date | null;
     end_date?: Date | null;
+    /** The SAP finish as received (the due date); a date-only one arrives as an exact-midnight Date. */
+    original_end_date?: Date | null;
+    /** Server marker: the order was placed outside the normal rules. */
+    placement_exception?: 'overtime' | 'overlong' | null;
+    /** Session-only note the schedule engine leaves on a task; the core renders it as an alert. */
+    derivationIssue?: { code: string; from?: Date; to?: Date; detail?: string } | null;
     firmed?: boolean; // manual firm mirror
     runtime_schedule_mismatch?: boolean;
     planning_status?: string;
@@ -174,6 +184,12 @@ declare global {
     dismissed: string[];
     opts?: { lines?: string[] | null };
     setup?: NimbusSetupObservation;
+    /** Per-plant wall-clock "now" (naive Date in the plant zone, from Store.plantNow), keyed by plant.
+     *  The active-order horizon reads it instead of the worker's own clock; a plant with no entry
+     *  falls back to the clock of the thread running the core. */
+    now?: Record<string, Date>;
+    /** Plants the clock refused (no valid timezone, from Store._blockedPlants): one plant_no_timezone alert each. */
+    blockedPlants?: string[];
   }
 
   interface ComputeUtilizationPayload {
@@ -219,11 +235,29 @@ declare global {
     ensurePlant(name: string | null, plants: Record<string, NimbusCalendarEntry>): void;
     _dayWindow(workHours: NimbusWorkHours, date: unknown): [Date, Date] | null;
     _nextCalendarDay(d: Date): Date;
+    /** Previous local calendar midnight (calendar-date arithmetic, never minus 24 h): the backward twin of `_nextCalendarDay`. */
+    prevCalendarDay(d: Date): Date;
+    /** Project an absolute instant into the naive wall-clock Date convention of the plant zone.
+     *  No timezone returns a copy of the instant; an invalid zone returns null. */
+    plantWallClockFromInstant(timezone: string | null | undefined, instant: Date): Date | null;
+    /** Inverse of `plantWallClockFromInstant`: read a naive wall-clock Date as plant-zone wall time and
+     *  return the absolute instant (gap resolves after it, fall-back hour to the earlier occurrence).
+     *  No timezone returns a copy of the Date; an invalid zone returns null. */
+    plantInstantFromWallClock(timezone: string | null | undefined, wall: Date): Date | null;
     workWindow(
       line: string, date: unknown,
       calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusCalendarEntry>,
       lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData
     ): [Date, Date] | null;
+    /** A date-only SAP finish arrives as an exact-midnight Date; read it as the end of that date's
+     *  working window. Timed values pass through; a closed date resolves to the previous open
+     *  date's close (30-day look-back), no window at all gives raw + 23:59:59. */
+    dueDateInstant(raw: Date, dayWindowFor: (date: Date) => { open: Date; close: Date } | null): Date;
+    /** THE day-attribution rule: minutes of an order's work per calendar day (key = dayKey). A split order is
+     *  exact by piece; a single bar spreads its run time over the days it spans in proportion to each day's
+     *  working-window overlap (no working overlap at all falls back to wall-clock overlap); a start with no
+     *  finish puts everything on the start day. The matrix, the overload alert and the cell briefing share it. */
+    workingMinutesByDay(task: NimbusTask, dayWindowFor: ((date: Date) => { open: Date; close: Date } | null) | null | undefined): Record<string, number>;
     _indexCapacityBlocks(blocks: NimbusBlock[], plantBlocks: NimbusPlantBlock[]): unknown;
     dailyCapacityHours(
       line: string, date: unknown,

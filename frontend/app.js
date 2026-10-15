@@ -48,8 +48,9 @@
    backend-sync logic — so nothing stayed behind in app.js besides consumers
    of `Persistence.*`/`CalendarSync.*`. The two real data→services dependencies
    found during Phase 2 research (Persistence calling into Calendar's capacity
-   math, and Persistence calling Alerts.scheduleRecompute()) are resolved by
-   an injected seam (`Persistence.setCalendarService`, wired below) and a
+   math, and Persistence calling Alerts.scheduleRecompute()) were resolved by
+   an injected seam (`Persistence.setCalendarService`, removed with the load-time
+   re-snap in backward scheduling Task 2.5) and a
    Store event (`schedule:hydrated`, subscribed to once in schedule-services.mjs)
    respectively — schedule-data.mjs still never imports schedule-services.mjs.
    CQ-1 Phase 2 Task 5 moved Session's pure state/API half into the same
@@ -278,16 +279,6 @@ const NIMBUS = (function () {
   const { CalendarUI, Plant, ProdLines, MasterData, LaborPlanning, Interface, Security, SystemConfig, AdminCockpit, PriorityListMapping, setActiveTabResolvers: _setPlantAdminTabResolvers } = window.__NIMBUS_PLANT_ADMIN;
   const { Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App } = window.__NIMBUS_SHELL;
   const { MaterialGrids } = window.__NIMBUS_MATERIAL_GRIDS;
-  // Inject the calendar-capacity seam schedule-data.mjs's Persistence needs (it may never
-  // statically import schedule-services.mjs — see that file's header). Arrow-function
-  // wrappers, not bare method references: Calendar's methods read `this._runCache`/
-  // `this._runBlocks` internally, so they must be invoked with Calendar as the receiver.
-  Persistence.setCalendarService({
-    beginRun: (plant) => Calendar._beginRun(plant),
-    endRun: () => Calendar._endRun(),
-    nextAvailable: (line, from, durationMs) => Calendar.nextAvailable(line, from, durationMs),
-    workWindow: (line, date) => Calendar.workWindow(line, date),
-  });
   // Injected getter seam so plant-and-administration.mjs's Plant/LaborPlanning
   // can ask "am I currently the visible tab/sub-tab?" without a bare reference
   // to `App`. `App` is now imported from application-shell.mjs via the bridge
@@ -310,6 +301,15 @@ const NIMBUS = (function () {
   // plant IS Store.selectedPlant, and the KPI is always about the run in front
   // of the user.
   Util.setChangeoverFieldsResolver(() => Engine.changeoverTaskFields(Store.selectedPlant));
+  // A date-only SAP due date (exact midnight) reads as the end of that date's working window;
+  // the window comes from the line's calendar rows in Store (platform may not import Store).
+  // A line with no calendar row resolves to null -> "no calendar" (raw + 23:59:59).
+  Util.setDueCalendarResolver(line => {
+    const row = Store.calendars[line];
+    if (!row) return null;
+    const plant = Store.getPlantForLine(line);
+    return { lineHours: row.workHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plant, rev: Store.rev() };
+  });
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
   ErrorLog.setAdminGate(() => Session.isAdmin());

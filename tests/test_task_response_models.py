@@ -65,6 +65,7 @@ SAMPLE_TASK_ROW = {
         {"sequence": 2, "start_date": "2026-08-02T07:00:00", "end_date": "2026-08-02T09:00:00"},
     ],
     "runtime_schedule_mismatch": False,
+    "placement_exception": "overtime",
     "planning_status": "scheduled",
     "planning_reason": None,
     "run_time_source": "routing",
@@ -91,6 +92,8 @@ def test_bulk_update_result_round_trips_db_shape():
         # ROUTING_RUNTIME_DESIGN.md §8.5: purely additive sparse {id: reason}
         # map, populated only for the routing-eligibility invalid_ids rejection.
         "rejection_reasons": {},
+        # Backward scheduling Task 2.7: sparse {id: True} -- the ids whose sent start was not trusted.
+        "start_derived": {},
     }
     out = brain.BulkUpdateResult(**sample).model_dump()
     assert out == sample
@@ -153,6 +156,68 @@ def test_firmed_is_forwarded_only_when_the_planner_sent_it(monkeypatch):
     assert captured["items"][0]["FIRMED"] is False
     brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", PRT_01="X")])
     assert "FIRMED" not in captured["items"][0]
+
+
+def test_placement_exception_is_the_one_new_wire_field_and_only_two_values_are_accepted():
+    from backend.scheduling.models import TaskVersionRow
+    assert brain.TaskDTO(**{**SAMPLE_TASK_ROW, "placement_exception": None}).placement_exception is None
+    assert brain.TaskDTO(**SAMPLE_TASK_ROW).placement_exception == "overtime"
+    assert TaskVersionRow(id="a").placement_exception is None
+    assert TaskVersionRow(id="a", placement_exception="overlong").placement_exception == "overlong"
+    for model in (brain.TaskDTO, TaskVersionRow):
+        base = SAMPLE_TASK_ROW if model is brain.TaskDTO else {"id": "a"}
+        with pytest.raises(ValidationError):
+            model(**{**base, "placement_exception": "sideways"})
+
+
+def test_placement_exception_is_forwarded_only_when_sent_and_an_explicit_null_clears(monkeypatch):
+    captured = {}
+
+    def fake_update(items, allowed_plants=None):
+        captured["items"] = items
+        return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
+                "not_found_ids": [], "stale": [], "versions": {"abc123": 43}}
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    # a marker alone is a valid edit
+    assert brain._apply_task_date_updates(
+        [brain.TaskDateUpdate(id="abc123", placement_exception="overlong", base_version=42)])["persisted"] == 1
+    assert captured["items"][0]["placement_exception"] == "overlong"
+    # an explicit null is forwarded as None (clear); an omitted field stays out
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", placement_exception=None, PRT_01="X")])
+    assert "placement_exception" in captured["items"][0] and captured["items"][0]["placement_exception"] is None
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", PRT_01="X")])
+    assert "placement_exception" not in captured["items"][0]
+    with pytest.raises(ValidationError):
+        brain.TaskDateUpdate(id="abc123", placement_exception="sideways")
+
+
+def test_trust_start_is_forwarded_only_when_a_caller_distrusts_the_start(monkeypatch):
+    """Task 2.7 (OQ59): `trust_start` defaults to True and never travels unless a caller sent False, so every
+    existing item shape stays byte-identical; the bulk result's `start_derived` is forwarded as received."""
+    captured = {}
+
+    def fake_update(items, allowed_plants=None):
+        captured["items"] = items
+        return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
+                "not_found_ids": [], "stale": [], "versions": {"abc123": 43}, "start_derived": {"abc123": True}}
+
+    monkeypatch.setattr(brain.db, "update_task_dates_bulk", fake_update)
+    assert brain.TaskDateUpdate(id="a").trust_start is True
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                                                         end_date="2026-08-01T15:00:00")])
+    assert "trust_start" not in captured["items"][0]
+    brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                                                         end_date="2026-08-01T15:00:00", trust_start=True)])
+    assert "trust_start" not in captured["items"][0]
+    res = brain._apply_task_date_updates([brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00",
+                                                               end_date="2026-08-01T15:00:00", trust_start=False)])
+    assert captured["items"][0]["trust_start"] is False
+    assert res["start_derived"] == {"abc123": True}
+    out = scheduling_routes.bulk_update(
+        [brain.TaskDateUpdate(id="abc123", start_date="2026-08-01T07:00:00", end_date="2026-08-01T15:00:00",
+                              trust_start=False)], allowed_plants=None)
+    assert out["start_derived"] == {"abc123": True}
 
 
 def test_task_version_row_carries_firmed():
@@ -234,8 +299,6 @@ class _FakeSegmentCursor:
             self._pending = ("all", list(self.eff_rows))
         elif "FROM plants WHERE plant = ANY" in sql:
             self._pending = ("all", list(self.plant_rows))
-        elif "MAX(run_time)" in sql:
-            self._pending = ("all", [(0,)])   # conflict-scan lookback widening
         elif "SELECT machine FROM machine WHERE plant" in sql:
             self._pending = ("all", [("M1",), ("M2",)])   # known machines for the MACHINE-edit check
         elif sql.strip().startswith("UPDATE orders o SET") and "RETURNING" in sql:
@@ -291,13 +354,16 @@ class _FakeSegmentConnection:
 def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, machine,
              planning_status="scheduled", reason_code=None, routing_runtime_enabled=False,
              parent_order=None, run_time_source=None, material_number=None,
-             order_quantity=None, basic_start_date=None, production_version=None):
+             order_quantity=None, basic_start_date=None, production_version=None,
+             placement_exception=None, timezone=None, stored_start=None, stored_end=None):
     """One row of update_task_dates_bulk's `FOR UPDATE OF o` eff-lookup SELECT,
-    in its current 17-column order (id, eff_start, eff_end, run_time,
+    in its current 21-column order (id, eff_start, eff_end, run_time,
     row_version, segment_count, plant, machine, planning_status, reason_code,
     routing_runtime_enabled, parent_order, run_time_source, material_number,
-    order_quantity, basic_start_date, production_version -- the last five
-    added for ROUTING_RUNTIME_DESIGN.md §8.5's write-time eligibility gate).
+    order_quantity, basic_start_date, production_version -- those five added
+    for ROUTING_RUNTIME_DESIGN.md §8.5's write-time eligibility gate -- then
+    placement_exception and the plant's timezone, added for the backward-scheduling
+    save contract, then the raw stored scheduled_start/scheduled_end; all four default to None).
     None of these tests exercise the routing-runtime feature itself, so
     routing_runtime_enabled defaults to False/disabled — matching today's
     unconditional pre-routing-runtime behavior — and reason_code defaults to
@@ -310,7 +376,7 @@ def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, 
     return (order_id, start, end, run_time, row_version, segment_count, plant, machine,
             planning_status, reason_code, routing_runtime_enabled, parent_order,
             run_time_source, material_number, order_quantity, basic_start_date,
-            production_version)
+            production_version, placement_exception, timezone, stored_start, stored_end)
 
 
 def _segment_batch_item(order_id):
@@ -555,6 +621,10 @@ def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch
     assert result["invalid_ids"] == ["r-bad"]
     assert result["persisted"] == 0
     assert captured["args"] == ("PLANT-R", "MAT1", "0001", "M2", 1000, datetime(2026, 6, 1))
+    # Backward scheduling OQ26: the start handed to the eligibility check is the LOCKED SAP start, read in
+    # the same statement that locks the row (an echo that moved basic_start_date must not change validity).
+    prefetch = next(sql for sql, _p in cursor.executed if "FOR UPDATE OF o" in sql)
+    assert "COALESCE(o.original_start_received, o.basic_start_date) AS original_start" in prefetch
     # The eligibility check must read within THIS function's own open
     # connection -- never a second, independently-opened one.
     assert captured["conn"] is pool.last_connection
@@ -667,7 +737,7 @@ def test_openapi_schema_includes_new_components():
     schema = brain.api.openapi()
     names = set(schema.get("components", {}).get("schemas", {}).keys())
     for expected in ("TasksResponse", "TaskDTO", "LinkDTO", "TaskUpdateResult",
-                     "BulkUpdateResult", "TasksRefreshResponse", "BaselineCorrectResult"):
+                     "BulkUpdateResult", "TasksRefreshResponse"):
         assert expected in names, f"{expected} missing from OpenAPI components.schemas"
 
 
@@ -681,6 +751,7 @@ def test_tasks_endpoint_response_validates_live(client):
     assert r.status_code == 200
     body = r.json()
     assert "data" in body and "links" in body and "meta" in body
+    assert body["meta"]["server_now"].endswith("Z")   # backward scheduling Task 2.4: one clock
     if body["data"]:
         row = body["data"][0]
         assert "id" in row and "start_date" in row and "row_version" in row
@@ -791,18 +862,19 @@ from math import inf, nan  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 
-@pytest.mark.parametrize("value", [nan, inf, -inf, -1, 168, 200])
+@pytest.mark.parametrize("value", [nan, inf, -inf, -1, 8760, 9000])
 def test_task_date_update_run_time_rejects_non_finite_or_out_of_range_values(value):
     """A crafted RUN_TIME of NaN reaches SQL interval arithmetic in db.py and
     crashes reads/saves for the whole plant (H8). The model-level validator
     must reject it — and every other non-finite or out-of-bounds value —
     before it ever reaches a route or the database. Upper bound is exclusive
-    (168 itself is rejected), matching the DB CHECK constraint."""
+    (8760 itself is rejected), matching the DB CHECK constraint -- a representation
+    bound; the 336 h scheduling cap is enforced per plant in db.update_task_dates_bulk."""
     with pytest.raises(ValidationError):
         brain.TaskDateUpdate(id="abc123", RUN_TIME=value)
 
 
-@pytest.mark.parametrize("value", [0, 0.5, 40.25, 167.99, None])
+@pytest.mark.parametrize("value", [0, 0.5, 40.25, 167.99, 168, 400, 8759.99, None])
 def test_task_date_update_run_time_accepts_finite_in_range_values(value):
     """Sanity check on the other side of the boundary: legitimate values
     (including the None default meaning "unchanged") must not be rejected."""
@@ -877,14 +949,16 @@ class TestOrdersRunTimeBoundsConstraint:
         )
         assert "chk_orders_run_time_bounds" in str(exc)
 
-    @pytest.mark.parametrize("run_time_sql", ["200", "-1", "168"])
+    @pytest.mark.parametrize("run_time_sql", ["9000", "-1", "8760"])
     def test_constraint_rejects_out_of_range_finite_run_time(self, pg, run_time_sql):
         exc = self._insert_run_time(pg, run_time_sql)
         assert exc is not None
         assert isinstance(exc, pg_errors.CheckViolation)
 
-    def test_constraint_accepts_in_range_run_time(self, pg):
-        exc = self._insert_run_time(pg, "40.5")
+    @pytest.mark.parametrize("run_time_sql", ["40.5", "168", "400", "8759.99"])
+    def test_constraint_accepts_in_range_run_time(self, pg, run_time_sql):
+        """The bound is a representation bound (< 8760 h); the 336 h limit is application-level."""
+        exc = self._insert_run_time(pg, run_time_sql)
         assert exc is None
 
 
@@ -897,3 +971,20 @@ def test_update_task_dates_bulk_rejects_an_unknown_machine_with_a_reason(monkeyp
     assert result["invalid_ids"] == ["r-ghost"]
     assert result["rejection_reasons"] == {"r-ghost": "machine_unknown"}
     assert result["persisted"] == 0
+
+
+def test_tasks_meta_carries_server_now_as_iso_utc_on_the_empty_envelope(monkeypatch):
+    """Backward scheduling Task 2.4 (OQ52): `server_now` travels in `/tasks` `meta` (never on the DTO) so
+    the browser derives one plant-zone clock from the server's instant. Pinned on the empty-result
+    envelope (no DB rows needed) and on the helper the full path shares."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(scheduling_routes.db, "query_orders", lambda **kw: (None, None, None))
+    body = scheduling_routes.get_tasks(plant="5512", machine=None, limit=None, offset=None, allowed_plants=None)
+    stamp = body["meta"]["server_now"]
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    assert stamp.endswith("Z") and parsed.tzinfo is not None
+    assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 5
+    assert "server_now" not in brain.TaskDTO.model_fields  # envelope meta, not a DTO field
+    assert scheduling_routes._server_now_iso().endswith("Z")
+

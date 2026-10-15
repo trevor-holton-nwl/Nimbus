@@ -7,10 +7,21 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import vm from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOCALES_DIR = join(__dirname, '..', '..', 'frontend', 'locales');
 const LOCALES = ['en', 'de', 'es', 'fr', 'pt'];
+
+// A locale file with a syntax error (e.g. an unescaped apostrophe in a single-quoted string) fails to load in the
+// browser and takes the whole language with it; the key regex below would never notice, so compile each file.
+for (const locale of LOCALES) {
+  test(`${locale}.js is syntactically valid JavaScript`, () => {
+    const file = join(LOCALES_DIR, `${locale}.js`);
+    assert.doesNotThrow(() => new vm.Script(readFileSync(file, 'utf8'), { filename: file }));
+  });
+}
+
 // Locale entries are usually one per line, but valid object literals may keep
 // several short translations together; key discovery must not mistake that
 // formatting choice for a missing translation.
@@ -503,7 +514,7 @@ test('en.js is the superset — no locale has a key en.js lacks', () => {
 // missing keys per locale must never grow. When you ADD keys to en.js, add the
 // same keys to every locale (English value is fine) rather than raising these
 // numbers; when you translate and the count drops, LOWER the number here.
-const MISSING_KEY_BASELINE = { de: 231, es: 231, fr: 231, pt: 231 };
+const MISSING_KEY_BASELINE = { de: 230, es: 230, fr: 230, pt: 230 };
 
 test('locale parity ratchet - missing-key count per locale never grows vs en.js', () => {
   const en = keysOf('en');
@@ -524,4 +535,132 @@ test('G3: ui.firm_reason_running says running orders are protected from Optimize
     assert.ok(val(loc) && val(loc) !== val('en'), `${loc} must carry its own translation`);
   }
   assert.doesNotMatch(val('en'), /locked/i);
+});
+
+// Backward scheduling Task 3.4 (group 32): the finish-anchored vocabulary. Each key below was reworded (or renamed
+// from an "Original/Updated" key) and must exist in all five files; en.js must carry the pinned English text. The
+// four translations are written separately, so this pins presence and the English source, not the translation.
+const REWORDED_KEYS = {
+  'col.due_date': 'Due Date',
+  'col.planned_start': 'Planned Start',
+  'col.planned_finish': 'Planned Finish',
+  'ui.insp_due_date': 'Due Date',
+  'ui.insp_planned_start': 'Planned Start',
+  'ui.insp_planned_finish': 'Planned Finish',
+  'ui.insp_variance_shifted': 'Planned finish compared with the due date',
+  'ui.diff_kind_start': 'Planned start',
+  'ui.diff_kind_finish': 'Planned finish',
+  'toast.order_moved': 'Moved "{{name}}" so it now finishes {{date}}',
+  'toast.commit_failed': 'Could not hold the finish there. The order stays where it was.',
+  'toast.sap_sent_queued': 'Queued {{queued}} orders for SAP',
+};
+const RETIRED_KEYS = ['col.orig_start', 'col.orig_end', 'col.updated_start', 'col.updated_end',
+  'ui.insp_orig_start', 'ui.insp_orig_end', 'ui.insp_updated_start', 'ui.insp_updated_end'];
+const enDict = (() => {
+  const sandbox = { window: {} };
+  vm.runInNewContext(readFileSync(join(LOCALES_DIR, 'en.js'), 'utf8'), sandbox);
+  return sandbox.window.__NIMBUS_LOCALES.en;
+})();
+const enValue = key => enDict[key];
+
+test('group 32: every reworded scheduling key exists in all five locales and en.js carries the finish-anchored text', () => {
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const [key, text] of Object.entries(REWORDED_KEYS)) {
+    assert.equal(enValue(key), text, `en.js text for "${key}"`);
+    for (const locale of LOCALES) assert.ok(perLocale[locale].has(key), `${locale}.js is missing reworded key "${key}"`);
+  }
+});
+
+test('group 32: the retired Original/Updated keys are gone from every locale', () => {
+  for (const locale of LOCALES) {
+    const have = keysOf(locale);
+    for (const key of RETIRED_KEYS) assert.ok(!have.has(key), `${locale}.js still carries retired key "${key}"`);
+  }
+});
+
+test('gate 4b: every alert.* message key the compute core can emit exists in all 5 locales (literals, derivation-issue codes, reversal details)', () => {
+  const core = readFileSync(join(__dirname, '..', '..', 'frontend', 'nimbus-compute-core.js'), 'utf8');
+  const emitted = new Set([...core.matchAll(/'(alert\.[a-z_]+)'/g)].map(m => m[1]));
+  // `alert.${code}` is built from the derivation-issue switch: every case label is a key.
+  const sw = core.slice(core.indexOf("switch (code) {"), core.indexOf("default:", core.indexOf("switch (code) {")));
+  const codes = [...sw.matchAll(/case '([a-z_]+)'/g)].map(m => m[1]);
+  assert.ok(codes.includes('finish_moved_earlier') && codes.includes('pull_floor_crossed'), 'the derivation switch was found');
+  for (const code of codes) emitted.add(code === 'reversal_forward' ? 'alert.reversal_forward' : `alert.${code}`);
+  for (const detail of ['run_time_grew', 'due_date_past', 'cutover']) emitted.add(`alert.reversal_forward_${detail}`);
+  assert.ok(emitted.size >= 20, `expected the core to emit 20+ alert keys, found ${emitted.size}`);
+  const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
+  for (const key of emitted) {
+    for (const locale of LOCALES) assert.ok(perLocale[locale].has(key), `${locale}.js is missing alert key "${key}"`);
+  }
+});
+
+// Senior review U32/U28/U34: a presence + placeholder + non-empty guard over EVERY en.js key this branch added or
+// reworded (hand list, like the lists above). A later new key must be appended here; the parity ratchet above only
+// bounds the count, it does not look at values.
+const BRANCH_KEYS = [
+  'toast.optimize_plant_no_timezone', 'toast.plant_no_timezone', 'toast.finish_cannot_hold', 'toast.left_edge_locked',
+  'toast.system_moved_n', 'toast.cutover_summary', 'toast.manual_refusal_generic', 'toast.order_moved', 'toast.commit_failed',
+  'modal.override_finish_label', 'modal.override_finish_hint', 'modal.override_title', 'modal.override_line_label',
+  'modal.override_apply', 'modal.confirm_overtime_title', 'modal.confirm_overtime_msg', 'modal.confirm_overtime_confirm',
+  'col.due_date', 'col.planned_start', 'col.planned_finish', 'planning_reason.run_time_over_cap',
+  'planning_reason.overlong_never', 'ui.diff_kind_start', 'ui.diff_kind_finish', 'ui.max_push_forward_help',
+  'ui.insp_due_date', 'ui.insp_planned_start', 'ui.insp_planned_finish', 'ui.insp_system_move',
+  'ui.insp_move_reason_finish_moved_earlier', 'ui.insp_move_reason_reversal_forward', 'ui.insp_move_reason_pull_floor_crossed',
+  'ui.insp_move_reason_run_time_changed', 'ui.insp_move_reason_due_date_derivation', 'ui.insp_move_reason_cutover',
+  'ui.hov_run', 'ui.insp_variance_shifted', 'ui.derive_paused', 'alert.setup_violated', 'alert.distribution_separation',
+  'alert.start_may_be_stale', 'alert.late', 'alert.late_beyond_cap', 'alert.finish_moved_earlier', 'alert.reversal_forward',
+  'alert.reversal_forward_run_time_grew', 'alert.reversal_forward_due_date_past', 'alert.reversal_forward_cutover',
+  'alert.plant_no_timezone', 'alert.line_no_calendar', 'alert.no_anchor', 'alert.no_operating_window', 'alert.run_time_zero',
+  'alert.setup_override_orphaned', 'alert.pull_floor_crossed', 'alert.frozen_window_crossed',
+  'alert.placement_exception_overtime', 'alert.placement_exception_overlong', 'alert.derivation_issue',
+  'ui.diag_unreadable_start', 'ui.diag_dropped_no_finish', 'ui.sap_send_confirm', 'toast.sap_sent_queued',
+  'toast.sap_sent_skipped_unfirmed', 'ui.preview_stale', 'ui.opt_backlog_runtime_grew',
+  'ui.dist_status_separation_violated_tip', 'ui.opt_pv_distribution_separation_head', 'ui.reject_run_time_over_cap',
+  'ui.reject_width_mismatch', 'ui.reject_single_edge',
+  // fix wave B6 (U28, U34)
+  'toast.pushed_orders_skipped', 'undo.push_orders_1h',
+];
+const localeDict = locale => {
+  const sandbox = { window: {} };
+  vm.runInNewContext(readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8'), sandbox);
+  return sandbox.window.__NIMBUS_LOCALES[locale];
+};
+const placeholdersOf = s => [...String(s).matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]).sort().join(',');
+
+test('U32: every key this branch added exists in all five locales, non-empty, with the same {{placeholder}} set as en.js', () => {
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  for (const key of BRANCH_KEYS) {
+    assert.ok(typeof dicts.en[key] === 'string' && dicts.en[key].trim(), `en.js has no usable "${key}"`);
+    for (const locale of LOCALES.filter(l => l !== 'en')) {
+      const v = dicts[locale][key];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js is missing or empty for "${key}"`);
+      assert.equal(placeholdersOf(v), placeholdersOf(dicts.en[key]), `${locale}.js "${key}" must carry the same {{placeholders}} as en.js`);
+    }
+  }
+});
+
+test('U28: every AlertType has a localized alert.type.<type> headline row in all five locales', () => {
+  const types = readFileSync(join(__dirname, '..', '..', 'frontend', 'platform', 'types.mts'), 'utf8');
+  const union = types.slice(types.indexOf('export type AlertType ='), types.indexOf('export type AlertSev'));
+  const alertTypes = [...union.matchAll(/'([a-z_-]+)'/g)].map(m => m[1]);
+  assert.ok(alertTypes.length >= 30 && alertTypes.includes('finish_moved_earlier'), 'the AlertType union was parsed');
+  for (const locale of LOCALES) {
+    const dict = localeDict(locale);
+    for (const type of alertTypes) {
+      const v = dict[`alert.type.${type}`];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js has no headline row alert.type.${type}`);
+    }
+  }
+});
+
+test('U33: the new es rows use "pedido" and the new fr rows "commande" (no ordre/orden mix), de uses "festgeschrieben" for firmed, pt "firmadas"', () => {
+  const es = localeDict('es'), fr = localeDict('fr'), de = localeDict('de'), pt = localeDict('pt');
+  for (const key of BRANCH_KEYS) {
+    assert.doesNotMatch(es[key], /\b[Oo]rden(es)?\b/, `es "${key}" must say pedido, not orden`);
+    assert.doesNotMatch(fr[key], /\b[Oo]rdres?\b/, `fr "${key}" must say commande, not ordre`);
+  }
+  assert.doesNotMatch(de['modal.confirm_overtime_msg'], /fixiert/);
+  assert.doesNotMatch(de['ui.sap_send_confirm'], /fixiert|Fixierung/);
+  assert.match(pt['toast.sap_sent_skipped_unfirmed'], /firmadas/);
+  assert.doesNotMatch(es['alert.finish_moved_earlier'], /a las \{\{to\}\}/, 'es: {{to}} is a full date-time, not an hour');
 });

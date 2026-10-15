@@ -304,10 +304,12 @@ def test_upsert_sql_no_longer_blanket_flags_runtime_mismatch():
     _UPSERT_SQL; only a plain carry-forward (COALESCE(...,FALSE)) remains, so
     only the resolver's own write (backend/routing/resolver.py, elsewhere) may
     ever set this flag now."""
-    # Review round (H10/D33): the ONLY exception is a scheduled distribution child,
-    # i.e. the flag CASE is gated on a parent link; ordinary orders carry forward.
-    flag = db._UPSERT_SQL.split("runtime_schedule_mismatch = CASE", 1)[1].split("ELSE COALESCE", 1)[0]
-    assert "orders.parent_production_order IS NOT NULL" in flag
+    # Backward scheduling (OQ34): the flag CASE is gated on the order being PLACED (a stored start, a stored
+    # finish or segments), no longer on a parent link; an unplaced order carries the flag forward.
+    flag = db._UPSERT_SQL.split("runtime_schedule_mismatch = CASE", 1)[1].split("ELSE COALESCE(orders.runtime_schedule_mismatch", 1)[0]
+    assert "orders.parent_production_order" not in flag
+    assert "orders.scheduled_start IS NOT NULL" in flag and "orders.scheduled_end IS NOT NULL" in flag
+    assert "order_schedule_segments" in flag
     assert "COALESCE(orders.runtime_schedule_mismatch, FALSE)" in db._UPSERT_SQL
 
 
@@ -471,6 +473,15 @@ class Test_sap_changed_fields:
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(incoming=inc) == {"dates"}
 
+    def test_start_only_change_is_not_a_dates_change(self):
+        """Backward scheduling OQ25 c: the finish decides. A moved start with the finish unchanged keeps the
+        placement, with or without a remembered send."""
+        assert self._run(incoming=self._incoming(basic_start_date=self.S1)) == set()
+        before = self._before(sap_sent_finish=self.F0, sap_sent_version="0001")
+        assert self._run(before, self._incoming(basic_start_date=self.S1)) == set()
+        before = self._before(scheduled_start=self.S0, scheduled_end=self.F0)
+        assert self._run(before, self._incoming(basic_start_date=self.S1)) == set()
+
     def test_dates_finish_only_changed(self):
         assert self._run(incoming=self._incoming(basic_finish_date=self.F1)) == {"dates"}
 
@@ -479,12 +490,18 @@ class Test_sap_changed_fields:
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == set()
 
+    def test_finish_echo_of_the_placed_finish_is_not_changed_whatever_the_start(self):
+        # the placed finish is the anchor: SAP sending it back is an echo even with a different start
+        before = self._before(scheduled_start=self.S1, scheduled_end=self.F1)
+        assert self._run(before, self._incoming(basic_start_date=self.S0, basic_finish_date=self.F1)) == set()
+        assert self._run(before, self._incoming(basic_start_date=None, basic_finish_date=self.F1)) == set()
+
     def test_dates_partial_echo_still_changed(self):
         before = self._before(scheduled_start=self.S1, scheduled_end=self.F0)
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == {"dates"}
 
-    def test_dates_echo_needs_both_schedule_values(self):
+    def test_dates_echo_needs_the_placed_finish(self):
         before = self._before(scheduled_start=self.S1, scheduled_end=None)
         inc = self._incoming(basic_start_date=self.S1, basic_finish_date=self.F1)
         assert self._run(before, inc) == {"dates"}
@@ -549,6 +566,8 @@ class Test_sap_changed_fields:
         assert self._run(incoming=self._incoming(basic_finish_date=None)) == set()
         inc = self._incoming(basic_start_date=None, basic_finish_date=self.F1)
         assert self._run(incoming=inc) == {"dates"}
+        # no start sent and a moved start baseline is not a change either
+        assert self._run(self._before(sap_basic_start_date=None), self._incoming(basic_start_date=self.S1)) == set()
 
     def test_incoming_none_workcenter_not_changed(self):
         assert self._run(incoming=self._incoming(sap_workcenter=None)) == set()
@@ -591,9 +610,13 @@ class Test_sap_changed_fields:
         assert self._run(incoming=inc) == {"quantity"}
 
     def test_several_fields_at_once(self):
-        inc = self._incoming(basic_start_date=self.S1, sap_workcenter="WC2",
+        inc = self._incoming(basic_finish_date=self.F1, sap_workcenter="WC2",
                              order_quantity=1, sap_production_version="0002")
         assert self._run(incoming=inc) == {"dates", "workcenter", "quantity", "production_version"}
+        # a moved start alone adds nothing
+        inc = self._incoming(basic_start_date=self.S1, sap_workcenter="WC2",
+                             order_quantity=1, sap_production_version="0002")
+        assert self._run(incoming=inc) == {"workcenter", "quantity", "production_version"}
 
     # ---- D20 echo suppression (orders.sap_sent_*) -------------------------
     def test_echo_finish_with_moved_start_is_not_a_dates_change(self):
@@ -651,6 +674,87 @@ class Test_sap_changed_fields:
 
 
 # ---------------------------------------------------------------------------
+# finish_echoes -- the one echo rule, judged in the SAP frame (DB-free)
+# ---------------------------------------------------------------------------
+class Test_finish_echoes:
+    """Backward-scheduling Task 1.2. SAP's own zone is `UTC`; Chicago is UTC-5 in October (CDT) and New York
+    UTC-4 (EDT), so the SAME wall-clock finish lands on different SAP-frame calendar dates."""
+    from datetime import datetime as _dt
+    SENT = _dt(2026, 10, 22, 19, 0)         # Thu 22 Oct 19:00 plant-local
+    FRI = _dt(2026, 10, 23, 0, 0)           # SAP's date-only echo of the finish: Fri 23 Oct
+    SAT = _dt(2026, 10, 24, 0, 0)
+
+    def test_m1_chicago_date_only_next_day_is_an_echo(self):
+        # 19:00 CDT = 00:00 UTC Friday: SAP reads our Thursday evening finish as Friday
+        assert db.finish_echoes(self.FRI, True, self.SENT, "UTC", "America/Chicago") is True
+
+    def test_m1_chicago_sap_changed_fields_reports_no_dates(self):
+        before = {"sap_basic_start_date": Test_sap_changed_fields.S0, "sap_basic_finish_date": Test_sap_changed_fields.F0,
+                  "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+                  "production_version": "0001", "scheduled_start": None, "scheduled_end": None,
+                  "sap_sent_finish": self.SENT, "sap_sent_version": "0001", "tz": "America/Chicago"}
+        inc = {"basic_start_date": Test_sap_changed_fields.S1, "basic_finish_date": self.FRI,
+               "_finish_date_only": True, "sap_workcenter": "WC1", "order_quantity": 100,
+               "sap_production_version": "0001", "parent_production_order": None}
+        assert db.sap_changed_fields(before, inc, "M1", sap_tz="UTC") == set()
+
+    def test_genuine_change_date_only_two_days_later_is_not_an_echo(self):
+        assert db.finish_echoes(self.SAT, True, self.SENT, "UTC", "America/Chicago") is False
+
+    def test_genuine_change_sap_changed_fields_reports_dates(self):
+        before = {"sap_basic_start_date": Test_sap_changed_fields.S0, "sap_basic_finish_date": Test_sap_changed_fields.F0,
+                  "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+                  "production_version": "0001", "scheduled_start": None, "scheduled_end": None,
+                  "sap_sent_finish": self.SENT, "sap_sent_version": "0001", "tz": "America/Chicago"}
+        inc = {"basic_start_date": Test_sap_changed_fields.S1, "basic_finish_date": self.SAT,
+               "_finish_date_only": True, "sap_workcenter": "WC1", "order_quantity": 100,
+               "sap_production_version": "0001", "parent_production_order": None}
+        assert db.sap_changed_fields(before, inc, "M1", sap_tz="UTC") == {"dates"}
+
+    def test_timed_echo_to_the_minute(self):
+        from datetime import timedelta
+        # the incoming timed value is plant-local (already converted from the SAP zone by the staging parser)
+        assert db.finish_echoes(self.SENT + timedelta(seconds=40), False, self.SENT, "UTC", "America/Chicago") is True
+        assert db.finish_echoes(self.SENT + timedelta(minutes=1), False, self.SENT, "UTC", "America/Chicago") is False
+
+    def test_no_sent_finish_is_never_an_echo(self):
+        assert db.finish_echoes(self.FRI, True, None, "UTC", "America/Chicago") is False
+        assert db.finish_echoes(self.SENT, False, None, "UTC", "America/Chicago") is False
+
+    def test_no_incoming_finish_is_never_an_echo(self):
+        assert db.finish_echoes(None, True, self.SENT, "UTC", "America/Chicago") is False
+
+    def test_new_york_variant_is_not_an_echo(self):
+        # 19:00 EDT = 23:00 UTC Thursday: the SAP-frame date is still Thu 22, so Friday is NOT an echo
+        assert db.finish_echoes(self.FRI, True, self.SENT, "UTC", "America/New_York") is False
+        assert db.finish_echoes(self._dt(2026, 10, 22), True, self.SENT, "UTC", "America/New_York") is True
+
+    def test_unknown_sap_zone_uses_the_plant_frame(self):
+        # Excel path: no SAP zone of its own, so SAP's frame is the plant's frame
+        assert db.finish_echoes(self._dt(2026, 10, 22), True, self.SENT, None, "America/Chicago") is True
+        assert db.finish_echoes(self.FRI, True, self.SENT, None, "America/Chicago") is False
+
+    def test_plant_without_timezone_compares_naively(self):
+        assert db.finish_echoes(self._dt(2026, 10, 22), True, self.SENT, "UTC", None) is True
+        assert db.finish_echoes(self.FRI, True, self.SENT, "UTC", None) is False
+
+    def test_date_only_defaults_to_midnight_inference_in_sap_changed_fields(self):
+        # no `_finish_date_only` key (Excel path / old callers): time 00:00:00 means date only
+        before = {"sap_basic_start_date": Test_sap_changed_fields.S0, "sap_basic_finish_date": Test_sap_changed_fields.F0,
+                  "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+                  "production_version": "0001", "scheduled_start": None, "scheduled_end": None,
+                  "sap_sent_finish": self._dt(2026, 11, 1, 19, 0), "sap_sent_version": "0001"}
+        inc = {"basic_start_date": Test_sap_changed_fields.S1, "basic_finish_date": self._dt(2026, 11, 1),
+               "sap_workcenter": "WC1", "order_quantity": 100, "sap_production_version": "0001",
+               "parent_production_order": None}
+        assert db.sap_changed_fields(before, inc, "M1") == set()
+
+    def test_staging_reexport_is_the_same_function(self):
+        import backend.integration.sap_staging as st
+        assert st.finish_echoes is db.finish_echoes
+
+
+# ---------------------------------------------------------------------------
 # D20 (refined): a planner's end/version change does NOT clear what was remembered as sent to SAP.
 # ---------------------------------------------------------------------------
 class _BulkCursor:
@@ -691,7 +795,7 @@ def _bulk_eff_row(oid="O1"):
     # run_time_source, material_number, order_quantity, basic_start_date, production_version
     return (oid, _d(2026, 10, 1, 6), _d(2026, 10, 1, 14), 8.0, 7, 0, "P1", "M1",
             "scheduled", None, False, None, None, "MAT", 100,
-            _d(2026, 10, 1, 6), "0001")
+            _d(2026, 10, 1, 6), "0001", None, None, None, None)
 
 
 def _run_bulk(monkeypatch, item):
@@ -709,8 +813,10 @@ def test_bulk_save_keeps_sap_sent_when_end_changes(monkeypatch):
 
 def test_bulk_save_keeps_sap_sent_when_end_unchanged(monkeypatch):
     from datetime import datetime as _d
-    # same end as the current row (14:00), only the start moves
-    sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 14)})
+    # same end as the current row (14:00), only the start moves (a 7 h bar for an 8 h run time: a deliberate
+    # placement exception, so the width check stands down)
+    sql = _run_bulk(monkeypatch, {"start": _d(2026, 10, 1, 7), "end": _d(2026, 10, 1, 14),
+                                  "placement_exception": "overlong"})
     assert "sap_sent_" not in sql
 
 

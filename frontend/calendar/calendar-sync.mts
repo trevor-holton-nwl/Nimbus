@@ -9,9 +9,8 @@
 // `Persistence` (scheduling/persistence.mjs) is a real cross-file import
 // forming a two-way ESM cycle with that module — this file's flush path
 // (`_flushLineHours`/`_flushPlantHours`) calls back into
-// `Persistence._dirtyIds`/`_forceIds`/`_snapToWorkingHours`/`_saveCache`/
-// `_relayDueDateCorrections` so a re-snap against freshly-authoritative
-// hours can fold into the SAME dirty/force bookkeeping an in-flight manual
+// `Persistence._dirtyIds`/`_forceIds`/`_saveCache`
+// so a flush can fold into the SAME dirty/force bookkeeping an in-flight manual
 // edit already established, rather than silently reverting it. Safe under
 // the same rule used throughout this split: every cross-reference is inside
 // a method body invoked after both modules finish loading, never at
@@ -85,6 +84,45 @@ export const CalendarSync = {
   _pendingLineHours: {} as Record<string, Record<string, WorkHours>>,   // plant → { line → workHours } awaiting a batched flush
   _whDebounce: {} as Record<string, ReturnType<typeof setTimeout>>,         // plant → timeout id
   _deferredHydrationPlant: null as string | null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
+  /** Per plant: has the SERVER's calendar landed in Store? `pending` until the first GET resolves, `hydrated`
+   *  once `_applyConfig` has run, `failed` when the GET failed and nothing from the server is on hand. `lines`
+   *  are the lines the server holds an hours row for (the client default is never a server row). The
+   *  backward-scheduling reconcile derives starts only from a hydrated plant (OQ51): a derive-and-save on the
+   *  client's default 07:00-19:00 would be written to the server as truth. */
+  _hydration: {} as Record<string, { state: 'hydrated' | 'pending' | 'failed'; lines: Set<string> }>,
+
+  /** Where the plant's calendar stands: `'hydrated'` (the server's rows are in Store), `'pending'` (not fetched
+   *  yet, or in flight) or `'failed'` (the fetch failed and no earlier server copy is on hand). */
+  calendarState(plant: string | null | undefined): 'hydrated' | 'pending' | 'failed' {
+    return (plant && this._hydration[plant]?.state) || 'pending';
+  },
+
+  /** True when the server returned its own hours row for `line` in `plant` (OQ62). A line riding on the client's
+   *  default calendar has no server row and is not derived. */
+  hasServerLineCalendar(plant: string | null | undefined, line: string): boolean {
+    return !!plant && this._hydration[plant]?.state === 'hydrated' && this._hydration[plant].lines.has(line);
+  },
+
+  /** Record a plant's hydration state (the fetch path, and tests that stand in for it). `lines` replaces the
+   *  server line set only when given. */
+  _setHydration(plant: string, state: 'hydrated' | 'pending' | 'failed', lines?: Iterable<string>): void {
+    const prior = this._hydration[plant];
+    this._hydration[plant] = { state, lines: lines ? new Set(lines) : (prior?.lines ?? new Set<string>()) };
+  },
+
+  /** A successful line-hours POST made these lines server rows (R-I7): add them to the hydration's server-line
+   *  set so `hasServerLineCalendar` is true and the reconcile unblocks without a reload. Emits `calendar:change`
+   *  only when a line was newly added. A skipped POST (hydrating / Sandbox) wrote nothing and adds nothing. */
+  _noteServerLines(plant: string, machines: Iterable<string>, result: CalendarSyncResult): CalendarSyncResult {
+    const entry = this._hydration[plant];
+    if (!result?.ok || result.skipped || !entry) return result;
+    let added = false;
+    for (const machine of machines) {
+      if (!entry.lines.has(machine)) { entry.lines.add(machine); added = true; }
+    }
+    if (added) Store.emit({ type: 'calendar:change', source: 'calendar-sync', plant });
+    return result;
+  },
 
   /* ----- load / hydration ----------------------------------------------- */
   fetchPlantConfig(plant: string | null): Promise<void> {
@@ -93,6 +131,9 @@ export const CalendarSync = {
     // resolves reliably even when the master-data fetch REJECTED (the .finally still
     // runs us). Otherwise the migration/clear filters misfire on a stale/empty index. (F4)
     Store.rebuildPlantIndex();
+    // A plant that was never hydrated is `pending` while the GET is in flight; one that already holds a server
+    // copy keeps it (a refetch that fails must not un-know what the server told us earlier).
+    if (this._hydration[plant]?.state !== 'hydrated') this._setHydration(plant, 'pending');
     return Util.fetchTraced(`${Config.API_BASE}/plant-calendar?plant=${encodeURIComponent(plant)}`,
                             { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PlantCalendarConfig> : Promise.reject(new Error(`HTTP ${r.status}`)))
@@ -101,6 +142,7 @@ export const CalendarSync = {
       .catch(e => {
         // The localStorage restore already painted the UI — degrade gracefully.
         ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
+        if (CalendarSync._hydration[plant]?.state !== 'hydrated') CalendarSync._setHydration(plant, 'failed');
         Toast.show(Util.t('toast.calendar_offline_cache'), 'info');
       });
   },
@@ -219,6 +261,9 @@ export const CalendarSync = {
             start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusPlantBlock);
         }
       }
+      // The server's calendar is now in Store: mark it before the emits below, because the backward-scheduling
+      // reconcile subscribes to `calendar:change` and asks `calendarState` synchronously.
+      this._setHydration(plant, 'hydrated', Object.keys(cfg.line_work_hours || {}));
       // Notify subscribers + refresh the offline cache with backend truth. These
       // emits fire while _hydrating=true, so no POST-back to the backend.
       Store.emit({ type: 'calendar:change',    source: 'calendar-sync', plant });
@@ -227,47 +272,8 @@ export const CalendarSync = {
     } finally {
       this._hydrating = false;
     }
-    // Backend-authoritative working hours just landed. The initial ingest snap
-    // (Persistence._snapToWorkingHours at load) ran against default/stale hours, and is
-    // never otherwise re-run — so fresh (non-user-scheduled) orders may sit outside the
-    // real working window. Re-snap against the now-correct hours and re-render/cache.
-    // Idempotent when hours match; _snapToWorkingHours re-baselines each pass, so a
-    // second pass leaves the correct final baseline (no set-once needed). (F7)
-    // Deliberately NOT gated on (has.plantHours || has.lineHours): "backend has no
-    // override" is still an authoritative answer (use defaults) that the due-date
-    // correction phase needs in order to relay — gating on has.* left the relay
-    // permanently dead for every plant that has never had custom hours saved to the
-    // backend, which is the common case (CalendarSync never migrates auto-seeded
-    // default hours up), not a rare one.
-    if (Store.tasksArr.length) {
-      try {
-        // A slow (8s) fetchPlantConfig can resolve AFTER the user started editing this
-        // session. tasks:bulk clears _dirtyIds/_forceIds (reload semantics, app.js:14840),
-        // so snapshot and restore them — the re-snap only re-places non-user-scheduled
-        // orders (user moves are startMoved-skipped) and must not drop pending saves.
-        const dirtySnapshot  = new Set(Persistence._dirtyIds);
-        const forceSnapshot  = new Set(Persistence._forceIds);
-        const { movedIds, corrections } = Persistence._snapToWorkingHours(Store.tasksArr, plant);
-        Persistence._saveCache();
-        // Only emit and re-render if tasks actually moved; idempotent when hours haven't
-        // changed (nextAvailable will find the same slots, startMoved-skip user-placed).
-        if (movedIds.length) {
-          Store.emit({ type: 'tasks:bulkUpdate', ids: movedIds, source: 'calendar-resnap' });
-        }
-        for (const id of dirtySnapshot) Persistence._dirtyIds.add(id);
-        for (const id of forceSnapshot) Persistence._forceIds.add(id);
-        // Backend-authoritative hours have now landed — this is the only point
-        // in the session safe to PERSIST due-date-baseline corrections. The
-        // earlier pre-hydration call in Persistence.load may have computed
-        // against Config.DEFAULT_SHIFT / stale cached hours, and this
-        // correction is deliberately freeze-once (see _snapToWorkingHours) —
-        // persisting from that first pass could lock in a wrong value before
-        // the accurate hours ever get a chance to run.
-        Persistence._relayDueDateCorrections(corrections);
-      } catch (e) {
-        ErrorLog.warn('calendar-sync', `Re-snap after hydrate failed for ${plant}: ${(e as Error).message}`);
-      }
-    }
+    // (There is no post-hydration re-snap any more: backend-authoritative hours landing does not move any
+    // bar. Task 2.6's reconcile derives never-placed rows once the calendar state is known.)
     // Migrate the slices the backend still lacks but local has. Covers first upgrade
     // (backend fully empty) AND partial-migration retry. Each slice is one atomic POST
     // (all-or-nothing); a failed slice stays un-migrated and retries next load.
@@ -290,7 +296,10 @@ export const CalendarSync = {
         .filter(l => Store.getPlantForLine(l) === plant
                   && !CalendarSync._isDefaultWorkHours(Store.calendars[l].workHours))  // F11
         .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
-      if (lines.length) jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours'));
+      if (lines.length) {
+        jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours')
+          .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r)));
+      }
     }
     if (!has.lineBlackouts) {
       // Migrate this plant's own blocks: already-stamped for it, or line-mapped to it.
@@ -382,7 +391,8 @@ export const CalendarSync = {
     if (!pending || !Object.keys(pending).length) return;
     delete this._pendingLineHours[plant];
     const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
-    return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours');
+    return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours')
+      .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r));
   },
 
   saveLineBlackoutUpsert(block: NimbusBlock): Promise<CalendarSyncResult> {

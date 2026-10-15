@@ -31,6 +31,11 @@
 
   const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
 
+  // One clock (I13): the plant's "now" / start of today, the same helpers the Dashboard uses. Read late-bound per call
+  // (the `NIMBUS.Engine?.` idiom below) so the legacy-surface ratchet does not grow; the fallback is the old viewer clock.
+  const _plantClock = () => NIMBUS.Util?.plantClock?.(Store.selectedPlant) ?? new Date();
+  const _plantToday = () => NIMBUS.Util?.plantToday?.(Store.selectedPlant) ?? Util.startOfDay(new Date());
+
   // Confidence horizon: the selected plant's own conf_score_horizon (what the Plant
   // settings tab edits and shows), then the per-user setting, then 14 days. Reading only
   // the user setting made the score ignore the plant's configured horizon.
@@ -507,7 +512,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Peak utilization — use sync compute, but trigger worker refresh for next call
       let maxUtil = 0, overloadedLine = null;
       try {
-        const now = Util.startOfDay(new Date());
+        // One clock (OQ52 / I13): the plant's today, the same start the Dashboard matrix and the prewarm use.
+        const now = _plantToday();
         const startMs = now.getTime();
         const days = 7;
         const rev = Store.rev();
@@ -1229,34 +1235,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_shift_orders_1h'),
         run() {
           CommandPalette.close();
-          const patches = ids
-            .filter(id => Store.tasks[id]?.start_date && Store.tasks[id]?.end_date)
-            .map(id => {
-              const order = Store.tasks[id];
-              const requestedStart = new Date(order.start_date.getTime() + 3600000);
-              const plant = Store.getPlantForLine(order.MACHINE || 'Unknown')
-                || order.PLANT || Store.selectedPlant;
-              const policy = NIMBUS.Engine?.splitOrderPolicyFor?.(plant);
-              const needsAggregate = (order.scheduleSegments?.length ?? 0) >= 2
-                || (policy && policy !== 'never');
-              if (needsAggregate) {
-                const changes = NIMBUS.Engine?.manualSchedulePatchFor?.(
-                  order, order.MACHINE || 'Unknown', requestedStart);
-                return changes ? { id, changes } : null;
-              }
-              return { id, changes: {
-                start_date: requestedStart,
-                end_date: new Date(order.end_date.getTime() + 3600000),
-              }};
-            })
-            .filter(Boolean);
-          if (patches.length) {
-            _pushTaskUndo(`Push ${n} orders +1h`, patches.map(p => p.id));
+          // Push moves the FINISH one hour later and the start follows (backward scheduling OQ8). Firmed,
+          // frozen and running orders stay where they are; an order whose new finish cannot be held on the
+          // machine's working hours is skipped too (quiet: the one summary toast below counts what moved).
+          const patches = NIMBUS.Engine?.pushFinishPatches?.(ids.map(id => Store.tasks[id]).filter(Boolean), 3600000) || [];
+          const moved = patches.length;
+          const skipped = Math.max(0, ids.filter(id => Store.tasks[id]).length - moved);   // U34: say why fewer moved than selected
+          if (moved) {
+            _pushTaskUndo(t('undo.push_orders_1h', { count: moved }), patches.map(p => p.id));
             Store.updateMany(patches, 'cmd-palette');
           }
           Alerts.scheduleRecompute();
           Toast.show(
-            patches.length ? t('toast.pushed_orders', { count: patches.length }) :
+            moved ? t(skipped ? 'toast.pushed_orders_skipped' : 'toast.pushed_orders', { count: moved, skipped }) :
               t('cmdp.toast_no_orders_moveable'),
             patches.length ? 'success' : 'warn', patches.length ? 1400 : 3000);
         }
@@ -1451,16 +1442,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!snap) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
       const beforeSnap = UndoStack.snapshotTasks(Store.tasksArr.map(t => t.id));
       UndoStack._entries.push({ label: 'Before Time Machine restore', undoFn: () => UndoStack.restoreTasks(beforeSnap), at: Date.now() });
+      // OQ21 (group 15): a restore brings back the FINISH; the stored start is a placeholder, so each row is flagged
+      // stale and the engine re-derives the start from the finish under the current run time.
       const patches = snap.tasks
         .filter(s => Store.tasks[s.id])
         .map(s => ({
           id: s.id,
           changes: {
             start_date: s.start_date ? new Date(s.start_date) : null,
-            end_date:   s.end_date   ? new Date(s.end_date)   : null
+            end_date:   s.end_date   ? new Date(s.end_date)   : null,
+            runtime_schedule_mismatch: true
           }
         }));
+      // U31: the rows that already carried unsaved edits BEFORE this restore, read before updateMany dirties them,
+      // like the undo path (afterRestore): a never-placed row with a null snapshot start keeps its dirty id.
+      const wasDirty = new Set(patches.map(p => String(p.id)).filter(id => NIMBUS.UndoStack?.dirtyProbe?.(id)));
       Store.updateMany(patches, 'time-machine');
+      NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id), wasDirty);
       Alerts.scheduleRecompute();
       Toast.show(t('toast.restored', { label: snap.label, time: TimeMachine._relTime(ts) }), 'success', 3000);
       if (TimeMachine._panel) TimeMachine._panel.hidden = true;
@@ -1623,7 +1621,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!tasks.length) { Confidence._apply(100); return; }
 
       const hMinutes = _confHorizonMinutes();
-      const horizonStart = new Date();
+      const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
       // Days-out from now → time-weight multiplier (imminent = more costly)
@@ -1647,7 +1645,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       let matrix = null;
       const days = Math.ceil(hMinutes / 1440);
       const plant = Store.selectedPlant;
-      const startMs = horizonStart.getTime();
+      const startMs = _plantToday().getTime();   // same start (and cache key) as computeMatrix / the prewarm
 
       if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
         try {
@@ -1773,7 +1771,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const alerts = Store.alerts || [];
       const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
-      const horizonStart = new Date();
+      const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
       const tw = date => { if (!date) return 1.0; const d = (date - horizonStart) / 86400000; return d <= 3 ? 1.5 : d <= 7 ? 1.25 : 1.0; };
 
@@ -1786,7 +1784,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
-      const startMs = horizonStart.getTime();
+      const startMs = _plantToday().getTime();   // same start (and cache key) as computeMatrix / the prewarm
       const rev = Store.rev();
       const plant = Store.selectedPlant;
 
@@ -1846,7 +1844,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             ${sortedAlerts.map(a => `
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
-                <span class="ni-conf-msg">${_esc(a.msg)}</span>
+                <span class="ni-conf-msg">${_esc(a.msgKey ? t(a.msgKey, a.msgVars) : a.msg)}</span>
                 <span class="ni-conf-date">${a.time ? a.time.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</span>
                 ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
               </div>`).join('')}

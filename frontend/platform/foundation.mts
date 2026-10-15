@@ -21,6 +21,17 @@ declare global {
 type PreferenceResolver = (key: string) => string | undefined;
 type ActorResolver = () => string | undefined;
 
+/** One line's calendar rows as held in Store, handed to Util.sapDueDate through a DI seam
+ *  (platform sits below Calendar/Store, so it can import neither). `rev` is the Store
+ *  revision, used only to invalidate the per-line+date window cache. */
+export interface DueCalendarSource {
+  lineHours: Record<number, [number, number] | null> | null;
+  plantHours: Record<number, [number, number] | null> | null;
+  plant: string | null;
+  rev: number;
+}
+type DueCalendarResolver = (line: string) => DueCalendarSource | null;
+
 // The full per-line/day utilization matrix type is Phase 3's domain
 // (schedule-services.mts, not yet converted). This resolver only ever reads
 // `.pct` off a matrix cell (see Util.scheduleKpis below), so it's typed to
@@ -141,7 +152,7 @@ export const Config = {
   WARN_THRESHOLD:     0.8,
   SHOW_NEAR_CAPACITY_ALERTS: false,           // set true to re-enable near-capacity warnings
   LS_KEY:             'nimbus.state.v3',          // do NOT bump for shape changes — use SCHEMA_VERSION
-  SCHEMA_VERSION:     6,                          // bump whenever _saveCache snapshot fields change
+  SCHEMA_VERSION:     7,                          // bump whenever _saveCache snapshot fields change
   BUILD_ID:           (typeof window !== 'undefined' && window.NIMBUS_BUILD_ID) || 'dev',
   DEFAULT_PLANT:      null,
   KNOWN_PLANTS:       ['5512', '1006'],
@@ -171,6 +182,18 @@ let _prefResolver: PreferenceResolver = () => undefined;
 let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
 let _changeoverFieldsResolver: (() => string[]) | null = null;
+let _dueCalendarResolver: DueCalendarResolver | null = null;
+// The server's instant (OQ52, one clock). store.mts wires this to Store.serverNow() when it loads;
+// until then (Node tests that load foundation alone) it is the viewer's own clock, as it always was.
+let _serverNowResolver: (() => Date) | null = null;
+// "Now" at a plant (OQ52): the server instant projected into the plant's zone, as the naive wall-clock Date every
+// derivation compares against. store.mts wires this to Store.plantNow; null (or null result) falls back to the
+// server instant and then the viewer's clock, as before the seam existed.
+let _plantClockResolver: ((plant: string | null | undefined, line?: string | null) => Date | null) | null = null;
+// Day window per (line, calendar date), valid for one Store revision: latenessHours runs per row
+// in grid filters and tile loops, so a midnight due date must not rebuild its window each call.
+let _dueWindowRev = NaN;
+const _dueWindowCache = new Map<string, { open: Date; close: Date } | null>();
 let _locale: string = (typeof localStorage !== 'undefined' && localStorage.getItem('nimbus.locale')) || 'en';
 if (typeof document !== 'undefined' && document.documentElement) document.documentElement.lang = _locale;
 // The NIMBUS_API_KEY deployment-config stopgap (see backend/security/CLAUDE.md),
@@ -192,6 +215,14 @@ export const Util = {
   setActorResolver(fn: ActorResolver): void { _actorResolver = typeof fn === 'function' ? fn : () => undefined; },
   setUtilizationResolver(fn: UtilizationResolverFn | null): void { _utilizationResolver = typeof fn === 'function' ? fn : null; },
   setChangeoverFieldsResolver(fn: (() => string[]) | null): void { _changeoverFieldsResolver = typeof fn === 'function' ? fn : null; },
+  setDueCalendarResolver(fn: DueCalendarResolver | null): void {
+    _dueCalendarResolver = typeof fn === 'function' ? fn : null;
+    _dueWindowCache.clear(); _dueWindowRev = NaN;
+  },
+  setServerNowResolver(fn: (() => Date) | null): void { _serverNowResolver = typeof fn === 'function' ? fn : null; },
+  setPlantClockResolver(fn: ((plant: string | null | undefined, line?: string | null) => Date | null) | null): void {
+    _plantClockResolver = typeof fn === 'function' ? fn : null;
+  },
   setApiKey(key: string): void { _apiKey = key || ''; },
 
   /** The task fields whose change between adjacent orders is a changeover, for
@@ -606,10 +637,68 @@ export const Util = {
     }));
   },
 
-  // SAP planning baseline finish. NIMBUS keeps this in `original_end_date`
-  // (set once from ORIGINAL_END_DATE; what the variance badge compares against).
+  // SAP planning baseline finish. NIMBUS keeps this in `original_end_date` (the locked SAP
+  // finish as received; what the variance badge compares against). A date-only SAP finish
+  // arrives as an exact-midnight timestamp; it reads as the END of that date's working window
+  // (OQ23) via NimbusComputeCore.dueDateInstant, with the window built from the line's calendar
+  // rows in Store (DI seam). A line with no calendar rows reads as raw + 23:59:59. A timed value
+  // is returned unchanged.
   sapDueDate(t: NimbusTask): Date | null {
-    return t?.original_end_date || null;
+    const raw = t?.original_end_date || null;
+    if (!raw) return null;
+    const core = globalThis.NimbusComputeCore;
+    if (!core?.dueDateInstant) return raw;
+    const line = t.MACHINE || '';
+    return core.dueDateInstant(raw, date => Util._dueWindowForLine(line, date));
+  },
+
+  /** True when the SAP finish on the wire is an exact-midnight value, i.e. a date-only due date (OQ23). */
+  isDateOnlyDue(task: Pick<NimbusTask, 'original_end_date'>): boolean {
+    const raw = task.original_end_date;
+    return raw instanceof Date && raw.getHours() === 0 && raw.getMinutes() === 0 && raw.getSeconds() === 0 && raw.getMilliseconds() === 0;
+  },
+
+  /** The due instant of an order: the finish a held (unplaced) order anchors on. The finish-anchored name for
+   *  `sapDueDate` (same value; the SAP finish as received, a date-only one read as the close of that day). */
+  dueInstant(t: NimbusTask): Date | null {
+    return Util.sapDueDate(t);
+  },
+
+  /** The due DAY to show a planner. A date-only due on a line that closes at 24:00 resolves to the exclusive
+   *  next-day 00:00 instant (the lateness and anchor maths need that exact instant), which would read as the NEXT
+   *  day ("Thu 00:00"). For display the instant minus 1 ms is shown instead, so the due day keeps its date. A timed
+   *  due, or a date-only one closing earlier in the day, is returned unchanged. Never use it for arithmetic. */
+  dueDisplayDate(t: NimbusTask): Date | null {
+    const due = Util.dueInstant(t);
+    const raw = t?.original_end_date || null;
+    const midnight = (d: Date): boolean => d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0;
+    if (due instanceof Date && !isNaN(due.getTime()) && raw instanceof Date && midnight(raw) && midnight(due)) {
+      return new Date(due.getTime() - 1);
+    }
+    return due;
+  },
+
+  /** Working window of `line` on one calendar date (line hours intersected with its plant's), or
+   *  null when closed or when Store holds no calendar rows for the line. Cached per line+date for
+   *  the current Store revision, so per-row callers stay O(1). Internal to sapDueDate. */
+  _dueWindowForLine(line: string, date: Date): { open: Date; close: Date } | null {
+    const src = _dueCalendarResolver && line ? _dueCalendarResolver(line) : null;
+    if (!src || !src.lineHours) return null;
+    if (src.rev !== _dueWindowRev) { _dueWindowCache.clear(); _dueWindowRev = src.rev; }
+    const key = `${line}|${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+    const hit = _dueWindowCache.get(key);
+    if (hit !== undefined) return hit;
+    const core = globalThis.NimbusComputeCore!;
+    const lineWin = core._dayWindow(src.lineHours, date);
+    const plantWin = src.plantHours ? core._dayWindow(src.plantHours, date) : lineWin;
+    let result: { open: Date; close: Date } | null = null;
+    if (lineWin && plantWin) {
+      const open = new Date(Math.max(+lineWin[0], +plantWin[0]));
+      const close = new Date(Math.min(+lineWin[1], +plantWin[1]));
+      if (open < close) result = { open, close };
+    }
+    _dueWindowCache.set(key, result);
+    return result;
   },
 
   // Scheduled finish for a task — user override `end_date` if present, otherwise the SAP baseline.
@@ -618,29 +707,49 @@ export const Util = {
     return t?.end_date || Util.sapDueDate(t);
   },
 
-  // Display-only derived "Original Start": due date minus RUN_TIME, so
-  // Orig Start and Orig End always form a runtime-consistent pair (e.g.
-  // RUN_TIME 1h, due 7:00 PM -> Orig Start 6:00 PM) instead of the raw
-  // midnight SAP date. Falls back to the raw original_start_date (coerced
-  // to a Date) when there's no due date to anchor on. Pure/cheap — no
-  // Calendar lookup, no persistence — and never writes back to the task:
-  // original_start_date itself stays untouched because it's load-bearing
-  // for _snapToWorkingHours's startMoved guard and _overlayUserMoves's
-  // move-detection. Edge case (not clamped, deliberately): an order whose
-  // RUN_TIME exceeds the gap between midnight and its due time will show
-  // an implied start before midnight (the previous calendar day).
-  impliedOriginalStart(t: NimbusTask): Date | null {
-    const due = Util.sapDueDate(t);
-    if (!due) {
-      return t?.original_start_date instanceof Date ? t.original_start_date : Util.parseDate(t?.original_start_date);
-    }
-    return new Date(due.getTime() - Util.runHours(t) * Config.MS_HOUR);
+  /** The plant clock: "now" at `plant` (or at the plant of `line`) as the naive wall-clock Date derivations use.
+   *  Falls back to the server instant, then the viewer's clock, when the plant has no valid zone or none is wired. */
+  plantClock(plant?: string | null, line?: string | null): Date {
+    let at: Date | null = null;
+    if (_plantClockResolver) { try { at = _plantClockResolver(plant, line); } catch { at = null; } }
+    return at ?? (_serverNowResolver ? _serverNowResolver() : new Date());
   },
 
-  // Hours that scheduled finish slips past the SAP planning date (clamped at 0).
+  /** Start of "today" at a plant, on the plant clock (the day key every "today" filter compares against). */
+  plantToday(plant?: string | null, line?: string | null): Date {
+    return Util.startOfDay(Util.plantClock(plant, line))!;
+  },
+
+  /** OQ42: an order is "on" a calendar day when its bar overlaps that day, so a bar crossing midnight counts on
+   *  both days (and one that ends exactly at midnight does not count on the next). A split order is tested piece
+   *  by piece; a start with no finish counts on its start day. `key` is a Util.dayKey ('YYYY-MM-DD'). */
+  overlapsDay(t: NimbusTask, key: string): boolean {
+    const dayStart = new Date(key + 'T00:00:00');
+    if (isNaN(dayStart.getTime())) return false;
+    const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
+    const intervals = Util.scheduleIntervals(t);
+    if (intervals.length) return intervals.some(i => i.start < dayEnd && i.end > dayStart);
+    const start = Util.parseDate(t?.start_date);
+    if (!start) {
+      // A finish-only row (end set, start null) is the bar [end - run_time, end] (U29).
+      const end = Util.parseDate(t?.end_date);
+      const run = parseFloat(String(t?.RUN_TIME ?? ''));
+      if (!end || !(run > 0)) return false;
+      return new Date(end.getTime() - run * 3600000) < dayEnd && end > dayStart;
+    }
+    return start >= dayStart && start < dayEnd;
+  },
+
+  /** The alert text in the viewer's language: worker alerts carry a locale key + vars, with English `msg` as the fallback. */
+  alertMessage(a: { msg: string; msgKey?: string; msgVars?: Record<string, string | number> }): string {
+    return a.msgKey ? Util.t(a.msgKey, a.msgVars as Record<string, string | number> | undefined) : a.msg;
+  },
+
+  // Hours that scheduled finish slips past the SAP planning date (clamped at 0). A queued order has no placed
+  // finish, so "now" on its own plant's clock stands in for its end.
   latenessHours(t: NimbusTask): number {
-    const end = t.planning_status === 'needs_planning' ? new Date() : Util.scheduledEnd(t);
-    const due = Util.sapDueDate(t);
+    const end = t.planning_status === 'needs_planning' ? Util.plantClock(t.PLANT, t.MACHINE) : Util.scheduledEnd(t);
+    const due = Util.dueInstant(t);
     if (!end || !due) return 0;
     const diff = (end.getTime() - due.getTime()) / Config.MS_HOUR;
     return diff > 0 ? diff : 0;
@@ -709,7 +818,7 @@ export const Util = {
     let peak = 0, peakFrozen = 0, peakOpen = 0;
     try {
       if (!_utilizationResolver) throw new Error('utilization resolver not wired');
-      const m = _utilizationResolver(new Date(), horizonDays, tasks, utilizationContext);
+      const m = _utilizationResolver(Util.plantClock(tasks[0]?.PLANT, tasks[0]?.MACHINE), horizonDays, tasks, utilizationContext);
       for (const ln of Object.keys(m)) {
         for (const d of Object.keys(m[ln])) {
           const p = m[ln][d]?.pct || 0;
@@ -747,7 +856,9 @@ export const Util = {
   // RangeError on an empty/invalid IANA zone — that catch IS the contract:
   // callers get zoned:false and a viewer-local fallback rather than a crash.
   plantNowParts(tz?: string | null): { hour: number; minute: number; hhmm: string; zoned: boolean } {
-    const now = new Date();
+    // The server's instant (Store.serverNow via the resolver) so the header clock and the greeting
+    // agree with the derivations; the viewer's clock only before the first /tasks response.
+    const now = _serverNowResolver ? _serverNowResolver() : new Date();
     const z = (tz ?? '').trim();
     if (z) {
       try {

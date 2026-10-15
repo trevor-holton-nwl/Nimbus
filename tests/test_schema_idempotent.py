@@ -14,6 +14,7 @@ Two layers:
     sub-365 plant and asserts the value SURVIVES (the true end-to-end idempotency
     check; catches a reintroduced data mutation anywhere in the file).
 """
+import contextlib
 import os
 import re
 import sys
@@ -25,6 +26,19 @@ from scripts import schema_bootstrap_smoke
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(ROOT, "schema.sql")
 SETUP_MIGRATION_PATH = os.path.join(ROOT, "migrations", "2026-08-13-changeover-matrix-stage-0.sql")
+
+
+@contextlib.contextmanager
+def _rolled_back(pg):
+    """A cursor whose whole transaction is ROLLED BACK on exit. Every test that applies schema.sql runs inside
+    one: schema.sql ends with the ledger-guarded backward-scheduling cutover, and a COMMITTED apply on a
+    developer database that lacks the ledger id would null its placed finishes and delete its segments once
+    (senior review I14). Nothing here may commit."""
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            yield cur
+        finally:
+            conn.rollback()
 
 
 def _schema_text() -> str:
@@ -118,6 +132,7 @@ def test_manual_migrations_folder_is_pinned_and_retired_column_stays_out_of_top_
         "2026-08-20-line-to-machine.sql",
         "2026-08-20-setup-value-case-fold-backfill.sql",
         "2026-10-08-nimbus-mulesoft-role.sql",
+        "2026-10-20-restore-precutover-snapshot.sql",
     }
     for name in os.listdir(mig):
         if name.endswith(".sql"):
@@ -174,6 +189,12 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-06-sap-truth-firming.sql",
         "2026-10-08-sap-staging-columns.sql",
         "2026-10-08-sap-staging-tables.sql",
+        "2026-10-15-1-orders-original-dates.sql",
+        "2026-10-15-2-orders-run-time-bounds-336.sql",
+        "2026-10-16-1-orders-placement-exception.sql",
+        "2026-10-16-2-orders-original-finish-date-only.sql",
+        "2026-10-20-0-orders-precutover-snapshot.sql",
+        "2026-10-20-1-backward-cutover.sql",
     }
     all_names = {
         os.path.basename(path)
@@ -564,11 +585,9 @@ class TestHorizonMigrationIdempotent:
         db = pg
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             schema_sql = f.read()
-        # Re-apply the full (idempotent) schema, exactly like a redeploy would.
-        with db._pool.connection() as conn, conn.cursor() as cur:
+        # Re-apply the full (idempotent) schema, exactly like a redeploy would (rolled back, see _rolled_back).
+        with _rolled_back(db) as cur:
             cur.execute(schema_sql)
-            conn.commit()
-        with db._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT alt_flag_horizon, conf_score_horizon FROM plants "
                 "WHERE subnetwork = %s AND plant = %s",
@@ -582,9 +601,8 @@ class TestHorizonMigrationIdempotent:
         db = pg
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             schema_sql = f.read()
-        with db._pool.connection() as conn, conn.cursor() as cur:
+        with _rolled_back(db) as cur:
             cur.execute(schema_sql)
-            conn.commit()
             cur.execute("SELECT 1 FROM schema_migrations WHERE id = 'plants_horizon_minutes'")
             assert cur.fetchone() is not None
 
@@ -706,3 +724,157 @@ def test_sap_staging_migrations_are_idempotent_and_create_every_object(pg):
         for idx in STAGE_INDEXES:
             assert idx in have_idx, f"{idx} missing after the migrations"
         assert any(r[1] == "chk_sap_sync_config_apply_mode" for r in before["constraints"])
+
+
+# --- Locked original SAP dates (backward-scheduling Phase 1, Task 1.1) ---------------------------------------
+ORIGINAL_DATES_MIGRATION = "2026-10-15-1-orders-original-dates.sql"
+ORIGINAL_DATES_COLUMN_STATEMENTS = (
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;",
+    "ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;",
+)
+
+
+def test_original_dates_columns_and_ledger_in_schema_and_migration():
+    """The locked SAP start/finish columns and the ledger-guarded backfill live in BOTH schema.sql (safe to
+    re-apply) and the dated migration deploys actually apply; the migration says it is destructive by text."""
+    with open(os.path.join(ROOT, "migrations", ORIGINAL_DATES_MIGRATION), encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    for stmt in ORIGINAL_DATES_COLUMN_STATEMENTS:
+        assert stmt in schema_text, stmt
+        assert stmt in migration_text, stmt
+    for text in (schema_text, migration_text):
+        assert "WHERE id = 'orders_original_dates_backfill'" in text
+        assert "VALUES ('orders_original_dates_backfill')" in text
+    assert "Destructive by text" in migration_text
+    # The backfill reads order_sap_sent, so schema.sql must create it first.
+    assert schema_text.index("CREATE TABLE IF NOT EXISTS order_sap_sent (") < schema_text.index(
+        "VALUES ('orders_original_dates_backfill')"
+    )
+
+
+@pytest.mark.pg
+def test_original_dates_schema_applies_twice_and_ledger_has_one_row(pg):
+    """Apply schema.sql twice: the three columns exist and the backfill ledger id is recorded exactly once."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with _rolled_back(pg) as cur:
+        cur.execute(schema_sql)
+        cur.execute(schema_sql)
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns"
+            " WHERE table_schema = 'public' AND column_name IN ('original_start_received', 'original_finish_received')"
+        )
+        have = {tuple(r) for r in cur.fetchall()}
+        assert have == {
+            ("orders", "original_start_received"),
+            ("orders", "original_finish_received"),
+            ("order_distribution", "original_finish_received"),
+        }
+        cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_original_dates_backfill'")
+        assert cur.fetchone()[0] == 1
+
+
+# --- Run-time cap (backward-scheduling Task 1.6): the CHECK becomes a representation bound ------------------
+RUN_TIME_BOUNDS_MIGRATION = "2026-10-15-2-orders-run-time-bounds-336.sql"
+
+
+def test_run_time_bounds_8760_in_schema_and_migration_say_destructive_and_use_the_ledger():
+    with open(os.path.join(ROOT, "migrations", RUN_TIME_BOUNDS_MIGRATION), encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    assert "Destructive by text" in migration_text
+    for text in (schema_text, migration_text):
+        assert "DROP CONSTRAINT IF EXISTS chk_orders_run_time_bounds" in text
+        assert "run_time >= 0 AND run_time < 8760" in text
+        assert "orders_run_time_bounds_8760" in text
+    # schema.sql must not keep creating the old 168-hour bound under the same name.
+    assert "run_time < 168" not in schema_text
+
+
+@pytest.mark.pg
+def test_run_time_bounds_schema_reapply_raises_an_old_bound_exactly_once(pg):
+    """An initialised database carries the old < 168 constraint under the same name: re-applying
+    schema.sql (ledger row absent) must drop and re-add it at 8760, then leave it alone."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with _rolled_back(pg) as cur:
+        cur.execute("DELETE FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760'")
+        cur.execute("ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_run_time_bounds")
+        cur.execute("ALTER TABLE orders ADD CONSTRAINT chk_orders_run_time_bounds"
+                    " CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 168))")
+        cur.execute(schema_sql)
+        cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'")
+        assert "8760" in cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760'")
+        assert cur.fetchone()[0] == 1
+        # Second apply: the ledger row stops it; the bound is unchanged.
+        cur.execute(schema_sql)
+        cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'")
+        assert "8760" in cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760'")
+        assert cur.fetchone()[0] == 1
+
+
+# --- Placement-exception marker (backward-scheduling Task 2.3) ---------------------------------------------
+PLACEMENT_EXCEPTION_MIGRATION = "2026-10-16-1-orders-placement-exception.sql"
+
+
+def test_placement_exception_column_in_schema_and_migration_say_destructive():
+    with open(os.path.join(ROOT, "migrations", PLACEMENT_EXCEPTION_MIGRATION), encoding="utf-8") as f:
+        migration_text = f.read()
+    schema_text = _schema_text()
+    assert "Destructive by text" in migration_text
+    for text in (schema_text, migration_text):
+        assert "ADD COLUMN IF NOT EXISTS placement_exception TEXT NULL" in text
+        assert "CHECK (placement_exception IN ('overtime', 'overlong'))" in text
+
+
+@pytest.mark.pg
+def test_placement_exception_migration_and_schema_apply_twice_and_check_holds(pg):
+    """Replay the migration and schema.sql twice: one column, one CHECK, bad values refused, NULL allowed."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with open(os.path.join(ROOT, "migrations", PLACEMENT_EXCEPTION_MIGRATION), encoding="utf-8") as f:
+        migration_sql = f.read()
+    with _rolled_back(pg) as cur:
+        cur.execute(migration_sql)
+        cur.execute(migration_sql)
+        cur.execute(schema_sql)
+        cur.execute(schema_sql)
+        cur.execute("SELECT count(*) FROM information_schema.columns"
+                    " WHERE table_name = 'orders' AND column_name = 'placement_exception'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM pg_constraint WHERE conname = 'chk_orders_placement_exception'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SAVEPOINT bad")
+        with pytest.raises(Exception):
+            cur.execute("INSERT INTO orders (id, production_order, material_number, placement_exception)"
+                        " VALUES ('pe-bad', 'pe-bad', 'm', 'sideways')")
+        cur.execute("ROLLBACK TO SAVEPOINT bad")
+
+
+@pytest.mark.pg
+def test_schema_reapply_has_no_data_effect_without_the_cutover_ledger_rows(pg):
+    """I14: re-applying schema.sql on a database that has NOT recorded the cutover ledger ids must leave order
+    placements and segments exactly as they were once the (rolled-back) transaction ends. Seeds a placed,
+    flagged order and a segment, deletes the ledger ids, applies, and checks the data only inside the
+    transaction; then confirms from a second connection that nothing survived."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema_sql = f.read()
+    with _rolled_back(pg) as cur:
+        cur.execute("DELETE FROM schema_migrations WHERE id IN ('backward_cutover_snapshot', 'backward_scheduling_cutover')")
+        for t in ("orders_precutover_snapshot", "order_schedule_segments_precutover_snapshot",
+                  "order_sap_sent_precutover_snapshot"):
+            cur.execute(f"DROP TABLE IF EXISTS {t}")  # in-transaction: the snapshot block recreates them
+        cur.execute("INSERT INTO orders (id, production_order, material_number, planning_status, "
+                    "scheduled_start, scheduled_end) VALUES ('zzi14', 'zzi14', 'm', 'scheduled', "
+                    "'2031-01-01 08:00', '2031-01-01 12:00')")
+        cur.execute(schema_sql)
+        cur.execute("SELECT scheduled_start FROM orders WHERE id = 'zzi14'")
+        assert cur.fetchone()[0] is None  # proves the guard is what protects the data outside the transaction
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM orders WHERE id = 'zzi14'")
+        assert cur.fetchone()[0] == 0
+        conn.rollback()

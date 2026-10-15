@@ -62,32 +62,41 @@ def _candidate(row_id, **overrides):
 
 @pytest.mark.parametrize("skip_override", [{"eff_end": None}, {"planning_status": "needs_planning"}])
 def test_skipped_child_never_contributes_firmness_version_or_finish(skip_override):
+    # The skipped child is firmed but is not a candidate, so its firmness cannot make the (unfirmed) group sendable.
     rows = [_candidate("ok"), _candidate("skip", manual_firmed=True, production_version="A",
                                            eff_end=datetime(2026, 10, 14, 18))]
     rows[1].update(skip_override)
     original = deepcopy(rows)
-    groups, skipped = staging.build_outbound_groups(rows, None)
-    assert skipped == 1
-    assert groups == [{"plnum": "PARENT", "matnr": "MAT", "end": datetime(2026, 10, 13, 14),
-                       "auffx": "", "verid": "B", "member_ids": ["ok", "skip"], "sent_ids": ["ok"],
-                       "rolled_up": True, "nimbus_order_id": None}]
+    groups, skipped, unfirmed = staging.build_outbound_groups(rows, None)
+    assert (skipped, unfirmed) == (1, 1)
+    assert groups == []
     assert rows == original
+    # With the candidate child firmed the group is sent; the skipped child still adds no finish or version.
+    rows[0]["manual_firmed"] = True
+    groups, skipped, unfirmed = staging.build_outbound_groups(rows, None)
+    assert (skipped, unfirmed) == (1, 0)
+    assert groups == [{"plnum": "PARENT", "matnr": "MAT", "end": datetime(2026, 10, 13, 14),
+                       "auffx": "X", "verid": "B", "member_ids": ["ok", "skip"], "sent_ids": ["ok"],
+                       "rolled_up": True, "nimbus_order_id": None}]
 
 
 def test_group_with_only_skipped_children_is_omitted_and_counts_every_skipped_row():
-    groups, skipped = staging.build_outbound_groups([
+    groups, skipped, unfirmed = staging.build_outbound_groups([
         _candidate("a", eff_end=None), _candidate("b", planning_status="needs_planning"),
     ], None)
     assert groups == []
-    assert skipped == 2
+    assert (skipped, unfirmed) == (2, 0)
 
 
 def test_direct_orders_remain_distinct_by_both_order_number_and_material():
-    rows = [_candidate("a", parent_production_order=None, production_order="PO1", material_number="M1"),
-            _candidate("b", parent_production_order=None, production_order="PO1", material_number="M2"),
-            _candidate("c", parent_production_order=None, production_order="PO2", material_number="M1")]
-    groups, skipped = staging.build_outbound_groups(rows, None)
-    assert skipped == 0
+    rows = [_candidate("a", parent_production_order=None, production_order="PO1", material_number="M1",
+                       manual_firmed=True),
+            _candidate("b", parent_production_order=None, production_order="PO1", material_number="M2",
+                       manual_firmed=True),
+            _candidate("c", parent_production_order=None, production_order="PO2", material_number="M1",
+                       manual_firmed=True)]
+    groups, skipped, unfirmed = staging.build_outbound_groups(rows, None)
+    assert (skipped, unfirmed) == (0, 0)
     assert {(g["plnum"], g["matnr"], g["nimbus_order_id"]) for g in groups} == {
         ("PO1", "M1", "a"), ("PO1", "M2", "b"), ("PO2", "M1", "c"),
     }
@@ -99,8 +108,8 @@ def test_rollup_business_values_are_invariant_to_child_input_order():
             _candidate("b", production_version="B", eff_end=datetime(2026, 10, 14, 16)),
             _candidate("c", production_version=None, firming_indicator=" x ")]
     for permuted in permutations(rows):
-        groups, skipped = staging.build_outbound_groups(list(permuted), None)
-        assert skipped == 0
+        groups, skipped, unfirmed = staging.build_outbound_groups(list(permuted), None)
+        assert (skipped, unfirmed) == (0, 0)
         assert len(groups) == 1
         group = groups[0]
         assert (group["end"], group["verid"], group["auffx"]) == (datetime(2026, 10, 14, 16), "B", "X")
@@ -109,9 +118,9 @@ def test_rollup_business_values_are_invariant_to_child_input_order():
 
 def test_frozen_horizon_is_exclusive_at_exact_start_boundary():
     frozen_end = datetime(2026, 10, 13, 12)
-    groups, _ = staging.build_outbound_groups([_candidate("a")], frozen_end)
-    assert groups[0]["auffx"] == ""
-    groups, _ = staging.build_outbound_groups([
+    groups, _, unfirmed = staging.build_outbound_groups([_candidate("a")], frozen_end)
+    assert groups == [] and unfirmed == 1                                 # exactly at the boundary: not firmed, not sent
+    groups, _, unfirmed = staging.build_outbound_groups([
         _candidate("a", eff_start=datetime(2026, 10, 13, 11, 59, 59, 999999)),
     ], frozen_end)
-    assert groups[0]["auffx"] == "X"
+    assert groups[0]["auffx"] == "X" and unfirmed == 0

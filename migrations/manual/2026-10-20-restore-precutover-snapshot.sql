@@ -1,0 +1,62 @@
+-- migrations/manual/2026-10-20-restore-precutover-snapshot.sql
+-- nimbus-migration: manual-only
+-- ROLLBACK for the backward-scheduling cutover (migrations/2026-10-20-1-backward-cutover.sql).
+-- Not applied by any routine deploy: it lives under migrations/manual/ (the runner lists migrations/*.sql
+-- non-recursively) and carries the manual-only marker. To run it, copy it next to a scratch -MigrationsDir or
+-- run it with psql --single-transaction -f; see docs/DEPLOYMENT.md, "Backward-scheduling cutover" rollback matrix.
+--
+-- What it restores, from the three snapshot tables taken by 2026-10-20-0:
+--   * orders: scheduled_start, scheduled_end, manual_firmed, firming_indicator, runtime_schedule_mismatch,
+--     placement_exception, for every order that is in the snapshot (matched by id). updated_at is set to now()
+--     (NOT the snapshot value) so client caches that key on it re-read the restored rows.
+--   * order_schedule_segments: for every order in the snapshot, current fragments are deleted and the snapshot
+--     fragments re-inserted.
+--   * order_sap_sent is not touched: the cutover never writes it, so it needs no restore.
+-- Orders created after the snapshot are left exactly as they are.
+--   * ledger: deletes the schema_migrations rows 'backward_cutover_snapshot' and 'backward_scheduling_cutover' and
+--     RENAMES the three snapshot tables to <table>_rst_<yyyymmddhh24mi> (short suffix: the longest name must stay
+--     under 63 characters), so after a restore the window can be re-run (snapshot retaken, cutover re-applied)
+--     while the archived copies keep the pre-cutover rows. The operator drops the archived tables by hand once
+--     the window has closed.
+-- WARNING: anything a planner saved after the cutover (placements, firm flags, segments) on the restored
+-- columns is OVERWRITTEN. Restore only inside the rollback window, before planners start saving, and with the
+-- previous image rolled back first (the old image is forward-scheduling and needs these columns as they were).
+-- Run it in ONE transaction (the deploy runner and psql --single-transaction both do).
+DO $mig$
+DECLARE t TEXT; n INTEGER; total INTEGER;
+BEGIN
+  IF to_regclass('orders_precutover_snapshot') IS NULL
+     OR to_regclass('order_schedule_segments_precutover_snapshot') IS NULL THEN
+    RAISE EXCEPTION 'pre-cutover snapshot tables not found; nothing to restore from';
+  END IF;
+
+  UPDATE orders o SET
+    scheduled_start = s.scheduled_start,
+    scheduled_end = s.scheduled_end,
+    manual_firmed = s.manual_firmed,
+    firming_indicator = s.firming_indicator,
+    runtime_schedule_mismatch = s.runtime_schedule_mismatch,
+    placement_exception = s.placement_exception,
+    updated_at = now()
+  FROM orders_precutover_snapshot s
+  WHERE o.id = s.id;
+
+  DELETE FROM order_schedule_segments g
+   USING orders_precutover_snapshot s WHERE g.order_id = s.id;
+  INSERT INTO order_schedule_segments
+    SELECT (jsonb_populate_record(NULL::order_schedule_segments, to_jsonb(g))).*
+    FROM order_schedule_segments_precutover_snapshot g
+    WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id = g.order_id);   -- VI16: an order purged since the snapshot has nothing to restore
+  GET DIAGNOSTICS n = ROW_COUNT;
+  SELECT count(*) INTO total FROM order_schedule_segments_precutover_snapshot;
+  RAISE NOTICE 'restored % segment rows, skipped % whose order no longer exists', n, total - n;
+
+  DELETE FROM schema_migrations WHERE id IN ('backward_cutover_snapshot', 'backward_scheduling_cutover');
+  FOREACH t IN ARRAY ARRAY['orders_precutover_snapshot', 'order_schedule_segments_precutover_snapshot',
+                           'order_sap_sent_precutover_snapshot'] LOOP
+    IF to_regclass(t) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE %I RENAME TO %I', t, t || '_rst_' || to_char(clock_timestamp(), 'YYYYMMDDHH24MI'));
+    END IF;
+  END LOOP;
+END
+$mig$;

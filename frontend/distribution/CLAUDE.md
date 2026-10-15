@@ -38,6 +38,8 @@
 
 Run: `npm run build && node --test tests/modules/distribution/distribution-pane.test.mjs`
 
+**Separation is judged on the finish (backward scheduling Task 3.5, OQ38).** The `separation_violated` alert and the optimizer's separation finding bucket a family's siblings by their planned FINISH (`end_date`), not their start: siblings share a finish by default, so a 70/30 family that finishes together raises nothing even though the long child starts earlier. The rule is hand-mirrored in `nimbus-compute-core.js` (`computeAlerts` rule 1c) and `optimization/setup-scheduler.mts` (`checkDistributionSeparation`); keep the two in step.
+
 ## Counterpart
 
 Backend half carries the load-bearing data, routes, and ingest logic: `backend/distribution/CLAUDE.md`.

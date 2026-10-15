@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_machine       ON orders(machine);
 -- (db.query_orders ORDER BY machine, effective start). Supersedes
 -- relying on the two single-column indexes above for that access pattern.
 CREATE INDEX IF NOT EXISTS idx_orders_machine_start ON orders(machine, basic_start_date);
--- Matches db.query_orders() ORDER BY exactly: per-machine scan ordered by effective start.
+-- Matches db.query_orders() ORDER BY exactly: per-machine scan ordered by effective start (a finish-anchored row can store only scheduled_end, so it sorts by its SAP start here; the browser derives the real start from the stored finish).
 -- Supersedes idx_orders_machine_start for the /tasks read path when scheduled_start is set.
 CREATE INDEX IF NOT EXISTS idx_orders_machine_eff_start
   ON orders(machine, COALESCE(scheduled_start, basic_start_date));
@@ -111,14 +111,21 @@ ALTER TABLE orders ADD CONSTRAINT chk_orders_sched_range
 -- (migrations/2026-09-25-orders-run-time-bounds.sql +
 -- migrations/2026-09-26-orders-run-time-bounds-validate.sql) splits it into
 -- two separate files/transactions instead.
+--
+-- Run-time cap (OQ28): the bound is now a pure REPRESENTATION bound (< 8760 hours); the LIMIT an order
+-- is scheduled with (a flat 336 hours, no per-plant horizon term) is enforced in the
+-- application. An initialised database still carries the old < 168 constraint under the SAME name, so
+-- this block drops and re-adds it exactly once, guarded by the schema_migrations ledger id
+-- 'orders_run_time_bounds_8760' (mirrors migrations/2026-10-15-2-orders-run-time-bounds-336.sql;
+-- destructive by text: DROP CONSTRAINT, then re-ADD). Widening can never fail validation.
 DO $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'chk_orders_run_time_bounds'
-  ) THEN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_run_time_bounds_8760') THEN
+    ALTER TABLE orders DROP CONSTRAINT IF EXISTS chk_orders_run_time_bounds;
     ALTER TABLE orders
       ADD CONSTRAINT chk_orders_run_time_bounds
-      CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 168));
+      CHECK (run_time IS NULL OR (run_time >= 0 AND run_time < 8760));
+    INSERT INTO schema_migrations (id) VALUES ('orders_run_time_bounds_8760') ON CONFLICT DO NOTHING;
   END IF;
 END $$;
 
@@ -239,6 +246,22 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_workcenter TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_production_version TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_start_date TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_finish_date TIMESTAMP;
+
+-- Locked copies of the SAP start/finish as received (backward scheduling Phase 1, OQ31 b / OQ26).
+-- GET /tasks serves original_start_date/original_end_date as COALESCE(original_*_received, basic_*).
+-- Mirrors migrations/2026-10-15-1-orders-original-dates.sql; the one-time backfill is at the end of this file.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+-- Backward scheduling D10 (VI12): whether the SAP finish arrived as a date with no time (Send transmits the
+-- working-window close instead of a zone-converted midnight). Mirrors migrations/2026-10-16-2-*.sql.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_date_only BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+
+-- Placement-exception marker (backward scheduling OQ50): 'overtime' / 'overlong' = the planner placed this bar
+-- off its run-time width on purpose; NULL = a normal bar. Mirrors migrations/2026-10-16-1-orders-placement-exception.sql.
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS placement_exception TEXT NULL
+    CONSTRAINT chk_orders_placement_exception CHECK (placement_exception IN ('overtime', 'overlong'));
 
 -- ----------------------------------------------------------------------------
 -- upload_audit: one row per /upload call so the Admin Cockpit can show a
@@ -1998,3 +2021,101 @@ BEGIN
         CHECK (run_time_source IS NULL OR run_time_source IN
             ('routing', 'manual', 'legacy', 'distributed', 'sap_order'));
 END $$;
+
+-- Backfill of the locked original SAP dates (mirrors migrations/2026-10-15-1-orders-original-dates.sql).
+-- Placed last because it reads order_sap_sent. Ledger-guarded so a re-apply never re-runs it. The UPDATE
+-- rewrites every orders row (bumps xmin / base_version): apply at deploy time, never mid-shift.
+-- A row with no order_sap_sent row takes the as-received sap_basic_* dates when present, else basic_*;
+-- a row with a sent row had its original overwritten by NIMBUS's own send, so original_* = basic_*.
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_original_dates_backfill') THEN
+    UPDATE orders o SET
+      original_finish_received = CASE WHEN s.order_id IS NULL THEN COALESCE(o.sap_basic_finish_date, o.basic_finish_date) ELSE o.basic_finish_date END,
+      original_start_received  = CASE WHEN s.order_id IS NULL THEN COALESCE(o.sap_basic_start_date,  o.basic_start_date)  ELSE o.basic_start_date  END
+    FROM orders o2 LEFT JOIN order_sap_sent s ON s.order_id = o2.id
+    WHERE o2.id = o.id;
+    UPDATE order_distribution SET original_finish_received = basic_finish_date WHERE original_finish_received IS NULL;
+    INSERT INTO schema_migrations (id) VALUES ('orders_original_dates_backfill');
+  END IF;
+END
+$mig$;
+
+-- Backward scheduling D10 (VI12): mirrors migrations/2026-10-16-2-orders-original-finish-date-only.sql. Marks existing
+-- rows whose locked finish sits at exact midnight (the only evidence old rows carry); ledger-guarded.
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_original_finish_date_only_backfill') THEN
+    UPDATE orders SET original_finish_date_only = TRUE
+     WHERE original_finish_received IS NOT NULL AND original_finish_received::time = TIME '00:00:00';
+    INSERT INTO schema_migrations (id) VALUES ('orders_original_finish_date_only_backfill');
+  END IF;
+END
+$mig$;
+
+-- Backward-scheduling cutover (mirrors migrations/2026-10-20-0-orders-precutover-snapshot.sql and
+-- migrations/2026-10-20-1-backward-cutover.sql). Placed last: it reads orders, segments and order_sap_sent.
+-- Each block is ledger-guarded, so a re-apply never repeats it. NOTE: a developer database that re-applies
+-- schema.sql runs the cutover ONCE and nulls its local placed finishes and segments (running rows keep theirs).
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_cutover_snapshot') THEN
+    CREATE TABLE orders_precutover_snapshot AS
+      SELECT id, plant, machine, planning_status, run_time,
+             basic_start_date, basic_finish_date,
+             scheduled_start, scheduled_end,
+             manual_firmed, firming_indicator,
+             runtime_schedule_mismatch, placement_exception,
+             updated_at
+      FROM orders;
+    CREATE TABLE order_schedule_segments_precutover_snapshot AS
+      SELECT * FROM order_schedule_segments;
+    CREATE TABLE order_sap_sent_precutover_snapshot AS
+      SELECT * FROM order_sap_sent;
+    INSERT INTO schema_migrations (id) VALUES ('backward_cutover_snapshot');
+  END IF;
+END
+$mig$;
+
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_scheduling_cutover') THEN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_cutover_snapshot') THEN
+      RAISE EXCEPTION 'backward cutover: apply migrations/2026-10-20-0-orders-precutover-snapshot.sql first (no snapshot in the ledger)';
+    END IF;
+    -- running = a planner-placed start at or before plant-local now and the old effective end after it
+    -- (Task 0 ruling: real column names — plants.plant (PK is (subnetwork, plant); MIN(timezone) per plant as
+    --  sap_staging.py does, a plant may sit in two subnetworks), orders.planning_status = 'needs_planning',
+    --  order_schedule_segments.scheduled_end; plant-local naive now is simply now() AT TIME ZONE tz.)
+    WITH plant_now AS (
+      SELECT p.plant, now() AT TIME ZONE COALESCE(NULLIF(MIN(p.timezone),''),'UTC') AS pnow
+      FROM plants p GROUP BY p.plant
+    ), old_end AS (
+      SELECT o.id, COALESCE(MAX(s.scheduled_end), o.scheduled_end, o.scheduled_start + (o.run_time * INTERVAL '1 hour')) AS old_end
+      FROM orders o LEFT JOIN order_schedule_segments s ON s.order_id = o.id GROUP BY o.id
+    ), running AS (
+      SELECT o.id, e.old_end FROM orders o LEFT JOIN plant_now pn ON pn.plant = o.plant JOIN old_end e ON e.id = o.id
+      WHERE o.scheduled_start IS NOT NULL
+        AND o.scheduled_start <= COALESCE(pn.pnow, now() AT TIME ZONE 'UTC')
+        AND e.old_end > COALESCE(pn.pnow, now() AT TIME ZONE 'UTC')
+    )
+    UPDATE orders o SET
+      -- Task 0 ruling B4 (OQ3/OQ5, D15): a running row keeps BOTH its start and its STORED end so it still
+      -- reads as running (server _order_is_running needs both edges; client isInProgress needs now < end)
+      -- even when its due date is already past. Every other row loses both edges and re-derives from its due date.
+      scheduled_start = CASE WHEN r.id IS NOT NULL THEN o.scheduled_start ELSE NULL END,
+      scheduled_end   = CASE WHEN r.id IS NOT NULL THEN r.old_end        ELSE NULL END,
+      placement_exception = NULL,
+      runtime_schedule_mismatch = TRUE,
+      updated_at = now()
+    FROM (SELECT id FROM orders) a LEFT JOIN running r ON r.id = a.id
+    WHERE o.id = a.id AND o.planning_status <> 'needs_planning';
+    -- Segments are removed for every non-queued row EXCEPT a running one (a running row kept its start above, so
+    -- scheduled_start IS NULL here marks exactly the rows that lost their placement); a running split order keeps
+    -- its fragments and so its closed-hours gaps.
+    DELETE FROM order_schedule_segments s USING orders o
+     WHERE s.order_id = o.id AND o.planning_status <> 'needs_planning' AND o.scheduled_start IS NULL;
+    INSERT INTO schema_migrations (id) VALUES ('backward_scheduling_cutover');
+  END IF;
+END
+$mig$;

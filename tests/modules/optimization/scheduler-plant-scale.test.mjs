@@ -33,6 +33,28 @@ for (const [name, evaluate] of strategies) {
     assert.deepEqual(fixture.snapshot, before, 'detached optimization leaves the captured read model intact');
   });
 
+  test(`${name}: every placed order's finish is the last productive edge (Reading A: the finish is the result)`, () => {
+    const fixture = scaleFixture();
+    const result = evaluate(fixture.snapshot, fixture.bounds);
+    const byId = new Map(fixture.snapshot.tasks.map(task => [String(task.id), task]));
+    let checked = 0;
+    for (const patch of result.patches) {
+      const { start_date: start, end_date: end, scheduleSegments } = patch.changes;
+      if (!start || !end) continue;
+      const runMinutes = Math.round(Number(byId.get(String(patch.id)).RUN_TIME) * 60);
+      if (scheduleSegments?.length >= 2) {
+        assert.equal(+end, +scheduleSegments.at(-1).endDate, `${patch.id}: end_date is the last segment end`);
+        assert.equal(+start, +scheduleSegments[0].startDate, `${patch.id}: start_date is the first segment start`);
+        const productive = scheduleSegments.reduce((sum, segment) => sum + (+segment.endDate - +segment.startDate) / MINUTE, 0);
+        assert.equal(productive, runMinutes, `${patch.id}: segments carry exactly the run time`);
+      } else {
+        assert.equal((+end - +start) / MINUTE, runMinutes, `${patch.id}: an unsplit bar is start plus run time`);
+      }
+      checked++;
+    }
+    assert.equal(checked, 840, 'every order of the fixture is placed and checked');
+  });
+
   test(`${name}: 70 capacity-constrained machines each admit exactly two orders and retain all overflow`, () => {
     const fixture = scaleFixture({ ordersPerLine: 4, colors: ['GREEN'], runtime: 1 });
     fixture.bounds.horizonEnd = instant(10);

@@ -46,14 +46,11 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'RUN_TIME', dbColumn: 'run_time', type: 'number',
         gridDefault: true, inspectorDefault: true,
         i18nGridKey: 'col.run_h', i18nInspectorKey: 'ui.insp_run_time' },
-    // Display-only derived scheduling fields (see Util.impliedOriginalStart) —
-    // shown in both surfaces today (grid column + Inspector Schedule card row).
-    { key: 'original_start_date', dbColumn: 'basic_start_date', type: 'text',
-        gridDefault: true, inspectorDefault: true,
-        i18nGridKey: 'col.orig_start', i18nInspectorKey: 'ui.insp_orig_start' },
+    // Display-only scheduling fields — shown in both surfaces today (grid column + Inspector Schedule card row).
+    // The retired Original Start entry is gone (backward scheduling OQ16); Due Date is the SAP finish as received.
     { key: 'original_end_date', dbColumn: 'basic_finish_date', type: 'text',
         gridDefault: true, inspectorDefault: true,
-        i18nGridKey: 'col.orig_end', i18nInspectorKey: 'ui.insp_orig_end' },
+        i18nGridKey: 'col.due_date', i18nInspectorKey: 'ui.insp_due_date' },
     // PRT_01/PRT_02 — materialized from material_plants at ingest, Stage 1 of
     // docs/scheduling_priority.md. Visible and editable in the Orders grid
     // today, no Inspector row today.

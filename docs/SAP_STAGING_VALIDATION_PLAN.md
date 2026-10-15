@@ -1,3 +1,4 @@
+> Superseded by the finish anchor (2026-10): starts are derived backward from the placed finish; see BACKWARD_SCHEDULING_MIGRATION.md.
 # SAP Staging — Validation Plan
 
 > Written 2026-10-07 for branch `feature/sap-staging`. Purpose: find bad code, poor assumptions and weak spots **before** this first SAP interface reaches a live plant. Companion: `docs/SAP_STAGING_DESIGN.md` (design of record, decisions D1–D35), `docs/NIMBUS_INTERFACE_ARCHITECTURE.md` §7 (Mulesoft contract), `docs/DEPLOYMENT.md` (release steps).

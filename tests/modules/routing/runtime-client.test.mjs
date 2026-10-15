@@ -369,3 +369,18 @@ test('runtime-client.load: an older load that returns a non-ok response after a 
     Runtime._rateMap = null; Runtime._rateMapPlant = null;
   }
 });
+
+test('runtime-client.resolve: validity is judged on the locked SAP start, so an echo that moves the placed start changes nothing', () => {
+  Runtime._rateMap = { plant: 'P1', generated_at: '', machines: { M1: 'WC1' },
+    pv: { 'MAT|0001': { key: 'MAT|N|G|01', valid_from: '2026-01-01', valid_to: '2026-12-31' } },
+    ops: { 'MAT|N|G|01|WC1': { minutes_per_unit: 60 } } };
+  Runtime._rateMapPlant = 'P1';
+  const base = { id: 'v', PLANT: 'P1', MACHINE: 'M1', PRODUCTION_VERSION: '0001', MATERIAL_NUMBER: 'MAT',
+    'ORDER_QUANTITY_(GMEIN)': 2 };
+  // locked SAP start inside validity; the placed start (and a snapped display baseline) are outside: still valid
+  assert.equal(Runtime.resolve({ ...base, BASIC_START_DATE: new Date('2026-06-01T00:00:00'),
+    start_date: new Date('2027-03-01T08:00:00'), original_start_date: new Date('2027-03-01T08:00:00') }).ok, true);
+  // locked SAP start outside validity: expired, whatever the placed start says
+  assert.deepEqual(Runtime.resolve({ ...base, BASIC_START_DATE: new Date('2027-03-01T00:00:00'),
+    start_date: new Date('2026-06-01T08:00:00') }), { ok: false, step: 'pv_expired' });
+});

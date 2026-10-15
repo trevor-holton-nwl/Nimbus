@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Calendar } from '../../frontend/calendar/calendar-engine.mjs';
+import { CalendarSync } from '../../frontend/calendar/calendar-sync.mjs';
 import { Engine } from '../../frontend/optimization/engine.mjs';
 import { Store } from '../../frontend/platform/store.mjs';
 
@@ -272,11 +273,10 @@ test('standard scheduling regenerates an in-window logical parent as one split a
   assert.equal(scheduled.end_date?.getHours(), 10);
 });
 
-test('a runtime mismatch remains diagnostic until calendar-based reconciliation repairs the parent', () => {
+test('a runtime mismatch remains diagnostic until calendar-based reconciliation re-derives the start from the held finish', () => {
   const plant = 'P-RUNTIME-REPAIR';
   const line = 'L-RUNTIME-REPAIR';
   const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 20]]));
-  const start = new Date('2026-08-12T08:00:00');
   Store.replaceBlocks([], 'test');
   Store.replacePlantBlocks([], 'test');
   Store.replaceCalendars({}, 'test');
@@ -288,21 +288,39 @@ test('a runtime mismatch remains diagnostic until calendar-based reconciliation 
   Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
   Store.setCalendar(line, workHours, 'test');
   for (const day of Object.keys(workHours).map(Number)) Store.setPlantWorkHours(plant, day, workHours[day], 'test');
-  Store.setTasks([{
-    id: 'runtime-repair', PLANT: plant, MACHINE: line, RUN_TIME: 14,
-    start_date: start, end_date: new Date('2026-08-12T20:00:00'), runtime_schedule_mismatch: true,
-  }], 'test');
+  // The plant's clock is Mon 10 Aug 08:00 (New York), so the Wednesday finish is in the future and nothing reverses.
+  const priorOffset = Store.serverOffsetMs;
+  Store.serverOffsetMs = new Date('2026-08-10T12:00:00Z').getTime() - Date.now();
+  Store._blockedPlants.clear();
+  CalendarSync._setHydration(plant, 'hydrated', [line]);
+  try {
+    // A 14 h run on a 12 h day (08:00-20:00), finish held at 20:00 on the 12th: the start walks BACK into the 11th.
+    Store.setTasks([{
+      id: 'runtime-repair', PLANT: plant, MACHINE: line, RUN_TIME: 14, user_scheduled: true,
+      start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-12T20:00:00'), runtime_schedule_mismatch: true,
+    }], 'test');
 
-  const before = Core.computeAlerts({
-    tasks: Store.tasksArr, calendars: Store.calendars, plants: Store.plants,
-    lineSettings: Store.lineSettings, masterData: Store.masterData, blocks: [], plantBlocks: [], dismissed: [], opts: {},
-  }).alerts;
-  assert.ok(before.some(alert => alert.type === 'runtime-schedule-mismatch'));
+    const before = Core.computeAlerts({
+      tasks: Store.tasksArr, calendars: Store.calendars, plants: Store.plants,
+      lineSettings: Store.lineSettings, masterData: Store.masterData, blocks: [], plantBlocks: [], dismissed: [], opts: {},
+    }).alerts;
+    assert.ok(before.some(alert => alert.type === 'runtime-schedule-mismatch'));
 
-  Engine.reconcileRuntimeSchedules(plant);
-  const repaired = Store.tasks['runtime-repair'];
-  assert.equal(repaired.runtime_schedule_mismatch, false);
-  assert.equal(repaired.scheduleSegments?.length, 2);
+    Engine.reconcileRuntimeSchedules(plant);
+    const repaired = Store.tasks['runtime-repair'];
+    assert.equal(repaired.runtime_schedule_mismatch, false);
+    assert.equal(repaired.scheduleSegments?.length, 2);
+    assert.equal(repaired.end_date.getTime(), new Date('2026-08-12T20:00:00').getTime(), 'the held finish does not move');
+    assert.equal(repaired.start_date.getTime(), new Date('2026-08-11T18:00:00').getTime(), '2 h into the previous day, 12 h on the finish day');
+    assert.deepEqual(repaired.scheduleSegments.map(s => [s.startDate.getTime(), s.endDate.getTime()]), [
+      [new Date('2026-08-11T18:00:00').getTime(), new Date('2026-08-11T20:00:00').getTime()],
+      [new Date('2026-08-12T08:00:00').getTime(), new Date('2026-08-12T20:00:00').getTime()],
+    ]);
+  } finally {
+    Store.serverOffsetMs = priorOffset;
+    Store._blockedPlants.clear();
+    delete CalendarSync._hydration[plant];
+  }
 });
 
 test('a runtime mismatch stays visible even when its prior schedule is already in the past', () => {

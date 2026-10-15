@@ -326,13 +326,13 @@ export const OptimizeDialog = (() => {
   function _backlogNow(): Date {
     const timezone = Store.masterData?.plants?.find(p => p.plant === _plant)?.timezone;
     if (typeof timezone === 'string' && timezone.trim()) {
-      try { return Engine._plantWallNow(timezone, new Date()); }
+      try { return Engine._plantWallNow(timezone, Store.serverNow()); }
       catch { /* Run surfaces the configured-timezone error with an actionable message. */ }
     }
     // The engine still blocks this configuration at Run. This local fallback
     // merely gives the planner usable editable fields while they configure the
     // required plant timezone.
-    const local = new Date(); local.setSeconds(0, 0); return local;
+    const local = Store.serverNow(); local.setSeconds(0, 0); return local;
   }
 
   function _addCalendarMonths(date: Date, months: number): Date {
@@ -366,6 +366,19 @@ export const OptimizeDialog = (() => {
     if (sb && _start) sb.textContent = _displayDate(_start);
     if (eb && _end) eb.textContent = _displayDate(_end);
     _updateSummary();
+    _updateBacklogRuntimeNote(tasks);
+  }
+
+  /** OQ56 a: tell the planner how many orders are backlog only because their run time grew (the reconcile
+   *  tags those `reversal_forward` / `run_time_grew`). Shown under the strategy hint in Remove Backlog mode. */
+  function _backlogRuntimeGrewCount(tasks: ReadonlyArray<NimbusTask>): number {
+    return tasks.filter(t => t.derivationIssue?.code === 'reversal_forward' && t.derivationIssue.detail === 'run_time_grew').length;
+  }
+  function _updateBacklogRuntimeNote(tasks: ReadonlyArray<NimbusTask>) {
+    const hint = document.getElementById('opt-strategy-hint');
+    if (!hint || _mode !== 'backlog') return;
+    const grew = _backlogRuntimeGrewCount(tasks);
+    hint.textContent = Util.t('tip.backlog_mode') + (grew ? ' ' + Util.t('ui.opt_backlog_runtime_grew', { count: grew }) : '');
   }
 
   function _applyModeOptions() {
@@ -415,7 +428,7 @@ export const OptimizeDialog = (() => {
       } else {
         days = PRESET_DAYS[key];
       }
-      const now = new Date();
+      const now = Store.plantNow(_plant) ?? Store.serverNow();
       now.setSeconds(0, 0);
       _start = new Date(now);
       _end   = new Date(now.getTime() + days * Config.MS_DAY);
@@ -633,6 +646,12 @@ export const OptimizeDialog = (() => {
       Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
       return;
     }
+    // Senior review U21 (OQ52): a plant with no valid timezone has no clock, so the optimizer refuses to place on it,
+    // like the reconcile and manual paths. The dialog's own `liveClock` fallback stays for display defaults only.
+    if (!Store.plantNow(plant)) {
+      Toast.show(Util.t('toast.optimize_plant_no_timezone', { plant }), 'error', 9000);
+      return;
+    }
     const sfEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const scEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
 
@@ -738,11 +757,11 @@ export const OptimizeDialog = (() => {
     const optsForEngine: OptimizerRunOptions = {
       plant,
       lines:           linesScope,
-      startDate:       _start ?? (() => { const d = new Date(); d.setSeconds(0, 0); return d; })(),
-      endDate:         _end   ?? new Date(Date.now() + 28 * Config.MS_DAY),
+      startDate:       _start ?? (() => { const d = Store.plantNow(plant) ?? Store.serverNow(); d.setSeconds(0, 0); return d; })(),
+      endDate:         _end   ?? new Date((Store.plantNow(plant) ?? Store.serverNow()).getTime() + 28 * Config.MS_DAY),
       respectFirmed:   sfEl?.checked ?? true,
       respectCalendar: _mode === 'backlog' ? true : (scEl?.checked ?? true),
-      runAt:           new Date(),
+      runAt:           Store.serverNow(),
       auditDetails: _mode === 'backlog' ? undefined : {
         mode: _mode,
         wheelUsed,
@@ -1258,6 +1277,16 @@ export const OptimizerPreview = {
     OptimizerPreview._taskWatchUnsubscribe = Store.subscribe(event => {
       if (!OptimizerPreview.active || !OptimizerPreview._taskBaseline
         || !PREVIEW_TASK_CHANGE_EVENTS.has(event.type)) return;
+      // Group 26: the engine re-deriving starts (run time changed, calendar landed) under an open preview makes
+      // its numbers stale whatever the field-level comparison says; Apply is disabled with its own banner.
+      if (event.source === 'engine-runtime-reconcile') {
+        const rawIds = (event as unknown as { ids?: unknown }).ids;
+        const ids = Array.isArray(rawIds) ? rawIds.map(String) : null;
+        if (!ids || ids.some(id => OptimizerPreview._taskBaseline!.has(id))) {
+          OptimizerPreview._markTaskStale('engine re-derived starts while the preview was open', 'ui.preview_stale');
+          return;
+        }
+      }
       if (OptimizerPreview._applying && event.source === 'engine') return;
       OptimizerPreview._revalidateTaskBaseline();
     }, 'OptimizerPreview.tasks');
@@ -1268,11 +1297,11 @@ export const OptimizerPreview = {
     OptimizerPreview._taskWatchUnsubscribe = null;
   },
 
-  _markTaskStale(reason: string): void {
+  _markTaskStale(reason: string, messageKey = 'ui.opt_preview_task_stale'): void {
     if (OptimizerPreview.stale) return;
     OptimizerPreview.stale = true;
     OptimizerPreview._staleReason = reason;
-    OptimizerPreview._staleMessageKey = 'ui.opt_preview_task_stale';
+    OptimizerPreview._staleMessageKey = messageKey;
     OptimizerPreview._syncApplyButton();
     if (typeof document !== 'undefined') OptimizerPreview._render();
   },
@@ -1979,7 +2008,7 @@ export const OptimizerPreview = {
     const distributionSeparationFindings = (OptimizerPreview._candidate?.validationFindings ?? [])
       .filter(item => item.code === 'distribution_separation');
     const distributionSeparationHtml = distributionSeparationFindings.length ? `<details class="opt-pv-section">
-      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Sub-orders may start in different buckets</span><span class="opt-pv-section-badge">${distributionSeparationFindings.length}</span></summary>
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_distribution_separation_head'))}</span><span class="opt-pv-section-badge">${distributionSeparationFindings.length}</span></summary>
       <div class="opt-pv-section-body">
         <ul>${distributionSeparationFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
@@ -2112,10 +2141,10 @@ export const OptimizerPreview = {
     // This is the sole schedule-state commit for a preview candidate.
     // A running order never moves, and the preview may have sat open while one started. Drop
     // those patches at apply time (Remove Backlog is the one run that moves running orders).
-    const applyNow = new Date();
+    // The running test at Apply uses each order's own plant clock (Store.plantNow via the default now).
     const keptPatches = mode === 'backlog'
       ? candidate.patches
-      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live, applyNow)); });
+      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
     const skippedRunning = candidate.patches.length - keptPatches.length;
     Engine.applySchedulePatches(keptPatches);
     if (skippedRunning) Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skippedRunning }), 'warn', 7000);

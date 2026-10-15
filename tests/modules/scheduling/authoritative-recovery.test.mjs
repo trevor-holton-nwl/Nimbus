@@ -7,6 +7,10 @@ import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Table } from '../../../frontend/scheduling/orders.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
+import { createRequire } from 'node:module';
+
+// Placement derives from the plant clock, which projects through the compute core's zone helper (OQ52).
+globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 function fixture(t) {
@@ -19,11 +23,16 @@ function fixture(t) {
   t.mock.method(CalendarSync, 'fetchPlantConfig', async () => {});
   t.mock.method(Persistence, 'loadPriorityRankMaps', async () => {});
   t.mock.method(Persistence, 'loadSetupSnapshot', async () => null);
-  t.mock.method(Persistence, '_snapToWorkingHours', () => {});
   t.mock.method(Runtime, 'load', async () => {});
   t.mock.method(Alerts, 'scheduleRecompute', () => {});
   Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._conflictedIds.clear();
-  Store.setMasterData({ plants: [{ plant: 'P', routing_runtime_enabled: true }], lines: [] }, 'test');
+  // A placement edit holds the finish on the plant's clock (backward scheduling Task 2.5): the plant needs a zone,
+  // a pinned server clock (the fixture is dated 2026-10-01) and a splitting policy so a 12 h run can end at 14:00.
+  Store.setMasterData({ plants: [{ plant: 'P', routing_runtime_enabled: true, split_order_policy: 'partial_allowed',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }], lines: [] }, 'test');
+  const priorOffset = Store.serverOffsetMs;
+  Store.serverOffsetMs = new Date('2026-09-01T00:00:00').getTime() - Date.now();
+  t.after(() => { Store.serverOffsetMs = priorOffset; Store._blockedPlants.clear(); });
   Store.setSelectedPlant('P', 'test');
   Persistence._currentLoadedPlant = 'P';
   const server = { id: 'A', PLANT: 'P', MATERIAL_NUMBER: 'MAT', MACHINE: 'M1',
@@ -161,4 +170,63 @@ test('raw SAP date survives display-baseline snapping and a cache round trip', t
   const decoded = Persistence._prepTask(JSON.parse(JSON.stringify(task)));
   assert.equal(decoded.BASIC_START_DATE.getDate(), 1);
   assert.equal(decoded.original_start_date.getDate(), 2);
+});
+
+test('C1: a dragged row restored from the cache is still placed and its Save sends the dates', async t => {
+  const server = fixture(t);
+  Store.updateTask('A', { start_date: new Date('2026-10-01T12:00:00'), end_date: new Date('2026-10-01T15:00:00') }, 'gantt');
+  Persistence._dirtyIds.add('A');
+  assert.equal(Store.tasks.A.user_scheduled, true);
+  Persistence._saveCache();
+  let submitted = null;
+  t.mock.method(Util, 'fetchTraced', async (url, o) => ({ ok: true, json: async () => {
+    if (url.includes('/tasks/update')) {
+      submitted = JSON.parse(o.body).tasks[0];
+      return { status: 'ok', updated: 1, persisted: 1, versions: { A: 2 }, stale: [], invalid_ids: [], not_found_ids: [] };
+    }
+    return url.includes('/tasks?') ? { data: [structuredClone(server)], meta: {}, links: [] }
+      : url.endsWith('/system-settings') ? {} : { rows: [] };
+  } }));
+  await Persistence.load({ force: true, plant: 'P' }); await tick();
+  assert.equal(Store.tasks.A.start_date.getHours(), 12);
+  assert.equal(Store.tasks.A.user_scheduled, true);
+  assert.equal(Persistence._dirtyIds.has('A'), true);
+  Persistence.saveAll(); await tick(); await tick();
+  assert.ok(submitted && 'start_date' in submitted && 'end_date' in submitted, 'the Save payload carries the dates');
+});
+
+test('C1: the overlay restores the placement exception marker exactly as cached', t => {
+  fixture(t);
+  const backend = [Persistence._prepTask({ id: 'A', PLANT: 'P', MACHINE: 'M1', row_version: 1, planning_status: 'scheduled',
+    original_start_date: '2026-10-01T08:00:00', start_date: '2026-10-01T08:00:00', end_date: '2026-10-01T11:00:00', schedule_segments: [] })];
+  const cached = [{ id: 'A', planning_status: 'scheduled', row_version: 1, user_scheduled: true, placement_exception: 'overtime',
+    original_start_date: '2026-10-01T08:00:00', start_date: '2026-10-01T12:00:00', end_date: '2026-10-01T15:00:00' }];
+  assert.deepEqual(Persistence._overlayUserMoves(backend, cached), ['A']);
+  assert.equal(backend[0].user_scheduled, true);
+  assert.equal(backend[0].placement_exception, 'overtime');
+});
+
+for (const version of [6, Config.SCHEMA_VERSION]) test(`U22: online load ${version === Config.SCHEMA_VERSION ? 'keeps' : 'discards'} a cache written under schema ${version}`, async t => {
+  const server = fixture(t); cacheConflict();
+  const raw = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
+  raw._schemaVersion = version;
+  globalThis.localStorage.setItem(Config.LS_KEY, JSON.stringify(raw));
+  Persistence._dirtyIds.clear(); Persistence._conflictedIds.clear();
+  mockLoad(t, server);
+  await Persistence.load({ plant: 'P' }); await tick();
+  const kept = version === Config.SCHEMA_VERSION;
+  assert.equal(Store.tasks.A.start_date.getHours(), kept ? 12 : 8);
+  assert.equal(Persistence._dirtyIds.has('A'), kept);
+});
+
+test('I11: a refresh row carries user_scheduled so the engine does not re-derive a server-placed row', async t => {
+  const server = fixture(t);
+  assert.ok(!Store.tasks.A.user_scheduled);
+  Object.assign(server, { user_scheduled: true, row_version: 2, start_date: '2026-10-01T10:00:00', end_date: '2026-10-01T13:00:00' });
+  t.mock.method(Util, 'fetchTraced', async () => ({ ok: true, json: async () => ({ data: [server], missing: [] }) }));
+  Persistence._refreshTasks(['A']); await tick();
+  assert.equal(Store.tasks.A.user_scheduled, true);
+  server.user_scheduled = false; server.row_version = 3;
+  Persistence._refreshTasks(['A']); await tick();
+  assert.equal(Store.tasks.A.user_scheduled, false);
 });

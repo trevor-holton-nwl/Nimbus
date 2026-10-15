@@ -10,6 +10,8 @@ only the file that owns them changed. `_clean_id`, `_to_pydt`,
 `_schedule_segments_to_wire`, and `_apply_task_date_updates` are private
 helpers used only within this domain and moved along with their callers.
 """
+from datetime import datetime, timezone
+
 import pandas as pd
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,9 +22,7 @@ from backend.admin_ops.diagnostics_state import DIAGNOSTICS
 from backend.admin_ops.logbuffer import _current_rid, _log_event
 from backend.priority_lists import cache as plcache
 from backend.scheduling.models import (
-    BaselineCorrectResult,
     BulkUpdateResult,
-    DueDateCorrectionPayload,
     HorizonsResponse,
     TaskDateUpdate,
     TaskRefreshPayload,
@@ -90,6 +90,13 @@ def _schedule_segments_to_wire(raw) -> list[dict]:
     return clean
 
 
+def _server_now_iso() -> str:
+    """The server's instant as ISO-8601 UTC ('...Z'). Rides in `/tasks` `meta.server_now` so the browser
+    derives ONE plant-zone clock (Store.plantNow) from the server instead of each viewer's own clock
+    (backward scheduling OQ52). Never a DTO field."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 @router.get("/tasks", response_model=TasksResponse)
 def get_tasks(plant: str | None = None, machine: str | None = None,
               limit: int | None = Query(default=None, ge=1, le=10000,
@@ -155,12 +162,16 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                       "loaded_at": DIAGNOSTICS.get("loaded_at"),
                       "source_file": "postgres://nimbus/orders",
                       "visibility_horizon_end": visibility_horizon_end.isoformat() if visibility_horizon_end else None,
-                      "frozen_horizon_end": frozen_horizon_end.isoformat() if frozen_horizon_end else None}
+                      "frozen_horizon_end": frozen_horizon_end.isoformat() if frozen_horizon_end else None,
+                      "server_now": _server_now_iso()}
         return {"data": [], "links": [], "meta": empty_meta}
 
     # Drop rows with no usable start date (query can't enforce this without
     # losing the NULL diagnostic), then color-merge the scoped subset.
-    df = df[df["BASIC_START_DATE"].notna() |
+    # The start is optional at ingest (backward scheduling OQ24/OQ25), so a never-placed order can have a
+    # finish and no start: it is still served (the browser derives the start). Only a row with neither edge
+    # and no queue state has nothing to draw.
+    df = df[df["BASIC_START_DATE"].notna() | df["BASIC_FINISH_DATE"].notna() |
             (df.get("PLANNING_STATUS", pd.Series("scheduled", index=df.index)) == "needs_planning")].reset_index(drop=True)
     pre_merge_count = len(df)
 
@@ -227,6 +238,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
                 "schedule_segments": _schedule_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
                 "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
+                "placement_exception": row.get("PLACEMENT_EXCEPTION") or None,
                 "planning_status": row.get("PLANNING_STATUS") or "scheduled",
                 "planning_reason": row.get("PLANNING_REASON"),
                 "run_time_source": row.get("run_time_source"),
@@ -258,6 +270,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     meta["total"] = db.count_orders(plant=plant, line=machine, allowed_plants=allowed_plants) if paging else len(data)
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
+    meta["server_now"] = _server_now_iso()
     return {"data": data, "links": links, "meta": meta}
 
 
@@ -302,7 +315,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     to a nonexistent one (folded into not_found_ids) rather than leaking plant
     membership via a distinct rejection reason.
 
-    Returns { applied, persisted, failed, invalid, not_found, invalid_ids,
+    Returns { applied, persisted, failed, invalid, not_found, invalid_ids, start_derived,
               not_found_ids, stale, versions, rejection_reasons }. invalid_ids/
     not_found_ids carry the actual rejected ids (from db.update_task_dates_bulk)
     so the client can stop retrying terminal rejections while keeping
@@ -338,6 +351,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
         has_runtime = "RUN_TIME" in supplied
         has_firmed = "FIRMED" in supplied and it.FIRMED is not None
         has_segments = "schedule_segments" in supplied
+        has_exception = "placement_exception" in supplied
         segments: list[dict] | None = None
         if has_segments:
             # An aggregate replacement is deliberately explicit.  Treating a
@@ -364,7 +378,7 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 })
             if segments is None:
                 continue
-        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_firmed and not has_segments and not has_planning:
+        if start_dt is None and end_dt is None and not attrs and not has_runtime and not has_firmed and not has_segments and not has_planning and not has_exception:
             if atomic_optimizer:
                 invalid += 1
                 invalid_ids.append(it.id)
@@ -381,6 +395,10 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             item["FIRMED"] = it.FIRMED
         if has_segments:
             item["schedule_segments"] = segments
+        if has_exception:
+            item["placement_exception"] = it.placement_exception   # None = clear the marker
+        if "trust_start" in supplied and not it.trust_start:
+            item["trust_start"] = False      # only a caller that distrusts its start sends it (True = default)
         norm.append(item)
 
     forced_ids = [it["id"] for it in norm if it.get("force")]
@@ -431,9 +449,10 @@ def update_task(task: TaskDateUpdate,
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Update a single task's schedule/priority attributes and persist to DB.
-    Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
-               PRODUCTION_VERSION?, base_version?, force? }
-    Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
+    Payload: { id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+               PRT_01?, PRT_02?, PRODUCTION_VERSION?, base_version?, force? }
+    Response: 200 { status, persisted, failed, stale, versions, conflicts, rejection_reasons, start_derived }
+              | 400 { error: "invalid", rejection_reasons } | 404 not found.
     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
     client can refetch and warn uniformly with the bulk path.
     """
@@ -441,10 +460,13 @@ def update_task(task: TaskDateUpdate,
     if res.get("not_found"):
         raise HTTPException(status_code=404, detail="Task not found")
     if res.get("invalid"):
-        raise HTTPException(status_code=400, detail="Invalid date range (end must be after start)")
+        raise HTTPException(status_code=400, detail={"error": "invalid",
+                                                     "rejection_reasons": res.get("rejection_reasons", {})})
     return {"status": "ok", "persisted": res["persisted"], "failed": res["failed"],
             "stale": res.get("stale", []), "versions": res.get("versions", {}),
-            "conflicts": res.get("conflicts", [])}
+            "conflicts": res.get("conflicts", []),
+            "rejection_reasons": res.get("rejection_reasons", {}),
+            "start_derived": res.get("start_derived", {})}
 
 
 @router.post("/task/note", dependencies=[Depends(auth.require_authenticated)])
@@ -480,7 +502,8 @@ def tasks_update(payload: TasksUpdatePayload,
                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Bulk-update task dates/priority attributes and persist to DB (one transaction).
-    Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+    Payload: { tasks: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+                         PRT_01?, PRT_02?,
                          PRODUCTION_VERSION?, base_version?, force? }],
                blocks?, calendars? }
     Response: { status, updated, persisted, failed, invalid, not_found,
@@ -521,7 +544,8 @@ def tasks_update(payload: TasksUpdatePayload,
            # eligibility rejection inside db.update_task_dates_bulk — every
            # other invalid_ids cause has no entry here. Purely additive; does
            # not change invalid_ids' own shape.
-           "rejection_reasons": res.get("rejection_reasons", {})}
+           "rejection_reasons": res.get("rejection_reasons", {}),
+           "start_derived": res.get("start_derived", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")
@@ -534,9 +558,18 @@ def bulk_update(tasks: list[TaskDateUpdate],
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-    Payload: [{ id, start_date?, end_date?, base_version? }]
+    Payload: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+                base_version?, trust_start? }]
     Response: { status, updated, persisted, failed, invalid, not_found,
-                invalid_ids, not_found_ids, stale, versions, rejection_reasons }
+                invalid_ids, not_found_ids, stale, versions, rejection_reasons, start_derived }
+
+    Both edges are accepted, and `end_date` is read as the PLACED FINISH (the anchor NIMBUS keeps; the start
+    is derived from it). `trust_start` (default true) says whether the sent `start_date` was derived from
+    the run time by the caller: an external or integration writer that cannot do that sends
+    `trust_start: false`, which skips the width check, forces the row's stale flag so the browser re-derives
+    the start from the finish, and lists the id in `start_derived` (backward scheduling OQ59). The default
+    stays "trusted" because the browser's own saves send starts it computed; the width check then refuses a
+    start that does not fit the run time.
 
     `force` is accepted for wire compatibility but ignored (N2, 2026-09): an
     external caller may not bypass the base_version check. A stale row is
@@ -573,7 +606,8 @@ def bulk_update(tasks: list[TaskDateUpdate],
            # eligibility rejection inside db.update_task_dates_bulk — every
            # other invalid_ids cause has no entry here. Purely additive; does
            # not change invalid_ids' own shape.
-           "rejection_reasons": res.get("rejection_reasons", {})}
+           "rejection_reasons": res.get("rejection_reasons", {}),
+           "start_derived": res.get("start_derived", {})}
     if res.get("status") == "error":
         out["error_code"] = res.get("error_code")
         out["cause"] = res.get("cause")
@@ -616,40 +650,3 @@ def tasks_refresh(payload: TaskRefreshPayload,
         row["PLANT"] = row.pop("plant", None)
         row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
     return {"data": rows, "missing": missing}
-
-
-@router.post("/tasks/baseline-correct", response_model=BaselineCorrectResult,
-             dependencies=[Depends(auth.require_authenticated)])
-def baseline_correct(payload: DueDateCorrectionPayload,
-                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """
-    Persist due-date-baseline (basic_finish_date) corrections found by the
-    frontend's Persistence._snapToWorkingHours. Fire-and-forget from the
-    client's perspective — every row is re-validated server-side
-    (db.correct_due_date_baselines) before being written, so a late,
-    duplicate, or concurrent call can never overwrite an already-corrected or
-    genuinely fresh (re-uploaded) value; a failed re-validation is a safe
-    per-row no-op, not an error.
-    Payload: { corrections: [{ id, basic_finish_date, base_version }] }
-    Response: { status, applied, persisted, skipped, not_matched, versions }
-    """
-    items = [
-        {
-            "id": c.id,
-            "basic_finish_date": _to_pydt(c.basic_finish_date),
-            "base_version": c.base_version,
-        }
-        for c in payload.corrections
-        if c.id and c.basic_finish_date and c.base_version is not None
-    ]
-    try:
-        res = db.correct_due_date_baselines(items, allowed_plants=allowed_plants)
-    except Exception as e:
-        error_code = (db.translate_db_error(e).get("error_code")
-                      if isinstance(e, psycopg.Error) else "db.error")
-        _log_event("error", "db", "Due-date baseline correction failed (transaction rolled back)",
-                   exc=e, error_code=error_code, count=len(items))
-        return {"status": "error", "applied": 0, "persisted": 0, "skipped": len(items),
-                "not_matched": 0, "versions": {}, "error_code": error_code,
-                "cause": "Due-date baseline correction failed (transaction rolled back)"}
-    return {"status": "ok", **res}

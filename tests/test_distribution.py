@@ -746,6 +746,14 @@ class TestComputeDerivedStatuses:
         statuses = compute_derived_statuses(header, shares, children, None, {})
         assert "runtime_mismatch" in statuses
 
+    def test_runtime_mismatch_reads_the_wire_flag_only_never_the_dates(self):
+        """A.3 #23: the list badge follows the flag, so a child whose stored finish disagrees with the sum of its
+        pieces but carries no flag raises nothing, and a flagged finish-only child does."""
+        dated = {"runtime_schedule_mismatch": False, "scheduled_start": None, "scheduled_end": "2026-10-07T16:00"}
+        assert "runtime_mismatch" not in compute_derived_statuses({}, [], [dated], None, {})
+        assert "runtime_mismatch" in compute_derived_statuses(
+            {}, [], [{**dated, "runtime_schedule_mismatch": True}], None, {})
+
     def test_incomplete_missing_child(self):
         """Positive share with no corresponding child."""
         header = {}
@@ -1335,7 +1343,8 @@ class TestPlanApplyAnchorCarry:
         rows_out, plan_structure, warnings = distribution_data.plan([row], batch_id)
         header_key = (self.PLANT, self.ORD, self.MAT)
         assert plan_structure["parents"][header_key]["anchor"] is not None
-        assert plan_structure["parents"][header_key]["anchor"]["anchor"] == self.anchor_start
+        # backward scheduling Task 2.7: what travels is the plain order's STORED FINISH
+        assert plan_structure["parents"][header_key]["anchor"]["finish"] == self.anchor_start + dt.timedelta(hours=10)
         assert self.plain_id in plan_structure["parents"][header_key]["previous_child_ids"]
 
         with db_._pool.connection() as conn:
@@ -1345,12 +1354,17 @@ class TestPlanApplyAnchorCarry:
 
         children = _snapshot_children(db_, self.PLANT, self.ORD)
         assert len(children) == 2
+        finish = self.anchor_start + dt.timedelta(hours=10)
         for child in children:
-            assert child["scheduled_start"] == self.anchor_start
+            # the carry reads the placed finish; no start + run time is written forward (the child's run
+            # time is a share, not the plain order's 10 h), so the start stays unset for the browser to derive
+            assert child["scheduled_end"] == finish and child["scheduled_start"] is None
             assert child["notes"] == "Planner note"
         with db_._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT manual_firmed FROM orders WHERE parent_production_order = %s", (self.ORD,))
-            assert [r[0] for r in cur.fetchall()] == [True, True], "the slot is carried, so the firm follows it"
+            cur.execute("SELECT manual_firmed, runtime_schedule_mismatch, planning_status FROM orders"
+                        " WHERE parent_production_order = %s", (self.ORD,))
+            assert cur.fetchall() == [(True, True, "scheduled")] * 2, \
+                "the placement is carried (the firm follows it) and flagged stale so the start is re-derived"
 
         # The old plain id must be gone.
         with db_._pool.connection() as conn, conn.cursor() as cur:
@@ -1510,8 +1524,9 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
 
         children = _snapshot_children(db_, self.PLANT, self.ORD)
         assert len(children) == 2
+        finish = self.anchor_start + dt.timedelta(hours=10)
         for child in children:
-            assert child["scheduled_start"] == self.anchor_start
+            assert child["scheduled_end"] == finish and child["scheduled_start"] is None
             assert child["notes"] == "Planner note"
 
         post_apply_rows = self._children_state(db_, "planning_status, planning_reason, run_time")
@@ -1536,7 +1551,8 @@ class TestAnchorCarryThroughRoutingIngestNeverBreaksPlanningCheck:
         for planning_status, planning_reason, scheduled_start, _scheduled_end, run_time, run_time_source in final_rows:
             assert planning_status == "scheduled"
             assert planning_reason is None
-            assert scheduled_start == self.anchor_start  # untouched by the resolve
+            assert scheduled_start is None  # the carried placement is finish-only; the resolve does not start it
+            assert _scheduled_end == self.anchor_start + dt.timedelta(hours=10)  # ... and does not move the finish
             assert run_time is not None
             assert run_time_source == "routing"
 
@@ -2280,13 +2296,38 @@ class TestDistributionReadRoutes:
         assert row["child_count"] == 2
         assert row["sum_child_quantity"] == pytest.approx(100.0)
         assert len(row["children"]) == 2
-        # Child runtimes are 6/4 hours; the header runtime is 10. Alias
-        # qualification must retain child timing, never the header's finish.
+        # Backward scheduling: nobody has placed either child, so each reads the SAP finish it carries (the
+        # shared fragment's last arm), never start + its own run time (6 h / 4 h) and never the header's
+        # columns (the unqualified header-vs-orders rewrite of old broke on columns both tables have).
         assert row["start"] == "2026-10-01T08:00:00"
-        assert row["finish"] == "2026-10-01T14:00:00"
+        assert row["finish"] == "2026-10-01T18:00:00"
         assert {child["machine"]: child["end"] for child in row["children"]} == {
-            self.L1: "2026-10-01T14:00:00", self.L2: "2026-10-01T12:00:00",
+            self.L1: "2026-10-01T18:00:00", self.L2: "2026-10-01T18:00:00",
         }
+
+    def test_aggregate_reads_a_placed_childs_stored_finish_and_last_segment(self, client, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s"
+                        " WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                        (dt.datetime(2026, 10, 1, 9, 0), dt.datetime(2026, 10, 1, 17, 30),
+                         self.PLANT, self.ORD, self.L2))               # 4 h of work drawn over 8.5 h
+            conn.commit()
+        rows = client.get(f"/distribution/{self.PLANT}/aggregate", params={"workcenter": self.WC}).json()["data"]
+        ends = {child["machine"]: child["end"] for child in rows[0]["children"]}
+        assert ends[self.L2] == "2026-10-01T17:30:00" and ends[self.L1] == "2026-10-01T18:00:00"
+        assert rows[0]["finish"] == "2026-10-01T18:00:00"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM orders WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                        (self.PLANT, self.ORD, self.L2))
+            oid = cur.fetchone()[0]
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                        " VALUES (%s, 1, %s, %s), (%s, 2, %s, %s)",
+                        (oid, dt.datetime(2026, 10, 1, 9, 0), dt.datetime(2026, 10, 1, 11, 0),
+                         oid, dt.datetime(2026, 10, 2, 9, 0), dt.datetime(2026, 10, 2, 11, 0)))
+            conn.commit()
+        rows = client.get(f"/distribution/{self.PLANT}/aggregate", params={"workcenter": self.WC}).json()["data"]
+        ends = {child["machine"]: child["end"] for child in rows[0]["children"]}
+        assert ends[self.L2] == "2026-10-02T11:00:00" and rows[0]["finish"] == "2026-10-02T11:00:00"
 
     def test_aggregate_csv_export(self, client):
         response = client.get(f"/distribution/{self.PLANT}/aggregate",
@@ -2294,6 +2335,9 @@ class TestDistributionReadRoutes:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/csv")
         assert self.ORD in response.text
+        header_row = response.text.lstrip("\ufeff").splitlines()[0].split(",")
+        assert header_row[:3] == ["production_order", "material_number", "machine"]
+        assert "due_date" in header_row and header_row[header_row.index("finish")] == "finish"
 
     def test_unresolved_lists_the_unmapped_machine(self, client):
         response = client.get(f"/distribution/{self.PLANT}/unresolved")
@@ -2864,6 +2908,158 @@ class TestReweightSharesGuards(_ReweightFixtureBase):
 
 
 @pytest.mark.pg
+class TestFinishOnlyPlacedChildCountsAsScheduled(_ReweightFixtureBase):
+    """Backward scheduling Task 2.7: a child carries a placement when it has a stored finish even if it has no
+    stored start yet (the `_PLACED_SQL` shape), so the removal guard, the dry-run flag and the orphan sweep
+    all see it -- and a child a re-weight creates copies its sibling's finish, flagged stale."""
+    WC = "ZZTEST_WC_FINONLY"
+    L1, L2 = "ZZTEST_L1_FINONLY", "ZZTEST_L2_FINONLY"
+    ORD, MAT = "ZZTEST_ORD_FINONLY", "ZZTEST_MAT_FINONLY"
+    FINISH = dt.datetime(2026, 10, 1, 14, 0)
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _child(self, pg, machine):
+        return next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == machine)
+
+    def _place_finish_only(self, pg, child_id):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start = NULL, scheduled_end = %s,"
+                        " runtime_schedule_mismatch = TRUE WHERE id = %s", (self.FINISH, child_id))
+            conn.commit()
+
+    def test_removing_a_finish_only_child_without_confirm_raises_409(self, pg):
+        l2 = self._child(pg, self.L2)
+        self._place_finish_only(pg, l2["id"])
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        payload = [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}]
+        preview = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], dry_run=True, actor="tester")
+        assert [r["id"] for r in preview["removed_scheduled"]] == [l2["id"]]
+        assert {e["machine"]: e["scheduled"] for e in preview["plan"]}[self.L2] is True
+        with pytest.raises(distribution_data.DistributionChildrenScheduled) as excinfo:
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], actor="tester")
+        assert excinfo.value.children[0]["id"] == l2["id"]
+        assert any(c["id"] == l2["id"] for c in _snapshot_children(pg, self.PLANT, self.ORD)), "nothing was deleted"
+
+    def test_a_child_with_neither_edge_is_still_unscheduled(self, pg):
+        l1, l2 = self._child(pg, self.L1), self._child(pg, self.L2)
+        self._place_finish_only(pg, l2["id"])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            assert distribution_data._unscheduled_ids(cur, {l1["id"], l2["id"]}) == {l1["id"]}
+
+    def test_a_new_child_copies_the_siblings_finish_sets_the_stale_flag_and_writes_no_start(self, pg):
+        l1, l2 = self._child(pg, self.L1), self._child(pg, self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # L1 is placed (a normal bar); L2's child is gone and its share no longer points at it
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s, notes = 'keep' WHERE id = %s",
+                        (self.FINISH - dt.timedelta(hours=6), self.FINISH, l1["id"]))
+            cur.execute("DELETE FROM orders WHERE id = %s", (l2["id"],))
+            cur.execute("UPDATE order_distribution_share SET child_id = NULL WHERE plant = %s AND production_order = %s"
+                        " AND machine = %s", (self.PLANT, self.ORD, self.L2))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 60}, {"machine": self.L2, "weight": 40}],
+            base_version=header["xmin"], actor="tester")
+        new = self._child(pg, self.L2)
+        assert new["scheduled_end"] == self.FINISH, "the sibling's stored finish is copied"
+        assert new["scheduled_start"] is None, "no start + run time is written forward"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT runtime_schedule_mismatch, planning_status FROM orders WHERE id = %s", (new["id"],))
+            assert cur.fetchone() == (True, "scheduled")
+        kept = self._child(pg, self.L1)
+        assert (kept["scheduled_start"], kept["scheduled_end"], kept["notes"]) == (
+            self.FINISH - dt.timedelta(hours=6), self.FINISH, "keep")
+
+    def test_a_new_child_with_no_placed_sibling_stays_unplaced(self, pg):
+        l2 = self._child(pg, self.L2)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM orders WHERE id = %s", (l2["id"],))
+            cur.execute("UPDATE order_distribution_share SET child_id = NULL WHERE plant = %s AND production_order = %s"
+                        " AND machine = %s", (self.PLANT, self.ORD, self.L2))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 60}, {"machine": self.L2, "weight": 40}],
+            base_version=header["xmin"], actor="tester")
+        new = self._child(pg, self.L2)
+        assert new["scheduled_start"] is None and new["scheduled_end"] is None, \
+            "the old fallback placed it at the SAP start; nothing is written until a planner places it"
+
+
+@pytest.mark.pg
+class TestPlannerWriteRunTimeCap(_ReweightFixtureBase):
+    """R-I12: a planner share edit passes each child through the run-time cap; an over-cap child is queued
+    `run_time_over_cap` with dates cleared (never written as `scheduled`), an under-cap sibling is untouched,
+    ."""
+    WC = "ZZTEST_WC_RWCAP"
+    L1, L2 = "ZZTEST_L1_RWCAP", "ZZTEST_L2_RWCAP"
+    ORD, MAT = "ZZTEST_ORD_RWCAP", "ZZTEST_MAT_RWCAP"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, pg):
+        self._seed_header(pg, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
+            conn.commit()
+
+    def _state(self, pg, machine):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT planning_status, planning_reason->>'code', run_time, scheduled_start, scheduled_end"
+                        " FROM orders WHERE plant = %s AND parent_production_order = %s AND machine = %s",
+                        (self.PLANT, self.ORD, machine))
+            return cur.fetchone()
+
+    def test_share_edit_that_pushes_a_child_over_the_cap_queues_it(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE order_distribution SET run_time = 800 WHERE plant = %s AND production_order = %s",
+                        (self.PLANT, self.ORD))
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s"
+                        " WHERE plant = %s AND parent_production_order = %s",
+                        (dt.datetime(2026, 11, 2, 8), dt.datetime(2026, 11, 2, 12), self.PLANT, self.ORD))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 70}, {"machine": self.L2, "weight": 30}],
+            base_version=header["xmin"], actor="tester")
+        status, code, rt, start, end = self._state(pg, self.L1)      # 560 h > 336 h
+        assert float(rt) == pytest.approx(560.0)
+        assert (status, code, start, end) == ("needs_planning", "run_time_over_cap", None, None)
+        status, code, rt, start, end = self._state(pg, self.L2)      # 240 h, within the cap: stays placed
+        assert float(rt) == pytest.approx(240.0) and status == "scheduled" and start is not None
+
+    def test_collapse_survivor_over_the_cap_is_queued(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE order_distribution SET run_time = 400 WHERE plant = %s AND production_order = %s",
+                        (self.PLANT, self.ORD))
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s"
+                        " WHERE plant = %s AND parent_production_order = %s",
+                        (dt.datetime(2026, 11, 2, 8), dt.datetime(2026, 11, 2, 12), self.PLANT, self.ORD))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester")
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT planning_status, planning_reason->>'code', run_time, scheduled_start, scheduled_end"
+                        " FROM orders WHERE plant = %s AND production_order = %s", (self.PLANT, self.ORD))
+            rows = cur.fetchall()
+        assert len(rows) == 1
+        status, code, rt, start, end = rows[0]
+        assert float(rt) == pytest.approx(400.0)
+        assert (status, code, start, end) == ("needs_planning", "run_time_over_cap", None, None)
+
+
+@pytest.mark.pg
 class TestReweightSharesDryRunParity(_ReweightFixtureBase):
     """A dry-run's `plan` must match what the following real call then
     writes -- an actual two-call test, diffing the results, per SS5.5 step 8's
@@ -3009,7 +3205,7 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
             self._cleanup(cur, self.WC, self.L1, self.L2, self.ORD, self.MAT)
             conn.commit()
 
-    def test_collapse_copies_schedule_and_repoints_segments(self, pg):
+    def test_collapse_carries_start_notes_and_firm_and_drops_partial_segments(self, pg):
         children = _snapshot_children(pg, self.PLANT, self.ORD)
         l1_child = next(c for c in children if c["machine"] == self.L1)
         assert l1_child["distribution_letter"] is not None, "L1 must start lettered (2 positive shares)"
@@ -3055,11 +3251,99 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
 
         assert old_still_exists == 0, "the superseded lettered child must be deleted"
         assert new_row is not None, "the surviving 100% machine's bare id must exist"
-        assert new_row[0] == sched_start and new_row[1] == sched_end
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_time, runtime_schedule_mismatch FROM orders WHERE id = %s", (new_bare_id,))
+            survivor_run_time, mismatch = cur.fetchone()
+        # OQ37 rule R2: the kept start plus the survivor's full run time, never the partial-share end verbatim
+        assert new_row[0] == sched_start
+        assert new_row[1] == sched_start + dt.timedelta(hours=float(survivor_run_time))
+        assert mismatch is True
         assert new_row[2] == "keep me"
         assert new_row[3] is True, "the slot is carried, so the manual firm must follow it"
-        assert segment_owner is not None and segment_owner[0] == new_bare_id, \
-            "the segment must be re-pointed onto the new bare id, not cascade-deleted"
+        assert segment_owner is None, "the partial-share segments are deleted, not re-pointed (R2)"
+
+    def test_collapse_carries_the_full_run_time_end_and_flags_the_spec_example(self, pg):
+        """Spec example: partial-share end Wed 12:00, kept start Tue 18:00, full run time 22 h -> stored end
+        Wed 16:00 (plain arithmetic), start kept, segments gone, mismatch flag set."""
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        start, partial_end = dt.datetime(2026, 10, 6, 18, 0), dt.datetime(2026, 10, 7, 12, 0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time=22, run_time_source='manual',"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (start, partial_end, old["id"]))
+            cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                        " VALUES (%s, 1, %s, %s)", (old["id"], start, partial_end))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester")
+        new_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT scheduled_start, scheduled_end, runtime_schedule_mismatch FROM orders WHERE id=%s",
+                        (new_id,))
+            assert cur.fetchone() == (start, dt.datetime(2026, 10, 7, 16, 0), True)
+            cur.execute("SELECT COUNT(*) FROM order_schedule_segments WHERE order_id=%s", (new_id,))
+            assert cur.fetchone()[0] == 0
+
+    @pytest.mark.parametrize("run_time", [None, 0])
+    def test_collapse_with_no_positive_run_time_keeps_the_schedule_range_check(self, pg, run_time):
+        """F3: a placed survivor with a NULL or 0 manual run time carries end = start + 1 minute (the strict
+        chk_orders_sched_range holds), the mismatch flag is set, and the whole re-weight write succeeds."""
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        start, partial_end = dt.datetime(2026, 10, 6, 18, 0), dt.datetime(2026, 10, 7, 12, 0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, run_time=%s, run_time_source='manual',"
+                        " runtime_schedule_mismatch=FALSE WHERE id=%s", (start, partial_end, run_time, old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], confirm_remove_scheduled=True, actor="tester")
+        new_id = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT scheduled_start, scheduled_end, runtime_schedule_mismatch FROM orders WHERE id=%s",
+                        (new_id,))
+            assert cur.fetchone() == (start, start + dt.timedelta(minutes=1), True)
+
+    def test_collapse_of_a_firmed_survivor_is_listed_in_the_dry_run_and_needs_the_confirm(self, pg):
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=TRUE WHERE id=%s",
+                        (dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 12), old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        payload = [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}]
+        preview = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], dry_run=True, actor="tester")
+        assert old["id"] in [r["id"] for r in preview["removed_scheduled"]]
+        with pytest.raises(distribution_data.DistributionChildrenScheduled):
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT, payload, base_version=header["xmin"], actor="tester")
+
+    def test_collapse_of_an_unfirmed_survivor_is_not_listed(self, pg):
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start=%s, scheduled_end=%s, manual_firmed=FALSE,"
+                        " firming_indicator=NULL WHERE id=%s",
+                        (dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 12), old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        preview = distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT, [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=header["xmin"], dry_run=True, actor="tester")
+        assert old["id"] not in [r["id"] for r in preview["removed_scheduled"]]
+
+    def test_repair_runs_with_the_scheduled_removal_confirmed(self, pg):
+        """Repair re-materializes with `confirm_remove_scheduled=True` (A.3 #16): the guard is evaluated, never
+        raised, for a header repair must fix."""
+        with mock.patch.object(distribution_data, "_materialize_reweight",
+                               return_value={"children": [], "removed": []}) as mat, \
+                mock.patch.object(distribution_data, "_load_one_header_shares", return_value={}), \
+                mock.patch.object(distribution_data, "_load_one_material_attrs", return_value={}):
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                distribution_data._repair_one_header(
+                    cur, self.PLANT, self.ORD, self.MAT, {"source": "x", "default_basis": "y"})
+        assert mat.call_args.kwargs["confirm_remove_scheduled"] is True
 
 
 @pytest.mark.pg
@@ -4007,7 +4291,7 @@ class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
             cur.execute("SELECT COUNT(*) FROM orders WHERE id=%s", (added["id"],))
             assert cur.fetchone()[0] == 0
 
-    def test_collapse_response_carries_preserved_segment_aggregate(self, pg):
+    def test_collapse_response_carries_the_carried_finish_and_no_segments(self, pg):
         survivor = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
         segments = [(1, dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 11)),
                     (2, dt.datetime(2026, 10, 1, 12), dt.datetime(2026, 10, 1, 15))]
@@ -4027,12 +4311,8 @@ class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
         child = result["children"][0]
         assert child["id"] != survivor["id"]
         assert child["plant"] == self.PLANT and child["material_number"] == self.MAT
-        assert len(child["schedule_segments"]) == 2
-        for actual, (sequence, start, end) in zip(child["schedule_segments"], segments, strict=True):
-            assert actual["sequence"] == sequence
-            assert dt.datetime.fromisoformat(actual["start_date"]) == start
-            assert dt.datetime.fromisoformat(actual["end_date"]) == end
-        assert child["runtime_schedule_mismatch"] is True  # preserved pieces total 6 h, parent now 10 h
+        assert not child["schedule_segments"], "R2 deletes the partial-share segments"
+        assert child["runtime_schedule_mismatch"] is True  # the browser re-derives from the carried finish
 
     @pytest.mark.parametrize("operation", ["shares", "reset"])
     def test_response_reads_runtime_attributes_and_version_after_resolver_commit(self, pg, operation):
@@ -4648,6 +4928,45 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         assert self._state(pg, self.MAT) == before
         assert res["updated"] == 0 and res["unchanged"] == 2
 
+    def test_reupload_without_a_start_keeps_the_stored_basic_start_on_header_and_children(self, pg):
+        """The start is optional at ingest: a NULL start means 'not sent' and must not erase a stored one
+        (db._UPSERT_SQL is COALESCE(EXCLUDED, stored); the distribution child upsert and header write match)."""
+        self._upload(pg, [self._parent(self.MAT)])
+
+        def starts():
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT basic_start_date, basic_finish_date FROM order_distribution"
+                            " WHERE plant=%s AND production_order=%s AND material_number=%s",
+                            (self.PLANT, self.ORD, self.MAT))
+                header = cur.fetchone()
+                cur.execute("SELECT basic_start_date FROM orders WHERE plant=%s AND parent_production_order=%s"
+                            " AND material_number=%s ORDER BY id", (self.PLANT, self.ORD, self.MAT))
+                return header, [r[0] for r in cur.fetchall()]
+
+        (hs, hf), kids = starts()
+        assert hs == self.base and kids == [self.base, self.base]
+        new_finish = self.base + dt.timedelta(hours=14)
+        # a quantity change makes the children's upsert WHERE fire (basic_* alone is not a difference there)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=None, basic_finish_date=new_finish,
+                                       order_quantity=120.0)])
+        (hs2, hf2), kids2 = starts()
+        assert hs2 == self.base, "the header keeps its stored start"
+        assert kids2 == [self.base, self.base], "the children keep their stored start"
+        assert hf2 == new_finish, "the finish is still written"
+        # The ingest seam writes the children through db._UPSERT_SQL first, so drive distribution's own child upsert
+        # directly (apply()'s second pass) with a start-less plan that differs from what is stored.
+        _rows, plan_structure, _w = distribution_data.plan(
+            [self._parent(self.MAT, basic_start_date=None, basic_finish_date=new_finish + dt.timedelta(hours=2),
+                          order_quantity=140.0)], str(uuid.uuid4()))
+        parent = plan_structure["parents"][(self.PLANT, self.ORD, self.MAT)]
+        assert all(c["basic_start_date"] is None for c in parent["child_rows"])
+        parent["_ingest"] = True
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            assert distribution_data._apply_children(cur, parent) == 2, "both children were rewritten"
+            conn.commit()
+        (_hs3, _hf3), kids3 = starts()
+        assert kids3 == [self.base, self.base], "distribution's child upsert never erases a stored start"
+
     def test_child_change_resets_all_siblings_only(self, pg):
         def rows():
             return [self._parent(self.MAT), self._parent(self.MAT2)]
@@ -4655,9 +4974,10 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         self._place_and_firm(pg)
         mat_before, mat2_before = self._state(pg, self.MAT), self._state(pg, self.MAT2)
         assert len(mat_before) == 2 and len(mat2_before) == 2
-        # SAP "changed" ONE child of MAT only (its stored baseline differs from what arrives).
+        # SAP "changed" ONE child of MAT only (its stored FINISH baseline differs from what arrives; a start-only
+        # difference no longer counts, backward scheduling OQ25 c).
         with pg._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE orders SET sap_basic_start_date = sap_basic_start_date - interval '1 day'"
+            cur.execute("UPDATE orders SET sap_basic_finish_date = sap_basic_finish_date - interval '1 day'"
                         " WHERE id = %s", (mat_before[-1][0],))
             conn.commit()
         mat2_before = self._state(pg, self.MAT2)
@@ -4686,6 +5006,331 @@ class TestSapTruthDistributionReupload(_ReweightFixtureBase):
         assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
         for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
             assert sched is not None and firmed is True
+
+    def _originals(self, pg, mat):
+        """(header original_finish_received, {child id: (original_start_received, original_finish_received,
+        sap_basic_start_date, sap_basic_finish_date)})."""
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT original_finish_received FROM order_distribution"
+                        " WHERE plant=%s AND production_order=%s AND material_number=%s",
+                        (self.PLANT, self.ORD, mat))
+            header = cur.fetchone()[0]
+            cur.execute("SELECT id, original_start_received, original_finish_received, sap_basic_start_date,"
+                        " sap_basic_finish_date FROM orders WHERE plant=%s AND parent_production_order=%s"
+                        " AND material_number=%s ORDER BY id", (self.PLANT, self.ORD, mat))
+            return header, {r[0]: tuple(r[1:]) for r in cur.fetchall()}
+
+    def _mark_sent(self, pg, mat, sent_finish):
+        """What a Send to SAP leaves behind: one order_sap_sent row per member child carrying the roll-up end."""
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO order_sap_sent (order_id, plant, sent_finish)"
+                        " SELECT id, plant, %s FROM orders WHERE plant=%s AND parent_production_order=%s"
+                        " AND material_number=%s ON CONFLICT (order_id) DO UPDATE SET sent_finish = EXCLUDED.sent_finish",
+                        (sent_finish, self.PLANT, self.ORD, mat))
+            conn.commit()
+
+    def _date_state(self, pg, mat):
+        """Every stored date the writers could touch: the header's basic_finish_date and original, and each
+        child's basic dates, SAP baselines and locked originals."""
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT basic_start_date, basic_finish_date, original_finish_received"
+                        " FROM order_distribution WHERE plant=%s AND production_order=%s AND material_number=%s",
+                        (self.PLANT, self.ORD, mat))
+            header = cur.fetchone()
+            cur.execute("SELECT id, basic_start_date, basic_finish_date, sap_basic_start_date,"
+                        " sap_basic_finish_date, original_start_received, original_finish_received"
+                        " FROM orders WHERE plant=%s AND parent_production_order=%s AND material_number=%s"
+                        " ORDER BY id", (self.PLANT, self.ORD, mat))
+            return header, {r[0]: tuple(r[1:]) for r in cur.fetchall()}
+
+    def test_reweight_then_unchanged_dateonly_upload_resets_no_sibling(self, pg):
+        """Date-only SAP finish Fri 23 Oct; NIMBUS then sent Wed 28 Oct and the stored header/child
+        basic_finish_date drifted (a client due-date rewrite) so they differ from the SAP baseline. A planner
+        re-weight must leave EVERY stored date and baseline alone (a planner SET of sap_basic_* from header
+        facts would show here), and the next upload, SAP echoing the sent Wed 28 Oct date-only, must neither
+        reset a sibling slot (it would without the echo rule: 28 Oct differs from the 23 Oct baseline) nor
+        move the locked originals on the header or the children."""
+        fri = dt.datetime(2026, 10, 23)                       # date only: SAP sent no time
+        wed = dt.datetime(2026, 10, 28)
+        moved = dt.datetime(2026, 10, 30, 12, 0)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        header_before, kids_before = self._originals(pg, self.MAT)
+        assert header_before == fri and len(kids_before) == 2
+        assert all(k[1] == fri and k[3] == fri for k in kids_before.values())
+        self._mark_sent(pg, self.MAT, wed + dt.timedelta(hours=14))   # NIMBUS's roll-up end, differs from fri
+        self._place_and_firm(pg)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE order_distribution SET basic_finish_date=%s WHERE plant=%s AND production_order=%s",
+                        (moved, self.PLANT, self.ORD))
+            cur.execute("UPDATE orders SET basic_finish_date=%s WHERE plant=%s AND parent_production_order=%s",
+                        (moved, self.PLANT, self.ORD))
+            conn.commit()
+        state_before = self._date_state(pg, self.MAT)
+        assert state_before[0][1] == moved and all(k[1] == moved and k[3] == fri for k in state_before[1].values())
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 50}, {"machine": self.L2, "weight": 50}],
+            base_version=header["xmin"], actor="tester")
+        assert self._date_state(pg, self.MAT) == state_before, "a re-weight writes no date, baseline or original"
+        res = self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=wed)])
+        assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
+        for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+            assert sched is not None and firmed is True, "an echoed upload must not reset any sibling"
+        assert self._originals(pg, self.MAT)[0] == header_before
+        for cid, vals in self._originals(pg, self.MAT)[1].items():
+            assert vals[:2] == kids_before[cid][:2], "the locked originals did not move"
+
+    def test_reweight_adding_a_member_leaves_the_new_child_without_sap_baseline(self, pg):
+        """A child created by a planner re-weight inherits the header's originals but carries no SAP baseline
+        of its own (the next upload fills it); the existing children's baselines are not rewritten."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        L3 = "ZZTEST_L3_STR"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                        " VALUES (%s,%s,%s,%s,0)", (self.SUB, self.PLANT, L3, self.WC))
+            conn.commit()
+        try:
+            header_before, kids_before = self._originals(pg, self.MAT)
+            header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT,
+                [{"machine": self.L1, "weight": 40}, {"machine": self.L2, "weight": 40}, {"machine": L3, "weight": 20}],
+                base_version=header["xmin"], actor="tester")
+            header_after, kids_after = self._originals(pg, self.MAT)
+            assert header_after == header_before
+            assert len(kids_after) == 3
+            for cid, vals in kids_after.items():
+                if cid in kids_before:
+                    assert vals == kids_before[cid]
+                else:
+                    assert vals[0] == start and vals[1] == fri, "the new child inherits the locked originals"
+                    assert vals[2] is None and vals[3] is None, "and carries no SAP baseline yet"
+            # the same file again: no SAP change (a NULL baseline is never a difference), nothing resets, the
+            # new child's baseline is filled and the locked originals stay
+            self._place_and_firm(pg)
+            res = self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+            assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
+            for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+                assert sched is not None and firmed is True
+            header_after, kids_after = self._originals(pg, self.MAT)
+            assert header_after == header_before
+            assert all(v[0] == start and v[1] == fri and v[3] == fri for v in kids_after.values())
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+                conn.commit()
+
+    def test_reweight_never_rewrites_a_childs_dates_or_baseline(self, pg):
+        """A planner re-weight leaves every child's basic_finish_date, SAP baselines and locked originals
+        exactly as they are, even when the stored values differ from what the header would recompute."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        moved = dt.datetime(2026, 10, 27, 12, 0)     # what a client due-date rewrite would leave behind
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET basic_finish_date = %s WHERE plant=%s AND parent_production_order=%s",
+                        (moved, self.PLANT, self.ORD))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        distribution_data.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 50}, {"machine": self.L2, "weight": 50}],
+            base_version=header["xmin"], actor="tester")
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT basic_start_date, basic_finish_date, sap_basic_start_date, sap_basic_finish_date,"
+                        " original_start_received, original_finish_received FROM orders"
+                        " WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        for r in rows:
+            assert r == (start, moved, start, fri, start, fri)
+
+    def test_a_startless_header_matches_a_date_range_on_its_finish(self, pg):
+        """U14: a header created from a start-less row keeps basic_start_date NULL; the Board list and the
+        aggregate CSV date-range filters match it on its basic_finish_date instead of dropping it."""
+        finish = self.base + dt.timedelta(days=3)
+        self._upload(pg, [self._parent(self.MAT2, basic_start_date=None, basic_finish_date=finish)])
+        window = dict(date_from=finish - dt.timedelta(days=1), date_to=finish + dt.timedelta(days=1))
+        outside = dict(date_from=finish + dt.timedelta(days=5), date_to=finish + dt.timedelta(days=9))
+
+        def listed(**kw):
+            out = distribution_data.list_headers_for_plant(self.PLANT, search=self.ORD, limit=0, **kw)
+            return any(r["header"]["material_number"] == self.MAT2 for r in out["data"])
+
+        def aggregated(**kw):
+            return any(r.get("material_number") == self.MAT2 or r.get("material") == self.MAT2
+                       for r in distribution_data.get_aggregate(self.PLANT, **kw))
+
+        assert listed() and listed(**window) and not listed(**outside)
+        assert aggregated() and aggregated(**window) and not aggregated(**outside)
+
+    def test_new_child_without_a_sent_row_inherits_the_family_echo_decision(self, pg):
+        """U11: send -> re-weight (a new child with no order_sap_sent row) -> SAP echoes the sent finish. The
+        header and the old children keep their locked original finish; the new child must too (it used to take
+        NIMBUS's own sent finish as its locked SAP due date)."""
+        fri = dt.datetime(2026, 10, 23)
+        wed = dt.datetime(2026, 10, 28)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        self._mark_sent(pg, self.MAT, wed + dt.timedelta(hours=14))
+        L3 = "ZZTEST_L3_STR"
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter, distribution_weight)"
+                        " VALUES (%s,%s,%s,%s,0)", (self.SUB, self.PLANT, L3, self.WC))
+            conn.commit()
+        try:
+            header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+            distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT,
+                [{"machine": self.L1, "weight": 40}, {"machine": self.L2, "weight": 40}, {"machine": L3, "weight": 20}],
+                base_version=header["xmin"], actor="tester")
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM orders o JOIN order_sap_sent s ON s.order_id = o.id"
+                            " WHERE o.plant=%s AND o.parent_production_order=%s", (self.PLANT, self.ORD))
+                assert cur.fetchone()[0] == 2, "the new child has no sent row of its own"
+            self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=wed)])
+            header_orig, kids = self._originals(pg, self.MAT)
+            assert header_orig == fri
+            assert len(kids) == 3 and all(k[1] == fri for k in kids.values()), kids
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE plant=%s AND parent_production_order=%s", (self.PLANT, self.ORD))
+                cur.execute("DELETE FROM machine WHERE plant=%s AND machine=%s", (self.PLANT, L3))
+                conn.commit()
+
+    def test_header_original_finish_follows_the_echo_rule(self, pg):
+        """The header's locked due date: set by the first ingest, kept when the next upload echoes the roll-up
+        finish NIMBUS sent (judged on ANY member child's sent row), replaced by a genuine SAP change."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        assert self._originals(pg, self.MAT)[0] == fri
+        # no sent row on any member: a different finish is a genuine change
+        mon = dt.datetime(2026, 10, 26)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=mon)])
+        assert self._originals(pg, self.MAT)[0] == mon
+        # NIMBUS sent Wed 28 Oct; SAP echoes that date back (date only): the locked due date stays
+        self._mark_sent(pg, self.MAT, dt.datetime(2026, 10, 28, 14, 0))
+        wed = dt.datetime(2026, 10, 28)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=wed)])
+        header_orig, kids = self._originals(pg, self.MAT)
+        assert header_orig == mon and all(k[1] == mon for k in kids.values())
+        # a finish that is neither the old one nor the sent one is SAP's own change
+        thu = dt.datetime(2026, 10, 29)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=thu)])
+        header_orig, kids = self._originals(pg, self.MAT)
+        assert header_orig == thu and all(k[1] == thu for k in kids.values())
+
+    def test_header_echo_matches_any_member_sent_finish_not_only_the_largest(self, pg):
+        """VI11: a stale, larger sent finish on one member must not hide a genuine echo of the latest send
+        carried by another member; the header keeps its locked original finish."""
+        fri = dt.datetime(2026, 10, 23)
+        start = dt.datetime(2026, 10, 21, 8, 0)
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM orders WHERE plant=%s AND parent_production_order=%s AND material_number=%s"
+                        " ORDER BY id", (self.PLANT, self.ORD, self.MAT))
+            ids = [r[0] for r in cur.fetchall()]
+            assert len(ids) == 2
+            latest = dt.datetime(2026, 10, 28, 16, 0)
+            for oid, sent in ((ids[0], dt.datetime(2026, 11, 30, 10, 0)), (ids[1], latest)):
+                cur.execute("INSERT INTO order_sap_sent (order_id, plant, sent_finish) VALUES (%s, %s, %s)"
+                            " ON CONFLICT (order_id) DO UPDATE SET sent_finish = EXCLUDED.sent_finish",
+                            (oid, self.PLANT, sent))
+            conn.commit()
+        self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=latest)])
+        header_orig, _kids = self._originals(pg, self.MAT)
+        assert header_orig == fri
+
+    def test_sap_frame_echo_judged_for_header_and_children(self, pg):
+        """sap_tz="UTC" with a Chicago plant: Thu 22 Oct 19:00 plant-local is Fri 23 Oct in the SAP frame, so a
+        date-only Fri 23 Oct is an echo (locked originals stay, no slot reset); Sat 24 Oct is a genuine change."""
+        wed = dt.datetime(2026, 10, 21)
+        start = dt.datetime(2026, 10, 20, 8, 0)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT timezone FROM plants WHERE plant=%s", (self.PLANT,))
+            old_tz = cur.fetchone()[0]
+            cur.execute("UPDATE plants SET timezone='America/Chicago' WHERE plant=%s", (self.PLANT,))
+            conn.commit()
+        try:
+            self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=wed)], sap_tz="UTC")
+            assert self._originals(pg, self.MAT)[0] == wed
+            self._mark_sent(pg, self.MAT, dt.datetime(2026, 10, 22, 19, 0))
+            self._place_and_firm(pg)
+            fri = dt.datetime(2026, 10, 23)
+            res = self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=fri)],
+                               sap_tz="UTC")
+            assert not [w for w in res["warnings"] if w.get("category") in ("sap_changed", "unfirmed")], res["warnings"]
+            header_orig, kids = self._originals(pg, self.MAT)
+            assert header_orig == wed and all(k[1] == wed for k in kids.values()), "echo: originals stay"
+            for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+                assert sched is not None and firmed is True
+            sat = dt.datetime(2026, 10, 24)
+            res = self._upload(pg, [self._parent(self.MAT, basic_start_date=start, basic_finish_date=sat)],
+                               sap_tz="UTC")
+            header_orig, kids = self._originals(pg, self.MAT)
+            assert header_orig == sat and all(k[1] == sat for k in kids.values()), "genuine change: originals follow"
+            for _id, sched, firmed, _xmin in self._state(pg, self.MAT):
+                assert sched is None and firmed is False
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE plants SET timezone=%s WHERE plant=%s", (old_tz, self.PLANT))
+                conn.commit()
+
+    def test_replan_after_reweight_carries_the_date_only_flag_and_sap_fields(self, pg):
+        """The race re-plan rebuilds the children from the current shares; they must still carry the ingest
+        row's date-only flag (a timed 00:00:00 finish is not midnight-inferred), baselines and work center."""
+        midnight_timed = dt.datetime(2026, 10, 23)
+        row = self._parent(self.MAT, basic_start_date=dt.datetime(2026, 10, 21, 8, 0),
+                           basic_finish_date=midnight_timed, sap_basic_finish_date=midnight_timed,
+                           sap_basic_start_date=dt.datetime(2026, 10, 21, 8, 0), _finish_date_only=False,
+                           sap_workcenter=self.WC, sap_production_version="0001")
+        _rows, plan_structure, _w = distribution_data.plan([row], "replan-batch")
+        parent = plan_structure["parents"][(self.PLANT, self.ORD, self.MAT)]
+        assert all(c["_finish_date_only"] is False for c in parent["child_rows"])
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            current = distribution_data._lock_one_header(cur, self.PLANT, self.ORD, self.MAT)
+            replanned = distribution_data._replan_from_current_header(cur, parent, current)
+            conn.rollback()
+        assert replanned["child_rows"]
+        for c in replanned["child_rows"]:
+            assert c["_finish_date_only"] is False
+            assert c["sap_basic_finish_date"] == midnight_timed
+            assert c["sap_basic_start_date"] == dt.datetime(2026, 10, 21, 8, 0)
+            assert c["sap_workcenter"] == self.WC and c["sap_production_version"] == "0001"
+
+    def test_resolve_machines_header_due_comes_from_the_plain_orders_locked_original(self, pg):
+        """`resolve` scope `machines`: the new header's due date is the plain order's locked original finish,
+        never a client-rewritten basic_finish_date."""
+        fri = dt.datetime(2026, 10, 23)
+        moved = dt.datetime(2026, 10, 27, 12, 0)
+        oid = pg.make_id(self.ORD, self.MAT)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            # start from a plain order: drop the family the fixture ingested
+            cur.execute("DELETE FROM orders WHERE plant=%s AND (parent_production_order=%s OR id=%s)",
+                        (self.PLANT, self.ORD, oid))
+            cur.execute("DELETE FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            cur.execute(
+                "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                " basic_finish_date, original_start_received, original_finish_received, order_quantity, run_time)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,100,10)",
+                (oid, self.ORD, self.MAT, self.L1, self.PLANT, dt.datetime(2026, 10, 21, 8), moved,
+                 dt.datetime(2026, 10, 21, 8), fri))
+            conn.commit()
+        res = distribution_data.resolve(self.PLANT, "machines", workcenter=self.WC, actor="tester")
+        assert res["headers_created"] == 1
+        assert self._originals(pg, self.MAT)[0] == fri
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT basic_finish_date FROM order_distribution WHERE plant=%s AND production_order=%s",
+                        (self.PLANT, self.ORD))
+            assert cur.fetchone()[0] == fri
 
     def test_parent_quantity_change_resets_all_children(self, pg):
         self._upload(pg, [self._parent(self.MAT)])
@@ -4785,6 +5430,7 @@ class TestMutationHolesChildUpsertAndDelete(_ReweightFixtureBase):
         "order_type", "bom_alternative", "bom_usage", "labor_hours", "machine_hours", "no_of_fte",
         "parent_production_order", "distribution_letter",
         "sap_workcenter", "sap_production_version", "sap_basic_start_date", "sap_basic_finish_date",
+        "original_start_received", "original_finish_received",
     )
 
     def _child(self, pg, machine):
@@ -4961,3 +5607,12 @@ def test_aggregate_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
     assert data[:3] == ["'=1+1", "'+MAT", "'-WC"]
     assert data[10] == "'@X"
     assert data[3] == "10" and data[7] == "1"
+    assert parsed[0][-1] == "due_date" and data[-1] == "", "no due date from SAP -> empty cell, no fallback"
+    rows[0]["due_date"] = dt.datetime(2026, 10, 9, 16, 0)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "reader@example.com"
+    try:
+        again = TestClient(brain.api).get("/distribution/ZZPLANT/aggregate", params={"format": "csv"})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert list(_csv.reader(_io.StringIO(again.content.decode("utf-8-sig"))))[1][-1] == "2026-10-09 16:00:00"

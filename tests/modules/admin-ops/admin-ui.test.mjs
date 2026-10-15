@@ -132,3 +132,29 @@ test('_clearBackendLog confirms first, and reports a non-OK response instead of 
     globalThis.fetch = priorFetch; Modal.confirm = priorConfirm; Toast.show = priorToast;
   }
 });
+
+test('purge preview sends the whole-day range (T00:00:00 start, T23:59:59 end), the same shape the purge call sends', async () => {
+  const priorFetch = globalThis.fetch, priorDocument = globalThis.document;
+  const priorPlant = AdminCockpit._purgePlant, priorStart = AdminCockpit._fpPurgeStart, priorEnd = AdminCockpit._fpPurgeEnd;
+  const bodies = [];
+  const els = { 'admin-past-count': { innerHTML: '', textContent: '' }, 'admin-purge-btn': { disabled: false } };
+  globalThis.document = { getElementById: id => els[id] ?? null };
+  globalThis.fetch = (url, opts) => {
+    bodies.push({ url: String(url), body: JSON.parse(opts.body) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: 'ok', plant: '1085', total: 0, planner_overridden: 0 }) });
+  };
+  try {
+    AdminCockpit._purgePlant = '1085';
+    AdminCockpit._fpPurgeStart = { selectedDates: [new Date(2026, 8, 1)] };
+    AdminCockpit._fpPurgeEnd = { selectedDates: [new Date(2026, 8, 30)] };
+    await AdminCockpit._fetchPurgePreview();
+    assert.equal(bodies.length, 1, 'one preview request');
+    assert.match(bodies[0].url, /\/purge\/preview$/);
+    assert.equal(bodies[0].body.start_date, '2026-09-01T00:00:00');
+    assert.equal(bodies[0].body.end_date, '2026-09-30T23:59:59', 'a bare date would count the last day from 00:00 and under-count the purge');
+  } finally {
+    globalThis.fetch = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    AdminCockpit._purgePlant = priorPlant; AdminCockpit._fpPurgeStart = priorStart; AdminCockpit._fpPurgeEnd = priorEnd;
+  }
+});

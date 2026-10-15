@@ -1,0 +1,535 @@
+# Backward scheduling: validation findings (2026-10-15)
+
+Written for the product owner. This is the result of the exhaustive validation run you asked for on 2026-10-15: fifteen Sonnet agents each checked one area of branch `feature/backward-scheduling` (tip `69df633`, 133 commits over `main` at `62d786e`), fourteen independent checkers re-proved every serious finding, one agent ran the whole test suite and a trial merge with `main`, and one pass merged everything into a single list. **Nothing was fixed, committed, pushed or deployed.** The evidence lives in `.superpowers/sdd/2026-10-13-backward-scheduling-implementation/validation-review/` (`L<n>-report.md`, `V<n>-verdicts.md`, `GATES.md`, `CONSOLIDATED.md`); every line below links to a block there by id.
+
+Sections: 1 Verdict; 2 What a planner would hit, in plain language; 3 The full list, one line per finding; 4 How NIMBUS compares with standard SAP; 5 Test results; 6 What could not be checked; 7 Decisions you need to make; 8 Inputs for the implementation plan; Appendix: how this run was done.
+
+---
+
+## 1. Verdict
+
+**Not ready to merge as-is.** The branch is stable and the whole test suite is green on its own and after a trial merge with `main`, but the run found **1 Critical, 19 Important and 29 Minor confirmed defects**, plus 3 plausible-but-unproven and 29 reviewer-only minors (81 lines from 102 raw findings; 14 duplicates merged, 7 dropped as already-known). Nothing was refuted. Three earlier "leave it" decisions were shown to be wrong (the fall-back-hour case, the 90-day look-back, and "the browser never sends that payload").
+
+The core of the design holds: the backward walk matched an independent oracle on 15,000 random single orders, 41,000 reconcile rows and 30,549 alerts; the optimizer's output is byte-identical to the pre-branch base; the cutover migrations, the restore round trip and the schema re-apply all did what the runbook promises on a seeded pre-cutover database; the live HTTP contract behaved per spec on every step with no server errors; timing is linear (about half a millisecond per order).
+
+Against standard SAP backward scheduling: of 18 standard behaviours, 6 conform and 12 differ. Nine of the twelve are differences you already decided (one operation per order, finite capacity, no "today-scheduling" tolerance days, never-split plants, sequence-dependent setup, firm-only Send, and so on), two are open questions you have not yet decided (SAP's safety floats, and its "shrink before flipping" reduction steps), and one is an unintended defect (manual edits round the held finish to 15 minutes).
+
+---
+
+## 2. What a planner would hit, in plain language
+
+Each item names its id from section 3. "After cutover" means in the first days after the one-time migration, when almost every order is "not yet placed" until someone saves it.
+
+**The one Critical (VC1).** After cutover, a planner who firms an order, or changes its tooling or production version, on an order that has not been placed yet gets a warning "start and finish must be saved together" and the change is thrown away on reload. Why: the browser sends those edits without dates, and the server's new "both edges or nothing" rule rejects the whole item. Example: the morning after cutover a planner firms twenty orders for Send to SAP; none of them is firmed. Two independent agents found it from opposite ends (server and browser) and a third proved it end to end against a real database.
+
+**Saving and the server's width check (VI1, VI2, VI3, VI9, VI5).**
+- VI1: every manual edit that is supposed to hold the finish (run time, machine, production version, the Inspector, the Override window, Push +1 h, multi-drag) first rounds the finish to the nearest 15 minutes. A finish of 14:37 silently becomes 14:30 or 14:45, Push +1 h becomes anything from +53 to +67 minutes, and the rounded value is what goes to SAP. Found independently by three agents.
+- VI2: on the autumn clock-change day (1 Nov 2026 in the US, 25 Oct in Europe), any bar with an edge inside the repeated 01:00–02:00 hour on a line open through it is rejected by the server's width check, stays dirty, and is re-derived to the same rejected pair every time.
+- VI3: the paths kept from before (optimizer, auto-reflow, Remove Backlog) still measure time on the viewer's clock while the server measures on the plant's. On the spring clock-change day an 8-hour order placed across the gap is 7 real hours and the save is rejected. Twice a year, only when the planner's browser and the plant change clocks on different dates.
+- VI9: an unsaved run-time edit survives a reload as a bar of the new width on the old run time; the next Save is rejected and the edit is lost.
+- VI5: after a manual placement the red "start may be out of date" alert never clears for the session, and the next calendar change re-derives an already-saved bar.
+
+**Manual placement guards (VI4, VI6, VI7).**
+- VI4: a drop, typed finish or edit made in the first seconds after load, or on a line with no calendar row, derives the start on the built-in 07:00–19:00 default and Save persists it as truth. Only the automatic re-derive has the guard; hand placement does not.
+- VI6: on a never-split plant (the default) an order queued for being over the 336-hour cap can never be released by any planner action, although the decision says a planner can approve and release it.
+- VI7 (owner question): typing a new End, or dragging, on an order that is already running re-derives its start, so a started order becomes "not started" and loses its running protection. The decision only covered machine and version edits.
+
+**Send to SAP and the echo rule (VI11, VI12, VI13).**
+- VI12: for a firmed order that has not been placed and whose due date came from SAP as a date with no time, Send converts the stored midnight into SAP's zone. A Berlin plant sends 13 Oct 22:00 for a 14 Oct due date; NIMBUS's own Send rewrites the due date it is supposed to protect.
+- VI13: Send and ingest are not blocked for a plant with no time zone; the value goes out unconverted and is remembered as sent. The only guard is the one-time pre-cutover SQL check.
+- VI11: for an aggregate work-centre family, the header's echo check compares against the largest finish ever sent across the family, so a stale sent row on a queued sub-order makes a genuine SAP echo look like a change and the header's locked due date is overwritten with NIMBUS's own finish.
+
+**Cutover and rollback (VI14, VI15, VI16, VI17).**
+- VI14: the cutover nulls placed orders on lines that have no calendar row, although the decision says such lines are excluded, and the runbook has no gate for it. On the seeded copy 17 of 27 placed orders on one line lost their dates and the browser then refuses to re-derive them.
+- VI15: nothing forces the snapshot to run before the cutover. In the wrong order both succeed and the "rollback" snapshot holds the already-nulled state.
+- VI16: the restore script aborts if any snapshotted order was deleted afterwards (purge, re-upload, family collapse); the database is left unchanged but the operator must hand-edit the script mid-incident.
+- VI17: the backward walk looks back at most 90 days, so an order due after a 100-day shutdown is placed at "now", six months early, with a false "due date passed" alert.
+
+**Optimizer (VI10).** When the gap-fill step runs out of its one-second budget it relabels queued orders as "time limit reached", overwriting "too long to fit", so the planner loses the release path for overlong orders.
+
+**Release documents (VI18, VI19).** The three deploy documents disagree on whether Phase 1 ships first as its own release, and the Phase 1 branch they tell you to merge first (`5fbdfb7`) predates the senior-review fix wave, so it would ship already-fixed defects.
+
+---
+
+## 3. The full list, one line per finding
+
+Line shape: `id | source ids | verdict | severity | kind | file:line | defect | user-visible effect | how it was verified | SAP classification (divergences only)`. Severity is the checker's where it differs from the reviewer's. Verdict meanings: CONFIRMED = reproduced or traced with no guard; PLAUSIBLE-UNPROVEN = reviewer reproduced, checker did not re-run; REVIEWER-ONLY = Minor, read but not re-proved.
+
+### CONFIRMED - Critical (1)
+
+VC1 | L3-1+L6-1 | CONFIRMED | Critical | regression | db.py:1704-1715 (client side persistence.mts:1097-1117) | The browser save of a never-placed (display-only) row always carries planning_status:'scheduled' with no dates, and the new server guard rejects that whole item as single_edge (the Task 2.8/2.5 deferrals in section 7 assumed the browser never reaches it). | Firm, PRT_01/02 and production-version (non-routing plants) edits on any not-yet-placed order, which is nearly every order after cutover, are not saved: a misleading 'start and finish must be saved together' warn toast shows, the dirty flags clear, the edit vanishes on reload, and an unplaced order cannot be firmed for Send (OQ54/OQ61); L6-1's 'every attribute edit' is too broad, RUN_TIME/MACHINE edits place the row and are not hit. | Real payload through route layer, rolled back
+
+### CONFIRMED - Important (19)
+
+VI1 | L1-1+L2-2+L5-1 | CONFIRMED | Important | new-defect | frontend/optimization/engine.mts:1421 (Util.snap at foundation.mts:256) | manualSchedulePatchFor rounds every requested finish to the nearest 15 minutes, including the callers that mean hold the finish (run-time/machine/version edit, Inspector, Override, Push +1 h, line-only drag, multi-drag companions), while reconcile does not snap. | An off-grid held finish (reversal floor-to-minute, SAP timed finish, blackout clamp) silently moves up to 7.5 min later or earlier on a run-time edit, Push +1 h becomes +53 to +67 min, an edit at a window's opening minute is refused finish_cannot_hold, and that moved finish is what is sent to SAP. | Probes on compiled twins; callers traced
+VI2 | L2-1+L12-1 | CONFIRMED | Important | new-defect | frontend/calendar/calendar-engine.mts:784,884 (toWall) vs db.py:1140-1164,1695,1733 | On the daylight-saving fall-back day the plant-zone walk returns naive wall times inside the repeated hour that the server reads with fold=0 (first occurrence), so the new width gate rejects the engine's own bar as width_mismatch and a zero-width forward leg is rejected by end<=start; this overrides section 7 Task 2.3 'leave' and F17, whose premises (24/7 lines only, starts only, 1 h long) are too narrow. | On 2026-11-01 (US) / 2026-10-25 (EU), any re-derived or edited bar with an edge in the repeated hour on a line open through it is dropped from the save and stays dirty, the engine re-derives the same pair every time, and a reversal chain restarts an hour early (overlap). | Reran probes; called db width gate directly
+VI3 | L7-2 | CONFIRMED | Important | new-defect | frontend/optimization/setup-scheduler.mts (no zone), engine.mts:1279,2007-2011 vs db.py:1140-1164 | Every retained forward path (optimizer evaluators, schedulePatchFor running holds and overlap Fix, autoReflow, Remove Backlog) measures elapsed time in the viewer's clock while the new width gate measures in the plant's zone; this is a SIBLING of VI2 (spring-forward gap on zone-less forward paths, not the fall-back fold) and a fold-tolerant gate alone would not fix it. | For a viewer whose DST dates differ from the plant's, an 8 h order on a 00:00-08:00 window across the plant's spring-forward is placed Sunday 00:00-08:00 (7 h real) and the save rejects it width_mismatch, twice a year; for a same-DST viewer it is placed a day later than the wall clock suggests. | Optimizer-level probe; executed db width function
+VI4 | L5-2 | CONFIRMED | Important | new-defect | frontend/optimization/engine.mts:1310 (finishAnchoredPatchFor; guards only at 1575/1706) | Manual placement has no calendar-hydration or per-line-calendar guard; only the reconcile refuses while the plant calendar is pending/failed or the line has no server calendar row (OQ51/OQ62). | A drop, typed finish, run-time/machine/version edit or Push during the first seconds after load, after a failed calendar fetch, or on a line without a calendar row derives the start on the 07:00-19:00 Mon-Fri client default and Save persists it as truth. | Probe with real CalendarSync state
+VI5 | L5-3 | CONFIRMED | Important | new-defect | frontend/optimization/engine.mts:1397 (manual and Push patches; copy-back only at persistence.mts:1468) | A manual placement never clears runtime_schedule_mismatch on the client row, although the server clears it on a width-checked save. | After cutover every placed row keeps the red 'start may be out of date' alert for the session and the next calendar:change re-derives the already-saved row and writes a fresh dirty patch (a split order is re-walked and gets setup reserved). | Probe P3 plus server path trace
+VI6 | L5-4 | CONFIRMED | Important | new-defect | frontend/optimization/engine.mts:1425,1458-1474 | A queued run_time_over_cap row on a never-split plant (the DB default) can never be released: the marked-release fallback fires only for queue code overlong_never, so finishAnchoredPatchFor's overlong_never refusal stands (a ruling whose consequence the spec did not notice). | On a never plant an over-cap order cannot leave Needs Planning by any planner action (OQ28 says a planner can approve and release it), the planner only sees the generic 'could not place' toast, and editing RUN_TIME down to 20 h still refuses. | Probes P4a-c; traced release gate | owner question (OQ28/OQ50 ruling consequence)
+VI7 | L5-7 (promoted from Minor) | CONFIRMED | Important | sap-divergence | frontend/optimization/engine.mts:1428 (orders.mts:1420-1424,2544-2547; gantt.mts:4464,4564) | holdStartIfRunning is false for a typed End and for every Gantt drag, so moving the finish of a RUNNING order re-derives its start (OQ3 names machine/version edits and is silent on an explicit finish edit). | A physically started order typed to a new End becomes 'not started' with a future start, loses running protection (optimizer, autoReflow and alert fixes may move it) and the server's running readers no longer see it as running. | Probe P5; traced callers and firmingStatus | owner question (OQ3, SAP item 9)
+VI8 | L6-2 | CONFIRMED | Important | new-defect | frontend/nimbus-intelligence.js:1449-1461 with frontend/platform/store.mts:413-417 | A Time Machine restore patches every snapshot row with source 'time-machine', which _markPlaced does not exclude, so every never-placed row becomes user_scheduled+dirty before reconcileRestored can see it (the U31/F10 fix is incomplete). | Restoring any snapshot then Save persists every display-derived date of the plant as a planner placement, and any whose derived start sits in the frozen window is sent firm at the next Send (irreversible, OQ54). | Reran probe with real reconcileRestored
+VI9 | L6-3 | CONFIRMED | Important | new-defect | frontend/scheduling/persistence.mts:844-876 | The cached-edit overlay restores dates, segments, placed flag and marker but not RUN_TIME/MACHINE/PRT/PRODUCTION_VERSION. | An unsaved run-time edit survives a reload as a bar of the new width on the old run time, the next Save is rejected width_mismatch, the edit is lost and the bar stays mis-sized until reload (pre-branch the mismatched pair saved silently). | Reran overlay probe; traced reconcile filter
+VI10 | L7-1+V7-1 | CONFIRMED | Important | new-defect | frontend/optimization/setup-scheduler.mts:7081-7083,7187-7194 | fillPlanningGaps relabels every still-queued order search_limit when its gap check did not complete (budget expiry, or a validation error on the candidate so the loop never runs), overwriting overlong_never because the overlong test is gated on complete. | An overlong order on a never plant is queued as 'time limit reached' and the planner's OQ50 release (drag or run-time edit as one marked bar) is refused until a later run finishes in time; the label also varies with machine speed. | Reran probe at budgets 1000 and 0
+VI11 | L8-1 | CONFIRMED | Important | new-defect | backend/distribution/data.py:1181-1208 | _header_finish_echo compares the incoming SAP finish with MAX(sent_finish) over the family, while the child path (U11) accepts an echo of ANY member's sent finish. | With a stale greater sent row on a queued sibling, a genuine echo of NIMBUS's latest send reads as an SAP change, the header's locked due date is overwritten with NIMBUS's own finish and later-created children inherit it (self-corrects on the next real SAP change). | Reran rolled-back echo repro on DB
+VI12 | L4-1 | CONFIRMED | Important | sap-divergence | backend/integration/sap_staging.py:2214-2271 (queue_send_to_sap, _outbound_candidate_rows) | Send treats a date-only due date (stored as plant-local 00:00) on a never-placed firmed order as a timed value and converts it to the SAP zone, because no date-only flag is persisted for Send to read. | SAP receives a timed, zone-shifted finish (Chicago 05:00 same day, Berlin 22:00 the previous day, Singapore 16:00 the previous day) so NIMBUS's own Send rewrites the due date O4 protects while the echo loop stays silent. | Scratch send per zone; rolled back | unintended
+VI13 | L4-5+L11-4 (L11-4 promoted from Minor) | CONFIRMED | Important | sap-divergence | backend/integration/sap_staging.py:231-245,2256-2262 (ingest side :211-229) | Send to SAP and ingest for a plant with no timezone are not blocked: plant_local_to_sap and sap_to_plant_local do nothing when the zone is NULL, and the only guard is the manual one-time Q15 SQL gate (OQ52). | A firmed order on an unzoned plant is queued with its plant-local clock time unconverted (12:00 instead of 10:00 for Berlin to UTC), possibly on the wrong date, and the wrong value is remembered as the sent finish. | HTTP send with NULL zone reproduced | unintended
+VI14 | L10-1 | CONFIRMED | Important | new-defect | migrations/2026-10-20-1-backward-cutover.sql:25-45 (docs/DEPLOYMENT.md steps 2/4) | The cutover nulls placed orders on lines with no machine_calendar row although OQ62 says such lines are excluded from the cutover write, and the runbook has no Q13-must-be-zero gate (the SQL exclusion predicate must match the frontend guard, machine_calendar.work_hours IS NOT NULL, not plant hours). | On the pilot copy 17 of 27 placed orders on 1085/L3 lost start and end, the frontend then refuses to derive them (line_no_calendar) so they stay unplaced until a calendar exists, and the only copy of their placements is the snapshot. | Reran Q13; compared pre/post snapshot rows
+VI15 | L10-2 | CONFIRMED | Important | new-defect | migrations/2026-10-20-1-backward-cutover.sql:17-18 | The cutover has no precondition that the snapshot ledger id exists, so applying it before 2026-10-20-0 succeeds and the later snapshot then records the post-cutover state. | A wrong-order window exits 0 on both files with both ledger ids present and a rollback source holding the nulled state, so the pre-cutover placements are silently destroyed and no check (step 10 row count included) warns. | Fresh DB, wrong order, psql exit codes
+VI16 | L10-3+L15-2 | CONFIRMED | Important | new-defect | migrations/manual/2026-10-20-restore-precutover-snapshot.sql:44-55 | The restore re-inserts every snapshot segment row with no check that the owning order still exists, so one order purged, re-uploaded away or collapsed since the snapshot violates order_schedule_segments_order_id_fkey. | The rollback matrix's 'before any planner saves' path aborts (database left unchanged, psql exit 3) at the moment it is needed and the operator must hand-edit the script mid-incident; test_restore_before_any_save_is_exact seeds no deletion. | Copied DB; deleted order; ran restore
+VI17 | L12-4 (promoted from Minor) | CONFIRMED | Important | new-defect | frontend/calendar/calendar-engine.mts:148 (BACKWARD_LOOKBACK_DAYS 90), consumed engine.mts:1353 | The backward walk looks back at most 90 days, so a shutdown longer than that before a far due date makes the walk return reached_now and the caller reverses forward from now (section 7 Task 2.1 'naming only, leave' rests on the false premise that the forward leg then fails visibly). | An order due after a 100-day shutdown is placed at now, six months before its due date, consuming today's capacity under a false 'due date passed, will finish late' alert instead of the latest legal finish before the shutdown plus a distance alert (OQ13/OQ55). | Reran shutdown repro with controls
+VI18 | L15-1 | CONFIRMED | Important | doc-drift | docs/MIGRATION.md:1395 and runbook (b) step 4:1424 vs docs/DEPLOYMENT.md:130-132 vs final report section 6 | The three deploy documents disagree on whether Phase 1 ships as its own merge and image first (plan, spec, report section 6, MIGRATION step 4, DEPLOYMENT step 2) or all phases ship as one release (MIGRATION.md intro, broken by 4a5af9e; DEPLOYMENT step 1 'nothing from this branch deploys before that' is literally false once Phase 1 shipped). | An operator at a one-shot destructive cutover cannot tell which sequence is authoritative and may skip the Phase 1 image roll and run only its migrations. | Quoted passages; git history of sentence
+VI19 | V15-1 | CONFIRMED | Important | doc-drift | docs/MIGRATION.md:1424 (runbook (b) step 4) and final report section 6 item 1 | The branch both documents tell the owner to merge first, feature/backward-scheduling-phase1 (tip 5fbdfb7), predates the senior-review fix wave: it still has cap_hours lowered by the visibility horizon and lacks the I5/U5/U10/U11/U12 fixes (db.py and backend/integration differ by +435/-236). | A Phase-1-first release would ship the already-fixed defects while MIGRATION.md's own planner notice promises a flat 336 h cap. | git diff 5fbdfb7..HEAD on Phase 1 files
+
+### CONFIRMED - Minor (29)
+
+VM1 | L1-4 | CONFIRMED | Minor | sap-divergence | whole feature (no float concept in db.py, engine.mts, calendar-engine.mts) | NIMBUS schedules zero slack: no floats, opening period or scheduling margin (spec A9 lists floats as unverified; V1 also moves matrix row 6 'reduction before flipping' from owner-decided OQ50 to owner question and folds it here). | Bars end exactly on the due date and start exactly run time (plus setup) earlier, so any slippage is immediately late and the first SAP re-run after an echo could flip to today scheduling. | RULEBOOK scan; no float OQ exists | owner question (SAP items 2 and 6, A9)
+VM2 | L3-2+L11-1 (L3-2 downgraded Minor by V3; V11 kept Important) | CONFIRMED | Minor | new-defect | db.py:1635,1753-1760 (test pin tests/test_task_concurrency.py:246-250) | A save that changes RUN_TIME on a placed continuous row and sends no edges is accepted, writes the new run time, keeps the old bar and neither width-checks nor sets runtime_schedule_mismatch (same via /tasks/update and /task/update); consolidator sides with Minor because the browser always sends both edges, no external caller is known (Phase 0 item g) and pre-change behaviour was identical. | An external writer that sends only RUN_TIME leaves a 4 h bar for a 6 h order with no stale flag, no reconcile and no alert, and Send transmits the stale finish. | HTTP and route-layer repro, rolled back
+VM3 | L3-4+L11-2 | CONFIRMED | Minor | new-defect | backend/scheduling/routes.py:455-496 (models.py TaskUpdateResult) | POST /task/update turns every rejection into HTTP 400 'Invalid date range (end must be after start)' and its response model has no rejection_reasons or start_derived (text predates the branch, the new reasons were not wired in). | External callers get a wrong-cause 400 for a width mismatch or single_edge and are never told start_derived; the browser does not use this route. | HTTP repro of both rejection shapes
+VM4 | L3-6+L15-3 | CONFIRMED | Minor | doc-drift | schema.sql:116 and migrations/2026-10-15-2-orders-run-time-bounds-336.sql:11-12 | Both comments still say the run-time limit is '336 hours, or the plant's visibility horizon when shorter', but U5 made it a flat 336 (db.cap_hours ignores its argument); commit 5337e82 claimed to have fixed every such description (prior U5 fix incomplete). | The operator reads the migration before run 2 and a reader tunes a plant horizon expecting a shorter cap. | Compared comments with db.py:274-278
+VM5 | L7-3 | CONFIRMED | Minor | sap-divergence | frontend/optimization/engine.mts:1200-1232 and setup-scheduler.mts:6337-6347 | For a date-only due on a closed day the due DAY becomes the previous open day, so max_push/pull_forward_days N counts from that day and silently shrinks by the length of the closed gap (help text en.js:753 does not say so). | On a Mon-Fri plant a Sunday due with N=2 allows no more working time after the due than N=0 (floor Wed, ceiling Mon 00:00). | Reran due-window probe; read help text | owner question (conflict 13, SAP item 5)
+VM6 | L7-4 | CONFIRMED | Minor | new-defect | frontend/insights/services.mts:488, frontend/optimization/engine.mts:2565-2574 | The U21 no-timezone refusal lives only in the Optimize dialog (optimize-ui.mts:650); the overload alert Fix calls Engine.runAndApply directly and liveClock keeps the viewer-clock fallback. | On a plant with no timezone, clicking Fix on an overload alert still re-places orders against the viewer's clock instead of refusing (OQ52). | V7 code-read of callers and guard
+VM7 | L7-6 | CONFIRMED | Minor | new-defect | frontend/optimization/engine.mts:1975,2047-2051 | Remove Backlog skips marked (overtime/overlong) rows as movers but neither treats them as obstacles nor includes them in its boundary scan, which only considers protected rows starting after the target. | A compressed order can land on a marked bar inside the window with no boundaryConflicts entry; only the later Gantt overlap alert reports it. | V7 code-read of boundary scan
+VM8 | L7-7 | CONFIRMED | Minor | doc-drift | frontend/optimization/optimize-ui.mts:372-381 (persistence.mts:1644, store.mts:425) | The Remove Backlog 'run-time grew' count reads derivationIssue, which is session-only (not cached or saved) and cleared on any later update of the row. | After a save and reload the count is 0 for exactly the orders OQ56(a) is about (owner question whether a session-only count meets OQ56). | Traced cache strip and note clearing
+VM9 | L7-8 | CONFIRMED | Minor | new-defect | frontend/calendar/calendar-engine.mts:975-988 via engine.mts:1735 | Under partial_allowed the reconcile's setup-aware second walk fragments an order that fits one window to make room for the changeover, and the I8 acceptance rule checks only the finish. | A 15.5 h run that fits one 06-22 window becomes two pieces (a 30-minute tail the previous evening) with no alert; whether a changeover may split an order is an owner call (OQ2 V1 vs ruling 3.2). | Reran split probe; read acceptance rule
+VM10 | L8-3 | CONFIRMED | Minor | new-defect | backend/distribution/data.py:3885-3935 (_resolve_wc_codes) | The wc_codes resolve path calls apply() and _stamp_batch_children but never db._apply_run_time_cap, the one distribution writer outside the I12 cap fix. | A queued over-cap order resolved into two within-cap children carries needs_planning and the over-cap reason onto both, and nothing releases them until a later upload. | V8 grep and code trace
+VM11 | L8-4 | CONFIRMED | Minor | test-gap | backend/distribution/data.py:3354-3361 (dry-run branch of _materialize_reweight) | The dry run returns before the cap runs, so a share edit that pushes a child over the cap previews as resized and queues the child on save; TestReweightSharesDryRunParity does not cover it. | The 'preview is provably identical to the write' claim fails for an over-cap child (70/30 on 800 h shows 560 h, Save queues it). | V8 code trace of branch order
+VM12 | L9-1+V9-1 | CONFIRMED | Minor | test-gap | frontend/nimbus-compute-core.js:1272 (also insights-ui.mts:1258-1263) | The U29 fix stopped at workingMinutesByDay: computeUtilization still skips a row with no start_date and the cell briefing discards the same row, so a finish-only row never reaches the matrix (U29 fix shown incomplete; V9 refuted the dispatch premise that all post-cutover rows are finish-only, the cutover nulls both edges and the first-load reconcile derives them in memory). | For rows that stay end-only (reconcile cannot derive: no calendar row, no zone, unhydrated) the overload alert counts the hours while the heatmap, Dashboard headroom tile and Labor plan show 0 and the briefing lists none of it. | Scratch node test; traced populations
+VM13 | L9-5 | CONFIRMED | Minor | new-defect | frontend/insights/insights-ui.mts:1287-1304 | CAT_MAP has no entry for the 13 new alert types (late, reversal_forward, finish_moved_earlier, plant_no_timezone, line_no_calendar, placement_exception, ...), so the cell briefing files them all under Other. | A line_no_calendar card sits under Other instead of Calendar Restrictions and a late card under Other on its finish day (headline and Go to/Dismiss still work). | Traced CAT_MAP fall-through
+VM14 | L9-6 | CONFIRMED | Minor | new-defect | frontend/nimbus-compute-core.js:992-1008 with insights-ui.mts:399-405 | An approved placement exception (OQ63) raises a permanent error-severity alert, the Alerts Today tile counts it as 'blocking - fix now' and the Orders Conflicting chip lists it (the alert is owner-decided, the err severity is a Phase 3 ruling, the stickiness is F18); V9 corrected L9: no Fix button renders for it. | Every approved overtime/overlong placement is a permanent red card, a 'blocking' tile count and a Conflicting row until the order is unscheduled. | Traced tile, chip, dismissal paths | owner question (OQ63, F18)
+VM15 | L11-3 | CONFIRMED | Minor | test-gap | db.py:1719-1735 (comment at :1716) | The unmoved-bar bypass is computed before the marker change, so an explicit placement_exception:null on an unmoved wrong-width bar is accepted unchecked and clears the marker (the inline comment is wrong for this case; no browser path reaches it). | An external writer can strip the marker from an off-width bar, leaving it unmarked and unflagged until the next edge change (whether a marker change counts as moved is an OQ63 question). | HTTP repro with moved control
+VM16 | L11-5 | CONFIRMED | Minor | doc-drift | backend/scheduling/routes.py:557-564, backend/scheduling/models.py:206-207 | Route and model docs show start_date/end_date as optional although a finish-only or start-only write to a non-queued, non-segment row is always rejected single_edge. | An external writer following the docstring [{id, end_date}] gets persisted 0 / single_edge; a queued row cannot be released by a status-only save either. | HTTP repro of single_edge
+VM17 | L12-2 | CONFIRMED | Minor | new-defect | frontend/calendar/calendar-engine.mts:905-906 (hasNominalWindow at :494-507) | The forward leg decides 'inherently overlong' from viewer-zone elapsed ms via hasNominalWindow while the backward walk decides in plant-zone instants (same root as VI3; the known-not-verified DST item, now verified from this side). | A Berlin overlong_only order 1 h above its longest window is split in a UTC browser but refused no_operating_window in a Chicago browser when a US DST change falls in the 90-day look-ahead. | Reran repro under two process zones
+VM18 | L12-3 | CONFIRMED | Minor | new-defect | frontend/nimbus-compute-core.js:120-131 (plantWallClockFromInstant) / Store.plantNow store.mts:322-327 | Plant wall times that do not exist in the browser's own spring-forward gap cannot be carried by a naive Date, so a cross-zone viewer gets different results for that one plant hour (documented only for the zone-less path). | A US browser viewing a Berlin or Kolkata plant sees plant now an hour late on 2026-03-08 and loses an hour of capacity in partial placements. | Harness re-run under UTC and Chicago
+VM19 | L12-5 | CONFIRMED | Minor | doc-drift | frontend/insights/services.mts:337-361 | The _recomputeSync comment claims worker-dead alerts are identical, but the sync clock payload covers every loaded plant while the worker path is scoped to the selected one, so another plant's plant-no-timezone alert appears only on the sync path (reach is narrow: tasks load per plant). | With two loaded plants the sync list carries an unzoned second plant's alert that the worker list lacks. | Harness re-run; traced both payloads
+VM20 | L14-1+L14-2 (L14-1 downgraded Minor by V14; see section 5 timings) | CONFIRMED | Minor | perf | frontend/calendar/calendar-engine.mts:705-786,872-936 via nimbus-compute-core.js:103,152 | Every backward walk converts the whole free-interval list to plant-zone instants (two Intl.formatToParts per conversion, 26-46 per order) and the forward reversal leg re-converts the 90-day list per row (~128 per row), with Intl in _wallAsUtcMs about 70 percent of the pass (section 7 Task 2.1/2.6 and F16 deferrals confirmed linear, not super-linear). | Quiet-machine first-load reconcile is 148 ms at the 307-order pilot, 415 ms at 1,000 orders and about 2 s for a 70-line x 4,000-order plant, a main-thread pause that grows linearly (a throttled laptop may see 2-3x). | 5 fresh processes; cpu-prof; call counts
+VM21 | V10-1 | CONFIRMED | Minor | test-gap | tests/test_backward_cutover.py:42-45 | The cutover test seeds only plants and orders (no machine_calendar rows), so every seeded line is a no-calendar line and test_backward_cutover_write_set_and_idempotence pins the nulling that VI14 reports as wrong. | A fix for VI14 fails this test until the seed gains calendar rows plus one deliberately uncalendared line asserting it keeps its bar. | grep machine_calendar in test seed
+VM22 | L15-4 | CONFIRMED | Minor | doc-drift | docs/MIGRATION.md section (c) bullets 3-4 (about lines 1454-1458) | Two planner-notice claims are false at HEAD: 'the screen does not show the skipped_unfirmed count' (sap-interface-ui.mts:1425-1427 toasts it in five locales) and the grid's 'Original End' column (it is Due Date, orders.mts:379). | The owner-facing 'what planners notice' list would tell planners the wrong thing. | Checked UI code and locales
+VM23 | L15-5 | CONFIRMED | Minor | doc-drift | backend/distribution/CLAUDE.md:33 | The doc says a survivor with no run time carries scheduled_end = scheduled_start, but _collapse_to_survivor writes start + 1 minute because chk_orders_sched_range is strict. | A developer trusting the doc would change the code into a constraint violation. | Compared doc with data.py and schema
+VM24 | L15-6 | CONFIRMED | Minor | doc-drift | frontend/scheduling/CLAUDE.md:48 (and AGENTS twin) | The doc still says Engine.autoReflow() is called from Interaction/drag handlers; the only caller is the overload-alert Fix (insights/services.mts:466) and gantt.mts:3390 says a drop runs no autoReflow cascade (spec 11.8 listed this exact claim as stale). | A reader assumes dragging cascades peers. | grep autoReflow callers
+VM25 | L15-7 | CONFIRMED | Minor | doc-drift | docs/SAP_INTEGRATION_ROADMAP.md:26,123,229,288; NIMBUS_INTERFACE_ARCHITECTURE.md:105,367; nimbus-data-model.html:1017-1018; aggregate_to_detail.md:30,49,430; ROUTING_RUNTIME_DESIGN.md:26,175,417; optimizer-dispatch.md:15 | Spec section 11.2/11.2a REWRITE rows were given at most a one-line Superseded banner (three files untouched) and still carry forward-rule wording ('never overwrites scheduled_start/end', 'user-owned', start-bucketed separation, 'stay put'); the final report does not list this as deferred. | SAP-integration readers rely on the roadmap's overwrite guarantee, which is false since the SAP-truth round and the echo and placed-finish rules. | Grepped phrases; git diff stat
+VM26 | L15-8 | CONFIRMED | Minor | doc-drift | frontend/optimization/CLAUDE.md:21; frontend/scheduling/CLAUDE.md:44-48; frontend/calendar/CLAUDE.md:22; backend/scheduling/CLAUDE.md:22 | Domain CLAUDE.md line anchors are stale although commit 56ebf28 says they were refreshed (evaluateSchedule 'line 3216' in a 3,197-line file, 905 vs 930, saveAll 1119 vs 1159, nextAvailable ~314 vs 355, db.py 5,148 vs 5,197 lines). | A reader jumping to a cited line lands on unrelated code (the docs say to re-grep). | Compared cited lines with HEAD
+VM27 | L15-9 | CONFIRMED | Minor | doc-drift | /.claude/skills/promote-azure/SKILL.md:44 (and .agents twin) | The skill still advises forcing a BLOCKED file with -AllowDestructive and only the manual-only case was qualified, so Phase 1's non-manual 2026-10-15-1 (backfill UPDATE of every orders row, xmin bump) is not warned about there (only DEPLOYMENT.md and MIGRATION.md say use -Only per file). | An operator following the skill releases both Phase 1 files together mid-shift. | Read skill text and runbooks
+VM28 | L15-10 | CONFIRMED | Minor | doc-drift | /.agents/skills/promote-azure/SKILL.md:19,39-40; final report line 763; spec line 5686 | The Codex twin still says 'confirm before each prod mutation' and uses .Codex\skills paths, and the report and spec cite scripts/apply-migrations.ps1 which does not exist (the divergence predates the branch). | A Codex operator cannot run the quoted commands and the report misdirects a reader. | Compared twins; searched for script
+VM29 | L15-11 | CONFIRMED | Minor | doc-drift | docs/DEPLOYMENT.md steps 3.4, 3.5, 13 (engine.mts:1602-1603, CUTOVER_MIN_ROWS 386) | The runbook tells the operator to record the cutover summary toast per plant, but it fires only for plants with at least 10 non-queued rows and more than half carrying the cutover signature. | A small plant shows ordinary per-row toasts so the per-plant pass bar cannot be read from it; the step 9 / G-6 SQL counts are needed instead. | Read engine gate against runbook
+
+### PLAUSIBLE-UNPROVEN (3)
+
+VP1 | L1-2+L2-3 | PLAUSIBLE-UNPROVEN | Minor | sap-divergence | frontend/nimbus-compute-core.js:440-462 (dueDateInstant) vs calendar-engine.mts _backwardFrame clampReason; engine.mts:1757 | A date-only SAP finish on a blackout (holiday) day is read as the close of that day's nominal window and the blackout-aware walk then moves it earlier with a finish_moved_earlier warning, while a closed weekday resolves silently to the previous working day (two lanes reproduced it by probe; V1 and V2 did not re-run). | Every never-placed order with a holiday date-only due carries a warning the planner did not cause, unlike standard SAP, which moves it silently. | Two reviewer probes; verifier did not re-run | owner question (OQ13/OQ23, SAP item 5; L1 filed unintended)
+VP2 | L2-4 | PLAUSIBLE-UNPROVEN | Minor | new-defect | frontend/platform/foundation.mts:679-700 and frontend/app.js:307-312 vs calendar-engine.mts:262-283 | The due-day window resolver reads Store.plants[plant]?.workHours (line hours when no plant row) while Calendar.workWindow calls ensurePlant and intersects the 07:00-19:00 default, and _dueWindowCache is keyed on Store.rev() which ensurePlant does not bump. | For an unknown plant with no server plant-hours row, a 24/7 line and a Saturday date-only due, the due instant is Sunday 00:00 but the walk clamps to Friday and a finish_moved_earlier warning appears (reach depends on pilot plant-hours rows). | Reviewer probe; needs pilot plant-hours
+VP3 | L2-5 | PLAUSIBLE-UNPROVEN | Minor | doc-drift | frontend/calendar/CLAUDE.md:23 (OQ46 residual) | The doc says a viewer in a different DST zone 'can get a piece boundary in a local hour that does not exist' but the real effect is larger: a whole window shrinks and a held finish moves a day earlier. | A Chicago viewer of an Asia/Kolkata plant with a 02:00-10:00 line sees the held 2026-03-08 10:00 finish moved to 03-07 (moved:no_slot_at_finish). | Reviewer probe diff; not re-run
+
+### REVIEWER-ONLY (Minor, not verified) (29)
+
+VU1 | L1-3 | REVIEWER-ONLY | Minor | sap-divergence | frontend/optimization/engine.mts:1289-1295 (heldStartPatchFor) | When the forward allocator cannot reproduce a running order's exact start (never policy: 15-minute snap and whole-window fit, or start in closed time) the finish becomes start + run time as plain elapsed time ignoring working hours and blackouts (V1 did not reproduce). | A running order whose run time grew can end after closing or overnight with only an hours alert, reintroducing the calendar-blind finish spec section 2.1 retires, and every kept running row at cutover is re-derived through this path. | Reviewer code read; not reproduced | owner question (OQ3 iii, SAP items 3 and 9; L1 filed unintended)
+VU2 | L3-3 | REVIEWER-ONLY | Minor | perf | db.py:1103-1106,698 (schema.sql:75-78 comment) | The conflict scan's new OR o.scheduled_end BETWEEN arm has no index and the read ORDER BY no longer matches the idx_orders_machine_eff_start expression the schema comment says it matches exactly. | Each save and strict optimizer apply reads every row of each touched machine instead of a date range, growing with history at 70 machines per plant. | Reviewer diff and grep; no plan run
+VU3 | L3-5 | REVIEWER-ONLY | Minor | new-defect | db.py:373-470 vs 1140-1164 | Two width frames: _validate_schedule_segments sums wall minutes while the continuous check uses plant-zone elapsed seconds, and a naive time in the repeated fall-back hour reads as fold 0. | A one-piece segments aggregate across a spring-forward gap on a 24/7 line is rejected with no reason, while the same bar sent as [] is accepted, and a real 1 h bar in the second 01:30 cannot be saved (browser normally sends [] so reach is small). | Reviewer probes C, C2, D
+VU4 | L3-7 | REVIEWER-ONLY | Minor | new-defect | db.py:3352-3361 (_plant_local_now) | The server-side running test's 'now' falls back to UTC when a plant has no zone or an unresolvable one, used by the ingest zero-open sweep, the resolver holds and routing. | On an unzoned plant a started order can be judged not running and have its slot cleared (bites only if the OQ52 cutover gate is missed). | Reviewer code read
+VU5 | L4-2 | REVIEWER-ONLY | Minor | new-defect | db.py:4322-4366 (_date_hygiene_df) with sap_staging.py:211-229 | The 'finish on an earlier date than the start' check compares a zone-converted timed start with a date-only finish that is deliberately not converted. | A valid order is dropped for a non-US plant with an evening start and a bare-date finish (Singapore start 14 Oct 23:30 UTC, finish 14 Oct date-only); US pilot plants are not hit. | Reviewer probe section 4
+VU6 | L4-3 | REVIEWER-ONLY | Minor | test-gap | db.py:2706-2707 (finish_echoes timed branch) | 'To the minute' is truncation, not rounding: 14:00:01 echoes 14:00:00 but 13:59:59 does not, and a sent 23:59:59 (no-calendar close fallback) does not match 00:00:00 next day. | If SAP rounds returned seconds to the minute the order reads as an SAP change and its placement is wiped (depends on unverified A9). | Reviewer probe section 3 | owner question (spec 4.5.2, A9)
+VU7 | L4-7 | REVIEWER-ONLY | Minor | doc-drift | backend/routing/resolver.py:920-925 vs db.py:225 (_PLACED_SQL) | The resolver's over-cap re-queue reads 'placed' as scheduled_start/scheduled_end IS NOT NULL only, while ingest's _apply_run_time_cap and _PLACED_SQL also count segments. | A segmented order whose parent lacks both edges would be re-queued by the resolver but kept by ingest (no live path found). | Reviewer code read
+VU8 | L5-5 | REVIEWER-ONLY | Minor | new-defect | frontend/scheduling/orders.mts:1295 | Distinct refusal reasons (overlong_never, run_time_zero, plant_no_timezone, no_operating_window, routing resolve failure) all end in one generic toast and an overlong run-time edit on a never plant is refused outright with no route to Needs Planning. | A planner on an unzoned plant reads 'Could not hold the finish there' while the real cause is named only by a separate alert. | Reviewer code read; V5 skim
+VU9 | L5-6 | REVIEWER-ONLY | Minor | sap-divergence | frontend/optimization/engine.mts:1434-1451 | A split order is translated rigidly with no calendar check on any manual surface, including a machine change to a line with different hours and Push +1 h (the old code had the same rigid shift). | Pieces can land on closed Saturday or a Sunday finish be accepted; a machine edit onto a line with other hours is unchecked. | Reviewer probes S5/S5b; V5 skim | owner-decided (OQ17) for drag; machine edit and Push are an owner question
+VU10 | L5-8 | REVIEWER-ONLY | Minor | regression | frontend/scheduling/orders.mts:1285 | _runtimeEditAnchor now returns the due instant for runtime_unknown/overlong_never/run_time_over_cap queued rows, so a plain machine edit on such a row goes through placement and, with no usable run time, is refused and reverted (pre-change the machine edit applied and tried the routing resolve). | Assigning a machine to a held row with no run time fails with a generic toast instead of working. | Reviewer probe S7; git show base
+VU11 | L5-9 | REVIEWER-ONLY | Minor | perf | frontend/scheduling/gantt.mts:4698 | The multi-drag ghost preview runs one backward walk per companion on every unthrottled vis timechange event. | About 29-46 ms per frame with 40 companions (~20 fps) and ~100 ms with 100 selected during a drag. | Reviewer probe S11; V5 re-measured
+VU12 | L5-10 | REVIEWER-ONLY | Minor | test-gap | tests/modules/optimization/engine.test.mjs | No test names holdStartIfRunning or heldStartPatchFor and none covers an off-grid held finish, an over-cap queued row on a never plant or a manual edit of a stale-flagged row; the snap test at :3193 pins the behaviour VI1 reports as a defect for non-drop paths. | VI1, VI5, VI6 and the manual running-hold branch have no guard. | Reviewer grep of tests
+VU13 | L6-4 | REVIEWER-ONLY | Minor | new-defect | frontend/optimization/engine.mts:1613-1618 | The system_moved_n toast says start recalculated so the finish stays, but its count includes running rows whose start holds and whose finish moves (OQ3 iii). | A routing re-upload that lengthens three running orders announces the finish stayed while the SAP finish changes at the next Send (OQ53(e)). | Reviewer code read
+VU14 | L6-5 | REVIEWER-ONLY | Minor | new-defect | frontend/calendar/calendar-sync.mts:128-148, engine.mts:1529-1545 | After a failed or timed-out calendar GET the derive-paused banner says nothing moves until it loads but nothing retries, and a hydrated plant whose refetch fails emits no calendar:change. | An 8 s timeout on the first post-cutover load leaves rows at SAP raw dates with a banner until reload or plant switch. | Reviewer code read
+VU15 | L6-6 | REVIEWER-ONLY | Minor | new-defect | frontend/calendar/calendar-sync.mts:380-390 vs :116 | The What-If promote path posts /plant-calendar/line-hours without _noteServerLines, so a line that gains its first server hours row through a promote stays line_no_calendar (the I7 fix covers only _flushLineHours and _migrateMissingSlices; I7 shown incomplete). | A line given hours via promote remains blocked until a full reload. | Reviewer code read
+VU16 | L6-7 | REVIEWER-ONLY | Minor | new-defect | frontend/optimization/engine.mts:1590-1617 | The cutover summary counts only anchored/reversed/running/blocked stale rows, so rows queued by overlong_never/run_time_zero/no_operating_window are in no bucket, and a second pass in the same session is not tagged cutover. | A 300-row cutover with 12 overlong rows reports 288 and Save then queues 12 more unmentioned. | Reviewer code read
+VU17 | L6-8 | REVIEWER-ONLY | Minor | new-defect | frontend/optimization/engine.mts:1766-1768 | For a firmed row frozen_window_crossed fires whenever the derived start is inside the frozen window with no outside-to-inside transition (the unfirmed branch has one). | At cutover every firmed near-term order gets a warning that nothing actually crossed (owner question whether 'already inside' should alert, OQ4(a)). | Reviewer code read
+VU18 | L6-10 | REVIEWER-ONLY | Minor | doc-drift | frontend/scheduling/persistence.mts:525-535,893-902 | On first load under SCHEMA_VERSION 7 the old cache is removed with only an ErrorLog line, so unsaved dirty edits and local-only state vanish with no toast (OQ36 made the notice operational only). | A planner who ignored the 'save and close tabs' notice loses edits silently after deploy. | Reviewer code read
+VU19 | L7-5 | REVIEWER-ONLY | Minor | new-defect | frontend/optimization/setup-scheduler.mts:1022-1040 (:655) | neverOverlongReason reads the split policy from the snapshot, not the run, so with Respect calendar unchecked (policy forced never) an order failing for another reason is labelled overlong_never. | Wrong 'longer than any single working period' reason although the calendar was ignored (low impact). | Reviewer code read; V7 not re-verified
+VU20 | L8-5 | REVIEWER-ONLY | Minor | doc-drift | backend/distribution/data.py:2062-2066 and aggregate_to_detail.md section 6 | A comment says separation_violated is computed from live children starts and the design of record still describes the alert as start-bucketed; code, both copies and locale rows are finish-based (OQ38). | A maintainer reading PROBLEM_STATUSES or section 6 could re-introduce start bucketing. | Reviewer comparison; V8 skim
+VU21 | L8-6 | REVIEWER-ONLY | Minor | perf | backend/distribution/data.py:1250 (_write_header_facts) | _header_finish_echo runs for every parent with an existing header on every upload, adding one join query per parent. | About 5,000 extra small queries inside apply() for a 5,000-parent plant upload (not measured). | Reviewer code read
+VU22 | L9-2 | REVIEWER-ONLY | Minor | new-defect | frontend/nimbus-compute-core.js:405-412 | The split-order (>=2 pieces) branch of workingMinutesByDay sums real elapsed ms of naive wall-clock Dates, so it differs from the run time on a viewer-zone DST day. | A 6 h order in two 3 h pieces on a 24/7 line shows 420 min on the US fall-back day and 300 on spring-forward: a phantom hour of load two days a year. | Reviewer probe2; V9 left Minor
+VU23 | L9-3 | REVIEWER-ONLY | Minor | new-defect | frontend/nimbus-compute-core.js:392-440 | The single-bar day split weights days by working-window overlap and ignores blackouts although OQ12 asked for a calendar-aware spread (base behaved the same, not a regression). | A bar placed around a Thursday-morning blackout shows Wed 3.2 h / Thu 4.8 h instead of 4/4, which can tip a near-capacity day in or out of the overload alert. | Reviewer probe3; V9 left Minor
+VU24 | L9-4 | REVIEWER-ONLY | Minor | new-defect | frontend/insights/insights-ui.mts:871,1505,1548; frontend/labor/labor-planning.mts:148,277,952 | I13 'one clock' is incomplete: the alert-horizon cutoffs still use Date.now() and the Labor plan's current week uses the viewer's new Date() (I13 shown incomplete; invisible when viewer zone equals plant zone). | A New York planner on a Singapore plant sees about 12 h of alerts hidden or extra and the Labor plan opens on the wrong week near Sunday evening. | Reviewer code read; V9 left Minor
+VU25 | L10-4 | REVIEWER-ONLY | Minor | new-defect | docs/DEPLOYMENT.md step 4 / migrations/2026-10-20-1-backward-cutover.sql:25 | A plant whose timezone is non-empty but unrecognised passes the step 4 gate and then aborts the cutover inside the window (spec Q15's second clause, pg_timezone_names, is missing from the runbook gate). | A clean rollback (exit 3, nothing applied) that wastes window time. | Reviewer scratch copy; V10 skim
+VU26 | L10-5 | REVIEWER-ONLY | Minor | doc-drift | migrations/2026-10-20-1-backward-cutover.sql:19-21, schema.sql:2065-2067 | The comment says a plant may sit in two subnetworks (hence MIN(timezone)) but UNIQUE (plant) (uq_plants_plant) forbids it. | No runtime effect, a misleading comment. | Reviewer insert attempt; V10 skim
+VU27 | L11-6 | REVIEWER-ONLY | Minor | perf | /tasks, /tasks/refresh, upsert_orders | On a 3,000-order single plant GET /tasks takes 3.9 s, refresh of 1,000 ids 2.8 s, an echo re-upload of 3,000 unchanged rows 6.7 s and bulk_update of 1,000 rows 4.3 s (linear; no pre-change baseline possible). | A plant near 3,000 live orders loads in about 4 s and an unchanged-workbook re-upload costs as much as a first load. | Reviewer timing; not re-measured
+VU28 | L13-1 | REVIEWER-ONLY | Minor | test-gap | tests/test_distribution.py::TestSqlStatusClassificationParityAndScale::test_summary_counts_past_5000_headers | A 5,000-header scale test hit a Postgres statement timeout once under load in the merged run (152 s vs 107 s), passed on isolated re-run and in the HEAD run; the branch does not touch distribution_data or backend/distribution (no verifier lane exists for L13). | A timing-bound test can show a spurious red in CI. | Gate rerun; flaky, passes alone
+VU29 | L14-4 | REVIEWER-ONLY | Minor | test-gap | tests/modules/optimization/scheduler-plant-scale.test.mjs | The plant-scale suite covers only the setup-scheduler evaluators; nothing exercises reconcileRuntimeSchedules, _backwardFrame or placeForwardSequence beyond a handful of rows (V14: not re-verified, a counted test is cheap). | A change that makes the walk O(n^2) or defeats the _beginRun memo would pass the whole gate. | Reviewer grep; V14 not re-verified
+
+---
+
+## 4. How NIMBUS compares with standard SAP
+
+Reference = standard SAP ECC lead-time scheduling, backward type (the reference you chose). Classification: conforms / divergence you already decided (OQ#) / divergence unintended / owner question. Source: lane L1, reclassified by checker V1.
+
+| # | SAP rule | NIMBUS behaviour (file:line) | classification | planner-visible effect |
+|---|---|---|---|---|
+| 1 | Backward from basic finish; start derived | `finishAnchoredPatchFor` engine.mts:1309; reconcile anchor = stored end if placed else `Util.dueInstant` engine.mts:1724 (O4) | conforms | none |
+| 2 | Floats (before/after production, opening period) | none anywhere (spec 4.13.2 lists floats as unverified; no OQ decides it) | divergence, **owner question** (L1 filed unintended/owner question; V1 confirms owner question) = VM1 | bars end exactly at the due date with zero slack; SAP's own start (lead time) is earlier than NIMBUS's derived start (spec example C: SAP Mon 06:00 vs NIMBUS Tue 14:00) |
+| 3 | Duration on shifts/breaks/holidays; setup + run + teardown; inter-operation times | one operation; run time on line window minus blackouts; setup reserved before start; no teardown/queue/move; `allocateRuntimeBackward` calendar-engine.mts:938 | divergence, owner-decided (model: one op; setup OQ2/OQ40; contiguity under `never` OQ50) | breaks only via blackouts; under `never` a break splits windows (contiguity) |
+| 4 | Today scheduling: start before today (minus tolerance days) flips forward from today, due unchanged, exception message | reversal from plant `now` floored to the minute: engine.mts:1353-1359 (single), :1785-1800 (batch); alert `reversal_forward` (error) | divergence, owner-decided (O2, OQ18, OQ53) for the flip; **tolerance days and severity of a minutes-late flip are an owner question** (V1: not decided in RULEBOOK) | an order whose derived start is minutes before now flips and shows an error-severity alert though late by minutes; SAP compares dates |
+| 5 | Date-only finish = end of last working interval of that day; closed day = previous working day | `dueDateInstant` nimbus-compute-core.js:440-462 wired app.js:307; blackouts ignored by design | conforms, one inconsistency (VP1: holiday-as-blackout date-only due raises a finish_moved_earlier warning; owner question) | holiday-as-blackout due date raises an alert; closed weekday is silent; 24:00 close = exclusive next-day 00:00; no calendar = raw + 23:59:59 |
+| 6 | Reduction before flipping | none; per-plant split policy; `overlong_only` retries `partial_allowed` (engine.mts:1342) | divergence, **owner question** (L1 filed owner-decided OQ50; V1: OQ50 covers only the overlong/never-split case) folded into VM1 | no 'shrink then flip' step: a placement that cannot fit goes straight to reversal or queue |
+| 7 | Infinite capacity | finite: finish moves earlier on no slot only in system re-derivation (OQ13); manual drop refuses | divergence, owner-decided (OQ13) | alert `finish_moved_earlier` |
+| 8 | Reschedule on quantity/routing change from same finish | run-time/machine/version edit holds the finish (orders.mts:1418-1424); running order holds start (:1428) | conforms (but the hold is rounded, see VI1) | a held finish drifts up to 7.5 min (VI1) |
+| 9 | Started operation keeps actual start; remaining duration scheduled | running row keeps start; end = start + FULL run time (`heldStartPatchFor` engine.mts:1289-1295); cutover keeps start + old end (migration 2026-10-20-1) | divergence, owner-decided (OQ3 iii) + minor unintended calendar-blind fallback (VU1, owner may accept) + a typed End re-derives a running start (VI7, owner question) | a started order shows its full run time again after any run-time edit; no remaining-quantity notion; a reversal-placed order counts as running (OQ18) |
+| 10 | Firming / time fence | firm-only Send (OQ54/OQ61); frozen judged on stored derived start (`firm_flag` sap_staging.py); client `isFrozenHorizon` engine.mts:1096 also needs start >= now | divergence, owner-decided (OQ27, OQ54, OQ61, R26) | a JIT-late derived start leaves orders outside the frozen window SAP's own start would have frozen, so fewer firm/send; client and server frozen tests differ for past-start rows (pre-existing) |
+| 11 | Plant time zone | `plantInstantFromWallClock` / `plantWallClockFromInstant` core:120-160; no-zone plant blocked on the client (OQ52) but not on Send/ingest (VI13) or in server running sweeps (VU4) | conforms in the walk; DST defects VI2, VI3, VM17, VM18 | DST not executed by L1; later lanes reproduced the fall-back and spring-forward failures |
+| 12 | Precision and rounding | minute floor of finish in the walk (never later); 60 s width tolerance; manual finish snapped to nearest 15 min (`Util.snap`, engine.mts manualSchedulePatchFor) | divergence, **unintended** (= VI1) | a held finish drifts up to +/-7.5 min on any run-time/machine/version edit or Push |
+| 13 | Finish in the past gives today scheduling | manual/release/reconcile reverse (`due_date_past`); Optimize keeps queued (OQ19 c); Remove Backlog places at now | divergence, owner-decided (OQ19) | past-due orders stay in Needs Planning after Optimize until released |
+| 14 | Operation longer than a shift spans days | `never`: queued `overlong_never`; release = one continuous marked bar (engine.mts:1458-1474) | divergence, owner-decided (OQ50 c); release dead ends VI6 and VI10; marker lifetime F18 owner to confirm | a placed order whose run time grows past the longest window loses its bar on re-derive |
+| 15 | Sequence-dependent setup | reserved before start in same window, discarded if it would move the finish (engine.mts ~1730) | conforms to ruling 3.2 (but VM9: setup can split an order under partial_allowed, owner question) | setup alert only |
+| 16 | Echo of sent finish; SAP may flip to today and return a later finish | `finish_echoes` db.py:2675; one rule at all writers; an SAP flip is a genuine change: placement wiped, due date takes SAP's later finish | divergence, owner-decided (OQ31 b, spec 4.13.2 item 3); depends on unrun A9; VI11 and VI12 are echo-path defects | after one SAP flip the due date moves later so lateness reads 0 against the new date |
+| 17 | Multi-operation / sub-orders | one bar per order; siblings share one finish (OQ11); Send rolls up the latest child end (`build_outbound_groups`) | divergence, owner-decided (model) | nothing assumes inter-operation gaps |
+| 18 | Requirement date never written by scheduling | SAP finish = `original_finish_received`; only ingest/echo write it | conforms (VI11 shows the header echo can wrongly overwrite it; VI12 shows Send converts a date-only due) | none by design |
+
+---
+
+## 5. Test results
+
+Baseline = gate-final `18946fc`: lint 0/34; npm legacy 73/73; modules 1454/0/3 todo; pytest 1797 passed / 2 failed / 1 skipped / 13 xfailed. pytest env on the command line only (password redacted in GATES.md).
+
+**HEAD `69df633` (main checkout)**
+
+| command | exit | result | vs baseline |
+|---|---|---|---|
+| npm run build | 0 | clean | = |
+| npm run typecheck | 0 | clean | = |
+| npm run lint | 0 | 0 errors / 34 warnings | = |
+| npm run check:static-assets | 0 | clean | = |
+| npm run check:legacy-surface | 0 | clean | = |
+| npm test | 0 | legacy 73/73; modules 1457 tests, 1454 pass, 0 fail, 3 todo | = |
+| pytest -ra -q | 1 | 1797 passed, 2 failed, 1 skipped, 13 xfailed | = (2 baseline test_scale_catalog_paging collation failures) |
+
+**Merged tree** (main `62d786e` + merge of `69df633` -> `c9a2f44`, detached scratch worktree, merge clean, no conflicts)
+
+| command | exit | result | vs baseline |
+|---|---|---|---|
+| npm run build | 0 | clean | = |
+| npm run typecheck | 0 | clean | = |
+| npm run lint | 0 | 0 errors / 34 warnings | = |
+| npm run check:static-assets | 0 | clean | = |
+| npm run check:legacy-surface | 0 | clean | = |
+| npm test | 0 | legacy 73/73; modules 1473 tests, 1470 pass, 0 fail, 3 todo | +16 tests from main |
+| pytest -ra -q | 1 | 1806 passed, 3 failed, 1 skipped, 13 xfailed | +9 main-side tests; 3rd failure flaky (below) |
+
+Failures: the 2 baseline `test_scale_catalog_paging` material-grid cases (local DB collation, file untouched by the branch) on both trees; on the merged tree also `tests/test_distribution.py::...::test_summary_counts_past_5000_headers`, a load-sensitive psycopg QueryCanceled (152 s vs 107 s run), passes alone and in the HEAD run (VU28). No merged-only deterministic failure. Cleanup: scratch worktree removed; `.git/worktrees/merged` admin dir could not be deleted (OneDrive lock), run `git worktree prune` later; main checkout status identical to before (5 pre-existing entries).
+
+**V14 reconcile timing (quiet machine, CPU 5-19 percent, median of 5 fresh single passes = what first-load hydration does; 20 percent past dues, default calendars)**
+
+| Lines | Orders | L14 (loaded) ms | V14 median ms | spread | ms/order |
+|---|---|---|---|---|---|
+| 5 | 307 (pilot) | 1,058 (493 stale) | 148 | 147-155 | 0.48 |
+| 5 | 1,000 | 2,451 | 415 | 404-435 | 0.42 |
+| 5 | 2,000 | 4,267 | 821 | 810-827 | 0.41 |
+| 5 | 4,000 | 9,234 | 1,619 (3 runs) | 1,602-1,636 | 0.40 |
+| 70 | 1,000 | 3,418 | 643 | 621-671 | 0.64 |
+| 70 | 4,000 | 12,977 | 1,954 | 1,792-2,034 | 0.49 |
+
+Linear in orders (0.40-0.49 ms/order; 5 to 70 lines at 1,000 orders adds ~230 ms), no super-linear term. Hotspot: `Intl.DateTimeFormat.formatToParts` in `_wallAsUtcMs` (nimbus-compute-core.js:103) about 70 percent of the pass (46 `plantInstantFromWallClock` calls per order with 20 percent reversals, 26 without; `_backwardFrame` calls == orders, so the memo works). `placeForwardSequence` measured 46/92/184/562 ms at 50/100/200/400 reversing rows (L14's 1.4 s for 200 was ~7.5x inflated). Repeating a pass in one process drifts 1.8 to 5.6 s on identical call counts, a machine/Intl throttle, not repo state growth (heap flat 80-127 MB). Not measured: real calendars with blackouts, real order mixes, setup-live second walk (L14: ~2x), 50 plants hydrating together, the browser. Mechanism confirmed, severity Minor (VM20).
+
+---
+
+## 6. What could not be checked
+
+- SAP stores the sent finish unchanged, keeps time of day and zone, rounds seconds, flips ECC planned orders to today scheduling and with what tolerance (A9, spec 4.13.8; L1, L4) - needs SAP Development or a real SAP system, not the simulator.
+- Every browser behaviour (no browser in this run): banner, toasts, alert cards, drawer rows, tile click-through, Time Machine panel, preview stale banner, dialog refusal toast, shares-editor 'Current start' of a finish-only child (L5, L6, L7, L8, L9) - needs a browser session.
+- Real vis behaviour for a vertical-only drag of a bar whose start and end are both off the 15-minute grid, and whether the Override flatpickr can produce an off-grid minute (L5; affects VI1 surface list) - needs a browser.
+- Push +1 h across a DST boundary in a viewer zone, and plant spring-forward gap resolution in a viewer-DST browser (L5, L9) - needs a browser in a DST-observing zone.
+- Whether the client surfaces the VI2 width rejection usefully (L12) - needs a browser or a DB-backed /tasks save (V3 traced the toast for VC1 only).
+- A never-placed row with an inverted same-date SAP window (start after finish) is served with start later than end; whether anything draws or chains it before the client re-derives (L11) - needs a browser.
+- VU1: a running order on a `never` plant whose run time grew past its window, to reproduce the calendar-blind finish (L1, V1) - needs that fixture.
+- PLAUSIBLE items VP1-VP3: VP1 needs a verifier re-run of the blackout-day probe; VP2 needs the pilot `plant_work_hours` rows (read of the Azure DB, not allowed here); VP3 needs a non-US DST viewer population decision.
+- Pilot-only facts: the Azure session time zone for the G-6 timestamp (L10-6), real plant-hours rows (L2-4), the pilot's role/plant scoping, the previous image's behaviour on migrated never-placed rows (matters for rollback before any planner saves), the platform's point-in-time-restore window, whether changing an env var creates a new Container Apps revision, whether the corporate proxy caches index.html, whether the Excel upload has a freeze switch for the quiet window, `sslmode=require` against a server with SSL, and the Q13/Q15/G-6 SQL on the real pilot DB (all marked [unverified] in the runbook; need an az/psql rehearsal, never executed).
+- The deploy runbook end to end and the psql fallback `-c INSERT INTO migration_files_applied` (needs the ledger table; failed only on a pre-Phase-1 copy) - needs the rehearsal.
+- Final report's 'gate tip 0b45e85' does not resolve in this clone (L15, V15); whether main commits after 62d786e add migrations that change DEPLOYMENT step 2's 'exactly these three files'.
+- Reconcile timing with real server calendars (blackouts, per-line hours), real order mixes, the setup-live second walk and 50 plants hydrating together; Gantt rebuild/frame time at 2,800 tasks; whether the optimizer bench is slower than pre-branch (large --no-deadline 4.5-6 s vs 1.7-3.1 s in the Phase 1 report; digests identical) - needs a quiet-machine like-for-like rerun and a browser (L2, L6, L9, L14, V14).
+- Query plan of the conflict scan at 50 plants x 70 machines (VU2), the purge-preview range at plant scale and cost of VU21 at 5,000 parents (L3, L4, L8) - need production-size tables or a timed large fixture.
+- >500-row `_UPSERT_CHUNK` behaviour (commits per chunk, cannot run in a rolled-back scratch transaction) (L4).
+- Whether any external caller of `/tasks/bulk_update` exists (Phase 0 item g; sets reach of VM2, VM15 and open item U6) - needs the caller list. V11 answered the browser half: the browser never sends a RUN_TIME-only save or a null marker on unmoved edges.
+- Distribution families, routing-on plants, `role_plants` scoping and a non-UTC `NIMBUS_SAP_SYSTEM_TZ` over HTTP (L11); the Excel path's SAP frame equals plant frame (L4).
+- Digest equality against `main` itself (main's twins are not built; compared to BASE 0317dd8 transpiled in scratch, identical) (L7).
+- Line-level assertion strength of every changed test (L13 reviewed subjects only); locale wording beyond placeholder parity and U33 (native review) (L9); `Intl.hourCycle` in non-V8 engines (L2).
+- L12's property harness blind spots (V12-1): the 90-day look-back, the nominal-window clip and partial-policy exactness are baked into its oracle, so VI17 was invisible to it by construction; seeds above 21 and rare fold-hour endings (1 in 5,000 cases hit VI2).
+- Leftover `.git/worktrees/merged` admin dir (OneDrive lock) - run `git worktree prune` outside OneDrive.
+
+---
+
+## 7. Decisions you need to make
+
+Each line names the finding and the decision it relates to. None blocked the run; each was logged and left as found.
+
+- Floats / scheduling margin: does the pilot SAP carry floats or lead time that NIMBUS's zero-slack backward finish ignores, and is a per-plant float setting needed before Send goes live? [SAP items 2 and 6, A9; VM1 (L1-4)]
+- Reduction before flipping: should NIMBUS shrink/queue times before reversing to today? V1 moved row 6 from owner-decided (OQ50 only covers the overlong/never case) to owner question. [SAP item 6, OQ50; VM1]
+- Today-scheduling tolerance: should a start only minutes (or less than a day) before now flip to reversal with an error alert, or follow SAP's date compare with tolerance days? [SAP item 4, O2/OQ18/OQ53; matrix row 4]
+- A date-only SAP finish on a blackout/holiday day: warn (finish_moved_earlier) or resolve silently to the previous working day like a closed weekday? (L1 filed unintended, L2 and V1 say owner question.) [SAP item 5, OQ13/OQ23/OQ55; VP1 (L1-2, L2-3)]
+- Running order's finish when the allocator cannot reproduce its start (never policy, start in closed time): accept the calendar-blind start + run time, or place it forward through working time / flag the bar? [SAP items 3 and 9, OQ3 iii; VU1 (L1-3)]
+- Should an explicit finish edit (typed End or Gantt drag) on a RUNNING order be refused/confirmed, or extend only the finish and keep the start? (OQ3 names machine/version edits only.) [SAP item 9, OQ3; VI7 (L5-7)]
+- Split-order rigid translation on a machine edit or Push +1 h: is the unchecked shift onto closed time an accepted consequence of OQ17 or should it be checked? [OQ17(b), SAP items 3/11; VU9 (L5-6)]
+- Does OQ62 'placement blocked' for a line with no calendar row cover hand placement (drop/typed finish/edit), not just the reconcile? (L5 owner question; V5 notes OQ51 already lists a derive before hydration as a staleness cause.) [OQ62, OQ51; VI4 (L5-2)]
+- Over-cap release on a `never` plant: the Task 1.6/2.5 ruling 'run_time_over_cap releases through finishAnchoredPatchFor' cannot succeed for a run time over one window; widen the marked-release fallback to run_time_over_cap? [OQ28, OQ50; VI6 (L5-4)]
+- Cutover calendar exclusion: enforce OQ62 in SQL (predicate machine_calendar.work_hours IS NOT NULL) or rely on a Q13=0 gate added to DEPLOYMENT.md step 4 (or both)? And should an excluded row still get runtime_schedule_mismatch = TRUE so its first re-derivation persists? [OQ62; VI14 (L10-1), VM21]
+- Running row end at cutover: stored end or start + run time? The spec wording (G-0.29 'keeps both its start and its old forward end') and the ruling (DEPLOYMENT.md states start + run time replaces a differing stored end) disagree. Dropped as a duplicate of RULEBOOK conflict 1 but still open. [G-0.29, OQ3/OQ5; L10-7]
+- Frozen-window warning for firmed rows: should frozen_window_crossed fire for a firmed order already inside the window at cutover (no outside-to-inside transition)? [OQ4(a); VU17 (L6-8)]
+- Setup versus fragmentation: may a changeover split an order that fits one window under partial_allowed (second walk accepted because the finish is unchanged)? [OQ2 V1 vs ruling 3.2; VM9 (L7-8)]
+- Push/pull caps on a closed due day: should N count calendar days from the last open day (current), or working days / from the SAP date? [conflict 13, SAP item 5; VM5 (L7-3)]
+- Is a session-only 'run time grew' count in Remove Backlog acceptable for OQ56(a), given it reads 0 after any reload? [OQ56(a); VM8 (L7-7)]
+- Approved placement exception: keep error severity, permanent red card, 'blocking - fix now' tile count and Conflicting chip, or make it a warning / exclude from the count? And confirm the sticky marker (F18). [OQ63, F18, Phase 3 severity ruling; VM14 (L9-6)]
+- Date-only due Send: transmit 000000 (SAP back-schedules from start of day) or the end of the working window (OQ23 reading) instead of the zone-converted midnight? A persisted original_finish_date_only column or an 'exact plant-local midnight with no placement' heuristic would carry it. [O4, OQ23/OQ61, spec 4.5.5; VI12 (L4-1)]
+- Echo compare: is truncation to the minute right if SAP rounds returned seconds (23:59:59 close-of-day fallback)? Wait for the A9 test. [spec 4.5.2, A9; VU6 (L4-3)]
+- Marker change on an unmoved off-width bar: should clearing placement_exception count as 'moved' so the width gate applies? [OQ63, ruling 2.3; VM15 (L11-3)]
+- Release model: does Phase 1 ship as its own merge and image first (plan, spec, report section 6) or do all phases ship from the single merge? Either way the branch tip 5fbdfb7 must be refreshed to the fix wave or the model dropped. [O3, spec 7.3, plan 7.1.1; VI18 (L15-1), VI19 (V15-1)]
+- `trust_start` default true on /tasks/bulk_update (prior open item U6 / Phase 0 item g): VM2, VM15 and VM3 are external-writer-only paths whose reach depends on the caller list. [U6, OQ59; VM2, VM3, VM15]
+- Section 7 deferrals that verifiers found mis-rated need an owner call on whether to fix before cutover: fold=0/F17 (VI2), reached_now (VI17), browser-never-reaches-it (VC1). [final report section 7 Task 2.3/2.1/2.8; VC1, VI2, VI17]
+
+---
+
+## 7a. Decisions made (owner, 2026-10-15, after reading this document)
+
+Every open question in section 7 was put to the owner one at a time, in plain language, and answered. These answers supersede the matching section 7 lines and the earlier OQ answers they touch. The implementation plan is built from this section plus section 8.
+
+**Saving, rounding, resizing**
+
+- D1 (VI1, SAP item 12) **Minute precision everywhere except a horizontal Gantt drag.** Run-time, machine and version edits, the Inspector, the Override window, Push +1 h, typed times and multi-drag companions keep the exact minute. Only a left/right drag of a bar still lands on the 15-minute grid. Push +1 h is exactly 60 minutes.
+- D2 (VI7, SAP item 9, OQ3) **No surface may change a bar's width by hand; a run-time edit (or a routing change) is the only manual resize.** A drag or a right-edge resize only moves the finish with the start following. On a RUNNING order a typed End or a drag of the finish is refused (it would either grow the bar or un-start the order); the run-time edit holds the actual start and is the way to change a running order's finish.
+- D3 (VU1, SAP items 3 and 9, OQ3 iii) **When the allocator cannot reproduce a running order's exact start, the remaining run is walked forward through working time from the actual start.** The calendar-blind start + run time fallback is retired. This is also the path every kept running row takes after cutover.
+- D4 (VI4, OQ62, OQ51) **Hand placement is left as is; no new guard.** A default plant calendar, and per machine a default machine calendar, always exist, so there is never a line without a calendar. The 'line has no calendar' state is not a real condition (see D14).
+
+**Placement and queue rules**
+
+- D5 (VI6, OQ28, OQ50) **An approved over-cap order on a never-split plant places as one continuous marked bar**, the same release path as an overlong order (widen the marked-release fallback to `run_time_over_cap`).
+- D6 (VM9, OQ2 vs ruling 3.2) **A changeover never splits an order that fits one working window.** If the setup does not also fit, it is not reserved and the existing setup alert shows.
+- D7 (VU9, OQ17) **Rigid shift on every surface: drag, machine change and Push +1 h.** Pieces of a split order keep their shape and offsets; a piece that lands in closed time is caught by the existing overlap alert and corrected by the next optimizer run. Push +1 h stays (it moves, it does not resize).
+- D8 (VM5, conflict 13, SAP item 5) **Push/pull day caps keep counting calendar days from the last open day before the due date; fix the help text** so it says so.
+
+**SAP conformance**
+
+- D9 (VM1, SAP items 2 and 6, A9) **Floats: wanted later, deferred.** The owner wants float periods eventually; nothing is built now (not yet developed). Zero slack stays for this release.
+- D9a (VM1, SAP item 6, OQ50) **No reduction-before-flipping step.** An order that cannot fit before now goes straight to reversal or to Needs Planning, as today.
+- D9b (matrix row 4, O2/OQ18/OQ53) **Keep the minute-level flip (nothing is ever scheduled in the past) but make it a warning**, not an error, unless the flipped finish lands more than the plant's push-forward cap past the due date (then it stays an error; with no cap it is always a warning and lateness shows through the existing late alert). No tolerance-days setting now; it may come with floats.
+- D9c (VP1, SAP item 5, OQ13/OQ23) **A date-only due date on a holiday/blackout day resolves silently to the close of the previous working day**, the same as a closed weekend day. No `finish_moved_earlier` card for it.
+
+**Send to SAP and the echo rule**
+
+- D10 (VI12, O4, OQ23/OQ61) **Persist that a due date arrived date-only, and Send transmits the close of the plant's working window on that day** (converted to the SAP zone), so the date SAP sent stays intact. A stored flag (e.g. `original_finish_date_only`) written at ingest, not a midnight heuristic.
+- D11 (VU6, spec 4.5.2, A9) **Echo compare stays truncated to the minute until the A9 test against a real SAP system says how SAP returns seconds.**
+- D12 (VM15, OQ63, ruling 2.3) **A change to `placement_exception` counts as a move**, so the server width check runs when the marker is cleared on an otherwise unmoved bar.
+- D13 (VM2, VM3, VM16, U6, OQ59) **External-writer paths: fix the cheap ones now.** `/task/update` returns the real rejection reasons and `start_derived`; the route/model docs say both edges are required; a dates-free RUN_TIME save on a placed continuous row sets `runtime_schedule_mismatch` (flagged stale, not silently kept). `trust_start` keeps its default. The caller list is still owed.
+
+**Cutover and release**
+
+- D14 (VI14, VM21, OQ62) **The cutover excludes no line.** Every placed order is cut over; the browser derives a line that has no `machine_calendar` row of its own on the plant default calendar (the `line_no_calendar` refusal in the reconcile is relaxed to that fallback, consistent with D4). No SQL exclusion predicate; the test seed's nulling is therefore correct as pinned. Q13 in the runbook becomes informational.
+- D15 (G-0.29 vs DEPLOYMENT.md, OQ3/OQ5, L10-7) **A running order keeps its stored end at cutover.** No recompute to start + run time during the migration; the first run-time edit re-derives it (through D3).
+- D16 (VI18, VI19, O3) **One release from the single merge.** The Phase-1-first model is dropped; `feature/backward-scheduling-phase1` (`5fbdfb7`) is not merged on its own. `docs/MIGRATION.md`, `docs/DEPLOYMENT.md` and the final report are aligned to one image roll, snapshot, cutover, verify.
+- D17 (VC1, VI2, VI17; final report section 7 Tasks 2.8/2.3/2.1) **All three overturned deferrals are fixed before cutover**: the dates-free browser save (Critical), the fall-back-hour width rejection (fold-tolerant server check plus plant-zone forward paths, which also covers VI3/VM17), and the 90-day look-back (latest legal finish before the shutdown plus a distance alert, per OQ13/OQ55).
+- D18 (VI15, VI16) Not a question; confirmed as must-fix: the cutover requires the snapshot ledger id first, and the restore script skips segments whose order no longer exists instead of aborting.
+
+**Alerts and presentation**
+
+- D19 (VU17, OQ4 a) **`frozen_window_crossed` for a firmed order fires only on an actual outside-to-inside crossing**, the same rule as unfirmed rows. Being already inside the window at cutover is silent.
+- D20 (VM14, OQ63, F18) **An approved placement exception shows as an amber warning card, is not counted in the 'blocking, fix now' tile or the Orders Conflicting chip, and the marker stays sticky on the bar** until a planner clears it.
+- D21 (VM8, OQ56 a) **The Remove Backlog 'run time grew' note is kept in the browser cache** until the row is next saved or re-placed, so the count survives a reload. Not persisted on the server.
+
+**Closed without change:** VI4 (D4), VM5 engine behaviour (D8), VU6 (D11, waits on A9), VM1 reduction step (D9a).
+
+---
+
+## 8. Inputs for the implementation plan
+
+The next step is the plan that addresses these findings. These are the inputs it needs; nothing here is decided.
+
+**Must-fix before cutover (the checkers' view).** VC1; the save/width cluster VI1, VI2, VI3, VI9, VI5; the guards VI4, VI6; the Send cluster VI12, VI13, VI11; the cutover cluster VI14, VI15, VI16, VI17; VI10; and the release-doc pair VI18, VI19 (a doc fix plus either refreshing the Phase 1 branch to the fix wave or dropping the Phase-1-first model). Fixing VI14 also needs the cutover test's seed changed (VM21). A fold-tolerant server width check covers VI2 but not VI3; VI3 needs the forward paths to take the plant zone (VM17 shares that root).
+
+**Owner decisions that gate a fix.** VI7 (running order's finish edit), VI6 (over-cap release on never plants), VI4 (does "blocked" cover hand placement), VI12 (what a date-only due should send), the cutover calendar exclusion mechanism (SQL predicate or runbook gate or both), and the three mis-rated deferrals the checkers overturned (fold=0, 90-day look-back, "browser never reaches it"). Full list in section 7.
+
+**Minors worth bundling with a nearby fix.** VM2/VM3/VM15/VM16 (external-writer save paths; reach depends on the still-missing caller list, prior open item U6), VM4 and VM22–VM29 (doc drift incl. a migration-file comment that will be read during the production run), VM12/VM13/VM14 (dashboard and alert presentation), VM6/VM7 (optimizer guards), VM10/VM11 (distribution cap gaps), VM20 (reconcile cost: linear, 148 ms at pilot size; a worker move or Intl caching if 70-line plants arrive).
+
+**Prior fixes shown incomplete.** U29 (VM12), U31/F10 (VI8), I7 (VU15), I13 (VU24), U5 (VM4).
+
+**Tests to add** (test-gap lines): VM11, VM12, VM15, VM21, VU12, VU28 (flaky scale test), VU29 (no scale test covers the reconcile or the walk).
+
+**Still owed from before, unchanged by this run.** The 10 browser checks (final report §5), the cutover rehearsal on a restored pilot copy (G-10), the SAP echo test against a real SAP system (A9), the Phase 0 caller list for `/tasks/bulk_update`.
+
+---
+
+## Appendix: how this run was done
+
+**Brief.** "Exhaustively test and validate this new backward scheduling against SAP backward scheduling logic for detailed scheduling and general regressions or problems. Spawn a fleet of Sonnet agents to find any issues. Then we will address those things in an implementation plan."
+
+**Your answers (2026-10-15).** SAP reference = how standard SAP production planning works (ECC lead-time / backward scheduling), with every difference marked "you already decided" or "unintended"; no browser click-through; Postgres password supplied in chat and used on command lines only (never written to any file; the consolidation pass grepped every report for it); "Everything" (about 15 agents plus checkers).
+
+**Shape of the run.** Step 0: two scratch databases built from `schema.sql` (one from `main`'s copy to get the pre-cutover state), git positions recorded, compiled output confirmed fresh, briefs written (common brief, checker brief, rulebook extracted from the spec with all 63 owner answers and 20 recorded conflicts, code map with file:line anchors, standard-SAP checklist of 18 behaviours, 15 lane briefs). Stage 1: 14 lanes in parallel (SAP conformance; calendar math; server contract; ingest/echo/Send; manual placement; reconcile and persistence; optimizer and setup; distribution; alerts/KPIs/translations; cutover rehearsal on the seeded pre-cutover database; live API end to end on a local server; a randomized scenario harness; scale/performance; docs and runbook), then the full suite plus trial merge alone. Stage 2: one checker per lane with serious findings (13), plus a performance re-measurement on the quiet machine. Stage 3: one merge pass, then this document. Every agent was Sonnet; the orchestrator wrote only briefs, rulings and this document. Rules: repository read-only (no edits, commits, checkouts), scratch files only under the session scratchpad, reports written by the agents themselves, no fix wave.
+
+**Facts learned along the way.** The spec has no "R1–R30" rule list (its R-ids are the risk register); "SAP today scheduling" never appears in it (its term is "backward-with-reversal", sourced from an APO note while the pilot talks to ECC). The ECC integration document in the repo root (`Nimbus_ECC_Integration_FSD.docx`) was permission-locked and not read. A fresh database from the branch's `schema.sql` already carries the cutover ledger ids, so a pre-cutover state must come from `main`'s `schema.sql`. The migration runner hard-codes `sslmode=require`; the psql fallback was used locally. The first-wave timings were inflated 3–7× by 14 agents sharing one machine; the checker re-measured alone. Two stale worktree admin folders under `.git/worktrees/` could not be deleted (OneDrive lock); `git worktree prune` outside OneDrive clears them. `main` did not move during the run (`62d786e` at start and end).
+
+**Rejected alternatives.** A fix wave (your standing rule: findings only); a browser lane (declined); SAP PP/DS as the reference (pilot is ECC); spec-only checking with no SAP comparison.
+
+**Cleanup.** Scratch databases `nimbus_val_cutover`, `nimbus_val_api` and the checker copies were dropped after this document was written; the seed and check scripts that reproduce every finding stay under the session scratchpad (`validation-review/L<n>` and `V<n>`, each with a README). The working tree is unchanged except for this file and the gitignored compiled output the full-suite run rebuilt.
+
+
+## 9. Fix wave (2026-10-15)
+
+Tip: 261d9cb on `feature/backward-scheduling` (base 69df633). Nothing is merged, pushed or deployed. The change log, rulings and gate numbers are in `BACKWARD_SCHEDULING_MIGRATION.md`, subsection "Validation fix wave (2026-10-15)". Final gate: legacy 77/77; module tests 1476 with 3 failures that are the known optimizer-probe timeout flake (the engine file alone passes 183/183); Python 1809 passed with only the two `test_scale_catalog_paging` collation failures; trial merge with `main` clean.
+
+### Finding status
+
+| Finding | Status |
+|---|---|
+| VC1 | fixed e1cb68d |
+| VI1 | fixed b1cf2a6 |
+| VI2 | fixed 3cd83a8 (fold-tolerant width check); zero-wall-width bar ruled residual |
+| VI3 | fixed 44655e7 (optimizer evaluators deferred by scope cut 1) |
+| VI4 | closed by decision D4 |
+| VI5 | fixed b1cf2a6 |
+| VI6 | fixed 6e0ebe2 |
+| VI7 | fixed 8508c4d |
+| VI8 | fixed bc25663 |
+| VI9 | fixed bc25663 |
+| VI10 | fixed b15353f |
+| VI11 | fixed 6c70cb1 |
+| VI12 | fixed 4c24d55 |
+| VI13 | fixed 4c24d55 |
+| VI14 | fixed 294792d |
+| VI15 | fixed 32f2009 |
+| VI16 | fixed 32f2009 |
+| VI17 | fixed 44655e7 |
+| VI18 | fixed 3ba27bf |
+| VI19 | fixed 3ba27bf |
+| VM1 | closed by decision D9 (floats deferred) and D9a |
+| VM2 | fixed 3cd83a8 |
+| VM3 | fixed 3cd83a8 |
+| VM4 | fixed 32f2009 |
+| VM5 | closed by decision D8 (help text fixed be815f4) |
+| VM6 | fixed b15353f |
+| VM7 | fixed b15353f |
+| VM8 | fixed bc25663 |
+| VM9 | fixed b15353f (D6) |
+| VM10 | deferred |
+| VM11 | deferred |
+| VM12 | fixed d3857cc |
+| VM13 | fixed d3857cc |
+| VM14 | fixed d3857cc |
+| VM15 | fixed 3cd83a8 |
+| VM16 | fixed 3cd83a8 and d7c9b8f (route docstrings, then the request model docstring) |
+| VM17 | fixed 44655e7 |
+| VM18 | deferred |
+| VM19 | deferred |
+| VM20 | deferred |
+| VM21 | closed by decision D14 |
+| VM22 | fixed 3ba27bf |
+| VM23 | fixed 38b8dc7 |
+| VM24 | fixed 38b8dc7 |
+| VM25 | deferred |
+| VM26 | fixed 38b8dc7 and 3be3837 (anchors refreshed; CLAUDE.md sync) |
+| VM27 | fixed 38b8dc7 |
+| VM28 | fixed 38b8dc7 |
+| VM29 | fixed 3ba27bf |
+| VP1 | fixed ee41cc3 (D9c) |
+| VP2 | deferred |
+| VP3 | deferred |
+| VU1 | fixed 8508c4d (D3), refined 3959432 (running-order walk returns calendar pieces) |
+| VU2 | deferred |
+| VU3 | deferred |
+| VU4 | deferred |
+| VU5 | deferred |
+| VU6 | closed by decision D11 (waits on the SAP echo test) |
+| VU7 | deferred |
+| VU8 | deferred |
+| VU9 | closed by decision D7 |
+| VU10 | deferred |
+| VU11 | deferred |
+| VU12 | deferred |
+| VU13 | deferred |
+| VU14 | deferred |
+| VU15 | deferred |
+| VU16 | deferred |
+| VU17 | fixed ee41cc3 (D19) |
+| VU18 | deferred |
+| VU19 | deferred |
+| VU20 | deferred |
+| VU21 | deferred |
+| VU22 | deferred |
+| VU23 | deferred |
+| VU24 | deferred |
+| VU25 | fixed 3ba27bf |
+| VU26 | deferred |
+| VU27 | deferred |
+| VU28 | deferred |
+| VU29 | deferred |
+
+### Decision status
+
+| Decision | Status |
+|---|---|
+| D1 | fixed b1cf2a6 |
+| D2 | fixed 8508c4d |
+| D3 | fixed 8508c4d, refined 3959432 |
+| D4 | closed by decision, no change |
+| D5 | fixed 6e0ebe2 |
+| D6 | fixed b15353f |
+| D7 | closed by decision, no change |
+| D8 | fixed be815f4 (help text) |
+| D9, D9a | closed by decision, floats deferred, no reduction step |
+| D9b | fixed d3857cc |
+| D9c | fixed ee41cc3 |
+| D10 | fixed 4c24d55 |
+| D11 | closed by decision, no change |
+| D12 | fixed 3cd83a8 |
+| D13 | fixed 3cd83a8 and d7c9b8f |
+| D14 | fixed 294792d, d3857cc, 3ba27bf |
+| D15 | fixed 32f2009 |
+| D16 | fixed 3ba27bf |
+| D17 | fixed e1cb68d, 3cd83a8, 44655e7 |
+| D18 | fixed 32f2009 |
+| D19 | fixed ee41cc3 |
+| D20 | fixed d3857cc |
+| D21 | fixed bc25663 |
+
+### Residuals and owed
+
+- VM10: deferred, not fixed in this wave (distribution minor, see section 3 line VM10).
+- VM11: deferred, not fixed in this wave (distribution test gap, see section 3 line VM11).
+- VM25: deferred, not fixed in this wave (stale roadmap and architecture docs, see section 3 line VM25).
+- VM18, VM19, VM20, VP2, VP3: deferred minors from section 3 that the plan did not include (plant-clock nonexistent times, a sync comment, a calendar performance note, the due-day window resolver, a calendar doc line).
+- VU2: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU2).
+- VU3: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU3).
+- VU4: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU4).
+- VU5: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU5).
+- VU6: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU6).
+- VU7: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU7).
+- VU8: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU8).
+- VU10: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU10).
+- VU11: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU11).
+- VU12: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU12).
+- VU13: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU13).
+- VU14: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU14).
+- VU15: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU15).
+- VU16: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU16).
+- VU18: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU18).
+- VU19: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU19).
+- VU20: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU20).
+- VU21: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU21).
+- VU22: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU22).
+- VU23: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU23).
+- VU24: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU24).
+- VU26: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU26).
+- VU27: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU27).
+- VU28: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU28).
+- VU29: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU29).
+- Optimizer evaluators still measure elapsed time in the viewer zone: an optimizer placement that straddles the plant spring-forward gap, viewed from a browser in a different daylight-saving calendar, is rejected at Save with a width toast and re-runs correctly (scope cut 1).
+- Zero-wall-width bar in the repeated hour (ruled): an order of exactly one hour that ends inside the repeated hour at the same wall time cannot be saved during that hour once a year, because the stored-range constraint needs the end after the start; fixing it needs a schema change.
+- No pytest feeds the running-order piece payloads (two pieces, or no pieces plus both edges) through the bulk date update route; the server acceptance was checked by reading only.
+- The date-only backfill for pre-existing rows is a midnight heuristic: a genuine midnight due date on an existing row reads as date-only until SAP next sends it.
+- Browser check 1: left-handle veto on a bar drag.
+- Browser check 2: derive-paused banner appearance and stacking under the concurrency banner.
+- Browser check 3: overtime confirm when a firmed order finish is moved outside working hours.
+- Browser check 4: display-only never-placed rows after cutover show a derived bar and are not saved until a planner acts or the first-load Save runs.
+- Browser check 5: Gantt lock and today bands on the plant clock for a viewer in a different time zone.
+- Browser check 6: Override window and hover card, including the explain-the-move line.
+- Browser check 7: multi-drag ghost preview on a right-edge resize.
+- Browser check 8: cutover summary toast in all five languages.
+- Browser check 9: reversal toast and alert on a run-time edit of a late order, alert cards and glossary in five languages, distribution separation wording.
+- Browser check 10 (G-10): rehearse the whole cutover on a restored copy of the pilot database, timing the first-load reconcile at real plant size.
+- Browser check, added: the running-order finish toast (a typed End or a drag on a running order is refused, the run-time edit is the only resize), in five languages.
+- Browser check, added: minute-held finishes show and edit at the exact minute in the grid, the Inspector and the Override window; only a horizontal drag lands on the 15-minute grid.
+- Browser check, added: the amber placement-exception card and its tile count (not counted in the blocking tile or the Orders Conflicting chip; the marker stays on the bar).
+- Browser check, added: the derived bar on a line without its own calendar row (plant default calendar), including the reconcile after undo.
+- Cutover rehearsal on a restored pilot copy (G-10): the full runbook in `docs/DEPLOYMENT.md`, never executed end to end.
+- SAP echo test against a real SAP system (A9): confirms how SAP returns seconds before the echo compare (kept truncated to the minute, D11) is revisited.
+- External callers of the bulk task update route (`/tasks/bulk_update`): the owner must list them, because the route now requires both edges and carries start-derived reasons.
+- Two stale `.git/worktrees` admin directories (`bisect-wt`, `merged`) need `git worktree prune`, to be run outside OneDrive.

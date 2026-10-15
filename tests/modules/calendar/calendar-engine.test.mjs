@@ -11,7 +11,7 @@
 // Under plain Node ESM (this file) nothing sets that global automatically, so
 // we bootstrap it here via createRequire — mirroring
 // tests/modules/helpers/load-legacy-app.mjs's identical bootstrap.
-import { test } from 'node:test';
+import { test, describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
@@ -114,4 +114,657 @@ test('nextAvailable returns null when a day-long blackout leaves no window long 
   } finally {
     Store.replaceBlocks(prior, 'unit-test');
   }
+});
+
+// ---------------------------------------------------------------------------
+// Backward (finish-anchored) primitives: Calendar.latestAvailable,
+// Calendar._freeIntervalsBackward, Calendar.allocateRuntimeBackward.
+// Worked examples follow BACKWARD_SCHEDULING_MIGRATION.md 4.2.3 - 4.2.7.
+// 19-23 Oct 2026 is Mon-Fri; 24/25 Oct is the weekend.
+// ---------------------------------------------------------------------------
+const p2 = n => String(n).padStart(2, '0');
+const fmt = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+const at = (day, clock) => new Date(`${day}T${clock}:00`);
+const D = { mon: '2026-10-19', tue: '2026-10-20', wed: '2026-10-21', thu: '2026-10-22', fri: '2026-10-23', sat: '2026-10-24', sun: '2026-10-25', nextMon: '2026-10-26' };
+const weekdays = (open, close) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [open, close] : null]));
+const everyDay = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+const FLOOR = at('2026-09-01', '00:00');
+const bopts = (extra = {}) => ({ floor: FLOOR, minSegmentMinutes: 30, plantTz: null, ...extra });
+const summary = r => r.kind !== 'placed' ? r.kind
+  : `${fmt(r.start)} -> ${fmt(r.end)}${r.finishMoved ? ` moved:${r.moveReason}` : ''}${r.scheduleSegments.length ? ` [${r.scheduleSegments.map(s => `${fmt(s.startDate)}-${fmt(s.endDate)}`).join(' | ')}]` : ''}`;
+const blk = (id, line, start, end) => ({ id, line, start, end });
+const withZone = async (zone, fn) => {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  try { await fn(); } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+};
+
+describe('backward calendar primitives', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+
+  // The 4.2.3 fixture: Mon-Fri 06-18, 2 h blackout Thu 10:00-12:00.
+  const sim1 = name => {
+    Store.setCalendar(name, weekdays(6, 18), 'unit-test');
+    Store.replaceBlocks([blk(`${name}-b`, name, at(D.thu, '10:00'), at(D.thu, '12:00'))], 'unit-test');
+    return name;
+  };
+  const plain = (name, hours = weekdays(6, 18)) => {
+    Store.setCalendar(name, hours, 'unit-test');
+    Store.replaceBlocks([], 'unit-test');
+    return name;
+  };
+
+  describe('allocateRuntimeBackward: finish boundaries', () => {
+    it('clamps a finish after close to the close (closed_finish)', () => {
+      const line = plain('BW-A1');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '18:30'), 120, 'never', bopts())),
+        '2026-10-21 16:00 -> 2026-10-21 18:00 moved:closed_finish');
+    });
+
+    it('moves a finish on a closed day to the previous open day close (closed_finish)', () => {
+      const line = plain('BW-A2');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.sat, '12:00'), 120, 'never', bopts())),
+        '2026-10-23 16:00 -> 2026-10-23 18:00 moved:closed_finish');
+    });
+
+    it('moves a finish inside a blackout to the blackout start, which rounds DOWN to the minute', () => {
+      const line = plain('BW-A3');
+      Store.replaceBlocks([{ id: 'a3', line, start: new Date(+at(D.thu, '09:30') + 30000), end: at(D.thu, '12:00') }], 'unit-test');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.thu, '11:00'), 60, 'never', bopts())),
+        '2026-10-22 08:30 -> 2026-10-22 09:30 moved:blackout');
+    });
+
+    it('treats a finish exactly at window close as valid (no move)', () => {
+      const line = plain('BW-A4');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '18:00'), 120, 'never', bopts())),
+        '2026-10-21 16:00 -> 2026-10-21 18:00');
+    });
+
+    it('hops a finish exactly at window open to the previous open day close', () => {
+      const line = plain('BW-A5');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.thu, '06:00'), 120, 'never', bopts())),
+        '2026-10-21 16:00 -> 2026-10-21 18:00 moved:closed_finish');
+    });
+
+    it('lands a Monday-open finish on the previous Friday close, never on the weekend', () => {
+      const line = plain('BW-A6');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.nextMon, '06:00'), 180, 'never', bopts())),
+        '2026-10-23 15:00 -> 2026-10-23 18:00 moved:closed_finish');
+    });
+
+    it('floors a sub-minute finish to the minute without reporting a move', () => {
+      const line = plain('BW-A7');
+      const finish = new Date(+at(D.wed, '12:00') + 45000);
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, finish, 60, 'never', bopts())),
+        '2026-10-21 11:00 -> 2026-10-21 12:00');
+    });
+  });
+
+  describe('allocateRuntimeBackward: placement and policies', () => {
+    it('keeps a finish that already sits in one window under every policy (fixed point, 4.2.3 row 1)', () => {
+      const line = sim1('BW-B1');
+      for (const policy of ['never', 'overlong_only', 'partial_allowed']) {
+        const r = Calendar.allocateRuntimeBackward(line, at(D.fri, '14:00'), 480, policy, bopts());
+        assert.equal(summary(r), '2026-10-23 06:00 -> 2026-10-23 14:00', policy);
+        assert.deepEqual(r.scheduleSegments, [], policy);
+      }
+    });
+
+    it('fills pieces from the latest fragment backward, each anchored at its fragment end', () => {
+      const line = plain('BW-B2');
+      Store.replaceBlocks([blk('b2', line, at(D.wed, '12:00'), at(D.wed, '14:00'))], 'unit-test');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '18:00'), 360, 'partial_allowed', bopts())),
+        '2026-10-21 10:00 -> 2026-10-21 18:00 [2026-10-21 10:00-2026-10-21 12:00 | 2026-10-21 14:00-2026-10-21 18:00]');
+    });
+
+    it('4.2.3 under never: no contiguous 8 h block ends at Fri 10:00, so the finish moves to Wed 18:00 (no_slot_at_finish)', () => {
+      const line = sim1('BW-B3');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.fri, '10:00'), 480, 'never', bopts());
+      assert.equal(summary(r), '2026-10-21 10:00 -> 2026-10-21 18:00 moved:no_slot_at_finish');
+      assert.deepEqual(r.scheduleSegments, []);
+    });
+
+    it('4.2.3 under overlong_only: same as never when the order is not inherently overlong', () => {
+      const line = sim1('BW-B4');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '10:00'), 480, 'overlong_only', bopts())),
+        '2026-10-21 10:00 -> 2026-10-21 18:00 moved:no_slot_at_finish');
+    });
+
+    it('4.2.3 under partial_allowed: pieces Thu 14:00-18:00 + Fri 06:00-10:00, finish held', () => {
+      const line = sim1('BW-B5');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.fri, '10:00'), 480, 'partial_allowed', bopts());
+      assert.equal(summary(r), '2026-10-22 14:00 -> 2026-10-23 10:00 [2026-10-22 14:00-2026-10-22 18:00 | 2026-10-23 06:00-2026-10-23 10:00]');
+      assert.deepEqual(r.scheduleSegments.map(s => s.sequence), [1, 2]);
+      assert.equal(r.finishMoved, false);
+    });
+
+    it('4.2.7 minimum-piece mirror: 4 h 20 m, finish Fri 10:00, min 30 -> Thu 17:30-18:00 + Fri 06:10-10:00', () => {
+      const line = sim1('BW-B6');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '10:00'), 260, 'partial_allowed', bopts({ minSegmentMinutes: 30 }))),
+        '2026-10-22 17:30 -> 2026-10-23 10:00 [2026-10-22 17:30-2026-10-22 18:00 | 2026-10-23 06:10-2026-10-23 10:00]');
+    });
+
+    it('skips a piece at the finish shorter than the minimum and moves the finish earlier (min_piece, OQ55)', () => {
+      const line = plain('BW-B7');
+      // Only 20 minutes (06:00-06:20) precede the finish on Friday; a 20-minute piece is below the 30-minute floor.
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '06:20'), 100, 'partial_allowed', bopts())),
+        '2026-10-22 16:20 -> 2026-10-22 18:00 moved:min_piece');
+    });
+
+    it('lets a whole order shorter than the minimum piece be placed as one piece', () => {
+      const line = plain('BW-B8');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '12:00'), 20, 'partial_allowed', bopts())),
+        '2026-10-21 11:40 -> 2026-10-21 12:00');
+    });
+
+    it('reports overlong when the run time exceeds the longest merged window under never / overlong_only (OQ50)', () => {
+      const line = plain('BW-B9');          // 12 h windows, weekends closed
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '18:00'), 13 * 60, 'never', bopts())), 'overlong');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '18:00'), 13 * 60, 'overlong_only', bopts())), 'overlong');
+      assert.equal(Calendar.allocateRuntimeBackward(line, at(D.fri, '18:00'), 13 * 60, 'partial_allowed', bopts()).kind, 'placed');
+    });
+
+    it('does not call an order overlong just because blackouts slice the windows (nominal windows decide)', () => {
+      const line = sim1('BW-B10');
+      assert.notEqual(Calendar.allocateRuntimeBackward(line, at(D.fri, '10:00'), 11 * 60, 'never', bopts()).kind, 'overlong');
+    });
+
+    it('does not call an order overlong when only the clipped window at the finish is short', () => {
+      const line = plain('BW-B11');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '06:30'), 8 * 60, 'never', bopts())),
+        '2026-10-22 10:00 -> 2026-10-22 18:00 moved:no_slot_at_finish');
+    });
+
+    it('reports unavailable when the line has no operating window at all inside the lookback', () => {
+      const line = plain('BW-B12', everyDay(null));
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), 60, 'never', bopts())), 'unavailable');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), 60, 'partial_allowed', bopts())), 'unavailable');
+    });
+
+    it('bounds the lookback by lookbackDays measured back from the finish', () => {
+      const line = plain('BW-B13', { 0: null, 1: null, 2: [6, 18], 3: null, 4: null, 5: null, 6: null });   // Tuesdays only
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), 60, 'never', bopts({ lookbackDays: 1 }))), 'unavailable');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), 60, 'never', bopts({ lookbackDays: 7 }))),
+        '2026-10-20 17:00 -> 2026-10-20 18:00 moved:closed_finish');
+    });
+
+    it('treats a non-positive or non-numeric run time as unavailable instead of throwing', () => {
+      const line = plain('BW-B14');
+      for (const runtime of [0, -5, NaN, Infinity, 'x']) {
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), runtime, 'never', bopts()).kind, 'unavailable');
+      }
+    });
+  });
+
+  describe('allocateRuntimeBackward: reached_now (4.2.4)', () => {
+    // 08:00-20:00 Mon-Fri, 6 h order, held finish Mon 19 Oct 12:00 -> backward start Fri 16 Oct 18:00.
+    const reversal = name => plain(name, weekdays(8, 20));
+
+    it('places the walk when it stops exactly at the floor', () => {
+      const line = reversal('BW-C1');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.mon, '12:00'), 360, 'partial_allowed', bopts({ floor: at('2026-10-16', '18:00') }));
+      assert.equal(summary(r), '2026-10-16 18:00 -> 2026-10-19 12:00 [2026-10-16 18:00-2026-10-16 20:00 | 2026-10-19 08:00-2026-10-19 12:00]');
+    });
+
+    it('returns reached_now when the walk would place any minute before the floor (partial_allowed)', () => {
+      const line = reversal('BW-C2');
+      assert.deepEqual(Calendar.allocateRuntimeBackward(line, at(D.mon, '12:00'), 360, 'partial_allowed', bopts({ floor: at('2026-10-16', '19:00') })), { kind: 'reached_now' });
+    });
+
+    it('returns reached_now under never when no contiguous slot ends at or after the floor', () => {
+      const line = reversal('BW-C3');
+      assert.deepEqual(Calendar.allocateRuntimeBackward(line, at(D.mon, '12:00'), 360, 'never', bopts({ floor: at('2026-10-16', '19:00') })), { kind: 'reached_now' });
+    });
+
+    it('returns reached_now when the finish itself is before the floor', () => {
+      const line = reversal('BW-C4');
+      assert.deepEqual(Calendar.allocateRuntimeBackward(line, at(D.mon, '12:00'), 60, 'never', bopts({ floor: at(D.tue, '09:00') })), { kind: 'reached_now' });
+    });
+
+    it('returns reached_now, not a partial placement, when nothing fits between the floor and the finish', () => {
+      const line = reversal('BW-C5');
+      Store.replaceBlocks([blk('c5', line, at(D.mon, '08:00'), at(D.mon, '20:00'))], 'unit-test');
+      assert.deepEqual(Calendar.allocateRuntimeBackward(line, at(D.mon, '12:00'), 60, 'never', bopts({ floor: at(D.mon, '07:00') })), { kind: 'reached_now' });
+    });
+  });
+
+  describe('allocateRuntimeBackward: contiguity across midnight and DST (OQ46, OQ47)', () => {
+    it('merges touching windows across midnight on a 24/7 line, so never can place across midnight (OQ47)', () => {
+      const line = plain('BW-D1', everyDay([0, 24]));
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '02:00'), 360, 'never', bopts());
+      assert.equal(summary(r), '2026-10-19 20:00 -> 2026-10-20 02:00');
+      assert.deepEqual(r.scheduleSegments, []);
+      const split = Calendar.allocateRuntimeBackward(line, at(D.tue, '02:00'), 360, 'partial_allowed', bopts());
+      assert.equal(summary(split), '2026-10-19 20:00 -> 2026-10-20 02:00', 'touching pieces form one bar, not two segments');
+    });
+
+    it('does not merge windows separated by a gap', () => {
+      const line = plain('BW-D2', weekdays(0, 24));   // Mon-Fri 24 h; weekend closed
+      // A 130 h order exceeds the longest merged window (Mon 00:00 -> Sat 00:00 = 120 h).
+      assert.equal(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), 130 * 60, 'never', bopts()).kind, 'overlong');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.fri, '12:00'), 100 * 60, 'never', bopts())),
+        '2026-10-19 08:00 -> 2026-10-23 12:00');
+    });
+
+    describe('senior review I9: one overlong definition (merged contiguous spans) on the forward, reversal and backward paths', () => {
+      const H = 3600 * 1000;
+      const night = () => ({ 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null });   // Mon 22:00 -> Tue 06:00 = one 8 h span
+      it('a 24/7 line: a 30 h contiguous run is not overlong anywhere', () => {
+        const line = plain('BW-I9A', everyDay([0, 24]));
+        assert.equal(Calendar.hasNominalWindow(line, at(D.mon, '08:00'), 30 * H), true, 'forward predicate');
+        assert.equal(Calendar.findContiguousSlot(line, at(D.mon, '08:00'), 30 * H).kind, 'slot', 'reversal-queue slot');
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.wed, '12:00'), 30 * 60, 'never', bopts()).kind, 'placed', 'backward walk');
+      });
+      it('a night shift crossing midnight is one span: 8 h fits, 8 h + 1 min is overlong, on all three paths', () => {
+        const line = plain('BW-I9B', night());
+        const from = at(D.mon, '00:00');
+        assert.equal(Calendar.hasNominalWindow(line, from, 8 * H), true, 'run == merged window length fits');
+        assert.equal(Calendar.hasNominalWindow(line, from, 8 * H + 60000), false);
+        assert.equal(Calendar.findContiguousSlot(line, from, 8 * H).kind, 'slot');
+        assert.equal(Calendar.findContiguousSlot(line, from, 8 * H + 60000).kind, 'overlong');
+        const fits = Calendar.allocateRuntimeBackward(line, at(D.tue, '06:00'), 480, 'never', bopts());
+        assert.equal(summary(fits), '2026-10-19 22:00 -> 2026-10-20 06:00');
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.tue, '06:00'), 481, 'never', bopts()).kind, 'overlong');
+      });
+      it('U20 boundaries: run == window length fits, and equal-length windows agree', () => {
+        const line = plain('BW-I9C', weekdays(8, 16));   // five equal 8 h windows, none touching
+        assert.equal(Calendar.hasNominalWindow(line, at(D.mon, '00:00'), 8 * H), true);
+        assert.equal(Calendar.hasNominalWindow(line, at(D.mon, '00:00'), 8 * H + 60000), false);
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.tue, '16:00'), 480, 'never', bopts()).kind, 'placed');
+        assert.equal(Calendar.allocateRuntimeBackward(line, at(D.tue, '16:00'), 481, 'never', bopts()).kind, 'overlong');
+      });
+    });
+
+    for (const zone of ['UTC', 'America/Chicago', 'Asia/Tokyo']) {
+      it(`DST case of 4.2.5 (plantTz Chicago, Sun 8 Mar 2026, 5 h finishing 04:00 -> start Sat 22:00), viewer zone ${zone}`, async () => {
+        await withZone(zone, () => {
+          const line = plain('BW-E1', everyDay([0, 24]));
+          const finish = new Date(2026, 2, 8, 4, 0, 0);
+          const r = Calendar.allocateRuntimeBackward(line, finish, 300, 'never', bopts({ plantTz: 'America/Chicago', floor: new Date(2026, 1, 1) }));
+          assert.equal(r.kind, 'placed');
+          assert.equal(summary(r), '2026-03-07 22:00 -> 2026-03-08 04:00');
+          // Elapsed time stays 5 h in plant-zone instants even though the wall clock spans 6 h.
+          const core = globalThis.NimbusComputeCore;
+          assert.equal((+core.plantInstantFromWallClock('America/Chicago', r.end) - +core.plantInstantFromWallClock('America/Chicago', r.start)) / 3600000, 5);
+          // Without a zone the walk is plain wall-clock subtraction and loses the hour.
+          if (zone !== 'America/Chicago') {
+            const naive = Calendar.allocateRuntimeBackward(line, finish, 300, 'never', bopts({ floor: new Date(2026, 1, 1) }));
+            assert.equal(summary(naive), '2026-03-07 23:00 -> 2026-03-08 04:00');
+          }
+        });
+      });
+    }
+
+    for (const [label, [month, day], first] of [
+      ['spring-forward night (Sun 8 Mar 2026)', [2, 8], '2026-03-08 00:00'],
+      ['fall-back night (Sun 1 Nov 2026)', [10, 1], '2026-11-01 00:00'],
+    ]) {
+      it(`gate 2: a partial_allowed walk under a Chicago plant zone across the ${label} places pieces whose plant-zone elapsed total is the run time`, async () => {
+        await withZone('UTC', () => {
+          const line = plain(`BW-E3-${first}`, everyDay([0, 6]));   // the change falls INSIDE the 00:00-06:00 window
+          const finish = new Date(2026, month, day, 6, 0);           // built inside withZone: a viewer-zone wall time
+          const r = Calendar.allocateRuntimeBackward(line, finish, 480, 'partial_allowed',
+            bopts({ plantTz: 'America/Chicago', floor: new Date(2026, 1, 1) }));
+          assert.equal(r.kind, 'placed');
+          const core = globalThis.NimbusComputeCore;
+          const pieces = r.scheduleSegments.length ? r.scheduleSegments : [{ startDate: r.start, endDate: r.end }];
+          assert.equal(fmt(pieces[pieces.length - 1].startDate), first, 'the change-night window is taken whole');
+          const elapsed = pieces.reduce((sum, piece) => sum
+            + (+core.plantInstantFromWallClock('America/Chicago', piece.endDate) - +core.plantInstantFromWallClock('America/Chicago', piece.startDate)), 0);
+          assert.equal(elapsed / 60000, 480, 'the pieces add up to 8 elapsed hours even though the wall clock spans 7 or 9');
+          assert.equal(r.finishMoved, false);
+        });
+      });
+    }
+
+    for (const zone of ['UTC', 'America/Chicago', 'Asia/Tokyo']) {
+      it(`U16: the reversal forward leg under plantTz Chicago spans the spring-forward night in plant-zone elapsed time (5 h bar from Sun 00:00 ends 06:00), viewer zone ${zone}`, async () => {
+        await withZone(zone, () => {
+          const line = plain('BW-U16', everyDay([0, 24]));
+          const core = globalThis.NimbusComputeCore;
+          const tz = 'America/Chicago';
+          const floor = new Date(2026, 2, 8, 0, 0, 0);
+          for (const policy of ['never', 'partial_allowed']) {
+            const r = Calendar.allocateRuntime(line, floor, 300, policy, tz);
+            assert.equal(r.kind, 'allocated', policy);
+            assert.equal(fmt(r.start), '2026-03-08 00:00', policy);
+            assert.equal(fmt(r.end), '2026-03-08 06:00', `${policy}: wall clock spans 6 h across the 02:00 jump`);
+            assert.equal((+core.plantInstantFromWallClock(tz, r.end) - +core.plantInstantFromWallClock(tz, r.start)) / 3600000, 5, 'elapsed is 5 h');
+          }
+          // Same elapsed length as the backward leg for the same run time.
+          const back = Calendar.allocateRuntimeBackward(line, new Date(2026, 2, 8, 6, 0), 300, 'never', bopts({ plantTz: tz, floor: new Date(2026, 1, 1) }));
+          assert.equal(summary(back), '2026-03-08 00:00 -> 2026-03-08 06:00', 'both legs agree');
+        });
+      });
+    }
+
+    it('U17: the nominal pass is memoised per line inside a run: 50 orders cost at most 2x the workWindow lookups of one', () => {
+      const line = plain('BW-U17', weekdays(6, 18));
+      const tz = 'America/Chicago';
+      const finishes = Array.from({ length: 50 }, (_, i) => new Date(2026, 9, 5 + (i % 25), 6 + (i % 12), 0));
+      const run = (finishList) => {
+        const original = Calendar.workWindow;
+        let calls = 0;
+        Calendar.workWindow = function (...args) { calls++; return original.apply(this, args); };
+        Calendar._beginRun(null);
+        try {
+          const results = finishList.map(finish => summary(Calendar.allocateRuntimeBackward(line, finish, 240, 'never',
+            bopts({ plantTz: tz, floor: new Date(finish.getTime() - 3 * 86400000) }))));
+          return { calls, results };
+        } finally { Calendar._endRun(); Calendar.workWindow = original; }
+      };
+      const one = run(finishes.slice(0, 1));
+      const many = run(finishes);
+      assert.ok(one.calls > 0);
+      assert.ok(many.calls <= 2 * one.calls, `50 orders made ${many.calls} lookups, one order ${one.calls}`);
+      // Same answers as the unmemoised (no run) path, order by order.
+      const plainResults = finishes.map(finish => summary(Calendar.allocateRuntimeBackward(line, finish, 240, 'never',
+        bopts({ plantTz: tz, floor: new Date(finish.getTime() - 3 * 86400000) }))));
+      assert.deepEqual(many.results, plainResults);
+      // Longest-window and availability facts still match when a run order is overlong or the line has no window.
+      Calendar._beginRun(null);
+      try {
+        assert.equal(Calendar.allocateRuntimeBackward(line, finishes[0], 13 * 60, 'never', bopts({ plantTz: tz })).kind, 'overlong');
+        Store.setCalendar('BW-U17-CLOSED', everyDay(null), 'unit-test');
+        assert.equal(Calendar.allocateRuntimeBackward('BW-U17-CLOSED', finishes[0], 60, 'never', bopts({ plantTz: tz })).kind, 'unavailable');
+      } finally { Calendar._endRun(); }
+    });
+
+    it('U18: a finish at 00:00 on an open 24 h day held by a blackout in the previous window reports blackout, not closed_finish', () => {
+      const line = plain('BW-U18', everyDay([0, 24]));
+      Store.replaceBlocks([blk('u18', line, at(D.tue, '20:00'), at(D.wed, '06:00'))], 'unit-test');
+      const midnight = Calendar.allocateRuntimeBackward(line, at(D.wed, '00:00'), 60, 'never', bopts());
+      assert.equal(midnight.kind, 'placed');
+      assert.equal(midnight.finishMoved, true);
+      assert.equal(midnight.moveReason, 'blackout');
+      const inside = Calendar.allocateRuntimeBackward(line, at(D.wed, '03:00'), 60, 'never', bopts());
+      assert.equal(inside.moveReason, 'blackout');
+      // A finish after close stays closed_finish.
+      const weekday = plain('BW-U18B', weekdays(6, 18));
+      assert.equal(Calendar.allocateRuntimeBackward(weekday, at(D.wed, '18:30'), 60, 'never', bopts()).moveReason, 'closed_finish');
+    });
+
+    it('U19: latestAvailable rounds the run time like the allocator (90.4 min -> 90, not 91)', () => {
+      const line = plain('BW-U19', weekdays(6, 18));
+      const finish = at(D.wed, '12:00');
+      const got = Calendar.latestAvailable(line, finish, 90.4 * 60000, { floor: FLOOR });
+      assert.equal((got.end - got.start) / 60000, 90);
+      const placed = Calendar.allocateRuntimeBackward(line, finish, 90.4, 'never', bopts());
+      assert.equal(fmt(got.start), fmt(placed.start));
+    });
+
+    it('merges a Sunday-night window with Monday-morning hours into one contiguous window (week wrap)', () => {
+      const line = plain('BW-E4', { 0: [22, 24], 1: [0, 6], 2: null, 3: null, 4: null, 5: null, 6: null });
+      const r = Calendar.allocateRuntimeBackward(line, at(D.mon, '04:00'), 360, 'never', bopts());
+      assert.equal(summary(r), '2026-10-18 22:00 -> 2026-10-19 04:00');
+      assert.deepEqual(r.scheduleSegments, []);
+    });
+
+    it('when the finish is both clamped by a blackout and unplaceable there, no_slot_at_finish takes precedence over blackout', () => {
+      const line = plain('BW-E5');
+      Store.replaceBlocks([blk('e5', line, at(D.wed, '14:00'), at(D.wed, '18:00'))], 'unit-test');
+      // The finish (Wed 17:00) clamps to 14:00. 8 h fit in Wed 06-14: the only cause is the blackout.
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '17:00'), 480, 'never', bopts())),
+        '2026-10-21 06:00 -> 2026-10-21 14:00 moved:blackout');
+      // 10 h do not fit in that 8 h window: the walk lands on Tuesday, and that cause wins.
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.wed, '17:00'), 600, 'never', bopts())),
+        '2026-10-20 08:00 -> 2026-10-20 18:00 moved:no_slot_at_finish');
+    });
+
+    it('hops days by calendar date across the fall-back change (never minus 24 h)', async () => {
+      await withZone('America/New_York', () => {
+        const line = plain('BW-E2', everyDay([8, 16]));
+        // Sun 1 Nov 2026 is 25 h long in New York. 20 h of runtime from Mon 2 Nov 12:00 spans Mon, Sun and Sat.
+        const r = Calendar.allocateRuntimeBackward(line, new Date(2026, 10, 2, 12, 0), 1200, 'partial_allowed', bopts({ floor: new Date(2026, 9, 1) }));
+        assert.equal(summary(r), '2026-10-31 08:00 -> 2026-11-02 12:00 [2026-10-31 08:00-2026-10-31 16:00 | 2026-11-01 08:00-2026-11-01 16:00 | 2026-11-02 08:00-2026-11-02 12:00]');
+        assert.equal(fmt(globalThis.NimbusComputeCore.prevCalendarDay(new Date(2026, 10, 1, 23, 30))), '2026-10-31 00:00');
+      });
+    });
+
+    it('prevCalendarDay is the calendar-date twin of _nextCalendarDay', async () => {
+      await withZone('America/Chicago', () => {
+        const core = globalThis.NimbusComputeCore;
+        assert.equal(fmt(core.prevCalendarDay(new Date(2026, 2, 9, 0, 0))), '2026-03-08 00:00');
+        assert.equal(fmt(core.prevCalendarDay(new Date(2026, 2, 8, 23, 59))), '2026-03-07 00:00');
+        assert.equal(fmt(core.prevCalendarDay(core._nextCalendarDay(new Date(2026, 10, 1, 12, 0)))), '2026-11-01 00:00');
+      });
+    });
+  });
+
+  describe('plantInstantFromWallClock / plantWallClockFromInstant', () => {
+    it('round-trips ordinary wall times and resolves DST edges (gap forward, fall-back earlier)', async () => {
+      await withZone('UTC', () => {
+        const core = globalThis.NimbusComputeCore;
+        const tz = 'America/Chicago';
+        assert.equal(core.plantInstantFromWallClock(tz, new Date(2026, 6, 1, 12, 30)).toISOString(), '2026-07-01T17:30:00.000Z');
+        assert.equal(core.plantInstantFromWallClock(tz, new Date(2026, 0, 1, 12, 30)).toISOString(), '2026-01-01T18:30:00.000Z');
+        assert.equal(core.plantInstantFromWallClock(tz, new Date(2026, 2, 8, 4, 0)).toISOString(), '2026-03-08T09:00:00.000Z');
+        assert.equal(core.plantInstantFromWallClock(tz, new Date(2026, 2, 7, 22, 0)).toISOString(), '2026-03-08T04:00:00.000Z');
+        assert.equal(core.plantInstantFromWallClock(tz, new Date(2026, 2, 8, 2, 30)).toISOString(), '2026-03-08T08:30:00.000Z', 'gap resolves after it');
+        assert.equal(core.plantInstantFromWallClock(tz, new Date(2026, 10, 1, 1, 30)).toISOString(), '2026-11-01T06:30:00.000Z', 'ambiguous hour resolves to the earlier occurrence');
+        for (const instant of ['2026-03-08T04:00:00.000Z', '2026-03-08T09:00:00.000Z', '2026-07-01T17:30:00.000Z', '2026-12-31T23:59:59.000Z']) {
+          const wall = core.plantWallClockFromInstant(tz, new Date(instant));
+          assert.equal(core.plantInstantFromWallClock(tz, wall).toISOString(), instant);
+        }
+        assert.equal(+core.plantInstantFromWallClock(null, new Date(2026, 6, 1, 12, 30)), +new Date(2026, 6, 1, 12, 30), 'no zone: the Date itself');
+        assert.equal(core.plantInstantFromWallClock('Not/AZone', new Date(2026, 6, 1, 12, 30)), null, 'invalid zone: null');
+        assert.equal(core.plantWallClockFromInstant('Not/AZone', new Date()), null);
+      });
+    });
+  });
+
+  describe('latestAvailable (contiguous twin of nextAvailable)', () => {
+    it('returns the latest contiguous interval of the duration ending at or before the finish', () => {
+      const line = sim1('BW-F1');
+      const hour = 3600000;
+      const four = Calendar.latestAvailable(line, at(D.fri, '10:00'), 4 * hour, {});
+      assert.deepEqual([fmt(four.start), fmt(four.end)], ['2026-10-23 06:00', '2026-10-23 10:00']);
+      const eight = Calendar.latestAvailable(line, at(D.fri, '10:00'), 8 * hour, {});
+      assert.deepEqual([fmt(eight.start), fmt(eight.end)], ['2026-10-21 10:00', '2026-10-21 18:00'], 'no Thursday fragment holds 8 h');
+    });
+
+    it('returns null for an overlong duration, a closed line, an exhausted floor or lookback', () => {
+      const line = sim1('BW-F2');
+      const hour = 3600000;
+      assert.equal(Calendar.latestAvailable(line, at(D.fri, '10:00'), 13 * hour, {}), null);
+      assert.equal(Calendar.latestAvailable(line, at(D.fri, '10:00'), 8 * hour, { floor: at(D.thu, '17:00') }), null, 'floor leaves no 8 h block');
+      const closed = plain('BW-F3', everyDay(null));
+      assert.equal(Calendar.latestAvailable(closed, at(D.fri, '10:00'), hour, {}), null);
+      const tuesdays = plain('BW-F4', { 0: null, 1: null, 2: [6, 18], 3: null, 4: null, 5: null, 6: null });
+      assert.equal(Calendar.latestAvailable(tuesdays, at(D.fri, '12:00'), hour, { lookbackDays: 1 }), null);
+      assert.ok(Calendar.latestAvailable(tuesdays, at(D.fri, '12:00'), hour, { lookbackDays: 7 }));
+    });
+
+    it('honours plantTz for elapsed arithmetic and returns naive wall-clock Dates', async () => {
+      await withZone('UTC', () => {
+        const line = plain('BW-F5', everyDay([0, 24]));
+        const slot = Calendar.latestAvailable(line, new Date(2026, 2, 8, 4, 0), 5 * 3600000, { plantTz: 'America/Chicago', floor: new Date(2026, 1, 1) });
+        assert.deepEqual([fmt(slot.start), fmt(slot.end)], ['2026-03-07 22:00', '2026-03-08 04:00']);
+      });
+    });
+  });
+
+  describe('_freeIntervalsBackward', () => {
+    const spans = list => list.map(s => `${fmt(s.start)}~${fmt(s.end)}`);
+
+    it('is right-clipped at the finish, left-bounded by the floor, in chronological order (4.2.3)', () => {
+      const line = sim1('BW-G1');
+      assert.deepEqual(spans(Calendar._freeIntervalsBackward(line, at(D.fri, '10:00'), at(D.wed, '00:00'))), [
+        '2026-10-21 06:00~2026-10-21 18:00', '2026-10-22 06:00~2026-10-22 10:00',
+        '2026-10-22 12:00~2026-10-22 18:00', '2026-10-23 06:00~2026-10-23 10:00',
+      ]);
+      assert.deepEqual(spans(Calendar._freeIntervalsBackward(line, at(D.fri, '10:00'), at(D.thu, '14:00'))), [
+        '2026-10-22 14:00~2026-10-22 18:00', '2026-10-23 06:00~2026-10-23 10:00',
+      ]);
+    });
+
+    it('merges touching free intervals across midnight (OQ47) and rounds a blackout start down to the minute', () => {
+      const line = plain('BW-G2', everyDay([0, 24]));
+      Store.replaceBlocks([{ id: 'g2', line, start: new Date(+at(D.tue, '03:00') + 20000), end: new Date(+at(D.tue, '04:00') + 20000) }], 'unit-test');
+      assert.deepEqual(spans(Calendar._freeIntervalsBackward(line, at(D.tue, '12:00'), at(D.mon, '22:00'))), [
+        '2026-10-19 22:00~2026-10-20 03:00', '2026-10-20 04:01~2026-10-20 12:00',
+      ]);
+    });
+
+    it('returns an empty list for a closed line or a floor at or after the finish', () => {
+      const closed = plain('BW-G3', everyDay(null));
+      assert.deepEqual(Calendar._freeIntervalsBackward(closed, at(D.fri, '12:00'), FLOOR), []);
+      const line = plain('BW-G4');
+      assert.deepEqual(Calendar._freeIntervalsBackward(line, at(D.fri, '12:00'), at(D.fri, '12:00')), []);
+      assert.deepEqual(Calendar._freeIntervalsBackward(line, at(D.fri, '12:00'), at(D.sat, '12:00')), []);
+    });
+  });
+
+  describe('allocateRuntimeBackward: changeover reserved ahead of the productive start (OQ2 V1)', () => {
+    // Window 06-18 daily. Order A occupies Mon 08-16 (the setup predecessor); B is 8 h held at Tue 14:00 with a
+    // 30-minute changeover. The setup must sit in the same operating window right before B's earliest piece.
+    const v1 = name => plain(name, everyDay([6, 18]));
+
+    it('partial_allowed: an order that fits the Tue fragment stays whole and the changeover is not reserved (D6, VM9; repaired from the clip-and-split expectation)', () => {
+      const line = v1('BW-S1');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'partial_allowed', bopts({ setupMinutes: 30 }));
+      assert.equal(summary(r), '2026-10-20 06:00 -> 2026-10-20 14:00');
+      assert.equal(r.finishMoved, false);
+    });
+
+    it('never: no window holds run time plus changeover ending at the finish, so the finish moves (no_slot_at_finish)', () => {
+      const line = v1('BW-S2');
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'never', bopts({ setupMinutes: 30 }));
+      assert.equal(summary(r), '2026-10-19 10:00 -> 2026-10-19 18:00 moved:no_slot_at_finish');
+    });
+
+    it('zero or absent setup minutes change nothing', () => {
+      const line = v1('BW-S3');
+      for (const extra of [{}, { setupMinutes: 0 }, { setupMinutes: -5 }, { setupMinutes: NaN }]) {
+        assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 480, 'partial_allowed', bopts(extra))),
+          '2026-10-20 06:00 -> 2026-10-20 14:00', JSON.stringify(extra));
+      }
+    });
+
+    it('a window that holds the run time and the changeover keeps the finish (never)', () => {
+      const line = v1('BW-S4');
+      assert.equal(summary(Calendar.allocateRuntimeBackward(line, at(D.tue, '14:00'), 420, 'never', bopts({ setupMinutes: 30 }))),
+        '2026-10-20 07:00 -> 2026-10-20 14:00');
+    });
+
+    it('a fragment too small to hold the changeover is skipped and the walk continues into the previous one', () => {
+      const line = v1('BW-S5');
+      Store.replaceBlocks([blk('s5', line, at(D.mon, '15:00'), at(D.mon, '17:30'))], 'unit-test');
+      // Mon 17:30-18:00 (30 min) cannot hold the last 30 production minutes plus a 60-minute changeover.
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '06:30'), 60, 'partial_allowed', bopts({ setupMinutes: 60 }));
+      assert.equal(summary(r), '2026-10-19 14:30 -> 2026-10-20 06:30 [2026-10-19 14:30-2026-10-19 15:00 | 2026-10-20 06:00-2026-10-20 06:30]');
+    });
+
+    it('the setup sits across midnight on a 24/7 line (touching windows merge, OQ47)', () => {
+      const line = plain('BW-S6', everyDay([0, 24]));
+      const r = Calendar.allocateRuntimeBackward(line, at(D.tue, '00:30'), 60, 'never', bopts({ setupMinutes: 30 }));
+      assert.equal(summary(r), '2026-10-19 23:30 -> 2026-10-20 00:30');
+    });
+  });
+
+  describe('purity and caches', () => {
+    it('does not mutate Store state or the inputs, and returns the same answer through the per-run caches', () => {
+      const line = sim1('BW-H1');
+      const finish = at(D.fri, '10:00'), floor = at(D.wed, '00:00');
+      const before = JSON.stringify({ c: Store.calendars, b: Store.blocks, t: Store.tasksArr, f: +finish, fl: +floor });
+      const uncached = summary(Calendar.allocateRuntimeBackward(line, finish, 480, 'partial_allowed', bopts({ floor })));
+      Calendar._beginRun(null);
+      const cached = summary(Calendar.allocateRuntimeBackward(line, finish, 480, 'partial_allowed', bopts({ floor })));
+      const cachedNever = summary(Calendar.allocateRuntimeBackward(line, finish, 480, 'never', bopts({ floor })));
+      Calendar._endRun();
+      assert.equal(cached, uncached);
+      assert.equal(cachedNever, '2026-10-21 10:00 -> 2026-10-21 18:00 moved:no_slot_at_finish');
+      assert.equal(JSON.stringify({ c: Store.calendars, b: Store.blocks, t: Store.tasksArr, f: +finish, fl: +floor }), before);
+    });
+
+    it('leaves the forward helpers untouched in behaviour (nextAvailable still snaps forward)', () => {
+      const line = plain('BW-H2');
+      const start = Calendar.nextAvailable(line, at(D.wed, '05:00'), 3600000);
+      assert.equal(fmt(start), '2026-10-21 06:00');
+    });
+  });
+});
+
+// Gate group 17 (Task 3.5): the 620-minute forward-versus-backward drift, on a sibling family.
+// Windows 06:00-16:00, 30-minute minimum piece. Two siblings share the finish Tue 16:00 and each run 620 minutes.
+// A BACKWARD walk from the shared finish honours it (start Mon 15:30); a FORWARD walk from that derived start ends
+// at Tue 15:50, ten minutes early. Finish-anchored placement must therefore be the backward one.
+describe('gate 17: sibling family finish survives only the backward walk (620 min over a closed window)', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+
+  it('both siblings land at the shared finish backward; a forward walk from the derived start drifts 10 minutes', () => {
+    for (const line of ['G17-A', 'G17-B']) {
+      Store.setCalendar(line, weekdays(6, 16), 'unit-test');
+      Store.replaceBlocks([], 'unit-test');
+    }
+    const finish = at(D.tue, '16:00');
+    const placed = ['G17-A', 'G17-B'].map(line => Calendar.allocateRuntimeBackward(line, finish, 620, 'partial_allowed', bopts()));
+    for (const r of placed) {
+      assert.equal(summary(r), '2026-10-19 15:30 -> 2026-10-20 16:00 [2026-10-19 15:30-2026-10-19 16:00 | 2026-10-20 06:10-2026-10-20 16:00]');
+      assert.equal(r.end.getTime(), finish.getTime(), 'the shared finish is honoured exactly');
+    }
+    const forward = Calendar.allocateRuntime('G17-A', placed[0].start, 620, 'partial_allowed');
+    assert.equal(forward.kind, 'allocated');
+    assert.equal(fmt(forward.end), '2026-10-20 15:50', 'the forward walk would end 10 minutes before the held finish');
+    assert.equal(finish.getTime() - forward.end.getTime(), 10 * 60 * 1000);
+  });
+});
+
+// D17 (VI17, VM17): the look-back retry and plant-zone nominal windows.
+describe('D17: look-back retry and plant-zone nominal window', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+  const dayMs = 24 * 3600 * 1000;
+  const due = at('2026-10-20', '18:00');
+  const open = weekdays(6, 22);
+
+  it('VI17: a 100-day shutdown before a far due date places the order before the shutdown, finish moved, not reached_now', () => {
+    Store.setCalendar('VI17-A', open, 'unit-test');
+    const shutStart = new Date(due.getTime() - 100 * dayMs), shutEnd = due;
+    Store.replaceBlocks([blk('vi17-a', 'VI17-A', shutStart, shutEnd)], 'unit-test');
+    const r = Calendar.allocateRuntimeBackward('VI17-A', due, 480, 'never', bopts({ floor: at('2026-01-01', '00:00') }));
+    assert.equal(r.kind, 'placed');
+    assert.equal(r.finishMoved, true);
+    assert.ok(r.end.getTime() <= shutStart.getTime(), 'ends before the shutdown starts');
+  });
+
+  it('VI17: with no open time inside 400 days the walk reports lookback_exhausted, never reached_now', () => {
+    Store.setCalendar('VI17-B', open, 'unit-test');
+    Store.replaceBlocks([blk('vi17-b', 'VI17-B', new Date(due.getTime() - 400 * dayMs), due)], 'unit-test');
+    const r = Calendar.allocateRuntimeBackward('VI17-B', due, 480, 'never', bopts({ floor: at('2025-01-01', '00:00') }));
+    assert.equal(r.kind, 'lookback_exhausted');
+  });
+
+  it('VM17: hasNominalWindow judges a plant-zone day by real elapsed time (the fall-back Sunday is 9 real hours, a normal Sunday 8)', async () => {
+    // Only Sundays are open (00:00-08:00), so the single 9 elapsed-hour day in the 90-day scan is Sun 1 Nov 2026 in Chicago.
+    await withZone('UTC', () => {
+      const sundayOnly = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d === 0 ? [0, 8] : null]));
+      Store.setCalendar('VM17-A', sundayOnly, 'unit-test');
+      const tz = 'America/Chicago', nineH = 9 * 3600 * 1000;
+      assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-01', '00:00'), nineH, tz), true, 'the fall-back day holds 9 real hours');
+      assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-01', '00:00'), nineH), false, 'wall-clock reading sees only 8 h');
+      assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-02', '00:00'), nineH, tz), false, 'later Sundays are 8 h');
+    });
+  });
+});
+
+describe('D6 (VM9): setup never splits an order that fits one window', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+
+  it('D6: under partial_allowed a run that fits one window is not clipped to make room for the changeover', () => {
+    Store.setCalendar('D6-A', weekdays(6, 22), 'unit-test');
+    Store.replaceBlocks([], 'unit-test');
+    const r = Calendar.allocateRuntimeBackward('D6-A', at(D.tue, '22:00'), 930, 'partial_allowed', bopts({ setupMinutes: 60 }));
+    assert.equal(r.kind, 'placed');
+    assert.equal(r.scheduleSegments.length, 0, 'one piece, not split');
+    assert.equal(fmt(r.start), '2026-10-20 06:30');
+    assert.equal(fmt(r.end), '2026-10-20 22:00');
+  });
 });

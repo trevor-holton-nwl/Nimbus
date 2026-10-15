@@ -37,6 +37,9 @@ const seed = parseInt(args.get('seed') || '42', 10);
 // is clock-independent (the iteration cap still applies).
 const noIndex = args.has('no-index');
 const noDeadline = args.has('no-deadline');
+// --midnight-dues: strip the time from every SAP due date (floor to local midnight),
+// the shape real date-only dues arrive in. Same rng stream, so the fixture is otherwise identical.
+const midnightDues = args.has('midnight-dues');
 
 // Constants
 const SHAPES = {
@@ -84,6 +87,8 @@ function makeOrder(rng, id, plant, line, colors, due) {
   const runtimeHours = 0.5 + rng() * 7.5; // 0.5-8 hours
   const colorIdx = Math.floor(rng() * colors.length);
   const dueTime = due + (rng() * HORIZON_MS - HORIZON_MS * 0.5); // ±50% of horizon
+  const dueDate = new Date(dueTime);
+  if (midnightDues) dueDate.setHours(0, 0, 0, 0);
   return {
     id,
     PLANT: plant,
@@ -91,7 +96,7 @@ function makeOrder(rng, id, plant, line, colors, due) {
     MACHINE: line,
     RUN_TIME: runtimeHours,
     COLOR: colors[colorIdx],
-    original_end_date: new Date(dueTime),
+    original_end_date: dueDate,
     start_date: null,
     end_date: null,
     original_start_date: null,

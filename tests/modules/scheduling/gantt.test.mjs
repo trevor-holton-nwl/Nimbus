@@ -3,11 +3,11 @@
 // tests/modules/schedule-workbench.test.mjs (Phase P3 of
 // docs/architecture/domain-refactor-plan.md, which split that mega-module
 // into 6 domain files) to mirror the new file layout.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -16,6 +16,32 @@ import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 const require = createRequire(import.meta.url);
+// Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
+// shared zone helper (OQ52); a real page loads the core before any module, so the tests do the same.
+globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || require('../../../frontend/nimbus-compute-core.js');
+
+// A drop holds the FINISH and derives the start from the plant's working time (backward scheduling Task 2.5), which
+// needs a plant with a time zone and a pinned server clock (these fixtures are dated in 2026-08/09, long before the
+// real clock). The naive instant is read in this machine's zone, which is also the plant's zone below.
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const REAL_SERVER_OFFSET_MS = Store.serverOffsetMs;
+afterEach(() => { Store.serverOffsetMs = REAL_SERVER_OFFSET_MS; Store._blockedPlants.clear(); });
+function pinPlantClock(plants, nowNaive = '2026-08-01T00:00:00') {
+  const priorOffset = Store.serverOffsetMs;
+  const priorMaster = Store.masterData;
+  Store.setMasterData({
+    ...priorMaster,
+    plants: [...(priorMaster?.plants || []).filter(p => !plants.includes(p.plant)), ...plants.map(plant => ({ plant, timezone: LOCAL_TZ }))],
+    lines: priorMaster?.lines || [],
+  }, 'unit-test');
+  Store.serverOffsetMs = new Date(nowNaive).getTime() - Date.now();
+  Store._blockedPlants.clear();
+  return () => {
+    Store.serverOffsetMs = priorOffset;
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store._blockedPlants.clear();
+  };
+}
 
 test('hierarchy escapes stored machine and order labels', () => {
   const payload = '<img src=x onerror=alert(1)>';
@@ -277,8 +303,8 @@ test('Timeline._itemForTask: className reflects firming status (order-firmed for
 
 test('G5: the live lock-band scan membership includes running orders, not only the frozen horizon', () => {
   const now = new Date('2026-09-09T10:00:00');
-  const running = { id: 'lb-run', start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00') };
-  const future = { id: 'lb-fut', start_date: new Date('2026-09-09T14:00:00'), end_date: new Date('2026-09-09T16:00:00') };
+  const running = { id: 'lb-run', user_scheduled: true, start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00') };
+  const future = { id: 'lb-fut', user_scheduled: true, start_date: new Date('2026-09-09T14:00:00'), end_date: new Date('2026-09-09T16:00:00') };
   const priorEnd = Store.frozenHorizonEnd;
   try {
     Store.setFrozenHorizonEnd(null, 'test');
@@ -964,53 +990,127 @@ test('Interaction.uninstall removes every document-level listener install() atta
 // start/end/group for a FIRMED task. Writing this test uncovered that the
 // module's own header comment ("Firmed orders are reverted in the DataSet and
 // never reach the Store") does not match the real code — see the corrected
-// comment above `_onDataSetUpdate` in schedule-workbench.mjs. These two tests
-// pin the REAL current behavior (a "verbatim move" task must not change
-// logic), not the aspirational behavior the stale comment described.
+// comment above `_onDataSetUpdate`. These tests pin the REAL current behavior.
+//
+// Backward scheduling Task 2.5 (OQ1): a drop anchors on the FINISH. The right edge sets the finish, the start is
+// derived from the run time, and a change of the left edge alone is not a move at all (it is reverted with a toast).
 
-test('Interaction._onDataSetUpdate: the firmed-task noActualChange guard checks only start+group (not end) — a same-start/same-group echo with a changed end is still swallowed', () => {
+function _stubGanttSideEffects() {
+  const prior = {
+    recompute: Alerts.scheduleRecompute, recomputeLines: Alerts.scheduleRecomputeLines,
+    rebuild: Timeline._scheduleRebuild, toast: Toast.show, items: Timeline._items,
+  };
+  const calls = { rebuilds: 0, toasts: [] };
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  Timeline._scheduleRebuild = () => { calls.rebuilds++; };
+  Toast.show = (msg, type) => { calls.toasts.push({ msg, type }); };
+  calls.restore = () => {
+    Alerts.scheduleRecompute = prior.recompute; Alerts.scheduleRecomputeLines = prior.recomputeLines;
+    Timeline._scheduleRebuild = prior.rebuild; Toast.show = prior.toast; Timeline._items = prior.items;
+    Selection.clear();
+    Store.setTasks([], 'test');
+  };
+  return calls;
+}
+
+test('Interaction._onDataSetUpdate: a firmed order\'s unchanged-edges echo is swallowed (nothing is committed)', () => {
   const id = 'fx-echo-1';
-  const start = new Date('2026-07-01T08:00:00');
-  const end   = new Date('2026-07-01T12:00:00');
-  // Same start and same group as the Store, but a DIFFERENT end — the
-  // firmed-order noActualChange guard (schedule-workbench.mjs _onDataSetUpdate)
-  // deliberately compares only start+group, not end, so this must still be
-  // treated as a no-op by that guard specifically. A same-start/same-end/
-  // same-group scenario would be caught just as well by the generic `moved`
-  // check further down (start+end+line) regardless of whether the firmed-only
-  // guard exists at all, which is why that shape doesn't actually characterize
-  // this guard (confirmed by mutation: disabling the guard while keeping that
-  // shape still passed). This shape — start+group unchanged, end changed —
-  // only stays a no-op because of the firmed-specific guard; if the guard is
-  // removed or broken, this scenario falls through to the generic `moved`
-  // check, which DOES see the changed end and commits it, failing this test.
-  const differentEnd = new Date('2026-07-01T14:00:00');
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
   Store.setTasks([{
     id, PRODUCTION_ORDER: 'PFX1', MATERIAL_NUMBER: 'MFX1', MACHINE: 'L1',
-    plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+    PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
   }], 'test');
   Store.setFirmed([id], true, 'test');
   Selection.clear();
-
-  Timeline._items = { get: (i) => (i === id ? { start, end: differentEnd, group: 'L1' } : undefined) };
+  Timeline._items = { get: (i) => (i === id ? { start, end, group: 'L1' } : undefined) };
   try {
     Interaction._onDataSetUpdate({ items: [id] });
-    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'the firmed-task guard must treat a same-start/same-group echo as a no-op even when end differs');
-    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'the firmed-task guard must not let the changed end leak into the Store');
-  } finally {
-    Timeline._items = undefined;
-  }
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime());
+    assert.equal(fx.rebuilds, 0, 'an echo is ignored, not reverted');
+    assert.equal(fx.toasts.length, 0);
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('Interaction._onDataSetUpdate: an end-only change is a real move — the finish is held and the start follows (OQ1)', () => {
+  const id = 'fx-endonly-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const draggedEnd = new Date('2026-08-05T14:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'PFX1B', MATERIAL_NUMBER: 'MFX1B', MACHINE: 'L1',
+    PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+  }], 'test');
+  Store.setFirmed([id], true, 'test');
+  Selection.clear();
+  // The right edge was dragged: start unchanged, end two hours later.
+  Timeline._items = { get: (i) => (i === id ? { start, end: draggedEnd, group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].end_date.getTime(), draggedEnd.getTime(), 'the dragged right edge IS the finish');
+    assert.equal(Store.tasks[id].start_date.getTime(), new Date('2026-08-05T10:00:00').getTime(),
+      'the start is re-derived from the 4 h run time, not left where it was');
+    assert.equal(fx.rebuilds, 0);
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('Interaction._onDataSetUpdate: a left-edge-only change is reverted with toast.left_edge_locked and commits nothing', () => {
+  const id = 'fx-leftedge-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start: new Date('2026-08-05T06:00:00'), end, group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime());
+    assert.equal(fx.rebuilds, 1, 'the bar springs back');
+    assert.deepEqual(fx.toasts.map(t => t.type), ['warn']);
+    assert.match(fx.toasts[0].msg, /left_edge_locked/);
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('Interaction._onDataSetUpdate: a drop whose finish cannot be held reverts with toast.finish_cannot_hold and commits nothing (OQ13 b)', () => {
+  const id = 'fx-cannot-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  // Dropped so it ends at 06:00, before the 07:00 opening: nothing 4 h long can end there on that day.
+  Timeline._items = { get: (i) => (i === id
+    ? { start: new Date('2026-08-05T02:00:00'), end: new Date('2026-08-05T06:00:00'), group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime());
+    assert.equal(fx.rebuilds, 1);
+    assert.equal(fx.toasts.length, 1, 'one toast, no second "could not commit" on top of it');
+    assert.match(fx.toasts[0].msg, /finish_cannot_hold/);
+  } finally { fx.restore(); restoreClock(); }
 });
 
 test('Interaction._onDataSetUpdate: a genuine drag on a firmed task commits today — firmed-order protection only suppresses no-op echoes, not real drags', () => {
   const id = 'fx-real-1';
-  const start = new Date('2026-07-01T08:00:00');
-  const end   = new Date('2026-07-01T12:00:00');
-  const draggedStart = new Date('2026-07-01T09:00:00');
-  const draggedEnd   = new Date('2026-07-01T13:00:00');
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const draggedStart = new Date('2026-08-05T09:00:00');
+  const draggedEnd   = new Date('2026-08-05T13:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
   Store.setTasks([{
     id, PRODUCTION_ORDER: 'PFX2', MATERIAL_NUMBER: 'MFX2', MACHINE: 'L1',
-    plant: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+    PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
   }], 'test');
   Store.setFirmed([id], true, 'test');
   Selection.clear();
@@ -1020,44 +1120,62 @@ test('Interaction._onDataSetUpdate: a genuine drag on a firmed task commits toda
     Interaction._onDataSetUpdate({ items: [id] });
     assert.equal(
       Store.tasks[id].start_date.getTime(), draggedStart.getTime(),
-      'current behavior: a genuine drag on a firmed task commits to the Store — it is NOT reverted (see the corrected header comment in schedule-workbench.mjs)'
+      'current behavior: a genuine drag on a firmed task commits to the Store — it is NOT reverted (see the corrected header comment above _onDataSetUpdate)'
     );
     assert.equal(Store.tasks[id].end_date.getTime(), draggedEnd.getTime());
-  } finally {
-    Timeline._items = undefined;
-  }
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('OQ63: a firmed order dropped outside working hours asks to confirm; confirming stores the overtime marker, declining reverts', async () => {
+  const id = 'fx-overtime-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorConfirm = Engine.confirmOvertimePlacement;
+  let asked = 0;
+  let answer = false;
+  Engine.confirmOvertimePlacement = async () => { asked++; return answer; };
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Store.setFirmed([id], true, 'test');
+  Selection.clear();
+  const late = { start: new Date('2026-08-05T18:00:00'), end: new Date('2026-08-05T22:00:00'), group: 'L1' };   // closes at 19:00
+  Timeline._items = { get: (i) => (i === id ? late : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(asked, 1, 'the planner is asked');
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'nothing is committed while the question is open');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(Store.tasks[id].end_date.getTime(), end.getTime(), 'declined: nothing committed');
+    assert.equal(fx.rebuilds, 1, 'declined: the bar springs back');
+    assert.ok(!Store.tasks[id].placement_exception);
+
+    answer = true;
+    Interaction._onDataSetUpdate({ items: [id] });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(asked, 2);
+    assert.equal(Store.tasks[id].end_date.getTime(), late.end.getTime());
+    assert.equal(Store.tasks[id].start_date.getTime(), late.start.getTime(), 'raw placement: finish minus run time');
+    assert.equal(Store.tasks[id].placement_exception, 'overtime');
+    assert.equal(fx.toasts.length, 0, 'no refusal toast on either path');
+  } finally { Engine.confirmOvertimePlacement = priorConfirm; fx.restore(); restoreClock(); }
 });
 
 // ---------------------------------------------------------------------------
-// Workstream B1 (2026-08-21) — one policy-independent, segment-shift-aware
-// manual commit path. Before this task, a Timeline drag on an order that
-// already had >=2 scheduleSegments routed through
-// Interaction._dragRequiresRegeneration/_regenerateDragPatch, a SEPARATE
-// branch in _onDataSetUpdate that has been deleted; every drag now goes
-// through the same two branches (multi-select / single-item), both of which
-// call the rewritten Engine.manualSchedulePatchFor.
+// Workstream B1 (2026-08-21), rewritten for Task 2.5 (OQ17 b): a drag through manualSchedulePatchFor, which
+// translates an order that already has >=2 scheduleSegments rigidly by the DRAGGED PIECE's same-edge delta.
 // ---------------------------------------------------------------------------
 
-test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=2 segments) order shifts EVERY segment by the drag delta instead of collapsing it (OD-B1a)', () => {
-  // Engine.autoReflow (called by the single-item drag branch) unconditionally
-  // arms Alerts' debounced recompute timer at the end of its walk. Stubbed to
-  // a no-op for the duration of this test -- same established pattern as the
-  // OptimizerPreview tests below -- so no setTimeout callback fires after the
-  // test has already completed and reached for the real (unstubbed in this
-  // file) NimbusComputeCore global.
-  const priorScheduleRecompute = Alerts.scheduleRecompute;
-  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
-  Alerts.scheduleRecompute = () => {};
-  Alerts.scheduleRecomputeLines = () => {};
-
+test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=2 segments) order moves EVERY segment by that piece\'s same-edge delta (OQ17 b)', () => {
+  const fx = _stubGanttSideEffects();
   const id = 'split-drag-1';
   const line = 'SPLIT-DRAG-LINE';
   const seg1Start = new Date('2026-08-20T08:00:00');
   const seg1End   = new Date('2026-08-20T16:00:00');
   const seg2Start = new Date('2026-08-21T08:00:00');
   const seg2End   = new Date('2026-08-21T16:00:00');
-  const seg3Start = new Date('2026-08-22T08:00:00');
-  const seg3End   = new Date('2026-08-22T16:00:00');
+  const seg3Start = new Date('2026-08-24T08:00:00');
+  const seg3End   = new Date('2026-08-24T16:00:00');
   const originalSegments = [
     { sequence: 1, startDate: seg1Start, endDate: seg1End },
     { sequence: 2, startDate: seg2Start, endDate: seg2End },
@@ -1071,13 +1189,11 @@ test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=
   }], 'test');
   Selection.clear();
 
-  // Simulate the user dragging segment 3's own bar forward by two days —
-  // the real vis-timeline item id for that bar is the segment sub-item id
-  // Timeline._itemsForTask already produces for a >=2-segment task.
+  // The user drags segment 3's own bar two days later: its end moves by +2 days, so EVERY piece moves by +2 days
+  // (not by the distance from the dragged piece to the first piece's start, which was the old start-anchored rule).
   const draggedSegmentItemId = Timeline._segmentItemId(id, 3);
-  const droppedSeg3Start = new Date('2026-08-24T08:00:00');
-  const droppedSeg3End   = new Date('2026-08-24T16:00:00');
-
+  const droppedSeg3Start = new Date('2026-08-26T08:00:00');
+  const droppedSeg3End   = new Date('2026-08-26T16:00:00');
   Timeline._items = {
     get: (i) => (i === draggedSegmentItemId
       ? { start: droppedSeg3Start, end: droppedSeg3End, group: line, parentId: id }
@@ -1089,60 +1205,31 @@ test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=
     const updated = Store.tasks[id];
     assert.equal(updated.scheduleSegments.length, 3,
       'the order is NOT collapsed to a single continuous block just because a segment was dragged');
-
-    // OD-B1a's resolved contract (same semantics the deleted regeneration
-    // branch already used at :6614-6616): the dropped position becomes the
-    // new FIRST-segment start, so the delta is measured against the task's
-    // ORIGINAL parent start_date (segment 1's original start) — not against
-    // the dragged segment's own prior position.
-    const deltaMs = Util.snap(droppedSeg3Start).getTime() - seg1Start.getTime();
-    assert.notEqual(deltaMs, 0, 'sanity: the drag must have actually requested a different start');
-
+    const deltaMs = Util.snap(droppedSeg3End).getTime() - seg3End.getTime();
+    assert.equal(deltaMs, 2 * 24 * 3600 * 1000, 'sanity: the dragged piece\'s end moved by two days');
     for (let i = 0; i < 3; i++) {
       const original = originalSegments[i];
       const shifted = updated.scheduleSegments[i];
-      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs,
-        `segment ${i + 1} start shifted by exactly the drag delta`);
-      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
-        `segment ${i + 1} end shifted by exactly the drag delta`);
-      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
-        original.endDate.getTime() - original.startDate.getTime(),
-        `segment ${i + 1} duration is unchanged`);
+      assert.equal(shifted.startDate.getTime(), original.startDate.getTime() + deltaMs, `segment ${i + 1} start shifted by the same-edge delta`);
+      assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs, `segment ${i + 1} end shifted by the same-edge delta`);
     }
-    assert.equal(updated.start_date.getTime(), updated.scheduleSegments[0].startDate.getTime(),
-      'parent start_date mirrors the shifted first segment');
-    assert.equal(updated.end_date.getTime(), updated.scheduleSegments[2].endDate.getTime(),
-      'parent end_date mirrors the shifted last segment');
+    assert.equal(updated.start_date.getTime(), updated.scheduleSegments[0].startDate.getTime(), 'parent start mirrors the first segment');
+    assert.equal(updated.end_date.getTime(), updated.scheduleSegments[2].endDate.getTime(), 'parent end mirrors the last segment');
     assert.equal(updated.MACHINE, line);
-  } finally {
-    Timeline._items = undefined;
-    Store.setTasks([], 'test');
-    Alerts.scheduleRecompute = priorScheduleRecompute;
-    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
-  }
+  } finally { fx.restore(); }
 });
 
 test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s existing >=2 scheduleSegments by the GROUP delta too (whole-branch review fix)', () => {
-  // Before this fix, the multi-select branch's companion loop built a plain
-  // {start_date, end_date, MACHINE} object directly -- never consulting
-  // manualSchedulePatchFor -- so a companion that was itself already split
-  // into >=2 scheduleSegments had its PARENT boundaries moved while its
-  // CHILD segments stayed stale at their old absolute positions. The
-  // companion loop now routes every companion through the same
-  // manualSchedulePatchFor the dragged item uses, so this is a real
-  // regression check on the same shift contract Step 6 already pins for
-  // the dragged item, applied to a companion instead.
-  const priorScheduleRecompute = Alerts.scheduleRecompute;
-  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
-  Alerts.scheduleRecompute = () => {};
-  Alerts.scheduleRecomputeLines = () => {};
-
+  // The companion loop routes every companion through the same manualSchedulePatchFor the dragged item uses,
+  // so a companion that is itself already split moves its pieces with the group instead of leaving them stale.
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
   const line = 'MULTI-DRAG-LINE';
   const anchorId = 'multi-anchor';
   const companionId = 'multi-companion';
 
-  const anchorStart = new Date('2026-08-20T08:00:00');
-  const anchorEnd   = new Date('2026-08-20T12:00:00'); // RUN_TIME 4h
+  const anchorStart = new Date('2026-08-24T08:00:00');
+  const anchorEnd   = new Date('2026-08-24T12:00:00'); // RUN_TIME 4h
 
   const seg1Start = new Date('2026-09-01T08:00:00');
   const seg1End   = new Date('2026-09-01T16:00:00');
@@ -1159,21 +1246,20 @@ test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s ex
   Store.setTasks([
     {
       id: anchorId, PRODUCTION_ORDER: 'PANCHOR', MATERIAL_NUMBER: 'MANCHOR', MACHINE: line,
-      plant: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
+      PLANT: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
     },
     {
       id: companionId, PRODUCTION_ORDER: 'PCOMP', MATERIAL_NUMBER: 'MCOMP', MACHINE: line,
-      plant: '5512', RUN_TIME: 24, start_date: seg1Start, end_date: seg3End,
+      PLANT: '5512', RUN_TIME: 24, start_date: seg1Start, end_date: seg3End,
       scheduleSegments: companionOriginalSegments,
     },
   ], 'test');
   Selection.set([anchorId, companionId]);
 
-  // The anchor (dragged item) is dropped two days later; the companion is
-  // NOT dragged directly -- it must move by the same group delta.
-  const droppedAnchorStart = new Date('2026-08-22T08:00:00');
-  const droppedAnchorEnd   = new Date('2026-08-22T12:00:00');
-
+  // The anchor (dragged item) is dropped two days later; the companion is NOT dragged directly -- it moves by
+  // the same finish delta.
+  const droppedAnchorStart = new Date('2026-08-26T08:00:00');
+  const droppedAnchorEnd   = new Date('2026-08-26T12:00:00');
   Timeline._items = {
     get: (i) => (i === anchorId ? { start: droppedAnchorStart, end: droppedAnchorEnd, group: line } : undefined),
     update: () => {},
@@ -1183,14 +1269,14 @@ test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s ex
     Interaction._onDataSetUpdate({ items: [anchorId] });
 
     const updatedAnchor = Store.tasks[anchorId];
-    assert.equal(updatedAnchor.start_date.getTime(), Util.snap(droppedAnchorStart).getTime(),
-      'the dragged anchor commits at the dropped position');
+    assert.equal(updatedAnchor.end_date.getTime(), Util.snap(droppedAnchorEnd).getTime(), 'the dragged anchor holds the dropped finish');
+    assert.equal(updatedAnchor.start_date.getTime(), Util.snap(droppedAnchorStart).getTime());
 
     const updatedCompanion = Store.tasks[companionId];
     assert.equal(updatedCompanion.scheduleSegments.length, 3,
       'the companion is NOT collapsed to a single continuous block just because it was dragged as part of a group');
 
-    const deltaMs = Util.snap(droppedAnchorStart).getTime() - anchorStart.getTime();
+    const deltaMs = Util.snap(droppedAnchorEnd).getTime() - anchorEnd.getTime();
     assert.notEqual(deltaMs, 0, 'sanity: the group drag must have actually moved');
 
     for (let i = 0; i < 3; i++) {
@@ -1200,68 +1286,45 @@ test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s ex
         `companion segment ${i + 1} start shifted by exactly the GROUP drag delta, not left stale`);
       assert.equal(shifted.endDate.getTime(), original.endDate.getTime() + deltaMs,
         `companion segment ${i + 1} end shifted by exactly the GROUP drag delta, not left stale`);
-      assert.equal(shifted.endDate.getTime() - shifted.startDate.getTime(),
-        original.endDate.getTime() - original.startDate.getTime(),
-        `companion segment ${i + 1} duration is unchanged`);
     }
-    assert.equal(updatedCompanion.start_date.getTime(), updatedCompanion.scheduleSegments[0].startDate.getTime(),
-      'companion parent start_date mirrors its own shifted first segment');
-    assert.equal(updatedCompanion.end_date.getTime(), updatedCompanion.scheduleSegments[2].endDate.getTime(),
-      'companion parent end_date mirrors its own shifted last segment');
+    assert.equal(updatedCompanion.start_date.getTime(), updatedCompanion.scheduleSegments[0].startDate.getTime());
+    assert.equal(updatedCompanion.end_date.getTime(), updatedCompanion.scheduleSegments[2].endDate.getTime());
     assert.equal(updatedCompanion.MACHINE, line);
-  } finally {
-    Timeline._items = undefined;
-    Selection.clear();
-    Store.setTasks([], 'test');
-    Alerts.scheduleRecompute = priorScheduleRecompute;
-    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
-  }
+  } finally { fx.restore(); restoreClock(); }
 });
 
 test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion patch commits NOTHING — the dragged item is not partially committed (final-review fix 1)', () => {
-  // Regression target: before this fix, Store.updateTask(id, draggedPatch, ...)
-  // ran BEFORE the companion loop validated every companion's
-  // manualSchedulePatchFor call. A companion with a non-finite/<=0
-  // Util.runHours (e.g. RUN_TIME: 0, a real NIMBUS data-quality pattern)
-  // makes manualSchedulePatchFor return null, which set companionFailed and
-  // broke out -- but the dragged item's Store mutation from earlier was never
-  // rolled back and had no UndoStack entry. The fix defers ALL Store/Timeline
-  // mutation in this branch until both the dragged item's patch AND every
-  // companion's patch have validated successfully.
-  const priorScheduleRecompute = Alerts.scheduleRecompute;
-  const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
+  // Regression target: the dragged item's Store mutation must wait until every companion patch has validated.
+  // A companion with RUN_TIME 0 makes manualSchedulePatchFor return null, so the whole drag reverts.
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
   const priorRaf = globalThis.requestAnimationFrame;
-  Alerts.scheduleRecompute = () => {};
-  Alerts.scheduleRecomputeLines = () => {};
-  // The failure path calls Timeline._scheduleRebuild(), which schedules via
-  // requestAnimationFrame -- not defined in this Node test environment.
   globalThis.requestAnimationFrame = callback => { callback(performance.now()); return 1; };
 
   const line = 'MULTI-DRAG-FAIL-LINE';
   const anchorId = 'multi-anchor-fail';
   const companionId = 'multi-companion-fail';
 
-  const anchorStart = new Date('2026-08-20T08:00:00');
-  const anchorEnd   = new Date('2026-08-20T12:00:00'); // RUN_TIME 4h
-  const companionStart = new Date('2026-08-20T08:00:00');
-  const companionEnd   = new Date('2026-08-20T12:00:00');
+  const anchorStart = new Date('2026-08-24T08:00:00');
+  const anchorEnd   = new Date('2026-08-24T12:00:00'); // RUN_TIME 4h
+  const companionStart = new Date('2026-08-24T08:00:00');
+  const companionEnd   = new Date('2026-08-24T12:00:00');
 
   Store.setTasks([
     {
       id: anchorId, PRODUCTION_ORDER: 'PANCHORF', MATERIAL_NUMBER: 'MANCHORF', MACHINE: line,
-      plant: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
+      PLANT: '5512', RUN_TIME: 4, start_date: anchorStart, end_date: anchorEnd,
     },
     {
-      // RUN_TIME: 0 -> Util.runHours returns 0 -> manualSchedulePatchFor
-      // computes runtimeMinutes <= 0 and returns null for this companion.
+      // RUN_TIME: 0 -> Util.runHours returns 0 -> manualSchedulePatchFor refuses for this companion.
       id: companionId, PRODUCTION_ORDER: 'PCOMPF', MATERIAL_NUMBER: 'MCOMPF', MACHINE: line,
-      plant: '5512', RUN_TIME: 0, start_date: companionStart, end_date: companionEnd,
+      PLANT: '5512', RUN_TIME: 0, start_date: companionStart, end_date: companionEnd,
     },
   ], 'test');
   Selection.set([anchorId, companionId]);
 
-  const droppedAnchorStart = new Date('2026-08-22T08:00:00');
-  const droppedAnchorEnd   = new Date('2026-08-22T12:00:00');
+  const droppedAnchorStart = new Date('2026-08-26T08:00:00');
+  const droppedAnchorEnd   = new Date('2026-08-26T12:00:00');
 
   let timelineItemUpdateCalled = false;
   Timeline._items = {
@@ -1276,23 +1339,21 @@ test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion
     assert.equal(stillAnchor.start_date.getTime(), anchorStart.getTime(),
       'the dragged anchor must NOT be partially committed when a companion patch fails validation');
     assert.equal(stillAnchor.end_date.getTime(), anchorEnd.getTime());
-    assert.equal(stillAnchor.MACHINE, line, 'the anchor MACHINE must be unchanged (it was already on this line, but must not be re-stamped mid-failure)');
+    assert.equal(stillAnchor.MACHINE, line);
 
     const stillCompanion = Store.tasks[companionId];
-    assert.equal(stillCompanion.start_date.getTime(), companionStart.getTime(),
-      'the companion must also be completely unchanged');
+    assert.equal(stillCompanion.start_date.getTime(), companionStart.getTime(), 'the companion must also be completely unchanged');
     assert.equal(stillCompanion.end_date.getTime(), companionEnd.getTime());
 
     assert.equal(timelineItemUpdateCalled, false,
       'no Timeline._items.update call should happen for any companion when the batch fails validation');
   } finally {
-    Timeline._items = undefined;
-    Selection.clear();
-    Store.setTasks([], 'test');
-    Alerts.scheduleRecompute = priorScheduleRecompute;
-    Alerts.scheduleRecomputeLines = priorScheduleRecomputeLines;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore(); restoreClock();
   }
 });
+
+
 test('Task 3: B2 — Interaction._onDataSetUpdate no longer calls autoReflow (peers stay put even if overlapping)', () => {
   // Task 3 deleted Engine.autoReflow call from Interaction._onDataSetUpdate (single-item drag branch).
   // This test calls the real handler (not Store.updateTask) and verifies autoReflow is NOT invoked.
@@ -1312,6 +1373,7 @@ test('Task 3: B2 — Interaction._onDataSetUpdate no longer calls autoReflow (pe
   let autoReflowCalls = [];
   Engine.autoReflow = (id) => autoReflowCalls.push(id);
   Alerts.scheduleRecompute = () => {}; // stub to avoid setTimeout
+  const restoreClock = pinPlantClock([plant]);
 
   Store.setSelectedPlant(plant, 'unit-test');
   Store.setTasks([
@@ -1332,6 +1394,7 @@ test('Task 3: B2 — Interaction._onDataSetUpdate no longer calls autoReflow (pe
     assert.equal(peerAfter, peerBefore, 'peer must NOT be reflowed after Timeline drag');
     assert.equal(autoReflowCalls.length, 0, 'Engine.autoReflow must NOT be called from Interaction._onDataSetUpdate (Task 3: B2 deleted this call)');
   } finally {
+    restoreClock();
     Engine.autoReflow = priorAutoReflow;
     Alerts.scheduleRecompute = priorScheduleRecompute;
     Timeline._items = undefined;
@@ -1392,6 +1455,7 @@ test('Interaction._onDataSetUpdate allows a time-only drag of a sub-order on the
   Toast.show = () => {};
   Alerts.scheduleRecompute = () => {};
 
+  const restoreClock = pinPlantClock(['P-DIST-TIME']);
   const id = 'dist-drag-timeonly';
   const line = 'DIST-DRAG-TIME-L1';
   const start = new Date('2026-09-21T08:00:00');
@@ -1399,7 +1463,7 @@ test('Interaction._onDataSetUpdate allows a time-only drag of a sub-order on the
   const newStart = new Date('2026-09-21T09:00:00');
   const newEnd = new Date('2026-09-21T11:00:00');
   Store.setTasks([{
-    id, PRODUCTION_ORDER: 'A-9106', ORDER: 'A-9106', PARENT_ORDER: '9106', DISTRIBUTION_LETTER: 'A',
+    id, PRODUCTION_ORDER: 'A-9106', ORDER: 'A-9106', PARENT_ORDER: '9106', DISTRIBUTION_LETTER: 'A', PLANT: 'P-DIST-TIME',
     MACHINE: line, RUN_TIME: 2, start_date: start, end_date: end,
   }], 'test');
   Selection.clear();
@@ -1408,8 +1472,10 @@ test('Interaction._onDataSetUpdate allows a time-only drag of a sub-order on the
   try {
     Interaction._onDataSetUpdate({ items: [id] });
     assert.equal(Store.tasks[id].MACHINE, line);
-    assert.equal(Store.tasks[id].start_date.getTime(), newStart.getTime(), 'time-only drags remain unrestricted for sub-orders');
+    assert.equal(Store.tasks[id].end_date.getTime(), newEnd.getTime(), 'time-only drags remain unrestricted for sub-orders');
+    assert.equal(Store.tasks[id].start_date.getTime(), newStart.getTime());
   } finally {
+    restoreClock();
     Timeline._items = undefined;
     Toast.show = priorToastShow;
     Alerts.scheduleRecompute = priorScheduleRecompute;
@@ -1522,7 +1588,8 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is a locked sub
 
 function _enableRoutingForPlant(plant) {
   const priorMasterData = Store.masterData;
-  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: true }] }, 'test');
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, routing_runtime_enabled: true }] }, 'test');
+  Store.serverOffsetMs = new Date('2026-08-01T00:00:00').getTime() - Date.now();   // restored by the afterEach hook above
   return priorMasterData;
 }
 
@@ -1580,7 +1647,8 @@ test('Interaction._onDataSetUpdate skips the routing eligibility guard on a plan
   const priorScheduleRecompute = Alerts.scheduleRecompute;
   const plant = 'P-ROUTING-DISABLED-DRAG';
   const priorMasterData = Store.masterData;
-  Store.setMasterData({ ...priorMasterData, plants: [{ plant, routing_runtime_enabled: false }] }, 'test');
+  Store.setMasterData({ ...priorMasterData, plants: [{ plant, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, routing_runtime_enabled: false }] }, 'test');
+  Store.serverOffsetMs = new Date('2026-08-01T00:00:00').getTime() - Date.now();   // restored by the afterEach hook
   Alerts.scheduleRecompute = () => {};
   let eligibleCalls = 0;
   Runtime.eligible = () => { eligibleCalls++; return false; };
@@ -1879,16 +1947,18 @@ test('#33 Timeline._itemForTask re-applies the active Gantt filter dimming so a 
 // reference) and is refused on manual-firmed, frozen and running orders.
 // ---------------------------------------------------------------------------
 function _unscheduleFixture(extra = []) {
+  // A plant needs a valid zone to have a clock (OQ52): the running order below is judged against it.
+  Store.setMasterData({ lines: [], ...Store.masterData, plants: [{ plant: '5512', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
   const farStart = new Date('2035-03-01T08:00:00');
   const farEnd   = new Date('2035-03-01T12:00:00');
   const mk = (id, over = {}) => ({
     id, PRODUCTION_ORDER: id, MATERIAL_NUMBER: 'M', MACHINE: 'L1', plant: '5512', PLANT: '5512',
-    start_date: farStart, end_date: farEnd, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
+    user_scheduled: true, start_date: farStart, end_date: farEnd, RUN_TIME: 4, COLOR: 'RED', FORM_SIZE: 'S',
     original_start_date: new Date('2035-02-27T08:00:00'), original_end_date: new Date('2035-02-27T12:00:00'),
     ...over,
   });
   Store.setTasks([mk('un-ok'), mk('un-manual'), mk('un-frozen'), mk('un-running', {
-    start_date: new Date(Date.now() - 3600_000), end_date: new Date(Date.now() + 3600_000),
+    user_scheduled: true, start_date: new Date(Date.now() - 3600_000), end_date: new Date(Date.now() + 3600_000),
   }), mk('un-split', { scheduleSegments: [
     { sequence: 1, startDate: farStart, endDate: farEnd }, { sequence: 2, startDate: new Date('2035-03-02T08:00:00'), endDate: new Date('2035-03-02T12:00:00') },
   ] }), ...extra], 'test');
@@ -1997,4 +2067,255 @@ test('Interaction.unscheduleIds (the palette entry point) applies the same guard
     }
     assert.equal(stub.calls.recomputes, 1);
   } finally { stub.restore(); }
+});
+
+test('lockLeftEdge (OQ1): a drag that changes only the start puts the stored start back; every other drag is accepted as is', () => {
+  const stored = { id: 'o1', group: 'L1', start: new Date('2026-08-05T08:00:00'), end: new Date('2026-08-05T12:00:00') };
+  const left = { ...stored, start: new Date('2026-08-05T06:00:00') };
+  assert.equal(lockLeftEdge(left, stored).start.getTime(), stored.start.getTime(), 'left handle: snapped back');
+  assert.equal(lockLeftEdge(left, stored).end.getTime(), stored.end.getTime());
+  const right = { ...stored, end: new Date('2026-08-05T14:00:00') };
+  assert.equal(lockLeftEdge(right, stored), right, 'right handle: accepted');
+  const whole = { ...stored, start: new Date('2026-08-05T09:00:00'), end: new Date('2026-08-05T13:00:00') };
+  assert.equal(lockLeftEdge(whole, stored), whole, 'whole-bar move: accepted');
+  const vertical = { ...stored, group: 'L2' };
+  assert.equal(lockLeftEdge(vertical, stored), vertical, 'line change: accepted');
+  assert.equal(lockLeftEdge(left, null), left, 'no stored item: nothing to compare with');
+});
+
+test('Timeline._nowFor judges an order against its own plant clock; the viewer clock only when the plant has no zone (Task 2.4 carry-in)', () => {
+  const restoreClock = pinPlantClock(['TZ-GANTT-NOW'], '2026-08-05T10:00:00');
+  try {
+    const plantNow = Timeline._nowFor({ PLANT: 'TZ-GANTT-NOW' });
+    assert.ok(Math.abs(plantNow.getTime() - new Date('2026-08-05T10:00:00').getTime()) < 5000, 'the pinned plant clock, not the real one');
+    const viewer = Timeline._nowFor({ PLANT: 'NOT-IN-MASTER-DATA' });
+    assert.ok(Math.abs(viewer.getTime() - Date.now()) < 5000, 'no zone known: the viewer clock');
+    // The lock band follows the plant clock: running at 10:00 plant time even though the real clock is far later.
+    const running = { id: 'lb', PLANT: 'TZ-GANTT-NOW', user_scheduled: true, start_date: new Date('2026-08-05T09:00:00'), end_date: new Date('2026-08-05T11:00:00') };
+    assert.equal(Timeline._inLockBand(running), true);
+    assert.equal(Timeline._inLockBand({ ...running, id: 'lb2', start_date: new Date('2026-08-05T06:00:00'), end_date: new Date('2026-08-05T08:00:00') }), false);
+  } finally { restoreClock(); }
+});
+
+test('U26: inside a rebuild/scan pass Store.plantNow is read once per plant, not once per order', () => {
+  const restoreClock = pinPlantClock(['TZ-GANTT-MEMO'], '2026-08-05T10:00:00');
+  const realPlantNow = Store.plantNow;
+  let calls = 0;
+  Store.plantNow = function (plant) { calls++; return realPlantNow.call(this, plant); };
+  try {
+    const tasks = Array.from({ length: 50 }, (_, i) => ({ id: `m${i}`, PLANT: 'TZ-GANTT-MEMO', MACHINE: 'L1', text: `m${i}`,
+      user_scheduled: true, start_date: new Date('2026-08-05T09:00:00'), end_date: new Date('2026-08-05T11:00:00') }));
+    for (const t of tasks) Timeline._inLockBand(t);
+    assert.equal(calls, 50, 'sanity: outside a pass every order reads the clock');
+    calls = 0;
+    Timeline._clockMemo = new Map();
+    try {
+      for (const t of tasks) Timeline._inLockBand(t);
+      for (const t of tasks) Timeline._itemForTask(t);
+    } finally { Timeline._clockMemo = null; }
+    assert.equal(calls, 1, 'one clock read for the whole pass');
+  } finally { Store.plantNow = realPlantNow; restoreClock(); }
+});
+
+test('Interaction._onDataSetUpdate: an echo (or a vetoed left-edge drag) on a bar whose derived start is off the 15-minute grid is ignored, with no left-edge toast', () => {
+  const id = 'fx-offgrid-1';
+  const start = new Date('2026-08-05T08:10:00');   // derived starts are often off the grid
+  const end   = new Date('2026-08-05T12:00:00');
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 3.8333 }], 'test');
+  Store.updateTask(id, { start_date: start }, 'test');   // a derived start lands off the grid; setTasks would snap it
+  assert.equal(Store.tasks[id].start_date.getTime(), start.getTime(), 'sanity: the fixture really is off the grid');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start, end, group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(fx.toasts.length, 0);
+    assert.equal(fx.rebuilds, 0);
+    assert.equal(Store.tasks[id].start_date.getTime(), start.getTime());
+  } finally { fx.restore(); }
+});
+
+// ---------------------------------------------------------------------------
+// Backward scheduling Task 3.4 (A.3 #18, gate group 3): resize edges and the keyboard path.
+// ---------------------------------------------------------------------------
+
+test('a right-edge resize is a finish move and pushes exactly one undo entry (A.3 #18)', () => {
+  const id = 'fx-resize-undo-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  UndoStack._entries = [];
+  const before = 0;
+  Timeline._items = { get: (i) => (i === id ? { start, end: new Date('2026-08-05T14:00:00'), group: 'L1' } : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(Store.tasks[id].end_date.getTime(), new Date('2026-08-05T14:00:00').getTime());
+    assert.equal(UndoStack._entries.length, before + 1);
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('G4 / gate 30: the multi-drag ghost preview takes the FINISH delta, so a right-edge resize moves the ghosts of the companions by the delta the commit applies', () => {
+  const anchorId = 'ghost-anchor', companionId = 'ghost-companion';
+  const aStart = new Date('2026-08-05T08:00:00'), aEnd = new Date('2026-08-05T12:00:00');
+  const cStart = new Date('2026-08-06T08:00:00'), cEnd = new Date('2026-08-06T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorItems = Timeline._items, priorTl = Timeline._tl;
+  Store.setTasks([
+    { id: anchorId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: aStart, end_date: aEnd },
+    { id: companionId, MACHINE: 'L2', PLANT: '5512', RUN_TIME: 4, start_date: cStart, end_date: cEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  const updates = [];
+  const priorRaf = globalThis.requestAnimationFrame, priorCaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;      // the edge-scroll loop is not under test
+  globalThis.cancelAnimationFrame = () => {};
+  Timeline._items = {
+    get: (i) => (i === companionId ? { id: i, className: '' } : undefined),
+    update: (list) => updates.push(...list),
+  };
+  try {
+    // Resize: vis keeps the start (props.time is the start) and moves the end 2 h later on its live item data.
+    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: aStart, end: new Date('2026-08-05T14:00:00') } } } } };
+    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
+    assert.equal(updates.length, 1, 'the companion gets a ghost');
+    assert.equal(updates[0].start.getTime(), cStart.getTime() + 2 * 3600000, 'ghost start shifted by the finish delta');
+    assert.equal(updates[0].end.getTime(), cEnd.getTime() + 2 * 3600000);
+    // Body drag: both edges move together, the same delta on either basis.
+    updates.length = 0;
+    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: new Date('2026-08-05T09:00:00'), end: new Date('2026-08-05T13:00:00') } } } } };
+    Interaction._onTimeChange({ id: anchorId, time: new Date('2026-08-05T09:00:00'), group: 'L1' });
+    assert.equal(updates[0].start.getTime(), cStart.getTime() + 3600000);
+  } finally {
+    Interaction._clearGhosts();
+    globalThis.requestAnimationFrame = priorRaf; globalThis.cancelAnimationFrame = priorCaf;
+    Timeline._items = priorItems; Timeline._tl = priorTl;
+    fx.restore(); restoreClock(); Selection.clear();
+  }
+});
+
+test('U27: a companion ghost takes the width the drop derives (backward walk), not the stored width shifted', () => {
+  const anchorId = 'ghost-u27-anchor', companionId = 'ghost-u27-companion';
+  const aStart = new Date('2026-08-05T08:00:00'), aEnd = new Date('2026-08-05T12:00:00');
+  const cStart = new Date('2026-08-06T08:00:00'), cEnd = new Date('2026-08-06T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorItems = Timeline._items, priorTl = Timeline._tl, priorPatch = Engine.manualRoutingSchedulePatchFor;
+  Store.setTasks([
+    { id: anchorId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: aStart, end_date: aEnd },
+    { id: companionId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: cStart, end_date: cEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  const updates = [], calls = [];
+  const priorRaf = globalThis.requestAnimationFrame, priorCaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1; globalThis.cancelAnimationFrame = () => {};
+  Timeline._items = { get: i => (i === companionId ? { id: i, className: '' } : undefined), update: list => updates.push(...list) };
+  // The drop's derivation across a closed day: the 4 h run starts the evening before and ends at the translated finish.
+  const derivedStart = new Date('2026-08-07T22:00:00'), derivedEnd = new Date('2026-08-10T02:00:00');
+  Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => { calls.push({ id: task.id, line, finish, opts }); return { start_date: derivedStart, end_date: derivedEnd }; };
+  try {
+    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: aStart, end: new Date('2026-08-05T14:00:00') } } } } };
+    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].id, companionId);
+    assert.equal(calls[0].finish.getTime(), cEnd.getTime() + 2 * 3600000, 'the translated finish, as the drop computes it');
+    assert.equal(calls[0].opts.quiet, true, 'a 60 fps preview never toasts a refusal');
+    assert.equal(updates[0].start.getTime(), derivedStart.getTime());
+    assert.equal(updates[0].end.getTime(), derivedEnd.getTime(), 'ghost width equals the dropped bar width');
+    // No derivation (null): the translated stored edges are the fallback.
+    updates.length = 0;
+    Engine.manualRoutingSchedulePatchFor = () => null;
+    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
+    assert.equal(updates[0].start.getTime(), cStart.getTime() + 2 * 3600000);
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Interaction._clearGhosts();
+    globalThis.requestAnimationFrame = priorRaf; globalThis.cancelAnimationFrame = priorCaf;
+    Timeline._items = priorItems; Timeline._tl = priorTl;
+    fx.restore(); restoreClock(); Selection.clear();
+  }
+});
+
+test('a resize that derives the bar it already was creates no undo entry, no Store write, and springs back (A.3 #18)', () => {
+  const id = 'fx-resize-noop-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const priorUpdate = Store.updateTask;
+  const writes = [];
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  UndoStack._entries = [];
+  const before = 0;
+  Timeline._items = { get: (i) => (i === id ? { start, end: new Date('2026-08-05T14:00:00'), group: 'L1' } : undefined) };
+  // The engine answers with the very bar the order already is (the dragged finish resolves back onto it).
+  Engine.manualRoutingSchedulePatchFor = () => ({ start_date: start, end_date: end, MACHINE: 'L1', scheduleSegments: [] });
+  Store.updateTask = (...args) => { writes.push(args); return priorUpdate.apply(Store, args); };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(UndoStack._entries.length, before, 'no undo entry');
+    assert.equal(writes.length, 0, 'nothing written, so nothing dirtied');
+    assert.equal(fx.rebuilds, 1, 'the bar springs back to where it was');
+    assert.equal(fx.toasts.length, 0, 'not an error');
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Store.updateTask = priorUpdate;
+    fx.restore(); restoreClock();
+  }
+});
+
+test('G3: the Gantt keyboard handler selects but writes no dates; date edits stay on the finish-anchored grid/Inspector path', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const priorUpdate = Store.updateTask;
+  const priorUpdateMany = Store.updateMany;
+  const calls = [];
+  Store.setTasks([
+    { id: 'kb-a', MACHINE: 'L1', PLANT: '5512', start_date: new Date('2026-08-05T08:00:00'), end_date: new Date('2026-08-05T12:00:00'), RUN_TIME: 4 },
+    { id: 'kb-b', MACHINE: 'L1', PLANT: '5512', start_date: new Date('2026-08-05T13:00:00'), end_date: new Date('2026-08-05T15:00:00'), RUN_TIME: 2 },
+  ], 'test');
+  Selection.set(['kb-a']);
+  Engine.manualRoutingSchedulePatchFor = (...a) => { calls.push('patch'); return priorPatch.apply(Engine, a); };
+  Store.updateTask = (...a) => { calls.push('update'); return priorUpdate.apply(Store, a); };
+  Store.updateMany = (...a) => { calls.push('updateMany'); return priorUpdateMany.apply(Store, a); };
+  try {
+    for (const key of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown']) {
+      Interaction._onKeyDown({ key, target: { tagName: 'DIV' }, metaKey: false, ctrlKey: false, shiftKey: false, preventDefault() {} });
+    }
+    assert.deepEqual(calls, [], 'arrows move the selection only');
+    assert.equal(Store.tasks['kb-a'].end_date.getTime(), new Date('2026-08-05T12:00:00').getTime());
+    assert.equal(Store.tasks['kb-b'].end_date.getTime(), new Date('2026-08-05T15:00:00').getTime());
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Store.updateTask = priorUpdate; Store.updateMany = priorUpdateMany;
+    fx.restore(); restoreClock();
+  }
+});
+
+test('a drag asks the engine for the FINISH (third argument is the dropped right edge), the same call the grid and Inspector make', () => {
+  const id = 'fx-drag-finish-1';
+  const start = new Date('2026-08-05T08:00:00');
+  const end   = new Date('2026-08-05T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorPatch = Engine.manualRoutingSchedulePatchFor;
+  const seen = [];
+  Store.setTasks([{ id, MACHINE: 'L1', PLANT: '5512', start_date: start, end_date: end, RUN_TIME: 4 }], 'test');
+  Selection.clear();
+  Timeline._items = { get: (i) => (i === id ? { start: new Date('2026-08-05T10:00:00'), end: new Date('2026-08-05T14:00:00'), group: 'L1' } : undefined) };
+  Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => { seen.push(finish); return priorPatch.call(Engine, task, line, finish, opts); };
+  try {
+    Interaction._onDataSetUpdate({ items: [id] });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].getTime(), new Date('2026-08-05T14:00:00').getTime());
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    fx.restore(); restoreClock();
+  }
 });

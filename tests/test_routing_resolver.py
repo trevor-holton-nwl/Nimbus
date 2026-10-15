@@ -571,3 +571,225 @@ def test_check_eligibility_cache_loads_plant_lookups_once_per_call_scope():
     assert len(opened) == 1
     check_eligibility(*args, conn=conn)          # no cache -> loads again
     assert len(opened) == 2
+
+
+# ---------------------------------------------------------------------------
+# Run-time cap (OQ28): a recomputed run time over the plant's cap is queued with reason
+# run_time_over_cap through the same hold writer routing holds use; a run time within the cap
+# releases a previous over-cap hold. Driven through _resolve_orders_on_conn with the loaders and
+# writers stubbed (no database), like the gate tests above.
+# ---------------------------------------------------------------------------
+class _CapCursor:
+    def __init__(self, horizon_days):
+        self.horizon_days = horizon_days
+        self._one = None
+
+    def execute(self, statement, params=None):
+        stmt = str(statement)
+        if "SELECT routing_runtime_enabled FROM plants" in stmt:
+            self._one = (True,)
+        elif "SELECT EXISTS(SELECT 1 FROM orders" in stmt:
+            self._one = (True,)
+        elif "SELECT visibility_horizon_days FROM plants" in stmt:
+            self._one = (self.horizon_days,)
+        else:
+            self._one = None
+
+    def fetchone(self):
+        return self._one
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _CapConn:
+    def __init__(self, horizon_days=None):
+        self.cursor_obj = _CapCursor(horizon_days)
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+def _run_cap_resolve(monkeypatch, orders, results, horizon_days=None):
+    from backend.routing import resolver as r
+
+    writes: list = []
+    holds: list = []
+    monkeypatch.setattr(r, "_load_orders", lambda *a, **k: orders)
+    for loader in ("_load_pv_lookup", "_load_op_lookup", "_load_machine_workcenter", "_load_rules"):
+        monkeypatch.setattr(r, loader, lambda *a, **k: {})
+    monkeypatch.setattr(r, "resolve_one", lambda order, **k: results[order["id"]])
+    monkeypatch.setattr(r, "_running_ids", lambda *a, **k: set())
+    monkeypatch.setattr(r, "_write_outcomes", lambda cur, rows: writes.extend(rows))
+    monkeypatch.setattr(r, "_write_holds", lambda cur, rows: holds.extend(rows))
+    report = r._resolve_orders_on_conn("P1", _CapConn(horizon_days))
+    return report, writes, holds
+
+
+def _resolved(hours):
+    return {"status": "resolved", "run_time": hours, "run_time_source": "routing",
+            "run_time_basis": {"unit": "h"}}
+
+
+class TestRunTimeCap:
+    ORDER = {"id": "o1", "planning_status": "scheduled", "planning_reason": None,
+             "scheduled_start": None, "scheduled_end": None, "run_time_source": "routing"}
+
+    def test_recomputed_run_time_over_the_cap_is_held_with_the_over_cap_reason(self, monkeypatch):
+        report, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(400.0)})
+        assert report["over_cap"] == 1
+        assert [h[0] for h in holds] == ["o1"]
+        reason = holds[0][1].obj
+        assert reason["code"] == "run_time_over_cap" and "400" in reason["message"] and reason["cap_hours"] == 336.0
+        # The computed run time is still stored (the order keeps its number), but never releases a hold.
+        assert len(writes) == 1 and writes[0][1] == 400.0 and writes[0][4] is False
+
+    def test_run_time_within_the_cap_is_written_and_not_held(self, monkeypatch):
+        report, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(336.0)})
+        assert holds == [] and "over_cap" not in report and len(writes) == 1
+
+    def test_plant_visibility_horizon_does_not_lower_the_cap(self, monkeypatch):
+        # U5: the cap is a flat 336 h; a 5-day horizon plant resolves a 200 h order normally.
+        _, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(200.0)}, horizon_days=5)
+        assert holds == [] and len(writes) == 1
+
+    def test_a_placed_over_cap_order_with_an_unchanged_run_time_is_not_requeued(self, monkeypatch):
+        # R-I5: planner-released + placed + firm; every upload re-resolves it to the same 400 h.
+        placed = dict(self.ORDER, run_time=Decimal("400.0"),
+                      scheduled_start=dt.datetime(2026, 11, 1, 8), scheduled_end=dt.datetime(2026, 11, 18, 0))
+        report, writes, holds = _run_cap_resolve(monkeypatch, [placed], {"o1": _resolved(400.0)})
+        assert holds == [] and "over_cap" not in report
+        # a CHANGED over-cap run time re-queues it, and so does a never-placed order
+        _, _, holds = _run_cap_resolve(monkeypatch, [placed], {"o1": _resolved(450.0)})
+        assert [h[0] for h in holds] == ["o1"]
+        _, _, holds = _run_cap_resolve(monkeypatch, [dict(placed, scheduled_start=None, scheduled_end=None)],
+                                       {"o1": _resolved(400.0)})
+        assert [h[0] for h in holds] == ["o1"]
+
+    def test_run_time_past_the_representation_bound_is_held_without_writing_the_number(self, monkeypatch):
+        _, writes, holds = _run_cap_resolve(monkeypatch, [dict(self.ORDER)], {"o1": _resolved(9000.0)})
+        assert writes == [] and len(holds) == 1
+
+    def test_an_over_cap_hold_is_released_when_the_run_time_comes_back_within_the_cap(self, monkeypatch):
+        held = dict(self.ORDER, planning_status="needs_planning",
+                    planning_reason={"code": "run_time_over_cap", "message": "x"})
+        _, writes, holds = _run_cap_resolve(monkeypatch, [held], {"o1": _resolved(100.0)})
+        assert holds == [] and len(writes) == 1 and writes[0][4] is True    # release_hold
+
+    def test_another_subsystems_hold_is_not_overwritten(self, monkeypatch):
+        held = dict(self.ORDER, planning_status="needs_planning",
+                    planning_reason={"code": "planner_unscheduled", "message": "x"})
+        report, _, holds = _run_cap_resolve(monkeypatch, [held], {"o1": _resolved(400.0)})
+        assert holds == [] and "over_cap" not in report
+
+
+# ---------------------------------------------------------------------------
+# Backward scheduling OQ34: ANY run-time change on a PLACED order flags it stale; the one-time cutover branch is
+# gone (the plant here is NOT in cutover: _CapCursor reports an existing routing-sourced order).
+# ---------------------------------------------------------------------------
+class TestAnyRunTimeChangeOnAPlacedOrderFlagsIt:
+    PLACED = {"id": "o1", "planning_status": "scheduled", "planning_reason": None,
+              "scheduled_start": dt.datetime(2026, 6, 1, 8), "scheduled_end": dt.datetime(2026, 6, 1, 12),
+              "run_time_source": "routing", "run_time": Decimal("4.0")}
+
+    def _flag(self, monkeypatch, order, hours):
+        _, writes, _ = _run_cap_resolve(monkeypatch, [dict(order)], {"o1": _resolved(hours)})
+        assert len(writes) == 1
+        return writes[0][5]
+
+    def test_a_changed_run_time_on_a_placed_order_sets_the_flag_even_when_the_plant_is_not_in_cutover(self, monkeypatch):
+        assert self._flag(monkeypatch, self.PLACED, 6.0) is True
+
+    def test_an_unchanged_run_time_does_not(self, monkeypatch):
+        order = dict(self.PLACED, run_time_source="legacy")   # a label change still writes the row
+        assert self._flag(monkeypatch, order, 4.0) is False
+
+    def test_a_never_placed_order_is_not_flagged(self, monkeypatch):
+        order = dict(self.PLACED, scheduled_start=None, scheduled_end=None)
+        assert self._flag(monkeypatch, order, 6.0) is False
+
+    def test_an_order_placed_by_a_stored_finish_alone_is_flagged(self, monkeypatch):
+        assert self._flag(monkeypatch, dict(self.PLACED, scheduled_start=None), 6.0) is True
+
+    def test_a_placed_order_that_had_no_run_time_is_flagged_when_one_arrives(self, monkeypatch):
+        assert self._flag(monkeypatch, dict(self.PLACED, run_time=None), 6.0) is True
+
+    def test_the_cutover_branch_is_gone(self):
+        import inspect
+        from backend.routing import resolver as r
+        assert "is_cutover" not in inspect.signature(r._build_write_row).parameters
+        assert "is_cutover" not in inspect.getsource(r._build_write_row)
+
+    def test_a_hold_clears_the_flag_and_the_placement_marker(self):
+        from psycopg.types.json import Jsonb
+        from backend.routing import resolver as r
+
+        class Rec:
+            def __init__(self): self.sql = []
+            def execute(self, stmt, params=None): self.sql.append(str(stmt))
+            def fetchall(self): return []
+
+        cur = Rec()
+        r._write_holds_chunk(cur, [("o1", Jsonb({"code": "runtime_unknown", "message": "x"}))])
+        update = next(q for q in cur.sql if "UPDATE orders" in q)
+        assert "runtime_schedule_mismatch = FALSE" in update and "placement_exception = NULL" in update
+
+
+# ---------------------------------------------------------------------------
+# Backward scheduling OQ26: production-version validity is judged on the SAP start as FIRST received (the
+# locked `original_start_received`), never on `basic_start_date`, which an echo of NIMBUS's own send can move.
+# ---------------------------------------------------------------------------
+class TestValidityIsJudgedOnTheLockedSapStart:
+    PV = {("P", "M", "0001"): {"valid_from": dt.date(2026, 1, 1), "valid_to": dt.date(2026, 12, 31)}}
+
+    def _step(self, **dates):
+        from backend.routing.resolver import _resolve_steps
+        order = {"plant": "P", "material_number": "M", "production_version": "0001", **dates}   # no machine
+        result = _resolve_steps(order, pv_lookup=self.PV, op_lookup={}, machine_workcenter={}, rules={})
+        return result["step"]
+
+    def test_an_echo_that_moves_basic_start_date_does_not_change_validity(self):
+        inside, outside = dt.datetime(2026, 6, 1, 8), dt.datetime(2027, 3, 1, 8)
+        assert self._step(original_start_received=inside, basic_start_date=outside) == "no_machine"   # still valid
+        assert self._step(original_start_received=outside, basic_start_date=inside) == "pv_expired"
+
+    def test_a_row_without_the_locked_start_falls_back_to_basic_start_date(self):
+        assert self._step(basic_start_date=dt.datetime(2026, 6, 1, 8)) == "no_machine"
+        assert self._step(basic_start_date=dt.datetime(2027, 3, 1, 8)) == "pv_expired"
+
+    def test_a_startless_order_is_judged_on_its_finish_never_on_none(self):
+        # U13: no start of any kind -> the locked finish, then the planning finish, then today
+        assert self._step(original_finish_received=dt.datetime(2027, 3, 1)) == "pv_expired"
+        assert self._step(basic_finish_date=dt.datetime(2027, 3, 1)) == "pv_expired"
+        assert self._step(original_finish_received=dt.datetime(2026, 6, 1)) == "no_machine"
+        from backend.routing.resolver import _resolve_steps
+        expired = {("P", "M", "0001"): {"valid_from": dt.date(2019, 1, 1), "valid_to": dt.date(2020, 12, 31)}}
+        order = {"plant": "P", "material_number": "M", "production_version": "0001"}
+        assert _resolve_steps(order, pv_lookup=expired, op_lookup={}, machine_workcenter={}, rules={})["step"]             == "pv_expired", "no date at all reads as today, never as valid"
+
+    def test_check_eligibility_judges_the_start_it_is_given_as_the_locked_start(self):
+        case = _ELIGIBILITY_CASES["pv_expired_before_valid_from_falls_to_sap_order_fallback"]
+        order = case["order"]
+        pv = case["production_versions"][0]
+        inside = _parse_date(pv["valid_from"]) + dt.timedelta(days=1)
+        result = check_eligibility(order["plant"], order["material_number"], order["production_version"],
+                                   order["machine"], order["order_quantity"], inside,
+                                   conn=_FakeEligibilityConnection(case))
+        assert result.get("step") != "pv_expired"
+
+    def test_the_order_loaders_select_the_locked_start(self):
+        from backend.routing.resolver import _load_orders
+
+        class Cur:
+            def __init__(self): self.sql = []
+            description = [("id",)]
+            def execute(self, sql, params=None): self.sql.append(sql)
+            def fetchall(self): return []
+
+        for kwargs in ({"full": True}, {}):
+            cur = Cur()
+            _load_orders(cur, "P", False, **kwargs)
+            assert "original_start_received" in cur.sql[0]

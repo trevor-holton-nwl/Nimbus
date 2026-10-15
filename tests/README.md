@@ -4,7 +4,7 @@
 
 ```bash
 npm run test:legacy   # tests/js/*.test.js  — CommonJS, covers compute-core + timezone
-npm run test:modules  # tests/modules/*.test.mjs — ESM, covers CQ-1 compatibility surface
+npm run test:modules  # tests/modules/**/*.test.mjs — ESM, covers CQ-1 compatibility surface
 npm test              # both suites
 npm run check:legacy-surface  # diff scanner output vs contract snapshot
 ```
@@ -18,57 +18,27 @@ npm run check:legacy-surface  # diff scanner output vs contract snapshot
 - `legacy-app-characterization.test.mjs` pins selected-plant scoping, save payload shape,
   and the public namespace surface. These survive Phase 1–4 refactoring as regression guards.
 - The harness throws on any unrecognised network call so missing stubs are immediately visible.
-- `foundation.test.mjs` / `schedule-state.test.mjs` — plain ESM `import` shape
-  and behavior tests for `application-foundation.mjs`/`schedule-state.mjs`
-  (no VM sandbox needed — these are real native modules). `app-entry.test.mjs`
-  covers the loader's load-then-load-in-order contract via dependency
-  injection (`loadScript`), not real DOM script tags — real-browser boot
-  ordering is a Phase 4 browser-smoke responsibility, not unit-tested here.
-- `schedule-services.test.mjs` / `schedule-data.test.mjs` — plain ESM `import`
-  shape and behavior tests for `schedule-services.mjs` (Calendar capacity
-  math, Compute, Alerts computation, Utilization, Engine) and
-  `schedule-data.mjs` (Persistence, CalendarSync, Session state/API), the
-  Phase 2 modules. Cover the worker-protocol/memoization/optimistic-
-  concurrency contracts plus the two data→services seams
-  (`schedule:hydrated` event, `Persistence.setCalendarService`) — no VM
-  sandbox needed, these are real native modules too.
-- `schedule-workbench.test.mjs` — plain ESM `import` shape and behavior tests
-  for `schedule-workbench.mjs` (`Timeline`, `Table`, `Inspector`, `Hierarchy`,
-  `Dashboard`, `TimelineNav`, `GanttFilter`, `DependencyOverlay`,
-  `ContextMenu`, `Interaction`, `OptimizeDialog`, `OptimizerPreview`,
-  `EditCalendar`, `ColorWheelViewer`, `Printer`, plus the relocated
-  `SandboxAdapter`/`AlertsUIAdapter` DOM adapters), the Phase 3 module — no
-  VM sandbox needed, these are real native modules too. A minimal
-  hand-rolled `document`/`#vis-timeline`-container stub with
-  call-counting `addEventListener`/`removeEventListener` (defined at the top
-  of the file, only installed if `globalThis.document` isn't already set)
-  backs the `Interaction` characterization tests: idempotent `install()`,
-  the new `uninstall()` teardown removing every listener `install()`
-  attached, and the `_onDataSetUpdate` fixed-task drag behavior (a real
-  drag on a fixed order commits to the Store — it is not reverted, despite
-  the module's original header comment claiming otherwise; the comment was
-  corrected, the behavior was not changed). `load-legacy-app.mjs`'s VM
-  harness bridges `window.__NIMBUS_WORKBENCH` the same way as the Phase 1/2
-  bridges, for the legacy-app characterization suite.
-- `plant-and-administration.test.mjs` — plain ESM `import` shape tests for
-  `plant-and-administration.mjs` (`CalendarUI`, `Plant`, `ProdLines`,
-  `MasterData`, `LaborPlanning`, `Interface`, `Security`, `AdminCockpit`), the
-  Phase 4 Task 1-3 module — no VM sandbox needed, a real native module.
-  `load-legacy-app.mjs`'s VM harness bridges `window.__NIMBUS_PLANT_ADMIN`
-  the same way as the earlier bridges.
-- `application-shell.test.mjs` — plain ESM `import` shape tests for
-  `application-shell.mjs` (`SessionUIAdapter`, `showLoginScreen`,
-  `PlantSelector`, `EmptyState`, `App`, `Settings`), the Phase 4 Task 4
-  module and the seventh and final CQ-1 file — asserts
-  `App._renderSettingsPane` is `undefined` on this module (relocated to
-  `Plant` in Task 1, not carried here), and that `WelcomeSplash` is no
-  longer exported (retired outright by the Command Band re-skin's
-  chrome-wiring task). `load-legacy-app.mjs`'s VM harness bridges
-  `window.__NIMBUS_SHELL` the same way as the earlier bridges.
+- `foundation.test.mjs` — plain ESM `import` shape and behavior tests for the
+  platform foundation module (no VM sandbox needed — a real native module).
+  `app-entry.test.mjs` covers the loader's load-then-load-in-order contract via
+  dependency injection (`loadScript`), not real DOM script tags — real-browser
+  boot ordering is a browser-smoke responsibility, not unit-tested here.
+  `application-shell.test.mjs` covers the shell module (`SessionUIAdapter`,
+  `showLoginScreen`, `PlantSelector`, `EmptyState`, `App`, `Settings`).
+- Every other frontend domain has its own folder, `tests/modules/<domain>/`
+  (`scheduling`, `calendar`, `optimization`, `insights`, `platform`,
+  `security`, ...), with real ESM imports and no VM. The CQ-1-era file names
+  `schedule-state`, `schedule-services`, `schedule-data`, `schedule-workbench`
+  and `plant-and-administration` no longer exist: their tests moved into those
+  folders when the modules were split (for example `scheduling/persistence.test.mjs`,
+  `calendar/calendar-engine.test.mjs`, `platform/store.test.mjs`). The
+  `Persistence.setCalendarService` seam they once covered was removed in
+  backward scheduling Task 2.5 (the load-time calendar re-snap it served is
+  gone). Each domain's `CLAUDE.md` lists its own test files.
 
-**CQ-1 complete (all 4 phases):** all seven `.mjs` module files above are now
-real ES modules with their own shape/behavior test files; `app.js` is a
-731-line launcher with no module bodies of its own. See
+**CQ-1 complete (all 4 phases):** the compatibility-bridge modules were later
+split per domain (see `frontend/<domain>/CLAUDE.md`); `app.js` is a 797-line
+launcher with no module bodies of its own. See
 `docs/architecture/cq1-compatibility-inventory.md` for the full ownership map
 and the honest final-criteria report (§8) — including the one gate never
 run in any of the four phases: a real Docker/browser boot smoke test.

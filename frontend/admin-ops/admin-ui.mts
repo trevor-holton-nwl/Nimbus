@@ -84,8 +84,8 @@ interface AdminPipelineSnapshot {
   load_ms: number | null;
   source_file: string | null;
   raw_row_count: number;
-  dropped_no_start_date: number;
-  dropped_no_finish_date_filled: number;
+  unreadable_start_date: number;
+  dropped_no_finish_date: number;
   duplicate_ids_suffixed: number;
   color_merge_misses: number;
   color_merge_ms: number | null;
@@ -780,7 +780,7 @@ export const AdminCockpit = {
             label: 'DB Load',
             count: rawDb,
             delta: null,
-            status: p.dropped_no_start_date > 0 ? 'warn' : 'ok',
+            status: (p.unreadable_start_date > 0 || p.dropped_no_finish_date > 0) ? 'warn' : 'ok',
             detail: () => AdminCockpit._pipelineDetailDB(p, dbSt),
           },
           ...(activePlant ? [{
@@ -891,7 +891,8 @@ export const AdminCockpit = {
       [Util.t('ui.diag_null_runtime'), dbSt.null_runtime ?? '—'],
       [Util.t('ui.diag_date_range_min'), dbSt.date_range?.min?.slice(0, 10) ?? '—'],
       [Util.t('ui.diag_date_range_max'), dbSt.date_range?.max?.slice(0, 10) ?? '—'],
-      [Util.t('ui.diag_dropped_no_start'), p.dropped_no_start_date ?? 0],
+      [Util.t('ui.diag_unreadable_start'), p.unreadable_start_date ?? 0],
+      [Util.t('ui.diag_dropped_no_finish'), p.dropped_no_finish_date ?? 0],
       [Util.t('ui.diag_load_time'), p.load_ms != null ? p.load_ms + ' ms' : '—'],
     ];
 
@@ -965,7 +966,8 @@ export const AdminCockpit = {
     const scopeLbl = st?.plant ? `${Util.t('ui.plant_prefix')} ${st.plant}` : Util.t('ui.all_plants');
     const rows: AdminKvRow[] = [
       [Util.t('ui.diag_raw_from_db'), p.raw_row_count ?? '—'],
-      [Util.t('ui.diag_dropped_no_start'), p.dropped_no_start_date ?? 0],
+      [Util.t('ui.diag_unreadable_start'), p.unreadable_start_date ?? 0],
+      [Util.t('ui.diag_dropped_no_finish'), p.dropped_no_finish_date ?? 0],
       [Util.t('ui.diag_active_scope'), scopeLbl],
       [Util.t('ui.diag_rows_entering_cmerge'), st?.pre_color_merge_count ?? '—'],
       [Util.t('ui.diag_color_merge_misses'), st?.color_merge_misses ?? 0],
@@ -1308,7 +1310,7 @@ export const AdminCockpit = {
       const r = await Util.fetchTraced(`${Config.API_BASE}/purge/preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plant, start_date: startStr, end_date: endStr }),
+        body: JSON.stringify({ plant, start_date: startStr + 'T00:00:00', end_date: endStr + 'T23:59:59' }),
       });
       const body = await r.json().catch(() => ({})) as AdminPurgePreview;
       if (seq !== AdminCockpit._purgePreviewSeq) return; // superseded by a newer request

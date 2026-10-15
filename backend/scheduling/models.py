@@ -84,6 +84,10 @@ class TaskDTO(BaseModel):
     row_version: int | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
+    # Why the planner's bar deliberately differs from the run time (backward scheduling OQ50):
+    # 'overtime' (placed on non-working time) or 'overlong' (wider than the run time). NULL = a
+    # normal bar; the server's width check is skipped for a marked bar.
+    placement_exception: Literal["overtime", "overlong"] | None = None
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
     # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed
@@ -100,7 +104,8 @@ class TasksResponse(BaseModel):
     key precisely is out of scope for this phase and would need to track
     DIAGNOSTICS's shape by hand forever. The empty-result path also returns a
     smaller `meta` subset (see get_tasks's `empty_meta`), which a strict schema
-    would reject."""
+    would reject. Both paths carry `meta.server_now` (ISO-8601 UTC): the one clock the browser
+    projects into each plant's zone (backward scheduling OQ52); it is not a TaskDTO field."""
     data: list[TaskDTO]
     links: list[LinkDTO]
     meta: dict[str, Any]
@@ -137,6 +142,8 @@ class TaskUpdateResult(BaseModel):
     stale: list[str]
     versions: dict[str, int]
     conflicts: list[ScheduleConflict] = Field(default_factory=list)
+    rejection_reasons: dict[str, str] = Field(default_factory=dict)
+    start_derived: dict[str, bool] = Field(default_factory=dict)
 
 
 class BulkUpdateResult(BaseModel):
@@ -165,6 +172,10 @@ class BulkUpdateResult(BaseModel):
     # unchanged (still a plain id list) so this never breaks a consumer that
     # treats invalid_ids elements as bare ids.
     rejection_reasons: dict[str, str] = Field(default_factory=dict)
+    # Backward scheduling OQ59: sparse {id: True} -- the ids saved with `trust_start: false`. The server
+    # stored the sent finish as the placed finish and flagged the row stale, so the BROWSER re-derives
+    # its start from that finish on the next load. Absent id = the start was trusted.
+    start_derived: dict[str, bool] = Field(default_factory=dict)
 
 
 class TaskVersionRow(BaseModel):
@@ -184,8 +195,16 @@ class TaskVersionRow(BaseModel):
     PLANT: str | None = None
     firmed: bool = False
     original_start_date: str | None = None
+    # The locked SAP finish (the due date): COALESCE(original_finish_received, basic_finish_date).
+    original_end_date: str | None = None
     schedule_segments: list[ScheduleSegmentDTO] = Field(default_factory=list)
     runtime_schedule_mismatch: bool = False
+    # Why the planner's bar deliberately differs from the run time (backward scheduling OQ50):
+    # 'overtime' (placed on non-working time) or 'overlong' (wider than the run time). NULL = a
+    # normal bar; the server's width check is skipped for a marked bar.
+    placement_exception: Literal["overtime", "overlong"] | None = None
+    # Someone placed this order (db._PLACED_SQL): the client must not re-derive a placed row from its due date.
+    user_scheduled: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
     # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed
@@ -206,20 +225,6 @@ class TasksRefreshResponse(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
-class BaselineCorrectResult(BaseModel):
-    """Response for POST /tasks/baseline-correct — db.correct_due_date_baselines'
-    shape (db.py:604+) plus the same status/error_code/cause failure fields as
-    BulkUpdateResult."""
-    status: str
-    applied: int
-    persisted: int
-    skipped: int
-    not_matched: int
-    versions: dict[str, int]
-    error_code: str | None = None
-    cause: str | None = None
-
-
 # ---------------------------------------------------------------------------
 # Task date updates — shared model + validation + apply/persist/rollback
 # ---------------------------------------------------------------------------
@@ -235,6 +240,9 @@ class ScheduleSegmentInput(BaseModel):
 
 class TaskDateUpdate(BaseModel):
     """One task's optional schedule/attribute edit. Unknown fields are ignored.
+
+    `start_date` and `end_date` are both-or-neither: a payload carrying only one
+    edge is rejected as `single_edge`. `trust_start` semantics are unchanged.
 
     Optimistic concurrency: `base_version` is the xmin the client last saw for this
     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
@@ -255,8 +263,17 @@ class TaskDateUpdate(BaseModel):
     # Planner's manual firm, sent only for rows whose firm the planner toggled.
     FIRMED: bool | None = None
     schedule_segments: list[ScheduleSegmentInput] | None = None
+    # Marker on a bar the planner placed on purpose off its run-time width. Sent only when the
+    # marker changed; an explicit null clears it (read through model_fields_set, like the
+    # attributes), an omitted field leaves the stored marker alone.
+    placement_exception: Literal["overtime", "overlong"] | None = None
     base_version: int | None = None
     force: bool = False
+    # Backward scheduling OQ59 (external date writers): False says the `start_date` sent is a best guess the
+    # caller did not derive from the run time. The save then skips the width check, stores `end_date` as the
+    # placed finish, forces the row's stale flag, and lists the id in the response's `start_derived`.
+    # Default True (the browser's own save sends starts it derived itself).
+    trust_start: bool = True
     planning_status: str | None = None
     planning_reason: dict[str, Any] | None = None
 
@@ -266,16 +283,17 @@ class TaskDateUpdate(BaseModel):
         """H8: an unvalidated RUN_TIME (e.g. NaN from a crafted request) reaches
         SQL interval arithmetic in db.py (`_EFF_END_SQL` et al.) and crashes
         `GET /tasks`/`/tasks/refresh`/the save-lock query for the whole plant.
-        Bounds mirror the DB-level CHECK constraint added (as NOT VALID, then
-        validated by a later, separate file) in
-        migrations/2026-09-25-orders-run-time-bounds.sql +
-        migrations/2026-09-26-orders-run-time-bounds-validate.sql, which is
-        the backstop for the separate Excel/SAP ingest write path (db.py's
-        bulk upsert) that this pydantic model never sees."""
+        Bounds mirror the DB-level CHECK constraint (a representation bound:
+        migrations/2026-10-15-2-orders-run-time-bounds-336.sql raised it from 168
+        to 8760 hours; first added by migrations/2026-09-25-orders-run-time-bounds.sql),
+        which is the backstop for the separate Excel/SAP ingest write path (db.py's
+        bulk upsert) that this pydantic model never sees. The LIMIT an order is
+        scheduled with is the flat 336 h cap (db.cap_hours),
+        enforced per id in db.update_task_dates_bulk, not here."""
         if value is None:
             return value
-        if not math.isfinite(value) or value < 0 or value >= 168:
-            raise ValueError("RUN_TIME must be a finite number of hours in [0, 168)")
+        if not math.isfinite(value) or value < 0 or value >= 8760:
+            raise ValueError("RUN_TIME must be a finite number of hours in [0, 8760)")
         return value
 
 
@@ -294,22 +312,3 @@ class TasksUpdatePayload(BaseModel):
 class TaskRefreshPayload(BaseModel):
     """Ids the client needs to reconcile after a concurrency conflict."""
     ids: list[str] = []
-
-
-class DueDateCorrection(BaseModel):
-    """One order's due-date-baseline correction, computed client-side by
-    Persistence._snapToWorkingHours's due-date-baseline phase in app.js.
-    `base_version` is the row's xmin as of the client's last load/save of it —
-    used server-side to pin the write against ANY concurrent change to the row
-    (a SAP re-upload, a normal scheduling save, or another tab's correction).
-    Deliberately not a raw date value: a date round-trips through JS
-    Date/JSON.stringify, which would re-label a naive local timestamp as UTC
-    and never match Postgres's naive basic_start_date for a non-UTC client.
-    See db.correct_due_date_baselines."""
-    id: str
-    basic_finish_date: str
-    base_version: int
-
-
-class DueDateCorrectionPayload(BaseModel):
-    corrections: list[DueDateCorrection] = []

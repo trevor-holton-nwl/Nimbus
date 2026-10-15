@@ -186,9 +186,14 @@ test('#25 command-palette Firm/Unfirm/Push/Unschedule push a REAL undo that rest
   const priorEntries = UndoStack._entries.slice();
   const priorNimbus = globalThis.NIMBUS;
   const priorSchedule = Alerts.scheduleRecompute;
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
   globalThis.NIMBUS = nimbus;
   Alerts.scheduleRecompute = () => {};
   CommandPalette.close = () => {};
+  // Push derives the start from the held finish on the plant's clock: give the plant a zone and pin the clock.
+  Store.setMasterData({ ...priorMaster, plants: [{ plant: 'UNDO-P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
+  Store.serverOffsetMs = new Date(2026, 7, 1).getTime() - Date.now();
   const mk = (id, h) => ({ id, PLANT: 'UNDO-P', MACHINE: 'UNDO-L', RUN_TIME: 1,
     start_date: new Date(2026, 7, 3, h), end_date: new Date(2026, 7, 3, h + 1) });
   const run = (labelRe) => {
@@ -230,6 +235,53 @@ test('#25 command-palette Firm/Unfirm/Push/Unschedule push a REAL undo that rest
     UndoStack._entries.length = 0;
     for (const e of priorEntries) UndoStack._entries.push(e);
     Alerts.scheduleRecompute = priorSchedule;
+    Store.setMasterData(priorMaster, 'test');
+    Store.serverOffsetMs = priorOffset;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+test('Push +1 hour moves the finish and re-derives the start; firmed, frozen and running orders stay put (OQ8)', () => {
+  const { CommandPalette, UndoStack, Selection } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorEntries = UndoStack._entries.slice();
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
+  const priorFrozen = Store.frozenHorizonEnd;
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  CommandPalette.close = () => {};
+  Store.setMasterData({ ...priorMaster, plants: [{ plant: 'PUSH-P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
+  Store.serverOffsetMs = new Date(2026, 7, 3, 6, 0).getTime() - Date.now();   // plant clock: Mon 2026-08-03 06:00
+  Store.setFrozenHorizonEnd(new Date(2026, 7, 3, 9, 0), 'test');
+  const mk = (id, h1, h2) => ({ id, PLANT: 'PUSH-P', MACHINE: 'PUSH-L', RUN_TIME: h2 - h1,
+    user_scheduled: true, start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
+  try {
+    Store.setTasks([mk('normal', 10, 11), mk('firmed', 12, 13), mk('running', 5, 7), mk('frozen', 8, 9), mk('late', 18, 19)], 'test');
+    Store.setSelectedPlant('PUSH-P', 'test');
+    Store.setFirmed(['firmed'], true, 'test');
+    Selection.set(['normal', 'firmed', 'running', 'frozen', 'late']);
+    const cmd = CommandPalette._buildSelectionCommands().find(c => /push/i.test(c.label));
+    cmd.run();
+    const at = id => [Store.tasks[id].start_date.getHours(), Store.tasks[id].end_date.getHours()];
+    assert.deepEqual(at('normal'), [11, 12], 'finish +1 h, start re-derived from the run time');
+    assert.deepEqual(at('firmed'), [12, 13], 'a firmed order is skipped');
+    assert.deepEqual(at('running'), [5, 7], 'a running order is skipped');
+    assert.deepEqual(at('frozen'), [8, 9], 'a frozen order is skipped');
+    assert.deepEqual(at('late'), [18, 19], 'a finish past closing cannot be held, so it is skipped rather than leapt');
+  } finally {
+    Selection.clear();
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setMasterData(priorMaster, 'test');
+    Store.serverOffsetMs = priorOffset;
+    Store.setFrozenHorizonEnd(priorFrozen, 'test');
     Store.setTasks(priorTasks, 'test');
     Store.setSelectedPlant(priorPlant, 'test');
     globalThis.NIMBUS = priorNimbus;
@@ -568,4 +620,175 @@ test('TimeMachine.snapshot prunes IndexedDB to 200 and trims the in-memory histo
     assert.equal(TimeMachine._snapshots.length, 200);
     assert.equal(TimeMachine._snapshots[0].label, 'old0');
   });
+});
+
+test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stale and hands the ids to Engine.reconcileRestored (OQ21)', () => {
+  const { TimeMachine, UndoStack, Toast } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorEntries = UndoStack._entries.slice();
+  const priorSnaps = TimeMachine._snapshots;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorToast = Toast.show;
+  const Engine = nimbus.Engine;
+  const priorReconcile = Engine.reconcileRestored;
+  const reconciled = [];
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  Toast.show = () => {};
+  Engine.reconcileRestored = ids => { reconciled.push([...ids].map(String)); };
+  try {
+    Store.setTasks([{ id: 'tm1', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 2, runtime_schedule_mismatch: false,
+      start_date: new Date('2031-03-04T08:00:00'), end_date: new Date('2031-03-04T10:00:00') }], 'test');
+    TimeMachine._snapshots = [{ id: 1, ts: 4242, label: 'before', plant: 'TM-P', tasks: [
+      { id: 'tm1', start_date: '2031-03-03T06:00:00', end_date: '2031-03-03T08:00:00' },
+      { id: 'gone', start_date: '2031-03-03T06:00:00', end_date: '2031-03-03T08:00:00' }] }];
+    TimeMachine.restore(4242);
+    const t = Store.tasks.tm1;
+    assert.equal(t.end_date.getTime(), new Date('2031-03-03T08:00:00').getTime(), 'the snapshot finish is restored');
+    assert.equal(t.runtime_schedule_mismatch, true, 'the restored start is a placeholder: the row is flagged stale');
+    assert.deepEqual(reconciled, [['tm1']], 'only rows that still exist are re-derived, through Engine.reconcileRestored');
+    assert.equal(UndoStack._entries.at(-1).label, 'Before Time Machine restore', 'the restore is itself undoable');
+  } finally {
+    Engine.reconcileRestored = priorReconcile;
+    TimeMachine._snapshots = priorSnaps;
+    UndoStack._entries = priorEntries;
+    Toast.show = priorToast;
+    Alerts.scheduleRecompute = priorSchedule;
+    globalThis.NIMBUS = priorNimbus;
+    Store.setTasks(priorTasks, 'test');
+  }
+});
+
+// ---- Senior review I13 (one clock): intelligence panels read the plant's "today", like the Dashboard ----------------
+test('I13: the Confidence and peak-briefing matrix requests start on the plant clock, not the viewer clock', async () => {
+  const { NeedsEngine, Util } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAvailable = Compute.available;
+  const priorUtilization = Compute.utilization;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorCache = nimbus.Utilization._cache;
+  const starts = [];
+  globalThis.NIMBUS = nimbus;
+  // The plant is a day ahead of the viewer: its wall clock reads Thu 15 Oct 00:30 whatever the machine's clock says.
+  Util.setPlantClockResolver(plant => (plant === 'I13-P' ? new Date(2026, 9, 15, 0, 30) : null));
+  Compute.available = () => true;
+  Compute.utilization = (startMs) => { starts.push(startMs); return Promise.resolve({ matrix: {} }); };
+  try {
+    Confidence._invalidatePending(true);
+    Store.setTasks([{ id: 'i13-1', PLANT: 'I13-P', MACHINE: 'I13-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('I13-P', 'test');
+    nimbus.Utilization._cache = null;
+    await Confidence._recompute();
+    NeedsEngine._readState();
+    const plantToday = new Date(2026, 9, 15).getTime();
+    assert.ok(starts.length >= 2, 'both panels asked the worker for a matrix');
+    for (const startMs of starts) assert.equal(startMs, plantToday, 'the matrix window starts on the plant\'s today');
+  } finally {
+    Confidence._invalidatePending(true);
+    Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
+    nimbus.Utilization._cache = priorCache;
+    Compute.available = priorAvailable;
+    Compute.utilization = priorUtilization;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+// ---- Senior review U31: Time Machine restore keeps a row's earlier unsaved edit dirty ------------------------------
+test('U31: Time Machine restore hands the pre-restore dirty set to the reconcile (a null-start snapshot row keeps its dirty id)', () => {
+  const { TimeMachine, UndoStack } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSnapshots = TimeMachine._snapshots;
+  const priorProbe = UndoStack.dirtyProbe;
+  const priorReconcile = nimbus.Engine.reconcileRestored;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorEntries = UndoStack._entries.slice();
+  const seen = [];
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  UndoStack.dirtyProbe = id => id === 'tm-dirty';           // only this row carried unsaved edits before the restore
+  nimbus.Engine.reconcileRestored = (ids, wasDirty) => { seen.push({ ids: [...ids], wasDirty }); };
+  try {
+    Store.setTasks([{ id: 'tm-dirty', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 3 }, { id: 'tm-clean', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 2 }], 'test');
+    Store.setSelectedPlant('TM-P', 'test');
+    TimeMachine._snapshots = [{ ts: 4242, label: 'snap', tasks: [{ id: 'tm-dirty', start_date: null, end_date: null }, { id: 'tm-clean', start_date: null, end_date: null }] }];
+    TimeMachine.restore(4242);
+    assert.equal(seen.length, 1, 'the restore reconciles once');
+    assert.equal(typeof seen[0].wasDirty?.has, 'function', 'the second argument is the wasDirty set');
+    assert.ok(seen[0].wasDirty.has('tm-dirty'), 'the row that was dirty before the restore is in the set');
+    assert.ok(!seen[0].wasDirty.has('tm-clean'), 'a row that was clean is not');
+  } finally {
+    TimeMachine._snapshots = priorSnapshots;
+    UndoStack.dirtyProbe = priorProbe;
+    nimbus.Engine.reconcileRestored = priorReconcile;
+    Alerts.scheduleRecompute = priorSchedule;
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+// ---- Senior review U34: Push +1 h says how many stayed put and labels its undo with the moved count ----------------
+test('U34: Push +1 hour reports moved and skipped counts and the undo label carries the moved count', () => {
+  const { CommandPalette, UndoStack, Selection, Toast } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorEntries = UndoStack._entries.slice();
+  const priorNimbus = globalThis.NIMBUS;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorMaster = Store.masterData;
+  const priorOffset = Store.serverOffsetMs;
+  const priorShow = Toast.show;
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  const loc = nimbus.Util.locale();
+  const shown = [];
+  globalThis.NIMBUS = nimbus;
+  Alerts.scheduleRecompute = () => {};
+  CommandPalette.close = () => {};
+  Toast.show = (msg, type) => { shown.push({ msg, type }); };
+  globalThis.window.__NIMBUS_LOCALES = { [loc]: {
+    'toast.pushed_orders': 'Pushed {{count}} orders +1h',
+    'toast.pushed_orders_skipped': 'Pushed {{count}} orders +1h; {{skipped}} stayed in place',
+    'undo.push_orders_1h': 'Push {{count}} orders +1h',
+  } };
+  Store.setMasterData({ ...priorMaster, plants: [{ plant: 'P34-P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }] }, 'test');
+  Store.serverOffsetMs = new Date(2026, 7, 3, 6, 0).getTime() - Date.now();
+  const mk = (id, h1, h2) => ({ id, PLANT: 'P34-P', MACHINE: 'P34-L', RUN_TIME: h2 - h1,
+    user_scheduled: true, start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
+  try {
+    Store.setTasks([mk('mv', 10, 11), mk('fz1', 12, 13), mk('fz2', 14, 15), mk('fz3', 16, 17)], 'test');
+    Store.setSelectedPlant('P34-P', 'test');
+    Store.setFirmed(['fz1', 'fz2', 'fz3'], true, 'test');
+    Selection.set(['mv', 'fz1', 'fz2', 'fz3']);
+    const depth = UndoStack._entries.length;
+    CommandPalette._buildSelectionCommands().find(c => /push/i.test(c.label)).run();
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].msg, 'Pushed 1 orders +1h; 3 stayed in place', 'one moved, the three firmed ones are counted as skipped');
+    assert.equal(UndoStack._entries.length, depth + 1);
+    assert.equal(UndoStack._entries.at(-1).label, 'Push 1 orders +1h', 'the undo label uses the moved count, not the 4 selected');
+    // Nothing skipped: the plain toast.
+    shown.length = 0;
+    Selection.set(['mv']);
+    CommandPalette._buildSelectionCommands().find(c => /push/i.test(c.label)).run();
+    assert.equal(shown[0].msg, 'Pushed 1 orders +1h');
+  } finally {
+    Selection.clear();
+    Toast.show = priorShow;
+    UndoStack._entries.length = 0;
+    for (const e of priorEntries) UndoStack._entries.push(e);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setMasterData(priorMaster, 'test');
+    Store.serverOffsetMs = priorOffset;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    globalThis.NIMBUS = priorNimbus;
+  }
 });
