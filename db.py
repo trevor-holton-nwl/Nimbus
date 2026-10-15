@@ -890,7 +890,8 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                COALESCE(o.original_start_received, o.basic_start_date) AS original_start,
                o.manual_firmed,
                COALESCE(o.original_finish_received, o.basic_finish_date) AS original_end,
-               o.placement_exception
+               o.placement_exception,
+               {_PLACED_SQL} AS user_scheduled
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
@@ -922,6 +923,7 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "firmed": bool(r[19]),
             "original_end_date": r[20].strftime("%Y-%m-%dT%H:%M:%S") if r[20] else None,
             "placement_exception": r[21],
+            "user_scheduled": bool(r[22]),
         }
         for r in rows
     ]

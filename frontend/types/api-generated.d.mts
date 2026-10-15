@@ -3748,6 +3748,11 @@ export interface components {
             /** Placement Exception */
             placement_exception?: ("overtime" | "overlong") | null;
             /**
+             * User Scheduled
+             * @default false
+             */
+            user_scheduled: boolean;
+            /**
              * Planning Status
              * @default scheduled
              * @enum {string}

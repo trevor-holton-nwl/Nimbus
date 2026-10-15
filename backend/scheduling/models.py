@@ -201,6 +201,8 @@ class TaskVersionRow(BaseModel):
     # 'overtime' (placed on non-working time) or 'overlong' (wider than the run time). NULL = a
     # normal bar; the server's width check is skipped for a marked bar.
     placement_exception: Literal["overtime", "overlong"] | None = None
+    # Someone placed this order (db._PLACED_SQL): the client must not re-derive a placed row from its due date.
+    user_scheduled: bool = False
     planning_status: Literal["scheduled", "needs_planning"] = "scheduled"
     planning_reason: PlanningReason | None = None
     # Routing runtime (ROUTING_RUNTIME_DESIGN.md §8.2/§13) — server-computed

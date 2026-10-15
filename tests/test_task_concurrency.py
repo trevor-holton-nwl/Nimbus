@@ -130,6 +130,20 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert res["persisted"] == 1
         assert self._manual_firmed(db_, self.oid) is False
 
+    def test_refresh_row_carries_the_placed_flag(self, pg):
+        """I11: /tasks/refresh rows carry user_scheduled (db._PLACED_SQL) so the client does not re-derive a
+        server-placed row from its due date."""
+        db_ = pg
+        assert db_.get_task_versions([self.oid])[0]["user_scheduled"] is False        # never placed
+        with db_._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE id = %s",
+                        (self.start, self.end, self.oid))
+            conn.commit()
+        row = db_.get_task_versions([self.oid])[0]
+        assert row["user_scheduled"] is True
+        from backend.scheduling.models import TaskVersionRow
+        assert TaskVersionRow(**{**row, "PLANT": row["plant"]}).user_scheduled is True
+
     def test_firmed_only_save_is_still_subject_to_the_stale_check(self, pg):
         db_ = pg
         base_version = self._current_version(db_)

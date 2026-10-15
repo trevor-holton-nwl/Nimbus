@@ -522,7 +522,15 @@ export const Persistence = {
           const rawCache = localStorage.getItem(Config.LS_KEY);
           if (rawCache) {
             cacheData = JSON.parse(rawCache);
-            Persistence._restoreNonTaskState(cacheData);
+            if (cacheData?._schemaVersion !== undefined && cacheData._schemaVersion !== Config.SCHEMA_VERSION) {
+              // Same rule as the offline fallback: a cache written under another schema is discarded before any overlay.
+              ErrorLog.warn('persistence',
+                `Cache schema mismatch (cached=${cacheData._schemaVersion}, expected=${Config.SCHEMA_VERSION}) — discarding`);
+              try { localStorage.removeItem(Config.LS_KEY); } catch {}
+              cacheData = null;
+            } else {
+              Persistence._restoreNonTaskState(cacheData);
+            }
           }
         } catch {}
 
@@ -858,6 +866,10 @@ export const Persistence = {
       t.end_date   = ce;
       t.original_start_date = cos;
       t.scheduleSegments = Persistence._segmentsFromRaw(cached);
+      // The overlay itself proves a placement existed: carry the placed flag and the exception marker exactly
+      // as cached, or the next Save would treat the row as display-only and drop its dates.
+      t.user_scheduled = !!cached.user_scheduled;
+      t.placement_exception = (cached.placement_exception as NimbusTask['placement_exception']) ?? null;
       restored.push(String(t.id));
     }
     return restored;
@@ -1424,6 +1436,8 @@ export const Persistence = {
           tk.scheduleSegments = Persistence._segmentsFromRaw(row as unknown as Record<string, unknown>);
           tk.runtime_schedule_mismatch = !!row.runtime_schedule_mismatch;
           tk.placement_exception = row.placement_exception ?? null;
+          // A server-placed row must not be re-derived by the engine: carry the placed flag (older servers omit it).
+          if (typeof row.user_scheduled === 'boolean') tk.user_scheduled = row.user_scheduled;
           // The server row replaces whatever the engine derived locally, so its session notes go with it.
           tk.derivationIssue = null;
           tk.systemMove = null;
