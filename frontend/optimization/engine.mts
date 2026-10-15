@@ -182,7 +182,7 @@ export interface ManualPlacementOptions {
 }
 
 /** Why the last manual placement returned null (read by callers right after the call). */
-export type ManualRefusal = FinishRefusal | 'finish_cannot_hold' | 'needs_overtime_confirm';
+export type ManualRefusal = FinishRefusal | 'finish_cannot_hold' | 'needs_overtime_confirm' | 'running_finish_locked';
 
 /** Deliberately loose (see this plan's "Why Engine gets looser typing" section):
  *  cmp's params are `any` (not `T`) so a heterogeneous array of terms with
@@ -1284,14 +1284,25 @@ export const Engine = {
 
   /** OQ3: a started order keeps its real start and only the finish follows the run time. The allocator may move
    * the start (`never` may move it to the next open minute; any policy skips closed time), and a running order never
-   * loses its start, so in that case the bar is the held start plus the run time as one continuous piece. Shared
-   * by the reconcile's running branch and the manual (grid/Inspector) edit. Null when no window is found. */
+   * loses its start. In that case (D3, VU1) the remaining run is walked FORWARD through working time from the held
+   * start, so the bar is one continuous piece from the real start to the calendar-aware finish (the old start +
+   * run time as plain elapsed time is gone). Shared by the reconcile's running branch and the manual
+   * (grid/Inspector) edit. Null when no window is found. */
   heldStartPatchFor(task: NimbusTask, line: string, policy: SplitOrderPolicy): Partial<NimbusTask> | null {
     if (!task.start_date) return null;
     const held = Engine.schedulePatchFor(task, line, task.start_date, policy);
     if (!held?.start_date || !held.end_date) return null;
     if (held.start_date.getTime() === task.start_date.getTime()) return held;
-    return { start_date: task.start_date, end_date: new Date(task.start_date.getTime() + Math.round(Util.runHours(task) * 60) * Config.MS_MIN), scheduleSegments: [] };
+    // D3 (VU1): the allocator could not keep the real start (closed time, or a `never` window too short), so the
+    // remaining run is walked forward through working time from that start. `partial_allowed` is used deliberately
+    // so the remaining minutes are summed across windows; the segments are dropped because the piece boundaries
+    // are not planner placements and the start is held.
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const runtimeMinutes = Math.round(Util.runHours(task) * 60);
+    const forward = Calendar.allocateRuntime(line, task.start_date, runtimeMinutes, 'partial_allowed', plantTz);
+    if (forward.kind !== 'allocated') return null;
+    return { start_date: task.start_date, end_date: forward.end, scheduleSegments: [] };
   },
 
   /** Finish-anchored placement (backward scheduling OQ1/OQ7/OQ13): lay the order's run time so it ENDS at
@@ -1435,7 +1446,12 @@ export const Engine = {
     const releasable = queuedCode === 'overlong_never' || queuedCode === 'run_time_over_cap';
     const released: Partial<NimbusTask> = releasable ? { planning_status: 'scheduled', planning_reason: null } : {};
 
-    if (opts.holdStartIfRunning && task.start_date && Engine.isInProgress(task)) {
+    if (task.start_date && Engine.isInProgress(task)) {
+      if (!opts.holdStartIfRunning) {
+        // D2 (VI7): a started order's bar is not resized or moved by hand; the run-time edit is the only way to
+        // change its finish, and it holds the real start (below).
+        return refuse('running_finish_locked');
+      }
       // OQ3: it is already producing, so its start cannot move; the finish follows from the new run time.
       const held = Engine.heldStartPatchFor(task, line, policy ?? Engine.splitOrderPolicyFor(plant));
       return held ? { ...held, MACHINE: line } : refuse('no_operating_window');

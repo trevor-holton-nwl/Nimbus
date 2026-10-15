@@ -4256,7 +4256,9 @@ export const Interaction = {
       });
       return;
     }
-    if (Engine.lastManualRefusal !== 'finish_cannot_hold') Toast.show(Util.t('toast.commit_failed'), 'error');
+    if (Engine.lastManualRefusal === 'running_finish_locked') {
+      Toast.show(Util.t('toast.running_finish_locked', { order: Util.orderNumber(t) }), 'warn', 6000);
+    } else if (Engine.lastManualRefusal !== 'finish_cannot_hold') Toast.show(Util.t('toast.commit_failed'), 'error');
     Timeline._scheduleRebuild();
   },
 

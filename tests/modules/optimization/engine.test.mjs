@@ -3201,6 +3201,32 @@ test('D1: Engine.manualSchedulePatchFor holds an off-grid finish to the minute (
   } finally { fx.restore(); }
 });
 
+test('D2: a typed End or drag on a RUNNING order is refused with running_finish_locked', () => {
+  const fx = manualFixture();   // plant clock pinned to 2026-08-20T09:00 by the fixture
+  try {
+    const now = new Date('2026-08-20T09:00:00');
+    const task = { id: 'm25-run', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4', user_scheduled: true,
+      start_date: new Date(now.getTime() - Config.MS_HOUR), end_date: new Date(now.getTime() + 3 * Config.MS_HOUR) };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date(now.getTime() + 5 * Config.MS_HOUR));
+    assert.equal(patch, null);
+    assert.equal(Engine.lastManualRefusal, 'running_finish_locked');
+  } finally { fx.restore(); }
+});
+
+test('D3: a running order whose start sits in closed time finishes after the next open window, not start + run time', () => {
+  const fx = manualFixture();   // default hours 07:00-19:00 Mon-Fri
+  const restoreClock = pinPlantClock('2026-08-25T17:30:00');
+  try {
+    // started 17:00 Tuesday with 4 h to run: 2 h to the 19:00 close, 2 h after 07:00 Wednesday
+    const start = new Date('2026-08-25T17:00:00');
+    const task = { id: 'm25-held', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4', user_scheduled: true,
+      start_date: start, end_date: new Date(start.getTime() + 4 * Config.MS_HOUR) };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, task.end_date, undefined, { holdStartIfRunning: true });
+    assert.equal(patch.start_date.getTime(), start.getTime());
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-26T09:00:00').getTime());
+  } finally { restoreClock(); fx.restore(); }
+});
+
 test('D1: pushFinishPatches moves the finish by exactly the requested milliseconds', () => {
   const fx = manualFixture();
   try {

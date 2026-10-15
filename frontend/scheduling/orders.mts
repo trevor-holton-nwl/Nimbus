@@ -1298,6 +1298,10 @@ export const Table = {
       void Engine.confirmOvertimePlacement(task).then(ok => { if (ok) retry(); });
       return;
     }
+    if (reason === 'running_finish_locked') {
+      Toast.show(Util.t('toast.running_finish_locked', { order: Util.orderNumber(task) }), 'warn', 6000);
+      return;
+    }
     if (reason !== 'finish_cannot_hold') {
       Toast.show(Util.t('toast.manual_refusal_generic'), 'error');
     }
