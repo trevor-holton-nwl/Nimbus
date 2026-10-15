@@ -2531,7 +2531,7 @@ export const OptimizerPreview = {
   },
 
   /** Which plant orders no longer match the state the search ran on. */
-  _changedSinceBaseline(result: Pick<PreviewResult, 'candidate' | 'taskBaseline'>): { changed: string[]; missing: string[] } {
+  _changedSinceBaseline(result: Pick<PreviewResult, 'plant' | 'taskBaseline'>): { changed: string[]; missing: string[] } {
     const changed: string[] = [];
     const missing: string[] = [];
     // Every baseline task, not just the proposed ones: an edit to an unpatched order can still collide with a proposal.
@@ -2539,6 +2539,12 @@ export const OptimizerPreview = {
       const live = Store.tasks[id];
       if (!live) missing.push(id);
       else if (taskBaseline([live]).get(id) !== value) changed.push(id);
+    }
+    // Orders added to the plant since the search ran were never seen by it.
+    const scope = { lineSettings: Store.lineSettings, masterData: Store.masterData };
+    for (const task of Store.tasksArr) {
+      const id = String(task.id);
+      if (!result.taskBaseline.has(id) && resolveTaskPlant(task, scope) === result.plant) changed.push(id);
     }
     return { changed, missing };
   },
@@ -2687,37 +2693,52 @@ export const OptimizerPreview = {
       if (!task || Engine.isInProgress(task) || taskBaseline([task]).get(id) !== result.taskBaseline.get(id)) dropWithFamily(id);
     }
     // Re-validate the kept subset against the LIVE board (live rows, calendars, blackouts), not the compute-time
-    // snapshot. A kept order that errors is dropped. An error on an order we are not applying (dropped, live-only,
-    // firmed) is a collision when it is an overlap: drop every kept patch on that line whose proposed interval meets the
-    // order's live interval, and refuse when none does. Other findings on a non-kept order describe that order alone
-    // (its own bookkeeping or pre-existing defect, untouched by this apply) and are ignored. Any finding with no order
-    // refuses.
+    // snapshot. Findings on a kept order drop it (and its family). A finding on an order we are not applying is a
+    // collision only when the same finding is absent from the live board validated with no patches at all (otherwise it
+    // is a pre-existing defect or disposition bookkeeping noise). A collision drops every kept patch on that line whose
+    // proposed interval meets the order's live interval or, failing that, the kept patch placed immediately before it
+    // (it changed that order's incoming setup); with neither, the apply is refused. A finding with no order refuses.
     const context = candidate.validationContext;
+    if (!context) { refuse(); return; }
     const live0 = snapshotSchedule(plant);
-    const OVERLAP_CODES = new Set(['capacity_overlap', 'setup_overlap', 'segments']);
     const ms = (value: unknown): number | null => (value instanceof Date ? value.getTime() : null);
-    let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
-    for (let pass = 0; pass < 3 && context; pass++) {
-      const keptIds = new Set(kept.map(patch => String(patch.id)));
-      const findings = validateCandidate(live0, context.bounds, {
-        ...candidate, patches: kept,
-        dispositions: candidate.dispositions?.filter(item => keptIds.has(String(item.id))),
+    const keyOf = (finding: { code: string; taskId?: string | number }): string => `${finding.code}|${finding.taskId}`;
+    const errorsFor = (patchSet: SchedulePatch[]) => {
+      const ids = new Set(patchSet.map(patch => String(patch.id)));
+      return validateCandidate(live0, context.bounds, {
+        ...candidate, patches: patchSet,
+        dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
       }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
+    };
+    const baselineKeys = new Set(errorsFor([]).map(keyOf));
+    let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
+    for (let pass = 0; pass < 3; pass++) {
+      const keptIds = new Set(kept.map(patch => String(patch.id)));
+      const findings = errorsFor(kept);
       if (!findings.length) break;
       if (findings.some(finding => !finding.taskId)) { refuse(); return; }
       let dropped = false;
       for (const finding of findings) {
         const id = String(finding.taskId);
-        if (keptIds.has(id)) { dropWithFamily(id); dropped = true; continue; }
-        if (!OVERLAP_CODES.has(finding.code)) continue;
+        if (keptIds.has(id)) { if (!drop.has(id)) { dropWithFamily(id); dropped = true; } continue; }
+        if (finding.code === 'segments' || baselineKeys.has(keyOf(finding))) continue;
         const other = Store.tasks[id];
         const oStart = ms(other?.start_date); const oEnd = ms(other?.end_date);
-        const hits = oStart === null || oEnd === null ? [] : kept.filter(patch => {
-          const pid = String(patch.id);
-          if (drop.has(pid) || String(Store.tasks[pid]?.MACHINE) !== String(other?.MACHINE)) return false;
-          const pStart = ms(patch.changes.start_date); const pEnd = ms(patch.changes.end_date);
-          return pStart !== null && pEnd !== null && pStart < oEnd && oStart < pEnd;
+        const onLine = kept.filter(patch => !drop.has(String(patch.id))
+          && String(Store.tasks[String(patch.id)]?.MACHINE) === String(other?.MACHINE));
+        const range = (patch: SchedulePatch): [number, number] | null => {
+          const a = ms(patch.changes.start_date); const b = ms(patch.changes.end_date);
+          return a === null || b === null ? null : [a, b];
+        };
+        let hits = oStart === null || oEnd === null ? [] : onLine.filter(patch => {
+          const r = range(patch);
+          return !!r && r[0] < oEnd && oStart < r[1];
         });
+        if (!hits.length && oStart !== null) {
+          const before = onLine.flatMap(patch => { const r = range(patch); return r && r[1] <= oStart ? [{ patch, end: r[1] }] : []; })
+            .sort((a, b) => b.end - a.end)[0];
+          if (before) hits = [before.patch];
+        }
         if (!hits.length) { refuse(); return; }
         for (const hit of hits) dropWithFamily(String(hit.id));
         dropped = true;

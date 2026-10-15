@@ -2158,8 +2158,8 @@ test('Task 3 fix: a superseded run settling late keeps the newer run\'s leave gu
     assert.ok(OptimizerPreview._backgroundRun?.result, 'the second run finished');
     OptimizerPreview.cancelBackground();
     assert.ok(OptimizerPreview._backgroundRun?.result, 'cancel does not null a finished run');
-    assert.ok(!fx.toasts.slice(-1)[0].msg.includes('cancelled') || fx.toasts.filter(t => t.msg === Util.t('toast.opt_bg_cancelled')).length === 1,
-      'no second cancelled toast');
+    assert.equal(fx.toasts.filter(t => t.msg === Util.t('toast.opt_bg_cancelled')).length, 1,
+      'only the first cancel toasted; cancelling a finished run does nothing');
   } finally {
     delete globalThis.window.addEventListener; delete globalThis.window.removeEventListener;
     fx.restore();
@@ -2168,7 +2168,6 @@ test('Task 3 fix: a superseded run settling late keeps the newer run\'s leave gu
 
 test('Task 3 fix: a partial apply that throws before committing clears the installed preview', async () => {
   const fx = openBackgroundFixture();
-  const priorValidate = Store.updateTask;
   try {
     await OptimizerPreview.runInBackground('spt', fx.opts);
     const priorCommit = OptimizerPreview._commitPatches;
@@ -2181,7 +2180,83 @@ test('Task 3 fix: a partial apply that throws before committing clears the insta
     assert.equal(OptimizerPreview.active, false, 'a failed apply leaves no active preview behind');
     assert.equal(OptimizerPreview._candidate, null);
   } finally {
-    void priorValidate;
+    fx.restore();
+  }
+});
+
+/* Task 3 fix round 2: baseline-diff collision rule */
+test('Task 3 fix: a kept patch placed before an untouched order whose incoming setup it creates is skipped; U is untouched', async () => {
+  const plant = 'SU';
+  const line = 'SU-L1';
+  const priorMaster = structuredClone(Store.masterData);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  const fx = openBackgroundFixture(plant, [
+    { id: 'su-k', PLANT: plant, MACHINE: line, COLOR: 'BLUE', RUN_TIME: 1, row_version: 1, start_date: null, end_date: null },
+    { id: 'su-z', PLANT: plant, MACHINE: 'SU-L2', RUN_TIME: 1, row_version: 1, start_date: null, end_date: null },
+  ]);
+  try {
+    Store.setMasterData({ plants: [{ plant }], lines: [{ plant, machine: line }, { plant, machine: 'SU-L2' }] }, 'unit-test');
+    Store.setCalendar(line, { 0: [0, 24], 1: [0, 24], 2: [0, 24], 3: [0, 24], 4: [0, 24], 5: [0, 24], 6: [0, 24] }, 'unit-test');
+    Store.replaceSetupSnapshot({
+      plant,
+      definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1,
+        from_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }],
+        to_key: [{ fieldKey: 'colorWheel', value: 'RED' }], setup_min: 60 }],
+      machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    const k = patchById(result, 'su-k');
+    assert.ok(k && k.changes.start_date, 'precondition: K is proposed with dates');
+    // A new live order U (never seen by the search) starts exactly where K ends: BLUE then RED needs 60 min of setup
+    // that now collides with K's production.
+    const uStart = k.changes.end_date;
+    const uEnd = new Date(+uStart + 3600000);
+    Store.setTasks([...Store.tasksArr, { id: 'su-u', PLANT: plant, MACHINE: line, COLOR: 'RED', RUN_TIME: 1, row_version: 1,
+      start_date: uStart, end_date: uEnd }], 'unit-test');
+    await OptimizerPreview.backgroundApply();
+    assert.equal(Store.tasks['su-k'].start_date, null, 'K is skipped');
+    assert.equal(+Store.tasks['su-u'].start_date, +uStart, 'U is untouched');
+    assert.ok(Store.tasks['su-z'].start_date instanceof Date, 'the unrelated order still applies');
+    const toast = fx.toasts.find(t => t.msg.startsWith('Applied'));
+    assert.ok(toast && toast.msg.includes('su-k'), `the toast names K, got ${JSON.stringify(fx.toasts)}`);
+  } finally {
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setMasterData(priorMaster, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: a pre-existing live overlap between two unpatched orders does not block a partial apply', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const when = h => new Date(`2026-08-10T${String(h).padStart(2, '0')}:00:00`);
+    Store.setTasks([...Store.tasksArr,
+      { id: 'bx-p1', PLANT: 'BX', MACHINE: 'BX-L3', RUN_TIME: 3, row_version: 1, start_date: when(8), end_date: when(11) },
+      { id: 'bx-p2', PLANT: 'BX', MACHINE: 'BX-L3', RUN_TIME: 3, row_version: 1, start_date: when(9), end_date: when(12) },
+    ], 'unit-test');
+    await OptimizerPreview.backgroundApply();
+    assert.ok(Store.tasks['bx-y'].start_date instanceof Date, 'unrelated kept patch Y applies');
+    assert.ok(Store.tasks['bx-z'].start_date instanceof Date, 'unrelated kept patch Z applies');
+    assert.equal(+Store.tasks['bx-p1'].start_date, +when(8), 'the overlapping pair is untouched');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: the popup warning counts orders added to the plant since the search ran', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    Store.setTasks([...Store.tasksArr, { id: 'bx-late', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 1, row_version: 1, start_date: null, end_date: null }], 'unit-test');
+    assert.deepEqual(OptimizerPreview._changedSinceBaseline(result), { changed: ['bx-late'], missing: [] });
+  } finally {
     fx.restore();
   }
 });
