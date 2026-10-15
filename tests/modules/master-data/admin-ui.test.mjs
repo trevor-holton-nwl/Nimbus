@@ -1148,11 +1148,13 @@ test('WorkCenters.refresh resolves false and keeps rows, selection and staged ed
     WorkCenters._loadedPlant = '1006';
     const keptRows = [_wcRow('WC-1', 'kept')];
     WorkCenters._rows = keptRows;
+    WorkCenters._offset = 50; // after one load-more
     WorkCenters._selected = 'WC-1';
     const staged = _wcStaged('kept');
     WorkCenters._staged = staged;
     WorkCenters._baseline = _wcStaged('kept');
     assert.equal(await WorkCenters.refresh(), false);
+    assert.equal(WorkCenters._offset, 50, 'a failed refresh must not reset paging, or the next load-more duplicates rows');
     assert.equal(WorkCenters._rows, keptRows);
     assert.equal(WorkCenters._selected, 'WC-1');
     assert.equal(WorkCenters._staged, staged);
@@ -1192,5 +1194,40 @@ test('WorkCenters.refresh flushes a pending debounced edit before re-fetching', 
     const getIdx = calls.findIndex((c) => /\/master-data\/sap_workcenter\?/.test(c.url));
     assert.ok(putIdx >= 0, `pending edit was sent: ${JSON.stringify(calls)}`);
     assert.ok(putIdx < getIdx, 'the write is dispatched before the list re-fetch');
+  });
+});
+
+test('WorkCenters.refresh keeps an edit typed while the list fetch is pending and never re-sends the stale fetched value', async () => {
+  await _withWcRefreshState(async () => {
+    const h = _wcRefreshHarness({ rows: [_wcRow('WC-1', 'stale-from-server'), _wcRow('WC-2', 'new row')] });
+    const puts = [];
+    let releaseList;
+    const listGate = new Promise((res) => { releaseList = res; });
+    Util.fetchTraced = async (url, opts) => {
+      if (opts?.method === 'PUT') puts.push(JSON.parse(opts.body));
+      if (/\/master-data\/sap_workcenter\?/.test(String(url))) await listGate; // fetch "in flight"
+      return h.fetchTraced(url, opts);
+    };
+    Store.setSelectedPlant('1006', 'test');
+    WorkCenters._loadedPlant = '1006';
+    WorkCenters._rows = [_wcRow('WC-1', 'old')];
+    WorkCenters._machines = [{ machine: 'M1', sap_workcenter: 'WC-1', distribution_weight: null }];
+    WorkCenters._selected = 'WC-1';
+    WorkCenters._staged = { ..._wcStaged('old'), weights: { M1: null } };
+    WorkCenters._baseline = { ..._wcStaged('old'), weights: { M1: null } };
+    WorkCenters._saving = false;
+    WorkCenters._dirty = false;
+    const pending = WorkCenters.refresh();
+    // User types while the GET is outstanding.
+    WorkCenters._staged = { ...WorkCenters._staged, description: 'typed during fetch' };
+    WorkCenters._markDirty();
+    releaseList();
+    assert.equal(await pending, true);
+    assert.equal(WorkCenters._selected, 'WC-1');
+    assert.equal(WorkCenters._staged.description, 'typed during fetch', 'staged edit is not overwritten by the older fetched row');
+    await new Promise((r) => setTimeout(r, 20)); // let the _maybeFlush autosave settle
+    assert.ok(puts.length >= 1, 'the user edit is sent');
+    assert.ok(puts.every((p) => p.description === 'typed during fetch'), `no stale value is ever PUT: ${JSON.stringify(puts)}`);
+    assert.deepEqual(WorkCenters._rows.map((r) => r.sap_workcenter), ['WC-1', 'WC-2'], 'the list itself still refreshed');
   });
 });

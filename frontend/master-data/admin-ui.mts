@@ -5054,19 +5054,28 @@ export const WorkCenters = {
     // hazard render()'s plant-switch branch guards against.
     WorkCenters._flushPending();
     const keep = WorkCenters._selected;
+    const prevOffset = WorkCenters._offset; // _loadAll(reset) zeroes it up front, even when the fetch then fails
+    const seq0 = WorkCenters._editSeq;
     const loaded = await WorkCenters._loadAll(plant, true);
-    if (!loaded) return false; // old rows/selection/staged edit stay as they were
+    if (!loaded) {
+      WorkCenters._offset = prevOffset; // rows are untouched, so load-more must keep paging from where it was
+      return false; // old rows/selection/staged edit stay as they were
+    }
     if (Store.selectedPlant !== plant) return false; // plant switched while loading; its own render owns the pane
-    // An edit typed during the fetch would be discarded by the reset below.
-    WorkCenters._flushPending();
     WorkCenters._loadedPlant = plant;
     WorkCenters._offset = 0;
-    WorkCenters._selected = null;
-    WorkCenters._staged = null;
-    WorkCenters._baseline = null;
-    WorkCenters._dirty = false;
-    WorkCenters._editSeq++; // discontinuity marker — see _write's rollback guard
-    if (keep) WorkCenters._stageRow(keep);
+    // The fetched row was read before an edit typed during the fetch (or before the PUT that
+    // _flushPending just dispatched committed), so re-staging from it would show and later
+    // re-send stale values — _write skips its _staged update once _editSeq moves on. Keep the
+    // user's staged state in that case; only the list/roster (already replaced) refresh.
+    if (WorkCenters._editSeq === seq0 && !WorkCenters._saving) {
+      WorkCenters._selected = null;
+      WorkCenters._staged = null;
+      WorkCenters._baseline = null;
+      WorkCenters._dirty = false;
+      WorkCenters._editSeq++; // discontinuity marker — see _write's rollback guard
+      if (keep) WorkCenters._stageRow(keep);
+    }
     WorkCenters._renderPane();
     WorkCenters._maybeFlush();
     return true;
