@@ -282,3 +282,10 @@ test('G1: undo (restoreTasks) never changes a manual firm; firm moves only via s
   assert.equal(Store.tasks.uf2.firmed, false);
   assert.ok(!Store.firmedIds.has('uf2'));
 });
+
+test('VI8: a time-machine write never marks a row as placed', () => {
+  Store.setTasks([{ id: 'vi8', MACHINE: 'L1', user_scheduled: false }], 'unit-test');
+  Store.updateMany([{ id: 'vi8', changes: { start_date: new Date('2026-09-01T06:00:00'), end_date: new Date('2026-09-01T10:00:00') } }], 'time-machine');
+  assert.equal(Store.tasks.vi8.user_scheduled, false);
+  Store.setTasks([], 'unit-test');
+});

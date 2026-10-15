@@ -870,6 +870,18 @@ export const Persistence = {
       // as cached, or the next Save would treat the row as display-only and drop its dates.
       t.user_scheduled = !!cached.user_scheduled;
       t.placement_exception = (cached.placement_exception as NimbusTask['placement_exception']) ?? null;
+      // VI9: the unsaved edit that moved the dates may also have changed the run time, machine, tooling or
+      // version; a bar restored on the old run time fails the server width check and the edit is lost.
+      for (const key of ['RUN_TIME', 'MACHINE', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'run_time_source'] as const) {
+        if (key in cached) (t as Record<string, unknown>)[key] = cached[key];
+      }
+      // D21 (VM8): the "run time grew" note survives a reload until the row is saved or re-placed.
+      const issue = cached.derivationIssue as { code?: string; detail?: string; from?: unknown; to?: unknown } | null | undefined;
+      if (issue?.code) {
+        t.derivationIssue = { code: issue.code, ...(issue.detail ? { detail: issue.detail } : {}),
+          ...(issue.from ? { from: Util.parseDate(issue.from as string) ?? undefined } : {}),
+          ...(issue.to ? { to: Util.parseDate(issue.to as string) ?? undefined } : {}) } as NimbusTask['derivationIssue'];
+      }
       restored.push(String(t.id));
     }
     return restored;
@@ -1643,9 +1655,11 @@ export const Persistence = {
         _optimizerDirtyIds: [...Persistence._forceIds].filter(id => Persistence._dirtyIds.has(id)),
         _dirtyIds:      [...Persistence._dirtyIds],
         // firm is server state: never cached (a cached copy could revive a stale firm).
-        // The session-only derivation notes (`derivationIssue`, `systemMove`) are never cached either: they describe
-        // this session's derivation, and a restored copy would keep announcing a move that no longer applies.
-        tasks:          Store.tasksArr.map(({ firmed: _firmed, derivationIssue: _issue, systemMove: _move, ...rest }) => rest as Record<string, unknown>),
+        // `systemMove` is session-only and never cached: a restored copy would keep announcing a move that no
+        // longer applies. The `reversal_forward/run_time_grew` `derivationIssue` IS cached so Remove Backlog's
+        // count survives a reload (D21); it is revived only through the overlay (an unsaved placement edit) and is
+        // cleared by the next schedule edit or refresh as before.
+        tasks:          Store.tasksArr.map(({ firmed: _firmed, systemMove: _move, ...rest }) => rest as Record<string, unknown>),
         blocks:         Store.blocks,
         calendars:      Store.calendars,
         plants:         Store.plants,

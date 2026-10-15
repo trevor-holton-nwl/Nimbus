@@ -413,7 +413,8 @@ export const Store = {
   _markPlaced(task: NimbusTask, changes: Partial<NimbusTask>, source?: string): void {
     if (!changes.start_date || !changes.end_date || task.user_scheduled) return;
     if (source === 'refresh' || source === 'engine-runtime-reconcile-display' || source === 'undo'
-      || source === 'sandbox' || source === 'distribution' || source === 'note') return;
+      || source === 'sandbox' || source === 'distribution' || source === 'note' || source === 'time-machine') return;
+    // VI8: a Time Machine restore replays display-derived dates; reconcileRestored decides what is a placement.
     task.user_scheduled = true;
   },
 

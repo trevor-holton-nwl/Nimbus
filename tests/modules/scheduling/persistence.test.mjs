@@ -110,6 +110,41 @@ test('PR-2: _overlayUserMoves still applies the cached override when row_version
     'a same-versioned cached edit is the planner\'s own unsaved move and must still be overlaid');
 });
 
+test('VI9: the cached-edit overlay restores the run time, machine, PRTs and version with the dates', () => {
+  const backendTask = {
+    id: 'vi9', MACHINE: 'L1', RUN_TIME: 4, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'vi9', row_version: 5, RUN_TIME: 6, MACHINE: 'L2', PRT_01: 'P9', PRODUCTION_VERSION: '0002',
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T14:00:00',
+    original_start_date: '2026-09-08T00:00:00',
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.RUN_TIME, 6);
+  assert.equal(backendTask.MACHINE, 'L2');
+  assert.equal(backendTask.PRT_01, 'P9');
+  assert.equal(backendTask.PRODUCTION_VERSION, '0002');
+});
+
+test('D21: the overlay revives a cached run-time-grew note', () => {
+  const backendTask = {
+    id: 'd21', MACHINE: 'L1', RUN_TIME: 4, row_version: 5,
+    start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00'),
+    original_start_date: new Date('2026-09-08T00:00:00'),
+  };
+  const cachedTask = {
+    id: 'd21', row_version: 5, RUN_TIME: 6,
+    start_date: '2026-09-10T08:00:00', end_date: '2026-09-10T14:00:00', original_start_date: '2026-09-08T00:00:00',
+    derivationIssue: { code: 'reversal_forward', detail: 'run_time_grew', from: '2026-09-01T10:00:00', to: '2026-09-01T12:00:00' },
+  };
+  Persistence._overlayUserMoves([backendTask], [cachedTask]);
+  assert.equal(backendTask.derivationIssue.code, 'reversal_forward');
+  assert.equal(backendTask.derivationIssue.detail, 'run_time_grew');
+  assert.ok(backendTask.derivationIssue.from instanceof Date);
+});
+
 test('PR-2: _overlayUserMoves falls back to applying the override when either side lacks a row_version', () => {
   // Old caches (pre-dating this field) or rows that never got one keep the
   // previous best-effort behavior rather than being silently skipped forever.
@@ -1417,14 +1452,15 @@ test('_saveCache never writes firmedIds or per-task firmed', () => {
   globalThis.localStorage.removeItem(Config.LS_KEY);
 });
 
-test('_saveCache never writes the session-only derivationIssue / systemMove notes; a refreshed row drops them', async () => {
+test('_saveCache never writes systemMove (D21: derivationIssue is now cached); a refreshed row drops both notes', async () => {
   const task = firmTask('wr-notes', {});
   task.derivationIssue = { code: 'finish_moved_earlier', from: new Date('2026-09-09T20:00:00'), to: new Date('2026-09-09T19:00:00') };
   task.systemMove = { from: new Date('2026-09-09T08:00:00'), to: new Date('2026-09-09T07:00:00'), reason: 'run_time_changed' };
   Store.setTasks([task], 'unit-test');
   Persistence._saveCache();
   const parsed = JSON.parse(globalThis.localStorage.getItem(Config.LS_KEY));
-  assert.ok(parsed.tasks.every(t => !('derivationIssue' in t) && !('systemMove' in t)), 'neither note reaches the browser cache');
+  assert.ok(parsed.tasks.every(t => !('systemMove' in t)), 'the session-only systemMove never reaches the browser cache');
+  assert.ok(parsed.tasks.some(t => t.derivationIssue?.code === 'finish_moved_earlier'), 'D21: derivationIssue is cached for the overlay');
   assert.ok(Store.tasks['wr-notes'].derivationIssue, 'the live task keeps its notes');
   assert.ok(!('derivationIssue' in Persistence._taskEditSnapshot(Store.tasks['wr-notes'])), 'nor the save payload / refresh baseline');
   globalThis.localStorage.removeItem(Config.LS_KEY);
