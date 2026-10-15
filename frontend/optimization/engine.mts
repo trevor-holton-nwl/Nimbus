@@ -855,11 +855,17 @@ export function sourceLineWorkHours(line: string): WorkHours {
  *  midnight) value reads as the end of that date's working window, exactly as the detached
  *  scheduler's own `allowedPlanningWindow` reads it (same `dueInstant`), so the two bounds
  *  agree. Reads calendar rows without creating defaults. Null when the order has no SAP due. */
-function sourceDueInstant(task: NimbusTask, plant: string | null): Date | null {
-  const view = _candidateSnapshot ?? {
+function sourceDueInstant(
+  task: NimbusTask, plant: string | null,
+  view?: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'> | null,
+): Date | null {
+  // An explicit `view` wins over the ambient `_candidateSnapshot`: the optimizer worker serializes the
+  // engine's bounds closures AFTER the run ends (optimizer-worker.mts), when `_candidateSnapshot` is already
+  // null and the realm's Store is empty, so those closures must pass their captured snapshot here.
+  const src = view ?? _candidateSnapshot ?? {
     calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings, masterData: Store.masterData,
   };
-  return dueInstant(task, { snapshot: view, plant });
+  return dueInstant(task, { snapshot: src, plant });
 }
 
 export function sourcePlantWorkHours(plant: string): WorkHours {
@@ -1189,12 +1195,13 @@ export const Engine = {
   earliestAllowedStart(
     task: NimbusTask, plant: string | null, frozenHorizonEnd?: Date | null,
     masterDataOverride?: NimbusMasterData | null,
+    view?: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'> | null,
   ): Date | null {
     let floor: Date | null = null;
     const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
     const value = masterData?.plants?.find(row => row.plant === plant)?.max_pull_forward_days;
     if (Number.isInteger(value) && (value as number) >= 0) {
-      const due = sourceDueInstant(task, plant);
+      const due = sourceDueInstant(task, plant, view);
       if (due) {
         floor = new Date(+due - 1);   // a due on a 24:00 close is next-day 00:00 exclusive: its due DAY is the day before (R-I6)
         floor.setHours(0, 0, 0, 0);
@@ -1214,11 +1221,14 @@ export const Engine = {
    *  pull-forward floor: manual moves, Alerts fixes, autoReflow and Remove
    *  Backlog never consult it. Unlike earliestAllowedStart this is NOT maxed
    *  with the frozen horizon — the two floors/ceilings are independent. */
-  latestAllowedEnd(task: NimbusTask, plant: string | null, masterDataOverride?: NimbusMasterData | null): Date | null {
+  latestAllowedEnd(
+    task: NimbusTask, plant: string | null, masterDataOverride?: NimbusMasterData | null,
+    view?: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'> | null,
+  ): Date | null {
     const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
     const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
     if (!Number.isInteger(value) || (value as number) < 0) return null;
-    const due = sourceDueInstant(task, plant);
+    const due = sourceDueInstant(task, plant, view);
     if (!due) return null;
     const ceiling = new Date(+due - 1);   // due-DAY midnight even when the due is a 24:00 close (R-I6)
     ceiling.setHours(0, 0, 0, 0);
@@ -2752,8 +2762,10 @@ export const Engine = {
       horizonEnd,
       lines: Array.isArray(opts.lines) ? opts.lines as string[] : undefined,
       respectCalendar,
-      notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData),
-      notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData),
+      // Snapshot-bound: the worker serializes these closures after the run ends (optimizer-worker.mts), so they
+      // must never read the ambient _candidateSnapshot or the realm's Store.
+      notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData, baseSnapshot),
+      notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData, baseSnapshot),
       convergenceWindow: SETUP_AWARE_CONVERGENCE_WINDOW,
     };
     let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);

@@ -393,7 +393,7 @@ export interface ScheduleSnapshot {
   setupSnapshot?: SetupTruthSnapshot | null;
   /** Frozen-horizon value captured with the rest of the read model. */
   frozenHorizonEnd?: Date | null;
-  /** Store/read-model revision used to reject stale Apply operations. */
+  /** Store/read-model revision, diagnostics only (stale Apply is decided by a structural snapshot diff that ignores it). */
   readModelVersion?: string;
 }
 

@@ -38,6 +38,8 @@ import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
 import { App } from '../../../frontend/shell/application-shell.mjs';
+import { evaluateOptimizerWorkerRequest } from '../../../frontend/optimization/optimizer-worker.mjs';
+import { validateCandidateForApply } from '../../../frontend/optimization/setup-scheduler.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
@@ -5241,4 +5243,82 @@ test('Task 3.2 (A.3 #9): setup availability counts across midnight on merged 24/
   assert.equal(interval.requiredMinutes, 30);
   assert.equal(interval.availableMinutes, 20);
 
+});
+
+// Snapshot-bound due-window floors (post-cutover Apply rejected): Friday is closed on the line in the captured
+// snapshot but open in the live Store, so any read of the live Store moves the date-only due and the floor by a day.
+function dueWindowFixture() {
+  const open = [7, 19];
+  const closedFriday = { 0: null, 1: open, 2: open, 3: open, 4: open, 5: null, 6: null };
+  const openFriday = { ...closedFriday, 5: open };
+  const plantHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const md = { plants: [{ plant: 'DW', timezone: zone, max_pull_forward_days: 1, max_push_forward_days: 1 }],
+    lines: [{ plant: 'DW', machine: 'DW1' }] };
+  const task = { id: 'dw-task', PLANT: 'DW', MACHINE: 'DW1', COLOR: 'GREEN', RUN_TIME: 2,
+    original_end_date: new Date(2035, 7, 10, 0, 0, 0), start_date: new Date(2035, 7, 9, 7, 0, 0),
+    end_date: new Date(2035, 7, 9, 9, 0, 0), planning_status: 'scheduled' };
+  const view = { calendars: { DW1: { workHours: closedFriday } }, plants: { DW: { workHours: plantHours } },
+    lineSettings: {}, masterData: md };
+  return { closedFriday, openFriday, plantHours, md, task, view };
+}
+
+test('Engine.earliestAllowedStart/latestAllowedEnd read the explicit view, not the live Store', () => {
+  const { openFriday, plantHours, md, task, view } = dueWindowFixture();
+  const priorCal = Store.calendars.DW1;
+  const priorPlant = Store.plants.DW;
+  Store.calendars.DW1 = { workHours: openFriday };
+  Store.plants.DW = { workHours: plantHours };
+  try {
+    const live = Engine.earliestAllowedStart(task, 'DW', null, md);
+    const bound = Engine.earliestAllowedStart(task, 'DW', null, md, view);
+    assert.deepEqual([live.getMonth(), live.getDate(), live.getHours()], [7, 9, 0],
+      'live Store (Friday open): due day Friday, floor Thursday 00:00');
+    assert.deepEqual([bound.getMonth(), bound.getDate(), bound.getHours()], [7, 8, 0],
+      'view (Friday closed): due resolves to Thursday, floor Wednesday 00:00');
+    const liveCeil = Engine.latestAllowedEnd(task, 'DW', md);
+    const boundCeil = Engine.latestAllowedEnd(task, 'DW', md, view);
+    assert.deepEqual([liveCeil.getDate(), boundCeil.getDate()], [12, 11], 'the ceiling follows the view too');
+  } finally {
+    if (priorCal === undefined) delete Store.calendars.DW1; else Store.calendars.DW1 = priorCal;
+    if (priorPlant === undefined) delete Store.plants.DW; else Store.plants.DW = priorPlant;
+  }
+});
+
+test('sync preview bounds stay snapshot-bound after the run: a later live-Store calendar edit does not move the floor', () => {
+  const { openFriday, closedFriday, plantHours, md, task, view } = dueWindowFixture();
+  const snap = {
+    tasks: [task], firmedIds: [], alerts: [], selectedPlant: 'DW', blocks: [], plantBlocks: [],
+    calendars: view.calendars, plants: view.plants, lineSettings: {}, masterData: md, priorityRankMaps: {},
+    readModelVersion: '1', frozenHorizonEnd: null,
+    setupSnapshot: {
+      plant: 'DW', plant_active: true,
+      definition: { plant: 'DW', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    },
+  };
+  const candidate = evaluateOptimizerWorkerRequest({
+    runId: 'dw-sync', mode: 'duedate', snapshot: snap, deadlineDurationMs: 2000,
+    request: { mode: 'duedate', plant: 'DW', respectFirmed: true, respectCalendar: true,
+      planningStart: new Date(2035, 7, 6, 8, 0, 0), runNow: new Date(2035, 7, 6, 8, 0, 0),
+      endDate: new Date(2035, 7, 14, 0, 0, 0) },
+  }, () => 5000);
+  const priorCal = Store.calendars.DW1;
+  const priorPlant = Store.plants.DW;
+  Store.calendars.DW1 = { workHours: openFriday };   // the live Store drifts after the preview ran
+  Store.plants.DW = { workHours: plantHours };
+  try {
+    const floor = candidate.validationContext.bounds.notBefore(task);
+    assert.deepEqual([floor.getMonth(), floor.getDate(), floor.getHours()], [7, 8, 0],
+      'the closure must keep the captured snapshot floor (Wednesday), not move to Thursday with the live Store');
+    const legal = { ...candidate, patches: [{ id: 'dw-task', changes: {
+      start_date: new Date(2035, 7, 8, 7, 0, 0), end_date: new Date(2035, 7, 8, 9, 0, 0) } }] };
+    const findings = validateCandidateForApply({ ...legal, validationContext: candidate.validationContext }, snap);
+    assert.equal(findings.some(finding => finding.code === 'date_window'), false,
+      `no date_window error for a Wednesday placement, got ${JSON.stringify(findings.map(f => f.code))}`);
+  } finally {
+    if (priorCal === undefined) delete Store.calendars.DW1; else Store.calendars.DW1 = priorCal;
+    if (priorPlant === undefined) delete Store.plants.DW; else Store.plants.DW = priorPlant;
+    void closedFriday;
+  }
 });
