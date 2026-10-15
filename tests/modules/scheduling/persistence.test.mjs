@@ -803,6 +803,28 @@ test('F10: a never-placed row saves its attribute edits without dates or segment
   Store.setTasks([], 'unit-test');
 });
 
+test('VC1: a never-placed (display-only) row sends attributes only: no planning status, no dates, no segments', () => {
+  const t = { id: 'vc1', user_scheduled: false, planning_status: 'scheduled', planning_reason: null,
+    start_date: new Date('2026-09-01T06:00:00'), end_date: new Date('2026-09-01T10:00:00'),
+    PRT_01: 'P1', PRT_02: null, PRODUCTION_VERSION: '0001', RUN_TIME: 4, MACHINE: 'L1', scheduleSegments: [] };
+  const snap = Persistence._taskEditSnapshot(t);
+  assert.equal('planning_status' in snap, false);
+  assert.equal('planning_reason' in snap, false);
+  assert.equal('start_date' in snap, false);
+  assert.equal('end_date' in snap, false);
+  assert.equal('schedule_segments' in snap, false);
+  assert.equal(snap.PRT_01, 'P1');
+  assert.equal(snap.MACHINE, 'L1');
+});
+
+test('VC1: a queued row still sends its planning status and reason', () => {
+  const t = { id: 'vc1q', user_scheduled: false, planning_status: 'needs_planning',
+    planning_reason: { code: 'overlong_never', message: 'x' }, start_date: null, end_date: null, scheduleSegments: [] };
+  const snap = Persistence._taskEditSnapshot(t);
+  assert.equal(snap.planning_status, 'needs_planning');
+  assert.equal(snap.planning_reason.code, 'overlong_never');
+});
+
 test('Persistence._loadCache clears the rank cache — the offline restore hydrates without ever loading rank maps', () => {
   // Same exposure as _loadDemo: this is the backend-failed / boot restore path. It
   // rehydrates whatever plant was last persisted, which need not be the plant the

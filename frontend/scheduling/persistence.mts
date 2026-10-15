@@ -1092,14 +1092,18 @@ export const Persistence = {
    *  function guarantees the two snapshots are comparable. */
   _taskEditSnapshot(t: NimbusTask): Record<string, unknown> {
     // F10: a row that was never placed server-side (and is not queued) holds only DISPLAY-derived dates. A save for it
-    // carries its attribute edits and leaves the dates and segments out, so Save cannot store a placement the planner
+    // carries its attribute edits and leaves the dates, segments and planning status (VC1) out, so Save cannot store a placement the planner
     // never made. A planner placement marks the row placed (Store._markPlaced) and sends them as usual.
     const displayOnly = !t.user_scheduled && t.planning_status !== 'needs_planning';
     return {
       // Manual firm: sent only for rows whose firm the planner changed (see _firmDirtyIds).
       ...(Persistence._firmDirtyIds.has(String(t.id)) ? { FIRMED: !!t.firmed } : {}),
-      planning_status: t.planning_status ?? 'scheduled',
-      planning_reason: t.planning_reason ?? null,
+      // VC1: a display-only row has no placement to describe; sending a status with no edges is rejected by the
+      // server (single_edge). Its save carries attributes only; the stored status is already 'scheduled'.
+      ...(displayOnly ? {} : {
+        planning_status: t.planning_status ?? 'scheduled',
+        planning_reason: t.planning_reason ?? null,
+      }),
       // Placement exception (backward scheduling OQ50): the marker the planner's bar carries, sent with every
       // save of a task that holds the field. An explicit null clears the stored marker; a task that never
       // carried the field (an older server, a demo row) omits it, so the server leaves the stored one alone.
