@@ -337,6 +337,45 @@ test('refresh resolves false when the fetch fails and does not claim fresh rows'
   assert.equal(Toast.show.mock.calls.filter(c => c.arguments[1] === 'error').length, 1, 'one error toast, from _load');
 });
 
+test('confirmed refresh whose fetch fails reverts the discarded edits and keeps Save usable', async t => {
+  const f = await gridFixture(t);
+  t.mock.method(Modal, 'confirm', async () => true);
+  await f.load('A', 'white'); f.edit('red');
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  f.respond(f.requests.at(-1), { detail: 'boom' }, 500);
+  assert.equal(await pending, false);
+  assert.equal(f.rows()[0].color, 'white', 'discarded edit must not stay on screen');
+  assert.equal(f.saveButton().disabled, true, 'nothing is dirty');
+  // st.plant is still A, so a fresh edit is tracked against the baseline and Save really posts.
+  f.edit('blue');
+  assert.equal(f.saveButton().disabled, false);
+  f.edit('white');
+  assert.equal(f.saveButton().disabled, true, 'returning to the original value is detected via the kept baseline');
+  f.edit('blue');
+  const count = f.requests.length;
+  f.grid._save('material-plant');
+  assert.equal(f.requests.length, count + 1);
+  assert.equal(JSON.parse(f.requests.at(-1).opts.body).plant, 'A');
+  f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+});
+
+test('an edit made while the refresh is in flight does not outlive the replaced rows', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white');
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  f.edit('red');                                   // lands on rows about to be replaced
+  assert.equal(f.saveButton().disabled, false);
+  f.respond(f.requests.at(-1), { rows: [mpRow('MAT', 'white')] });
+  assert.equal(await pending, true);
+  await settle();
+  assert.equal(f.saveButton().disabled, true, 'orphan dirty patch must be cleared');
+  const count = f.requests.length;
+  f.grid._save('material-plant');
+  assert.equal(f.requests.length, count, 'nothing to save');
+});
+
 test('refresh resolves false when a newer load supersedes it', async t => {
   const f = await gridFixture(t);
   await f.load('A', 'white');

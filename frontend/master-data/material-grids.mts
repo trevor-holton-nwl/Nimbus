@@ -433,6 +433,10 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
     const body = await res.json() as MasterDataGridResponse;
     if (st.generation !== generation || Store.selectedPlant !== plant) return;
     st.rows = body.rows || [];
+    // A patch made while this fetch was in flight targets rows that are being
+    // replaced; it must not outlive them.
+    st.dirty.clear();
+    st.edited.clear();
     if (pendingWrite?.succeeded) {
       for (const u of pendingWrite.updates) {
         const row = st.rows.find(r => spec.rowKey(r) === `${u.material_id}|${plant}`);
@@ -474,13 +478,12 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
 // so the user's filters survive; _load aborts any in-flight request, bumps the
 // generation, re-indexes the rows and rebuilds the filter bars.
 async function _reload(spec: GridSpec, plant: string): Promise<void> {
-  const st = _state[spec.id];
-  st.dirty.clear();
-  st.edited.clear();
-  st.baseline.clear();
-  st.plant = null;
-  st.loaded = false;
-  _updateSaveBar(spec);
+  // Revert any dirty cells to their baseline first (clears st.dirty), so a failed
+  // or superseded fetch cannot leave discarded edits on screen. st.plant and
+  // st.baseline stay intact until fresh rows land, keeping Save/dirty-detection
+  // coherent with the rows still shown; _load replaces them on success.
+  _discard(spec.id);
+  _state[spec.id].edited.clear();
   return _load(spec, plant);
 }
 
