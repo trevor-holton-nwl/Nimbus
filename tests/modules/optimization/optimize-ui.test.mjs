@@ -2003,11 +2003,11 @@ test('Task 3: OptimizeDialog.open resets Search time to Normal', async () => {
 test('Task 3: the background driver finishes when the evaluator returns a Promise (worker path) and scales the primary deadline', async () => {
   const fx = openBackgroundFixture();
   const OriginalWorker = globalThis.Worker;
-  const posted = [];
+  const allPosted = [];
   class FakeWorker {
     constructor() { this.onmessage = null; this.onerror = null; }
     postMessage(message) {
-      posted.push(message);
+      allPosted.push(message);
       const response = buildOptimizerWorkerResponse(message);
       setTimeout(() => this.onmessage?.({ data: response }), 0);
     }
@@ -2015,10 +2015,14 @@ test('Task 3: the background driver finishes when the evaluator returns a Promis
   }
   try {
     globalThis.Worker = FakeWorker;
+    const seq = OptimizerPreview._runSeq + 1;
     await OptimizerPreview.runInBackground('spt', { ...fx.opts, searchBudgetMs: 180000, exhaustive: true });
+    // Hermetic: a run abandoned by an earlier test may still post through this FakeWorker; only this run's messages count.
+    const posted = allPosted.filter(message => String(message.runId).startsWith(`optimizer-preview-${seq}-`));
     const run = OptimizerPreview._backgroundRun;
     assert.ok(run?.result, `the async path produced a result, error: ${run?.error}`);
     assert.ok(posted.length > 1, 'the primary and the alternates all went through the worker');
+    assert.ok(posted[0].runId.endsWith('-primary'), 'the primary is first');
     assert.ok(posted[0].deadlineDurationMs > 170000 && posted[0].deadlineDurationMs <= 180000, 'primary carries the Exhaustive budget');
     for (const alt of posted.slice(1)) {
       // Wall-clock under suite load: bounded above by the Normal budget, and an order of magnitude below the primary.
