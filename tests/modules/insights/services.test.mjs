@@ -653,11 +653,15 @@ test('I13: the worker prewarm starts the matrix on the plant clock and writes th
   try {
     Store.setSelectedPlant('PW-P', 'unit-test');
     Utilization._cache = null;
-    Utilization._prewarm();
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // A debounced alert recompute left by an earlier test can bump the store revision while the prewarm is in flight,
+    // and the prewarm (correctly) drops a stale reply: retry until one lands.
+    for (let attempt = 0; attempt < 5 && !Utilization._cache; attempt++) {
+      Utilization._prewarm();
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
     const plantToday = new Date(2026, 9, 15).getTime();
     assert.equal(askedStart, plantToday, 'the prewarm asks for the plant\'s today, not the viewer\'s');
-    assert.equal(Utilization._cache?.key, `${plantToday}|7|${Store.rev()}|PW-P`,
+    assert.match(Utilization._cache?.key ?? '', new RegExp(String.raw`^${plantToday}\|7\|\d+\|PW-P$`),
       'the cache key carries the plant-today start, so a Dashboard computeMatrix(plantClock) call hits it');
   } finally {
     Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
