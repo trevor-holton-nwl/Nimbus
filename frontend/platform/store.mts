@@ -1084,6 +1084,9 @@ export const UndoStack = {
   /** Registered by the engine (platform cannot import it): re-derive the start of just-restored rows from their
    *  restored finish and the CURRENT run time (OQ21). Receives the restored ids. */
   afterRestore: null as null | ((ids: string[], wasDirty: ReadonlySet<string>) => void),
+  /** Registered by the engine: true when the post-restore reconcile will process this (restored) row. Only such a
+   *  row is flagged stale by restoreTasks, because only the reconcile ever clears the flag (U23). Null = every row. */
+  willRederive: null as null | ((task: NimbusTask) => boolean),
   restoreTasks(snapshot: NimbusTask[]): void {
     // planning_reason is defaulted explicitly: a snapshot of a scheduled order may not
     // carry the key, and an undone Unschedule must not leave its reason behind.
@@ -1094,7 +1097,11 @@ export const UndoStack = {
       const { firmed: _firmed, ...rest } = s;
       // OQ21: undo restores the FINISH. The restored start is only a placeholder, so the row is flagged stale and
       // the engine re-derives the start from the finish under the current run time (afterRestore below).
-      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, runtime_schedule_mismatch: true,
+      // A row the reconcile will not process (no machine, no server calendar row for its line, an overtime/overlong
+      // marker) keeps its previous flag: nothing would clear a flag set here.
+      const mismatch = UndoStack.willRederive && !UndoStack.willRederive(s as NimbusTask)
+        ? !!Store.tasks[s.id]?.runtime_schedule_mismatch : true;
+      return { id: s.id, changes: { ...rest, planning_reason: s.planning_reason ?? null, runtime_schedule_mismatch: mismatch,
         row_version: Store.tasks[s.id]?.row_version ?? s.row_version } };
     });
     Store.updateMany(patches, 'undo');

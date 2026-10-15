@@ -4717,6 +4717,23 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('U23: restoreTasks flags only the rows the reconcile will process (overtime marker and a calendar-less line keep their flag)', () => {
+    const fx = recFixture({ lineNames: ['A', 'B'], serverLineNames: ['A'] });
+    try {
+      const placed = { user_scheduled: true, start_date: at(26, 13), end_date: at(26, 17), runtime_schedule_mismatch: false };
+      Store.setTasks([
+        fx.task('plain', placed),
+        fx.task('ot', { ...placed, placement_exception: 'overtime' }),
+        fx.task('nocal', { ...placed, MACHINE: fx.lines[1] }),
+      ], 'unit-test');
+      UndoStack.restoreTasks(UndoStack.snapshotTasks(['plain', 'ot', 'nocal']));
+      assert.equal(Store.tasks.ot.runtime_schedule_mismatch, false, 'an overtime-marked bar is never re-derived, so it is never flagged');
+      assert.equal(Store.tasks.nocal.runtime_schedule_mismatch, false, 'a line with no server calendar row is never re-derived');
+      assert.equal(Store.tasks.plain.runtime_schedule_mismatch, false, 'a processed row ends derived and clear');
+      assert.equal(Store.tasks.plain.end_date.getTime(), at(26, 17).getTime());
+    } finally { fx.restore(); }
+  });
+
   test('gate 23 a / gate 16: restoring an Apply snapshot brings back the finish AND the run time of a row whose run time changed after the Apply', () => {
     const fx = recFixture();
     try {

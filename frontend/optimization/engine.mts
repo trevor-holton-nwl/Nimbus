@@ -3071,6 +3071,13 @@ Store.subscribe(evt => {
 // OQ21: an undo restores the finish, so the start is re-derived under the run time as it is now. The Store cannot
 // import the engine (platform sits below it); the engine registers this hook once at load.
 UndoStack.afterRestore = (ids: string[], wasDirty: ReadonlySet<string>): void => Engine.reconcileRestored(ids, wasDirty);
+// U23: restoreTasks flags a row stale only when the reconcile will process it (the same eligibility its candidate
+// filter and its per-line calendar check apply); any other row would keep the flag, and its error alert, until reload.
+UndoStack.willRederive = (task: NimbusTask): boolean => {
+  const plant = task.PLANT || Store.getPlantForLine(task.MACHINE);
+  return !!task.MACHINE && task.planning_status !== 'needs_planning' && !task.placement_exception
+    && (CalendarSync.calendarState(plant) !== 'hydrated' || CalendarSync.hasServerLineCalendar(plant, task.MACHINE));
+};
 // F10: the snapshot records which rows already carried unsaved edits (the platform cannot see Persistence).
 UndoStack.dirtyProbe = (id: string): boolean => Persistence._dirtyIds.has(id);
 
