@@ -22,7 +22,7 @@ import { Engine, snapshotSchedule, SETUP_AWARE_DEADLINE_MS, effectiveFirmedIdSet
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidateForApply } from './setup-scheduler.mjs';
-import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch } from './setup-scheduler.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
@@ -1035,6 +1035,29 @@ function taskBaseline(tasks: ReadonlyArray<NimbusTask>): Map<string, string> {
    pre/post KPI comparison before committing. Discard reverts to the snapshot;
    Apply pushes an UndoStack entry so Ctrl+Z still works after the fact.
    ========================================================================== */
+/** One Plan A/B/C comparison row held in `_finalists`. */
+interface OptimizerFinalist { label: string; mode: OptimizerMode; kpis: OptimizerKpis; whyNot: string | null }
+interface PreviewBacklogAudit {
+  plant: string; lines: string[] | null; from: Date | null; to: Date | null; runAt: Date | null; timezone: string | null;
+}
+interface PreviewComputeContext {
+  signal?: AbortSignal; tick: () => Promise<void>; shouldStop?: () => boolean; runSeq?: number;
+  /** Called once Plan A and its explanation are ready, before any alternate
+   *  runs, with the result so far (`finalists: null`). Foreground only. */
+  onPrimary?: (partial: PreviewResult) => void;
+}
+/** Everything `computePreview` produces and `present` publishes into OptimizerPreview. */
+interface PreviewResult {
+  runSeq: number; mode: OptimizerMode; plant: string; opts: OptimizerRunOptions;
+  snapshot: NimbusTask[]; taskBaseline: Map<string, string>;
+  candidate: CandidateResult; finalists: OptimizerFinalist[] | null;
+  preKpis: OptimizerKpis; postKpis: OptimizerKpis; explanation: PreviewExplanation;
+  previewDiagnostics: CandidateDiagnostic[]; splitOrderPolicy: SplitOrderPolicy;
+  backlogResult: RemoveBacklogResult | null; backlogAudit: PreviewBacklogAudit | null;
+  auditDetails: OptimizationAuditDetails | null; syntheticSetup: boolean;
+  startedAt: number; runtimeMs: number;
+}
+
 export const OptimizerPreview = {
   gapFillSummary(candidate: CandidateResult): string {
     const check = candidate.gapFill;
@@ -1372,212 +1395,35 @@ export const OptimizerPreview = {
     // Double rAF to ensure the loading skeleton actually paints before we
     // block the main thread with the optimizer. Single rAF schedules a frame
     // but synchronous work afterward can still preempt the paint.
-    let snapshot: NimbusTask[] | null = null;
     requestAnimationFrame(() => requestAnimationFrame(async () => {
       const _optTotalT0 = performance.now();
       try {
-        // Snapshot every task in the plant — the optimizer may touch any of
-        // them transitively (auto-reflow can ripple beyond the chosen window
-        // / lines), so the undo snapshot must stay unfiltered. `plant` scopes
-        // only calendars (Phase 2, Pkg D clone reduction) — every consumer of
-        // this snapshot's `calendars` only ever looks up a line that already
-        // passed this same plant's task filter (see snapshotSchedule's doc
-        // comment), so no other plant's calendar entries are ever needed here.
-        const candidateSnapshot = snapshotSchedule(plant);
-        const scopedTasks = candidateSnapshot.tasks.filter(task => resolveTaskPlant(task, candidateSnapshot) === plant);
-        const _snapT0 = performance.now();
-        snapshot = structuredClone(scopedTasks);
-        // Keep this detached copy only for the Undo entry if the planner applies.
-        OptimizerPreview._snapshot = snapshot;
-        OptimizerPreview._taskBaseline = taskBaseline(snapshot);
+        // The foreground run owns the modal from here: `active` lets
+        // apply/discard/abandon (all route through _clear()) be seen by
+        // shouldStop below.
         OptimizerPreview.active = true;
-        PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
-
-        // KPI inputs are scoped to what the user actually selected on screen 1 —
-        // time window and (optionally) a subset of lines. Otherwise the before/after
-        // comparison drowns the user's slice in out-of-scope tasks.
-        const winStart = opts.startDate ? opts.startDate.getTime() : -Infinity;
-        const winEnd   = opts.endDate   ? opts.endDate.getTime()   :  Infinity;
-        const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
-        const inScope = (t: NimbusTask): boolean => {
-          if (lineSet && !lineSet.has(t.MACHINE)) return false;
-          if (t.planning_status === 'needs_planning') return true;
-          const s = t.start_date ? t.start_date.getTime() : null;
-          if (s == null) return false;
-          const e = Util.scheduledEnd(t);
-          const eMs = e ? e.getTime() : s;
-          return eMs >= winStart && s <= winEnd;
-        };
-
-        // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
-        const _preKpiT0 = performance.now();
-        const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
-        PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
-
-        // Evaluate the established placement algorithm against a detached read
-        // model. Store changes only if the planner applies this candidate.
-        // Phase 2 (Pkg D): the primary run's deadline is now an explicit,
-        // once-computed `deadlineAt` rather than letting the engine derive a
-        // fresh SETUP_AWARE_DEADLINE_MS window internally — same numeric
-        // budget, no behavior change, but the option now exists so the
-        // (deferred) alt run below no longer inherits a full fresh one.
-        const _evalPrimaryT0 = performance.now();
-        const deadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
-        const primaryEvaluation = runOptimizerPreview({
-          runId: `optimizer-preview-${runSeq}-primary`, mode, snapshot: candidateSnapshot,
-          request: previewEvaluationRequest(mode, opts, plant, deadlineAt),
-        }, {
+        const computed = OptimizerPreview._driveCompute(OptimizerPreview._computeSteps(mode, opts, {
           signal: workerAbortController?.signal,
-          syncEvaluator: evaluateSchedule,
-        });
-        const candidate = primaryEvaluation instanceof Promise ? await primaryEvaluation : primaryEvaluation;
-        PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
-
-        // Post-KPIs are calculated from detached patched task values.
-        const _applyPatchesT0a = performance.now();
-        const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
-        PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0a);
-        const _postKpiT0 = performance.now();
-        const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
-        PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
-
-        OptimizerPreview._preKpis  = preKpis;
-        OptimizerPreview._postKpis = postKpis;
-        OptimizerPreview._candidate = candidate;
-        OptimizerPreview._previewDiagnostics = [...candidate.diagnostics.events];
-        OptimizerPreview._mode     = mode;
-        OptimizerPreview._plant    = plant;
-        const capturedValidation = candidate.validationContext;
-        const capturedSnapshot = capturedValidation?.snapshot ?? candidateSnapshot;
-        const capturedBounds = capturedValidation?.bounds;
-        const capturedSetup = capturedBounds?.setup
-          ?? (capturedSnapshot.setupSnapshot?.plant === plant ? capturedSnapshot.setupSnapshot : null);
-        const capturedSplitPolicy = capturedSnapshot.masterData?.plants?.find(row => row.plant === plant)?.split_order_policy;
-        OptimizerPreview._splitOrderPolicy = capturedSplitPolicy === 'overlong_only' || capturedSplitPolicy === 'partial_allowed'
-          ? capturedSplitPolicy : 'never';
-        OptimizerPreview._backlogResult = mode === 'backlog' ? candidate.backlogResult ?? null : null;
-        OptimizerPreview._backlogAudit = mode === 'backlog' ? {
-          plant,
-          lines: Array.isArray(opts.lines) ? opts.lines : null,
-          from: opts.startDate ?? null,
-          to: opts.endDate ?? null,
-          runAt: opts.runAt instanceof Date ? opts.runAt : null,
-          timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
-        } : null;
-        OptimizerPreview._auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
-        OptimizerPreview._syntheticSetup = mode !== 'backlog' && capturedBounds?.setup.synthetic === true;
-        // B3: the same run-scoped candidate pool used for the KPI comparison
-        // (plant, via `scopedTasks` above using the B7 line→plant fallback,
-        // plus opts.lines and excludeFromOpt) — NOT the time-windowed
-        // `inScope`, since an order outside the KPI window can still be
-        // legitimately "not scheduled" by this run.
-        const unplacedCandidates = scopedTasks
-          .filter(t => !lineSet || lineSet.has(t.MACHINE))
-          .filter(t => !candidateSnapshot.lineSettings[t.MACHINE || '']?.excludeFromOpt)
-          .map(t => ({ id: String(t.id), line: t.MACHINE || 'Unknown' }));
-        // Explanations must describe the same detached facts that produced the
-        // candidate. In particular, never recapture live setup/frozen state or
-        // a new wall clock after a worker has returned.
-        const runNow = capturedBounds?.runNow ?? capturedBounds?.now
-          ?? (opts.runNow ? new Date(opts.runNow as Date | string | number) : opts.startDate ? new Date(opts.startDate) : new Date());
-        const explanationFirmedIds = capturedValidation?.snapshot?.firmedIds
-          ?? effectiveFirmedIdSet(candidateSnapshot.tasks, candidateSnapshot.firmedIds, runNow, opts.respectFirmed ?? true, candidateSnapshot.frozenHorizonEnd);
-        const explanation = OptimizerPreview.summarizeCandidate(candidate, {
-          productionBefore: snapshot.filter(inScope).length,
-          productionAfter: postTasks.length,
-          preKpis,
-          postKpis,
-          unplacedCandidates,
-          firmedIds: explanationFirmedIds,
-          tasks: capturedSnapshot.tasks,
-          plant,
-          masterData: capturedSnapshot.masterData,
-        });
-        const described = OptimizerPreview.describeMissingPairs(
-          candidate,
-          capturedSnapshot.tasks,
-          capturedSetup,
-        );
-        explanation.missingPairs = described.pairs;
-        explanation.missingPairsTotal = described.total;
-        OptimizerPreview._explanation = explanation;
-
-        // Alternate-mode KPI vectors — the only data needed for the plan
-        // comparison table. Each primary mode can have multiple alternates
-        // (e.g. Changeover's alts are SPT and Due Date) — evaluated one at a
-        // time with a yield per alt (see the loop below), never in one
-        // synchronous pass, so a single alt's up-to-SETUP_AWARE_DEADLINE_MS
-        // search can't compound into a multi-alt main-thread freeze. All of
-        // them finish before the preview is rendered or revealed.
-        const altModeMap: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
-          changeover: ['spt', 'duedate'],
-          spt: ['changeover', 'duedate'],
-          duedate: ['spt', 'changeover'],
-        };
-        const altModes = altModeMap[mode] ?? [];
-        OptimizerPreview._finalists = null;
-
-        OptimizerPreview.stale = false;
-        OptimizerPreview._staleReason = null;
-        OptimizerPreview._staleMessageKey = null;
-        OptimizerPreview._startTaskWatch();
-
-        // Compute every alternate BEFORE the first (and only) render, so the
-        // popup opens once, fully populated; spinner-only until then. One alt
-        // per tick: requestAnimationFrame + setTimeout(0) yields to the event
-        // loop (and a paint) so the spinner keeps animating.
-        const finalists: NonNullable<typeof OptimizerPreview['_finalists']> = [
-          { label: 'A', mode, kpis: postKpis, whyNot: null },
-        ];
-        for (let idx = 0; idx < altModes.length; idx++) {
-          await new Promise<void>(resolve => requestAnimationFrame(() => { setTimeout(resolve, 0); }));
-          // Race safety: bail silently unless this preview is still the one
-          // the user is waiting on. `active` catches apply/discard/abandon
-          // (all route through _clear()); `_runSeq` catches a newer
-          // runWithPreview already in flight, so a slow superseded run can
-          // never resurrect stale finalists or issue an orphan render.
-          if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
+          // One alt per tick: requestAnimationFrame + setTimeout(0) yields to
+          // the event loop (and a paint) so the spinner keeps animating.
+          tick: () => new Promise<void>(resolve => requestAnimationFrame(() => { setTimeout(resolve, 0); })),
           // A Store setup write landing mid-way (markStale) would make further
           // alts evaluate against setup data Plan A never saw. Stop comparing
           // and reveal Plan A alone (Apply is blocked by the stale flag anyway).
-          if (OptimizerPreview.stale) { finalists.length = 1; break; }
-          const altMode = altModes[idx];
-          try {
-            const _evalAltT0 = performance.now();
-            const altDeadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
-            const altEvaluation = runOptimizerPreview({
-              runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
-              request: previewEvaluationRequest(altMode, opts, plant, altDeadlineAt),
-            }, {
-              signal: workerAbortController?.signal,
-              syncEvaluator: evaluateSchedule,
-            });
-            const altCandidate = altEvaluation instanceof Promise ? await altEvaluation : altEvaluation;
-            PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
-            const _applyPatchesT0b = performance.now();
-            const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
-            PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
-            const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
-            finalists.push({
-              label: String.fromCharCode(66 + idx), // 'B', 'C', ...
-              mode: altMode, kpis: altKpis,
-              whyNot: describeFinalistWhyNot(postKpis, altKpis),
-            });
-          } catch (altErr: unknown) {
-            // A cancelled run (newer preview / discard) must not fall through to a render.
-            if (altErr instanceof Error && altErr.name === 'AbortError') throw altErr;
-            /* this alt failed — omit it; other alts (and Plan A) still show */
-          }
-          // The await above may have outlived this preview.
-          if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
-        }
-        OptimizerPreview._finalists = finalists.length > 1 ? finalists : null;
-
-        footBtns.forEach((b) => { b.disabled = false; });
-        OptimizerPreview._syncApplyButton();
-        OptimizerPreview._render();
-        OptimizerPreview._endLoadingState();
-        previewRoot?.querySelector<HTMLElement>('.modal-head button')?.focus();
+          shouldStop: () => OptimizerPreview.stale || !OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq,
+          runSeq,
+          // Publish Plan A's state before the alternates compute (the modal
+          // stays spinner-only; the single render still waits for the alts).
+          onPrimary: partial => { OptimizerPreview._installPreviewResult(partial); },
+        }));
+        const result = computed instanceof Promise ? await computed : computed;
+        // Race safety: bail silently unless this preview is still the one the
+        // user is waiting on. `active` catches apply/discard/abandon;
+        // `_runSeq` catches a newer runWithPreview already in flight, so a
+        // slow superseded run can never resurrect stale finalists or issue an
+        // orphan render.
+        if (!OptimizerPreview.active || OptimizerPreview._runSeq !== runSeq) return;
+        OptimizerPreview.present(result, { open: true });
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           // A newer preview or an explicit discard owns the modal now. Do not
@@ -1608,6 +1454,271 @@ export const OptimizerPreview = {
         PerfMonitor.record('Optimize.total', performance.now() - _optTotalT0);
       }
     }));
+  },
+
+  /** Compute-only half of a preview run: evaluates the primary plan and every
+   *  alternate against a detached snapshot and returns the result. Touches no
+   *  OptimizerPreview state and no DOM, so a background run can compute while
+   *  the modal is closed; `present()` publishes the result. `tick` is awaited
+   *  between alternates; `shouldStop` ends the comparison early, keeping Plan A
+   *  alone (foreground: superseded / discarded / stale; background: never). */
+  computePreview(mode: OptimizerMode, opts: OptimizerRunOptions, ctx: PreviewComputeContext): Promise<PreviewResult> {
+    return (async () => OptimizerPreview._driveCompute(OptimizerPreview._computeSteps(mode, opts, ctx)))();
+  },
+
+  /** Run a compute generator, resolving synchronously when it never yields a
+   *  promise (sync evaluator, no alternates) and as a Promise otherwise. The
+   *  foreground path depends on that: its state must be installed in the same
+   *  tick as the evaluation when everything is synchronous. */
+  _driveCompute(gen: Generator<Promise<unknown>, PreviewResult, unknown>): PreviewResult | Promise<PreviewResult> {
+    const step = (next: () => IteratorResult<Promise<unknown>, PreviewResult>): PreviewResult | Promise<PreviewResult> => {
+      const r = next();
+      if (r.done) return r.value;
+      return r.value.then(
+        value => step(() => gen.next(value)),
+        err => step(() => gen.throw(err)),
+      );
+    };
+    return step(() => gen.next());
+  },
+
+  /** The compute body as a generator: every `yield` hands a promise to the driver. */
+  *_computeSteps(
+    mode: OptimizerMode,
+    opts: OptimizerRunOptions,
+    { signal, tick, shouldStop = () => false, runSeq = 0, onPrimary }: PreviewComputeContext,
+  ): Generator<Promise<unknown>, PreviewResult, unknown> {
+    const startedAt = performance.now();
+    const plant = opts.plant ?? Store.selectedPlant;
+    if (!plant) throw new Error('computePreview requires a plant');
+    // Snapshot every task in the plant — the optimizer may touch any of
+    // them transitively (auto-reflow can ripple beyond the chosen window
+    // / lines), so the undo snapshot must stay unfiltered. `plant` scopes
+    // only calendars (Phase 2, Pkg D clone reduction) — every consumer of
+    // this snapshot's `calendars` only ever looks up a line that already
+    // passed this same plant's task filter (see snapshotSchedule's doc
+    // comment), so no other plant's calendar entries are ever needed here.
+    const candidateSnapshot = snapshotSchedule(plant);
+    const scopedTasks = candidateSnapshot.tasks.filter(task => resolveTaskPlant(task, candidateSnapshot) === plant);
+    const _snapT0 = performance.now();
+    // Kept only for the Undo entry if the planner applies.
+    const snapshot = structuredClone(scopedTasks);
+    const baseline = taskBaseline(snapshot);
+    PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
+
+    // KPI inputs are scoped to what the user actually selected on screen 1 —
+    // time window and (optionally) a subset of lines. Otherwise the before/after
+    // comparison drowns the user's slice in out-of-scope tasks.
+    const winStart = opts.startDate ? opts.startDate.getTime() : -Infinity;
+    const winEnd   = opts.endDate   ? opts.endDate.getTime()   :  Infinity;
+    const lineSet  = (Array.isArray(opts.lines) && opts.lines.length) ? new Set(opts.lines) : null;
+    const inScope = (t: NimbusTask): boolean => {
+      if (lineSet && !lineSet.has(t.MACHINE)) return false;
+      if (t.planning_status === 'needs_planning') return true;
+      const s = t.start_date ? t.start_date.getTime() : null;
+      if (s == null) return false;
+      const e = Util.scheduledEnd(t);
+      const eMs = e ? e.getTime() : s;
+      return eMs >= winStart && s <= winEnd;
+    };
+
+    // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
+    const _preKpiT0 = performance.now();
+    const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+    PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
+
+    // Evaluate the established placement algorithm against a detached read
+    // model. Store changes only if the planner applies this candidate.
+    // Phase 2 (Pkg D): the primary run's deadline is now an explicit,
+    // once-computed `deadlineAt` rather than letting the engine derive a
+    // fresh SETUP_AWARE_DEADLINE_MS window internally — same numeric
+    // budget, no behavior change, but the option now exists so the
+    // (deferred) alt run below no longer inherits a full fresh one.
+    const _evalPrimaryT0 = performance.now();
+    const deadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+    const primaryEvaluation = runOptimizerPreview({
+      runId: `optimizer-preview-${runSeq}-primary`, mode, snapshot: candidateSnapshot,
+      request: previewEvaluationRequest(mode, opts, plant, deadlineAt),
+    }, {
+      signal,
+      syncEvaluator: evaluateSchedule,
+    });
+    const candidate = (primaryEvaluation instanceof Promise ? yield primaryEvaluation : primaryEvaluation) as CandidateResult;
+    PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
+
+    // Post-KPIs are calculated from detached patched task values.
+    const _applyPatchesT0a = performance.now();
+    const postTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, candidate.patches).filter(inScope);
+    PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0a);
+    const _postKpiT0 = performance.now();
+    const postKpis  = Util.scheduleKpis(postTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+    PerfMonitor.record('Optimize.postKPIs', performance.now() - _postKpiT0);
+
+    const previewDiagnostics = [...candidate.diagnostics.events];
+    const capturedValidation = candidate.validationContext;
+    const capturedSnapshot = capturedValidation?.snapshot ?? candidateSnapshot;
+    const capturedBounds = capturedValidation?.bounds;
+    const capturedSetup = capturedBounds?.setup
+      ?? (capturedSnapshot.setupSnapshot?.plant === plant ? capturedSnapshot.setupSnapshot : null);
+    const capturedSplitPolicy = capturedSnapshot.masterData?.plants?.find(row => row.plant === plant)?.split_order_policy;
+    const splitOrderPolicy: SplitOrderPolicy = capturedSplitPolicy === 'overlong_only' || capturedSplitPolicy === 'partial_allowed'
+      ? capturedSplitPolicy : 'never';
+    const backlogResult = mode === 'backlog' ? candidate.backlogResult ?? null : null;
+    const backlogAudit: PreviewBacklogAudit | null = mode === 'backlog' ? {
+      plant,
+      lines: Array.isArray(opts.lines) ? opts.lines : null,
+      from: opts.startDate ?? null,
+      to: opts.endDate ?? null,
+      runAt: opts.runAt instanceof Date ? opts.runAt : null,
+      timezone: candidateSnapshot.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null,
+    } : null;
+    const auditDetails = mode === 'backlog' ? null : opts.auditDetails ?? null;
+    const syntheticSetup = mode !== 'backlog' && capturedBounds?.setup.synthetic === true;
+    // B3: the same run-scoped candidate pool used for the KPI comparison
+    // (plant, via `scopedTasks` above using the B7 line→plant fallback,
+    // plus opts.lines and excludeFromOpt) — NOT the time-windowed
+    // `inScope`, since an order outside the KPI window can still be
+    // legitimately "not scheduled" by this run.
+    const unplacedCandidates = scopedTasks
+      .filter(t => !lineSet || lineSet.has(t.MACHINE))
+      .filter(t => !candidateSnapshot.lineSettings[t.MACHINE || '']?.excludeFromOpt)
+      .map(t => ({ id: String(t.id), line: t.MACHINE || 'Unknown' }));
+    // Explanations must describe the same detached facts that produced the
+    // candidate. In particular, never recapture live setup/frozen state or
+    // a new wall clock after a worker has returned.
+    const runNow = capturedBounds?.runNow ?? capturedBounds?.now
+      ?? (opts.runNow ? new Date(opts.runNow as Date | string | number) : opts.startDate ? new Date(opts.startDate) : new Date());
+    const explanationFirmedIds = capturedValidation?.snapshot?.firmedIds
+      ?? effectiveFirmedIdSet(candidateSnapshot.tasks, candidateSnapshot.firmedIds, runNow, opts.respectFirmed ?? true, candidateSnapshot.frozenHorizonEnd);
+    const explanation = OptimizerPreview.summarizeCandidate(candidate, {
+      productionBefore: snapshot.filter(inScope).length,
+      productionAfter: postTasks.length,
+      preKpis,
+      postKpis,
+      unplacedCandidates,
+      firmedIds: explanationFirmedIds,
+      tasks: capturedSnapshot.tasks,
+      plant,
+      masterData: capturedSnapshot.masterData,
+    });
+    const described = OptimizerPreview.describeMissingPairs(
+      candidate,
+      capturedSnapshot.tasks,
+      capturedSetup,
+    );
+    explanation.missingPairs = described.pairs;
+    explanation.missingPairsTotal = described.total;
+    const base: PreviewResult = {
+      runSeq, mode, plant, opts, snapshot, taskBaseline: baseline,
+      candidate, finalists: null,
+      preKpis, postKpis, explanation, previewDiagnostics, splitOrderPolicy,
+      backlogResult, backlogAudit, auditDetails, syntheticSetup,
+      startedAt, runtimeMs: 0,
+    };
+    onPrimary?.(base);
+
+    // Alternate-mode KPI vectors — the only data needed for the plan
+    // comparison table. Each primary mode can have multiple alternates
+    // (e.g. Changeover's alts are SPT and Due Date) — evaluated one at a
+    // time with a yield per alt (see the loop below), never in one
+    // synchronous pass, so a single alt's up-to-SETUP_AWARE_DEADLINE_MS
+    // search can't compound into a multi-alt main-thread freeze. All of
+    // them finish before the preview is rendered or revealed.
+    const altModeMap: Partial<Record<OptimizerMode, OptimizerMode[]>> = {
+      changeover: ['spt', 'duedate'],
+      spt: ['changeover', 'duedate'],
+      duedate: ['spt', 'changeover'],
+    };
+    const altModes = altModeMap[mode] ?? [];
+
+    // Compute every alternate BEFORE the first (and only) render, so the
+    // popup opens once, fully populated; spinner-only until then. One alt
+    // per tick() so the caller's spinner keeps animating.
+    const finalists: OptimizerFinalist[] = [
+      { label: 'A', mode, kpis: postKpis, whyNot: null },
+    ];
+    for (let idx = 0; idx < altModes.length; idx++) {
+      yield tick();
+      if (signal?.aborted) { const e = new Error('Aborted'); e.name = 'AbortError'; throw e; }
+      // The foreground's shouldStop covers a superseded/discarded run and a
+      // mid-way stale flag: stop comparing and keep Plan A alone (the
+      // foreground caller re-checks supersession and bails silently).
+      if (shouldStop()) { finalists.length = 1; break; }
+      const altMode = altModes[idx];
+      try {
+        const _evalAltT0 = performance.now();
+        const altDeadlineAt = performance.now() + SETUP_AWARE_DEADLINE_MS;
+        const altEvaluation = runOptimizerPreview({
+          runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
+          request: previewEvaluationRequest(altMode, opts, plant, altDeadlineAt),
+        }, {
+          signal,
+          syncEvaluator: evaluateSchedule,
+        });
+        const altCandidate = (altEvaluation instanceof Promise ? yield altEvaluation : altEvaluation) as CandidateResult;
+        PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
+        const _applyPatchesT0b = performance.now();
+        const altPostTasks = applyPatchesToSnapshot(candidateSnapshot.tasks, altCandidate.patches).filter(inScope);
+        PerfMonitor.record('Optimize.applyPatches', performance.now() - _applyPatchesT0b);
+        const altKpis = Util.scheduleKpis(altPostTasks, 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+        finalists.push({
+          label: String.fromCharCode(66 + idx), // 'B', 'C', ...
+          mode: altMode, kpis: altKpis,
+          whyNot: describeFinalistWhyNot(postKpis, altKpis),
+        });
+      } catch (altErr: unknown) {
+        // A cancelled run (newer preview / discard) must not fall through to a render.
+        if (altErr instanceof Error && altErr.name === 'AbortError') throw altErr;
+        /* this alt failed — omit it; other alts (and Plan A) still show */
+      }
+      // The await above may have outlived this preview.
+      if (shouldStop()) { finalists.length = 1; break; }
+    }
+
+    return { ...base, finalists: finalists.length > 1 ? finalists : null, runtimeMs: performance.now() - startedAt };
+  },
+
+  /** Publish a computed preview into OptimizerPreview state. With
+   *  `open: true` it also reveals the modal (single render); with
+   *  `open: false` the state is installed silently (no body write). A result
+   *  already installed via `onPrimary` only gains its finalists (the stale
+   *  flag, which may have been raised meanwhile, is left alone). */
+  present(result: PreviewResult, { open }: { open: boolean }): void {
+    if (OptimizerPreview._candidate === result.candidate) OptimizerPreview._finalists = result.finalists;
+    else OptimizerPreview._installPreviewResult(result);
+    if (!open) return;
+    const previewRoot = document.getElementById('modal-opt-preview');
+    if (previewRoot?.hidden) OptimizerPreview.showLoading(result.mode, result.plant);
+    previewRoot?.querySelectorAll<HTMLButtonElement>('.modal-foot button').forEach((b) => { b.disabled = false; });
+    OptimizerPreview._syncApplyButton();
+    OptimizerPreview._render();
+    OptimizerPreview._endLoadingState();
+    previewRoot?.querySelector<HTMLElement>('.modal-head button')?.focus();
+  },
+
+  /** Install every field of a (possibly primary-only) result and start the
+   *  task watch. Resets the stale flag: the result is fresh by construction. */
+  _installPreviewResult(result: PreviewResult): void {
+    OptimizerPreview._snapshot = result.snapshot;
+    OptimizerPreview._taskBaseline = result.taskBaseline;
+    OptimizerPreview._preKpis  = result.preKpis;
+    OptimizerPreview._postKpis = result.postKpis;
+    OptimizerPreview._candidate = result.candidate;
+    OptimizerPreview._previewDiagnostics = result.previewDiagnostics;
+    OptimizerPreview._mode     = result.mode;
+    OptimizerPreview._plant    = result.plant;
+    OptimizerPreview._splitOrderPolicy = result.splitOrderPolicy;
+    OptimizerPreview._backlogResult = result.backlogResult;
+    OptimizerPreview._backlogAudit = result.backlogAudit;
+    OptimizerPreview._auditDetails = result.auditDetails;
+    OptimizerPreview._syntheticSetup = result.syntheticSetup;
+    OptimizerPreview._explanation = result.explanation;
+    OptimizerPreview._finalists = result.finalists;
+    OptimizerPreview.stale = false;
+    OptimizerPreview._staleReason = null;
+    OptimizerPreview._staleMessageKey = null;
+    OptimizerPreview.active = true;
+    OptimizerPreview._startTaskWatch();
   },
 
   _render() {
@@ -2083,7 +2194,6 @@ export const OptimizerPreview = {
     const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
-    const auditDetails = OptimizerPreview._auditDetails;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
     if (!OptimizerPreview.canApply()) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
@@ -2097,6 +2207,32 @@ export const OptimizerPreview = {
       Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
       return;
     }
+    // This is the sole schedule-state commit for a preview candidate.
+    // A running order never moves, and the preview may have sat open while one started. Drop
+    // those patches at apply time (Remove Backlog is the one run that moves running orders).
+    // The running test at Apply uses each order's own plant clock (Store.plantNow via the default now).
+    const keptPatches = mode === 'backlog'
+      ? candidate.patches
+      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
+    const runningSkippedIds = candidate.patches
+      .filter(patch => !keptPatches.includes(patch)).map(patch => String(patch.id));
+    void OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap);
+  },
+
+  /** Commit a (possibly filtered) set of preview patches: audit, apply, undo
+   *  entry, toasts, teardown, and alert recompute. `skipped` carries the ids
+   *  dropped before this call and why, so the caller owns the filtering. */
+  async _commitPatches(
+    kept: ReadonlyArray<SchedulePatch>,
+    skipped: { ids: string[]; reason: 'running' | 'changed' },
+    snapBeforeApply: NimbusTask[],
+  ): Promise<void> {
+    const snap = snapBeforeApply;
+    const candidate = OptimizerPreview._candidate;
+    const mode = OptimizerPreview._mode;
+    const plant = OptimizerPreview._plant;
+    const auditDetails = OptimizerPreview._auditDetails;
+    if (!candidate) return;
     OptimizerPreview._applying = true;
     if (auditDetails && plant) {
       Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
@@ -2138,16 +2274,15 @@ export const OptimizerPreview = {
         }),
       }).catch(() => {});
     }
-    // This is the sole schedule-state commit for a preview candidate.
-    // A running order never moves, and the preview may have sat open while one started. Drop
-    // those patches at apply time (Remove Backlog is the one run that moves running orders).
-    // The running test at Apply uses each order's own plant clock (Store.plantNow via the default now).
-    const keptPatches = mode === 'backlog'
-      ? candidate.patches
-      : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
-    const skippedRunning = candidate.patches.length - keptPatches.length;
-    Engine.applySchedulePatches(keptPatches);
-    if (skippedRunning) Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skippedRunning }), 'warn', 7000);
+    Engine.applySchedulePatches(kept);
+    if (skipped.ids.length) {
+      if (skipped.reason === 'running') {
+        Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
+      } else {
+        // 'changed' (stale-skipped): Task 3 supplies the toast key; same toast until then.
+        Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
+      }
+    }
     Store.setLastOptimize(new Date(), 'engine');
     const hadDismissed = Alerts.clearDismissed();
     // Push an undo entry so Ctrl+Z restores the pre-optimization state later.

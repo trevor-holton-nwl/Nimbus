@@ -878,6 +878,30 @@ test('single reveal: spinner only until alternates finish, then the body is rend
   }
 });
 
+test('computePreview is state-free until present(result, { open: false }) installs it without a render', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview._clear();
+    const writesBefore = fx.writes.length;
+    const result = await OptimizerPreview.computePreview('spt',
+      { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00') },
+      { tick: async () => {}, shouldStop: () => false, runSeq: 0 });
+    assert.equal(OptimizerPreview.active, false, 'compute alone does not activate the preview');
+    assert.equal(OptimizerPreview._candidate, null, 'compute alone does not set _candidate');
+    assert.equal(OptimizerPreview._snapshot, null);
+    assert.ok(result.candidate && result.snapshot.length === 2 && result.runtimeMs >= 0);
+    assert.equal(fx.writes.length, writesBefore, 'compute writes nothing to the body');
+
+    OptimizerPreview.present(result, { open: false });
+    assert.equal(OptimizerPreview.active, true);
+    assert.equal(OptimizerPreview._candidate, result.candidate);
+    assert.equal(OptimizerPreview._finalists, result.finalists);
+    assert.equal(fx.writes.length, writesBefore, 'open: false installs state without rendering the body');
+  } finally {
+    fx.restore();
+  }
+});
+
 test('single reveal: discarding while alternates compute clears the loading class and never renders', async () => {
   const fx = openSingleRevealFixture('SR', singleRevealTasks);
   try {
