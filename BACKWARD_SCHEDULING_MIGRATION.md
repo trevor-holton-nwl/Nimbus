@@ -5686,3 +5686,7 @@ Merge-gate fixes after the batches: `3100e0a` (pytest refresh fixture), `eacf637
 - The Codex runner copy of `apply-migrations.ps1` now carries the marker and `-Only` (`3fa4673`) but is still a divergent file from `scripts/apply-migrations.ps1`.
 - Nine main-only locale keys (`col.orig_start`, `col.orig_end`, `col.updated_start`, `col.updated_end`, `ui.insp_orig_start`, `ui.insp_orig_end`, `ui.insp_updated_start`, `ui.insp_updated_end`, `ui.diag_dropped_no_start`) exist on main but were deliberately removed here (e33eec7 reworked the date columns); the merge is clean and nothing reads them.
 - Browser checks still owed: the unchanged list in section 5, plus the cutover summary toast threshold (>= 10 non-queued rows), derive-paused banner stacking under the concurrency banner, due-date day display in the grid and Inspector (24:00-close lines), and the Optimize refusal toast on a plant without a timezone.
+
+### Validation fix wave (2026-10-15)
+
+Forward paths that the placement code owns (the schedule patch, the backlog removal, the reversal queue) now measure run time in elapsed plant-zone time, and the backward walk retries a 90-day look-back once out to 400 days before it reports that no legal finish exists. Optimizer evaluators (the setup-aware scheduler) deliberately keep viewer-zone elapsed time: they rank candidates relative to each other inside one run, and moving them onto plant-zone instants was cut from this wave (Context cut 1).

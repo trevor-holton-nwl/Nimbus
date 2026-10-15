@@ -96,7 +96,9 @@ export type BackwardResult =
       finishMoved: boolean; moveReason?: 'closed_finish' | 'no_slot_at_finish' | 'min_piece' | 'blackout' }
   | { kind: 'reached_now' }
   | { kind: 'overlong' }
-  | { kind: 'unavailable' };
+  | { kind: 'unavailable' }
+  /** No open time inside BACKWARD_MAX_DAYS before the finish; the caller must not reverse from now (VI17). */
+  | { kind: 'lookback_exhausted' };
 
 /** Lookup options shared by the backward primitives. `floor` is the earliest minute the walk may use
  * (normally the plant's "now"); `plantTz`, when given, makes all elapsed arithmetic run on plant-zone
@@ -141,6 +143,8 @@ type BackwardFrame =
     longestMs: number;
     /** Why a finish that is earlier than requested was clamped: the working day itself, or a blackout inside an open window. */
     clampReason: 'closed_finish' | 'blackout';
+    /** True when the look-back start (not the caller's floor) bounded the free-interval walk (VI17). */
+    boundedByLookback: boolean;
     toWall: (ms: number) => Date | null;
   };
 
@@ -491,15 +495,22 @@ export const Calendar = {
    * 90 calendar days large enough for this runtime? Dated blackouts are
    * intentionally ignored: they can exhaust normal placement, but do not make
    * a fundamentally fittable order "inherently overlong". */
-  hasNominalWindow(line: string, from: Date, durationMs: number): boolean {
+  hasNominalWindow(line: string, from: Date, durationMs: number, plantTz: string | null = null): boolean {
     const first = new Date(from);
     first.setHours(0, 0, 0, 0);
+    const core = globalThis.NimbusComputeCore!;
     // Windows that touch at midnight merge into one contiguous span (senior review I9, OQ47), the backward walk's rule.
     const windows = function* (): Generator<{ s: number; e: number } | null> {
       const cur = new Date(first);
       for (let day = 0; day < 90; day++) {
         const win = Calendar.workWindow(line, cur);
-        yield win ? { s: win[0].getTime(), e: win[1].getTime() } : null;
+        if (!win) yield null;
+        else if (plantTz) {
+          // VM17: judge the window by real elapsed plant-zone time (a spring-forward day is one hour shorter).
+          const a = core.plantInstantFromWallClock(plantTz, win[0]);
+          const b = core.plantInstantFromWallClock(plantTz, win[1]);
+          yield a && b && Number.isFinite(a.getTime()) && Number.isFinite(b.getTime()) ? { s: a.getTime(), e: b.getTime() } : null;
+        } else yield { s: win[0].getTime(), e: win[1].getTime() };
         cur.setDate(cur.getDate() + 1);
       }
     };
@@ -559,10 +570,10 @@ export const Calendar = {
 
   /** Backlog-specific placement contract. Unlike legacy `nextAvailable`, its
    * fallback is never accepted as a real ordinary slot. */
-  findContiguousSlot(line: string, from: Date, durationMs: number): BacklogSlot {
+  findContiguousSlot(line: string, from: Date, durationMs: number, plantTz: string | null = null): BacklogSlot {
     const operatingStart = Calendar.nextOperatingInstant(line, from);
     if (!operatingStart) return { kind: 'unavailable' };
-    if (!Calendar.hasNominalWindow(line, from, durationMs)) return { kind: 'overlong', start: operatingStart };
+    if (!Calendar.hasNominalWindow(line, from, durationMs, plantTz)) return { kind: 'overlong', start: operatingStart };
     const start = Calendar._nextContiguousMinuteSlot(line, from, durationMs);
     return start ? { kind: 'slot', start } : { kind: 'exhausted' };
   },
@@ -767,6 +778,7 @@ export const Calendar = {
     const longestMs = nominal.reduce((max, span) => Math.max(max, span.e - span.s), 0);
 
     const bound = opts.floor && opts.floor.getTime() > lookbackStart.getTime() ? opts.floor : lookbackStart;
+    const boundedByLookback = bound === lookbackStart;
     const spans = toSpans(Calendar._freeIntervalsBackward(line, finishWall, bound));
     const finishMs = toMs(finishWall);
     if (failed || !Number.isFinite(finishMs)) return { kind: 'unavailable' };
@@ -780,7 +792,7 @@ export const Calendar = {
     const clampReason: 'closed_finish' | 'blackout' =
       win && before >= win[0] && before < win[1] ? 'blackout' : 'closed_finish';
     return {
-      kind: 'ok', finishMs, spans, longestMs, clampReason,
+      kind: 'ok', finishMs, spans, longestMs, clampReason, boundedByLookback,
       toWall: ms => core.plantWallClockFromInstant(tz, new Date(ms)),
     };
   },
@@ -903,7 +915,7 @@ export const Calendar = {
       };
     };
     const contiguous = policy === 'never'
-      || (policy === 'overlong_only' && Calendar.hasNominalWindow(line, from, runMs));
+      || (policy === 'overlong_only' && Calendar.hasNominalWindow(line, from, runMs, plantTz));
     if (contiguous) {
       const hit = spans.find(span => span.e - span.s >= runMs);
       return hit ? done([{ s: hit.s, e: hit.s + runMs }]) : { kind: 'exhausted' };
@@ -951,6 +963,19 @@ export const Calendar = {
    * are returned as naive wall-clock Dates (OQ46). */
   allocateRuntimeBackward(line: string, finish: Date, runtimeMinutes: number,
                           policy: SplitOrderPolicy, opts: BackwardAllocationOptions): BackwardResult {
+    const first = Calendar._allocateRuntimeBackwardOnce(line, finish, runtimeMinutes, policy, opts);
+    if (first !== 'retry') return first;
+    // VI17: the 90-day look-back, not the plant's now, stopped the walk (a long shutdown before a far due date).
+    // Look back the full BACKWARD_MAX_DAYS once; if that still finds nothing the order has no legal finish in
+    // range and the caller reports it rather than reversing from now (OQ13/OQ55).
+    const second = Calendar._allocateRuntimeBackwardOnce(line, finish, runtimeMinutes, policy,
+      { ...opts, lookbackDays: BACKWARD_MAX_DAYS });
+    return second === 'retry' ? { kind: 'lookback_exhausted' } : second;
+  },
+
+  /** One backward attempt; `'retry'` means the walk ran out at the look-back start rather than at the floor. */
+  _allocateRuntimeBackwardOnce(line: string, finish: Date, runtimeMinutes: number,
+                               policy: SplitOrderPolicy, opts: BackwardAllocationOptions): BackwardResult | 'retry' {
     const totalMinutes = Math.round(Number(runtimeMinutes));
     if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return { kind: 'unavailable' };
     const frame = Calendar._backwardFrame(line, finish, opts);
@@ -959,7 +984,7 @@ export const Calendar = {
     const runMs = totalMinutes * Config.MS_MIN;
     if (!splitting && runMs > frame.longestMs) return { kind: 'overlong' };
     const { spans, finishMs } = frame;
-    if (!spans.length) return { kind: 'reached_now' };
+    if (!spans.length) return frame.boundedByLookback ? 'retry' : { kind: 'reached_now' };
     const setupMs = Number.isFinite(opts.setupMinutes) && (opts.setupMinutes as number) > 0
       ? Math.round(opts.setupMinutes as number) * Config.MS_MIN : 0;
     const latestEnd = spans[spans.length - 1].e;   // the finish clamped to operating time
@@ -971,7 +996,7 @@ export const Calendar = {
         // OQ2 V1: the one window must hold the changeover right before the productive start as well.
         if (spans[i].e - spans[i].s >= runMs + setupMs) { picked.push({ s: spans[i].e - runMs, e: spans[i].e }); break; }
       }
-      if (!picked.length) return { kind: 'reached_now' };
+      if (!picked.length) return frame.boundedByLookback ? 'retry' : { kind: 'reached_now' };
       if (picked[0].e !== latestEnd) moveReason = 'no_slot_at_finish';
     } else {
       const minSegment = Number.isFinite(opts.minSegmentMinutes) ? Math.max(0, Math.round(opts.minSegmentMinutes)) : 0;
@@ -997,7 +1022,7 @@ export const Calendar = {
         picked.push({ s: spans[i].e - take * Config.MS_MIN, e: spans[i].e });
         remaining -= take;
       }
-      if (remaining !== 0) return { kind: 'reached_now' };
+      if (remaining !== 0) return frame.boundedByLookback ? 'retry' : { kind: 'reached_now' };
       if (picked[0].e !== latestEnd) moveReason = 'min_piece';
     }
     if (!moveReason && latestEnd < finishMs) moveReason = frame.clampReason;
@@ -1034,7 +1059,7 @@ export const Calendar = {
     const runtimeMinutes = Math.round(Number(request.runtimeMinutes));
     const durationMs = runtimeMinutes * Config.MS_MIN;
     const isInherentlyOverlong = Number.isFinite(runtimeMinutes) && runtimeMinutes > 0
-      && !Calendar.hasNominalWindow(line, request.earliestStart, durationMs);
+      && !Calendar.hasNominalWindow(line, request.earliestStart, durationMs, null);
     return placeWithSetupPure({
       ...request,
       freeIntervals: Calendar._freeIntervals(line, request.earliestStart),

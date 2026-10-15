@@ -713,3 +713,42 @@ describe('gate 17: sibling family finish survives only the backward walk (620 mi
     assert.equal(finish.getTime() - forward.end.getTime(), 10 * 60 * 1000);
   });
 });
+
+// D17 (VI17, VM17): the look-back retry and plant-zone nominal windows.
+describe('D17: look-back retry and plant-zone nominal window', () => {
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Calendar._endRun(); });
+  afterEach(() => { Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+  const dayMs = 24 * 3600 * 1000;
+  const due = at('2026-10-20', '18:00');
+  const open = weekdays(6, 22);
+
+  it('VI17: a 100-day shutdown before a far due date places the order before the shutdown, finish moved, not reached_now', () => {
+    Store.setCalendar('VI17-A', open, 'unit-test');
+    const shutStart = new Date(due.getTime() - 100 * dayMs), shutEnd = due;
+    Store.replaceBlocks([blk('vi17-a', 'VI17-A', shutStart, shutEnd)], 'unit-test');
+    const r = Calendar.allocateRuntimeBackward('VI17-A', due, 480, 'never', bopts({ floor: at('2026-01-01', '00:00') }));
+    assert.equal(r.kind, 'placed');
+    assert.equal(r.finishMoved, true);
+    assert.ok(r.end.getTime() <= shutStart.getTime(), 'ends before the shutdown starts');
+  });
+
+  it('VI17: with no open time inside 400 days the walk reports lookback_exhausted, never reached_now', () => {
+    Store.setCalendar('VI17-B', open, 'unit-test');
+    Store.replaceBlocks([blk('vi17-b', 'VI17-B', new Date(due.getTime() - 400 * dayMs), due)], 'unit-test');
+    const r = Calendar.allocateRuntimeBackward('VI17-B', due, 480, 'never', bopts({ floor: at('2025-01-01', '00:00') }));
+    assert.equal(r.kind, 'lookback_exhausted');
+  });
+
+  it('VM17: hasNominalWindow judges a plant-zone day by real elapsed time (the fall-back Sunday is 9 real hours, a normal Sunday 8)', async () => {
+    // Only Sundays are open (00:00-08:00), so the single 9 elapsed-hour day in the 90-day scan is Sun 1 Nov 2026 in Chicago.
+    await withZone('UTC', () => {
+      const sundayOnly = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d === 0 ? [0, 8] : null]));
+      Store.setCalendar('VM17-A', sundayOnly, 'unit-test');
+      const tz = 'America/Chicago', nineH = 9 * 3600 * 1000;
+      assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-01', '00:00'), nineH, tz), true, 'the fall-back day holds 9 real hours');
+      assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-01', '00:00'), nineH), false, 'wall-clock reading sees only 8 h');
+      assert.equal(Calendar.hasNominalWindow('VM17-A', at('2026-11-02', '00:00'), nineH, tz), false, 'later Sundays are 8 h');
+    });
+  });
+});

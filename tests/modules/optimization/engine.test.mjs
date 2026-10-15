@@ -4367,6 +4367,21 @@ describe('reconcile (finish-anchored)', () => {
     } finally { process.env.TZ = previousTz ?? LOCAL_TZ; }   // set explicitly: deleting TZ can leave the process on UTC
   });
 
+  test('VI3: schedulePatchFor measures the run in the plant zone (8 h across the spring-forward gap ends 09:00 wall, not 08:00)', () => {
+    const previousTz = process.env.TZ;
+    process.env.TZ = 'UTC';   // a viewer outside the plant zone: elapsed wall arithmetic knows nothing of the Chicago jump
+    const fx = recFixture({ timezone: 'America/Chicago' });
+    try {
+      const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+      Store.setCalendar(fx.line, all([0, 24]), 'unit-test');
+      for (let dow = 0; dow < 7; dow += 1) Store.setPlantWorkHours(fx.plant, dow, [0, 24], 'unit-test');
+      const patch = Engine.schedulePatchFor({ id: 'vi3', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '8' }, fx.line, new Date(2026, 2, 8, 0, 0), 'never');
+      assert.ok(patch, 'a patch is produced');
+      assert.deepEqual([patch.start_date.getDate(), patch.start_date.getHours()], [8, 0]);
+      assert.deepEqual([patch.end_date.getDate(), patch.end_date.getHours(), patch.end_date.getMinutes()], [8, 9, 0], 'the walk ran on instants: 09:00 wall');
+    } finally { fx.restore(); process.env.TZ = previousTz ?? LOCAL_TZ; }
+  });
+
   test('senior review M1: the never-branch reversal rounds the run time to whole minutes (no fractional-minute finish)', () => {
     const fx = recFixture();
     try {

@@ -1271,12 +1271,15 @@ export const Engine = {
                    policy: SplitOrderPolicy = Engine.splitOrderPolicyFor(sourceGetPlantForLine(line))): Partial<NimbusTask> | null {
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
-    if (policy === 'never') {
+    // VI3 (D17): the plant's zone, so the run is measured in elapsed plant-zone time across a DST change.
+    const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
+    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    if (policy === 'never' && !plantTz) {
       const start = Calendar.nextAvailable(line, requestedStart, runtimeMinutes * Config.MS_MIN);
       if (!start) return null;
       return { start_date: start, end_date: new Date(start.getTime() + runtimeMinutes * Config.MS_MIN), scheduleSegments: [] };
     }
-    const allocation = Calendar.allocateRuntime(line, requestedStart, runtimeMinutes, policy);
+    const allocation = Calendar.allocateRuntime(line, requestedStart, runtimeMinutes, policy, plantTz);
     return allocation.kind === 'allocated'
       ? { start_date: allocation.start, end_date: allocation.end, scheduleSegments: allocation.scheduleSegments }
       : null;
@@ -1360,6 +1363,7 @@ export const Engine = {
       };
     }
     if (result.kind === 'overlong') return { kind: 'refuse', reason: 'overlong_never' };
+    if (result.kind === 'lookback_exhausted') return { kind: 'refuse', reason: 'no_operating_window' };
     if (result.kind === 'unavailable') return { kind: 'refuse', reason: 'no_operating_window' };
     if (opts.deferReversal) return { kind: 'reached_now' };
     const forward = Calendar.allocateRuntime(line, floor, runtimeMinutes, effectivePolicy, plantTz);
@@ -1895,7 +1899,7 @@ export const Engine = {
         // Preserve the existing continuous-bar contract exactly for legacy
         // schedules. A split schedule that is explicitly regenerated under
         // this policy is cleared below as one atomic parent aggregate.
-        const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs);
+        const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs, opts.plantTz ?? null);
         if (slot.kind === 'unavailable' || (!opts.plantTz && !('start' in slot))) {
           out.failure = { item, reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
           break;
@@ -2035,7 +2039,7 @@ export const Engine = {
           line,
           items.slice(firstBacklog).map(item => ({ ...item, notBefore: item.snapshotStart >= now ? item.snapshotStart : undefined })),
           now, splitPolicy,
-          { stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart });
+          { plantTz: Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null, stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart });
         for (const item of sequence.invalidRuntime) diagnostics.invalidRuntimeIds.push(item.task.id);
         // OQ50 c: an order that cannot be one bar under the `never` policy is queued, not stretched over closed time.
         for (const item of sequence.overlong) {
