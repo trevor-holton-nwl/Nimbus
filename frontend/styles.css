@@ -723,10 +723,16 @@ textarea { min-height: 60px; padding: 7px 10px; }
   .wh-cta { width: 100%; justify-content: center; }
 }
 
-/* KPI tile row — 4 action tiles, one row, promoted directly under the work header. */
+/* KPI tile row — 4 steady-state action tiles plus the conditional Needs
+   Planning tile. At full width every tile shares one row (auto-flow columns
+   give each child an equal column); narrower viewports fall back to the
+   four-column grid and let a fifth tile wrap. */
 .kpi-stack {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
   margin-bottom: 22px;
+}
+@media (min-width: 1200px) {
+  .kpi-stack { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 }
 @media (max-width: 900px) {
   .kpi-stack { grid-template-columns: repeat(2, 1fr); }
