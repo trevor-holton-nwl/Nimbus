@@ -11,7 +11,7 @@
   - `POST /tasks/bulk_update` (`bulk_update`) — flat-list alias of the same logic for external tooling.
   - `POST /tasks/refresh` (`tasks_refresh`) — refetch complete writable task aggregates, runtime provenance and matching `row_version` for concurrency reconciliation.
   - Private helpers used only within this domain: `_clean_id` (strips Excel float suffix from SAP ids), `_to_pydt` (pandas/ISO/None → naive datetime), `_schedule_segments_to_wire` (normalizes the split-order JSONB aggregate to the API's naive-local contract), `_apply_task_date_updates` (the single shared validate/persist/rollback path behind all three `/update`-family endpoints).
-- **`models.py`** (307 lines) — the Pydantic DTOs backing `GET /tasks`'s `response_model=` runtime validation and every update endpoint's request/response shapes: `LinkDTO`, `ScheduleSegmentDTO`, `PlanningReason`, `TaskDTO` (mirrors `get_tasks`'s `data.append({...})` dict literal field-for-field), `TasksResponse`, `HorizonsResponse`, `ScheduleConflict`, `TaskUpdateResult`, `BulkUpdateResult`, `TaskVersionRow`, `TasksRefreshResponse`, `ScheduleSegmentInput`, `TaskDateUpdate` (carries `base_version`/`force` for the xmin contract), `TasksUpdatePayload`, `TaskRefreshPayload`.
+- **`models.py`** (309 lines) — the Pydantic DTOs backing `GET /tasks`'s `response_model=` runtime validation and every update endpoint's request/response shapes: `LinkDTO`, `ScheduleSegmentDTO`, `PlanningReason`, `TaskDTO` (mirrors `get_tasks`'s `data.append({...})` dict literal field-for-field), `TasksResponse`, `HorizonsResponse`, `ScheduleConflict`, `TaskUpdateResult`, `BulkUpdateResult`, `TaskVersionRow`, `TasksRefreshResponse`, `ScheduleSegmentInput`, `TaskDateUpdate` (carries `base_version`/`force` for the xmin contract), `TasksUpdatePayload`, `TaskRefreshPayload`.
 
 Both files carry a header docstring confirming this was a **pure move from `brain.py`** (routes.py: lines 1493-1982 of the pre-split file; models.py: verbatim) per `docs/architecture/domain-refactor-plan.md` §4 — route paths, payload shapes, and response models are byte-identical to before.
 
@@ -21,12 +21,12 @@ Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `sele
 
 **`db.py`/`master_data.py` are not split** (deferred, see `docs/MIGRATION.md`) — this domain's route file imports both whole at repo root (`import db`, `import master_data as md`) and calls into them for all actual data work. Current line ranges this domain's logic depends on (grepped fresh against `db.py` on `feature/backward-scheduling` at 60bfdfe as of 2026-10-14, 5,148 lines total):
 - `db.make_id()` — line 123 (the MD5 task-id scheme; not called directly by these routes but its stability is why ids can key `/tasks/refresh` and drag/edit operations across reloads).
-- `db._horizon_bounds_for_plant()` — line 540 (visibility/frozen horizon bounds `get_tasks` rides along on, per its own C1/C2 comments).
-- `db.query_orders()` — line 651 (the `GET /tasks` data source).
-- `db.count_orders()` — line 722 (paging total).
-- `db.get_task_versions()` — line 879 (backs `/tasks/refresh`; `TaskVersionRow`'s docstring cites `db.py:437-445` for its shape, which is stale — re-grep before trusting either number).
-- `db.update_task_dates_bulk()` — line 1278 (the shared persist path behind `_apply_task_date_updates`).
-- `db.update_task_note()` — line 1863 (backs `/task/note`).
+- `db._horizon_bounds_for_plant()` — line 529 (visibility/frozen horizon bounds `get_tasks` rides along on, per its own C1/C2 comments).
+- `db.query_orders()` — line 640 (the `GET /tasks` data source).
+- `db.count_orders()` — line 711 (paging total).
+- `db.get_task_versions()` — line 868 (backs `/tasks/refresh`; `TaskVersionRow`'s docstring cites `db.py:437-445` for its shape, which is stale — re-grep before trusting either number).
+- `db.update_task_dates_bulk()` — line 1275 (the shared persist path behind `_apply_task_date_updates`).
+- `db.update_task_note()` — line 1860 (backs `/task/note`).
 - `master_data.plants_for_line()` — line 2997 (used by `get_tasks`'s `?machine=`-only plant-scope check).
 
 ## Key invariants & hazards
@@ -63,7 +63,7 @@ Run: `python -m pytest tests/test_to_pydt.py tests/test_task_response_models.py 
 
 ## Gotchas
 
-- Don't trust the `TaskVersionRow` docstring's `db.py:437-445` citation for `get_task_versions`'s shape — that function is at line 879 on `feature/backward-scheduling` (2026-10-14). Line numbers drift across phases; re-grep before citing.
+- Don't trust the `TaskVersionRow` docstring's `db.py:437-445` citation for `get_task_versions`'s shape — that function is at line 868 on `feature/backward-scheduling` (2026-10-14). Line numbers drift across phases; re-grep before citing.
 - `brain.py`'s own comments (around its `backend.scheduling.*` imports) explain the re-export pattern exists specifically so pre-refactor test files that still say `import brain` keep working without edits — this is intentional back-compat scaffolding, not leftover duplication to clean up.
 - `response_model=` is only wired for this domain's routes (`GET /tasks` and the whole task-date-update family) — per the root `CLAUDE.md`, no other endpoint family in the app has it yet, so don't assume the same runtime-validation safety net exists elsewhere.
 
@@ -87,7 +87,7 @@ Run: `python -m pytest tests/test_to_pydt.py tests/test_task_response_models.py 
 ## What was last sent to SAP: side table `order_sap_sent` (2026-10-07, SAP staging)
 
 - **`order_sap_sent` (`order_id`, `plant`, `sent_finish`, `sent_version`, `sent_firm`, `sent_at`)** is written only by Send to SAP (`sap_staging.queue_send_to_sap`, `backend/integration/CLAUDE.md`), and only when the remembered values actually change. It is a side table, not `orders` columns, so a Send never writes an `orders` row and never bumps xmin (the `base_version`). `db._CHUNK_READ_SQL` LEFT JOINs it and exposes `sent_finish`/`sent_version` to `sap_changed_fields` as `sap_sent_finish`/`sap_sent_version`. **A planner's save does NOT clear them** (`db.update_task_dates_bulk` never touches it; D20 refinement): they are overwritten only by the next Send. Reason: clearing let SAP's echo of the old send wipe the planner's newer edit. They are never part of the `/tasks` DTO.
-- **Effect on re-ingest (echo rule, D20).** `db.sap_changed_fields` (`db.py:2733`; the finish is judged by `db.finish_echoes`, `db.py:2676`, in the SAP frame, see `backend/integration/CLAUDE.md`) treats an incoming SAP finish that echoes the remembered sent finish as NOT an SAP date change even when SAP back-scheduled the start (and a version equal to the remembered sent version as not a version change), so a re-import of what NIMBUS just sent does not reset the planner's slot; the new SAP baselines are still written. A different finish, version or work center still re-plans the order as before.
+- **Effect on re-ingest (echo rule, D20).** `db.sap_changed_fields` (`db.py:2732`; the finish is judged by `db.finish_echoes`, `db.py:2675`, in the SAP frame, see `backend/integration/CLAUDE.md`) treats an incoming SAP finish that echoes the remembered sent finish as NOT an SAP date change even when SAP back-scheduled the start (and a version equal to the remembered sent version as not a version change), so a re-import of what NIMBUS just sent does not reset the planner's slot; the new SAP baselines are still written. A different finish, version or work center still re-plans the order as before.
 - **Quantity rule (A3).** `sap_changed_fields` judges a quantity change on the TOTAL: when the incoming row carries `planned_order_initial_quantity` (SAP planned orders: gsmng) it is compared with the stored `planned_order_initial_quantity`; only a row without a total (Excel) falls back to `order_quantity`. A partial conversion shrinks only the open `order_quantity` and does not unschedule the order; open quantity is still written for display/planning.
 - **Excel-only columns on SAP applies (A1).** `upsert_orders(source="sap")` runs `_UPSERT_SQL_SAP`, which keeps stored description, form size, order category/type, labor/machine hours and FTE when SAP's row does not carry them (COALESCE; only a non-NULL differing value counts as a change), so Excel-loaded values survive and an identical SAP re-apply writes nothing.
 

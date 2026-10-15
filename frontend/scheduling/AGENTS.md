@@ -2,7 +2,7 @@
 
 ## What lives here
 
-- **`gantt.mts`** (4,891 lines) — the Gantt timeline surface and its supporting UI:
+- **`gantt.mts`** (4,940 lines) — the Gantt timeline surface and its supporting UI:
   - `Timeline` — the vis-timeline wrapper (render, item lifecycle, drag/resize hooks).
   - `TimelineNav` — the canvas minimap/navigator strip above the Gantt. It is a **projection of `Timeline._items` + `Timeline._visibleLines()`** (same bars, split-order segments, row order and `.dimmed` filter state the Gantt renders — never re-derive the task/line filter chain here). Repaints are rAF-coalesced and triggered by `Timeline._items.on('*')` (the only signal for GanttFilter's className-only dim/undim updates) plus `lines:selected`/`plant:selected`/alerts/blocks/calendar Store events. Two rules for that `_items` subscriber: **skip events whose changed ids are all `kind:'zone'`** (the 1s ticker pushes zone bands whenever 'now' has moved ≥0.5 px at the current zoom, or an edge input changed) and **never gate on `Timeline._suppressEvents`** (GanttFilter._doApply sets it around exactly the updates the nav needs). Pure geometry helpers `navComputeRange`/`navLayout`/`navBarStyle`/`navClampRect` are exported for tests. Colors are read from CSS tokens at paint time (canvas can't use `var()`); DarkMode's repaint hook in `nimbus-intelligence.js` calls `render()`.
   - `DependencyOverlay` — finish-to-start link line rendering.
@@ -10,14 +10,14 @@
   - `GanttFilter` — the Gantt's own line/search filter UI.
   - `Interaction` — the unified click/keyboard/drag pipeline (marquee multi-select, hover-preview card, double-click line isolation, multi-order ghost-drag, two-way AG Grid ↔ `Selection` sync).
   - `setupDiagnosticLabel` / `setupSourceLabel` — small label helpers for setup-aware diagnostics badges drawn on the timeline; `SetupPresentationDetail` is their shared type.
-- **`orders.mts`** (2,822 lines) — the AG Grid orders table and order-detail chrome:
+- **`orders.mts`** (2,833 lines) — the AG Grid orders table and order-detail chrome:
   - `Table` — the AG Grid wrapper (column defs, cell editors, row model).
   - `Inspector` — the single/multi-selection detail panel.
   - `ContextMenu` — right-click actions on grid rows/Gantt bars.
   - `Printer` — print/export.
   - `notifyResidualFirming` — standalone helper (fires a toast/alert when firming an order leaves a residual gap); `AgGridRowNode` is the row-node type used by both this file and `gantt.mts`.
 - **`selection.mts`** (138 lines) — `Selection`, the multi-select store (which task ids are selected, anchor tracking for Shift-range-select, listener fanout). Independent of vis-timeline internals; every UI (Timeline, Table, Inspector, ContextMenu) subscribes to it. Never persisted, never autosaved.
-- **`persistence.mts`** (1,715 lines) — `Persistence`: backend fetch (`load`/`loadForPlant`/`reload`), the localStorage cache (`_saveCache`, key `nimbus.state.v3`), dirty-id tracking, and the explicit `saveAll()` backend-save path.
+- **`persistence.mts`** (1,769 lines) — `Persistence`: backend fetch (`load`/`loadForPlant`/`reload`), the localStorage cache (`_saveCache`, key `nimbus.state.v3`), dirty-id tracking, and the explicit `saveAll()` backend-save path.
 - **`order-field-catalog.mjs`** (124 lines, + `order-field-catalog.d.mts` ambient types) — `ORDER_FIELD_CATALOG`, the single source of truth for which optional Orders fields exist and their default show/hide state in the AG Grid columns and Inspector panel. Deliberately a zero-dependency leaf module (no imports) so both this domain and the admin System Configuration UI can depend on it without adding a cross-domain edge.
 
 ## Counterpart
