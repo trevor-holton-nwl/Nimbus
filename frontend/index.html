@@ -1232,7 +1232,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
          Optimize/What-If/Print stay here; zoom + Fit/Now moved to gantt-filterbar.
          Inline onclick= kept verbatim (legacy-surface contract). -->
     <div class="context-sched-actions" id="context-sched-actions">
-      <button class="seg-btn btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize"><span aria-hidden="true">📈</span><span class="sa-label" data-i18n="btn.optimize">Optimize</span></button>
+      <button class="seg-btn btn-optimize" id="btn-optimize" onclick="NIMBUS.OptimizeDialog.open()" data-i18n-title="tip.smart_optimize" title="Smart optimize"><span aria-hidden="true">📈</span><span class="sa-label" data-i18n="btn.optimize">Optimize</span></button>
       <!-- .sandbox-btn is load-bearing: SandboxAdapter rewrites textContent + onclick. Keep flat, no inner spans. -->
       <button class="seg-btn sandbox-btn" onclick="NIMBUS.SandboxAdapter.enter()" data-i18n="ui.sandbox_off" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
       <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule"><span aria-hidden="true">⎙</span><span class="sa-label" data-i18n="btn.print">Print</span></button>
@@ -2607,6 +2607,14 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <span>Respect calendar blackouts</span>
             </label>
           </div>
+          <label class="opt-select-row" id="opt-budget-label" for="opt-search-budget">
+            <span data-i18n="ui.opt_search_time">Search time</span>
+            <select id="opt-search-budget" class="input" aria-describedby="opt-search-budget-hint">
+              <option value="8" data-i18n="ui.opt_search_time_normal">Normal (8 s)</option>
+              <option value="180" data-i18n="ui.opt_search_time_exhaustive">Exhaustive (up to 3 min, runs in the background)</option>
+            </select>
+          </label>
+          <p id="opt-search-budget-hint" class="opt-strategy-hint" data-i18n="ui.opt_search_time_hint">Exhaustive keeps searching for up to 3 minutes while you keep working and tells you when it is done. Comparison plans always use the normal budget.</p>
         </div>
       </div>
 
@@ -2678,6 +2686,24 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <footer class="modal-foot">
       <button class="btn btn-ghost"   data-i18n="btn.opt_pv_discard" onclick="NIMBUS.OptimizerPreview.discard()">↶ Discard</button>
       <button class="btn btn-primary" id="opt-preview-apply-btn" data-i18n="btn.opt_pv_apply" onclick="NIMBUS.OptimizerPreview.apply()">✓ Apply changes</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Exhaustive optimization finished (background run)
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-opt-background-done" data-no-backdrop-close hidden>
+  <div class="modal" style="max-width:520px;" role="dialog" aria-labelledby="opt-bg-done-title">
+    <header class="modal-head">
+      <h3 id="opt-bg-done-title" data-i18n="ui.opt_bg_done_title">Exhaustive optimization finished</h3>
+      <button class="icon-btn sm" id="opt-bg-close-btn" aria-label="Close">✕</button>
+    </header>
+    <div class="modal-body" id="opt-bg-done-body" style="padding:16px 20px;"></div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" id="opt-bg-switch-btn" data-i18n="ui.opt_bg_switch_plant" hidden>Switch to plant</button>
+      <button class="btn btn-ghost" id="opt-bg-view-btn" data-i18n="ui.opt_bg_view">View preview</button>
+      <button class="btn btn-primary" id="opt-bg-apply-btn" data-i18n="ui.opt_bg_apply">Apply without preview</button>
     </footer>
   </div>
 </div>

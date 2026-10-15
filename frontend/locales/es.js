@@ -1586,6 +1586,32 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_missing_remedy_state':        'Record this line\'s current setup state',                   // MISSING TRANSLATION
   'ui.setup_missing_remedy_row':          'Add a setup matrix row for this transition',                // MISSING TRANSLATION
   'ui.opt_pv_scheduled_state_unrecorded': '{{orders}} order(s) on {{lines}} machine(s) were scheduled as the line\'s first order without a recorded current setup state — record the line state to charge their setup.', // MISSING TRANSLATION
+  'ui.opt_pv_diag_limit_reached_note': 'La búsqueda se detuvo al alcanzar un límite de tiempo o de iteraciones en lugar de converger; para una ejecución más larga, elija el tiempo de búsqueda Exhaustiva en el diálogo Optimizar.',
+  'ui.opt_search_time': 'Tiempo de búsqueda',
+  'ui.opt_search_time_normal': 'Normal (8 s)',
+  'ui.opt_search_time_exhaustive': 'Exhaustiva (hasta 3 min, se ejecuta en segundo plano)',
+  'ui.opt_search_time_hint': 'La búsqueda exhaustiva sigue buscando hasta 3 minutos, más aproximadamente un minuto para la comprobación de capacidad y los planes de comparación, mientras usted sigue trabajando, y le avisa cuando termina.',
+  'btn.opt_run_bg_busy': 'Optimización exhaustiva en curso…',
+  'toast.opt_bg_started': 'Optimización exhaustiva iniciada para la planta {{plant}} (hasta 3 min). Puede seguir trabajando.',
+  'toast.opt_bg_running': 'Ya hay una optimización exhaustiva en curso para la planta {{plant}}. Espere a que termine o cancélela desde el botón Optimizar.',
+  'toast.opt_bg_cancelled': 'Optimización exhaustiva cancelada.',
+  'toast.opt_bg_other_plant': 'Vuelva a la planta {{plant}} para aplicar este resultado.',
+  'toast.opt_bg_partial_applied': 'Se aplicaron {{applied}} pedidos; {{skipped}} omitidos porque el programa cambió: {{list}}',
+  'modal.opt_bg_cancel_confirm': 'La optimización exhaustiva de la planta {{plant}} está en curso ({{elapsed}} transcurridos). ¿Cancelarla?',
+  'ui.opt_bg_done_title': 'Optimización exhaustiva finalizada',
+  'ui.opt_bg_done_summary': 'Planta {{plant}}: {{placed}} pedidos programados, {{queued}} aún pendientes de planificar, búsqueda de {{seconds}} s.',
+  'ui.opt_bg_done_changed': '{{count}} pedido(s) propuesto(s) cambiaron o desaparecieron mientras se ejecutaba el optimizador. Se omitirán; el resto se puede seguir aplicando.',
+  'ui.opt_bg_done_other_plant': 'Está viendo la planta {{current}}. Vuelva a la planta {{plant}} para aplicar este resultado.',
+  'ui.opt_bg_done_blocked': 'Este resultado tiene errores de validación bloqueantes y no se puede aplicar sin vista previa. Abra la vista previa para ver los detalles.',
+  'ui.opt_bg_done_failed': 'La optimización exhaustiva ha fallado: {{error}}',
+  'ui.opt_bg_view': 'Ver vista previa',
+  'ui.opt_bg_apply': 'Aplicar sin vista previa',
+  'ui.opt_pv_diag_limit_reached_note_exhaustive': 'La búsqueda se detuvo en su límite incluso en una ejecución exhaustiva; el resultado es el mejor encontrado.',
+  'ui.opt_bg_more': '(+{{count}} más)',
+  'ui.opt_bg_switch_plant': 'Cambiar a la planta {{plant}}',
+  'toast.opt_bg_no_worker': 'La búsqueda exhaustiva requiere un navegador compatible con workers en segundo plano.',
+  'ui.opt_pv_apply_fits': 'Aplicar lo que aún encaja',
+  'ui.opt_bg_leave_warning': 'Una optimización exhaustiva sigue en curso. Si sale de esta página, se perderá.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION
   'ui.setup_review_filter_state':         'Line state not recorded',                                   // MISSING TRANSLATION
   'ui.setup_review_filter_row':           'Matrix row absent',                                         // MISSING TRANSLATION

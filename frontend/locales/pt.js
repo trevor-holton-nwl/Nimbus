@@ -1584,6 +1584,32 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_missing_remedy_state':        'Record this line\'s current setup state',                   // MISSING TRANSLATION
   'ui.setup_missing_remedy_row':          'Add a setup matrix row for this transition',                // MISSING TRANSLATION
   'ui.opt_pv_scheduled_state_unrecorded': '{{orders}} order(s) on {{lines}} machine(s) were scheduled as the line\'s first order without a recorded current setup state — record the line state to charge their setup.', // MISSING TRANSLATION
+  'ui.opt_pv_diag_limit_reached_note': 'A busca parou em um limite de tempo ou de iterações em vez de convergir; para uma execução mais longa, escolha o tempo de busca Exaustiva no diálogo Otimizar.',
+  'ui.opt_search_time': 'Tempo de busca',
+  'ui.opt_search_time_normal': 'Normal (8 s)',
+  'ui.opt_search_time_exhaustive': 'Exaustiva (até 3 min, executa em segundo plano)',
+  'ui.opt_search_time_hint': 'A busca exaustiva continua por até 3 minutos, mais cerca de um minuto para a verificação de capacidade e os planos de comparação, enquanto você trabalha, e avisa quando terminar.',
+  'btn.opt_run_bg_busy': 'Otimização exaustiva em andamento…',
+  'toast.opt_bg_started': 'Otimização exaustiva iniciada para a planta {{plant}} (até 3 min). Você pode continuar trabalhando.',
+  'toast.opt_bg_running': 'Já há uma otimização exaustiva em andamento para a planta {{plant}}. Aguarde o fim ou cancele-a pelo botão Otimizar.',
+  'toast.opt_bg_cancelled': 'Otimização exaustiva cancelada.',
+  'toast.opt_bg_other_plant': 'Volte para a planta {{plant}} para aplicar este resultado.',
+  'toast.opt_bg_partial_applied': '{{applied}} pedidos aplicados; {{skipped}} ignorados porque a programação mudou: {{list}}',
+  'modal.opt_bg_cancel_confirm': 'A otimização exaustiva da planta {{plant}} está em andamento ({{elapsed}} decorridos). Cancelar?',
+  'ui.opt_bg_done_title': 'Otimização exaustiva concluída',
+  'ui.opt_bg_done_summary': 'Planta {{plant}}: {{placed}} pedidos programados, {{queued}} ainda precisam de planejamento, busca de {{seconds}} s.',
+  'ui.opt_bg_done_changed': '{{count}} pedido(s) proposto(s) mudaram ou desapareceram enquanto o otimizador estava em execução. Eles serão ignorados; o restante ainda pode ser aplicado.',
+  'ui.opt_bg_done_other_plant': 'Você está vendo a planta {{current}}. Volte para a planta {{plant}} para aplicar este resultado.',
+  'ui.opt_bg_done_blocked': 'Este resultado tem erros de validação bloqueantes e não pode ser aplicado sem uma prévia. Veja a prévia para os detalhes.',
+  'ui.opt_bg_done_failed': 'A otimização exaustiva falhou: {{error}}',
+  'ui.opt_bg_view': 'Ver prévia',
+  'ui.opt_bg_apply': 'Aplicar sem prévia',
+  'ui.opt_pv_diag_limit_reached_note_exhaustive': 'A busca parou em seu limite mesmo em uma execução exaustiva; o resultado é o melhor encontrado.',
+  'ui.opt_bg_more': '(+{{count}} mais)',
+  'ui.opt_bg_switch_plant': 'Mudar para a planta {{plant}}',
+  'toast.opt_bg_no_worker': 'A busca exaustiva requer um navegador compatível com workers em segundo plano.',
+  'ui.opt_pv_apply_fits': 'Aplicar o que ainda cabe',
+  'ui.opt_bg_leave_warning': 'Uma otimização exaustiva ainda está em andamento. Sair desta página fará com que ela seja perdida.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION
   'ui.setup_review_filter_state':         'Line state not recorded',                                   // MISSING TRANSLATION
   'ui.setup_review_filter_row':           'Matrix row absent',                                         // MISSING TRANSLATION

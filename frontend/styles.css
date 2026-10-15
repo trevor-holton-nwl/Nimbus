@@ -4317,6 +4317,10 @@ body.dark .cw-active-card {
 }
 .opt-window-row .opt-date-summary { margin: 0; }
 
+.opt-select-row { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; font-size: 13px; color: var(--fg); }
+.btn-optimize.is-running::after { content: ''; display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%; background: var(--accent); animation: opt-bg-pulse 1.2s ease-in-out infinite; }
+@keyframes opt-bg-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .btn-optimize.is-running::after { animation: none; } }
 .opt-strategy-hint { margin: 4px 0 0; font-size: 12px; color: var(--fg-mute); line-height: 1.4; }
 .opt-check:has(input:disabled) { cursor: help; color: var(--fg-mute); }
 .opt-check input:disabled + .opt-check-box { opacity: .7; }

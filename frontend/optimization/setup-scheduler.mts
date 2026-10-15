@@ -456,6 +456,11 @@ export interface EvaluationRequest {
    *  comparison run, which gets a smaller, fixed budget instead of a full
    *  fresh deadline on the synchronous path. */
   deadlineAt?: number;
+  /** Caller-chosen primary search budget in ms (Normal 8000, Exhaustive 180000). Drives the
+   *  iteration cap and the gap-fill budget through the engine's bounds builder; absent = 5000. */
+  searchBudgetMs?: number;
+  /** Exhaustive mode: also raises exactSearchThreshold / exactSearchLeafCap / convergenceWindow. */
+  exhaustive?: boolean;
 }
 
 /** All search limits are intentionally supplied by the caller. Stage 0's
@@ -474,11 +479,15 @@ export interface DueDateFirstBounds {
   boundaryTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
+  /** True for the planner's Exhaustive run: the capacity-check limit message then omits the "choose Exhaustive" advice. */
+  exhaustive?: boolean;
   /** Optional ceiling on the number of distinct orderings an exact search may
    * enumerate (default `EXACT_SEARCH_LEAF_CAP`). Engine leaves it unset; tests
    * that pin exact traversal pass `Infinity`. */
   exactSearchLeafCap?: number;
   iterationCap: number;
+  /** Soft wall-clock budget for fillPlanningGaps; absent = 1000. */
+  gapFillBudgetMs?: number;
   clock: () => number;
   deadline: number;
   now: Date;
@@ -7044,7 +7053,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
  * line until stable or the separate, soft wall-clock budget expires. */
 export function fillPlanningGaps(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
-  candidate: CandidateResult, budgetMs = 1000,
+  candidate: CandidateResult, budgetMs = bounds.gapFillBudgetMs ?? 1000,
 ): CandidateResult {
   const started = bounds.clock();
   const expired = (): boolean => bounds.clock() - started >= budgetMs;
@@ -7192,7 +7201,9 @@ export function fillPlanningGaps(
       ? prior
       : overlong ?? (complete
       ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
-      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked.' });
+      : { code: 'search_limit', message: bounds.exhaustive === true
+        ? 'Capacity check incomplete: time limit reached before all available gaps were checked.'
+        : 'Capacity check incomplete: time limit reached before all available gaps were checked. Choose Exhaustive search time in the Optimize dialog to check every gap.' });
     patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
     dispositions.set(id, { id, line, status: 'needs_planning', reason });
   }
