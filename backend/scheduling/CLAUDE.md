@@ -19,7 +19,7 @@ Both files carry a header docstring confirming this was a **pure move from `brai
 
 Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `selection.mts`, `persistence.mts`, `order-field-catalog.mjs`) — the UI/drag/save semantics that call these routes.
 
-**`db.py`/`master_data.py` are not split** (deferred, see `docs/MIGRATION.md`) — this domain's route file imports both whole at repo root (`import db`, `import master_data as md`) and calls into them for all actual data work. Current line ranges this domain's logic depends on (grepped fresh against `db.py` on `feature/backward-scheduling` at 60bfdfe as of 2026-10-14, 5,148 lines total):
+**`db.py`/`master_data.py` are not split** (deferred, see `docs/MIGRATION.md`) — this domain's route file imports both whole at repo root (`import db`, `import master_data as md`) and calls into them for all actual data work. Current line ranges this domain's logic depends on (grepped fresh against `db.py` on `feature/backward-scheduling` at 3ba27bf as of 2026-10-15, 5,235 lines total):
 - `db.make_id()` — line 123 (the MD5 task-id scheme; not called directly by these routes but its stability is why ids can key `/tasks/refresh` and drag/edit operations across reloads).
 - `db._horizon_bounds_for_plant()` — line 529 (visibility/frozen horizon bounds `get_tasks` rides along on, per its own C1/C2 comments).
 - `db.query_orders()` — line 640 (the `GET /tasks` data source).
