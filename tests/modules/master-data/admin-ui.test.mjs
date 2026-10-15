@@ -51,6 +51,67 @@ test('ProdLines.refresh re-fetches plants, the plant-scoped machines and the pla
   }
 });
 
+test('ProdLines.refresh resolves false, keeps the Store rows and still emits master-data-changed when both fetches fail', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const sentinel = { plants: [{ plant: 'KEEP' }], lines: [{ machine: 'KEEP-1' }], workcenters: [] };
+  const events = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = (url) => {
+    // Master-data fetches fail; the calendar fetch is allowed to succeed.
+    if (String(url).includes('/master-data/')) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Store.setMasterData(sentinel, 'test');
+    const unsubscribe = Store.subscribe(evt => { if (evt.type === 'master-data-changed') events.push(evt); }, 'test');
+    const result = await ProdLines.refresh();
+    unsubscribe();
+    assert.equal(result, false, 'no fresh rows landed');
+    assert.equal(Store.masterData, sentinel, 'a failed refresh never blanks the Store rows');
+    assert.equal(events.length, 1, 'the no-op branch still emits exactly one master-data-changed');
+    assert.equal(events[0].source, 'master-data-refresh');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('ProdLines.refresh resolves false and does not write the Store when the plant switches while the fetches are in flight', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const priorSetMasterData = Store.setMasterData;
+  const sentinel = { plants: [{ plant: 'KEEP' }], lines: [], workcenters: [] };
+  let writes = 0;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = (url) => {
+    // The user switches plant after the refresh began but before its responses are applied.
+    if (String(url).includes('/master-data/plants')) Store.setSelectedPlant('5512', 'test-switch');
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ plant: 'FRESH' }] }) });
+  };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Store.setMasterData(sentinel, 'test');
+    Store.setMasterData = function (...args) { writes += 1; return priorSetMasterData.apply(this, args); };
+    assert.equal(await ProdLines.refresh(), false);
+    assert.equal(writes, 0, 'the stale response must not overwrite the other plant\'s master data');
+    assert.equal(Store.masterData, sentinel);
+  } finally {
+    Store.setMasterData = priorSetMasterData;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
 test('ProdLines.refresh and Plant.refresh resolve false and fetch nothing when no plant is selected', async () => {
   const priorPlant = Store.selectedPlant;
   const priorFetch = Util.fetchTraced;
@@ -93,7 +154,7 @@ test('Plant.refresh also re-pulls priority rank maps, and the setup snapshot onl
     urls.length = 0;
     Plant._currentPlantTab = 'settings';
     assert.equal(await Plant.refresh(), true);
-    assert.ok(urls.some(u => u.includes('/setup/1006')), `setup snapshot re-fetched on the settings tab: ${urls}`);
+    assert.ok(urls.some(u => u.endsWith('/setup/1006')), `setup snapshot re-fetched on the settings tab: ${urls}`);
   } finally {
     Plant.gotoTab = originalGoto;
     Plant._currentPlantTab = priorTab;

@@ -67,10 +67,12 @@ const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
  *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
  *  sub-tab Refresh (awaited, `source: 'master-data-refresh'`). Resolves once the Store
  *  write — or the no-op/failed-fetch `master-data-changed` emit — has happened; never
- *  rejects. Staleness tokens: a plant switch or a newer Persistence load while these
+ *  rejects. Resolves `true` only when `Store.setMasterData` was actually called with at
+ *  least one fresh payload; `false` for the staleness skip, the no-op branch (neither
+ *  fetch returned rows) and the catch branch. Staleness tokens: a plant switch or a newer Persistence load while these
  *  fetches are in flight must not let this response overwrite the (now different)
  *  plant's master data. */
-async function refreshStoreMasterData(source: string, table?: string): Promise<void> {
+async function refreshStoreMasterData(source: string, table?: string): Promise<boolean> {
   const API = Config.API_BASE;
   const refreshPlant = Store.selectedPlant;
   const refreshLoadGen = Persistence._loadRequest;
@@ -83,7 +85,7 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<v
         ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
         : Promise.resolve(null),
     ]);
-    if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return;
+    if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
     if (pData || lData) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -109,11 +111,13 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<v
         // request here.
         workcenters: Store.masterData?.workcenters ?? [],
       }, source);
-    } else {
-      Store.emit({ type: 'master-data-changed', table, source });
+      return true;
     }
+    Store.emit({ type: 'master-data-changed', table, source });
+    return false;
   } catch {
     Store.emit({ type: 'master-data-changed', table, source });
+    return false;
   }
 }
 
@@ -276,16 +280,17 @@ export const Plant = {
 
   /** Master Data ▸ Plant sub-tab Refresh: re-pull this plant's master data, calendar
    *  (hours + blackouts), priority rank maps and — on the Settings inner tab — the setup
-   *  snapshot, then re-render. Resolves `true` once fresh data is showing; `false` when
-   *  there is no selected plant (nothing was reloaded). Calendar-fetch failures degrade
-   *  inside `CalendarSync.fetchPlantConfig` (toast + cached state), so they still count. */
+   *  snapshot, then re-render. Resolves `true` once fresh master data landed; `false`
+   *  when there is no selected plant or no fresh master data landed (failed fetch, plant
+   *  switched mid-flight). A degraded calendar fetch still counts: `CalendarSync.fetchPlantConfig`
+   *  toasts its own warning and keeps the cached state. */
   async refresh(): Promise<boolean> {
     const plant = Store.selectedPlant;
     if (!plant) return false;
     // A debounced line-hours write the user just typed must reach the server before the
     // re-fetch, or the fetch would overwrite it with the stale server copy.
     await CalendarSync._flushLineHours(plant);
-    await refreshStoreMasterData('master-data-refresh');
+    const fresh = await refreshStoreMasterData('master-data-refresh');
     await CalendarSync.fetchPlantConfig(plant);
     await Persistence.loadPriorityRankMaps(plant);
     if (Plant._currentPlantTab === 'settings') {
@@ -296,7 +301,7 @@ export const Plant = {
     // render() re-dispatches by inner tab: general reads Store, optimization re-fetches,
     // settings re-renders SetupAdmin against the fresh snapshot.
     Plant.render();
-    return true;
+    return fresh;
   },
 
   /** Called by App once `GET /priority-fields` resolves (application-shell.mts),
@@ -2071,17 +2076,18 @@ export const ProdLines = {
 
   /** Master Data ▸ Production Lines sub-tab Refresh: re-pull this plant's master data and
    *  calendar (hours + blackouts; fetchPlantConfig emits `calendar:change`/`blocks:change`),
-   *  then re-render. Resolves `true` once fresh data is showing; `false` when there is no
-   *  selected plant. Calendar-fetch failures degrade inside `CalendarSync.fetchPlantConfig`. */
+   *  then re-render. Resolves `true` once fresh master data landed; `false` when there is
+   *  no selected plant or no fresh master data landed (failed fetch, plant switched mid-flight).
+   *  A degraded calendar fetch still counts: `CalendarSync.fetchPlantConfig` toasts its own warning. */
   async refresh(): Promise<boolean> {
     const plant = Store.selectedPlant;
     if (!plant) return false;
     // Flush a just-typed debounced line-hours edit first so the re-fetch can't overwrite it.
     await CalendarSync._flushLineHours(plant);
-    await refreshStoreMasterData('master-data-refresh');
+    const fresh = await refreshStoreMasterData('master-data-refresh');
     await CalendarSync.fetchPlantConfig(plant);
     ProdLines.render();
-    return true;
+    return fresh;
   },
 
   render(): void {
