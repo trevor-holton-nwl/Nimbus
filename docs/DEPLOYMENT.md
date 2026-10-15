@@ -278,6 +278,15 @@ The cutover above was run once, on 2026-10-15 between 19:15 and 19:25 UTC, by th
 - **Roll and verify** (step 12): revision `ca-nimbus-dev--0000122` on `nimbus:v117`, 100 % traffic, healthy; the first cache-busted health answer after the roll still came from the old process (page build id `be40b55`), the new one (`06bb2fc`, loaded 19:24:48 UTC) answered 40 s later. `/tasks?plant=1008` and `/tasks?plant=1085` answer 200; `/sap/interface/objects` answers 403 to an anonymous request (RBAC, expected).
 - **Still owed from this runbook:** step 13 (open each plant as an admin, record the cutover toast, press Save), the Admin Cockpit log read, the step 9 browser capture (alerts, tiles, utilization; only the SQL counts were taken), the step 14 written go for planners, the step 15 first-shift watch, and the planner notice of step 6. Until step 13 is done no planner has saved under the new rule, so the step 16 clean rollback (roll `nimbus:v116` back, then `migrations/manual/2026-10-20-restore-precutover-snapshot.sql`) is still exact.
 
+### Fix-forward v118 (2026-10-15, commit 7a5ce0d): Optimize preview Apply rejected after the cutover
+
+Within the first hour on v117 every Optimize preview on plant 1008 failed at Apply ("This proposal is no longer valid", button greyed, `date_window` lines in the banner). Root cause: the optimizer Web Worker serialized the per-order pull-forward floors after its run had ended, so the engine's due-instant lookup fell back to the worker realm's empty Store (no calendars) and read a date-only due on a closed Friday as Friday end-of-day instead of Thursday's close; Apply then judged legally placed orders against a floor one day too late. Fix: the engine's `notBefore`/`notAfter` closures are now bound to the captured snapshot (`frontend/optimization/engine.mts`, `sourceDueInstant` view parameter). Plan and evidence: `docs/superpowers/plans/2026-10-15-optimizer-worker-due-window-fix.md`.
+
+- Code-only; no migration. Built `nimbus:v118` (ACR run `ch3w`, `BUILD_ID=7a5ce0d`), rolled 20:07 UTC to revision `ca-nimbus-dev--0000123`; the new process answered with build id `7a5ce0d` at 20:08:43 UTC; `/tasks` 200 for plants 1008 and 1085. **Rollback target `nimbus:v117`** (v116 predates the cutover and is not a valid rollback any more).
+- **CI OVERRIDE (2026-10-15, 7a5ce0d): operator chose to override the GitHub check-run gate again; no `GITHUB_TOKEN` on the deploy machine. Missing checks: all four workflow jobs unread at build time. Local gate: `npm test` legacy 77/77, modules 1528 pass / 0 fail / 3 todo; `check:static-assets` OK.**
+- Owed: the owner verifies Apply on plant 1008 in the browser (Optimize, Apply, then Discard or Save); the runbook step 13 toast capture for plant 1085 is still open.
+- Data finding, separate: plant 1008 (Mexicali) carries `timezone = America/New_York` in master data; every plant-zone placement rule uses it. Correct in Master Data in its own window.
+
 ## Prerequisites
 
 - Azure CLI (`winget install --exact --id Microsoft.AzureCLI`), `az login`, and **Contributor on `rg-nimbus-dev`**.
