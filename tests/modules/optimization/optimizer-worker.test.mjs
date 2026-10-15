@@ -464,3 +464,56 @@ test('gate 16: a worker-produced patch keeps end = the last productive edge (fin
   }
   assert.ok((byId['w-seg'].scheduleSegments ?? []).length >= 2, 'the 6 h order does not fit one 4 h window, so it is split');
 });
+
+test('worker validation bounds are snapshot-bound: a date-only due on a closed Friday keeps its in-run floor (post-cutover Apply rejected)', () => {
+  // Friday 2035-08-10 is closed on the line, so the date-only due (exact local midnight) resolves to Thursday's
+  // close; with max_pull_forward_days 1 the floor is Wednesday 00:00. The worker serializes the bounds closures
+  // AFTER the run, in a realm whose Store is empty: before the fix the due fell back to end-of-Friday and the
+  // serialized floor came back as Thursday 00:00, so Apply (main thread) rejected a legal Wednesday placement.
+  const open = [7, 19];
+  const workHours = { 0: null, 1: open, 2: open, 3: open, 4: open, 5: null, 6: null };
+  const plantHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const dueFriday = new Date(2035, 7, 10, 0, 0, 0);
+  const task = { id: 'due-window-task', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 2,
+    original_end_date: dueFriday, start_date: new Date(2035, 7, 9, 7, 0, 0), end_date: new Date(2035, 7, 9, 9, 0, 0),
+    planning_status: 'scheduled' };
+  const dueSnapshot = {
+    ...snapshot,
+    selectedPlant: 'P',
+    tasks: [task],
+    calendars: { L1: { workHours } }, plants: { P: { workHours: plantHours } },
+    masterData: {
+      plants: [{ plant: 'P', timezone: zone, max_pull_forward_days: 1, max_push_forward_days: 1 }],
+      lines: [{ plant: 'P', machine: 'L1' }],
+    },
+    setupSnapshot: {
+      plant: 'P', plant_active: true,
+      definition: { plant: 'P', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    },
+    frozenHorizonEnd: null,
+  };
+  const request = {
+    runId: 'worker-due-window', mode: 'duedate', snapshot: dueSnapshot, deadlineDurationMs: 2000,
+    request: { mode: 'duedate', plant: 'P', respectFirmed: true, respectCalendar: true,
+      planningStart: new Date(2035, 7, 6, 8, 0, 0), runNow: new Date(2035, 7, 6, 8, 0, 0),
+      endDate: new Date(2035, 7, 14, 0, 0, 0) },
+  };
+  const response = buildOptimizerWorkerResponse(request, () => 5000);
+  assert.ok(response.validation, 'the worker response must carry validation metadata');
+  const wednesday = new Date(2035, 7, 8, 0, 0, 0);
+  const saturday = new Date(2035, 7, 11, 0, 0, 0);
+  const floor = response.validation.notBeforeById['due-window-task'];
+  const ceiling = response.validation.notAfterById['due-window-task'];
+  assert.equal(+new Date(floor), +wednesday, `floor must be Wednesday 00:00, got ${floor}`);
+  assert.equal(+new Date(ceiling), +saturday, `ceiling must be Saturday 00:00, got ${ceiling}`);
+
+  // Apply side: a candidate placing the task on the Wednesday must not trip date_window on the main thread.
+  const legal = { ...response.candidate, patches: [{ id: 'due-window-task', changes: {
+    start_date: new Date(2035, 7, 8, 7, 0, 0), end_date: new Date(2035, 7, 8, 9, 0, 0) } }] };
+  const rehydrated = rehydrateOptimizerCandidate(legal, dueSnapshot, response.validation);
+  const findings = validateCandidateForApply(rehydrated, dueSnapshot);
+  assert.equal(findings.some(finding => finding.code === 'date_window'), false,
+    `no date_window error for a Wednesday placement, got ${JSON.stringify(findings.map(f => f.code))}`);
+});
