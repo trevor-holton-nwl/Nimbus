@@ -1258,7 +1258,8 @@ export const AlertsUIAdapter = {
       const minutes = Utilization.minutesByDay(task, line)[dayKey] || 0;
       if (minutes <= 0) continue;
       const onDay = Util.scheduleIntervals(task).filter(interval => interval.start < dayEnd && interval.end > dayStart);
-      const sortAt = onDay[0]?.start ?? task.start_date;
+      const sortAt = onDay[0]?.start ?? task.start_date
+        ?? (task.end_date ? new Date(task.end_date.getTime() - Util.runHours(task) * Config.MS_HOUR) : null);   // VM12: finish-only row
       if (!sortAt) continue;
       cellEntries.push({ task, scheduledHours: minutes / 60, sortAt });
     }
@@ -1297,6 +1298,12 @@ export const AlertsUIAdapter = {
       'runtime-schedule-mismatch': 'exceptions',
       'runtime-unknown':     'exceptions',
       'pv-lot-size':         'exceptions',
+      // D20/VM13: the alert types added by the backward-scheduling work file explicitly, not by the fallback.
+      late: 'exceptions', reversal_forward: 'exceptions', placement_exception: 'exceptions',
+      frozen_window_crossed: 'exceptions', pull_floor_crossed: 'exceptions', setup_override_orphaned: 'exceptions',
+      no_anchor: 'exceptions', derivation_issue: 'exceptions',
+      finish_moved_earlier: 'calendar', plant_no_timezone: 'calendar', line_no_calendar: 'calendar',
+      run_time_zero: 'exceptions', no_operating_window: 'calendar',
     };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
     // Setup diagnostics are intentionally not given a UI category in this

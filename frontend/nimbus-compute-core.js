@@ -963,21 +963,25 @@
       const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
       return Number.isInteger(value) && value >= 0 ? value : null;
     };
+    // Is a placed finish beyond the plant's push-forward ceiling? A due on a 24:00 close is the exclusive next-day
+    // 00:00: the due DAY is the one before it (R-I6). Shared by the late alert and the reversal_forward severity (D9b).
+    const beyondPushCap = (t, end, due) => {
+      const cap = pushCapDays(t.PLANT || plantOf(t.MACHINE || 'Unknown'));
+      if (cap === null || !end || !due) return false;
+      const ceiling = new Date(+due - 1); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
+      return end > ceiling;
+    };
     for (const t of activeTasks) {
       if (t.planning_status === 'needs_planning') continue;
       const end = parseDate(t.end_date), rawDue = parseDate(t.original_end_date);
       if (!end || !rawDue) continue;
       const line = t.MACHINE || 'Unknown';
-      const due = dueDateInstant(rawDue, dayWindowForLine(line, true));
+      // D14: a line with no row of its own reads the default window, so a date-only due resolves instead of staying silent.
+      const due = dueDateInstant(rawDue, dayWindowForLine(line, false));
       if (!(end > due)) continue;
       const hours = (end - due) / MS_HOUR;
       const cap = pushCapDays(t.PLANT || plantOf(line));
-      let beyondCap = false;
-      if (cap !== null) {
-        // A due on a 24:00 close is the exclusive next-day 00:00: the due DAY is the one before it (R-I6).
-        const ceiling = new Date(+due - 1); ceiling.setHours(0, 0, 0, 0); ceiling.setDate(ceiling.getDate() + cap + 1);
-        beyondCap = end > ceiling;
-      }
+      const beyondCap = beyondPushCap(t, end, due);
       const vars = { order: orderNumber(t), hours: hours.toFixed(1), days: cap ?? '' };
       alerts.push({
         id: `late-${t.id}`, sev: beyondCap ? 'err' : 'warn', type: 'late',
@@ -998,7 +1002,8 @@
       const line = t.MACHINE || 'Unknown';
       const vars = { order: orderNumber(t), line };
       alerts.push({
-        id: `placement-exception-${t.id}`, sev: 'err', type: 'placement_exception',
+        id: `placement-exception-${t.id}`, sev: 'warn',   // D20 (VM14): approved by the planner; visible, not blocking
+        type: 'placement_exception',
         msg: marker === 'overtime'
           ? `Order "${vars.order}" is placed outside working hours on ${line}.`
           : `Order "${vars.order}" is longer than any working window on ${line} and is placed as one long bar.`,
@@ -1013,7 +1018,7 @@
        line-level ones (no server calendar) are de-duplicated to ONE alert per plant / per line; a plant alert sits
        on the plant's first affected line (stable across incremental runs) and is emitted when that line is in
        scope. An unknown code still renders a generic alert. */
-    const ISSUE_SEV_ERR = new Set(['reversal_forward', 'plant_no_timezone', 'line_no_calendar', 'no_anchor']);
+    const ISSUE_SEV_ERR = new Set(['plant_no_timezone', 'line_no_calendar', 'no_anchor']);   // D9b: reversal_forward is 'err' only beyond the push cap (below)
     const readable = d => { const v = parseDate(d); return v ? fmtDTReadable(v) : ''; };
     const plantFirstLine = new Map();   // plant -> smallest affected line (all tasks, scope-independent)
     const noteFirstLine = (plant, line) => {
@@ -1050,26 +1055,17 @@
       const code = issue.code;
       if (code === 'plant_no_timezone') { emitPlantNoTimezone(plant); continue; }
       if (!inScopeLine(line)) continue;
-      if (code === 'line_no_calendar') {
-        if (emittedLines.has(line)) continue;
-        emittedLines.add(line);
-        alerts.push({
-          id: `line-no-calendar-${line}`, sev: 'err', type: 'line_no_calendar',
-          msg: `${line} has no saved working calendar, so NIMBUS cannot derive start times for its orders.`,
-          msgKey: 'alert.line_no_calendar', msgVars: { line },
-          line, time: now?.[plant] || new Date(),
-        });
-        continue;
-      }
+      // D14: line_no_calendar is no longer emitted (a line without its own row reads the default window).
       const order = orderNumber(t);
       const vars = { order, line, from: readable(issue.from), to: readable(issue.to) };
       let key = `alert.${code}`, type = code, msg;
-      const sev = ISSUE_SEV_ERR.has(code) ? 'err' : 'warn';
+      let sev = ISSUE_SEV_ERR.has(code) ? 'err' : 'warn';
       switch (code) {
         case 'finish_moved_earlier':
           msg = `Order "${order}" could not hold its finish and now ends earlier, at ${vars.to} (was ${vars.from}).`; break;
         case 'reversal_forward': {
           const detail = issue.detail;
+          if (beyondPushCap(t, parseDate(t.end_date), dueDateInstant(parseDate(t.original_end_date), dayWindowForLine(line, false)))) sev = 'err';
           if (detail === 'run_time_grew' || detail === 'due_date_past' || detail === 'cutover') key = `alert.reversal_forward_${detail}`;
           msg = detail === 'run_time_grew'
             ? `Order "${order}" was placed forward from now because its run time grew and its start would fall in the past.`
@@ -1270,7 +1266,7 @@
 
     // One attribution rule (workingMinutesByDay), shared with the overload alert and the cell briefing.
     for (const t of tasks) {
-      if (!t.start_date) continue;
+      if (!t.start_date && !t.end_date) continue;   // VM12: a finish-only row is the bar [end - run time, end]
       const line = t.MACHINE || 'Unknown';
       const lineRows = matrix[line];
       if (!lineRows) continue;

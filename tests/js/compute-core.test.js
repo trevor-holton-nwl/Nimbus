@@ -908,8 +908,12 @@ test('late alert (R-I6): the push ceiling on a 06:00-24:00 line is the due DAY m
 test('late alert: a timed due date compares exactly, and a line with no calendar row reads a date-only due as 23:59:59', () => {
   const timed = dueFri({ original_end_date: D(16, 12, 30), start_date: D(16, 9), end_date: D(16, 12, 31) });
   assert.equal(Core.computeAlerts(alertBase([timed])).alerts.filter(a => a.type === 'late').length, 1);
+  // D14 (repaired from the earlier 'no row reads 23:59:59' expectation): a line with no row of its own reads the
+  // default window, so a date-only due resolves on it and is judged, not silently skipped.
   const bare = alertBase([dueFri({ start_date: D(16, 20), end_date: D(16, 23, 0) })], { calendars: {} });
-  assert.equal(Core.computeAlerts(bare).alerts.filter(a => a.type === 'late').length, 0, 'due reads Fri 23:59:59 with no calendar row');
+  assert.equal(Core.computeAlerts(bare).alerts.filter(a => a.type === 'late').length, 1, 'a finish after the default window close is late');
+  const bareOk = alertBase([dueFri({ start_date: D(16, 8), end_date: D(16, 10, 0) })], { calendars: {} });
+  assert.equal(Core.computeAlerts(bareOk).alerts.filter(a => a.type === 'late').length, 0, 'a finish inside the day is on time');
 });
 
 test('late alert: beyond the plant push-forward ceiling it is an error', () => {
@@ -959,14 +963,23 @@ test('every engine derivationIssue code renders an alert with a locale key, the 
   }
 });
 
-test('reversal_forward renders one key per detail and is an error; an unrecorded detail takes the generic key', () => {
+test('reversal_forward renders one key per detail and is a warning inside the push cap; an unrecorded detail takes the generic key', () => {
   const tasks = ['run_time_grew', 'due_date_past', 'cutover', undefined].map((detail, i) => issueTask(`r${i}`, { code: 'reversal_forward', ...(detail ? { detail } : {}) }));
   const byId = Object.fromEntries(issueAlerts(tasks).map(a => [a.taskId, a]));
   assert.equal(byId.r0.msgKey, 'alert.reversal_forward_run_time_grew');
   assert.equal(byId.r1.msgKey, 'alert.reversal_forward_due_date_past');
   assert.equal(byId.r2.msgKey, 'alert.reversal_forward_cutover');
   assert.equal(byId.r3.msgKey, 'alert.reversal_forward');
-  for (const alert of Object.values(byId)) { assert.equal(alert.sev, 'err'); assert.equal(alert.type, 'reversal_forward'); }
+  for (const alert of Object.values(byId)) { assert.equal(alert.sev, 'warn', 'D9b: no push cap set, so never an error'); assert.equal(alert.type, 'reversal_forward'); }
+});
+
+test('D9b: reversal_forward is a warning unless the reversed finish is beyond the plant push cap', () => {
+  const masterData = { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P', max_push_forward_days: 1 }] };
+  const due = D(15, 0);   // date-only due Thu 15 Oct, 08:00-18:00 line: due day plus one day = ceiling Sat 00:00
+  const within = issueTask('w1', { code: 'reversal_forward', detail: 'due_date_past' }, { original_end_date: due, start_date: D(15, 9), end_date: D(16, 11) });
+  const beyond = issueTask('w2', { code: 'reversal_forward', detail: 'due_date_past' }, { original_end_date: due, start_date: D(17, 9), end_date: D(17, 11) });
+  const byId = Object.fromEntries(issueAlerts([within, beyond], { masterData }).filter(a => a.type === 'reversal_forward').map(a => [a.taskId, a.sev]));
+  assert.deepEqual(byId, { w1: 'warn', w2: 'err' });
 });
 
 test('gate 14: pull_floor_crossed renders, and an unfirmed order whose start flips into the frozen window renders frozen_window_crossed', () => {
@@ -994,21 +1007,20 @@ test('plant-level and line-level findings de-duplicate to one alert per plant / 
   assert.equal(plantAlerts[0].line, 'L1', 'sits on the plant\'s first affected line');
   assert.equal(plantAlerts[0].sev, 'err');
   assert.deepEqual(plantAlerts[0].msgVars, { plant: 'P' });
-  const lineAlerts = alerts.filter(a => a.type === 'line_no_calendar');
-  assert.deepEqual(lineAlerts.map(a => a.id).sort(), ['line-no-calendar-L1', 'line-no-calendar-L2']);
-  assert.ok(lineAlerts.every(a => a.sev === 'err'));
+  // D14/VM13: line_no_calendar is retired; it is no longer emitted, one per line or otherwise.
+  assert.equal(alerts.filter(a => a.type === 'line_no_calendar').length, 0, 'line_no_calendar is no longer emitted');
 });
 
 test('computeAlerts never mutates now[plant]; derivation alerts carry the real now as their time (U15)', () => {
   const nowP = D(14, 15, 42);
   const before = +nowP;
   const masterData = { lines: [{ machine: 'L1', plant: 'P' }], plants: [{ plant: 'P' }] };
-  const alerts = issueAlerts([issueTask('n1', { code: 'line_no_calendar' }, { MACHINE: 'L1' })], {
+  const alerts = issueAlerts([issueTask('n1', { code: 'plant_no_timezone' }, { MACHINE: 'L1' })], {
     masterData, calendars: {}, lineSettings: { L1: { plant: 'P' } }, now: { P: nowP },
   });
   assert.equal(+nowP, before, 'the now Date passed in is left alone');
-  const alert = alerts.find(x => x.type === 'line_no_calendar');
-  assert.ok(alert, 'line_no_calendar alert present');
+  const alert = alerts.find(x => x.type === 'plant_no_timezone');   // repaired: line_no_calendar is retired (D14); same time rule on the plant alert
+  assert.ok(alert, 'plant_no_timezone alert present');
   assert.equal(+alert.time, before, 'alert time is the real now, not 00:00');
 });
 
@@ -1033,7 +1045,7 @@ test('an unknown derivationIssue code still renders a generic alert (never silen
   assert.equal(alerts[0].sev, 'warn');
 });
 
-test('placement_exception markers render as errors; a normal row or a cleared marker does not', () => {
+test('placement_exception markers render as warnings (D20); a normal row or a cleared marker does not', () => {
   const tasks = [
     issueTask('o', null, { placement_exception: 'overtime' }),
     issueTask('l', null, { placement_exception: 'overlong' }),
@@ -1041,7 +1053,7 @@ test('placement_exception markers render as errors; a normal row or a cleared ma
   ];
   const alerts = issueAlerts(tasks).filter(a => a.type === 'placement_exception');
   assert.deepEqual(alerts.map(a => [a.taskId, a.msgKey, a.sev]).sort(), [
-    ['l', 'alert.placement_exception_overlong', 'err'], ['o', 'alert.placement_exception_overtime', 'err'],
+    ['l', 'alert.placement_exception_overlong', 'warn'], ['o', 'alert.placement_exception_overtime', 'warn'],
   ]);
 });
 
@@ -1078,4 +1090,27 @@ test('U16: the plant-zone conversion pair the forward and backward legs share ke
   // And 5 h after 00:00 reads back as wall 06:00 (what the forward allocator returns for a 5 h bar).
   const back = Core.plantWallClockFromInstant(tz, new Date(+a + 5 * 3600000));
   assert.deepEqual([back.getHours(), back.getMinutes(), back.getDate()], [6, 0, 8]);
+});
+
+test('D20: an approved placement exception is a warning, not an error', () => {
+  const alerts = issueAlerts([issueTask('pe', null, { placement_exception: 'overtime' })]).filter(a => a.type === 'placement_exception');
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].sev, 'warn');
+});
+
+test('VM13: line_no_calendar is no longer emitted for a line without a calendar row', () => {
+  const alerts = issueAlerts([issueTask('lc', { code: 'line_no_calendar' }, { MACHINE: 'L1' })], {
+    masterData: { lines: [{ machine: 'L1', plant: 'P' }], plants: [{ plant: 'P' }] }, calendars: {}, lineSettings: { L1: { plant: 'P' } },
+  });
+  assert.equal(alerts.filter(a => a.type === 'line_no_calendar').length, 0);
+});
+
+test('VM12: a finish-only row contributes its hours to computeUtilization', () => {
+  const task = { id: 'fo', MACHINE: 'L', PLANT: 'P', RUN_TIME: 4, start_date: null, end_date: D(15, 12) };
+  const { matrix } = Core.computeUtilization({
+    tasks: [task], lineSettings: { L: { plant: 'P' } }, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P' }] }, startMs: +D(15, 0), days: 1, lines: ['L'],
+  });
+  const row = Object.values(matrix.L)[0];
+  assert.equal(row.scheduled * 60, 240);
 });
