@@ -4678,11 +4678,23 @@ export const Interaction = {
       arr.push(peer);
     }
 
+    const ghostPlant = t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant;
+    const ghostLineMoved = props.group != null && String(props.group) !== (t.MACHINE || 'Unknown');
+    Calendar._beginRun(ghostPlant);   // one calendar cache for every companion's derivation this frame
+    try {
     for (const sid of selIds) {
       const st = Store.tasks[sid];
       if (!st || !st.start_date) continue;
-      const ghostStart = new Date(st.start_date.getTime() + deltaMs);
-      const ghostEnd   = st.end_date ? new Date(st.end_date.getTime() + deltaMs) : ghostStart;
+      // U27: the drop derives each companion's start by the backward walk from its translated finish, so the
+      // ghost does too (its width then matches the dropped bar across a closed day or a shift boundary). The
+      // translated stored edges stay as the fallback when no placement derives.
+      let ghostStart = new Date(st.start_date.getTime() + deltaMs);
+      let ghostEnd   = st.end_date ? new Date(st.end_date.getTime() + deltaMs) : ghostStart;
+      if (st.end_date) {
+        const derived = Engine.manualRoutingSchedulePatchFor(st, ghostLineMoved ? String(props.group) : (st.MACHINE || 'Unknown'),
+          new Date(st.end_date.getTime() + deltaMs), { quiet: true });
+        if (derived?.start_date && derived.end_date) { ghostStart = derived.start_date; ghostEnd = derived.end_date; }
+      }
       const item = Timeline._items!.get(sid) as TimelineVisItem | null;
       if (!item) continue;
 
@@ -4701,6 +4713,7 @@ export const Interaction = {
         className: baseCls + (hasConflict ? ' ghost ghost-conflict' : ' ghost')
       });
     }
+    } finally { Calendar._endRun(); }
 
     if (updates.length) {
       Timeline._suppressEvents = true;

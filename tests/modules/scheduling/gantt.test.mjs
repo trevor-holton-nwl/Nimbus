@@ -2197,6 +2197,48 @@ test('G4 / gate 30: the multi-drag ghost preview takes the FINISH delta, so a ri
   }
 });
 
+test('U27: a companion ghost takes the width the drop derives (backward walk), not the stored width shifted', () => {
+  const anchorId = 'ghost-u27-anchor', companionId = 'ghost-u27-companion';
+  const aStart = new Date('2026-08-05T08:00:00'), aEnd = new Date('2026-08-05T12:00:00');
+  const cStart = new Date('2026-08-06T08:00:00'), cEnd = new Date('2026-08-06T12:00:00');
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorItems = Timeline._items, priorTl = Timeline._tl, priorPatch = Engine.manualRoutingSchedulePatchFor;
+  Store.setTasks([
+    { id: anchorId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: aStart, end_date: aEnd },
+    { id: companionId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: cStart, end_date: cEnd },
+  ], 'test');
+  Selection.set([anchorId, companionId]);
+  const updates = [], calls = [];
+  const priorRaf = globalThis.requestAnimationFrame, priorCaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1; globalThis.cancelAnimationFrame = () => {};
+  Timeline._items = { get: i => (i === companionId ? { id: i, className: '' } : undefined), update: list => updates.push(...list) };
+  // The drop's derivation across a closed day: the 4 h run starts the evening before and ends at the translated finish.
+  const derivedStart = new Date('2026-08-07T22:00:00'), derivedEnd = new Date('2026-08-10T02:00:00');
+  Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => { calls.push({ id: task.id, line, finish, opts }); return { start_date: derivedStart, end_date: derivedEnd }; };
+  try {
+    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: aStart, end: new Date('2026-08-05T14:00:00') } } } } };
+    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].id, companionId);
+    assert.equal(calls[0].finish.getTime(), cEnd.getTime() + 2 * 3600000, 'the translated finish, as the drop computes it');
+    assert.equal(calls[0].opts.quiet, true, 'a 60 fps preview never toasts a refusal');
+    assert.equal(updates[0].start.getTime(), derivedStart.getTime());
+    assert.equal(updates[0].end.getTime(), derivedEnd.getTime(), 'ghost width equals the dropped bar width');
+    // No derivation (null): the translated stored edges are the fallback.
+    updates.length = 0;
+    Engine.manualRoutingSchedulePatchFor = () => null;
+    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
+    assert.equal(updates[0].start.getTime(), cStart.getTime() + 2 * 3600000);
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch;
+    Interaction._clearGhosts();
+    globalThis.requestAnimationFrame = priorRaf; globalThis.cancelAnimationFrame = priorCaf;
+    Timeline._items = priorItems; Timeline._tl = priorTl;
+    fx.restore(); restoreClock(); Selection.clear();
+  }
+});
+
 test('a resize that derives the bar it already was creates no undo entry, no Store write, and springs back (A.3 #18)', () => {
   const id = 'fx-resize-noop-1';
   const start = new Date('2026-08-05T08:00:00');
