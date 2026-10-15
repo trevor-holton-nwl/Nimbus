@@ -1457,3 +1457,59 @@ Every step is run by the owner. Agents run none of them. Stop at any step whose 
 - **Send to SAP transmits firmed orders only.** An unfirmed order is skipped and counted as `skipped_unfirmed` in the Send result and the audit log. The Send result on screen shows that count, so a Send with nothing firmed sends nothing.
 - **Rows with no usable finish are not loaded.** A blank or unreadable finish, or a finish on an earlier calendar date than the start, is no longer filled in or rewritten; the finish is stored exactly as SAP sent it. An upload drops such a row with an error warning that names the order (the SAP staging check marks it `invalid_date`), and the count appears in the Admin Cockpit's DB Load step as "Dropped (no finish)".
 - **Admins:** the purge preview now counts the whole last day of the chosen range.
+
+### (d) Validation fix wave (2026-10-15): residuals and owed checks
+
+Tip 261d9cb on `feature/backward-scheduling`, still unmerged and undeployed. Full status table: section 9 of `docs/superpowers/plans/2026-10-15-backward-scheduling-validation-findings.md`. Still owed before or at the release:
+
+- VM10: deferred, not fixed in this wave (distribution minor, see section 3 line VM10).
+- VM11: deferred, not fixed in this wave (distribution test gap, see section 3 line VM11).
+- VM25: deferred, not fixed in this wave (stale roadmap and architecture docs, see section 3 line VM25).
+- VM18, VM19, VM20, VP2, VP3: deferred minors from section 3 that the plan did not include (plant-clock nonexistent times, a sync comment, a calendar performance note, the due-day window resolver, a calendar doc line).
+- VU2: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU2).
+- VU3: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU3).
+- VU4: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU4).
+- VU5: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU5).
+- VU6: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU6).
+- VU7: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU7).
+- VU8: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU8).
+- VU10: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU10).
+- VU11: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU11).
+- VU12: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU12).
+- VU13: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU13).
+- VU14: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU14).
+- VU15: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU15).
+- VU16: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU16).
+- VU18: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU18).
+- VU19: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU19).
+- VU20: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU20).
+- VU21: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU21).
+- VU22: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU22).
+- VU23: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU23).
+- VU24: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU24).
+- VU26: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU26).
+- VU27: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU27).
+- VU28: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU28).
+- VU29: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU29).
+- Optimizer evaluators still measure elapsed time in the viewer zone: an optimizer placement that straddles the plant spring-forward gap, viewed from a browser in a different daylight-saving calendar, is rejected at Save with a width toast and re-runs correctly (scope cut 1).
+- Zero-wall-width bar in the repeated hour (ruled): an order of exactly one hour that ends inside the repeated hour at the same wall time cannot be saved during that hour once a year, because the stored-range constraint needs the end after the start; fixing it needs a schema change.
+- No pytest feeds the running-order piece payloads (two pieces, or no pieces plus both edges) through the bulk date update route; the server acceptance was checked by reading only.
+- The date-only backfill for pre-existing rows is a midnight heuristic: a genuine midnight due date on an existing row reads as date-only until SAP next sends it.
+- Browser check 1: left-handle veto on a bar drag.
+- Browser check 2: derive-paused banner appearance and stacking under the concurrency banner.
+- Browser check 3: overtime confirm when a firmed order finish is moved outside working hours.
+- Browser check 4: display-only never-placed rows after cutover show a derived bar and are not saved until a planner acts or the first-load Save runs.
+- Browser check 5: Gantt lock and today bands on the plant clock for a viewer in a different time zone.
+- Browser check 6: Override window and hover card, including the explain-the-move line.
+- Browser check 7: multi-drag ghost preview on a right-edge resize.
+- Browser check 8: cutover summary toast in all five languages.
+- Browser check 9: reversal toast and alert on a run-time edit of a late order, alert cards and glossary in five languages, distribution separation wording.
+- Browser check 10 (G-10): rehearse the whole cutover on a restored copy of the pilot database, timing the first-load reconcile at real plant size.
+- Browser check, added: the running-order finish toast (a typed End or a drag on a running order is refused, the run-time edit is the only resize), in five languages.
+- Browser check, added: minute-held finishes show and edit at the exact minute in the grid, the Inspector and the Override window; only a horizontal drag lands on the 15-minute grid.
+- Browser check, added: the amber placement-exception card and its tile count (not counted in the blocking tile or the Orders Conflicting chip; the marker stays on the bar).
+- Browser check, added: the derived bar on a line without its own calendar row (plant default calendar), including the reconcile after undo.
+- Cutover rehearsal on a restored pilot copy (G-10): the full runbook in `docs/DEPLOYMENT.md`, never executed end to end.
+- SAP echo test against a real SAP system (A9): confirms how SAP returns seconds before the echo compare (kept truncated to the minute, D11) is revisited.
+- External callers of the bulk task update route (`/tasks/bulk_update`): the owner must list them, because the route now requires both edges and carries start-derived reasons.
+- Two stale `.git/worktrees` admin directories (`bisect-wt`, `merged`) need `git worktree prune`, to be run outside OneDrive.

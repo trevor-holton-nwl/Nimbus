@@ -360,3 +360,176 @@ The next step is the plan that addresses these findings. These are the inputs it
 **Rejected alternatives.** A fix wave (your standing rule: findings only); a browser lane (declined); SAP PP/DS as the reference (pilot is ECC); spec-only checking with no SAP comparison.
 
 **Cleanup.** Scratch databases `nimbus_val_cutover`, `nimbus_val_api` and the checker copies were dropped after this document was written; the seed and check scripts that reproduce every finding stay under the session scratchpad (`validation-review/L<n>` and `V<n>`, each with a README). The working tree is unchanged except for this file and the gitignored compiled output the full-suite run rebuilt.
+
+
+## 9. Fix wave (2026-10-15)
+
+Tip: 261d9cb on `feature/backward-scheduling` (base 69df633). Nothing is merged, pushed or deployed. The change log, rulings and gate numbers are in `BACKWARD_SCHEDULING_MIGRATION.md`, subsection "Validation fix wave (2026-10-15)". Final gate: legacy 77/77; module tests 1476 with 3 failures that are the known optimizer-probe timeout flake (the engine file alone passes 183/183); Python 1809 passed with only the two `test_scale_catalog_paging` collation failures; trial merge with `main` clean.
+
+### Finding status
+
+| Finding | Status |
+|---|---|
+| VC1 | fixed e1cb68d |
+| VI1 | fixed b1cf2a6 |
+| VI2 | fixed 3cd83a8 (fold-tolerant width check); zero-wall-width bar ruled residual |
+| VI3 | fixed 44655e7 (optimizer evaluators deferred by scope cut 1) |
+| VI4 | closed by decision D4 |
+| VI5 | fixed b1cf2a6 |
+| VI6 | fixed 6e0ebe2 |
+| VI7 | fixed 8508c4d |
+| VI8 | fixed bc25663 |
+| VI9 | fixed bc25663 |
+| VI10 | fixed b15353f |
+| VI11 | fixed 6c70cb1 |
+| VI12 | fixed 4c24d55 |
+| VI13 | fixed 4c24d55 |
+| VI14 | fixed 294792d |
+| VI15 | fixed 32f2009 |
+| VI16 | fixed 32f2009 |
+| VI17 | fixed 44655e7 |
+| VI18 | fixed 3ba27bf |
+| VI19 | fixed 3ba27bf |
+| VM1 | closed by decision D9 (floats deferred) and D9a |
+| VM2 | fixed 3cd83a8 |
+| VM3 | fixed 3cd83a8 |
+| VM4 | fixed 32f2009 |
+| VM5 | closed by decision D8 (help text fixed be815f4) |
+| VM6 | fixed b15353f |
+| VM7 | fixed b15353f |
+| VM8 | fixed bc25663 |
+| VM9 | fixed b15353f (D6) |
+| VM10 | deferred |
+| VM11 | deferred |
+| VM12 | fixed d3857cc |
+| VM13 | fixed d3857cc |
+| VM14 | fixed d3857cc |
+| VM15 | fixed 3cd83a8 |
+| VM16 | fixed 3cd83a8 and d7c9b8f (route docstrings, then the request model docstring) |
+| VM17 | fixed 44655e7 |
+| VM18 | deferred |
+| VM19 | deferred |
+| VM20 | deferred |
+| VM21 | closed by decision D14 |
+| VM22 | fixed 3ba27bf |
+| VM23 | fixed 38b8dc7 |
+| VM24 | fixed 38b8dc7 |
+| VM25 | deferred |
+| VM26 | fixed 38b8dc7 and 3be3837 (anchors refreshed; CLAUDE.md sync) |
+| VM27 | fixed 38b8dc7 |
+| VM28 | fixed 38b8dc7 |
+| VM29 | fixed 3ba27bf |
+| VP1 | fixed ee41cc3 (D9c) |
+| VP2 | deferred |
+| VP3 | deferred |
+| VU1 | fixed 8508c4d (D3), refined 3959432 (running-order walk returns calendar pieces) |
+| VU2 | deferred |
+| VU3 | deferred |
+| VU4 | deferred |
+| VU5 | deferred |
+| VU6 | closed by decision D11 (waits on the SAP echo test) |
+| VU7 | deferred |
+| VU8 | deferred |
+| VU9 | closed by decision D7 |
+| VU10 | deferred |
+| VU11 | deferred |
+| VU12 | deferred |
+| VU13 | deferred |
+| VU14 | deferred |
+| VU15 | deferred |
+| VU16 | deferred |
+| VU17 | fixed ee41cc3 (D19) |
+| VU18 | deferred |
+| VU19 | deferred |
+| VU20 | deferred |
+| VU21 | deferred |
+| VU22 | deferred |
+| VU23 | deferred |
+| VU24 | deferred |
+| VU25 | fixed 3ba27bf |
+| VU26 | deferred |
+| VU27 | deferred |
+| VU28 | deferred |
+| VU29 | deferred |
+
+### Decision status
+
+| Decision | Status |
+|---|---|
+| D1 | fixed b1cf2a6 |
+| D2 | fixed 8508c4d |
+| D3 | fixed 8508c4d, refined 3959432 |
+| D4 | closed by decision, no change |
+| D5 | fixed 6e0ebe2 |
+| D6 | fixed b15353f |
+| D7 | closed by decision, no change |
+| D8 | fixed be815f4 (help text) |
+| D9, D9a | closed by decision, floats deferred, no reduction step |
+| D9b | fixed d3857cc |
+| D9c | fixed ee41cc3 |
+| D10 | fixed 4c24d55 |
+| D11 | closed by decision, no change |
+| D12 | fixed 3cd83a8 |
+| D13 | fixed 3cd83a8 and d7c9b8f |
+| D14 | fixed 294792d, d3857cc, 3ba27bf |
+| D15 | fixed 32f2009 |
+| D16 | fixed 3ba27bf |
+| D17 | fixed e1cb68d, 3cd83a8, 44655e7 |
+| D18 | fixed 32f2009 |
+| D19 | fixed ee41cc3 |
+| D20 | fixed d3857cc |
+| D21 | fixed bc25663 |
+
+### Residuals and owed
+
+- VM10: deferred, not fixed in this wave (distribution minor, see section 3 line VM10).
+- VM11: deferred, not fixed in this wave (distribution test gap, see section 3 line VM11).
+- VM25: deferred, not fixed in this wave (stale roadmap and architecture docs, see section 3 line VM25).
+- VM18, VM19, VM20, VP2, VP3: deferred minors from section 3 that the plan did not include (plant-clock nonexistent times, a sync comment, a calendar performance note, the due-day window resolver, a calendar doc line).
+- VU2: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU2).
+- VU3: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU3).
+- VU4: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU4).
+- VU5: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU5).
+- VU6: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU6).
+- VU7: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU7).
+- VU8: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU8).
+- VU10: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU10).
+- VU11: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU11).
+- VU12: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU12).
+- VU13: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU13).
+- VU14: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU14).
+- VU15: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU15).
+- VU16: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU16).
+- VU18: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU18).
+- VU19: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU19).
+- VU20: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU20).
+- VU21: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU21).
+- VU22: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU22).
+- VU23: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU23).
+- VU24: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU24).
+- VU26: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU26).
+- VU27: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU27).
+- VU28: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU28).
+- VU29: reviewer-only minor, not verified, not fixed in this wave (see section 3 line VU29).
+- Optimizer evaluators still measure elapsed time in the viewer zone: an optimizer placement that straddles the plant spring-forward gap, viewed from a browser in a different daylight-saving calendar, is rejected at Save with a width toast and re-runs correctly (scope cut 1).
+- Zero-wall-width bar in the repeated hour (ruled): an order of exactly one hour that ends inside the repeated hour at the same wall time cannot be saved during that hour once a year, because the stored-range constraint needs the end after the start; fixing it needs a schema change.
+- No pytest feeds the running-order piece payloads (two pieces, or no pieces plus both edges) through the bulk date update route; the server acceptance was checked by reading only.
+- The date-only backfill for pre-existing rows is a midnight heuristic: a genuine midnight due date on an existing row reads as date-only until SAP next sends it.
+- Browser check 1: left-handle veto on a bar drag.
+- Browser check 2: derive-paused banner appearance and stacking under the concurrency banner.
+- Browser check 3: overtime confirm when a firmed order finish is moved outside working hours.
+- Browser check 4: display-only never-placed rows after cutover show a derived bar and are not saved until a planner acts or the first-load Save runs.
+- Browser check 5: Gantt lock and today bands on the plant clock for a viewer in a different time zone.
+- Browser check 6: Override window and hover card, including the explain-the-move line.
+- Browser check 7: multi-drag ghost preview on a right-edge resize.
+- Browser check 8: cutover summary toast in all five languages.
+- Browser check 9: reversal toast and alert on a run-time edit of a late order, alert cards and glossary in five languages, distribution separation wording.
+- Browser check 10 (G-10): rehearse the whole cutover on a restored copy of the pilot database, timing the first-load reconcile at real plant size.
+- Browser check, added: the running-order finish toast (a typed End or a drag on a running order is refused, the run-time edit is the only resize), in five languages.
+- Browser check, added: minute-held finishes show and edit at the exact minute in the grid, the Inspector and the Override window; only a horizontal drag lands on the 15-minute grid.
+- Browser check, added: the amber placement-exception card and its tile count (not counted in the blocking tile or the Orders Conflicting chip; the marker stays on the bar).
+- Browser check, added: the derived bar on a line without its own calendar row (plant default calendar), including the reconcile after undo.
+- Cutover rehearsal on a restored pilot copy (G-10): the full runbook in `docs/DEPLOYMENT.md`, never executed end to end.
+- SAP echo test against a real SAP system (A9): confirms how SAP returns seconds before the echo compare (kept truncated to the minute, D11) is revisited.
+- External callers of the bulk task update route (`/tasks/bulk_update`): the owner must list them, because the route now requires both edges and carries start-derived reasons.
+- Two stale `.git/worktrees` admin directories (`bisect-wt`, `merged`) need `git worktree prune`, to be run outside OneDrive.
