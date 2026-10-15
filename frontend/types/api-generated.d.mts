@@ -74,9 +74,10 @@ export interface paths {
         /**
          * Update Task
          * @description Update a single task's schedule/priority attributes and persist to DB.
-         *     Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
-         *                PRODUCTION_VERSION?, base_version?, force? }
-         *     Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
+         *     Payload: { id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+         *                PRT_01?, PRT_02?, PRODUCTION_VERSION?, base_version?, force? }
+         *     Response: 200 { status, persisted, failed, stale, versions, conflicts, rejection_reasons, start_derived }
+         *               | 400 { error: "invalid", rejection_reasons } | 404 not found.
          *     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
          *     client can refetch and warn uniformly with the bulk path.
          */
@@ -120,7 +121,8 @@ export interface paths {
         /**
          * Tasks Update
          * @description Bulk-update task dates/priority attributes and persist to DB (one transaction).
-         *     Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+         *     Payload: { tasks: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+         *                          PRT_01?, PRT_02?,
          *                          PRODUCTION_VERSION?, base_version?, force? }],
          *                blocks?, calendars? }
          *     Response: { status, updated, persisted, failed, invalid, not_found,
@@ -145,7 +147,8 @@ export interface paths {
         /**
          * Bulk Update
          * @description Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-         *     Payload: [{ id, start_date?, end_date?, base_version?, trust_start? }]
+         *     Payload: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+         *                 base_version?, trust_start? }]
          *     Response: { status, updated, persisted, failed, invalid, not_found,
          *                 invalid_ids, not_found_ids, stale, versions, rejection_reasons, start_derived }
          *
@@ -3617,6 +3620,9 @@ export interface components {
          * TaskDateUpdate
          * @description One task's optional schedule/attribute edit. Unknown fields are ignored.
          *
+         *     `start_date` and `end_date` are both-or-neither: a payload carrying only one
+         *     edge is rejected as `single_edge`. `trust_start` semantics are unchanged.
+         *
          *     Optimistic concurrency: `base_version` is the xmin the client last saw for this
          *     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
          *     unless `force` is set. The optimizer does NOT use `force` — it sends
@@ -3699,6 +3705,14 @@ export interface components {
             };
             /** Conflicts */
             conflicts?: components["schemas"]["ScheduleConflict"][];
+            /** Rejection Reasons */
+            rejection_reasons?: {
+                [key: string]: string;
+            };
+            /** Start Derived */
+            start_derived?: {
+                [key: string]: boolean;
+            };
         };
         /**
          * TaskVersionRow

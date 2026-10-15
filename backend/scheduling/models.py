@@ -241,6 +241,9 @@ class ScheduleSegmentInput(BaseModel):
 class TaskDateUpdate(BaseModel):
     """One task's optional schedule/attribute edit. Unknown fields are ignored.
 
+    `start_date` and `end_date` are both-or-neither: a payload carrying only one
+    edge is rejected as `single_edge`. `trust_start` semantics are unchanged.
+
     Optimistic concurrency: `base_version` is the xmin the client last saw for this
     row. The write is rejected (reported as `stale`) if the row's current xmin differs,
     unless `force` is set. The optimizer does NOT use `force` — it sends
