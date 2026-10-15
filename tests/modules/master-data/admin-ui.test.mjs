@@ -18,6 +18,113 @@ test('Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof Plant.gotoTab, 'function');
   assert.equal(typeof Plant._renderSettingsPane, 'function', 'App._renderSettingsPane was relocated bodily onto Plant in Task 1 — must land here');
   assert.equal(typeof ProdLines.render, 'function');
+  assert.equal(typeof ProdLines.refresh, 'function');
+  assert.equal(typeof Plant.refresh, 'function');
+});
+
+// Master Data sub-tab Refresh (docs/superpowers plan 2026-10-15-master-data-refresh, Task 2).
+// ProdLines.refresh re-pulls the same plant-scoped data the page boots with, without a reload.
+test('ProdLines.refresh re-fetches plants, the plant-scoped machines and the plant calendar, then resolves true', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const urls = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = (url) => {
+    urls.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    const result = await ProdLines.refresh();
+    assert.equal(result, true);
+    assert.ok(urls.some(u => /\/master-data\/plants(\?|$)/.test(u)), `plants fetched: ${urls}`);
+    assert.ok(urls.some(u => u.endsWith('/master-data/machine?plant=1006')), `plant-scoped machines fetched: ${urls}`);
+    assert.ok(urls.some(u => u.endsWith('/plant-calendar?plant=1006')), `plant calendar fetched: ${urls}`);
+    assert.ok(!urls.some(u => /\/master-data\/machine(\?(?!plant=)|$)/.test(u)), 'never an unscoped machine fetch');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('ProdLines.refresh and Plant.refresh resolve false and fetch nothing when no plant is selected', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorFetch = Util.fetchTraced;
+  const urls = [];
+  Util.fetchTraced = (url) => { urls.push(String(url)); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); };
+  try {
+    Store.setSelectedPlant(null, 'test');
+    assert.equal(await ProdLines.refresh(), false);
+    assert.equal(await Plant.refresh(), false);
+    assert.deepEqual(urls, []);
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+});
+
+test('Plant.refresh also re-pulls priority rank maps, and the setup snapshot only on the settings inner tab', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const priorTab = Plant._currentPlantTab;
+  const originalGoto = Plant.gotoTab;
+  const urls = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = (url) => {
+    urls.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  // gotoTab would render panes that need a real DOM; render() dispatching to it is Plant's own contract.
+  Plant.gotoTab = () => {};
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Plant._currentPlantTab = 'general';
+    assert.equal(await Plant.refresh(), true);
+    assert.ok(urls.some(u => u.includes('/priority-rank-maps?plant=1006')), `rank maps fetched: ${urls}`);
+    assert.ok(urls.some(u => u.endsWith('/plant-calendar?plant=1006')), `plant calendar fetched: ${urls}`);
+    assert.ok(!urls.some(u => u.includes('/setup/1006')), `no setup snapshot on the general tab: ${urls}`);
+
+    urls.length = 0;
+    Plant._currentPlantTab = 'settings';
+    assert.equal(await Plant.refresh(), true);
+    assert.ok(urls.some(u => u.includes('/setup/1006')), `setup snapshot re-fetched on the settings tab: ${urls}`);
+  } finally {
+    Plant.gotoTab = originalGoto;
+    Plant._currentPlantTab = priorTab;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('ProdLines.refresh flushes a pending debounced line-hours write before re-fetching', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const priorFlush = CalendarSync._flushLineHours;
+  const order = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  CalendarSync._flushLineHours = (plant) => { order.push(`flush:${plant}`); return Promise.resolve({ ok: true }); };
+  Util.fetchTraced = (url) => { order.push(`fetch:${String(url)}`); return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) }); };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    await ProdLines.refresh();
+    assert.equal(order[0], 'flush:1006', 'the flush runs before any fetch');
+  } finally {
+    CalendarSync._flushLineHours = priorFlush;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
 });
 
 test('Plant working-hours pills open the plant Edit Calendar modal; _fmtHour renders midnight', () => {

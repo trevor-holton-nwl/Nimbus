@@ -903,6 +903,19 @@ export const SetupAdmin = (() => {
     });
   }
 
+  /** Drop this plant's cached line scope, coverage and per-line compatibility so the
+   *  next `render` re-fetches them. `loadScopeLines`/`loadCoverage`/`loadCompatibility`
+   *  early-return on a cached entry and nothing else expires them; the Master Data
+   *  Refresh calls this before re-rendering the Settings pane. */
+  function invalidatePlant(plant: string): void {
+    delete _linesByPlant[plant];
+    delete _coverageByPlant[plant];
+    const prefix = `${plant}\u0000`;
+    for (const key of Object.keys(_compatibilityByLine)) {
+      if (key.startsWith(prefix)) delete _compatibilityByLine[key];
+    }
+  }
+
   function renderSnapshot(target: HTMLElement, snapshot: SetupSnapshot): void {
     const definition = snapshot.definition;
     const version = definition?.signature_version ?? null;
@@ -2051,7 +2064,7 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); return false; }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, setSetupActive,
+  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, invalidatePlant, setSetupActive,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
     stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,

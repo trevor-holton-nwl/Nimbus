@@ -6,6 +6,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SetupAdmin } from '../../../frontend/setup/setup-admin.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+import { Util } from '../../../frontend/platform/foundation.mjs';
 
 test('SetupAdmin keeps read, copy, and export available to non-writers', () => {
   // Regression target: hiding the entire matrix UI from a scheduler/preview
@@ -224,6 +226,48 @@ test('SetupAdmin.fetchListRows scopes the List view page fetch by machine, not t
     assert.equal(query.get('line'), null, 'must not send a line= param at all');
   } finally {
     globalThis.fetch = origFetch;
+  }
+});
+
+test('SetupAdmin.invalidatePlant drops the per-plant line and coverage caches so the next render re-fetches them', async () => {
+  // Regression target: loadScopeLines/loadCoverage early-return on a cached
+  // plant and never expire, so a Master Data Refresh could not reach this pane.
+  const plant = 'P-INVAL';
+  const priorFetch = Util.fetchTraced;
+  const priorPlant = Store.selectedPlant;
+  const priorSnapshot = Store.setupSnapshot;
+  const urls = [];
+  Util.fetchTraced = (url) => {
+    urls.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ machine: 'M1' }], meta: { total: 1 } }) });
+  };
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  const count = (needle) => urls.filter(u => u.includes(needle)).length;
+  try {
+    // A different selected plant makes render's post-load repaint a no-op, so no DOM is needed.
+    Store.setSelectedPlant(null, 'test');
+    Store.replaceSetupSnapshot({ plant }, 'test');
+    const target = { innerHTML: '' };
+
+    SetupAdmin.render(target, plant);
+    await settle();
+    assert.equal(count(`/master-data/machine?plant=${plant}`), 1);
+    assert.equal(count(`/setup/${plant}/coverage`), 1);
+
+    SetupAdmin.render(target, plant);
+    await settle();
+    assert.equal(count(`/master-data/machine?plant=${plant}`), 1, 'cached: no second line fetch');
+    assert.equal(count(`/setup/${plant}/coverage`), 1, 'cached: no second coverage fetch');
+
+    SetupAdmin.invalidatePlant(plant);
+    SetupAdmin.render(target, plant);
+    await settle();
+    assert.equal(count(`/master-data/machine?plant=${plant}`), 2, 'invalidated: lines re-fetched');
+    assert.equal(count(`/setup/${plant}/coverage`), 2, 'invalidated: coverage re-fetched');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.replaceSetupSnapshot(priorSnapshot, 'test-restore');
   }
 });
 

@@ -62,6 +62,61 @@ const _FALLBACK_PRIORITY_FIELDS: PriorityFieldMeta[] = [
  *  value used on more than one line (they are per-line COUNT(DISTINCT …)). */
 const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
 
+/** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
+ *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
+ *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
+ *  sub-tab Refresh (awaited, `source: 'master-data-refresh'`). Resolves once the Store
+ *  write — or the no-op/failed-fetch `master-data-changed` emit — has happened; never
+ *  rejects. Staleness tokens: a plant switch or a newer Persistence load while these
+ *  fetches are in flight must not let this response overwrite the (now different)
+ *  plant's master data. */
+async function refreshStoreMasterData(source: string, table?: string): Promise<void> {
+  const API = Config.API_BASE;
+  const refreshPlant = Store.selectedPlant;
+  const refreshLoadGen = Persistence._loadRequest;
+  try {
+    const [pData, lData] = await Promise.all([
+      Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
+      // Plant-scoped (#25): never refetch every plant's machines. With no
+      // selected plant, keep whatever lines are already in the Store.
+      Store.selectedPlant
+        ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
+        : Promise.resolve(null),
+    ]);
+    if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return;
+    if (pData || lData) {
+      // Public Store.setMasterData(...) equivalent of the former direct
+      // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
+      // (CQ-1 Phase 4 Task 2 — closes MasterData's tracked §6 exception).
+      // It fires its own 'master-data-changed' emit (without the `table`
+      // field the manual emit below carries — unused by any subscriber,
+      // confirmed by inspection), so the `table`-carrying emit only needs to
+      // fire on the no-op (neither fetch returned rows) branch to preserve
+      // the original single-emit-per-call shape.
+      Store.setMasterData({
+        plants: pData?.rows ?? [],
+        // A failed machine fetch keeps the lines already in the Store (never blank them).
+        lines:  lData?.rows ?? (Store.masterData?.lines ?? []),
+        // This re-fetches only plants/machine (the two tables the
+        // Hierarchy/ProdLines consumers actually need); it is not
+        // work-center-specific and has no sap_workcenter rows in scope
+        // even when `table === 'sap_workcenter'`. setMasterData replaces
+        // the whole object (Store.setMasterData in store.mts), so
+        // omitting this field — or passing [] — would silently wipe
+        // whatever work-center data persistence.mts's boot-time fetch
+        // already populated. Preserve the current in-memory value
+        // instead of firing a redundant new /master-data/sap_workcenter
+        // request here.
+        workcenters: Store.masterData?.workcenters ?? [],
+      }, source);
+    } else {
+      Store.emit({ type: 'master-data-changed', table, source });
+    }
+  } catch {
+    Store.emit({ type: 'master-data-changed', table, source });
+  }
+}
+
 /* =============================================================================
    PLANT — plant-level calendar UI (working hours, blackouts, lines roster).
    ========================================================================== */
@@ -217,6 +272,31 @@ export const Plant = {
     Plant._renderHours();
     Plant._renderBlocks();
     Plant._renderRoster();
+  },
+
+  /** Master Data ▸ Plant sub-tab Refresh: re-pull this plant's master data, calendar
+   *  (hours + blackouts), priority rank maps and — on the Settings inner tab — the setup
+   *  snapshot, then re-render. Resolves `true` once fresh data is showing; `false` when
+   *  there is no selected plant (nothing was reloaded). Calendar-fetch failures degrade
+   *  inside `CalendarSync.fetchPlantConfig` (toast + cached state), so they still count. */
+  async refresh(): Promise<boolean> {
+    const plant = Store.selectedPlant;
+    if (!plant) return false;
+    // A debounced line-hours write the user just typed must reach the server before the
+    // re-fetch, or the fetch would overwrite it with the stale server copy.
+    await CalendarSync._flushLineHours(plant);
+    await refreshStoreMasterData('master-data-refresh');
+    await CalendarSync.fetchPlantConfig(plant);
+    await Persistence.loadPriorityRankMaps(plant);
+    if (Plant._currentPlantTab === 'settings') {
+      // SetupAdmin's per-plant line/coverage caches never expire on their own.
+      SetupAdmin.invalidatePlant(plant);
+      await Persistence.loadSetupSnapshot(plant);
+    }
+    // render() re-dispatches by inner tab: general reads Store, optimization re-fetches,
+    // settings re-renders SetupAdmin against the fresh snapshot.
+    Plant.render();
+    return true;
   },
 
   /** Called by App once `GET /priority-fields` resolves (application-shell.mts),
@@ -1988,6 +2068,21 @@ export const ProdLines = {
   _delegated: false,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
+
+  /** Master Data ▸ Production Lines sub-tab Refresh: re-pull this plant's master data and
+   *  calendar (hours + blackouts; fetchPlantConfig emits `calendar:change`/`blocks:change`),
+   *  then re-render. Resolves `true` once fresh data is showing; `false` when there is no
+   *  selected plant. Calendar-fetch failures degrade inside `CalendarSync.fetchPlantConfig`. */
+  async refresh(): Promise<boolean> {
+    const plant = Store.selectedPlant;
+    if (!plant) return false;
+    // Flush a just-typed debounced line-hours edit first so the re-fetch can't overwrite it.
+    await CalendarSync._flushLineHours(plant);
+    await refreshStoreMasterData('master-data-refresh');
+    await CalendarSync.fetchPlantConfig(plant);
+    ProdLines.render();
+    return true;
+  },
 
   render(): void {
     const body = document.getElementById('lines-body');
@@ -4496,51 +4591,9 @@ export const MasterData = (() => {
         }
       }
 
-      // Refresh master-data in Store so Hierarchy/ProdLines stay in sync. Staleness token:
-      // a plant switch or a newer Persistence load while these fetches are in flight must not
-      // let this response overwrite the (now different) plant's master data.
-      const refreshPlant = Store.selectedPlant;
-      const refreshLoadGen = Persistence._loadRequest;
-      Promise.all([
-        Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
-        // Plant-scoped (#25): never refetch every plant's machines. With no
-        // selected plant, keep whatever lines are already in the Store.
-        Store.selectedPlant
-          ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
-          : Promise.resolve(null),
-      ]).then(([pData, lData]) => {
-        if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return;
-        if (pData || lData) {
-          // Public Store.setMasterData(...) equivalent of the former direct
-          // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
-          // (CQ-1 Phase 4 Task 2 — closes MasterData's tracked §6 exception).
-          // It fires its own 'master-data-changed' emit (without the `table`
-          // field the old manual emit below carried — unused by any
-          // subscriber, confirmed by inspection), so the `table`-carrying
-          // emit only needs to fire on the no-op (neither fetch returned
-          // rows) branch to preserve the original single-emit-per-call shape.
-          Store.setMasterData({
-            plants: pData?.rows ?? [],
-            // A failed machine fetch keeps the lines already in the Store (never blank them).
-            lines:  lData?.rows ?? (Store.masterData?.lines ?? []),
-            // This refresh only re-fetches plants/machine (the two tables the
-            // Hierarchy/ProdLines consumers below actually need); it is not
-            // work-center-specific and has no sap_workcenter rows in scope
-            // even when `table === 'sap_workcenter'`. setMasterData replaces
-            // the whole object (Store.setMasterData in store.mts), so
-            // omitting this field — or passing [] — would silently wipe
-            // whatever work-center data persistence.mts's boot-time fetch
-            // already populated. Preserve the current in-memory value
-            // instead of firing a redundant new /master-data/sap_workcenter
-            // request here.
-            workcenters: Store.masterData?.workcenters ?? [],
-          }, 'master-data-save');
-        } else {
-          Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });
-        }
-      }).catch(() => {
-        Store.emit({ type: 'master-data-changed', table, source: 'master-data-save' });
-      });
+      // Refresh master-data in Store so Hierarchy/ProdLines stay in sync (fire-and-forget;
+      // the staleness tokens and the no-op/catch emit live in refreshStoreMasterData).
+      void refreshStoreMasterData('master-data-save', table);
     } catch (e) {
       Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
       ErrorLog.error('master-data', `Save failed for ${table}: ${(e as Error).message}`);
