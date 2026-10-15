@@ -65,7 +65,7 @@ def _seed(cur):
         )
 
     a = pnow
-    add("zzcut-run-pastdue", AK, base=a, start=a - _h(2), end=a + _h(3), run=4, due_days=-5)  # old end = start + run_time
+    add("zzcut-run-pastdue", AK, base=a, start=a - _h(2), end=a + _h(3), run=4, due_days=-5)  # old end = stored end (D15)
     add("zzcut-run-futuredue", AK, base=a, start=a - _h(1), end=a + _h(2), run=3, due_days=3)
     add("zzcut-run-split", AK, base=a, start=a - _h(3), end=a + _h(9), run=6, due_days=1)  # old end = last segment end
     add("zzcut-run-noruntime", AK, base=a, start=a - _h(1), end=a + _h(6), run=None, due_days=1)  # old end = scheduled_end
@@ -144,8 +144,8 @@ def test_backward_cutover_write_set_and_idempotence(pg):
             cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id = 'zzcut-future'")
             assert cur.fetchone()[0] == 1
 
-            # Running rows keep start AND the old end (arm order: last segment end, start + run_time, scheduled_end).
-            assert (r["zzcut-run-pastdue"]["start"], r["zzcut-run-pastdue"]["end"]) == (pnow - _h(2), pnow + _h(2))
+            # Running rows keep start AND the old end (arm order: last segment end, stored end, start + run_time).
+            assert (r["zzcut-run-pastdue"]["start"], r["zzcut-run-pastdue"]["end"]) == (pnow - _h(2), pnow + _h(3))   # D15: the STORED end, not start + run_time
             assert r["zzcut-run-pastdue"]["bfinish"] < pnow  # due date already past, still running
             assert (r["zzcut-run-futuredue"]["start"], r["zzcut-run-futuredue"]["end"]) == (pnow - _h(1), pnow + _h(2) - _h(0))
             assert (r["zzcut-run-split"]["start"], r["zzcut-run-split"]["end"]) == (pnow - _h(3), pnow + _h(8))
@@ -210,6 +210,29 @@ def test_backward_cutover_write_set_and_idempotence(pg):
             conn.rollback()
 
 
+@pytest.mark.pg
+def test_cutover_before_snapshot_raises_and_writes_nothing(pg):
+    """D18: the cutover refuses to run without the snapshot in the ledger; nothing is written, no ledger row."""
+    import psycopg
+    cutover_sql = _read(CUTOVER_SQL)
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("DELETE FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))
+            for t in SNAP_TABLES:
+                cur.execute(f"DROP TABLE IF EXISTS {t}")
+            _seed(cur)
+            before = {oid: _row(cur, oid) for oid in FLEET}
+            cur.execute("SAVEPOINT pre_cutover")
+            with pytest.raises(psycopg.errors.RaiseException, match="precutover-snapshot"):
+                cur.execute(cutover_sql)
+            cur.execute("ROLLBACK TO SAVEPOINT pre_cutover")
+            assert {oid: _row(cur, oid) for oid in FLEET} == before
+            cur.execute("SELECT count(*) FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))
+            assert cur.fetchone()[0] == 0
+        finally:
+            conn.rollback()
+
+
 def test_snapshot_cutover_and_restore_files_carry_the_manual_only_marker():
     """I1/I2: the deploy runner skips files with this header line in every mode, so none of the three can be
     applied by a routine promote (the runner behaviour itself is exercised in the B1 report / DEPLOYMENT.md)."""
@@ -265,5 +288,32 @@ def test_restore_before_any_save_is_exact(pg):
             cur.execute(cutover_sql)
             cur.execute("SELECT count(*) FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))
             assert cur.fetchone()[0] == 2
+        finally:
+            conn.rollback()
+
+
+@pytest.mark.pg
+def test_restore_skips_segments_of_orders_deleted_since_the_snapshot(pg):
+    """VI16: an order purged after the snapshot has nothing to restore; its snapshotted segments are skipped
+    instead of failing the whole restore on the foreign key."""
+    snapshot_sql, cutover_sql, restore_sql = _read(SNAPSHOT_SQL), _read(CUTOVER_SQL), _read(RESTORE_SQL)
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("DELETE FROM schema_migrations WHERE id = ANY(%s)", (list(LEDGER_IDS),))
+            for t in SNAP_TABLES:
+                cur.execute(f"DROP TABLE IF EXISTS {t}")
+            _seed(cur)
+            cur.execute("SELECT order_id, segment_no, scheduled_start, scheduled_end FROM order_schedule_segments"
+                        " WHERE order_id = 'zzcut-run-split' ORDER BY segment_no")
+            kept_before = cur.fetchall()
+            cur.execute(snapshot_sql)
+            cur.execute(cutover_sql)
+            cur.execute("DELETE FROM orders WHERE id = 'zzcut-split-future'")   # purged since the snapshot
+            cur.execute(restore_sql)
+            cur.execute("SELECT count(*) FROM order_schedule_segments WHERE order_id = 'zzcut-split-future'")
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT order_id, segment_no, scheduled_start, scheduled_end FROM order_schedule_segments"
+                        " WHERE order_id = 'zzcut-run-split' ORDER BY segment_no")
+            assert cur.fetchall() == kept_before
         finally:
             conn.rollback()

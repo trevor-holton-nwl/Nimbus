@@ -113,7 +113,7 @@ ALTER TABLE orders ADD CONSTRAINT chk_orders_sched_range
 -- two separate files/transactions instead.
 --
 -- Run-time cap (OQ28): the bound is now a pure REPRESENTATION bound (< 8760 hours); the LIMIT an order
--- is scheduled with (336 h, or the plant's visibility horizon when shorter) is enforced in the
+-- is scheduled with (a flat 336 hours, no per-plant horizon term) is enforced in the
 -- application. An initialised database still carries the old < 168 constraint under the SAME name, so
 -- this block drops and re-adds it exactly once, guarded by the schema_migrations ledger id
 -- 'orders_run_time_bounds_8760' (mirrors migrations/2026-10-15-2-orders-run-time-bounds-336.sql;
@@ -2080,6 +2080,9 @@ $mig$;
 DO $mig$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_scheduling_cutover') THEN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'backward_cutover_snapshot') THEN
+      RAISE EXCEPTION 'backward cutover: apply migrations/2026-10-20-0-orders-precutover-snapshot.sql first (no snapshot in the ledger)';
+    END IF;
     -- running = a planner-placed start at or before plant-local now and the old effective end after it
     -- (Task 0 ruling: real column names — plants.plant (PK is (subnetwork, plant); MIN(timezone) per plant as
     --  sap_staging.py does, a plant may sit in two subnetworks), orders.planning_status = 'needs_planning',
@@ -2088,7 +2091,7 @@ BEGIN
       SELECT p.plant, now() AT TIME ZONE COALESCE(NULLIF(MIN(p.timezone),''),'UTC') AS pnow
       FROM plants p GROUP BY p.plant
     ), old_end AS (
-      SELECT o.id, COALESCE(MAX(s.scheduled_end), o.scheduled_start + (o.run_time * INTERVAL '1 hour'), o.scheduled_end) AS old_end
+      SELECT o.id, COALESCE(MAX(s.scheduled_end), o.scheduled_end, o.scheduled_start + (o.run_time * INTERVAL '1 hour')) AS old_end
       FROM orders o LEFT JOIN order_schedule_segments s ON s.order_id = o.id GROUP BY o.id
     ), running AS (
       SELECT o.id, e.old_end FROM orders o LEFT JOIN plant_now pn ON pn.plant = o.plant JOIN old_end e ON e.id = o.id
@@ -2097,7 +2100,7 @@ BEGIN
         AND e.old_end > COALESCE(pn.pnow, now() AT TIME ZONE 'UTC')
     )
     UPDATE orders o SET
-      -- Task 0 ruling B4 (OQ3/OQ5): a running row keeps BOTH its start and its old forward end so it still
+      -- Task 0 ruling B4 (OQ3/OQ5, D15): a running row keeps BOTH its start and its STORED end so it still
       -- reads as running (server _order_is_running needs both edges; client isInProgress needs now < end)
       -- even when its due date is already past. Every other row loses both edges and re-derives from its due date.
       scheduled_start = CASE WHEN r.id IS NOT NULL THEN o.scheduled_start ELSE NULL END,

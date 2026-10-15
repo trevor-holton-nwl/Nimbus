@@ -23,7 +23,7 @@
 -- previous image rolled back first (the old image is forward-scheduling and needs these columns as they were).
 -- Run it in ONE transaction (the deploy runner and psql --single-transaction both do).
 DO $mig$
-DECLARE t TEXT;
+DECLARE t TEXT; n INTEGER; total INTEGER;
 BEGIN
   IF to_regclass('orders_precutover_snapshot') IS NULL
      OR to_regclass('order_schedule_segments_precutover_snapshot') IS NULL THEN
@@ -45,7 +45,11 @@ BEGIN
    USING orders_precutover_snapshot s WHERE g.order_id = s.id;
   INSERT INTO order_schedule_segments
     SELECT (jsonb_populate_record(NULL::order_schedule_segments, to_jsonb(g))).*
-    FROM order_schedule_segments_precutover_snapshot g;
+    FROM order_schedule_segments_precutover_snapshot g
+    WHERE EXISTS (SELECT 1 FROM orders o WHERE o.id = g.order_id);   -- VI16: an order purged since the snapshot has nothing to restore
+  GET DIAGNOSTICS n = ROW_COUNT;
+  SELECT count(*) INTO total FROM order_schedule_segments_precutover_snapshot;
+  RAISE NOTICE 'restored % segment rows, skipped % whose order no longer exists', n, total - n;
 
   DELETE FROM schema_migrations WHERE id IN ('backward_cutover_snapshot', 'backward_scheduling_cutover');
   FOREACH t IN ARRAY ARRAY['orders_precutover_snapshot', 'order_schedule_segments_precutover_snapshot',

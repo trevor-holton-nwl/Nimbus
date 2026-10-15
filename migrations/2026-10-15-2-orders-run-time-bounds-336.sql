@@ -8,8 +8,8 @@
 -- (added by 2026-09-25-orders-run-time-bounds.sql, validated by 2026-09-26-...-validate.sql); it
 -- becomes a pure REPRESENTATION bound (0 <= run_time < 8760, the hours in a year), which still
 -- rejects NaN and +/-Infinity (Postgres sorts NaN above every number, so "NaN < 8760" is false).
--- The LIMIT an order is scheduled with is now enforced in the application: 336 hours, or the plant's
--- visibility horizon when that is shorter (db.cap_hours). A longer order is queued in Needs Planning
+-- The LIMIT an order is scheduled with is now enforced in the application: a flat 336 hours
+-- (no per-plant horizon term; db.cap_hours). A longer order is queued in Needs Planning
 -- (reason code run_time_over_cap) at upload, rejected per id on a planner edit.
 --
 -- Widening a bound can never fail validation, so (unlike the 2026-09-25/26 pair) the NOT VALID add and
