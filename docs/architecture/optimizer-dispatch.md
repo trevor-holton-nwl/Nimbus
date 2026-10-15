@@ -87,6 +87,18 @@ The setup-aware evaluators (`web/optimization/setup-scheduler.mts`) run a bounde
 - **Severity-ordered termination aggregation.** Combining N lines' outcomes into one plant-wide `SearchDiagnostics.termination` is not "last write wins" — `worseTermination(current, next)` compares `TERMINATION_SEVERITY`: `deadline (3) > iteration-cap (2) > converged (1) > completed (0)`. A later line's clean `'completed'` can never silently overwrite an earlier line's genuine `'deadline'`/`'iteration-cap'`, which would otherwise falsify `limitReached` for the whole run and defeat `evaluateMinChangeover`'s starvation guard. `'converged'` deliberately outranks `'completed'` (worth surfacing distinctly) but must never be conflated with, or ranked above, a genuine budget cutoff. Every aggregation site that folds a per-line/per-fragment `SearchRun`/`LineSearchResult` termination into a running plant-wide value must route through `worseTermination` rather than assigning directly — a whole-branch review found two direct `termination = fallbackCursor.termination` assignments (the terminal-fixed-boundary fallback paths in `evaluateLineWithFixedBoundaries`) that bypassed this helper and were corrected to route through it.
 - **`deadlineAt` option (`EvaluationRequest.deadlineAt`).** An optional absolute `performance.now()` timestamp a caller can supply to override the evaluator's default fresh `SETUP_AWARE_DEADLINE_MS` (5000, `web/optimization/engine.mts`) window. `runAndApply`'s live setup-aware path computes this once (`performance.now() + SETUP_AWARE_DEADLINE_MS`) up front so it is an explicit, inspectable number rather than an implicit "however long is left when the evaluator starts." A past `deadlineAt` is not special-cased — the search simply terminates immediately into tail placement, the existing safe deadline-exceeded path.
 - **Cancellable worker previews.** `OptimizerPreview.runWithPreview` routes setup-aware primary and alternate candidates through `optimizer-worker-client.mts`, using `optimizer-worker.mts` for module-worker execution and run IDs/`AbortSignal` to terminate stale work. The client falls back to the synchronous detached evaluator when Workers are unavailable or disabled, preserving tests and non-UI callers. Each candidate keeps its own absolute five-second diagnostics; stale responses update neither the active preview nor its finalist state.
+- **Search controls (Search time): `EvaluationRequest.searchBudgetMs` / `exhaustive`.** `searchBudgetMs` sets the primary deadline and scales the iteration cap (20 000 × lines in scope × scale, scale = max(1, budget / 5 000)); `exhaustive: true` also enables the Exhaustive knobs. The Optimize dialog's Search time select picks Normal (8 s) or Exhaustive (up to 3 min, background); alternate (comparison) plans always use Normal with `exhaustive: false`. The bounds builder in `engine.mts` derives these values:
+
+  | Derived value | Absent | Normal (`SETUP_AWARE_NORMAL_BUDGET_MS`, 8 000 ms) | Exhaustive (`SETUP_AWARE_EXHAUSTIVE_BUDGET_MS`, 180 000 ms) |
+  |---|---|---|---|
+  | `exhaustive` | false | false | true |
+  | Primary deadline | 5 000 ms (`SETUP_AWARE_DEADLINE_MS`) | 8 000 ms | 180 000 ms |
+  | Iteration-cap scale | 1 | 1.6 | 36 |
+  | Iteration cap per line in scope | 20 000 | 32 000 | 720 000 |
+  | `gapFillBudgetMs` | 1 000 | 2 000 | 36 000 |
+  | `exactSearchThreshold` | 8 | 8 | 10 |
+  | `exactSearchLeafCap` | 500 | 500 | 5 000 |
+  | `convergenceWindow` | 2 000 | 2 000 | 10 000 |
 
 ## Deliberately out of scope (see `docs/MIGRATION.md`)
 

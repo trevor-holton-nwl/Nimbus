@@ -1584,6 +1584,28 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_missing_remedy_state':        'Record this line\'s current setup state',                   // MISSING TRANSLATION
   'ui.setup_missing_remedy_row':          'Add a setup matrix row for this transition',                // MISSING TRANSLATION
   'ui.opt_pv_scheduled_state_unrecorded': '{{orders}} order(s) on {{lines}} machine(s) were scheduled as the line\'s first order without a recorded current setup state — record the line state to charge their setup.', // MISSING TRANSLATION
+  'ui.opt_pv_diag_limit_reached_note': 'Die Suche endete an einem Zeit- oder Iterationslimit, statt zu konvergieren — für einen längeren Lauf wählen Sie im Optimieren-Dialog die Suchzeit „Gründlich“.',
+  'ui.opt_search_time': 'Suchzeit',
+  'ui.opt_search_time_normal': 'Normal (8 s)',
+  'ui.opt_search_time_exhaustive': 'Gründlich (bis 3 Min., läuft im Hintergrund)',
+  'ui.opt_search_time_hint': 'Die gründliche Suche sucht bis zu 3 Minuten weiter, während Sie weiterarbeiten, und meldet, wenn sie fertig ist. Vergleichspläne verwenden immer das normale Budget.',
+  'btn.opt_run_bg_busy': 'Gründliche Optimierung läuft…',
+  'toast.opt_bg_started': 'Gründliche Optimierung für Werk {{plant}} gestartet (bis zu 3 Min.). Sie können weiterarbeiten.',
+  'toast.opt_bg_running': 'Für Werk {{plant}} läuft bereits eine gründliche Optimierung. Warten Sie, bis sie fertig ist, oder brechen Sie sie über die Schaltfläche Optimieren ab.',
+  'toast.opt_bg_cancelled': 'Gründliche Optimierung abgebrochen.',
+  'toast.opt_bg_other_plant': 'Wechseln Sie zurück zu Werk {{plant}}, um dieses Ergebnis anzuwenden.',
+  'toast.opt_bg_partial_applied': '{{applied}} Aufträge angewendet; {{skipped}} übersprungen, weil sich der Plan geändert hat: {{list}}',
+  'modal.opt_bg_cancel_confirm': 'Die gründliche Optimierung für Werk {{plant}} läuft ({{elapsed}} vergangen). Abbrechen?',
+  'ui.opt_bg_done_title': 'Gründliche Optimierung abgeschlossen',
+  'ui.opt_bg_done_summary': 'Werk {{plant}}: {{placed}} Aufträge eingeplant, {{queued}} brauchen noch Planung, Suchdauer {{seconds}} s.',
+  'ui.opt_bg_done_changed': '{{count}} vorgeschlagene(r) Auftrag/Aufträge haben sich während der Optimierung geändert oder sind verschwunden. Diese werden übersprungen; der Rest kann weiterhin angewendet werden.',
+  'ui.opt_bg_done_other_plant': 'Sie sehen Werk {{current}}. Wechseln Sie zurück zu Werk {{plant}}, um dieses Ergebnis anzuwenden.',
+  'ui.opt_bg_done_blocked': 'Dieses Ergebnis hat blockierende Validierungsfehler und kann nicht ohne Vorschau angewendet werden. Sehen Sie sich die Vorschau an, um Details zu erhalten.',
+  'ui.opt_bg_done_failed': 'Die gründliche Optimierung ist fehlgeschlagen: {{error}}',
+  'ui.opt_bg_view': 'Vorschau anzeigen',
+  'ui.opt_bg_apply': 'Ohne Vorschau anwenden',
+  'ui.opt_pv_apply_fits': 'Anwenden, was noch passt',
+  'ui.opt_bg_leave_warning': 'Eine gründliche Optimierung läuft noch. Wenn Sie diese Seite verlassen, geht sie verloren.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION
   'ui.setup_review_filter_state':         'Line state not recorded',                                   // MISSING TRANSLATION
   'ui.setup_review_filter_row':           'Matrix row absent',                                         // MISSING TRANSLATION
