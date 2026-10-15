@@ -4472,7 +4472,7 @@ describe('reconcile (finish-anchored)', () => {
     } finally { globalThis.document = priorDocument; fx.restore(); }
   });
 
-  test('OQ62: a line with no server calendar row is untouched and carries line_no_calendar', () => {
+  test('D14: a line with no server calendar row derives on the default calendar instead of being blocked', () => {
     const fx = recFixture({ lineNames: ['A', 'B'], serverLineNames: ['A'] });
     try {
       const withRow = fx.task('ok', { original_end_date: at(26, 17), start_date: at(18, 6), end_date: at(18, 10) });
@@ -4480,9 +4480,9 @@ describe('reconcile (finish-anchored)', () => {
       Store.setTasks([withRow, noRow], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);
       assert.equal(Store.tasks.ok.start_date.getTime(), at(26, 13).getTime());
-      assert.equal(Store.tasks.nr.start_date.getTime(), at(18, 6).getTime(), 'untouched');
-      assert.equal(Store.tasks.nr.end_date.getTime(), at(18, 10).getTime());
-      assert.equal(Store.tasks.nr.derivationIssue.code, 'line_no_calendar');
+      assert.equal(Store.tasks.nr.start_date.getTime(), at(26, 13).getTime(), 'derived on the default 07:00-19:00 hours');
+      assert.equal(Store.tasks.nr.end_date.getTime(), at(26, 17).getTime());
+      assert.equal(Store.tasks.nr.derivationIssue ?? null, null);
     } finally { fx.restore(); }
   });
 
@@ -4559,13 +4559,13 @@ describe('reconcile (finish-anchored)', () => {
         ...[28, 29, 30, 31].map(day => fx.task(`a${day}`, { original_end_date: at(day, 17), runtime_schedule_mismatch: true })),   // U24: the signature needs >= 10 non-queued rows
         fx.task('rv', { original_end_date: at(19, 14), runtime_schedule_mismatch: true }),               // due date already past: reversed from now
         fx.task('run', { user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(20, 7), end_date: at(20, 11) }),   // producing now: keeps its start
-        fx.task('bl', { MACHINE: lineB, original_end_date: at(26, 17), runtime_schedule_mismatch: true }),   // no server calendar on the line
+        fx.task('bl', { MACHINE: lineB, original_end_date: at(26, 17), runtime_schedule_mismatch: true }),   // D14: no server calendar row on the line, derives on the default hours
         fx.task('ok', { user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(27, 7), end_date: at(27, 11) }),
       ], 'unit-test');
       Engine.reconcileRuntimeSchedules(fx.plant);   // 9 of 10 non-queued rows were stale
-      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:6,1,1,1'], 're-anchored 6, reversed 1, kept running start 1, blocked 1');
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:7,1,1,0'], 're-anchored 7 (D14: the no-server-row line derives too), reversed 1, kept running start 1, blocked 0');
       assert.deepEqual(Store.tasks.rv.derivationIssue, { code: 'reversal_forward', detail: 'cutover' }, 'the first-load pass is tagged cutover');
-      assert.equal(Store.tasks.bl.derivationIssue.code, 'line_no_calendar', 'the alerts themselves are unchanged');
+      assert.equal(Store.tasks.bl.derivationIssue ?? null, null, 'D14: the no-server-row line is no longer blocked');
     } finally { unstub(); fx.restore(); }
   });
 

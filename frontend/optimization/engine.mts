@@ -1729,9 +1729,8 @@ export const Engine = {
     try {
       for (const task of candidates) {
         const line = task.MACHINE;
-        // OQ62: a line on the client default hours has no server calendar to derive from.
+        // D14: every line has a calendar (its own row or the plant default), so nothing is blocked here any more.
         const stale = !!task.runtime_schedule_mismatch;
-        if (!CalendarSync.hasServerLineCalendar(plant, line)) { noteOnly(task, { code: 'line_no_calendar' }); tally(stale, 'blocked'); continue; }
         const placed = !!task.user_scheduled;
 
         if (placed && task.start_date && task.end_date && Engine.isInProgress(task, plantNow)) {
@@ -3102,11 +3101,10 @@ Store.subscribe(evt => {
 // import the engine (platform sits below it); the engine registers this hook once at load.
 UndoStack.afterRestore = (ids: string[], wasDirty: ReadonlySet<string>): void => Engine.reconcileRestored(ids, wasDirty);
 // U23: restoreTasks flags a row stale only when the reconcile will process it (the same eligibility its candidate
-// filter and its per-line calendar check apply); any other row would keep the flag, and its error alert, until reload.
+// filter applies); any other row would keep the flag, and its error alert, until reload.
 UndoStack.willRederive = (task: NimbusTask): boolean => {
-  const plant = task.PLANT || Store.getPlantForLine(task.MACHINE);
-  return !!task.MACHINE && task.planning_status !== 'needs_planning' && !task.placement_exception
-    && (CalendarSync.calendarState(plant) !== 'hydrated' || CalendarSync.hasServerLineCalendar(plant, task.MACHINE));
+  // D14: every line derives (own calendar row or the plant default), so the per-line calendar check is gone.
+  return !!task.MACHINE && task.planning_status !== 'needs_planning' && !task.placement_exception;
 };
 // F10: the snapshot records which rows already carried unsaved edits (the platform cannot see Persistence).
 UndoStack.dirtyProbe = (id: string): boolean => Persistence._dirtyIds.has(id);
