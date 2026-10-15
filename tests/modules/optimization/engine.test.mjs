@@ -5286,7 +5286,7 @@ test('Engine.earliestAllowedStart/latestAllowedEnd read the explicit view, not t
 });
 
 test('sync preview bounds stay snapshot-bound after the run: a later live-Store calendar edit does not move the floor', () => {
-  const { openFriday, closedFriday, plantHours, md, task, view } = dueWindowFixture();
+  const { openFriday, plantHours, md, task, view } = dueWindowFixture();
   const snap = {
     tasks: [task], firmedIds: [], alerts: [], selectedPlant: 'DW', blocks: [], plantBlocks: [],
     calendars: view.calendars, plants: view.plants, lineSettings: {}, masterData: md, priorityRankMaps: {},
@@ -5319,6 +5319,5 @@ test('sync preview bounds stay snapshot-bound after the run: a later live-Store 
   } finally {
     if (priorCal === undefined) delete Store.calendars.DW1; else Store.calendars.DW1 = priorCal;
     if (priorPlant === undefined) delete Store.plants.DW; else Store.plants.DW = priorPlant;
-    void closedFriday;
   }
 });
