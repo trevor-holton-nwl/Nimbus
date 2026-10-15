@@ -724,7 +724,14 @@ export const Util = {
     const intervals = Util.scheduleIntervals(t);
     if (intervals.length) return intervals.some(i => i.start < dayEnd && i.end > dayStart);
     const start = Util.parseDate(t?.start_date);
-    return !!start && start >= dayStart && start < dayEnd;
+    if (!start) {
+      // A finish-only row (end set, start null) is the bar [end - run_time, end] (U29).
+      const end = Util.parseDate(t?.end_date);
+      const run = parseFloat(String(t?.RUN_TIME ?? ''));
+      if (!end || !(run > 0)) return false;
+      return new Date(end.getTime() - run * 3600000) < dayEnd && end > dayStart;
+    }
+    return start >= dayStart && start < dayEnd;
   },
 
   /** The alert text in the viewer's language: worker alerts carry a locale key + vars, with English `msg` as the fallback. */

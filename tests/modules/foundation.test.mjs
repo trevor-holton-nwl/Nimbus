@@ -652,6 +652,15 @@ test('Util.overlapsDay: split orders are tested piece by piece; a start with no 
   assert.equal(Util.overlapsDay({ id: 'z' }, '2026-10-14'), false);
 });
 
+test('Util.overlapsDay (U29): a finish-only row (end set, start null) counts on every day of [end - run_time, end]; without a run time or finish it never counts', () => {
+  const fo = { id: 'fo', RUN_TIME: 3, start_date: null, end_date: new Date(2026, 9, 15, 1, 0) };   // 22:00 Wed -> 01:00 Thu
+  assert.equal(Util.overlapsDay(fo, '2026-10-14'), true, 'the derived bar starts on Wednesday');
+  assert.equal(Util.overlapsDay(fo, '2026-10-15'), true);
+  assert.equal(Util.overlapsDay(fo, '2026-10-16'), false);
+  assert.equal(Util.overlapsDay({ id: 'x', RUN_TIME: 0, start_date: null, end_date: new Date(2026, 9, 15, 1) }, '2026-10-15'), false);
+  assert.equal(Util.overlapsDay({ id: 'y', RUN_TIME: 3, start_date: null, end_date: null }, '2026-10-15'), false);
+});
+
 test('Util.plantClock reads the wired plant clock (by plant, else by line), and falls back when it returns nothing', () => {
   const pinned = new Date(2026, 9, 15, 3, 30);
   Util.setPlantClockResolver((plant, line) => (plant === 'P' || line === 'L-P') ? pinned : null);

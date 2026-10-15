@@ -821,6 +821,18 @@ test('workingMinutesByDay: split orders are exact by piece; a start with no fini
   assert.deepEqual(Core.workingMinutesByDay({ id: 'n', RUN_TIME: 3, start_date: D(14, 9) }, null), { '2026-10-14': 180 });
 });
 
+test('U29: a finish-only row (end set, start null) is the bar [end - run_time, end]; with no run time or no finish it stays absent', () => {
+  // A freshly distributed child: scheduled_start NULL, finish Thu 11:00, 3 h run -> Thu 08:00-11:00, all inside the window.
+  const finishOnly = { id: 'fo', RUN_TIME: 3, start_date: null, end_date: D(15, 11) };
+  assert.deepEqual(Core.workingMinutesByDay(finishOnly, windowFor0818(open0818)), { '2026-10-15': 180 });
+  // The bar is wall-clock [end - run_time, end] (the ruling): finish Thu 09:00, 4 h -> Thu 05:00-09:00, only Thu 08-09 is working time, so all 4 h land on Thu.
+  const crossing = { id: 'fo2', RUN_TIME: 4, start_date: null, end_date: D(15, 9) };
+  const byDay = Core.workingMinutesByDay(crossing, windowFor0818(open0818));
+  assert.deepEqual(byDay, { '2026-10-15': 240 });
+  assert.deepEqual(Core.workingMinutesByDay({ id: 'z', RUN_TIME: 0, start_date: null, end_date: D(15, 11) }, null), {}, 'no run time: no bar');
+  assert.deepEqual(Core.workingMinutesByDay({ id: 'n', RUN_TIME: 3, start_date: null, end_date: null }, null), {}, 'no dates: nothing');
+});
+
 test('worked example: the matrix, the overload alert and the briefing helper all put the 14 h on Thursday', () => {
   const task = workedExample();
   const { matrix } = Core.computeUtilization({

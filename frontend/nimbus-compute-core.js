@@ -408,10 +408,15 @@
       }
       return out;
     }
-    const start = parseDate(task?.start_date);
-    if (!start) return out;
+    let start = parseDate(task?.start_date);
     const runMin = runHours(task) * 60;
     const end = parseDate(task?.end_date);
+    // A finish-only row (end set, start null: a freshly distributed child before the reconcile derives its start)
+    // is the bar [end - run_time, end] (U29), so it is visible to the matrix and the briefing before the derive.
+    if (!start) {
+      if (!end || runMin <= 0) return out;
+      start = new Date(+end - runMin * 60000);
+    }
     if (!end) { add(dayKey(start), runMin); return out; }
     if (end <= start || runMin <= 0) return out;
     const days = [];
