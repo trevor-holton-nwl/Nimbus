@@ -31,6 +31,11 @@
 
   const { Store, Toast, Alerts, AlertsUIAdapter, Util, UndoStack, Utilization } = NIMBUS;
 
+  // One clock (I13): the plant's "now" / start of today, the same helpers the Dashboard uses. Read late-bound per call
+  // (the `NIMBUS.Engine?.` idiom below) so the legacy-surface ratchet does not grow; the fallback is the old viewer clock.
+  const _plantClock = () => NIMBUS.Util?.plantClock?.(Store.selectedPlant) ?? new Date();
+  const _plantToday = () => NIMBUS.Util?.plantToday?.(Store.selectedPlant) ?? Util.startOfDay(new Date());
+
   // Confidence horizon: the selected plant's own conf_score_horizon (what the Plant
   // settings tab edits and shows), then the per-user setting, then 14 days. Reading only
   // the user setting made the score ignore the plant's configured horizon.
@@ -508,7 +513,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       let maxUtil = 0, overloadedLine = null;
       try {
         // One clock (OQ52 / I13): the plant's today, the same start the Dashboard matrix and the prewarm use.
-        const now = Util.plantToday(Store.selectedPlant);
+        const now = _plantToday();
         const startMs = now.getTime();
         const days = 7;
         const rev = Store.rev();
@@ -1450,8 +1455,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           }
         }));
       // U31: the rows that already carried unsaved edits BEFORE this restore, read before updateMany dirties them,
-      // like UndoStack.afterRestore: a never-placed row with a null snapshot start keeps its dirty id.
-      const wasDirty = new Set(patches.map(p => String(p.id)).filter(id => UndoStack.dirtyProbe?.(id)));
+      // like the undo path (afterRestore): a never-placed row with a null snapshot start keeps its dirty id.
+      const wasDirty = new Set(patches.map(p => String(p.id)).filter(id => NIMBUS.UndoStack?.dirtyProbe?.(id)));
       Store.updateMany(patches, 'time-machine');
       NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id), wasDirty);
       Alerts.scheduleRecompute();
@@ -1616,7 +1621,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!tasks.length) { Confidence._apply(100); return; }
 
       const hMinutes = _confHorizonMinutes();
-      const horizonStart = Util.plantClock(Store.selectedPlant);   // the plant clock (I13), not the viewer's
+      const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
       // Days-out from now → time-weight multiplier (imminent = more costly)
@@ -1640,7 +1645,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       let matrix = null;
       const days = Math.ceil(hMinutes / 1440);
       const plant = Store.selectedPlant;
-      const startMs = Util.plantToday(plant).getTime();   // same start (and cache key) as computeMatrix / the prewarm
+      const startMs = _plantToday().getTime();   // same start (and cache key) as computeMatrix / the prewarm
 
       if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
         try {
@@ -1766,7 +1771,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const alerts = Store.alerts || [];
       const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
-      const horizonStart = Util.plantClock(Store.selectedPlant);   // the plant clock (I13), not the viewer's
+      const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
       const tw = date => { if (!date) return 1.0; const d = (date - horizonStart) / 86400000; return d <= 3 ? 1.5 : d <= 7 ? 1.25 : 1.0; };
 
@@ -1779,7 +1784,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
-      const startMs = Util.plantToday(Store.selectedPlant).getTime();   // same start (and cache key) as computeMatrix / the prewarm
+      const startMs = _plantToday().getTime();   // same start (and cache key) as computeMatrix / the prewarm
       const rev = Store.rev();
       const plant = Store.selectedPlant;
 
