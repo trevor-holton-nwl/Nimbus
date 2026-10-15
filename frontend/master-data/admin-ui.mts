@@ -62,14 +62,21 @@ const _FALLBACK_PRIORITY_FIELDS: PriorityFieldMeta[] = [
  *  value used on more than one line (they are per-line COUNT(DISTINCT …)). */
 const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
 
+/** Per-plant memoized machine table state, used only by `MasterData.syncLineSettings`.
+ *  Deliberately separate from the Manage Data `_cache['machine']` (global/unscoped) to
+ *  avoid plant-to-plant collisions. Module-level (not inside the MasterData IIFE) so
+ *  `refreshStoreMasterData` can drop a plant's entry once fresh machine rows land. */
+const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineRow>> = {};
+
 /** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
  *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
  *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
  *  sub-tab Refresh (awaited, `source: 'master-data-refresh'`). Resolves once the Store
  *  write — or the no-op/failed-fetch `master-data-changed` emit — has happened; never
- *  rejects. Resolves `true` only when `Store.setMasterData` was actually called with at
- *  least one fresh payload; `false` for the staleness skip, the no-op branch (neither
- *  fetch returned rows) and the catch branch. Staleness tokens: a plant switch or a newer Persistence load while these
+ *  rejects. Resolves `true` only when BOTH fetches returned rows; `false` for the staleness
+ *  skip, a partial refresh (one fetch landed: the Store is still written, the other
+ *  table kept at its previous value), the no-op branch (neither returned rows) and the
+ *  catch branch. Staleness tokens: a plant switch or a newer Persistence load while these
  *  fetches are in flight must not let this response overwrite the (now different)
  *  plant's master data. */
 async function refreshStoreMasterData(source: string, table?: string): Promise<boolean> {
@@ -96,7 +103,8 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
       // fire on the no-op (neither fetch returned rows) branch to preserve
       // the original single-emit-per-call shape.
       Store.setMasterData({
-        plants: pData?.rows ?? [],
+        // A failed plants fetch keeps the plants already in the Store (never blank them).
+        plants: pData?.rows ?? (Store.masterData?.plants ?? []),
         // A failed machine fetch keeps the lines already in the Store (never blank them).
         lines:  lData?.rows ?? (Store.masterData?.lines ?? []),
         // This re-fetches only plants/machine (the two tables the
@@ -111,7 +119,12 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
         // request here.
         workcenters: Store.masterData?.workcenters ?? [],
       }, source);
-      return true;
+      // Fresh machine rows landed: the line-sync cache (filled on the first line edit, never
+      // expiring) may predate a machine a colleague just added.
+      if (lData && refreshPlant) delete _lineSyncMachineCache[refreshPlant];
+      // Partial data is still written above so what did land shows, but only a complete
+      // refresh reports success.
+      return !!(pData && lData);
     }
     Store.emit({ type: 'master-data-changed', table, source });
     return false;
@@ -289,10 +302,19 @@ export const Plant = {
     if (!plant) return false;
     // A debounced line-hours write the user just typed must reach the server before the
     // re-fetch, or the fetch would overwrite it with the stale server copy.
-    await CalendarSync._flushLineHours(plant);
+    // A failed flush has already dropped the pending edit; re-fetching now would overwrite it
+    // with the stale server copy.
+    const flushed = await CalendarSync._flushLineHours(plant);
+    if (flushed && flushed.ok === false) return false;
     const fresh = await refreshStoreMasterData('master-data-refresh');
     await CalendarSync.fetchPlantConfig(plant);
+    // loadPriorityRankMaps zeroes the maps on a failed fetch and only sets _rankMapsPlant on a
+    // 2xx, so null-before / still-null-after is the failure signal. Put the previous maps back
+    // and leave the marker unset so the freshness guards retry instead of trusting empty maps.
+    const prevRanks = Store.priorityRankMaps;
+    Persistence._rankMapsPlant = null;
     await Persistence.loadPriorityRankMaps(plant);
+    if (Persistence._rankMapsPlant !== plant) Store.setPriorityRankMaps(prevRanks, 'master-data-refresh');
     if (Plant._currentPlantTab === 'settings') {
       // SetupAdmin's per-plant line/coverage caches never expire on their own.
       SetupAdmin.invalidatePlant(plant);
@@ -2083,7 +2105,8 @@ export const ProdLines = {
     const plant = Store.selectedPlant;
     if (!plant) return false;
     // Flush a just-typed debounced line-hours edit first so the re-fetch can't overwrite it.
-    await CalendarSync._flushLineHours(plant);
+    const flushed = await CalendarSync._flushLineHours(plant);
+    if (flushed && flushed.ok === false) return false;
     const fresh = await refreshStoreMasterData('master-data-refresh');
     await CalendarSync.fetchPlantConfig(plant);
     ProdLines.render();
@@ -3877,11 +3900,6 @@ export const MasterData = (() => {
   // table's cached view corrupting the other's.
   const _bomComponentOptionsCache: Record<string, string[]> = {};
 
-  // Per-plant memoized machine table state, used only by syncLineSettings.
-  // Deliberately separate from _cache['machine'] (which is global/unscoped)
-  // to avoid plant-to-plant cache collisions when syncing line settings.
-  const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineRow>> = {};
-
   function _bomComponentSelect(plant: string | null, value: unknown, rowKey: string): HTMLSelectElement {
     const sel = document.createElement('select');
     sel.className = 'input md-fk-select';
@@ -4792,7 +4810,7 @@ export const MasterData = (() => {
     const plant = Store.getPlantForLine(line);
     if (!plant) return;
 
-    if (!_lineSyncMachineCache[plant]) {
+    const fillCache = async (): Promise<boolean> => {
       try {
         const data = await Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant }).toString()}`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -4802,12 +4820,23 @@ export const MasterData = (() => {
           columns: data.columns, rows: data.rows,
           dirty: new Map(), deleted: new Map(), added: [],
         };
-      } catch { return; }
-    }
+        return true;
+      } catch { return false; }
+    };
 
-    const state = _lineSyncMachineCache[plant]!;
-    const rowIdx = state.rows.findIndex((r) => r.machine === line);
-    if (rowIdx < 0) return;
+    if (!_lineSyncMachineCache[plant] && !(await fillCache())) return;
+
+    let state = _lineSyncMachineCache[plant]!;
+    let rowIdx = state.rows.findIndex((r) => r.machine === line);
+    if (rowIdx < 0) {
+      // The cache may predate a machine added since (e.g. one a colleague just created that
+      // Refresh now shows): drop it and refetch once before concluding the line is unknown.
+      delete _lineSyncMachineCache[plant];
+      if (!(await fillCache())) return;
+      state = _lineSyncMachineCache[plant]!;
+      rowIdx = state.rows.findIndex((r) => r.machine === line);
+      if (rowIdx < 0) return;
+    }
 
     const updatedRow = { ...state.rows[rowIdx] };
     // Only the columns this call changes (plus the key) go to the server: re-posting the

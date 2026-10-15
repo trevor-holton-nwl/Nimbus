@@ -12,6 +12,7 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { Modal, Toast, Util } from '../../../frontend/platform/foundation.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 
 test('Plant/ProdLines expose their documented public API', () => {
   assert.equal(typeof Plant.init, 'function');
@@ -183,6 +184,101 @@ test('ProdLines.refresh flushes a pending debounced line-hours write before re-f
     CalendarSync._flushLineHours = priorFlush;
     Util.fetchTraced = priorFetch;
     if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+// Final-review fixes (plan 2026-10-15-master-data-refresh): a failed flush, a partial master-data
+// fetch and a failed rank-map fetch must each leave the previous state intact.
+test('ProdLines.refresh and Plant.refresh resolve false and fetch nothing when the line-hours flush failed', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const priorFlush = CalendarSync._flushLineHours;
+  const urls = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  CalendarSync._flushLineHours = () => Promise.resolve({ ok: false });
+  Util.fetchTraced = (url) => { urls.push(String(url)); return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) }); };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    assert.equal(await ProdLines.refresh(), false);
+    assert.equal(await Plant.refresh(), false);
+    assert.deepEqual(urls, [], 'a failed flush must not be followed by a re-fetch that overwrites the local edit');
+  } finally {
+    CalendarSync._flushLineHours = priorFlush;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('ProdLines.refresh keeps the Store plants and resolves false when only the plants fetch fails', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const keepPlants = [{ plant: 'KEEP' }];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = (url) => {
+    if (String(url).includes('/master-data/plants')) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ machine: 'FRESH-1' }] }) });
+  };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Store.setMasterData({ plants: keepPlants, lines: [{ machine: 'OLD-1' }], workcenters: [] }, 'test');
+    assert.equal(await ProdLines.refresh(), false, 'only half the data is fresh');
+    assert.equal(Store.masterData.plants, keepPlants, 'a failed plants fetch must not wipe the plants');
+    assert.deepEqual(Store.masterData.lines, [{ machine: 'FRESH-1' }], 'the machine rows that did land still show');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('Plant.refresh restores the previous rank maps and leaves them marked stale when the rank-map fetch fails', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const priorTab = Plant._currentPlantTab;
+  const priorRankPlant = Persistence._rankMapsPlant;
+  const priorRanks = Store.priorityRankMaps;
+  const originalGoto = Plant.gotoTab;
+  const keepRanks = { color: { RED: 1 } };
+  let rankStatus = 500;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Plant.gotoTab = () => {};
+  Plant._currentPlantTab = 'general';
+  Util.fetchTraced = (url) => {
+    if (String(url).includes('/priority-rank-maps')) {
+      return Promise.resolve({ ok: rankStatus === 200, status: rankStatus, json: () => Promise.resolve({ color: { BLUE: 2 } }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Store.setPriorityRankMaps(keepRanks, 'test');
+    Persistence._rankMapsPlant = '1006';
+    await Plant.refresh();
+    assert.equal(Store.priorityRankMaps, keepRanks, 'a failed rank-map fetch must not leave the optimizer with empty priority lists');
+    assert.equal(Persistence._rankMapsPlant, null, 'the maps stay marked stale so the freshness guards retry');
+
+    rankStatus = 200;
+    await Plant.refresh();
+    assert.deepEqual(Store.priorityRankMaps, { color: { BLUE: 2 } });
+    assert.equal(Persistence._rankMapsPlant, '1006');
+  } finally {
+    Plant.gotoTab = originalGoto;
+    Plant._currentPlantTab = priorTab;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setPriorityRankMaps(priorRanks, 'test-restore');
+    Persistence._rankMapsPlant = priorRankPlant;
     Store.setSelectedPlant(priorPlant, 'test-restore');
     Store.setMasterData(priorMasterData, 'test-restore');
   }
@@ -890,6 +986,79 @@ test('syncLineSettings posts only the key columns and the changed column, not th
     Store.getPlantForLine = priorGetPlant;
     globalThis.fetch = priorFetch;
     Toast.show = priorToast;
+  }
+});
+
+// Final-review fix: syncLineSettings memoizes the plant's machine rows; a machine added after the
+// cache was filled (then shown by Refresh) must not be silently dropped by the rowIdx < 0 return.
+function _lineSyncHarness(plant, machineBatches) {
+  const gets = [];
+  const posts = [];
+  const priorFetch = globalThis.fetch;
+  const priorToast = Toast.show;
+  const priorGetPlant = Store.getPlantForLine;
+  Toast.show = () => {};
+  Store.getPlantForLine = (line) => (line.startsWith('M-') ? plant : priorGetPlant.call(Store, line));
+  globalThis.fetch = (url, opts) => {
+    if (opts && opts.method === 'POST') {
+      posts.push(JSON.parse(opts.body));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    gets.push(String(url));
+    const machines = machineBatches[Math.min(gets.length, machineBatches.length) - 1];
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      columns: [], rows: machines.map((m) => ({ subnetwork: 'S1', plant, machine: m, bottleneck: null })),
+    }) });
+  };
+  const restore = () => { globalThis.fetch = priorFetch; Toast.show = priorToast; Store.getPlantForLine = priorGetPlant; };
+  return { gets, posts, restore };
+}
+
+test('syncLineSettings drops its cache and refetches once when the line is absent, then posts (new machine after Refresh)', async () => {
+  const h = _lineSyncHarness('P-miss', [['M-A'], ['M-A', 'M-B']]);
+  try {
+    await MasterData.syncLineSettings('M-A', { bottleneck: true });
+    assert.equal(h.gets.length, 1, 'first call fills the cache');
+    await MasterData.syncLineSettings('M-B', { bottleneck: true });
+    assert.equal(h.gets.length, 2, 'a machine missing from the cache triggers exactly one refetch');
+    assert.match(h.gets[1], /\/master-data\/machine\?plant=P-miss$/);
+    assert.equal(h.posts.length, 2, 'the new machine\'s edit is saved, not silently dropped');
+    assert.equal(h.posts[1].upserts[0].machine, 'M-B');
+  } finally { h.restore(); }
+});
+
+test('syncLineSettings refetches once and then gives up without posting when the line is still absent', async () => {
+  const h = _lineSyncHarness('P-gone', [['M-A']]);
+  try {
+    await MasterData.syncLineSettings('M-A', { bottleneck: true });
+    await MasterData.syncLineSettings('M-Z', { bottleneck: true });
+    assert.equal(h.gets.length, 2);
+    assert.equal(h.posts.length, 1, 'no POST for a machine the server does not have');
+  } finally { h.restore(); }
+});
+
+test('a successful master-data refresh invalidates the line-sync machine cache for that plant', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetchTraced = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  const h = _lineSyncHarness('P-inv', [['M-A']]);
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  try {
+    await MasterData.syncLineSettings('M-A', { bottleneck: true });
+    assert.equal(h.gets.length, 1);
+    Store.setSelectedPlant('P-inv', 'test');
+    Util.fetchTraced = (url) => Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+    assert.equal(await ProdLines.refresh(), true);
+    Util.fetchTraced = priorFetchTraced;
+    await MasterData.syncLineSettings('M-A', { bottleneck: false });
+    assert.equal(h.gets.length, 2, 'the cache was dropped by the refresh, so the next sync refills it');
+  } finally {
+    h.restore();
+    Util.fetchTraced = priorFetchTraced;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
   }
 });
 
