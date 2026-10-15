@@ -683,6 +683,21 @@ class TestStoredFinishReadRule:
         preview = self.db.preview_purge_orders(self.PLANT, self.T0 - dt.timedelta(days=1), self.T0 + dt.timedelta(days=30))
         assert preview["planner_overridden"] == 2 and both
 
+    def test_health_stats_count_a_finish_only_placement_as_a_planner_override(self):
+        """U10 (carry-over): get_health_stats' `user_overrides` uses the same placement rule, either stored edge."""
+        before = self.db.get_health_stats()
+        both = self._seed("H_BOTH", start=self.T0, end=self.T0 + dt.timedelta(hours=4), run_time=2)
+        fin_only = self._seed("H_FINONLY", run_time=2)
+        self._seed("H_NEVER", run_time=2)
+        with self.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE orders SET scheduled_end = %s WHERE id = %s", (self.T0 + dt.timedelta(hours=3), fin_only))
+            conn.commit()
+        after = self.db.get_health_stats()
+        assert after["connected"] is True
+        assert after["total_orders"] - before["total_orders"] == 3
+        assert after["user_overrides"] - before["user_overrides"] == 2, "start-bearing AND finish-only rows count; the never-placed row does not"
+        assert both
+
 
 # ---------------------------------------------------------------------------
 # Bundle 0 #2 (Code_Review_Consolidated_10_05.md): cross-seam save contract.

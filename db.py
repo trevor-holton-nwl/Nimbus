@@ -2190,7 +2190,8 @@ def get_health_stats() -> dict:
             cur.execute("""
                 SELECT
                     COUNT(*)                 AS total_orders,
-                    COUNT(scheduled_start)   AS user_overrides
+                    -- a planner placement is either stored edge (U10): a finish-only row counts too
+                    COUNT(*) FILTER (WHERE scheduled_start IS NOT NULL OR scheduled_end IS NOT NULL) AS user_overrides
                 FROM orders
             """)
             row = cur.fetchone()
