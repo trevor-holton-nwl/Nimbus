@@ -1299,7 +1299,8 @@ test('deriveSetupObservation resolves one scoped override interval without invok
     availableMinutes: interval.availableMinutes,
   })), [{
     line: 'L-OBSERVE', predecessorOrderId: 'red', successorOrderId: 'blue',
-    start: '2026-08-03T13:40:00.000Z', end: '2026-08-03T14:00:00.000Z', requiredMinutes: 20, availableMinutes: 60,
+    // Zone-independent (M3): the fixtures are naive local wall-clock times, so the expected instants are parsed the same way.
+    start: new Date('2026-08-03T09:40:00').toISOString(), end: new Date('2026-08-03T10:00:00').toISOString(), requiredMinutes: 20, availableMinutes: 60,
   }]);
   assert.deepEqual(observation.diagnostics, []);
 });

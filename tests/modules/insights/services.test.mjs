@@ -621,13 +621,22 @@ test('#28 Alerts.applyFix fixes an SAP-firmed order, but refuses manually-firmed
 });
 
 
-test('Utilization.minutesByDay (the cell-briefing rule): the 14 h order held Fri 00:00 with start Wed 22:00 on 08-18 puts 14 h on Thursday', () => {
+test('Utilization.minutesByDay (the cell-briefing rule): a 14 h order spanning Wed 22:00 - Fri 00:00 (14-16 Oct 2026) puts all 14 h on Thursday, the only day with working time, and that 10 h window is overloaded', () => {
   const line = 'L-BRIEF';
   const priorCalendar = Store.calendars[line];
   const wh = {}; for (let i = 0; i < 7; i++) wh[i] = [8, 18];
   Store.calendars[line] = { workHours: wh };
   try {
     const task = { id: 'brief', MACHINE: line, RUN_TIME: 14, start_date: new Date(2026, 9, 14, 22), end_date: new Date(2026, 9, 16, 0) };
-    assert.deepEqual(Utilization.minutesByDay(task, line), { '2026-10-15': 840 });
+    const byDay = Utilization.minutesByDay(task, line);
+    // The rule is intentional: the bar is attributed in proportion to each day's WORKING overlap, and Wed 22:00 and
+    // Fri 00:00 are both outside the 08:00-18:00 window, so Thursday takes the whole run time.
+    assert.deepEqual(byDay, { '2026-10-15': 840 });
+    // Thursday's calendar window is 08:00-18:00 = 600 minutes, so the attributed 840 is 140% of that day's capacity:
+    // the matrix flags it as overload instead of spreading it onto Wed/Fri.
+    const capacityMin = (18 - 8) * 60;
+    assert.equal(capacityMin, 600);
+    assert.ok(byDay['2026-10-15'] > capacityMin, 'the attributed minutes exceed the 600-minute window');
+    assert.equal(Math.round(byDay['2026-10-15'] / capacityMin * 100), 140);
   } finally { if (priorCalendar) Store.calendars[line] = priorCalendar; else delete Store.calendars[line]; }
 });
