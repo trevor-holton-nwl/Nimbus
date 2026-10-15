@@ -2312,11 +2312,12 @@ test('Final wave F2: a kept proposal onto an untouched order that already overla
     assert.ok(y?.changes.start_date, 'precondition: Y is proposed with dates');
     const xLive = { start: Store.tasks['bx-x'].start_date, end: Store.tasks['bx-x'].end_date };
     assert.ok(overlaps({ start: y.changes.start_date, end: y.changes.end_date }, xLive), 'precondition: Y lands on X');
-    // V overlaps X live (a pre-existing defect on U = X) but not Y's proposed slot.
+    // V overlaps X live (a pre-existing defect on U = X) but not Y's proposed slot. V has a due date, so it is more
+    // urgent than X and the live overlap is reported against X, the very key the new Y-vs-X overlap will carry.
     const v = { start: new Date(+y.changes.end_date + 3600000), end: new Date(+xLive.end + 3600000) };
     assert.ok(v.start < xLive.end && !overlaps(v, { start: y.changes.start_date, end: y.changes.end_date }), 'precondition: V overlaps X only');
     Store.setTasks([...Store.tasksArr, { id: 'bx-v', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 2, row_version: 1,
-      start_date: v.start, end_date: v.end }], 'unit-test');
+      original_end_date: new Date('2026-08-04T00:00:00'), start_date: v.start, end_date: v.end }], 'unit-test');
     Store.updateTask('bx-x', { NOTE: 'edited while searching' }, 'user');
     await OptimizerPreview.backgroundApply();
     assert.equal(Store.tasks['bx-y'].start_date, null, 'Y is skipped');
