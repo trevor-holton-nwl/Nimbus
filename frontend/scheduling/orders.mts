@@ -1327,7 +1327,7 @@ export const Table = {
       // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(p.newValue);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
-      requestedFinish = Util.snap(d);
+      requestedFinish = d;
       // AG Grid has already written the typed value onto the row; placement must see the end the order had
       // (a marked bar is translated by the delta from it, not stretched).
       scheduleTask = { ...p.data, end_date: p.oldValue as Date | null };
@@ -1564,7 +1564,7 @@ export const Table = {
       return;
     }
 
-    const schedule = Engine.manualRoutingSchedulePatchFor(t, newLine, Util.snap(newFinish), opts);
+    const schedule = Engine.manualRoutingSchedulePatchFor(t, newLine, newFinish, opts);
     if (!schedule?.start_date || !schedule.end_date) {
       Table._explainManualRefusal(t, () => Table.applyOverride({ confirmedOvertime: true }));
       return;
@@ -2476,7 +2476,7 @@ export const Inspector = {
       // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(value);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
-      requestedFinish = Util.snap(d);
+      requestedFinish = d;
     } else if (field === 'start_date') {
       // The start is derived from the finish and is no longer an input; nothing to apply.
       Inspector._render(t);

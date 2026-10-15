@@ -4415,7 +4415,9 @@ export const Interaction = {
       // move all non-firmed selected items by the same time + line delta.
       // The dragged piece's same-edge delta (OQ17 b): for a one-piece order this is the order's own finish delta.
       const deltaMs  = newEnd.getTime() - expectedEnd.getTime();
-      const requestedFinish = new Date(t.end_date.getTime() + deltaMs);
+      // D1: a horizontal drag lands the finish on the 15-minute grid; a line-only drag (endMoved false) holds
+      // the finish exactly, so an off-grid SAP finish survives a vertical move.
+      const requestedFinish = endMoved ? Util.snap(new Date(t.end_date.getTime() + deltaMs)) : new Date(t.end_date.getTime());
 
       // Machine lock (decision C, aggregate_to_detail.md §8): reject a
       // cross-machine drag of a sub-order before either the multi-drag or

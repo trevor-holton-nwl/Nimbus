@@ -1283,7 +1283,7 @@ export const Engine = {
   },
 
   /** OQ3: a started order keeps its real start and only the finish follows the run time. The allocator may move
-   * the start (`never` snaps it to the 15-minute step; any policy skips closed time), and a running order never
+   * the start (`never` may move it to the next open minute; any policy skips closed time), and a running order never
    * loses its start, so in that case the bar is the held start plus the run time as one continuous piece. Shared
    * by the reconcile's running branch and the manual (grid/Inspector) edit. Null when no window is found. */
   heldStartPatchFor(task: NimbusTask, line: string, policy: SplitOrderPolicy): Partial<NimbusTask> | null {
@@ -1414,11 +1414,21 @@ export const Engine = {
    * `Engine.lastManualRefusal`. */
   manualSchedulePatchFor(task: NimbusTask, line: string, requestedFinish: Date,
                          policy?: SplitOrderPolicy, opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    const patch = Engine._manualSchedulePatchForInner(task, line, requestedFinish, policy, opts);
+    // VI5: a manual placement is the planner's own truth; the stale flag is cleared with it (the server clears
+    // it too on a width-checked save; the client copy must not keep the "start may be out of date" alert alive).
+    return patch ? { ...patch, runtime_schedule_mismatch: false } : null;
+  },
+
+  _manualSchedulePatchForInner(task: NimbusTask, line: string, requestedFinish: Date,
+                               policy?: SplitOrderPolicy, opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
     Engine.lastManualRefusal = null;
     const refuse = (reason: ManualRefusal): null => { Engine.lastManualRefusal = reason; return null; };
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return refuse('run_time_zero');
-    const finish = Util.snap(requestedFinish);
+    // D1 (VI1): a held finish keeps its exact minute; only a horizontal Gantt drag snaps, and it does so before
+    // reaching this function. Floor to the minute so the server's minute-granular width check sees whole minutes.
+    const finish = Calendar._floorMinute(requestedFinish);
     const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
     const queuedCode = task.planning_status === 'needs_planning' ? task.planning_reason?.code : undefined;
     // Only these two queue reasons are releasable by a placement; any other queued row follows the ordinary rule.

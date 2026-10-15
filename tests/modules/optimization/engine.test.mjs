@@ -3190,13 +3190,24 @@ test('Engine.manualSchedulePatchFor holds the requested finish and derives the s
   } finally { fx.restore(); }
 });
 
-test('Engine.manualSchedulePatchFor snaps the requested finish to the 15-minute step before walking back', () => {
+test('D1: Engine.manualSchedulePatchFor holds an off-grid finish to the minute (no 15-minute snap)', () => {
   const fx = manualFixture();
   try {
-    const task = { id: 'm25-snap', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2' };
-    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date('2026-08-24T14:07:00'));
-    assert.equal(patch.end_date.getTime(), Util.snap(new Date('2026-08-24T14:07:00')).getTime());
+    const task = { id: 'm25-minute', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2' };
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, new Date('2026-08-24T14:07:30'));
+    assert.equal(patch.end_date.getTime(), new Date('2026-08-24T14:07:00').getTime());   // floored to the minute
     assert.equal(patch.end_date.getTime() - patch.start_date.getTime(), 2 * Config.MS_HOUR);
+    assert.equal(patch.runtime_schedule_mismatch, false);   // VI5: a manual placement is not stale
+  } finally { fx.restore(); }
+});
+
+test('D1: pushFinishPatches moves the finish by exactly the requested milliseconds', () => {
+  const fx = manualFixture();
+  try {
+    const task = { id: 'm25-push', PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '2',
+      start_date: new Date('2026-08-24T12:07:00'), end_date: new Date('2026-08-24T14:07:00'), user_scheduled: true };
+    const [p] = Engine.pushFinishPatches([task], 3600000);
+    assert.equal(p.changes.end_date.getTime(), new Date('2026-08-24T15:07:00').getTime());
   } finally { fx.restore(); }
 });
 
