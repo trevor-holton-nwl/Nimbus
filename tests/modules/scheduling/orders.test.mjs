@@ -1593,6 +1593,31 @@ test('the Due Date column shows the due instant (a date-only SAP finish reads as
   assert.equal(due.valueGetter({ data: { id: 'x', MACHINE: 'L1' } }), null, 'no SAP finish, no value');
 });
 
+test('the Due Date column shows the due DAY for a date-only due on a 24:00-close line, not the exclusive next-day 00:00 (R-I6 display)', async () => {
+  const { createRequire } = await import('node:module');
+  const prevCore = globalThis.NimbusComputeCore;
+  globalThis.NimbusComputeCore = createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+  const hours = { 0: [6, 24], 1: [6, 24], 2: [6, 24], 3: [6, 24], 4: [6, 24], 5: [6, 24], 6: [6, 24] };
+  const early = { 0: [6, 22], 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: [6, 22] };
+  let current = hours;
+  Util.setDueCalendarResolver(line => (line === 'L24' ? { lineHours: current, plantHours: current, plant: 'P24', rev: current === hours ? 1 : 2 } : null));
+  try {
+    const [due] = Table._scheduleDateColumns();
+    const task = { id: 'due-24', MACHINE: 'L24', original_end_date: new Date(2026, 7, 5) };       // Wed 5 Aug, date-only
+    const value = due.valueGetter({ data: task });
+    assert.equal(+value, +new Date(2026, 7, 6, 0, 0, 0), 'the grid value (sort/filter) stays the exact instant');
+    assert.equal(Util.dueDisplayDate(task).getTime(), new Date(2026, 7, 6, 0, 0, 0).getTime() - 1);
+    const text = due.valueFormatter({ value, data: task });
+    assert.equal(text, Util.fmtDTReadable(new Date(2026, 7, 5, 23, 59, 59, 999)), 'the cell text is the due day');
+    assert.ok(!text.includes('00:00'), 'never "Thu 00:00"');
+    // A date-only due closing earlier in the day, and a timed due, are untouched.
+    current = early;
+    assert.equal(+Util.dueDisplayDate(task), +new Date(2026, 7, 5, 22, 0, 0));
+    const timed = { id: 'due-timed', MACHINE: 'L24', original_end_date: new Date(2026, 7, 5, 9, 30) };
+    assert.equal(+Util.dueDisplayDate(timed), +new Date(2026, 7, 5, 9, 30));
+  } finally { Util.setDueCalendarResolver(null); globalThis.NimbusComputeCore = prevCore; }
+});
+
 test('the retired Original Start column is gone from the grid and the field catalog; the wire field stays on the task', () => {
   assert.ok(!ORDER_FIELD_CATALOG.some(f => f.key === 'original_start_date'), 'catalog entry removed');
   assert.ok(!Table._catalogOnlyColumns().some(c => c.field === 'original_start_date'));

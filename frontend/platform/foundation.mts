@@ -658,6 +658,20 @@ export const Util = {
     return Util.sapDueDate(t);
   },
 
+  /** The due DAY to show a planner. A date-only due on a line that closes at 24:00 resolves to the exclusive
+   *  next-day 00:00 instant (the lateness and anchor maths need that exact instant), which would read as the NEXT
+   *  day ("Thu 00:00"). For display the instant minus 1 ms is shown instead, so the due day keeps its date. A timed
+   *  due, or a date-only one closing earlier in the day, is returned unchanged. Never use it for arithmetic. */
+  dueDisplayDate(t: NimbusTask): Date | null {
+    const due = Util.dueInstant(t);
+    const raw = t?.original_end_date || null;
+    const midnight = (d: Date): boolean => d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0;
+    if (due instanceof Date && !isNaN(due.getTime()) && raw instanceof Date && midnight(raw) && midnight(due)) {
+      return new Date(due.getTime() - 1);
+    }
+    return due;
+  },
+
   /** Working window of `line` on one calendar date (line hours intersected with its plant's), or
    *  null when closed or when Store holds no calendar rows for the line. Cached per line+date for
    *  the current Store revision, so per-row callers stay O(1). Internal to sapDueDate. */

@@ -379,7 +379,8 @@ export const Table = {
       { headerName: Util.t('col.due_date'), field: 'original_end_date', minWidth: 160,
         editable: false, hide: Table._fieldHidden('original_end_date'),
         valueGetter: (p: { data: NimbusTask }) => Util.dueInstant(p.data),
-        valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.value),
+        // The value stays the exact instant (sort/filter); the text shows the due DAY (a 24:00 close reads as 23:59).
+        valueFormatter: (p: TableValueFormatterParams) => Util.fmtDTReadable(p.data ? Util.dueDisplayDate(p.data) : p.value),
         cellClass: 'cell-date cell-date-original' },
       { headerName: Util.t('col.planned_start'), field: 'start_date', minWidth: 160,
         editable: false,
@@ -2168,7 +2169,7 @@ export const Inspector = {
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
       ? task.scheduleSegments : [];
     // Due Date shows the due instant (Util.dueInstant), never the raw midnight SAP date.
-    const dueInstant = Util.dueInstant(task);
+    const dueInstant = Util.dueDisplayDate(task);
     const systemMoveLine = Inspector._systemMoveLine(task);
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;

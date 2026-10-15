@@ -1092,7 +1092,7 @@ export const Dashboard = {
         const lh = Util.latenessHours(t);
         const days = lh / 24;
         const lateLbl = days >= 1 ? `+${days.toFixed(1)}d` : `+${lh.toFixed(1)}h`;
-        const due = Util.sapDueDate(t);
+        const due = Util.dueDisplayDate(t);   // the due DAY, not the exclusive next-day 00:00 of a 24:00 close
         const sched = Util.scheduledEnd(t);
         return `<div class="lh-drill-row" role="button" tabindex="0" data-order-id="${Util.escapeHtml(String(t.id))}">
           <span class="lh-drill-id">${Util.escapeHtml(t.id).slice(0, 10)}</span>
