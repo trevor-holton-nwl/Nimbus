@@ -2757,6 +2757,7 @@ export const Engine = {
       // fallback.
       setup: effectiveSetupSnapshot,
       exactSearchThreshold: exhaustive ? SETUP_AWARE_EXHAUSTIVE_EXACT_SEARCH_THRESHOLD : SETUP_AWARE_EXACT_SEARCH_THRESHOLD,
+      exhaustive,
       ...(exhaustive ? { exactSearchLeafCap: SETUP_AWARE_EXHAUSTIVE_EXACT_LEAF_CAP } : {}),
       // F4: Scale iteration cap per line. The cap is a stack-safety net; after
       // F2 a shared 20,000 iterations starved later lines on big plants. With

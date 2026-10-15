@@ -2112,7 +2112,8 @@ const App = {
 
     /* Modal backdrop click = close */
     document.querySelectorAll<HTMLElement>('.modal-backdrop').forEach(b => {
-      b.addEventListener('click', e => { if (e.target === b) Modal.close(b.id); });
+      // data-no-backdrop-close: a modal that holds unsaved work (the optimizer finish popup) closes only through its own buttons.
+      b.addEventListener('click', e => { if (e.target === b && !b.hasAttribute('data-no-backdrop-close')) Modal.close(b.id); });
     });
 
     /* Autosave on store mutations. Skip 'refresh' — those rows came FROM the server

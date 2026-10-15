@@ -1096,6 +1096,11 @@ interface PreviewResult {
 }
 
 export const OptimizerPreview = {
+  /** The "search hit its limit" note: an exhaustive run must not be told to choose Exhaustive. */
+  _limitNoteKey(exhaustive: boolean): string {
+    return exhaustive ? 'ui.opt_pv_diag_limit_reached_note_exhaustive' : 'ui.opt_pv_diag_limit_reached_note';
+  },
+
   gapFillSummary(candidate: CandidateResult): string {
     const check = candidate.gapFill;
     if (!check) return '';
@@ -2013,7 +2018,7 @@ export const OptimizerPreview = {
         runtime: `${explanation.search.runtimeMs.toFixed(0)} ms`,
       });
       const limitBadge = explanation.search.limitReached
-        ? `<span class="opt-pv-section-badge" title="${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached_note'))}">${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached'))}</span>`
+        ? `<span class="opt-pv-section-badge" title="${Util.escapeHtml(Util.t(OptimizerPreview._limitNoteKey(OptimizerPreview._auditDetails?.exhaustive === true)))}">${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached'))}</span>`
         : '';
       const diagEvents = OptimizerPreview._previewDiagnostics.filter(e => e.level === 'error' || e.level === 'warn');
       const eventsHtml = diagEvents.length
@@ -2038,7 +2043,7 @@ export const OptimizerPreview = {
             <div><dt>${Util.escapeHtml(Util.t('ui.opt_pv_diag_orders_in_scope'))}</dt><dd>${Util.escapeHtml(String(explanation.impact.production.before))} → ${Util.escapeHtml(String(explanation.impact.production.after))}</dd></div>
             ${rateHtml}
           </dl>
-          ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${Util.escapeHtml(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>` : ''}
+          ${explanation.search.limitReached ? `<p class="opt-pv-section-intro opt-pv-diag-limit">${Util.escapeHtml(Util.t(OptimizerPreview._limitNoteKey(OptimizerPreview._auditDetails?.exhaustive === true)))}</p>` : ''}
           ${eventsHtml}
         </div>
       </details>`;
@@ -2354,7 +2359,7 @@ export const OptimizerPreview = {
         Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
       } else {
         const shown = skipped.ids.slice(0, 5).join(', ');
-        const list = skipped.ids.length > 5 ? `${shown} (+${skipped.ids.length - 5} more)` : shown;
+        const list = skipped.ids.length > 5 ? `${shown} ${Util.t('ui.opt_bg_more', { count: skipped.ids.length - 5 })}` : shown;
         Toast.show(Util.t('toast.opt_bg_partial_applied', { applied: kept.length, skipped: skipped.ids.length, list }), 'warn', 9000);
       }
     }
@@ -2436,6 +2441,11 @@ export const OptimizerPreview = {
     const plant = opts.plant ?? Store.selectedPlant;
     if (!plant) { Toast.show(Util.t('toast.select_plant_before_opt'), 'warn'); return; }
     if (!Store.tasksArr.length) { Toast.show(Util.t('toast.no_tasks_to_optimise'), 'error'); return; }
+    if (opts.exhaustive === true && typeof Worker !== 'function') {
+      // Without a Worker the search would run on the page thread for minutes and freeze it.
+      Toast.show(Util.t('toast.opt_bg_no_worker'), 'error');
+      return;
+    }
     if (OptimizerPreview._backgroundRun) {
       Toast.show(Util.t('toast.opt_bg_running', { plant: OptimizerPreview._backgroundRun.plant }), 'warn');
       return;
@@ -2497,6 +2507,17 @@ export const OptimizerPreview = {
     const btn = typeof document === 'undefined' ? null : document.getElementById('btn-optimize') as HTMLButtonElement | null;
     if (!btn) return;
     const running = OptimizerPreview._backgroundComputing();
+    // The dialog's Run button follows the same state, so a run finishing while the dialog is open restores it.
+    const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
+    if (runBtn) {
+      if (running) {
+        runBtn.disabled = true;
+        runBtn.textContent = Util.t('btn.opt_run_bg_busy');
+      } else if (runBtn.textContent === Util.t('btn.opt_run_bg_busy')) {
+        runBtn.disabled = !OptimizerPreview._backgroundRun && !Store.selectedPlant;
+        runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+      }
+    }
     btn.classList.toggle('is-running', running);
     btn.title = running ? Util.t('btn.opt_run_bg_busy') : Util.t('tip.smart_optimize');
     btn.onclick = running ? () => { void OptimizerPreview._askCancelBackground(); } : () => { OptimizeDialog.open(); };
@@ -2554,7 +2575,9 @@ export const OptimizerPreview = {
     const body = typeof document === 'undefined' ? null : document.getElementById('opt-bg-done-body');
     const applyBtn = typeof document === 'undefined' ? null : document.getElementById('opt-bg-apply-btn') as HTMLButtonElement | null;
     const viewBtn = typeof document === 'undefined' ? null : document.getElementById('opt-bg-view-btn') as HTMLButtonElement | null;
+    const switchBtn = typeof document === 'undefined' ? null : document.getElementById('opt-bg-switch-btn') as HTMLButtonElement | null;
     if (!run) return;
+    if (switchBtn) switchBtn.hidden = true;
     const esc = (value: string): string => Util.escapeHtml(value);
     const warn = (text: string): string => `<div class="opt-pv-stale" style="margin-top:10px;">${esc(text)}</div>`;
     const result = run.result;
@@ -2570,7 +2593,7 @@ export const OptimizerPreview = {
     const seconds = Math.round(result.runtimeMs / 1000);
     let html = `<p style="margin:0;">${esc(Util.t('ui.opt_bg_done_summary', { plant: result.plant, placed, queued, seconds }))}</p>`;
     if (result.candidate.diagnostics?.limitReached) {
-      html += `<p class="opt-strategy-hint">${esc(Util.t('ui.opt_pv_diag_limit_reached_note'))}</p>`;
+      html += `<p class="opt-strategy-hint">${esc(Util.t(OptimizerPreview._limitNoteKey(result.opts?.exhaustive === true)))}</p>`;
     }
     const { changed, missing } = OptimizerPreview._changedSinceBaseline(result);
     if (changed.length + missing.length > 0) {
@@ -2580,6 +2603,12 @@ export const OptimizerPreview = {
     if (Store.selectedPlant !== result.plant) {
       html += warn(Util.t('ui.opt_bg_done_other_plant', { current: Store.selectedPlant ?? '', plant: result.plant }));
       blocked = true;
+      if (switchBtn) {
+        switchBtn.hidden = false;
+        switchBtn.textContent = Util.t('ui.opt_bg_switch_plant', { plant: result.plant });
+      }
+    } else if (OptimizerPreview._bgSwitching) {
+      blocked = true;   // the plant is selected but its orders have not loaded yet
     }
     if (result.candidate.validationFindings?.some(finding => finding.severity === 'error' && !finding.taskId)) {
       html += warn(Util.t('ui.opt_bg_done_blocked'));
@@ -2596,8 +2625,9 @@ export const OptimizerPreview = {
     Modal.open('modal-opt-background-done');
   },
 
-  /** The finish popup's backdrop closes on an outside click without calling a handler; treat that as Dismiss
-   *  so the finished run never stays stuck holding the optimizer. */
+  /** Binds the finish popup's buttons once. The popup's backdrop carries `data-no-backdrop-close` (honoured by the
+   *  shell's boot-time backdrop handler), so only the X button dismisses: an outside click (for example on the plant
+   *  selector, to switch to the result's plant) must never discard a finished run. */
   _installBackgroundDoneGuard(): void {
     if (OptimizerPreview._bgDoneBound || typeof document === 'undefined') return;
     const el = document.getElementById('modal-opt-background-done');
@@ -2607,18 +2637,43 @@ export const OptimizerPreview = {
     document.getElementById('opt-bg-close-btn')?.addEventListener('click', () => OptimizerPreview.backgroundDismiss());
     document.getElementById('opt-bg-view-btn')?.addEventListener('click', () => OptimizerPreview.backgroundView());
     document.getElementById('opt-bg-apply-btn')?.addEventListener('click', () => { void OptimizerPreview.backgroundApply(); });
-    if (typeof MutationObserver !== 'function') return;
-    new MutationObserver(() => {
-      const run = OptimizerPreview._backgroundRun;
-      if (el.hidden && run && !OptimizerPreview._backgroundComputing()) {
-        OptimizerPreview._backgroundRun = null;
-        Toast.show(Util.t('toast.opt_discarded'), 'info');
-      }
-    }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
+    document.getElementById('opt-bg-switch-btn')?.addEventListener('click', () => { void OptimizerPreview.backgroundSwitchPlant(); });
+  },
+
+  /** Set while a plant switch started from the finish popup is loading the result plant's orders: Apply stays
+   *  disabled until that plant's `tasks:bulk` arrives, so the apply never validates against another plant's rows. */
+  _bgSwitching: false,
+  _bgSwitchUnsub: null as (() => void) | null,
+
+  _resetBgSwitch(): void {
+    OptimizerPreview._bgSwitchUnsub?.();
+    OptimizerPreview._bgSwitchUnsub = null;
+    OptimizerPreview._bgSwitching = false;
+  },
+
+  async backgroundSwitchPlant(): Promise<void> {
+    const run = OptimizerPreview._backgroundRun;
+    const result = run?.result;
+    if (!run || !result || Store.selectedPlant === result.plant) return;
+    // Same unsaved-edits guard as the plant selector; declining keeps the popup and the result as they are.
+    if (!(await Persistence.confirmPlantSwitch(result.plant))) return;
+    if (OptimizerPreview._backgroundRun !== run) return;
+    OptimizerPreview._bgSwitchUnsub?.();
+    OptimizerPreview._bgSwitching = true;
+    OptimizerPreview._bgSwitchUnsub = Store.subscribe(evt => {
+      if (evt.type !== 'tasks:bulk' || Store.selectedPlant !== result.plant) return;
+      OptimizerPreview._bgSwitchUnsub?.();
+      OptimizerPreview._bgSwitchUnsub = null;
+      OptimizerPreview._bgSwitching = false;
+      if (OptimizerPreview._backgroundRun === run) OptimizerPreview._renderBackgroundDone();
+    }, 'OptimizerPreview.bgSwitch');
+    Store.setSelectedPlant(result.plant, 'optimize-background');
+    OptimizerPreview._renderBackgroundDone();
   },
 
   backgroundDismiss(): void {
     OptimizerPreview._backgroundRun = null;
+    OptimizerPreview._resetBgSwitch();
     Modal.close('modal-opt-background-done');
     Toast.show(Util.t('toast.opt_discarded'), 'info');
   },
@@ -2628,6 +2683,7 @@ export const OptimizerPreview = {
     const result = run?.result;
     if (!run || !result) return;
     OptimizerPreview._backgroundRun = null;
+    OptimizerPreview._resetBgSwitch();
     Modal.close('modal-opt-background-done');
     OptimizerPreview._partialApplyAllowed = true;
     OptimizerPreview.present(result, { open: true });
@@ -2646,6 +2702,7 @@ export const OptimizerPreview = {
       return;
     }
     OptimizerPreview._backgroundRun = null;
+    OptimizerPreview._resetBgSwitch();
     Modal.close('modal-opt-background-done');
     OptimizerPreview.present(result, { open: false });
     await OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial(result));
@@ -2702,7 +2759,9 @@ export const OptimizerPreview = {
     if (!context) { refuse(); return; }
     const live0 = snapshotSchedule(plant);
     const ms = (value: unknown): number | null => (value instanceof Date ? value.getTime() : null);
-    const keyOf = (finding: { code: string; taskId?: string | number }): string => `${finding.code}|${finding.taskId}`;
+    // The message is part of the key: capacity_overlap names both orders, so a NEW overlap that lands on an order which
+    // already overlapped another one live is a different finding, not the baseline one.
+    const keyOf = (finding: { code: string; taskId?: string | number; message?: string }): string => `${finding.code}|${finding.taskId}|${finding.message ?? ''}`;
     const errorsFor = (patchSet: SchedulePatch[]) => {
       const ids = new Set(patchSet.map(patch => String(patch.id)));
       return validateCandidate(live0, context.bounds, {

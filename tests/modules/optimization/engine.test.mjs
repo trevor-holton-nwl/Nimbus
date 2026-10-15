@@ -5359,7 +5359,11 @@ test('search budget: opts.searchBudgetMs / exhaustive scale the bounds the engin
     assert.equal(normal.bounds.exactSearchThreshold, 8);
     assert.equal(normal.bounds.exactSearchLeafCap, undefined);
     assert.equal(normal.bounds.convergenceWindow, 2000);
-    assert.ok(Math.abs(normal.bounds.deadline - normal.before - 8000) < 500);
+    assert.equal(normal.bounds.exhaustive, false);
+    {
+      const window = normal.bounds.deadline - normal.before;   // `before` precedes the call, so the window is the budget plus scheduling delay: bounded below by the budget, loosely above
+      assert.ok(window >= 8000 && window < 13000, `normal deadline window ${window}`);
+    }
 
     const exhaustive = capture({ searchBudgetMs: 180000, exhaustive: true });
     assert.equal(exhaustive.bounds.iterationCap, 1440000);
@@ -5367,7 +5371,11 @@ test('search budget: opts.searchBudgetMs / exhaustive scale the bounds the engin
     assert.equal(exhaustive.bounds.exactSearchThreshold, 10);
     assert.equal(exhaustive.bounds.exactSearchLeafCap, 5000);
     assert.equal(exhaustive.bounds.convergenceWindow, 10000);
-    assert.ok(Math.abs(exhaustive.bounds.deadline - exhaustive.before - 180000) < 500);
+    assert.equal(exhaustive.bounds.exhaustive, true);
+    {
+      const window = exhaustive.bounds.deadline - exhaustive.before;
+      assert.ok(window >= 180000 && window < 185000, `exhaustive deadline window ${window}`);
+    }
 
     const dflt = capture({});
     assert.equal(dflt.bounds.iterationCap, 40000);
@@ -5375,7 +5383,10 @@ test('search budget: opts.searchBudgetMs / exhaustive scale the bounds the engin
     assert.equal(dflt.bounds.exactSearchThreshold, 8);
     assert.equal(dflt.bounds.exactSearchLeafCap, undefined);
     assert.equal(dflt.bounds.convergenceWindow, 2000);
-    assert.ok(Math.abs(dflt.bounds.deadline - dflt.before - 5000) < 500);
+    {
+      const window = dflt.bounds.deadline - dflt.before;
+      assert.ok(window >= 5000 && window < 10000, `default deadline window ${window}`);
+    }
   } finally {
     Engine.evaluateSetupAware = original;
     Store.setTasks(priorTasks, 'unit-test');

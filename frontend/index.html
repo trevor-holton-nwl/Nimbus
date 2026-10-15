@@ -2693,7 +2693,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <!-- =========================================================
      MODAL: Exhaustive optimization finished (background run)
      ========================================================= -->
-<div class="modal-backdrop" id="modal-opt-background-done" hidden>
+<div class="modal-backdrop" id="modal-opt-background-done" data-no-backdrop-close hidden>
   <div class="modal" style="max-width:520px;" role="dialog" aria-labelledby="opt-bg-done-title">
     <header class="modal-head">
       <h3 id="opt-bg-done-title" data-i18n="ui.opt_bg_done_title">Exhaustive optimization finished</h3>
@@ -2701,6 +2701,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </header>
     <div class="modal-body" id="opt-bg-done-body" style="padding:16px 20px;"></div>
     <footer class="modal-foot">
+      <button class="btn btn-ghost" id="opt-bg-switch-btn" data-i18n="ui.opt_bg_switch_plant" hidden>Switch to plant</button>
       <button class="btn btn-ghost" id="opt-bg-view-btn" data-i18n="ui.opt_bg_view">View preview</button>
       <button class="btn btn-primary" id="opt-bg-apply-btn" data-i18n="ui.opt_bg_apply">Apply without preview</button>
     </footer>

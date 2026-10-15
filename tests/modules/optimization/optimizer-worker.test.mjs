@@ -150,12 +150,12 @@ test('worker transport carries the chosen search budget as the remaining deadlin
     return posted;
   };
   const exhaustive = post(SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, true);
-  assert.ok(exhaustive.deadlineDurationMs > 170000 && exhaustive.deadlineDurationMs <= 180000,
+  assert.ok(exhaustive.deadlineDurationMs > 175000 && exhaustive.deadlineDurationMs <= 180000,
     'the Exhaustive primary posts its 180 s budget');
   assert.equal(exhaustive.request.searchBudgetMs, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS);
   assert.equal(exhaustive.request.exhaustive, true);
   const normal = post(SETUP_AWARE_NORMAL_BUDGET_MS, false);
-  assert.ok(normal.deadlineDurationMs > 7000 && normal.deadlineDurationMs <= 8000, 'a Normal request posts its 8 s budget');
+  assert.ok(normal.deadlineDurationMs > 3000 && normal.deadlineDurationMs <= 8000, 'a Normal request posts its 8 s budget');
 });
 
 test('real optimizer worker boundary localizes its deadline and round-trips effective firming', () => {

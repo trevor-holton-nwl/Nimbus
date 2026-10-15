@@ -479,6 +479,8 @@ export interface DueDateFirstBounds {
   boundaryTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
+  /** True for the planner's Exhaustive run: the capacity-check limit message then omits the "choose Exhaustive" advice. */
+  exhaustive?: boolean;
   /** Optional ceiling on the number of distinct orderings an exact search may
    * enumerate (default `EXACT_SEARCH_LEAF_CAP`). Engine leaves it unset; tests
    * that pin exact traversal pass `Infinity`. */
@@ -7199,7 +7201,9 @@ export function fillPlanningGaps(
       ? prior
       : overlong ?? (complete
       ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
-      : { code: 'search_limit', message: 'Capacity check incomplete: time limit reached before all available gaps were checked. Choose Exhaustive search time in the Optimize dialog to check every gap.' });
+      : { code: 'search_limit', message: bounds.exhaustive === true
+        ? 'Capacity check incomplete: time limit reached before all available gaps were checked.'
+        : 'Capacity check incomplete: time limit reached before all available gaps were checked. Choose Exhaustive search time in the Optimize dialog to check every gap.' });
     patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
     dispositions.set(id, { id, line, status: 'needs_planning', reason });
   }

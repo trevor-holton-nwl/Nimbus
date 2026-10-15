@@ -1815,10 +1815,12 @@ function openBackgroundFixture(plant = 'SR', tasks = singleRevealTasks) {
   const base = openSingleRevealFixture(plant, structuredClone(tasks));
   const priorLocales = globalThis.window.__NIMBUS_LOCALES;
   globalThis.window.__NIMBUS_LOCALES = { en: {
-    'toast.opt_bg_partial_applied': enString('toast.opt_bg_partial_applied'),
+    ...Object.fromEntries(['toast.opt_bg_partial_applied', 'ui.opt_pv_diag_limit_reached_note',
+      'ui.opt_pv_diag_limit_reached_note_exhaustive', 'ui.opt_bg_switch_plant', 'toast.opt_bg_no_worker',
+      'btn.opt_run_bg_busy', 'btn.run_optimization'].map(key => [key, enString(key)])),
   } };
   const extra = new Map(['btn-optimize', 'modal-opt-background-done', 'opt-bg-done-body', 'opt-bg-apply-btn',
-    'opt-bg-view-btn', 'opt-search-budget', 'opt-run-btn'].map(id => [id, makeSandboxElement(id)]));
+    'opt-bg-view-btn', 'opt-bg-switch-btn', 'opt-search-budget', 'opt-run-btn'].map(id => [id, makeSandboxElement(id)]));
   extra.get('opt-search-budget').value = '8';
   const baseGet = globalThis.document.getElementById;
   globalThis.document.getElementById = id => extra.get(id) || baseGet(id);
@@ -2019,7 +2021,9 @@ test('Task 3: the background driver finishes when the evaluator returns a Promis
     assert.ok(posted.length > 1, 'the primary and the alternates all went through the worker');
     assert.ok(posted[0].deadlineDurationMs > 170000 && posted[0].deadlineDurationMs <= 180000, 'primary carries the Exhaustive budget');
     for (const alt of posted.slice(1)) {
-      assert.ok(alt.deadlineDurationMs > 7000 && alt.deadlineDurationMs <= 8000, 'alternates keep the Normal budget');
+      // Wall-clock under suite load: bounded above by the Normal budget, and an order of magnitude below the primary.
+      assert.ok(alt.deadlineDurationMs <= 8000 && alt.deadlineDurationMs > 0, `alternates keep the Normal budget, got ${alt.deadlineDurationMs}`);
+      assert.ok(alt.deadlineDurationMs < posted[0].deadlineDurationMs / 10, 'alternates are far smaller than the primary');
       assert.equal(alt.request.exhaustive, false);
     }
     assert.equal(posted[0].request.exhaustive, true);
@@ -2257,6 +2261,122 @@ test('Task 3 fix: the popup warning counts orders added to the plant since the s
     Store.setTasks([...Store.tasksArr, { id: 'bx-late', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 1, row_version: 1, start_date: null, end_date: null }], 'unit-test');
     assert.deepEqual(OptimizerPreview._changedSinceBaseline(result), { changed: ['bx-late'], missing: [] });
   } finally {
+    fx.restore();
+  }
+});
+
+/* Final fix wave */
+test('Final wave F1: a result finished on another plant offers Switch-to-plant; after the switch loads, Apply enables', async () => {
+  const fx = openBackgroundFixture();
+  const priorConfirm = Persistence.confirmPlantSwitch;
+  try {
+    Persistence.confirmPlantSwitch = async () => true;
+    const pending = OptimizerPreview.runInBackground('spt', fx.opts);
+    Store.setSelectedPlant('OTHER-PLANT', 'unit-test');
+    await pending;
+    const switchBtn = fx.extra.get('opt-bg-switch-btn');
+    assert.equal(switchBtn.hidden, false, 'the Switch to plant button is shown');
+    assert.equal(switchBtn.textContent, Util.t('ui.opt_bg_switch_plant', { plant: 'SR' }));
+    assert.equal(fx.extra.get('opt-bg-apply-btn').disabled, true);
+
+    await OptimizerPreview.backgroundSwitchPlant();
+    assert.equal(Store.selectedPlant, 'SR');
+    assert.equal(fx.extra.get('opt-bg-apply-btn').disabled, true, 'Apply waits for the plant orders to load');
+    assert.ok(OptimizerPreview._backgroundRun?.result, 'the result survives the switch');
+
+    // The plant's orders arrive, equal to the baseline rows.
+    Store.setTasks(structuredClone(Store.tasksArr), 'unit-test');
+    const { result } = OptimizerPreview._backgroundRun;
+    assert.deepEqual(OptimizerPreview._changedSinceBaseline(result), { changed: [], missing: [] });
+    assert.notEqual(fx.extra.get('opt-bg-apply-btn').disabled, true, 'Apply is enabled once the plant loaded');
+    assert.equal(switchBtn.hidden, true);
+  } finally {
+    Persistence.confirmPlantSwitch = priorConfirm;
+    fx.restore();
+  }
+});
+
+test('Final wave F1: only the X button dismisses the finish popup (the backdrop opts out of the shell backdrop-close)', () => {
+  const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
+  assert.match(html, /<div class="modal-backdrop" id="modal-opt-background-done" data-no-backdrop-close hidden>/);
+  const shell = readFileSync(new URL('../../../frontend/shell/application-shell.mts', import.meta.url), 'utf8');
+  assert.match(shell, /!b\.hasAttribute\('data-no-backdrop-close'\)/);
+});
+
+test('Final wave F2: a kept proposal onto an untouched order that already overlapped another live order is skipped', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    const y = patchById(result, 'bx-y');
+    assert.ok(y?.changes.start_date, 'precondition: Y is proposed with dates');
+    const xLive = { start: Store.tasks['bx-x'].start_date, end: Store.tasks['bx-x'].end_date };
+    assert.ok(overlaps({ start: y.changes.start_date, end: y.changes.end_date }, xLive), 'precondition: Y lands on X');
+    // V overlaps X live (a pre-existing defect on U = X) but not Y's proposed slot.
+    const v = { start: new Date(+y.changes.end_date + 3600000), end: new Date(+xLive.end + 3600000) };
+    assert.ok(v.start < xLive.end && !overlaps(v, { start: y.changes.start_date, end: y.changes.end_date }), 'precondition: V overlaps X only');
+    Store.setTasks([...Store.tasksArr, { id: 'bx-v', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 2, row_version: 1,
+      start_date: v.start, end_date: v.end }], 'unit-test');
+    Store.updateTask('bx-x', { NOTE: 'edited while searching' }, 'user');
+    await OptimizerPreview.backgroundApply();
+    assert.equal(Store.tasks['bx-y'].start_date, null, 'Y is skipped');
+    assert.equal(+Store.tasks['bx-x'].start_date, +xLive.start, 'X untouched');
+    assert.equal(+Store.tasks['bx-v'].start_date, +v.start, 'V untouched');
+    const toast = fx.toasts.find(t => t.msg.startsWith('Applied'));
+    assert.ok(toast && toast.msg.includes('bx-y'), `the toast lists Y, got ${JSON.stringify(fx.toasts)}`);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Final wave M2: the limit note key follows the run mode (preview and popup)', async () => {
+  assert.equal(OptimizerPreview._limitNoteKey(false), 'ui.opt_pv_diag_limit_reached_note');
+  assert.equal(OptimizerPreview._limitNoteKey(true), 'ui.opt_pv_diag_limit_reached_note_exhaustive');
+  const fx = openBackgroundFixture();
+  try {
+    assert.match(Util.t('ui.opt_pv_diag_limit_reached_note'), /Exhaustive/);
+    assert.doesNotMatch(Util.t('ui.opt_pv_diag_limit_reached_note_exhaustive'), /choose/i);
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const run = OptimizerPreview._backgroundRun;
+    run.result.candidate.diagnostics.limitReached = true;
+    run.result.opts = { ...run.result.opts, exhaustive: true };
+    OptimizerPreview._renderBackgroundDone();
+    assert.match(fx.extra.get('opt-bg-done-body').innerHTML, /even on an exhaustive run/);
+    run.result.opts = { ...run.result.opts, exhaustive: false };
+    OptimizerPreview._renderBackgroundDone();
+    assert.match(fx.extra.get('opt-bg-done-body').innerHTML, /choose Exhaustive/);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Final wave M6: Exhaustive without Worker support toasts and starts nothing', async () => {
+  const fx = openBackgroundFixture();
+  const OriginalWorker = globalThis.Worker;
+  try {
+    delete globalThis.Worker;
+    await OptimizerPreview.runInBackground('spt', { ...fx.opts, searchBudgetMs: 180000, exhaustive: true });
+    assert.equal(OptimizerPreview._backgroundRun, null);
+    assert.ok(fx.toasts.some(t => t.msg === Util.t('toast.opt_bg_no_worker')), `got ${JSON.stringify(fx.toasts)}`);
+  } finally {
+    if (OriginalWorker !== undefined) globalThis.Worker = OriginalWorker;
+    fx.restore();
+  }
+});
+
+test('Final wave M8: the Run button is restored when the background run finishes while the dialog is open', async () => {
+  const fx = openBackgroundFixture();
+  const runBtn = fx.extra.get('opt-run-btn');
+  try {
+    OptimizerPreview._backgroundRun = { plant: 'SR', mode: 'spt', startedAt: 0, controller: new AbortController(), result: null, error: null };
+    OptimizerPreview._syncToolbarRunning();
+    assert.equal(runBtn.disabled, true, 'disabled while computing');
+    assert.equal(runBtn.textContent, Util.t('btn.opt_run_bg_busy'));
+    OptimizerPreview._backgroundRun.result = {};   // finished
+    OptimizerPreview._syncToolbarRunning();
+    assert.match(runBtn.innerHTML, new RegExp(Util.t('btn.run_optimization')));
+  } finally {
+    OptimizerPreview._backgroundRun = null;
     fx.restore();
   }
 });

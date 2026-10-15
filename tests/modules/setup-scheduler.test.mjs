@@ -624,7 +624,16 @@ test('gap fill has a separate budget and labels unchecked orders when it expires
   assert.equal(result.gapFill.complete, false);
   assert.equal(result.gapFill.unchecked, 1);
   assert.match(result.dispositions[0].reason.message, /Capacity check incomplete/);
+  assert.match(result.dispositions[0].reason.message, /Choose Exhaustive/);
   assert.equal(result.patches[0].changes.start_date, null);
+});
+
+test('gap fill on an Exhaustive run does not tell the planner to choose Exhaustive', () => {
+  const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')]);
+  const result = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, exhaustive: true }, candidate, 0);
+  assert.equal(result.dispositions[0].reason.code, 'search_limit');
+  assert.match(result.dispositions[0].reason.message, /Capacity check incomplete/);
+  assert.doesNotMatch(result.dispositions[0].reason.message, /Exhaustive/);
 });
 
 test('VI10: fillPlanningGaps with a zero budget keeps overlong_never for an overlong order on a never plant', () => {
