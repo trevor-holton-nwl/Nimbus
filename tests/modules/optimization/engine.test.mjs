@@ -4724,6 +4724,24 @@ describe('reconcile (finish-anchored)', () => {
     } finally { Persistence._dirtyIds.delete('u'); fx.restore(); }
   });
 
+  test('group 15: Ctrl+Z of a task edit after a calendar edit re-derives against the CURRENT calendar and leaves the calendar edit alone', () => {
+    const fx = recFixture({ policy: 'never' });
+    try {
+      Store.setTasks([fx.task('cz', { RUN_TIME: '4', user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(26, 13), end_date: at(26, 17) })], 'unit-test');
+      const snap = UndoStack.snapshotTasks(['cz']);           // the state before the task edit (finish Wed 17:00, plant window 07-19)
+      Store.updateMany([{ id: 'cz', changes: { start_date: at(27, 9), end_date: at(27, 13) } }], 'unit-test');   // the task edit
+      // Between the snapshot and the undo the planner shortens the line's day: it now closes at 16:00.
+      const shortWeek = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [7, 16] : null]));
+      Store.setCalendar(fx.line, shortWeek, 'unit-test');
+      UndoStack.restoreTasks(snap);
+      const t = Store.tasks.cz;
+      assert.equal(fmtLocal(t.end_date), '8/26 16:00', 'the restored 17:00 finish cannot be held on the shortened day: the end lands on the new close');
+      assert.equal(fmtLocal(t.start_date), '8/26 12:00', 'and the 4 h start follows from it, not from the stale 13:00');
+      assert.equal(t.derivationIssue?.code, 'finish_moved_earlier', 'the move is recorded, not silent');
+      assert.deepEqual(Store.calendars[fx.line].workHours[3], [7, 16], 'the undo restored the task only; the calendar edit stands');
+    } finally { fx.restore(); }
+  });
+
   test('OQ21: restoreTasks flags every restored row stale before the engine derives', () => {
     const fx = recFixture({ state: 'pending' });   // nothing is derived, so the flag is still visible
     try {
@@ -4979,6 +4997,32 @@ describe('reconcile (finish-anchored)', () => {
         assert.notEqual(t.derivationIssue?.code, 'finish_moved_earlier');
       });
     } finally { fx.restore(); }
+  });
+
+  test('group 7 (pipeline): a reconcile that holds the finish leaves a shrunk changeover gap, and the alerts name it (setup-violated with the available minutes)', async () => {
+    const { Alerts } = await import('../../../frontend/insights/services.mjs');
+    const fx = recFixture({ policy: 'never' });
+    const priorAlerts = Store.alerts;
+    try {
+      withSetup(fx, { minutes: 90 }, () => {
+        // RED ends Tue 25 19:00 (window close). BLUE is 10 h held to Wed 26 17:00, so its zero-setup start is Wed 07:00.
+        // The 90-minute RED -> BLUE changeover would need 05:30-07:00 (before the window opens), so the setup-aware walk is
+        // discarded (I8) and the held bar stands with 0 working minutes of gap: the violation must be raised, not hidden.
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 17), end_date: at(25, 19) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '10', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(26, 7), end_date: at(26, 17) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00');
+        assert.equal(fmtLocal(Store.tasks.pb.end_date), '8/26 17:00', 'the finish is held');
+        Alerts._recomputeSync();
+        const violated = Store.alerts.filter(a => a.type === 'setup-violated' && a.taskId === 'pb');
+        assert.equal(violated.length, 1, 'one setup-violated alert on the successor');
+        assert.equal(violated[0].requiredMinutes, 90);
+        assert.ok(violated[0].availableMinutes < 90, `the available gap (${violated[0].availableMinutes} min) is below the 90 required`);
+        assert.equal(violated[0].shortMinutes, 90 - violated[0].availableMinutes);
+      });
+    } finally { Store.setAlerts(priorAlerts, 'unit-test'); fx.restore(); }
   });
 
   test('Task 3.2 (OQ40): a manual drop reserves no changeover; finishAnchoredPatchFor honours an explicit setupMinutes', () => {

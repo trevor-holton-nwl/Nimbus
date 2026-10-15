@@ -52,3 +52,58 @@ test('Aggregate grid writes the RAW week key into data-period, even where CSS.es
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete globalThis[k]; else globalThis[k] = v; }
   }
 });
+
+test('group 8 (labor downstream): the KPI strip reads the proportionally re-bucketed utilization hours, so a bar crossing midnight no longer piles on its start day', async () => {
+  const saved = { CSS: globalThis.CSS, document: globalThis.document, fetch: globalThis.fetch, flatpickr: globalThis.flatpickr,
+    NimbusComputeCore: globalThis.NimbusComputeCore };
+  // Utilization delegates to the UMD compute core through this ambient global (a real browser loads it first).
+  globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || (await import('node:module')).createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+  globalThis.flatpickr = () => ({ setDate() {} });
+  globalThis.CSS = { escape: (s) => String(s) };
+  const html = { grid: '', kpi: '' };
+  const grid = {
+    set innerHTML(v) { html.grid = v; }, get innerHTML() { return html.grid; },
+    querySelector: () => null, querySelectorAll: () => [], addEventListener() {},
+  };
+  const kpi = { set innerHTML(v) { html.kpi = v; }, get innerHTML() { return html.kpi; } };
+  const noop = () => {};
+  globalThis.document = {
+    getElementById: (id) => (id === 'labor-grid' ? grid : id === 'labor-kpi-strip' ? kpi : null),
+    addEventListener: noop, querySelector: () => null, querySelectorAll: () => [],
+  };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ rows: [] }) });
+  const { Store } = await import('../../../frontend/platform/store.mjs');
+  const priorMaster = Store.masterData;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const line = 'LB-G8-L1';
+  const wh = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map((d) => [d, [8, 18]]));   // a 10 h (600 min) working day
+  const monday = new Date(); monday.setHours(0, 0, 0, 0); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  const at = (dayOffset, hour) => { const d = new Date(monday); d.setDate(d.getDate() + dayOffset); d.setHours(hour, 0, 0, 0); return d; };
+  const strip = () => ({
+    required: Number((html.kpi.match(/Required<\/span>\s*<span class="lp-kpi-val">(\d+)h/) || [])[1]),
+    shortfalls: Number((html.kpi.match(/Shortfalls<\/span>\s*<span class="lp-kpi-val">(\d+)</) || [])[1]),
+  });
+  try {
+    Store.setMasterData({ plants: [{ plant: 'LB-G8', subnetwork: 'S' }], lines: [{ plant: 'LB-G8', machine: line, wc_group: 'G1' }] }, 'unit-test');
+    Store.setCalendar(line, wh, 'unit-test');
+    Store.setSelectedPlant('LB-G8', 'unit-test');
+    const task = (id, run, s, e) => ({ id, PLANT: 'LB-G8', MACHINE: line, RUN_TIME: run, start_date: s, end_date: e });
+
+    // 12 h from Wed 17:00 to Thu 13:00: 2 h on Wednesday and 10 h on Thursday (each inside its 10 h window): no shortfall.
+    Store.setTasks([task('g8-a', 12, at(2, 17), at(3, 13))], 'unit-test');
+    await LaborPlanning.render();
+    assert.deepEqual(strip(), { required: 12, shortfalls: 0 }, 'the 12 h are split 2 h / 10 h across the two days, not 12 h on the start day');
+
+    // 14 h from Wed 22:00 to Fri 00:00: only Thursday has working time, so Thursday carries all 14 h against a 10 h window.
+    Store.setTasks([task('g8-b', 14, at(2, 22), at(4, 0))], 'unit-test');
+    await LaborPlanning.render();
+    assert.deepEqual(strip(), { required: 14, shortfalls: 1 }, 'one line-day cell (Thursday) is short');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setMasterData(priorMaster, 'unit-test');
+    delete Store.calendars[line];
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete globalThis[k]; else globalThis[k] = v; }
+  }
+});
