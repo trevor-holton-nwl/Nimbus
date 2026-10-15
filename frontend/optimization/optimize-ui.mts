@@ -21,7 +21,7 @@ import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidateForApply } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch } from './setup-scheduler.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
@@ -502,7 +502,7 @@ export const OptimizeDialog = (() => {
     const badgeEl = document.getElementById('opt-wheel-badge');
     const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
 
-    if (runBtn) runBtn.disabled = !plant;
+    if (runBtn) runBtn.disabled = !plant || !!OptimizerPreview._backgroundRun;
 
     if (!badgeEl) return;
     const setBadge = (state: 'none' | 'loading' | 'active' | 'warn', icon: string, tip: string) => {
@@ -2286,6 +2286,9 @@ export const OptimizerPreview = {
   async _runGuardedCommit(commit: Promise<void>): Promise<void> {
     try { await commit; } catch (err) {
       ErrorLog.error('optimizer', `Apply failed: ${err instanceof Error ? err.message : String(err)}`, err);
+      // Never leave an installed preview active (task watch running) with no modal to act on it.
+      OptimizerPreview._clear();
+      Modal.close('modal-opt-preview');
     }
   },
 
@@ -2467,13 +2470,15 @@ export const OptimizerPreview = {
       }
     } finally {
       OptimizerPreview._syncToolbarRunning();
-      OptimizerPreview._removeLeaveGuard();
+      // A superseded run settling late must not strip the guard a newer run installed.
+      if (!OptimizerPreview._backgroundComputing()) OptimizerPreview._removeLeaveGuard();
     }
   },
 
   cancelBackground(): void {
     const run = OptimizerPreview._backgroundRun;
-    if (!run) return;
+    // Only a computing run can be cancelled; a finished one is dismissed through the popup.
+    if (!run || !OptimizerPreview._backgroundComputing()) return;
     run.controller?.abort();
     OptimizerPreview._backgroundRun = null;
     OptimizerPreview._syncToolbarRunning();
@@ -2525,15 +2530,15 @@ export const OptimizerPreview = {
     if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') window.removeEventListener('beforeunload', guard);
   },
 
-  /** Which of the result's proposed orders no longer match the state the search ran on. */
+  /** Which plant orders no longer match the state the search ran on. */
   _changedSinceBaseline(result: Pick<PreviewResult, 'candidate' | 'taskBaseline'>): { changed: string[]; missing: string[] } {
     const changed: string[] = [];
     const missing: string[] = [];
-    for (const patch of result.candidate.patches) {
-      const id = String(patch.id);
+    // Every baseline task, not just the proposed ones: an edit to an unpatched order can still collide with a proposal.
+    for (const [id, value] of result.taskBaseline) {
       const live = Store.tasks[id];
       if (!live) missing.push(id);
-      else if (taskBaseline([live]).get(id) !== result.taskBaseline.get(id)) changed.push(id);
+      else if (taskBaseline([live]).get(id) !== value) changed.push(id);
     }
     return { changed, missing };
   },
@@ -2681,17 +2686,44 @@ export const OptimizerPreview = {
       const task = live(id);
       if (!task || Engine.isInProgress(task) || taskBaseline([task]).get(id) !== result.taskBaseline.get(id)) dropWithFamily(id);
     }
-    // Re-validate the kept subset; a task-level error drops that order (and family), a candidate-wide error refuses.
+    // Re-validate the kept subset against the LIVE board (live rows, calendars, blackouts), not the compute-time
+    // snapshot. A kept order that errors is dropped. An error on an order we are not applying (dropped, live-only,
+    // firmed) is a collision when it is an overlap: drop every kept patch on that line whose proposed interval meets the
+    // order's live interval, and refuse when none does. Other findings on a non-kept order describe that order alone
+    // (its own bookkeeping or pre-existing defect, untouched by this apply) and are ignored. Any finding with no order
+    // refuses.
+    const context = candidate.validationContext;
+    const live0 = snapshotSchedule(plant);
+    const OVERLAP_CODES = new Set(['capacity_overlap', 'setup_overlap', 'segments']);
+    const ms = (value: unknown): number | null => (value instanceof Date ? value.getTime() : null);
     let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
-    for (let pass = 0; pass < 3; pass++) {
-      const findings = validateCandidateForApply({ ...candidate, patches: kept }, snapshotSchedule(plant))
-        // A dropped order keeps its live state, so the candidate's own accounting for it (disposition, queue shape)
-        // no longer describes anything this apply touches: ignore its findings, judge only what is still applied.
-        .filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate'
-          && !(finding.taskId && drop.has(String(finding.taskId))));
+    for (let pass = 0; pass < 3 && context; pass++) {
+      const keptIds = new Set(kept.map(patch => String(patch.id)));
+      const findings = validateCandidate(live0, context.bounds, {
+        ...candidate, patches: kept,
+        dispositions: candidate.dispositions?.filter(item => keptIds.has(String(item.id))),
+      }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
       if (!findings.length) break;
-      if (pass === 2 || findings.some(finding => !finding.taskId)) { refuse(); return; }
-      for (const finding of findings) dropWithFamily(String(finding.taskId));
+      if (findings.some(finding => !finding.taskId)) { refuse(); return; }
+      let dropped = false;
+      for (const finding of findings) {
+        const id = String(finding.taskId);
+        if (keptIds.has(id)) { dropWithFamily(id); dropped = true; continue; }
+        if (!OVERLAP_CODES.has(finding.code)) continue;
+        const other = Store.tasks[id];
+        const oStart = ms(other?.start_date); const oEnd = ms(other?.end_date);
+        const hits = oStart === null || oEnd === null ? [] : kept.filter(patch => {
+          const pid = String(patch.id);
+          if (drop.has(pid) || String(Store.tasks[pid]?.MACHINE) !== String(other?.MACHINE)) return false;
+          const pStart = ms(patch.changes.start_date); const pEnd = ms(patch.changes.end_date);
+          return pStart !== null && pEnd !== null && pStart < oEnd && oStart < pEnd;
+        });
+        if (!hits.length) { refuse(); return; }
+        for (const hit of hits) dropWithFamily(String(hit.id));
+        dropped = true;
+      }
+      if (!dropped) break;
+      if (pass === 2) { refuse(); return; }
       kept = patches.filter(patch => !drop.has(String(patch.id)));
     }
     if (!kept.length) { refuse(); return; }

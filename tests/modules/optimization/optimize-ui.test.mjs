@@ -2029,3 +2029,159 @@ test('Task 3: the background driver finishes when the evaluator returns a Promis
     fx.restore();
   }
 });
+
+/* Task 3 fix round 1: live-board partial apply, family drop, Run button, guards */
+const boardTasks = () => [
+  { id: 'bx-x', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 3, row_version: 1,
+    start_date: new Date('2026-08-03T08:30:00'), end_date: new Date('2026-08-03T11:30:00') },
+  { id: 'bx-y', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 1, row_version: 1, start_date: null, end_date: null },
+  { id: 'bx-z', PLANT: 'BX', MACHINE: 'BX-L2', RUN_TIME: 2, row_version: 1, start_date: null, end_date: null },
+];
+const patchById = (result, id) => result.candidate.patches.find(p => p.id === id);
+const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+
+test('Task 3 fix: partial apply validates against the live board, so a proposal onto an edited order is skipped with it', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    const x = patchById(result, 'bx-x'); const y = patchById(result, 'bx-y');
+    const xLive = { start: Store.tasks['bx-x'].start_date, end: Store.tasks['bx-x'].end_date };
+    assert.ok(x && y, 'both orders are proposed');
+    assert.ok(overlaps({ start: y.changes.start_date, end: y.changes.end_date }, xLive),
+      'precondition: the optimizer puts Y into the slot X occupies now');
+    assert.notEqual(+x.changes.start_date, +xLive.start, 'precondition: the optimizer moves X out of that slot');
+    Store.updateTask('bx-x', { NOTE: 'edited while searching' }, 'user');   // X stays in its slot live
+
+    await OptimizerPreview.backgroundApply();
+
+    assert.equal(Store.tasks['bx-y'].start_date, null, 'Y is not applied on top of X');
+    assert.equal(+Store.tasks['bx-x'].start_date, +xLive.start, 'X keeps its live slot');
+    const toast = fx.toasts.find(t => t.msg.startsWith('Applied'));
+    assert.ok(toast && toast.msg.includes('bx-x') && toast.msg.includes('bx-y'), `the toast lists X and Y, got ${JSON.stringify(fx.toasts)}`);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: an unpatched order edited into a kept proposal skips that proposal and applies the rest', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    const y = patchById(result, 'bx-y'); const z = patchById(result, 'bx-z');
+    assert.ok(y && z, 'precondition: Y and Z are proposed');
+    // A new live order the search never saw lands exactly on Y's proposed slot.
+    Store.setTasks([...Store.tasksArr, { id: 'bx-new', PLANT: 'BX', MACHINE: 'BX-L1', RUN_TIME: 1, row_version: 1,
+      start_date: y.changes.start_date, end_date: y.changes.end_date }], 'unit-test');
+    // The baseline now has no entry for it, so only the live-board validation can catch it.
+    await OptimizerPreview.backgroundApply();
+    assert.equal(Store.tasks['bx-y'].start_date, null, 'Y is skipped');
+    assert.ok(Store.tasks['bx-z'].start_date instanceof Date, 'the unrelated order still applies');
+    const toast = fx.toasts.find(t => t.msg.startsWith('Applied'));
+    assert.ok(toast && toast.msg.includes('bx-y'), `the toast names Y, got ${JSON.stringify(fx.toasts)}`);
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: editing one sub-order of a distributed family skips the whole family', async () => {
+  const family = [
+    { id: 'fm-1', PLANT: 'FM', MACHINE: 'FM-L1', RUN_TIME: 1, row_version: 1, PARENT_ORDER: 'P-100', MATERIAL_NUMBER: 'M1', start_date: null, end_date: null },
+    { id: 'fm-2', PLANT: 'FM', MACHINE: 'FM-L2', RUN_TIME: 1, row_version: 1, PARENT_ORDER: 'P-100', MATERIAL_NUMBER: 'M1', start_date: null, end_date: null },
+    { id: 'fm-3', PLANT: 'FM', MACHINE: 'FM-L3', RUN_TIME: 1, row_version: 1, start_date: null, end_date: null },
+  ];
+  const fx = openBackgroundFixture('FM', family);
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    Store.updateTask('fm-1', { NOTE: 'edited' }, 'user');
+    await OptimizerPreview.backgroundApply();
+    assert.equal(Store.tasks['fm-1'].start_date, null);
+    assert.equal(Store.tasks['fm-2'].start_date, null, 'the sibling is skipped with the edited sub-order');
+    assert.ok(Store.tasks['fm-3'].start_date instanceof Date, 'an unrelated order applies');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: the popup warning counts every plant order that changed, not only proposed ones', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    result.candidate = { ...result.candidate, patches: [] };
+    Store.updateTask('bx-x', { NOTE: 'edited' }, 'user');
+    assert.deepEqual(OptimizerPreview._changedSinceBaseline(result), { changed: ['bx-x'], missing: [] });
+  } finally {
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: the Run button stays disabled while a background run exists, even after the plant badge refreshes', async () => {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  try {
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    const modal = makeSandboxElement('modal-optimize');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
+    OptimizerPreview._backgroundRun = { plant: 'SR', mode: 'spt', startedAt: 0, controller: new AbortController(), result: null, error: null };
+    OptimizeDialog.open();
+    await wait(20);
+    assert.equal(fx.extra.get('opt-run-btn').disabled, true);
+  } finally {
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: a superseded run settling late keeps the newer run\'s leave guard; cancel ignores a finished run', async () => {
+  const fx = openBackgroundFixture();
+  const priorWindow = globalThis.window;
+  const listeners = new Set();
+  globalThis.window = Object.assign(priorWindow, {
+    addEventListener: (type, fn) => { if (type === 'beforeunload') listeners.add(fn); },
+    removeEventListener: (type, fn) => { if (type === 'beforeunload') listeners.delete(fn); },
+  });
+  try {
+    const first = OptimizerPreview.runInBackground('spt', fx.opts);
+    OptimizerPreview.cancelBackground();
+    const second = OptimizerPreview.runInBackground('spt', fx.opts);
+    assert.equal(listeners.size, 1, 'the second run installed a guard');
+    await first;
+    assert.equal(listeners.size, 1, 'the first run settling late did not remove it');
+    await second;
+    assert.equal(listeners.size, 0, 'the guard goes once nothing is computing');
+
+    assert.ok(OptimizerPreview._backgroundRun?.result, 'the second run finished');
+    OptimizerPreview.cancelBackground();
+    assert.ok(OptimizerPreview._backgroundRun?.result, 'cancel does not null a finished run');
+    assert.ok(!fx.toasts.slice(-1)[0].msg.includes('cancelled') || fx.toasts.filter(t => t.msg === Util.t('toast.opt_bg_cancelled')).length === 1,
+      'no second cancelled toast');
+  } finally {
+    delete globalThis.window.addEventListener; delete globalThis.window.removeEventListener;
+    fx.restore();
+  }
+});
+
+test('Task 3 fix: a partial apply that throws before committing clears the installed preview', async () => {
+  const fx = openBackgroundFixture();
+  const priorValidate = Store.updateTask;
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const priorCommit = OptimizerPreview._commitPatches;
+    OptimizerPreview._commitPatches = async () => { throw new Error('boom'); };
+    try {
+      await OptimizerPreview.backgroundApply();
+    } finally {
+      OptimizerPreview._commitPatches = priorCommit;
+    }
+    assert.equal(OptimizerPreview.active, false, 'a failed apply leaves no active preview behind');
+    assert.equal(OptimizerPreview._candidate, null);
+  } finally {
+    void priorValidate;
+    fx.restore();
+  }
+});
