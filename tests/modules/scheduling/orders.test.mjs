@@ -1594,9 +1594,8 @@ test('the Due Date column shows the due instant (a date-only SAP finish reads as
 });
 
 test('the Due Date column shows the due DAY for a date-only due on a 24:00-close line, not the exclusive next-day 00:00 (R-I6 display)', async () => {
-  const { createRequire } = await import('node:module');
   const prevCore = globalThis.NimbusComputeCore;
-  globalThis.NimbusComputeCore = createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
   const hours = { 0: [6, 24], 1: [6, 24], 2: [6, 24], 3: [6, 24], 4: [6, 24], 5: [6, 24], 6: [6, 24] };
   const early = { 0: [6, 22], 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: [6, 22] };
   let current = hours;
