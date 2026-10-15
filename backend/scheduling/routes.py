@@ -449,9 +449,10 @@ def update_task(task: TaskDateUpdate,
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Update a single task's schedule/priority attributes and persist to DB.
-    Payload: { id, start_date?, end_date?, PRT_01?, PRT_02?,
-               PRODUCTION_VERSION?, base_version?, force? }
-    Response: 200 { status, persisted, failed, stale, versions } | 400 invalid | 404 not found.
+    Payload: { id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+               PRT_01?, PRT_02?, PRODUCTION_VERSION?, base_version?, force? }
+    Response: 200 { status, persisted, failed, stale, versions, conflicts, rejection_reasons, start_derived }
+              | 400 { error: "invalid", rejection_reasons } | 404 not found.
     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
     client can refetch and warn uniformly with the bulk path.
     """
@@ -459,10 +460,13 @@ def update_task(task: TaskDateUpdate,
     if res.get("not_found"):
         raise HTTPException(status_code=404, detail="Task not found")
     if res.get("invalid"):
-        raise HTTPException(status_code=400, detail="Invalid date range (end must be after start)")
+        raise HTTPException(status_code=400, detail={"error": "invalid",
+                                                     "rejection_reasons": res.get("rejection_reasons", {})})
     return {"status": "ok", "persisted": res["persisted"], "failed": res["failed"],
             "stale": res.get("stale", []), "versions": res.get("versions", {}),
-            "conflicts": res.get("conflicts", [])}
+            "conflicts": res.get("conflicts", []),
+            "rejection_reasons": res.get("rejection_reasons", {}),
+            "start_derived": res.get("start_derived", {})}
 
 
 @router.post("/task/note", dependencies=[Depends(auth.require_authenticated)])
@@ -498,7 +502,8 @@ def tasks_update(payload: TasksUpdatePayload,
                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Bulk-update task dates/priority attributes and persist to DB (one transaction).
-    Payload: { tasks: [{ id, start_date?, end_date?, PRT_01?, PRT_02?,
+    Payload: { tasks: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+                         PRT_01?, PRT_02?,
                          PRODUCTION_VERSION?, base_version?, force? }],
                blocks?, calendars? }
     Response: { status, updated, persisted, failed, invalid, not_found,
@@ -553,7 +558,8 @@ def bulk_update(tasks: list[TaskDateUpdate],
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
-    Payload: [{ id, start_date?, end_date?, base_version?, trust_start? }]
+    Payload: [{ id, start_date and end_date (both, or neither; a single edge is rejected as single_edge),
+                base_version?, trust_start? }]
     Response: { status, updated, persisted, failed, invalid, not_found,
                 invalid_ids, not_found_ids, stale, versions, rejection_reasons, start_derived }
 

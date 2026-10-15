@@ -249,6 +249,9 @@ class TestUpdateTaskDatesBulkXminConflict:
             assert snap(oids[0]) == (new_start, new_end, 6, "K1", "K2")
             assert snap(oids[1]) == (sched_start, sched_end, 6, "N1", "K2")
             assert snap(oids[2]) == (sched_start, sched_end, 9, "K1", "K2")
+            with db_._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT runtime_schedule_mismatch FROM orders WHERE id = %s", (oids[2],))
+                assert cur.fetchone()[0] is True   # D13: a run-time-only save flags the stale bar
             # A single-edge save is rejected outright (both edges or segments, always): neither stored edge
             # is completed from the other, so nothing changes.
             early_start = sched_start - dt.timedelta(hours=1)
@@ -1003,6 +1006,36 @@ class TestSaveContractWidthValidator:
         res = self._save(oid, placement_exception="overlong")
         assert res["persisted"] == 1
         assert self._state(oid)[3] == "overlong" and self._state(oid)[2] is True
+
+    def test_a_bar_inside_the_repeated_fall_back_hour_saves_under_either_reading(self):
+        """VI2: 01:15 to 02:15 on the Chicago fall-back day is 1 h under the second reading of 01:15 and 2 h under
+        the first; a 1 h order must save (the width check accepts any reading)."""
+        oid = self._order("FALLBACK", run_time=1, hours=1)
+        s = dt.datetime(2026, 11, 1, 1, 15)
+        res = self._save(oid, start=s, end=dt.datetime(2026, 11, 1, 2, 15))
+        assert res["persisted"] == 1 and res["rejection_reasons"] == {}
+
+    def test_a_zero_wall_width_bar_across_the_fall_back_hour_is_rejected_cleanly(self):
+        """VI2 gap: 01:30 (first) to 01:30 (second) is a real hour, but the naive columns cannot store a
+        zero-width bar (chk_orders_sched_range), so it is refused as invalid rather than failing the write."""
+        oid = self._order("FALLZERO", run_time=1, hours=1)
+        t = dt.datetime(2026, 11, 1, 1, 30)
+        res = self._save(oid, start=t, end=t)
+        assert res["persisted"] == 0 and res["invalid_ids"] == [oid]
+
+    def test_clearing_the_exception_marker_on_an_unmoved_off_width_bar_is_judged(self):
+        """D12 (VM15): clearing the marker is a move even when the edges are unchanged."""
+        oid = self._order("MARKCLEAR", run_time=4, hours=20, exception="overtime")
+        res = self._save(oid, start=self.s, end=self.s + dt.timedelta(hours=20), placement_exception=None)
+        assert res["persisted"] == 0 and res["rejection_reasons"] == {oid: "width_mismatch"}
+        assert self._state(oid)[3] == "overtime"
+
+    def test_a_run_time_only_save_on_a_placed_continuous_row_flags_it_stale(self):
+        """D13 (VM2): the stored bar no longer fits the new run time; flag the row, leave the edges."""
+        oid = self._order("RTONLY", run_time=4, mismatch=False)
+        res = self._save(oid, RUN_TIME=6)
+        assert res["persisted"] == 1
+        assert self._state(oid) == (self.s, self.s + dt.timedelta(hours=4), True, None)
 
 
 @pytest.mark.pg

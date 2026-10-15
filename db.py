@@ -1137,20 +1137,26 @@ WIDTH_TOLERANCE_SECONDS = 60
 PLACEMENT_EXCEPTIONS = ("overtime", "overlong")
 
 
-def _elapsed_seconds(start: datetime, end: datetime, plant_tz: str | None) -> float:
-    """Real time between two NAIVE plant-local edges. With the plant's zone, each edge is turned into
-    the instant it names in that zone before diffing, so a bar across a daylight-saving change
-    measures what actually elapsed (a 24/7 bar from 00:00 to 06:00 across the spring-forward gap is
-    5 h, not 6). Without a zone (or an unknown one) the plain wall-clock difference is all there is."""
+def _elapsed_seconds_readings(start: datetime, end: datetime, plant_tz: str | None) -> list[float]:
+    """Every real duration two NAIVE plant-local edges can mean. With a zone, each edge is read as the instant
+    it names there; inside the repeated fall-back hour a naive wall time names two instants (fold 0 and 1), so
+    the readings are returned for every fold pair and the caller accepts a bar that fits under any of them
+    (VI2). Outside that hour all readings are equal. No zone: the plain wall-clock difference."""
+    zone = None
     if plant_tz:
         try:
             zone = ZoneInfo(plant_tz)
         except (ZoneInfoNotFoundError, ValueError):
             zone = None
-        if zone is not None:
-            return (end.replace(tzinfo=zone).astimezone(timezone.utc)
-                    - start.replace(tzinfo=zone).astimezone(timezone.utc)).total_seconds()
-    return (end - start).total_seconds()
+    if zone is None:
+        return [(end - start).total_seconds()]
+    out: list[float] = []
+    for fs in (0, 1):
+        for fe in (0, 1):
+            s = start.replace(tzinfo=zone, fold=fs).astimezone(timezone.utc)
+            e = end.replace(tzinfo=zone, fold=fe).astimezone(timezone.utc)
+            out.append((e - s).total_seconds())
+    return sorted(set(out))
 
 
 def _validate_continuous_width(start: datetime, end: datetime, run_time, placement_exception: str | None,
@@ -1161,7 +1167,8 @@ def _validate_continuous_width(start: datetime, end: datetime, run_time, placeme
     The server never derives an edge from the other; it only judges the pair it was sent."""
     if placement_exception is not None or run_time is None or float(run_time) <= 0:
         return None   # (a zero run time has no width to compare; its bar must still be non-empty)
-    return abs(_elapsed_seconds(start, end, plant_tz) - float(run_time) * 3600.0) <= WIDTH_TOLERANCE_SECONDS
+    target = float(run_time) * 3600.0
+    return any(abs(v - target) <= WIDTH_TOLERANCE_SECONDS for v in _elapsed_seconds_readings(start, end, plant_tz))
 
 
 _ORDER_ATTR_COLUMNS = {
@@ -1213,7 +1220,7 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
         lits.append("run_time_source = 'routing'")
         pars.append(("run_time_basis", "jsonb", "{v}"))
         vals.append(Jsonb(row["resolved_runtime"]["basis"]))
-    if row.get("force_mismatch"):
+    if row.get("force_mismatch") or row.get("stale_runtime"):
         # An untrusted start (trust_start=False, backward scheduling OQ59): the stored bar's start is a
         # guess, so the row is flagged for the browser to re-derive it. Takes precedence over any clearing.
         lits.append("runtime_schedule_mismatch = TRUE")
@@ -1692,6 +1699,9 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 invalid_ids.append(tid)
                 continue
 
+            # VI2 gap: a bar whose wall edges coincide (01:30 first reading to 01:30 second) is a real hour,
+            # but chk_orders_sched_range (scheduled_end > scheduled_start on naive columns) cannot store it,
+            # so the wall-clock rule stays here and the width check below is what became fold-tolerant.
             if new_start is not None and new_end is not None and new_end <= new_start:
                 invalid_ids.append(tid)
                 continue
@@ -1721,10 +1731,12 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # unchanged) is not judged: the browser resends the full snapshot on an attribute-only edit, and a
             # stale bar the engine could not re-derive must stay savable. The flag is then left untouched
             # (width_passed stays False). A never-placed order has NULL stored edges, so it is always judged.
+            # D12 (VM15): changing or clearing the marker is a move; the width gate must see it
+            marker_changed = has_exception and exception_value != current["placement_exception"]
             unmoved = (new_start is not None and new_end is not None
                        and current["stored_start"] is not None and current["stored_end"] is not None
                        and new_start == current["stored_start"] and new_end == current["stored_end"]
-                       and not runtime_changed)
+                       and not runtime_changed and not marker_changed)
             # An untrusted start (OQ59): the pair of edges is stored but not judged; the flag is forced below.
             trusted = it.get("trust_start", True) is not False
             if (trusted and not queued and not segment_rows and new_start is not None and new_end is not None
@@ -1755,6 +1767,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             update_rows.append({
                 "id": tid,
                 "force_mismatch": force_mismatch,
+                # D13 (VM2): a run time changed with no edges leaves the stored bar wrong; flag it so the browser re-derives
+                "stale_runtime": (runtime_changed and not queued and start is None and end is None
+                                  and not segment_rows and current["stored_start"] is not None
+                                  and current["stored_end"] is not None),
                 "start": new_start if has_segments else start,
                 "end": new_end if has_segments else end,
                 "attrs": attrs,

@@ -142,6 +142,8 @@ class TaskUpdateResult(BaseModel):
     stale: list[str]
     versions: dict[str, int]
     conflicts: list[ScheduleConflict] = Field(default_factory=list)
+    rejection_reasons: dict[str, str] = Field(default_factory=dict)
+    start_derived: dict[str, bool] = Field(default_factory=dict)
 
 
 class BulkUpdateResult(BaseModel):
