@@ -1593,7 +1593,7 @@ def _ingest_originals(cur, child_ids: list[str]) -> dict[str, dict]:
     cur.execute(
         """
         SELECT o.id, o.original_start_received, o.original_finish_received, ss.sent_finish,
-               (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant)
+               (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant), o.original_finish_date_only
           FROM orders o
           LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
          WHERE o.id = ANY(%s)
@@ -1601,7 +1601,8 @@ def _ingest_originals(cur, child_ids: list[str]) -> dict[str, dict]:
         (child_ids,),
     )
     return {r[0]: {"original_start_received": r[1], "original_finish_received": r[2],
-                   "sap_sent_finish": r[3], "tz": r[4]} for r in cur.fetchall()}
+                   "sap_sent_finish": r[3], "tz": r[4], "original_finish_date_only": r[5]}
+            for r in cur.fetchall()}
 
 
 def _apply_children(cur, parent: dict) -> int:
@@ -1637,6 +1638,7 @@ def _apply_children(cur, parent: dict) -> int:
     for child_row in parent["child_rows"]:
         child_id = db.make_id(child_row["production_order"], child_row["material_number"])
         is_new = child_id not in previous_ids
+        date_only_flag = None
         params = dict(child_row)
         params["id"] = child_id
         params["batch_id"] = parent["batch_id"]
@@ -1661,8 +1663,8 @@ def _apply_children(cur, parent: dict) -> int:
                                default=None)
                 if fam_sent is not None:
                     b = {**b, "sap_sent_finish": fam_sent}
-            params["original_start_received"], params["original_finish_received"] = db._locked_originals(
-                b, judged, parent.get("_sap_tz"))
+            (params["original_start_received"], params["original_finish_received"],
+             date_only_flag) = db._locked_originals(b, judged, parent.get("_sap_tz"))
             params.setdefault("sap_basic_start_date", None)
             params.setdefault("sap_basic_finish_date", None)
         else:
@@ -1674,6 +1676,11 @@ def _apply_children(cur, parent: dict) -> int:
             touched += 1
             if touched_ids is not None:
                 touched_ids.append(child_id)
+        if ingest and date_only_flag is not None and bool(date_only_flag) != bool(
+                (b or {}).get("original_finish_date_only")):
+            # D10 (VI12): the locked finish arrived as a date with no time; written only where it differs
+            cur.execute("UPDATE orders SET original_finish_date_only = %s WHERE id = %s",
+                        (bool(date_only_flag), child_id))
         if is_new:
             _carry_anchor_onto_new_child(cur, child_id, anchor)
     return touched

@@ -252,6 +252,9 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS sap_basic_finish_date TIMESTAMP;
 -- Mirrors migrations/2026-10-15-1-orders-original-dates.sql; the one-time backfill is at the end of this file.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_start_received  TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
+-- Backward scheduling D10 (VI12): whether the SAP finish arrived as a date with no time (Send transmits the
+-- working-window close instead of a zone-converted midnight). Mirrors migrations/2026-10-16-2-*.sql.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_finish_date_only BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE order_distribution ADD COLUMN IF NOT EXISTS original_finish_received TIMESTAMP;
 
 -- Placement-exception marker (backward scheduling OQ50): 'overtime' / 'overlong' = the planner placed this bar
@@ -2034,6 +2037,18 @@ BEGIN
     WHERE o2.id = o.id;
     UPDATE order_distribution SET original_finish_received = basic_finish_date WHERE original_finish_received IS NULL;
     INSERT INTO schema_migrations (id) VALUES ('orders_original_dates_backfill');
+  END IF;
+END
+$mig$;
+
+-- Backward scheduling D10 (VI12): mirrors migrations/2026-10-16-2-orders-original-finish-date-only.sql. Marks existing
+-- rows whose locked finish sits at exact midnight (the only evidence old rows carry); ledger-guarded.
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'orders_original_finish_date_only_backfill') THEN
+    UPDATE orders SET original_finish_date_only = TRUE
+     WHERE original_finish_received IS NOT NULL AND original_finish_received::time = TIME '00:00:00';
+    INSERT INTO schema_migrations (id) VALUES ('orders_original_finish_date_only_backfill');
   END IF;
 END
 $mig$;

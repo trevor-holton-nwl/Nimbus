@@ -1752,7 +1752,12 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         audit_taken = bool(cur.fetchone()[0])
     conn.commit()
     warnings: list = []
-    rows, problems = build_order_rows(stage, tz, None, warnings)
+    if _zone(tz) is None:
+        # VI13: a plant with no valid time zone cannot place SAP's times; its rows are rejected, never guessed
+        rows, problems = [], [(int(sr["id"]), "plant has no valid time zone") for sr in stage
+                              if sr.get("id") is not None]
+    else:
+        rows, problems = build_order_rows(stage, tz, None, warnings)
     _mark_rejected_at_apply(conn, table, bid, problems)         # B7: not built -> rejected, never `applied`
     zero_keys = zero_open_keys(rows)
     for r in rows:
@@ -2227,11 +2232,44 @@ def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
         # an SAP echo must not be able to flip the firm flag (db._EFF_START_SQL would fall back to it).
         " CASE WHEN o.planning_status = 'needs_planning' THEN NULL"
         " ELSE COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date) END,"
-        " " + db._EFF_END_SQL +                # the stored finish: what Send transmits (backward scheduling)
+        " " + db._EFF_END_SQL + ","            # the stored finish: what Send transmits (backward scheduling)
+        " o.machine, o.scheduled_end, seg.segment_count, o.original_finish_date_only"
         " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE o.plant = %s ORDER BY o.id", (plant,))
     names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",
-             "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end")
+             "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end",
+             "machine", "scheduled_end", "segment_count", "date_only")
     return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+
+
+def _working_window_close(cur, plant: str, machine: str | None, day: date) -> datetime:
+    """The close of the plant's working window on `day` (naive plant-local), for a due date SAP sent with no
+    time (D10, VI12). The machine's own calendar wins, else the plant's weekly hours (`{0..6: [open, close] |
+    null}`, day 0 = Sunday, fractional hours). A closed day walks back up to 30 days to the previous open
+    day's close (mirrors `dueDateInstant`). A close at or after the next midnight (a 24:00 close, a 24/7
+    line) sends 23:59:59 of that day; no calendar at all sends 23:59:59 of `day`."""
+    hours = None
+    if machine:
+        cur.execute("SELECT work_hours FROM machine_calendar WHERE plant = %s AND machine = %s"
+                    " AND work_hours IS NOT NULL LIMIT 1", (plant, machine))
+        r = cur.fetchone()
+        hours = r[0] if r else None
+    if not hours:
+        cur.execute("SELECT work_hours FROM plants WHERE plant = %s AND work_hours IS NOT NULL LIMIT 1", (plant,))
+        r = cur.fetchone()
+        hours = r[0] if r else None
+    end_of_day = lambda d: datetime.combine(d, dt_time(23, 59, 59))  # noqa: E731
+    if not isinstance(hours, dict) or not hours:
+        return end_of_day(day)
+    for back in range(31):
+        d = day - timedelta(days=back)
+        win = hours.get(str((d.weekday() + 1) % 7))     # stored keys follow JS getDay(): 0 = Sunday
+        if not win:
+            continue
+        close = float(win[1])
+        if close >= 24:
+            return end_of_day(d)
+        return datetime.combine(d, dt_time.min) + timedelta(minutes=round(close * 60))
+    return end_of_day(day)
 
 
 def queue_send_to_sap(plant: str, *, actor: str) -> dict:
@@ -2260,8 +2298,19 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
         try:
             with conn.cursor() as cur:
                 tz = _plant_info(cur, plant)["timezone"]
+                if _zone(tz) is None:
+                    raise ValueError(f"plant {plant} has no valid time zone; set it in Master Data before "
+                                     "sending to SAP (VI13)")
                 _vis, frozen_end = db._horizon_bounds_for_plant(cur, plant)
-                groups, skipped, skipped_unfirmed = build_outbound_groups(_outbound_candidate_rows(cur, plant), frozen_end)
+                candidates = _outbound_candidate_rows(cur, plant)
+                for row in candidates:
+                    # D10 (VI12): a never-placed order's finish is SAP's own date with no time; send the close of
+                    # the plant's working window on that date, not a zone-converted midnight (which moves the date)
+                    if (row["planning_status"] != "needs_planning" and row["scheduled_end"] is None
+                            and (row["segment_count"] or 0) < 2 and row["date_only"]
+                            and row["eff_end"] is not None):
+                        row["eff_end"] = _working_window_close(cur, plant, row["machine"], row["eff_end"].date())
+                groups, skipped, skipped_unfirmed = build_outbound_groups(candidates, frozen_end)
                 cur.execute("UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued',"
                             " sent_at = now() WHERE plant = %s AND row_status = 'ready'", (plant,))
                 firmed = rolled = 0

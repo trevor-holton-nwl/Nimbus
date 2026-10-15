@@ -3319,6 +3319,7 @@ _CHUNK_READ_COLS = (
     "basic_start_date", "basic_finish_date", "run_time", "planning_status",
     "machine_wc", "first_start", "last_end", "tz", "sap_sent_finish", "sap_sent_version",
     "planned_order_initial_quantity", "original_start_received", "original_finish_received",
+    "original_finish_date_only",
 )
 _CHUNK_READ_SQL = f"""
     SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
@@ -3330,7 +3331,8 @@ _CHUNK_READ_SQL = f"""
            seg.first_start, seg.last_end,
            (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz,
            ss.sent_finish AS sap_sent_finish, ss.sent_version AS sap_sent_version,
-           o.planned_order_initial_quantity, o.original_start_received, o.original_finish_received
+           o.planned_order_initial_quantity, o.original_start_received, o.original_finish_received,
+           o.original_finish_date_only
       FROM orders o
       LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
@@ -3481,7 +3483,8 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
 
 
 def _locked_originals(b: dict | None, row: dict, sap_tz: str | None) -> tuple:
-    """(original_start_received, original_finish_received) to write for one incoming row.
+    """(original_start_received, original_finish_received, original_finish_date_only) to write for one
+    incoming row.
 
     `b` is the stored before-image (None = brand-new row), `row` the ingest row (`basic_*` are SAP's dates as
     received, `sap_basic_finish_date` the finish judged for the echo). On an echo of the finish NIMBUS last
@@ -3489,22 +3492,33 @@ def _locked_originals(b: dict | None, row: dict, sap_tz: str | None) -> tuple:
     refresh `original_start_received`); a column with no stored value yet takes the incoming one, so a first
     write still populates it. Not an echo (never-sent order, or a genuine finish change): both carry the
     incoming SAP start / finish. Only the finish decides (OQ31). Shared by the order upsert and the
-    distribution child writer."""
+    distribution child writer.
+
+    The third value says whether the locked finish arrived as a date with no time (D10, VI12): on an echo the
+    stored flag stands (None = nothing stored to keep); otherwise it is the staging parser's
+    `_finish_date_only` when the row carries it, else True when the finish sits at exact midnight (the
+    Excel path, where a date-only cell is midnight)."""
     in_s, in_f = row.get("basic_start_date"), row.get("basic_finish_date")
     # the finish SAP actually sent (`sap_basic_finish_date`), judged exactly as sap_changed_fields does
     if b and _row_finish_echo(b, row, sap_tz, finish_key="sap_basic_finish_date"):
         orig_s = b.get("original_start_received") if b.get("original_start_received") is not None else in_s
         orig_f = b.get("original_finish_received") if b.get("original_finish_received") is not None else in_f
-        return orig_s, orig_f
-    return in_s, in_f
+        return orig_s, orig_f, b.get("original_finish_date_only")
+    flag = row.get("_finish_date_only")
+    if flag is None:
+        flag = isinstance(in_f, datetime) and in_f.time() == dt_time.min
+    return in_s, in_f, bool(flag)
 
 
 def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
-                            sap_tz: str | None) -> list[tuple]:
+                            sap_tz: str | None) -> tuple[list[tuple], list[tuple]]:
     """Fill the trailing (original_start_received, original_finish_received) of each upsert tuple from
     `_locked_originals`. The upsert SETs `COALESCE(EXCLUDED.original_*, orders.original_*)`, never from
-    `EXCLUDED.basic_*`."""
+    `EXCLUDED.basic_*`. Returns (chunk, flag_pairs): `flag_pairs` are the (order id, original_finish_date_only)
+    values the caller writes after the upsert, only where they differ from what is stored, so an unchanged
+    row keeps its xmin."""
     out: list[tuple] = []
+    pairs: list[tuple] = []
     for t in chunk:
         row = row_by_id.get(t[0])
         if row is None:
@@ -3524,8 +3538,12 @@ def _patch_locked_originals(chunk: list[tuple], before: dict, row_by_id: dict,
                            default=None)
             if fam_sent is not None:
                 b = {**b, "sap_sent_finish": fam_sent}
-        out.append((*t[:-2], *_locked_originals(b, row, sap_tz)))
-    return out
+        orig_s, orig_f, flag = _locked_originals(b, row, sap_tz)
+        out.append((*t[:-2], orig_s, orig_f))
+        stored = bool(b.get("original_finish_date_only")) if b is not None else False
+        if flag is not None and bool(flag) != stored:
+            pairs.append((t[0], bool(flag)))
+    return out, pairs
 
 
 def cap_requeue_decision(placed: bool, prior_run_time, run_time, *, prior_known: bool = True) -> bool:
@@ -3892,7 +3910,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
                 prior_run_times.update({rid: b["run_time"] for rid, b in before.items()})
                 # (a') the locked original_*_received per row, from the stored originals + the sent finish
-                chunk = _patch_locked_originals(chunk, before, row_by_id, sap_tz)
+                chunk, flag_pairs = _patch_locked_originals(chunk, before, row_by_id, sap_tz)
                 # (b) upsert (rows SAP did not change return nothing)
                 cur.executemany(_UPSERT_SQL_SAP if source == "sap" else _UPSERT_SQL,
                                 chunk, returning=True)
@@ -3910,6 +3928,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                             written_existing.append(row_id)
                     if not cur.nextset():
                         break
+                if flag_pairs:
+                    # D10 (VI12): whether the locked finish arrived as a date with no time; only differing values
+                    cur.executemany("UPDATE orders SET original_finish_date_only = %s WHERE id = %s",
+                                    [(flag, oid) for oid, flag in flag_pairs])
                 # (c) which written orders did SAP actually change?
                 changed: set[str] = set()
                 for rid in written_existing:

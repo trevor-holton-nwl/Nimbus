@@ -1958,3 +1958,111 @@ def test_unreadable_upload_says_so_in_plain_words():
     msg = str(exc.value)
     assert msg.startswith("Could not read the file")
     assert "engine" not in msg.lower()
+
+# ===========================================================================
+# Backward scheduling D10 / VI12 / VI13: date-only finish, working-window close, plant time zone
+# ===========================================================================
+def _date_only_order(pg, oid="zzstg-do", machine="ZZSTG-M1"):
+    """A firmed, never-placed order whose SAP finish arrived as a date with no time (2030-02-05)."""
+    due = datetime(2030, 2, 5, 0, 0)
+    with _conn(pg) as (conn, cur):
+        cur.execute(
+            "INSERT INTO orders (id, production_order, material_number, plant, machine, basic_start_date,"
+            " basic_finish_date, original_start_received, original_finish_received, original_finish_date_only,"
+            " run_time, firming_indicator)"
+            " VALUES (%s, 'DO1', '777', %s, %s, NULL, %s, NULL, %s, TRUE, 3, 'X')", (oid, PLANT, machine, due, due))
+        conn.commit()
+
+
+def _clear_outbound(pg):
+    with _conn(pg) as (conn, cur):
+        cur.execute("DELETE FROM sap_stage_planned_order_out WHERE plant = %s", (PLANT,))
+        cur.execute("DELETE FROM admin_audit WHERE table_name = 'sap_stage_planned_order_out'"
+                    " AND details->>'plant' = %s", (PLANT,))
+        conn.commit()
+
+
+@pytest.mark.pg
+def test_a_date_only_due_on_a_never_placed_firmed_order_is_sent_as_the_working_window_close(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    _date_only_order(pg)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = 'Europe/Berlin' WHERE plant = %s", (PLANT,))
+        cur.execute("SELECT subnetwork FROM plants WHERE plant = %s", (PLANT,))
+        sub = cur.fetchone()[0]
+        # 2030-02-05 is a Tuesday: key 2 (0 = Sunday). Closes 22:00.
+        cur.execute("INSERT INTO machine_calendar (subnetwork, plant, machine, work_hours) VALUES (%s, %s, %s, %s)",
+                    (sub, PLANT, "ZZSTG-M1", Jsonb({"2": [6, 22]})))
+        conn.commit()
+    try:
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 22, 0), "Europe/Berlin")
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+    finally:
+        _clear_outbound(pg)
+
+
+@pytest.mark.pg
+def test_review_focus_4_a_24_00_close_sends_23_59_59_of_the_due_date(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    _date_only_order(pg)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = 'Europe/Berlin' WHERE plant = %s", (PLANT,))
+        cur.execute("SELECT subnetwork FROM plants WHERE plant = %s", (PLANT,))
+        sub = cur.fetchone()[0]
+        cur.execute("INSERT INTO machine_calendar (subnetwork, plant, machine, work_hours) VALUES (%s, %s, %s, %s)",
+                    (sub, PLANT, "ZZSTG-M1", Jsonb({str(i): [0, 24] for i in range(7)})))
+        conn.commit()
+    try:
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 23, 59, 59), "Europe/Berlin")
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+    finally:
+        _clear_outbound(pg)
+
+
+@pytest.mark.pg
+def test_send_refuses_a_plant_with_no_time_zone(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = NULL WHERE plant = %s", (PLANT,))
+        conn.commit()
+    with pytest.raises(ValueError, match="time zone"):
+        st.queue_send_to_sap(PLANT, actor="pytest")
+
+
+@pytest.mark.pg
+def test_ingest_marks_rows_of_a_plant_with_no_time_zone_as_errors(pg, stg_plant):
+    """VI13: the rows are rejected at apply (the stage table's own error state) and no orders row is written."""
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 0, soon)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = NULL WHERE plant = %s", (PLANT,))
+        conn.commit()
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [_snapshot_row("NZ1", soon)])
+    res = st.validate_batch(bid)
+    st.apply_batch(bid, actor="pytest", confirm_held=res["status"] == "held")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT row_status, reject_reason FROM sap_stage_planned_order WHERE batch_id = %s", (bid,))
+        assert cur.fetchall() == [("rejected", "plant has no valid time zone")]
+        cur.execute("SELECT count(*) FROM orders WHERE plant = %s", (PLANT,))
+        assert cur.fetchone()[0] == 0
+
+
+@pytest.mark.pg
+def test_ingest_stores_the_date_only_flag_from_the_sap_time(pg, stg_plant):
+    _set_plant(pg, routing=True, horizon_days=30)
+    soon = datetime.utcnow() + timedelta(days=1)
+    _live_orders(pg, 0, soon)
+    date_only = {**_snapshot_row("DO1", soon), "pedti": "000000"}
+    timed = {**_snapshot_row("TM1", soon), "pedti": "180000"}
+    bid = _make_batch(pg, "stage_planned_orders", "sap_stage_planned_order", [date_only, timed])
+    res = st.validate_batch(bid)
+    st.apply_batch(bid, actor="pytest", confirm_held=res["status"] == "held")
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT production_order, original_finish_date_only FROM orders WHERE plant = %s"
+                    " ORDER BY production_order", (PLANT,))
+        assert cur.fetchall() == [("DO1", True), ("TM1", False)]
