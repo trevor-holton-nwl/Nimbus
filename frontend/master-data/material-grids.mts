@@ -1011,8 +1011,8 @@ export const MaterialGrids = {
   },
 
   // Master Data "Refresh": re-pull this grid for the selected plant. Resolves
-  // true once a reload was started, false if the user cancelled the discard
-  // prompt or no plant is selected.
+  // true once the grid shows freshly fetched rows; false if the user cancelled
+  // the discard prompt, no plant is selected, or the reload failed/was superseded.
   async refresh(which: GridId): Promise<boolean> {
     const spec = SPECS[which];
     if (!spec) return false;
@@ -1029,7 +1029,9 @@ export const MaterialGrids = {
     }
     if (!st.api) _createGrid(spec);
     await _reload(spec, plant);
-    return true;
+    // True only if the grid now shows freshly fetched rows for this plant; a
+    // failed fetch or a superseded load leaves st.loaded false.
+    return st.loaded && st.plant === plant;
   },
 
   _save(id: GridId): void { void _save(id); },

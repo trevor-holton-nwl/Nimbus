@@ -327,6 +327,31 @@ test('refresh with unsaved edits discards them on confirm and reloads', async t 
   assert.equal(f.saveButton().disabled, true, 'dirty map is empty after the reload');
 });
 
+test('refresh resolves false when the fetch fails and does not claim fresh rows', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white');
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  f.respond(f.requests.at(-1), { detail: 'boom' }, 500);
+  assert.equal(await pending, false);
+  assert.equal(Toast.show.mock.calls.filter(c => c.arguments[1] === 'error').length, 1, 'one error toast, from _load');
+});
+
+test('refresh resolves false when a newer load supersedes it', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white');
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  const stale = f.requests.at(-1);
+  f.grid.refresh('material-plant');        // second refresh bumps the generation
+  await settle();
+  f.respond(stale, { rows: [mpRow('MAT', 'stale')] });
+  assert.equal(await pending, false);
+  f.respond(f.requests.at(-1), { rows: [mpRow('MAT', 'fresh')] });
+  await settle();
+  assert.equal(f.rows()[0].color, 'fresh');
+});
+
 test('refresh with no plant selected resolves false without fetching', async t => {
   const f = await gridFixture(t);
   await f.load('A', 'white');
