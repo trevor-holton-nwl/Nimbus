@@ -19,9 +19,9 @@ Sections: 1 What was built; 2 Gap decisions, verbatim; 3 Rulings made on your be
 **Phase 4 (global cutover).** Two migrations: a snapshot of the pre-cutover order data, then the cutover itself. The cutover removes placed starts and ends from every order that is not in Needs Planning, deletes their segments, flags them for re-derive, and keeps running orders exactly where they are (start and old end). The image bumps the browser cache version to 7 and shows one summary toast per plant on first load with four counts: bars re-anchored on their due dates, bars moved forward from now, running orders that kept their start, and orders that could not be placed. The cutover pass is recognised by what the migration leaves behind (never-placed rows plus kept running rows exceeding half of the plant's non-queued rows), so an ordinary SAP re-upload keeps its per-row messages. Undo of a never-placed row stays display-only so Save cannot persist a placement the row never had (the old defect F10), while an unsaved attribute edit is kept. The cutover runbook is written into `docs/DEPLOYMENT.md` and was audited line by line, but never executed.
 
 **Branches and commits.**
-- `main` is no longer at `0317dd8`: when the senior-review fix wave ran it stood at `62d786e`, 7 commits past `0317dd8`, the point both branches fork from. It was not touched by this run. (The orchestrator re-checks the merge base when it finalises this report.)
+- `main` is no longer at `0317dd8`: when the senior-review fix wave ran it stood at `62d786e`, 7 commits past `0317dd8`, the point both branches fork from. It was not touched by this run. Merge-tree of `main` with both branches is clean (section 9).
 - `feature/backward-scheduling-phase1`, tip `5fbdfb7`: Phase 1 only. Deployable alone.
-- `feature/backward-scheduling`, tip at the time of the fix wave `98255bb` (the orchestrator finalises this sha later; the build run itself ended at `78cb71b`, which was 47 commits and not `0b45e85`, the Phase 4 gate tip): forks from the Phase 1 tip, carries Phases 2 to 4. At the fix wave it was 101 commits and 129 files (+13496 / -2851) against `5fbdfb7`, 123 commits from `0317dd8`; the figures grow with each fix-wave commit. This is the cutover branch.
+- `feature/backward-scheduling`, tip after the senior fix wave and final gate `18946fc` (the wrap-up docs commit follows it; the build run itself ended at `78cb71b`, which was 47 commits and not `0b45e85`, the Phase 4 gate tip): forks from the Phase 1 tip, carries Phases 2 to 4. At the gate tip it was 110 commits and 131 files (+13616 / -2886) against `5fbdfb7`, 132 commits from `0317dd8` (63 of them since `78cb71b`). This is the cutover branch.
 - Nothing was pushed, merged or deployed. No `az`, no `psql` against the pilot, no `/promote-azure`, no browser run.
 
 ---
@@ -680,3 +680,86 @@ The pytest failures in every column are the same two tests. They are not caused 
 - One date-bomb test (`test_same_instant_batches_have_exactly_one_winner`, a hard-coded date) was fixed in Task 2.8 (`fa003b3`).
 
 **What the tests do not cover.** The cutover's effect on real order data: `nimbus_sdd` holds 0 orders, so only the rolled-back test fleet in `tests/test_backward_cutover.py` proves it. Browser behaviour (section 5) and the runbook commands (section 4) were not run.
+
+---
+
+## 9. Senior regression review and fix wave (2026-10-14)
+
+**Method.** Eight Sonnet reviewers (R1 to R8, one per area) read the range `0317dd8..78cb71b` and produced 61 raw findings (2 duplicates merged). Eight Sonnet verifiers (V1 to V8) then tried to reproduce or trace each one; five more verifiers (V-UA to V-UE) did the same for the reviewer-only items. Nothing was accepted without a verifier reproduction or trace. Result: 1 Critical, 14 Important, 7 Minor confirmed, 1 plausible, 3 reviewer-only items refuted. Fixes ran as six sequential batches (B1 data/deploy, B2 backend ingest/distribution, B3 calendar, B4 optimizer, B5 scheduling UI, B6 insights/docs) with a Sonnet review after each, then a merge-gate fix. One commit per finding (or a tightly coupled pair). The binding rulings are in `.superpowers/sdd/2026-10-13-backward-scheduling-implementation/senior-review/FIXWAVE-BRIEF.md` and `FIXWAVE-U-RULINGS.md` (the R-ids below). Two rulings came after the batches: the restore script archives the snapshot tables under the suffix `_rst_<yyyymmddhh24mi>` (rename, never drop), and the late-bound `NIMBUS.Util?.plantToday?.()` / plant-clock / dirty-probe reads in `nimbus-intelligence.js` are accepted as that file's existing idiom (legacy-surface ratchet stays flat).
+
+**Per-finding table.** Verdict CONFIRMED unless noted. Sev: C critical, I important, M minor, P plausible, U reviewer-only.
+
+| Id | Sev | Defect | Fix commit(s) | Governing ruling |
+|---|---|---|---|---|
+| C1 | C | Cached-edit overlay drops `user_scheduled`; a dragged row's placement is lost on reload | 73d35c5 | R-I11/C1 |
+| I1 | I | Snapshot migration had no destructive keyword; a routine promote applies it early | 4a5af9e | R-I1/I2 manual-only marker + `-Only` |
+| I2 | I | Skill/runbook let a plain promote then `-AllowDestructive` run the whole cutover | 4a5af9e, 68ba126 | R-I1/I2 |
+| I3 | I | Cutover deleted segments of running orders | 826439d | R-I3 |
+| I4 | I | Running row with NULL/unknown plant got its start and end nulled | 826439d | R-I4 |
+| I5 | I | Over-cap re-queue unplaced a placed, firmed order on every upload | e8474a7 | R-I5 |
+| I6 | I | Date-only due on a 24:00-close line read 23:59:59 | 8949648, 49c16dd, 9391826 | R-I6 |
+| I7 | I | Server-line calendar set not updated after a line-hours save | 163a8ec | R-I7 |
+| I8 | I | Setup-aware second walk could move a held finish | 8d41093 | R-I8 (ruling 3.2) |
+| I9 | I | "Overlong" defined three ways (per-day vs midnight-merged) | 9592a40 | R-I9 |
+| I10 | I | Display-derived dates judged running/frozen/firmed | 3dcb767, 8d8c311, 6b192a9, e62b8ca | R-I10 |
+| I11 | I | Conflict refresh applied dates but not `user_scheduled` | 73d35c5 | R-I11/C1 |
+| I12 | I | Distribution planner writes had no run-time cap | aed52ee | R-I12 |
+| I13 | I | Intelligence panels and worker prewarm used the viewer clock | b56d8a8, 1ef8998, 29d1004 | R-I13 + late-bound idiom ruling |
+| I14 | I | Two schema re-apply tests committed the cutover on a developer DB | 723ec3f, 4c2afbe | R-I14 |
+| M1 | M | Never-branch reversal run time not rounded to whole minutes | 6eeea8e | R-M1 |
+| M2 | M | No restore script; restore untested | 4a5af9e, c0e5428, 20ff930 | R-M2 + `_rst_` archive suffix |
+| M3 | M | Override-interval test failed under TZ=UTC | 9e57785 | R-M3 |
+| M4 | M | minutesByDay test title/fixture mismatch (840 vs 600 min) | 9e57785 | R-M4 |
+| M5 | M | Bounds migration header said 336, installs 8760 | a67de37 | R-M5 (no rename) |
+| M6 | M | MIGRATION.md status text stale | 4a5af9e | R-M6 |
+| M7 | M | Calendar CLAUDE.md/AGENTS.md conflict with main | 889e53f, eacf637 | R-M7 |
+| P1 | P | No tests for spec 10.5 groups 7, 8, 15 (and 26 as listed) | 98255bb | U-ruling P1 (the tests V-UC listed as still missing) |
+| U1 | U | `plants` keyed (subnetwork, plant): arbitrary row | refuted, not touched | refuted (plants globally unique) |
+| U2 | U | Conflict scan misses finish-only rows | 83ee451 | U2 |
+| U3 | U | Setup coverage order on startless rows | 969cffb | U3 |
+| U4 | U | Horizon predicate off the C1 index | refuted, not touched | refuted (old predicate never indexed) |
+| U5 | U | Cap = min(336, horizon x 24) queues orders on short horizons | e8474a7, 5337e82 | U5 flat 336 h |
+| U6 | U | `trust_start` default / `bulk_update` callers | owner decision, documented only | U6 |
+| U7 | U | Dependency link order follows SAP start | 0a28df4 | U7 |
+| U8 | U | No restore SQL shipped | 4a5af9e, c0e5428, 20ff930 | R-M2 |
+| U9 | U | `_apply_run_time_cap` plants join | refuted, not touched | refuted |
+| U10 | U | Purge preview misses finish-only placements | 05bdcb6, f2cb931 (health stats) | U10 |
+| U11 | U | New distribution child overwrites locked finish | 76e6e8e | U11 (raised to Important) |
+| U12 | U | RUN_TIME rejection on routing plants | a450631 | U12 |
+| U13 | U | PV validity on a missing start | 11edb2b | U13 |
+| U14 | U | Board/CSV filters drop NULL-start headers | c240440 | U14 |
+| U15 | U | `startOfDay` mutated `now[plant]` | d1cc118 | U15 |
+| U16 | U | Reversal forward leg in viewer-zone time | ac5cbf7, 49c16dd, fea2de5 | U16 |
+| U17 | U | ~92-day nominal walk per backward call | 5dd6da7 | U17 |
+| U18 | U | `closed_finish` label where cause is a blackout | 5dd6da7 | U18 |
+| U19 | U | `latestAvailable` ceil vs allocator round | 5dd6da7 | U19 |
+| U20 | U | No tests for I8/I9 or boundary cases | 8d41093, 9592a40 | U20 |
+| U21 | U | Optimizer ran on a no-timezone plant | 34c29c4 | U21 (OQ52) |
+| U22 | U | Online load overlaid a v6 cache unchecked | 73d35c5 | U22 |
+| U23 | U | `restoreTasks` flagged every row stale | 8cff88b | U23 |
+| U24 | U | Cutover signature tripped on tiny plants | 5f3276c | U24 (>= 10 rows) |
+| U25 | U | Second planner's first Save reported every row stale | 30f7cda | U25 |
+| U26 | U | `plantNow` per task per rebuild | f5b8b6c | U26 |
+| U27 | U | Multi-select ghost width differed from the drop | 1d47494 | U27 |
+| U28 | U | Alert-card headline raw English type | f59022b | U28 |
+| U29 | U | Finish-only row invisible to tile and matrix | 5b9cd12 | U29 |
+| U30 | U | Derive-paused banner overlapped concurrency banner | e3167a4 | U30 |
+| U31 | U | Time Machine restore dropped dirty ids | b68bc02 | U31 |
+| U32 | U | No locale parity check for new keys | d75e552 | U32 |
+| U33 | U | Inconsistent terminology in new es/fr/de/pt rows | a9090c8 | U33 (new rows only) |
+| U34 | U | Push +1 h silently skipped rows | 33e51f0 | U34 |
+| U35 | U | Final report section 1 / 6.1 stale facts | eadb87a, this section | U35 |
+| U36 | U | Platform and root AGENTS.md not mirrored; anchors one line low | 56ebf28 | U36 |
+
+Merge-gate fixes after the batches: `3100e0a` (pytest refresh fixture), `eacf637` (calendar docs keep main's hunk), `e62b6fe` (locale rows reordered so the merge with main is clean). `e62b6fe` dropped `btn.change_scope` and `hint.bom_pick_scope` from all five locales; the final gate caught it (`tests/js/locale-keys.test.js`) and `18946fc` restored both with verbatim values (a key-set comparison per locale file proved nothing else was lost against `78cb71b`). Lint fix `cd80096` (no-shadow in `orders.test.mjs`).
+
+**Final gate (tip `18946fc`, 63 commits since `78cb71b`; logs in `.superpowers/sdd/2026-10-13-backward-scheduling-implementation/senior-review/gate-final/`).** build, typecheck, check:static-assets and check:legacy-surface clean. lint 0 errors / 34 warnings (baseline 0/34). `npm test` legacy 73/73, modules 1457 tests: 1454 pass, 0 fail, 3 todo (baseline 68/68 and 1408/0/3). pytest 1797 passed, 2 failed (the two baseline `test_scale_catalog_paging` cases), 1 skipped, 13 xfailed (baseline 1780 / 2 / 1 / 13). `git merge-tree --write-tree --messages` of `main` (`62d786e`) with `feature/backward-scheduling` and with `feature/backward-scheduling-phase1`: both clean, no conflicts. The five foreign working-tree files are untouched (empty diff since `78cb71b`). Nothing was pushed, merged or deployed. This docs commit comes after the gate tip and changes only `.md` files.
+
+**Residuals and owner notes.**
+- U6: `TaskDateUpdate.trust_start` still defaults true; flipping it waits on an owner decision about `/tasks/bulk_update` external callers.
+- Legacy-surface idiom: three late-bound consumers in `nimbus-intelligence.js` (`Util.plantToday`, plant clock, `UndoStack.dirtyProbe`) are invisible to the legacy-surface scanner until that script migrates off `NIMBUS`.
+- U33: es/fr/de/pt terminology outside the new rows (pre-existing) was not touched.
+- Nits from the reviews: U17 memoisation is per run batch only; U21 leaves the `liveClock` fallback for display; U25 same-derivation replies reconcile silently (no conflict toast for them).
+- The Codex runner copy of `apply-migrations.ps1` now carries the marker and `-Only` (`3fa4673`) but is still a divergent file from `scripts/apply-migrations.ps1`.
+- Nine main-only locale keys (`col.orig_start`, `col.orig_end`, `col.updated_start`, `col.updated_end`, `ui.insp_orig_start`, `ui.insp_orig_end`, `ui.insp_updated_start`, `ui.insp_updated_end`, `ui.diag_dropped_no_start`) exist on main but were deliberately removed here (e33eec7 reworked the date columns); the merge is clean and nothing reads them.
+- Browser checks still owed: the unchanged list in section 5, plus the cutover summary toast threshold (>= 10 non-queued rows), derive-paused banner stacking under the concurrency banner, due-date day display in the grid and Inspector (24:00-close lines), and the Optimize refusal toast on a plant without a timezone.
