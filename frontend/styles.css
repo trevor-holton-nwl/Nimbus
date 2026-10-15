@@ -4761,7 +4761,8 @@ body.dark .cw-active-card {
 #md-master-lines-pane,
 #md-master-plant-pane,
 #md-master-material-pane,
-#md-master-material-plant-pane {
+#md-master-material-plant-pane,
+#md-master-routing-pv-pane {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -4770,7 +4771,8 @@ body.dark .cw-active-card {
 #md-master-lines-pane[hidden],
 #md-master-plant-pane[hidden],
 #md-master-material-pane[hidden],
-#md-master-material-plant-pane[hidden] { display: none; }
+#md-master-material-plant-pane[hidden],
+#md-master-routing-pv-pane[hidden] { display: none; }
 /* Previously an inline style on the Plant pane itself (height:100%;overflow:hidden),
    removed so gotoMasterSub can toggle all four sub-panes uniformly via [hidden].
    Scoped here rather than folded into the shared rule above: the Plant pane's
@@ -4798,7 +4800,7 @@ body.dark .cw-active-card {
    the entire --ag-* NIMBUS-token mapping above, including body.dark retinting,
    with zero additional dark-mode work.
    ============================================================================= */
-#md-mat-grid, #md-mp-grid { flex: 1; min-height: 0; width: 100%; }
+#md-mat-grid, #md-mp-grid, #md-rpv-grid { flex: 1; min-height: 0; width: 100%; }
 
 /* Dirty-cell marker for the three planner-editable Material Plant columns. */
 .ag-theme-quartz .md-cell-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
