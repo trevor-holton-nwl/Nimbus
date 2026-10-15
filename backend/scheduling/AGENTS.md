@@ -25,8 +25,8 @@ Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `sele
 - `db.query_orders()` — line 640 (the `GET /tasks` data source).
 - `db.count_orders()` — line 711 (paging total).
 - `db.get_task_versions()` — line 868 (backs `/tasks/refresh`; `TaskVersionRow`'s docstring cites `db.py:437-445` for its shape, which is stale — re-grep before trusting either number).
-- `db.update_task_dates_bulk()` — line 1275 (the shared persist path behind `_apply_task_date_updates`).
-- `db.update_task_note()` — line 1860 (backs `/task/note`).
+- `db.update_task_dates_bulk()` — line 1282 (the shared persist path behind `_apply_task_date_updates`).
+- `db.update_task_note()` — line 1876 (backs `/task/note`).
 - `master_data.plants_for_line()` — line 2997 (used by `get_tasks`'s `?machine=`-only plant-scope check).
 
 ## Key invariants & hazards
