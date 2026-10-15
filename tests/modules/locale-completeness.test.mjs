@@ -514,7 +514,7 @@ test('en.js is the superset — no locale has a key en.js lacks', () => {
 // missing keys per locale must never grow. When you ADD keys to en.js, add the
 // same keys to every locale (English value is fine) rather than raising these
 // numbers; when you translate and the count drops, LOWER the number here.
-const MISSING_KEY_BASELINE = { de: 231, es: 231, fr: 231, pt: 231 };
+const MISSING_KEY_BASELINE = { de: 230, es: 230, fr: 230, pt: 230 };
 
 test('locale parity ratchet - missing-key count per locale never grows vs en.js', () => {
   const en = keysOf('en');
@@ -594,11 +594,52 @@ test('gate 4b: every alert.* message key the compute core can emit exists in all
   }
 });
 
+// Senior review U32/U28/U34: a presence + placeholder + non-empty guard over EVERY en.js key this branch added or
+// reworded (hand list, like the lists above). A later new key must be appended here; the parity ratchet above only
+// bounds the count, it does not look at values.
+const BRANCH_KEYS = [
+  'toast.optimize_plant_no_timezone', 'toast.plant_no_timezone', 'toast.finish_cannot_hold', 'toast.left_edge_locked',
+  'toast.system_moved_n', 'toast.cutover_summary', 'toast.manual_refusal_generic', 'toast.order_moved', 'toast.commit_failed',
+  'modal.override_finish_label', 'modal.override_finish_hint', 'modal.override_title', 'modal.override_line_label',
+  'modal.override_apply', 'modal.confirm_overtime_title', 'modal.confirm_overtime_msg', 'modal.confirm_overtime_confirm',
+  'col.due_date', 'col.planned_start', 'col.planned_finish', 'planning_reason.run_time_over_cap',
+  'planning_reason.overlong_never', 'ui.diff_kind_start', 'ui.diff_kind_finish', 'ui.max_push_forward_help',
+  'ui.insp_due_date', 'ui.insp_planned_start', 'ui.insp_planned_finish', 'ui.insp_system_move',
+  'ui.insp_move_reason_finish_moved_earlier', 'ui.insp_move_reason_reversal_forward', 'ui.insp_move_reason_pull_floor_crossed',
+  'ui.insp_move_reason_run_time_changed', 'ui.insp_move_reason_due_date_derivation', 'ui.insp_move_reason_cutover',
+  'ui.hov_run', 'ui.insp_variance_shifted', 'ui.derive_paused', 'alert.setup_violated', 'alert.distribution_separation',
+  'alert.start_may_be_stale', 'alert.late', 'alert.late_beyond_cap', 'alert.finish_moved_earlier', 'alert.reversal_forward',
+  'alert.reversal_forward_run_time_grew', 'alert.reversal_forward_due_date_past', 'alert.reversal_forward_cutover',
+  'alert.plant_no_timezone', 'alert.line_no_calendar', 'alert.no_anchor', 'alert.no_operating_window', 'alert.run_time_zero',
+  'alert.setup_override_orphaned', 'alert.pull_floor_crossed', 'alert.frozen_window_crossed',
+  'alert.placement_exception_overtime', 'alert.placement_exception_overlong', 'alert.derivation_issue',
+  'ui.diag_unreadable_start', 'ui.diag_dropped_no_finish', 'ui.sap_send_confirm', 'toast.sap_sent_queued',
+  'toast.sap_sent_skipped_unfirmed', 'ui.preview_stale', 'ui.opt_backlog_runtime_grew',
+  'ui.dist_status_separation_violated_tip', 'ui.opt_pv_distribution_separation_head', 'ui.reject_run_time_over_cap',
+  'ui.reject_width_mismatch', 'ui.reject_single_edge',
+  // fix wave B6 (U28, U34)
+  'toast.pushed_orders_skipped', 'undo.push_orders_1h',
+];
 const localeDict = locale => {
   const sandbox = { window: {} };
   vm.runInNewContext(readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8'), sandbox);
   return sandbox.window.__NIMBUS_LOCALES[locale];
 };
+
+const placeholdersOf = s => [...String(s).matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]).sort().join(',');
+
+test('U32: every key this branch added exists in all five locales, non-empty, with the same {{placeholder}} set as en.js', () => {
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  for (const key of BRANCH_KEYS) {
+    assert.ok(typeof dicts.en[key] === 'string' && dicts.en[key].trim(), `en.js has no usable "${key}"`);
+    for (const locale of LOCALES.filter(l => l !== 'en')) {
+      const v = dicts[locale][key];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js is missing or empty for "${key}"`);
+      assert.equal(placeholdersOf(v), placeholdersOf(dicts.en[key]), `${locale}.js "${key}" must carry the same {{placeholders}} as en.js`);
+    }
+  }
+});
+
 
 test('U28: every AlertType has a localized alert.type.<type> headline row in all five locales', () => {
   const types = readFileSync(join(__dirname, '..', '..', 'frontend', 'platform', 'types.mts'), 'utf8');
