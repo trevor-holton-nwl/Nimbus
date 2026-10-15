@@ -17,7 +17,7 @@
 // The two grids are ~85% identical, modeled as two GridSpecs over one engine
 // rather than two near-duplicate modules.
 /* global agGrid, NIMBUS */
-import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
+import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 
 // -- Local type declarations -------------------------------------------------
@@ -467,6 +467,21 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
   } finally {
     if (st.inflight === controller) st.inflight = null;
   }
+}
+
+// Re-pull the SAME plant from the database. Unlike _resetGridForPlant (a plant
+// change, which also clears the filter bar), this keeps st.selected / st.search
+// so the user's filters survive; _load aborts any in-flight request, bumps the
+// generation, re-indexes the rows and rebuilds the filter bars.
+async function _reload(spec: GridSpec, plant: string): Promise<void> {
+  const st = _state[spec.id];
+  st.dirty.clear();
+  st.edited.clear();
+  st.baseline.clear();
+  st.plant = null;
+  st.loaded = false;
+  _updateSaveBar(spec);
+  return _load(spec, plant);
 }
 
 // -- Filter bar (generic, config-driven) --------------------------------------
@@ -993,6 +1008,28 @@ export const MaterialGrids = {
     if (!st.api) _createGrid(spec);
     if (st.plant !== plant) _load(spec, plant);
     _sizeSoon(spec);
+  },
+
+  // Master Data "Refresh": re-pull this grid for the selected plant. Resolves
+  // true once a reload was started, false if the user cancelled the discard
+  // prompt or no plant is selected.
+  async refresh(which: GridId): Promise<boolean> {
+    const spec = SPECS[which];
+    if (!spec) return false;
+    const plant = Store.selectedPlant;
+    if (!plant) return false;
+    const st = _state[which];
+    if (st.dirty.size > 0) {
+      const ok = await Modal.confirm({
+        title: Util.t('ui.n_unsaved', { count: st.dirty.size }),
+        message: Util.t('confirm.md_refresh_discard'),
+        confirmLabel: Util.t('btn.discard'),
+      });
+      if (!ok) return false;
+    }
+    if (!st.api) _createGrid(spec);
+    await _reload(spec, plant);
+    return true;
   },
 
   _save(id: GridId): void { void _save(id); },

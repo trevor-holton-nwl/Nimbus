@@ -73,6 +73,7 @@ window.__NIMBUS_LOCALES.de = {
   'confirm.signout_title': 'Abmelden?',
   'confirm.signout_unsaved': 'Sie haben ungespeicherte Änderungen (Bearbeitungen, Festschreibungen, ausstehende Kalender-Löschungen oder ein offenes What-If). Beim Abmelden werden sie aus diesem Browser verworfen.',
   'confirm.signout_confirm': 'Abmelden und verwerfen',
+  'confirm.md_refresh_discard': 'Beim erneuten Laden aus der Datenbank werden Ihre nicht gespeicherten Änderungen verworfen. Fortfahren?',
   'toast.pushed_orders':               '{{count}} Aufträge um +1h verschoben',
   'toast.unscheduled_bulk':            '{{count}} Aufträge abgeplant',
   'toast.order_moved':                 '"{{name}}" verschoben nach {{date}}',

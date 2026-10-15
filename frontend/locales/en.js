@@ -74,6 +74,7 @@ window.__NIMBUS_LOCALES.en = {
   'confirm.signout_title': 'Sign out?',
   'confirm.signout_unsaved': 'You have unsaved work (edits, firms, queued calendar deletes or an open What-If). Signing out discards it from this browser.',
   'confirm.signout_confirm': 'Sign out and discard',
+  'confirm.md_refresh_discard': 'Reloading from the database discards your unsaved changes. Continue?',
   'toast.pushed_orders':               'Pushed {{count}} orders +1h',
   'toast.unscheduled_bulk':            'Unscheduled {{count}} orders',
   'toast.order_moved':                 'Moved "{{name}}" to {{date}}',

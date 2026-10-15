@@ -73,6 +73,7 @@ window.__NIMBUS_LOCALES.pt = {
   'confirm.signout_title': 'Sair?',
   'confirm.signout_unsaved': 'Você tem trabalho não salvo (edições, firmes, exclusões de calendário na fila ou um What-If aberto). Sair descarta isso deste navegador.',
   'confirm.signout_confirm': 'Sair e descartar',
+  'confirm.md_refresh_discard': 'Recarregar a partir do banco de dados descartará suas alterações não salvas. Continuar?',
   'toast.pushed_orders':               '{{count}} ordens avançadas +1h',
   'toast.unscheduled_bulk':            '{{count}} ordens desagendadas',
   'toast.order_moved':                 '"{{name}}" movida para {{date}}',

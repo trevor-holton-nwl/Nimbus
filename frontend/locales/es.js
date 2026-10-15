@@ -73,6 +73,7 @@ window.__NIMBUS_LOCALES.es = {
   'confirm.signout_title': '¿Cerrar sesión?',
   'confirm.signout_unsaved': 'Tiene trabajo sin guardar (ediciones, estados firmes, eliminaciones de calendario en cola o un What-If abierto). Al cerrar sesión se descarta de este navegador.',
   'confirm.signout_confirm': 'Cerrar sesión y descartar',
+  'confirm.md_refresh_discard': 'Al volver a cargar desde la base de datos se descartarán los cambios sin guardar. ¿Continuar?',
   'toast.pushed_orders':               '{{count}} pedidos movidos +1h',
   'toast.unscheduled_bulk':            '{{count}} pedidos desplanificados',
   'toast.order_moved':                 'Movido "{{name}}" a {{date}}',

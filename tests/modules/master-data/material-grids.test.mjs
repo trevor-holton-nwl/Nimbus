@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MaterialGrids } from '../../../frontend/master-data/material-grids.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 let fixtureId = 0;
@@ -13,7 +13,8 @@ async function gridFixture(t) {
   const element = id => {
     if (!nodes.has(id)) nodes.set(id, {
       style: {}, hidden: id.includes('pane') && id !== 'md-master-material-plant-pane',
-      addEventListener() {}, querySelectorAll: () => [], querySelector: () => null,
+      listeners: {}, addEventListener(evt, fn) { (this.listeners[evt] ||= []).push(fn); },
+      querySelectorAll: () => [], querySelector: () => null,
       toggleAttribute() {}, closest: () => null, clientWidth: 0,
     });
     return nodes.get(id);
@@ -62,7 +63,7 @@ async function gridFixture(t) {
     rows[0][field] = value;
     options.onCellValueChanged({ colDef: { field }, data: rows[0], newValue: value, api, node: {} });
   }
-  return { grid, requests, load, switchPlant, respond, edit, rows: () => rows, saveButton: () => element('md-mp-save') };
+  return { grid, requests, load, switchPlant, respond, edit, element, options: () => options, rows: () => rows, saveButton: () => element('md-mp-save') };
 }
 
 test('Material grid module exposes documented public API', () => {
@@ -70,6 +71,7 @@ test('Material grid module exposes documented public API', () => {
   assert.equal(typeof MaterialGrids._clearFilters, 'function');
   assert.equal(typeof MaterialGrids._save, 'function');
   assert.equal(typeof MaterialGrids._discard, 'function');
+  assert.equal(typeof MaterialGrids.refresh, 'function');
 });
 
 test('default_machine column is configured with select editor and unknown-machine marker', () => {
@@ -233,4 +235,103 @@ test('default_machine editor is the searchable combobox editor, not a plain sele
   const source = readFileSync(new URL('../../../frontend/master-data/material-grids.mts', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /cellEditor:\s*'agSelectCellEditor'/);
   assert.match(source, /cellEditor:\s*_mkMachineComboEditor\(\)/);
+});
+
+// -- refresh(): re-pull the active grid for the SAME plant ------------------------
+
+const mpRow = (id, color = '') => ({ material_id: id, plant: 'A', color, prt_01: '', prt_02: '', default_machine: '' });
+
+test('refresh re-fetches the same plant where render would not', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white');
+  const count = f.requests.length;
+  f.grid.render('material-plant');
+  assert.equal(f.requests.length, count, 'render is a no-op for an already-loaded plant');
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  assert.equal(f.requests.length, count + 1);
+  assert.match(f.requests.at(-1).url, /_material-plant-grid\?plant=A$/);
+  f.respond(f.requests.at(-1), { rows: [mpRow('MAT', 'green')] });
+  assert.equal(await pending, true);
+  await settle();
+  assert.equal(f.rows()[0].color, 'green', 'fresh database rows replace the cached ones');
+});
+
+test('refresh builds the grid first when the sub-tab was never rendered', async t => {
+  const f = await gridFixture(t);
+  Store.setSelectedPlant('A', 'test');
+  const pending = f.grid.refresh('material');
+  await settle();
+  assert.match(f.requests.at(-1).url, /_material-grid\?plant=A$/);
+  f.respond(f.requests.at(-1), { rows: [{ material_id: 'MAT', material_type: 'FERT' }] });
+  assert.equal(await pending, true);
+  await settle();
+  assert.equal(f.rows().length, 1, 'rows reach the freshly created grid api');
+});
+
+test('refresh keeps filter-bar selections and search text', async t => {
+  const f = await gridFixture(t);
+  const rebuilds = [];
+  t.mock.method(Util, 'renderLineChecklist', (_el, candidates, selected, search) => {
+    rebuilds.push({ candidates, selected: new Set(selected), search });
+  });
+  await f.load('A', 'white');
+  const input = f.element('md-mp-filterbar-material_id-search');
+  const paste = text => input.listeners.paste[0]({ preventDefault() {}, clipboardData: { getData: () => text } });
+  input.value = 'MA';
+  input.listeners.input[0]();      // type a search term
+  paste('MAT');                    // select MAT via the bigset paste path
+  assert.equal(f.options().isExternalFilterPresent(), true);
+
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  f.respond(f.requests.at(-1), { rows: [mpRow('MAT'), mpRow('OTHER')] });
+  assert.equal(await pending, true);
+  await settle();
+
+  assert.equal(f.options().isExternalFilterPresent(), true, 'selection survives the reload');
+  assert.equal(f.options().doesExternalFilterPass({ data: f.rows()[0] }), true);
+  assert.equal(f.options().doesExternalFilterPass({ data: f.rows()[1] }), false);
+  rebuilds.length = 0;
+  paste('OTHER');                  // forces a checklist rebuild that reads the live state
+  const last = rebuilds.at(-1);
+  assert.equal(last.search, 'MA', 'search text survives the reload');
+  assert.deepEqual([...last.selected].sort(), ['MAT', 'OTHER']);
+  assert.deepEqual(last.candidates, ['MAT', 'OTHER'], 'distinct values come from the reloaded rows');
+});
+
+test('refresh with unsaved edits asks first and leaves everything alone on cancel', async t => {
+  const f = await gridFixture(t);
+  const confirm = t.mock.method(Modal, 'confirm', async () => false);
+  await f.load('A', 'white'); f.edit('red');
+  const count = f.requests.length;
+  assert.equal(await f.grid.refresh('material-plant'), false);
+  assert.equal(confirm.mock.calls.length, 1);
+  assert.equal(f.requests.length, count, 'cancel must not fetch');
+  assert.equal(f.saveButton().disabled, false, 'the edit is still dirty');
+  assert.equal(f.rows()[0].color, 'red');
+});
+
+test('refresh with unsaved edits discards them on confirm and reloads', async t => {
+  const f = await gridFixture(t);
+  t.mock.method(Modal, 'confirm', async () => true);
+  await f.load('A', 'white'); f.edit('red');
+  const count = f.requests.length;
+  const pending = f.grid.refresh('material-plant');
+  await settle();
+  assert.equal(f.requests.length, count + 1);
+  f.respond(f.requests.at(-1), { rows: [mpRow('MAT', 'white')] });
+  assert.equal(await pending, true);
+  await settle();
+  assert.equal(f.rows()[0].color, 'white');
+  assert.equal(f.saveButton().disabled, true, 'dirty map is empty after the reload');
+});
+
+test('refresh with no plant selected resolves false without fetching', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white');
+  Store.setSelectedPlant(null, 'test');
+  const count = f.requests.length;
+  assert.equal(await f.grid.refresh('material-plant'), false);
+  assert.equal(f.requests.length, count);
 });

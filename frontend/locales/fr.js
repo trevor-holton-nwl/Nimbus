@@ -73,6 +73,7 @@ window.__NIMBUS_LOCALES.fr = {
   'confirm.signout_title': 'Se déconnecter ?',
   'confirm.signout_unsaved': 'Vous avez des modifications non enregistrées (modifications, statuts ferme, suppressions de calendrier en attente ou un What-If ouvert). La déconnexion les supprime de ce navigateur.',
   'confirm.signout_confirm': 'Se déconnecter et supprimer',
+  'confirm.md_refresh_discard': 'Le rechargement depuis la base de données supprimera vos modifications non enregistrées. Continuer ?',
   'toast.pushed_orders':               '{{count}} ordres décalés +1h',
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé à {{date}}',
