@@ -542,3 +542,44 @@ test('worker validation bounds are snapshot-bound: a date-only due on a closed F
   assert.equal(findings.some(finding => finding.code === 'date_window'), false,
     `no date_window error for a Wednesday placement, got ${JSON.stringify(findings.map(f => f.code))}`);
 });
+
+test('a worker error compute-core-stale falls back to the synchronous evaluator and warns once', async () => {
+  const { ErrorLog } = await import('../../../frontend/platform/foundation.mjs');
+  const originalWarn = ErrorLog.warn;
+  const warnings = [];
+  ErrorLog.warn = (...args) => { warnings.push(args); };
+  try {
+    const run = async (runId) => {
+      let worker;
+      let syncCalls = 0;
+      const promise = runOptimizerPreview({
+        runId, mode: 'spt', snapshot, request: { mode: 'spt', respectCalendar: false },
+      }, {
+        workerFactory: () => {
+          worker = { onmessage: null, onerror: null, terminated: false, postMessage() {}, terminate() { this.terminated = true; } };
+          return worker;
+        },
+        syncEvaluator: () => { syncCalls += 1; return candidate('sync-fallback'); },
+      });
+      worker.onmessage({ data: { runId, error: 'compute-core-stale' } });
+      const result = await promise;
+      assert.equal(result.id, 'sync-fallback');
+      assert.equal(syncCalls, 1, 'the main-thread evaluator ran once');
+      assert.equal(worker.terminated, true, 'the stale worker is released');
+    };
+    await run('stale-1');
+    await run('stale-2');
+    assert.equal(warnings.length, 1, 'logged once, not per run');
+    assert.match(String(warnings[0][1]), /stale compute core/);
+    // Any other worker error still rejects (no silent fallback).
+    let worker;
+    const failing = runOptimizerPreview({ runId: 'other-error', mode: 'spt', snapshot, request: { mode: 'spt' } }, {
+      workerFactory: () => { worker = { onmessage: null, onerror: null, postMessage() {}, terminate() {} }; return worker; },
+      syncEvaluator: () => { throw new Error('must not run'); },
+    });
+    worker.onmessage({ data: { runId: 'other-error', error: 'boom' } });
+    await assert.rejects(failing, /boom/);
+  } finally {
+    ErrorLog.warn = originalWarn;
+  }
+});

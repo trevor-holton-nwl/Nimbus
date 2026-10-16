@@ -5861,3 +5861,103 @@ test('fillPlanningGaps default budget comes from bounds.gapFillBudgetMs and the 
   const generous = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, gapFillBudgetMs: 60000 }, candidate);
   assert.equal(generous.gapFill.complete, true);
 });
+
+// ---------------------------------------------------------------------------
+// Dated plant calendar periods (W3): the detached scheduler resolves the plant pattern per date.
+// ---------------------------------------------------------------------------
+const periodRow = (id, validFrom, validTo, workHours) => ({ id, name: id, validFrom, validTo, workHours });
+const everyDayHours = hours => Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, hours]));
+
+function periodSnapshot(defaultHours, periods) {
+  const snapshot = setupSnapshot([]);
+  snapshot.calendars.L1.workHours = everyDayHours([8, 18]);
+  snapshot.plants.P1 = { workHours: defaultHours, ...(periods ? { periods } : {}) };
+  return snapshot;
+}
+
+const hhmm = d => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+const spans = intervals => intervals.map(i => `${i.start.getDate()} ${hhmm(i.start)}-${hhmm(i.end)}`);
+
+test('periods: freeIntervalsFor resolves the plant pattern per day, on the plain walk and through the F2 index', () => {
+  const snapshot = periodSnapshot(everyDayHours([8, 18]), [periodRow('p1', '2026-08-05', null, everyDayHours([10, 14]))]);
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-08-03T00:00:00'), horizonEnd: at('2026-08-10T00:00:00') });
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const from = at('2026-08-04T00:00:00'); const through = at('2026-08-06T23:00:00');
+  const expected = ['4 08:00-18:00', '5 10:00-14:00', '6 10:00-14:00'];
+  assert.deepEqual(spans(SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through)), expected, 'plain walk');
+  assert.deepEqual(spans(SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx)), expected, 'ctx (indexed) path');
+  assert.ok([...ctx._freeIndex.values()].some(entry => entry !== null), 'the periods fixture is served from the index');
+});
+
+test('periods: the F2 index is skipped (plain walk used) when a period pattern overflows the day', () => {
+  const overflow = everyDayHours([20, 30]);
+  const snapshot = periodSnapshot(everyDayHours([8, 18]), [periodRow('over', '2026-08-05', null, overflow)]);
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-08-03T00:00:00'), horizonEnd: at('2026-08-10T00:00:00') });
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const from = at('2026-08-04T00:00:00'); const through = at('2026-08-07T12:00:00');
+  assert.deepEqual(
+    SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx),
+    SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through),
+  );
+  assert.deepEqual([...ctx._freeIndex.values()], [null], 'the index entry is cached as unusable, so the walk serves it');
+});
+
+test('periods: the indexed path equals the plain walk across a boundary with a blackout and a closed period', () => {
+  const snapshot = periodSnapshot(everyDayHours([8, 18]), [
+    periodRow('short', '2026-08-05', '2026-08-06', everyDayHours([10, 14])),
+    periodRow('closed', '2026-08-08', '2026-08-08', everyDayHours(null)),
+  ]);
+  snapshot.blocks = [{ line: 'L1', plant: 'P1', start: at('2026-08-05T11:00:00'), end: at('2026-08-05T12:30:00') }];
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-08-03T00:00:00'), horizonEnd: at('2026-08-12T00:00:00') });
+  const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+  const from = at('2026-08-04T00:00:00'); const through = at('2026-08-10T12:00:00');
+  const walked = SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through);
+  assert.deepEqual(SetupScheduler.freeIntervalsForTest(snapshot, 'L1', 'P1', from, through, ctx), walked);
+  assert.deepEqual(spans(walked), ['4 08:00-18:00', '5 10:00-11:00', '5 12:30-14:00', '6 10:00-14:00', '7 08:00-18:00', '9 08:00-18:00', '10 08:00-12:00']);
+});
+
+test('periods: hasNominalWindow sees a longer window in a later epoch (ctx and non-ctx)', () => {
+  const hours = hoursText => everyDayHours(hoursText);
+  const periods = [periodRow('long', '2026-08-17', null, hours([8, 18]))];
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-08-03T00:00:00'), horizonEnd: at('2026-08-31T00:00:00') });
+  const withPeriods = periodSnapshot(hours([8, 12]), periods);
+  const without = periodSnapshot(hours([8, 12]));
+  const from = at('2026-08-03T00:00:00');
+  for (const useCtx of [false, true]) {
+    const ctxFor = snapshot => (useCtx ? SetupScheduler.buildRunContext(snapshot, bounds) : undefined);
+    assert.equal(SetupScheduler.hasNominalWindowForTest(withPeriods, 'L1', 'P1', from, 8 * 60, ctxFor(withPeriods)), true, `later 10 h epoch (ctx=${useCtx})`);
+    assert.equal(SetupScheduler.hasNominalWindowForTest(without, 'L1', 'P1', from, 8 * 60, ctxFor(without)), false, `no periods: 4 h only (ctx=${useCtx})`);
+    assert.equal(SetupScheduler.hasNominalWindowForTest(withPeriods, 'L1', 'P1', from, 11 * 60, ctxFor(withPeriods)), false, `longer than every window (ctx=${useCtx})`);
+  }
+  assert.equal(SetupScheduler.hasNominalWindowForTest({ ...withPeriods, plants: {} }, 'L1', 'P1', from, 60), false,
+    'a plant with no entry at all still reads as no nominal window');
+});
+
+test('periods: the due instant of a date-only due reads the period close on its date', () => {
+  const dueTask = () => ({ ...scheduledTask('d', 1, 'GREEN', '2026-08-06T00:00:00') });
+  const plain = periodSnapshot(everyDayHours([8, 18]));
+  const dated = periodSnapshot(everyDayHours([8, 18]), [periodRow('early', '2026-08-05', null, everyDayHours([10, 14]))]);
+  assert.equal(SetupScheduler.dueInstant(dueTask(), { snapshot: plain, plant: 'P1' }).getTime(), at('2026-08-06T18:00:00').getTime());
+  assert.equal(SetupScheduler.dueInstant(dueTask(), { snapshot: dated, plant: 'P1' }).getTime(), at('2026-08-06T14:00:00').getTime(),
+    'the period that covers Thursday closes at 14:00');
+  assert.equal(SetupScheduler.dueInstant({ ...dueTask(), original_end_date: at('2026-08-04T00:00:00') }, { snapshot: dated, plant: 'P1' }).getTime(),
+    at('2026-08-04T18:00:00').getTime(), 'a date before the period still uses the default close');
+});
+
+test('periods: plantHoursOn throws compute-core-stale when periods exist and the core is missing, never falling back to the default', () => {
+  const entry = { workHours: everyDayHours([8, 18]), periods: [periodRow('p', '2026-08-05', null, everyDayHours([10, 14]))] };
+  const day = at('2026-08-06T00:00:00');
+  assert.deepEqual(SetupScheduler.plantHoursOnForTest(entry, day)[4], [10, 14], 'with the core: the period pattern');
+  const core = globalThis.NimbusComputeCore;
+  try {
+    globalThis.NimbusComputeCore = undefined;
+    assert.throws(() => SetupScheduler.plantHoursOnForTest(entry, day), /compute-core-stale/);
+    globalThis.NimbusComputeCore = {};
+    assert.throws(() => SetupScheduler.plantHoursOnForTest(entry, day), /compute-core-stale/, 'a core without plantWorkHoursOn is stale too');
+    assert.equal(SetupScheduler.plantHoursOnForTest({ workHours: entry.workHours }, day), entry.workHours, 'no periods: the default by reference, core-less');
+    assert.equal(SetupScheduler.plantHoursOnForTest({ workHours: entry.workHours, periods: [] }, day), entry.workHours);
+    assert.equal(SetupScheduler.plantHoursOnForTest(undefined, day), undefined);
+  } finally {
+    globalThis.NimbusComputeCore = core;
+  }
+});

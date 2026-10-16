@@ -3,6 +3,7 @@
 // tooling, and non-UI integrations) keep the synchronous Engine evaluator.
 import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { evaluateSchedule, rehydrateOptimizerCandidate } from './engine.mjs';
+import { ErrorLog } from '../platform/foundation.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 
@@ -38,6 +39,10 @@ function workerRequestWithRemainingDeadline(request: OptimizerWorkerRequest): Op
     request: { ...request.request, deadlineAt: undefined },
   };
 }
+
+/** Thrown by the detached scheduler when dated plant periods exist but the realm's compute core predates them. */
+const COMPUTE_CORE_STALE = 'compute-core-stale';
+let _staleCoreWarned = false;
 
 function abortError(): Error {
   const error = new Error('Optimizer preview was cancelled.');
@@ -88,6 +93,22 @@ export function runOptimizerPreview(
     worker.onmessage = ({ data }): void => {
       if (!data || data.runId !== request.runId) return;
       if (data.error) {
+        if (String(data.error).includes(COMPUTE_CORE_STALE)) {
+          // The worker realm loaded a cached compute core without the dated-period helpers. The main thread
+          // has the current core, so evaluate there instead of failing the preview (logged once per session).
+          finish(() => {
+            if (!_staleCoreWarned) {
+              _staleCoreWarned = true;
+              ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; evaluating on the main thread.');
+            }
+            try {
+              resolve((options.syncEvaluator ?? evaluateSchedule)(request.snapshot, request.request));
+            } catch (error) {
+              reject(error);
+            }
+          });
+          return;
+        }
         finish(() => reject(new Error(data.error)));
         return;
       }

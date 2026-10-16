@@ -36,6 +36,7 @@ import {
   sourceGetPlantForLine,
   sourceLineWorkHours,
   sourcePlantWorkHours,
+  sourcePlantPeriods,
   reportSchedulerDiagnostic,
 } from '../optimization/engine.mjs';
 import type { PlaceWithSetupRequest, PlacementResult, RuntimeAllocation } from '../optimization/engine.mjs';
@@ -281,7 +282,7 @@ export const Calendar = {
     const plant = sourceGetPlantForLine(line);
     let result: [Date, Date];
     if (plant) {
-      const plantWin = Calendar._dayWindow(sourcePlantWorkHours(plant), date);
+      const plantWin = Calendar._dayWindow(sourcePlantWorkHours(plant, date), date);
       if (!plantWin) {
         if (rc) rc.ww.set(key, null);
         return null;
@@ -299,6 +300,13 @@ export const Calendar = {
 
     if (rc) rc.ww.set(key, result);
     return result;
+  },
+
+  /** The PLANT pattern's window on `date` ([start, end] naive plant-local Dates), or null when the plant is
+   *  closed that day. The plant pattern only (a dated period replaces the default): NOT intersected with any
+   *  line's hours. The Gantt shading consumes this. */
+  plantWorkWindow(plant: string, date: Date): [Date, Date] | null {
+    return Calendar._dayWindow(sourcePlantWorkHours(plant, date), date);
   },
 
   /** Total working hours in a day for a given line, after blackouts. Does not apply buffer.
@@ -363,14 +371,31 @@ export const Calendar = {
     const MAX_DAYS = 90;                   // explicit time bound from `from`
     const MAX_ITERS = MAX_DAYS * 24;       // and a hard cap on loop trips
     const limitMs = cur.getTime() + MAX_DAYS * Config.MS_DAY;
-    // Nominal-window short-circuit: working windows repeat weekly, so probing seven
-    // consecutive days gives the longest window this line can ever offer. No window,
-    // or an order longer than every window, can never fit.
+    // Nominal-window short-circuit: within one calendar-period epoch the working windows repeat weekly, so
+    // probing seven consecutive days gives the longest window this line can offer there. With dated plant
+    // periods the pattern changes at each period boundary, so seven days are probed from `cur` and from every
+    // boundary day inside the search horizon; with no periods the boundary list is empty and nothing changes.
+    // No window, or an order longer than every window, can never fit.
+    const probeStarts: Date[] = [cur];
+    const plantForProbe = sourceGetPlantForLine(line);
+    if (plantForProbe) {
+      const periods = sourcePlantPeriods(plantForProbe);
+      if (periods.length) {
+        const core = globalThis.NimbusComputeCore!;
+        const keys = core.periodBoundaryKeys(periods as any, core.dayKey(cur), core.dayKey(new Date(limitMs)));
+        for (const key of keys) {
+          const [y, m, d] = key.split('-').map(Number);
+          probeStarts.push(new Date(y, m - 1, d));
+        }
+      }
+    }
     let longestWindowMs = 0;
-    for (let i = 0; i < 7; i++) {
-      const probe = new Date(cur); probe.setDate(probe.getDate() + i);
-      const w = Calendar.workWindow(line, probe);
-      if (w) longestWindowMs = Math.max(longestWindowMs, w[1].getTime() - w[0].getTime());
+    for (const start of probeStarts) {
+      for (let i = 0; i < 7; i++) {
+        const probe = new Date(start); probe.setDate(probe.getDate() + i);
+        const w = Calendar.workWindow(line, probe);
+        if (w) longestWindowMs = Math.max(longestWindowMs, w[1].getTime() - w[0].getTime());
+      }
     }
     if (longestWindowMs <= 0 || durationMs > longestWindowMs) {
       // The optimizer hot loop re-asks the same (line, duration) thousands of times; warn once.

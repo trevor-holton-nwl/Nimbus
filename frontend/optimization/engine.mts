@@ -94,7 +94,7 @@ import type {
   ScheduleSnapshot,
   EvaluationRequest,
 } from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey, PlantCalendarEntry } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
@@ -400,11 +400,13 @@ function setupAvailabilityMinutes(
   const mappedPlant = plant;
   const probe = new Date(end.getTime() - 1);
   const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
-  const plantHours = context.plants[mappedPlant]?.workHours ?? setupDefaultWorkHours();
-  /** The line and plant working windows intersected for the day holding `day`, or null when closed. */
+  const plantEntry = context.plants[mappedPlant];
+  /** The line and plant working windows intersected for the day holding `day`, or null when closed.
+   *  The plant pattern is resolved per day (a dated period replaces the default). */
   const windowOf = (day: Date): readonly [Date, Date] | null => {
     const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, day);
     if (!lineWindow) return null;
+    const plantHours = plantEntry ? globalThis.NimbusComputeCore!.plantWorkHoursOn(plantEntry, day)! : setupDefaultWorkHours();
     const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, day);
     if (!plantWindow) return null;
     const both = [
@@ -879,12 +881,23 @@ function sourceDueInstant(
   return dueInstant(task, { snapshot: src, plant });
 }
 
-export function sourcePlantWorkHours(plant: string): WorkHours {
+/** The plant's weekly hours. With `date`, the pattern active on that date (a dated period replaces
+ *  the default); without it, the default pattern. The no-periods path returns the default by reference. */
+export function sourcePlantWorkHours(plant: string, date?: Date): WorkHours {
   if (!_candidateSnapshot) {
     Store.ensurePlant(plant);
-    return Store.plants[plant].workHours;
+    const entry = Store.plants[plant];
+    return date ? globalThis.NimbusComputeCore!.plantWorkHoursOn(entry, date)! : entry.workHours;
   }
-  return _candidateSnapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+  const entry = _candidateSnapshot.plants[plant];
+  if (!entry) return candidateDefaultWorkHours();
+  return date ? globalThis.NimbusComputeCore!.plantWorkHoursOn(entry, date)! : entry.workHours;
+}
+
+/** The plant's dated calendar periods (live Store entry, or the detached candidate snapshot's); `[]` when none. */
+export function sourcePlantPeriods(plant: string): ReadonlyArray<PlantPeriod> {
+  const entry = _candidateSnapshot ? _candidateSnapshot.plants[plant] : Store.plants[plant];
+  return entry?.periods ?? [];
 }
 
 function detachedCandidateResult(

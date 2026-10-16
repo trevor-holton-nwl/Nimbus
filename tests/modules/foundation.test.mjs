@@ -711,3 +711,25 @@ test('Util.scheduleKpis counts late orders on the due instant (the same reading 
   assert.equal(kpis.late_count, 1);
   assert.equal(Math.round(kpis.late_h * 10) / 10, 1);
 });
+
+test('sapDueDate: a plant period that changes the close time on the due date changes the due instant', () => {
+  const weekdays = (open, close) => ({ 0: null, 1: [open, close], 2: [open, close], 3: [open, close], 4: [open, close], 5: [open, close], 6: null });
+  const lineHours = weekdays(6, 22);
+  const plantHours = weekdays(6, 22);
+  // Wed 5 Aug 2026 onwards the plant closes at 14:00 instead of 22:00.
+  const periods = [{ id: 'early', name: 'early', validFrom: '2026-08-05', validTo: null, workHours: weekdays(6, 14) }];
+  let rev = 1;
+  let withPeriods = true;
+  try {
+    Util.setDueCalendarResolver(line => (line === 'L1'
+      ? { lineHours, plantHours, plantPeriods: withPeriods ? periods : null, plant: 'P1', rev }
+      : null));
+    const task = due => ({ id: 't', MACHINE: 'L1', original_end_date: due });
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 14, 0, 0), 'the period close on its validFrom date');
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 4))), +new Date(2026, 7, 4, 22, 0, 0), 'the day before the period keeps the default close');
+    withPeriods = false; rev = 2; // a Store revision bump (calendar:change) invalidates the per-line+date cache
+    assert.equal(+Util.sapDueDate(task(new Date(2026, 7, 5))), +new Date(2026, 7, 5, 22, 0, 0), 'no periods: the default pattern');
+  } finally {
+    Util.setDueCalendarResolver(null);
+  }
+});

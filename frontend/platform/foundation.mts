@@ -4,7 +4,7 @@
 // feature endpoints, no scheduling rules. See docs/architecture/
 // cq1-compatibility-inventory.md for the full module ownership map.
 
-import type { NimbusTask } from './types.mjs';
+import type { NimbusTask, PlantPeriod } from './types.mjs';
 
 // Ambient augmentation: these three custom globals are read via
 // `window.NIMBUS_API_BASE`/`window.NIMBUS_BUILD_ID`/`window.__NIMBUS_LOCALES`
@@ -27,6 +27,8 @@ type ActorResolver = () => string | undefined;
 export interface DueCalendarSource {
   lineHours: Record<number, [number, number] | null> | null;
   plantHours: Record<number, [number, number] | null> | null;
+  /** The plant's dated calendar periods; the pattern active on a date replaces `plantHours` for that date. */
+  plantPeriods?: ReadonlyArray<PlantPeriod> | null;
   plant: string | null;
   rev: number;
 }
@@ -721,7 +723,10 @@ export const Util = {
     if (hit !== undefined) return hit;
     const core = globalThis.NimbusComputeCore!;
     const lineWin = core._dayWindow(src.lineHours, date);
-    const plantWin = src.plantHours ? core._dayWindow(src.plantHours, date) : lineWin;
+    const plantHoursToday = src.plantHours
+      ? core.plantWorkHoursOn({ workHours: src.plantHours, periods: (src.plantPeriods ?? undefined) as PlantPeriod[] | undefined }, date)
+      : null;
+    const plantWin = plantHoursToday ? core._dayWindow(plantHoursToday, date) : lineWin;
     let result: { open: Date; close: Date } | null = null;
     if (lineWin && plantWin) {
       const open = new Date(Math.max(+lineWin[0], +plantWin[0]));

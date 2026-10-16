@@ -308,7 +308,7 @@ const NIMBUS = (function () {
     const row = Store.calendars[line];
     if (!row) return null;
     const plant = Store.getPlantForLine(line);
-    return { lineHours: row.workHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plant, rev: Store.rev() };
+    return { lineHours: row.workHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant, rev: Store.rev() };
   });
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));

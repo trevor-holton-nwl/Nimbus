@@ -768,3 +768,78 @@ describe('D6 (VM9): setup never splits an order that fits one window', () => {
     assert.equal(fmt(r.end), '2026-10-20 22:00');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dated plant calendar periods (W3): every reader of plant hours resolves the pattern per date.
+// Plant default Mon-Fri 06-18; 19-23 Oct 2026 is Mon-Fri, 26 Oct is the next Monday.
+// ---------------------------------------------------------------------------
+describe('calendar periods: engine threading', () => {
+  const PLANT = 'CP-PLANT';
+  const wk = (open, close) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [open, close] : null]));
+  const period = (id, validFrom, validTo, workHours) => ({ id, name: id, validFrom, validTo, workHours });
+  const setup = (line, lineHours, periods) => {
+    Store.ensurePlant(PLANT);
+    for (let d = 0; d < 7; d++) Store.setPlantWorkHours(PLANT, d, wk(6, 18)[d], 'unit-test');
+    Store.setPlantPeriods(PLANT, periods, 'unit-test');
+    Store.setLineSetting(line, { plant: PLANT }, 'unit-test');
+    Store.setCalendar(line, lineHours, 'unit-test');
+  };
+  let priorBlocks;
+  beforeEach(() => { priorBlocks = Store.blocks.slice(); Store.replaceBlocks([], 'unit-test'); Calendar._endRun(); });
+  afterEach(() => { Store.setPlantPeriods(PLANT, [], 'unit-test'); Store.replaceBlocks(priorBlocks, 'unit-test'); Calendar._endRun(); });
+
+  it('workWindow resolves the plant pattern per date: before, on and after a period boundary', () => {
+    setup('CP-L1', everyDay([0, 24]), [period('p1', '2026-10-21', '2026-10-22', wk(8, 12))]);
+    const win = (day) => Calendar.workWindow('CP-L1', at(day, '12:00')).map(fmt).join(' -> ');
+    assert.equal(win(D.tue), '2026-10-20 06:00 -> 2026-10-20 18:00', 'the day before the period uses the default');
+    assert.equal(win(D.wed), '2026-10-21 08:00 -> 2026-10-21 12:00', 'validFrom day uses the period');
+    assert.equal(win(D.thu), '2026-10-22 08:00 -> 2026-10-22 12:00', 'validTo day uses the period');
+    assert.equal(win(D.fri), '2026-10-23 06:00 -> 2026-10-23 18:00', 'the day after validTo reverts to the default');
+  });
+
+  it('an all-closed period closes the plant on its dates', () => {
+    setup('CP-L2', everyDay([0, 24]), [period('closed', '2026-10-21', '2026-10-21', everyDay(null))]);
+    assert.equal(Calendar.workWindow('CP-L2', at(D.wed, '12:00')), null);
+    assert.ok(Calendar.workWindow('CP-L2', at(D.thu, '12:00')));
+  });
+
+  it('allocateRuntimeBackward whose walk crosses a boundary uses both patterns', () => {
+    setup('CP-L3', everyDay([0, 24]), [period('p1', '2026-10-22', null, wk(8, 12))]);
+    // Thu 08-12 (period, 240 min) then Wed 06-18 (default): the last 120 min of Wednesday's window.
+    const r = Calendar.allocateRuntimeBackward('CP-L3', at(D.thu, '12:00'), 360, 'partial_allowed', bopts());
+    assert.equal(summary(r), '2026-10-21 16:00 -> 2026-10-22 12:00 [2026-10-21 16:00-2026-10-21 18:00 | 2026-10-22 08:00-2026-10-22 12:00]');
+  });
+
+  it('nextAvailable finds a slot in a later epoch when the current epoch windows are too short', () => {
+    // Default 08-10 (2 h) every weekday; from Mon 2 Nov the plant runs 06-18 (12 h). A 5 h order cannot fit before.
+    setup('CP-L4', everyDay([0, 24]), [period('long', '2026-11-02', null, wk(6, 18))]);
+    Store.setPlantWorkHours(PLANT, 1, [8, 10], 'unit-test');
+    for (const d of [2, 3, 4, 5]) Store.setPlantWorkHours(PLANT, d, [8, 10], 'unit-test');
+    const start = Calendar.nextAvailable('CP-L4', at(D.mon, '09:00'), 5 * 3600 * 1000);
+    assert.ok(start instanceof Date, 'the old 7-day probe returned null here');
+    assert.equal(fmt(start), '2026-11-02 06:00');
+  });
+
+  it('nextAvailable still returns null with no periods when every window is too short', () => {
+    setup('CP-L5', everyDay([0, 24]), []);
+    for (const d of [1, 2, 3, 4, 5]) Store.setPlantWorkHours(PLANT, d, [8, 10], 'unit-test');
+    assert.equal(Calendar.nextAvailable('CP-L5', at(D.mon, '09:00'), 5 * 3600 * 1000), null);
+  });
+
+  it('hasNominalWindow sees a longer window in a later epoch', () => {
+    setup('CP-L6', everyDay([0, 24]), [period('long', '2026-11-02', null, wk(6, 18))]);
+    for (const d of [1, 2, 3, 4, 5]) Store.setPlantWorkHours(PLANT, d, [8, 10], 'unit-test');
+    assert.equal(Calendar.hasNominalWindow('CP-L6', at(D.mon, '00:00'), 5 * 3600 * 1000), true);
+    assert.equal(Calendar.hasNominalWindow('CP-L6', at(D.mon, '00:00'), 13 * 3600 * 1000), false);
+    assert.equal(Calendar._hasNominalOperatingWindow('CP-L6', at(D.mon, '00:00')), true);
+  });
+
+  it('plantWorkWindow returns the plant pattern even when the line is narrower', () => {
+    setup('CP-L7', everyDay([9, 11]), [period('p1', '2026-10-22', null, wk(8, 12))]);
+    const fmtWin = w => w.map(fmt).join(' -> ');
+    assert.equal(fmtWin(Calendar.workWindow('CP-L7', at(D.wed, '12:00'))), '2026-10-21 09:00 -> 2026-10-21 11:00');
+    assert.equal(fmtWin(Calendar.plantWorkWindow(PLANT, at(D.wed, '12:00'))), '2026-10-21 06:00 -> 2026-10-21 18:00');
+    assert.equal(fmtWin(Calendar.plantWorkWindow(PLANT, at(D.thu, '12:00'))), '2026-10-22 08:00 -> 2026-10-22 12:00', 'the period replaces the default');
+    assert.equal(Calendar.plantWorkWindow(PLANT, at(D.sat, '12:00')), null, 'closed weekend');
+  });
+});

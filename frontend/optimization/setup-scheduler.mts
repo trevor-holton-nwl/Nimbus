@@ -1303,7 +1303,7 @@ function dueWindowForDay(scope: DueScope, line: string, plant: string | null, da
   if (lineRow) {
     const lineWin = localWindow(lineRow.workHours, dayStart);
     const plantRow = plant ? scope.snapshot.plants[plant] : undefined;
-    const plantWin = plantRow ? localWindow(plantRow.workHours, dayStart) : lineWin;
+    const plantWin = plantRow ? localWindow(plantHoursOn(plantRow, dayStart)!, dayStart) : lineWin;
     result = lineWin && plantWin ? intersectWindows(lineWin, plantWin) : null;
     if (result && result.start >= result.end) result = null;
   }
@@ -2370,6 +2370,18 @@ export function resolveTaskPlant(
   return mdLine?.plant ?? null;
 }
 
+/** The plant's weekly hours on `day`: the dated period covering it replaces the default pattern. No Store
+ *  access (this module is detached). A plant with no periods returns its default hours by reference, so
+ *  Core-less callers keep working; periods without the compute core fail loudly rather than silently using
+ *  the default pattern on dates a period covers (a stale cached worker bundle). */
+function plantHoursOn(entry: PlantCalendarEntry | undefined, day: Date): WorkHours | undefined {
+  if (!entry) return undefined;
+  if (!entry.periods?.length) return entry.workHours;
+  const core = (globalThis as any).NimbusComputeCore;
+  if (!core || typeof core.plantWorkHoursOn !== 'function') throw new Error('compute-core-stale');
+  return core.plantWorkHoursOn(entry, day);
+}
+
 function localWindow(hours: WorkHours, date: Date): PlacementInterval | null {
   const range = hours[date.getDay()];
   if (!range || range.length !== 2 || !Number.isFinite(range[0]) || !Number.isFinite(range[1])) return null;
@@ -2518,7 +2530,7 @@ function jointWindowForDay(
   const key = `${plant}${CTX_KEY_SEP}${line}|${dayStart.getTime()}`;
   if (ctx._dayWindow.has(key)) return ctx._dayWindow.get(key)!;
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
-  const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+  const plantHours = plantHoursOn(snapshot.plants[plant], dayStart) ?? candidateDefaultWorkHours();
   const result = intersectWindows(localWindow(lineHours, dayStart), localWindow(plantHours, dayStart));
   ctx._dayWindow.set(key, result);
   return result;
@@ -2538,14 +2550,14 @@ function walkFreeIntervals(
   // no `Store.plants` entry silently placed nothing for every line in it,
   // while alerts kept computing as though hours existed.
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
-  const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
+  const plantEntry = snapshot.plants[plant];
   const result: PlacementInterval[] = [];
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
   while (day <= through) {
     const joint = ctx
       ? jointWindowForDay(ctx, snapshot, line, plant, day)
-      : intersectWindows(localWindow(lineHours, day), localWindow(plantHours, day));
+      : intersectWindows(localWindow(lineHours, day), localWindow(plantHoursOn(plantEntry, day) ?? candidateDefaultWorkHours(), day));
     if (joint) {
       const start = new Date(Math.max(joint.start.getTime(), from.getTime()));
       const end = new Date(Math.min(joint.end.getTime(), through.getTime()));
@@ -2586,7 +2598,9 @@ function freeIndexFor(
   ));
   const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
-  if (!withinDay(lineHours) || !withinDay(plantHours)) {
+  // Every dated period's pattern can replace the default on some day, so each must stay within the day too.
+  const periods = snapshot.plants[plant]?.periods ?? [];
+  if (!withinDay(lineHours) || !withinDay(plantHours) || !periods.every(period => withinDay(period.workHours))) {
     ctx._freeIndex.set(key, null);
     return null;
   }
@@ -2766,8 +2780,8 @@ function hasNominalWindow(
   ctx?: SetupRunContext,
 ): boolean {
   const lineHours = snapshot.calendars[line]?.workHours;
-  const plantHours = snapshot.plants[plant]?.workHours;
-  if (!lineHours || !plantHours || !Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return false;
+  const plantEntry = snapshot.plants[plant];
+  if (!lineHours || !plantEntry || !Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return false;
   const requiredMs = Math.round(runtimeMinutes) * 60 * 1000;
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
@@ -2777,12 +2791,12 @@ function hasNominalWindow(
     for (let offset = 0; offset < 90; offset += 1) {
       const date = new Date(day);
       date.setDate(day.getDate() + offset);
-      // `lineHours`/`plantHours` are already confirmed present above, so the
+      // `lineHours`/`plantEntry` are already confirmed present above, so the
       // memo's own defaulting (for a missing calendar) never triggers here —
       // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
       const joint = ctx
         ? jointWindowForDay(ctx, snapshot, line, plant, date)
-        : intersectWindows(localWindow(lineHours, date), localWindow(plantHours, date));
+        : intersectWindows(localWindow(lineHours, date), localWindow(plantHoursOn(plantEntry, date)!, date));
       yield joint ? { s: joint.start.getTime(), e: joint.end.getTime() } : null;
     }
   };
@@ -7448,3 +7462,5 @@ export const fragmentObjectiveFactsForTest = fragmentObjectiveFacts;
 export const checkDistributionSeparationForTest = checkDistributionSeparation;
 export const freeIntervalsForTest = freeIntervalsFor;
 export const freeIntervalsForPlacementTest = freeIntervalsForPlacement;
+export const hasNominalWindowForTest = hasNominalWindow;
+export const plantHoursOnForTest = plantHoursOn;

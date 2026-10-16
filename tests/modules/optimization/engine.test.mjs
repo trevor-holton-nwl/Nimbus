@@ -5395,3 +5395,85 @@ test('search budget: opts.searchBudgetMs / exhaustive scale the bounds the engin
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Dated plant calendar periods (W3): the engine's plant-hours readers resolve the pattern per date.
+// ---------------------------------------------------------------------------
+describe('calendar periods: engine plant-hours readers', () => {
+  const weekdays = (open, close) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [open, close] : null]));
+  const allDays = hours => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, hours]));
+  const period = (id, validFrom, validTo, workHours) => ({ id, name: id, validFrom, validTo, workHours });
+  const PERIODS = [period('p1', '2026-10-22', null, weekdays(8, 12))];
+
+  test('sourcePlantWorkHours(plant, date) resolves the pattern per date on the live Store; no date returns the default', async () => {
+    const { sourcePlantWorkHours, sourcePlantPeriods } = await import('../../../frontend/optimization/engine.mjs');
+    Store.ensurePlant('SPW-LIVE');
+    for (let d = 0; d < 7; d++) Store.setPlantWorkHours('SPW-LIVE', d, weekdays(6, 18)[d], 'unit-test');
+    try {
+      assert.deepEqual(sourcePlantPeriods('SPW-LIVE'), []);
+      const noPeriods = sourcePlantWorkHours('SPW-LIVE', new Date('2026-10-22T12:00:00'));
+      assert.equal(noPeriods, Store.plants['SPW-LIVE'].workHours, 'no periods: the default by reference');
+      Store.setPlantPeriods('SPW-LIVE', PERIODS, 'unit-test');
+      assert.deepEqual(sourcePlantPeriods('SPW-LIVE'), PERIODS);
+      assert.deepEqual(sourcePlantWorkHours('SPW-LIVE', new Date('2026-10-21T12:00:00'))[3], [6, 18]);
+      assert.deepEqual(sourcePlantWorkHours('SPW-LIVE', new Date('2026-10-22T12:00:00'))[4], [8, 12]);
+      assert.equal(sourcePlantWorkHours('SPW-LIVE'), Store.plants['SPW-LIVE'].workHours, 'no date: the default pattern');
+    } finally {
+      Store.setPlantPeriods('SPW-LIVE', [], 'unit-test');
+    }
+  });
+
+  test('sourcePlantWorkHours and sourcePlantPeriods read the detached candidate snapshot, not the live Store', async () => {
+    const { sourcePlantWorkHours, sourcePlantPeriods } = await import('../../../frontend/optimization/engine.mjs');
+    Store.ensurePlant('SPW-SNAP');
+    Store.setPlantPeriods('SPW-SNAP', [period('live', '2026-10-01', null, allDays(null))], 'unit-test');
+    const originalRun = Engine.runAndApply;
+    try {
+      const snapshot = {
+        ...snapshotSchedule(),
+        plants: { 'SPW-SNAP': { workHours: weekdays(6, 18), periods: PERIODS } },
+      };
+      let seen = null;
+      // evaluateSchedule sets the detached candidate snapshot around runAndApply; read the accessors from inside it.
+      Engine.runAndApply = () => {
+        seen = {
+          periods: sourcePlantPeriods('SPW-SNAP'),
+          before: sourcePlantWorkHours('SPW-SNAP', new Date('2026-10-21T12:00:00'))[3],
+          during: sourcePlantWorkHours('SPW-SNAP', new Date('2026-10-22T12:00:00'))[4],
+          noDate: sourcePlantWorkHours('SPW-SNAP'),
+          missing: sourcePlantPeriods('SPW-MISSING'),
+        };
+        return null;
+      };
+      Engine.evaluateSchedule('spt', {}, snapshot);
+      assert.deepEqual(seen.periods, PERIODS, 'the snapshot periods, not the live all-closed period');
+      assert.deepEqual(seen.before, [6, 18]);
+      assert.deepEqual(seen.during, [8, 12]);
+      assert.equal(seen.noDate, snapshot.plants['SPW-SNAP'].workHours);
+      assert.deepEqual(seen.missing, []);
+    } finally {
+      Engine.runAndApply = originalRun;
+      Store.setPlantPeriods('SPW-SNAP', [], 'unit-test');
+    }
+  });
+
+  test('setupAvailabilityMinutes resolves the plant pattern per day (period opens later than the default)', () => {
+    const state = value => [{ fieldKey: 'colorWheel', value }];
+    const run = (periods) => {
+      const plants = { 'P-AV': { workHours: weekdays(6, 18), ...(periods ? { periods } : {}) } };
+      return deriveSetupObservation({
+        plant: 'P-AV',
+        definition: { plant: 'P-AV', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+        plant_rows: [{ machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 20 }],
+        machine_rows: [], machine_states: [], overrides: [],
+      }, [
+        { id: 'red', PLANT: 'P-AV', MACHINE: 'L-AV', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-10-21T15:00:00'), end_date: new Date('2026-10-21T17:00:00') },
+        { id: 'blue', PLANT: 'P-AV', MACHINE: 'L-AV', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-10-22T10:00:00'), end_date: new Date('2026-10-22T11:00:00') },
+      ], new Set(['L-AV']), {
+        calendars: { 'L-AV': { workHours: allDays([0, 24]) } }, plants, lineSettings: {}, masterData: null, blocks: [], plantBlocks: [],
+      }).intervals.map(i => i.availableMinutes);
+    };
+    assert.deepEqual(run(null), [240], 'default pattern opens 06:00: four free hours before the 10:00 end');
+    assert.deepEqual(run(PERIODS), [120], 'the period that covers Thursday opens 08:00: two free hours');
+  });
+});
