@@ -28,7 +28,7 @@ All “implemented” entries below still require the specified browser retest.
 
 ## Additional containment changes
 
-- Master Data and table navigation scroll horizontally. Refresh and Export Schema remain outside the strips. Focus/click and programmatic tab selection reveal the relevant tab without scrolling the vertical page.
+- Master Data and table navigation initially scrolled horizontally. Follow-up user correction removes those header scrollbars and automatic tab scrolling; tab rows now wrap when needed. Refresh and Export Schema remain outside the tab rows. Work Centers data-list scrolling is retained.
 - Orders/grid toolbars wrap and search inputs can shrink. Panel headings have explicit gaps and can wrap.
 - Plant General and Setup configuration use available-width-based grids. Production Line hours can wrap across rows.
 - Shared, Optimize, Calendar, and priority-viewer dialogs have bounded heights, nonshrinking headers/footers, and shrinkable body/list scrollers. Viewport gutter target: at least 16px.

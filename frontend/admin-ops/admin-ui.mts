@@ -8,7 +8,6 @@
 // grouping.
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from '../platform/foundation.mjs';
-import { revealHorizontalItem } from '../platform/layout.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Session } from '../security/session.mjs';
@@ -475,7 +474,6 @@ export const AdminCockpit = {
     AdminCockpit._activeOvTab = tab;
     document.querySelectorAll<HTMLElement>('.admin-ov-tabs .sub-subtab').forEach((b) => {
       b.classList.toggle('active', b.dataset.ovTab === tab);
-      if (b.dataset.ovTab === tab) revealHorizontalItem(b);
     });
     (['diagnostics', 'data-ops', 'logs', 'thread'] as const).forEach(t => {
       const el = document.getElementById(`admin-ov-${t}`);
@@ -488,7 +486,6 @@ export const AdminCockpit = {
     AdminCockpit._activeSub = sub ?? 'overview';
     document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
       b.classList.toggle('active', b.dataset.sub === sub);
-      if (b.dataset.sub === sub) revealHorizontalItem(b);
     });
     const ov = document.getElementById('admin-overview-pane');
     const mg = document.getElementById('admin-manage-pane');

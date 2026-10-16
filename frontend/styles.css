@@ -4782,8 +4782,8 @@ body.dark .cw-active-card {
   gap: 2px;
   border-bottom: 2px solid var(--line);
   margin: 12px 0 20px;
-  min-width: 0; overflow-x: auto;
-  scroll-padding-inline: 4px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 .admin-subtabs > button { flex-shrink: 0; }
 .admin-subtab {
@@ -4916,8 +4916,8 @@ body.dark .cw-active-card {
   gap: 2px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 16px;
-  min-width: 0; overflow-x: auto;
-  scroll-padding-inline: 4px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 .md-tabs > button { flex-shrink: 0; }
 .md-tab {

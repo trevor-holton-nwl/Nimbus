@@ -59,7 +59,7 @@
 // above (the same "no further change needed" idiom Phase 3/4 used for every
 // other now-same-file forward reference).
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
-import { installLayoutAffordances, revealHorizontalItem } from '../platform/layout.mjs';
+import { installLayoutAffordances } from '../platform/layout.mjs';
 import { createFactoryProducts } from './factory-products.mjs';
 import type { ProductDef } from './factory-products.mjs';
 import { FACTORY_SCENE, RefinedFactoryScene } from './factory-scene.mjs';
@@ -2706,7 +2706,6 @@ const App = {
     App._currentMasterSub = sub;
     document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(b => {
       b.classList.toggle('active', b.dataset.mdMaster === sub);
-      if (b.dataset.mdMaster === sub) revealHorizontalItem(b);
     });
     App._MASTER_SUBS.forEach(e => {
       const el = document.getElementById(e.paneId);

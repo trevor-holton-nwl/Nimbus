@@ -6,7 +6,6 @@
 // combined into this one file per that phase's per-domain grouping.
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
-import { revealHorizontalItem } from '../platform/layout.mjs';
 import { Store } from '../platform/store.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -361,7 +360,6 @@ export const Plant = {
     Plant._currentPlantTab = t;
     document.querySelectorAll<HTMLElement>('.plant-inner-tabs .sub-subtab').forEach(b => {
       b.classList.toggle('active', b.dataset.plantTab === t);
-      if (b.dataset.plantTab === t) revealHorizontalItem(b);
     });
     ['general', 'optimization', 'settings'].forEach(tt => {
       const el = document.getElementById(`plant-tab-${tt}`);
@@ -3264,7 +3262,6 @@ export const MasterData = (() => {
   function _syncTabUI(): void {
     document.querySelectorAll<HTMLElement>('.md-tab').forEach((b) => {
       b.classList.toggle('active', b.dataset.mdTab === _activeTable);
-      if (b.dataset.mdTab === _activeTable) revealHorizontalItem(b);
     });
   }
 
