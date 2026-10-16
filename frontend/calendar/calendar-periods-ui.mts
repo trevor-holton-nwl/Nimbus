@@ -134,7 +134,7 @@ export const CalendarPeriodsUI = {
     if (addBtn) addBtn.disabled = false;
     const periods = _sorted(plant);
     const todayKey = _todayKey(plant);
-    if (countEl) countEl.textContent = Util.t('ui.period_count', { count: periods.length });
+    if (countEl) countEl.textContent = periods.length === 1 ? Util.t('ui.period_count_one') : Util.t('ui.period_count', { count: periods.length });
     if (list) {
       const dayLabels = DAY_KEYS.map(k => Util.t(k));
       list.innerHTML = periods.length

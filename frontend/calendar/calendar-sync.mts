@@ -432,12 +432,16 @@ export const CalendarSync = {
    *  server refusal returns `{ ok: false, code, ids }` with Store untouched; the caller renders the message. */
   async savePlantPeriods(plant: string | null, next: PlantPeriod[]): Promise<CalendarSyncResult> {
     if (!plant) return { ok: false };
-    const verdict = globalThis.NimbusComputeCore!.validatePlantPeriods(next);
-    if (!verdict.ok) return { ok: false, code: verdict.code, ids: verdict.ids };
     const current = new Map(Store.getPlantPeriods(plant).map(p => [p.id, p] as const));
     const nextIds = new Set(next.map(p => p.id));
     const upserts = next.filter(p => { const c = current.get(p.id); return !c || !this._samePeriod(c, p); }).map(p => this._periodPayload(p));
     const deletes = [...current.keys()].filter(id => !nextIds.has(id));
+    // A pure delete is not validated locally: pre-existing overlapping data (written outside the UI) must not
+    // block removing a period; the server only checks pairs involving an upserted id.
+    if (upserts.length) {
+      const verdict = globalThis.NimbusComputeCore!.validatePlantPeriods(next);
+      if (!verdict.ok) return { ok: false, code: verdict.code, ids: verdict.ids };
+    }
     if (!upserts.length && !deletes.length) return { ok: true };
     if (this._hydrating || Sandbox.active) {
       Store.setPlantPeriods(plant, next, 'plant-periods');
@@ -574,7 +578,12 @@ export const CalendarSync = {
     if (periods.length || periodDeletes.length) {
       void this._post(PERIODS_PATH, { plant, upserts: periods.map(p => this._periodPayload(p)), deletes: periodDeletes },
         'promote-plant-periods').then(r => {
-        if (!r.ok) Toast.show(Util.t('toast.calendar_save_failed'), 'warn', 10000);
+        if (r.ok) return;
+        // A structured refusal gets its own message; any other code (plant_not_mastered) was already toasted by
+        // _post, so only an un-coded failure shows the generic one.
+        if (r.code === 'period_overlap') Toast.show(Util.t('toast.period_overlap'), 'warn', 10000);
+        else if (r.code === 'period_dates_invalid') Toast.show(Util.t('toast.period_dates_invalid'), 'warn', 10000);
+        else if (!r.code) Toast.show(Util.t('toast.calendar_save_failed'), 'warn', 10000);
       });
     }
   },

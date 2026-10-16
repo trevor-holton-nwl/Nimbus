@@ -162,7 +162,9 @@ export function buildPeriodStrip(periods: PlantPeriod[], todayKey: string, opts:
   const todayIdx = dayIndex(todayKey);
   const fromIdxs = periods.map(p => dayIndex(p.validFrom));
   const endIdxs = periods.map(p => (p.validTo === null ? dayIndex(p.validFrom) + 90 : dayIndex(p.validTo)));
-  const startIdx = Math.min(todayIdx - 30, ...fromIdxs);
+  // Start: 30 days back or the earliest period start, but never more than a year back (mirrors the end cap below);
+  // older segments are drawn clipped at the left edge with their title intact.
+  const startIdx = Math.max(Math.min(todayIdx - 30, ...fromIdxs), todayIdx - 365);
   const lastEnd = endIdxs.length ? Math.max(...endIdxs) : todayIdx;
   const endIdx = Math.min(Math.max(lastEnd, todayIdx + 365), todayIdx + 730);
   const total = endIdx - startIdx + 1;
@@ -170,8 +172,8 @@ export function buildPeriodStrip(periods: PlantPeriod[], todayKey: string, opts:
 
   const segments: StripSegment[] = periods.map(p => {
     const openEnded = p.validTo === null;
-    const fromIdx = Math.min(dayIndex(p.validFrom), endIdx);
-    const toIdx = openEnded ? endIdx : Math.min(dayIndex(p.validTo as string), endIdx);
+    const fromIdx = Math.max(Math.min(dayIndex(p.validFrom), endIdx), startIdx);
+    const toIdx = openEnded ? endIdx : Math.max(Math.min(dayIndex(p.validTo as string), endIdx), fromIdx);
     return {
       id: p.id,
       name: p.name,
@@ -188,7 +190,8 @@ export function buildPeriodStrip(periods: PlantPeriod[], todayKey: string, opts:
   const ticks: PeriodStrip['ticks'] = [];
   const startDate = new Date(startIdx * MS_DAY);
   let y = startDate.getUTCFullYear(), m = startDate.getUTCMonth();
-  for (let guard = 0; guard < 60; guard++) {
+  // The axis is bounded (<= ~3 years), so the loop runs to its end rather than a fixed month count.
+  for (;;) {
     const idx = Math.round(Date.UTC(y, m, 1) / MS_DAY);
     if (idx > endIdx) break;
     if (idx >= startIdx && (!quarterly || m % 3 === 0)) {

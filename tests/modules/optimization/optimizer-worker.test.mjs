@@ -37,6 +37,17 @@ const validation = {
   notBeforeById: {}, notAfterById: {}, effectiveFirmedIds: [],
 };
 
+test('the default worker URL carries the build id so the worker can cache-bust the compute core', () => {
+  let seen;
+  const result = runOptimizerPreview({
+    runId: 'url-run', mode: 'spt', snapshot, request: { mode: 'spt', respectCalendar: false },
+  }, {
+    workerFactory: (url) => { seen = url; return { onmessage: null, onerror: null, postMessage() {}, terminate() {} }; },
+  });
+  assert.match(seen, /optimizer-worker\.mjs\?v=[^&]+$/);
+  result.catch(() => {});
+});
+
 test('optimizer preview keeps a synchronous evaluator fallback for non-UI callers', async () => {
   let calls = 0;
   const result = await runOptimizerPreview({

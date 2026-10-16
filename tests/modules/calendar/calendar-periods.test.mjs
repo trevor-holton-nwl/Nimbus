@@ -113,6 +113,20 @@ test('buildPeriodStrip: month ticks (year on January) and quarterly ticks on a l
   assert.equal(dflt, 'Oct');
 });
 
+test('buildPeriodStrip: axis start is capped at one year back; old segments clip at the left edge; ticks cover the whole axis', () => {
+  const today = '2026-10-16';
+  const strip = buildPeriodStrip([per('old', '2020-01-01', '2020-06-30'), per('far', '2026-11-01', '2031-01-01')], today,
+    { fmtMonth: d => `M${d.getMonth() + 1}` });
+  assert.equal(strip.axisStartKey, addDaysKey(today, -365));
+  assert.equal(strip.axisEndKey, addDaysKey(today, 730));
+  const old = strip.segments[0];
+  assert.equal(old.leftPct, 0, 'a segment older than the axis is clipped at the left edge');
+  assert.equal(old.fromKey, '2020-01-01', 'the segment keeps its real dates for the title');
+  assert.ok(strip.today.leftPct > 30 && strip.today.leftPct < 36, 'today is not squeezed against the left edge');
+  assert.ok(strip.ticks.length > 0 && strip.ticks[0].leftPct < 10, 'ticks start near the left edge');
+  assert.ok(strip.ticks[strip.ticks.length - 1].leftPct > 85, 'ticks run to the right end of the axis');
+});
+
 test('nextPeriodDefaults: today, or the day after the latest end; one week long', () => {
   assert.deepEqual(nextPeriodDefaults([], '2026-10-16'), { validFrom: '2026-10-16', validTo: '2026-10-22' });
   const later = [per('a', '2026-10-01', '2026-10-31'), per('b', '2026-11-01', '2026-11-30')];

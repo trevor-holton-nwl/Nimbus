@@ -25,7 +25,7 @@ beforeEach(() => {
   respond = () => ({ ok: true, status: 200, json: () => Promise.resolve({}) });
   globalThis.fetch = (url, opts) => {
     posts.push({ url: String(url), body: opts?.body ? JSON.parse(opts.body) : null });
-    return Promise.resolve(respond());
+    return Promise.resolve(respond(String(url)));
   };
   CalendarSync._hydrating = false;
   CalendarSync._hoursEdits = {};
@@ -160,14 +160,39 @@ test('flushPlant with no periods and nothing removed sends no plant-periods writ
   assert.equal(posts.some(p => p.url.endsWith('/plant-calendar/plant-periods')), false);
 });
 
-test('flushPlant: a rejected periods promote shows calendar_save_failed', async () => {
+async function promoteRefused(body, status = 400) {
   Store.setPlantPeriods('P1', [per('a', '2026-10-01', null)], 'test');
-  respond = (() => {
-    return () => ({ ok: false, status: 400, json: () => Promise.resolve({ detail: { code: 'period_overlap', ids: ['a'] } }) });
-  })();
+  respond = (url) => (url.endsWith('/plant-calendar/plant-periods')
+    ? { ok: false, status, json: () => (body === null ? Promise.reject(new Error('no body')) : Promise.resolve(body)) }
+    : { ok: true, status: 200, json: () => Promise.resolve({}) });
   CalendarSync.flushPlant('P1', { line: [], plant: [] });
   await new Promise(r => setTimeout(r, 10));
-  assert.ok(toasts.some(t => t.msg === 'toast.calendar_save_failed'));
+  return toasts.map(t => t.msg);
+}
+
+test('flushPlant: a refused promote with period_overlap shows toast.period_overlap only', async () => {
+  assert.deepEqual(await promoteRefused({ detail: { code: 'period_overlap', ids: ['a'] } }), ['toast.period_overlap']);
+});
+
+test('flushPlant: a refused promote with period_dates_invalid shows toast.period_dates_invalid only', async () => {
+  assert.deepEqual(await promoteRefused({ detail: { code: 'period_dates_invalid', ids: ['a'] } }), ['toast.period_dates_invalid']);
+});
+
+test('flushPlant: another structured code (plant_not_mastered) is toasted once by _post, with no second toast', async () => {
+  assert.deepEqual(await promoteRefused({ detail: { code: 'plant_not_mastered' } }), ['toast.plant_not_mastered']);
+});
+
+test('flushPlant: an un-coded failed promote shows calendar_save_failed', async () => {
+  assert.deepEqual(await promoteRefused(null, 500), ['toast.calendar_save_failed']);
+});
+
+test('savePlantPeriods: a pure delete skips local validation, so pre-existing overlapping data cannot block it', async () => {
+  const bad = [per('a', '2026-10-01', '2026-10-31'), per('b', '2026-10-15', null), per('c', '2027-06-01', '2027-06-30')];
+  Store.setPlantPeriods('P1', bad, 'test');
+  const res = await CalendarSync.savePlantPeriods('P1', bad.filter(p => p.id !== 'c'));
+  assert.equal(res.ok, true);
+  assert.deepEqual(posts[0].body, { plant: 'P1', upserts: [], deletes: ['c'] });
+  assert.deepEqual(Store.getPlantPeriods('P1').map(p => p.id), ['a', 'b']);
 });
 
 test('a stale GET that started before an acknowledged period write does not clobber the new periods', async () => {

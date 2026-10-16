@@ -96,6 +96,15 @@ test('render: rows carry the right badge, range, summary and no inline handlers'
   assert.ok(html.indexOf('Always on') < html.indexOf('Old shutdown') && html.indexOf('Old shutdown') < html.indexOf('Far future'));
 });
 
+test('render: the count reads "1 period" for exactly one period and "N periods" otherwise', () => {
+  Store.setPlantPeriods('P1', [per('a', 'Only', '2999-01-01', '2999-02-01')], 'test');
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-periods-count'].textContent, '1 period');
+  Store.setPlantPeriods('P1', [per('a', 'One', '2999-01-01', '2999-02-01'), per('b', 'Two', '2999-03-01', '2999-04-01')], 'test');
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-periods-count'].textContent, '2 periods');
+});
+
 test('render: timeline has one segment per period, an open-ended one, and a today marker', () => {
   seed();
   CalendarPeriodsUI.render();

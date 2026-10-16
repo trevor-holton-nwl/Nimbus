@@ -1560,6 +1560,8 @@ export const Timeline = {
     const plant = Store.selectedPlant;
     if (!plant) return [];
     Store.ensurePlant(plant);
+    // Unreachable at the current zoomMax (30 d): the covered range is window + 2 * max(window, 7 d) <= 90 d. Kept
+    // deliberately as a guard for a future larger zoomMax.
     const coarse = range.toMs - range.fromMs > 90 * Config.MS_DAY;
     const { spans, truncated } = buildNonWorkingSpans(
       range.fromMs, range.toMs,

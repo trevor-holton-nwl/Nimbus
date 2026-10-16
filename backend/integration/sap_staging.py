@@ -2283,6 +2283,8 @@ def _working_window_close(cur, plant: str, machine: str | None, day: date,
         plant_day_hours = md.active_work_hours(plant_hours, periods, d)
         plant_day_hours = plant_day_hours if isinstance(plant_day_hours, dict) and plant_day_hours else None
         wins = [h.get(key) for h in (line_hours, plant_day_hours) if h is not None]
+        if not wins:                                    # no hours at all that day: the no-calendar result
+            return end_of_day(d)
         if not all(wins):
             continue
         opened, close = max(float(w[0]) for w in wins), min(float(w[1]) for w in wins)

@@ -2080,6 +2080,11 @@ def test_a_period_applies_to_its_dates_when_the_plant_has_no_default_hours():
     assert st._working_window_close(_PlantHoursCursor(None), "P", None, _TUE, periods) == datetime(2030, 2, 5, 14, 0)
 
 
+def test_a_period_not_covering_the_due_date_with_no_default_hours_and_no_line_sends_end_of_day():
+    periods = [_period("p", date(2030, 1, 1), date(2030, 2, 1), {"2": [6, 14]})]   # ends before the due Tuesday
+    assert st._working_window_close(_PlantHoursCursor(None), "P", None, _TUE, periods) == datetime(2030, 2, 5, 23, 59, 59)
+
+
 @pytest.mark.pg
 def test_send_uses_the_calendar_period_covering_the_due_date(pg, stg_plant):
     _set_plant(pg, routing=False, horizon_days=None)

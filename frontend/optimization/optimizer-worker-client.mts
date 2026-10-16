@@ -3,7 +3,7 @@
 // tooling, and non-UI integrations) keep the synchronous Engine evaluator.
 import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { evaluateSchedule, rehydrateOptimizerCandidate } from './engine.mjs';
-import { ErrorLog } from '../platform/foundation.mjs';
+import { Config, ErrorLog } from '../platform/foundation.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 
@@ -67,7 +67,10 @@ export function runOptimizerPreview(
 ): CandidateResult | Promise<CandidateResult> {
   if (options.signal?.aborted) return Promise.reject(abortError());
   const factory = options.workerFactory === undefined ? defaultWorkerFactory : options.workerFactory;
-  const worker = factory?.(options.workerUrl ?? new URL('./optimizer-worker.mjs', import.meta.url).href) ?? null;
+  // The build id rides on the worker URL so the worker can load the classic compute core with the same cache-bust
+  // (the corporate proxy caches .js by URL; a stale core would push every preview to the main thread).
+  const defaultUrl = `${new URL('./optimizer-worker.mjs', import.meta.url).href}?v=${encodeURIComponent(String(Config.BUILD_ID))}`;
+  const worker = factory?.(options.workerUrl ?? defaultUrl) ?? null;
   if (!worker) {
     const evaluator = options.syncEvaluator ?? evaluateSchedule;
     return evaluator(request.snapshot, request.request);

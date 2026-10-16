@@ -1,8 +1,6 @@
 // Module-worker entry for detached optimizer previews. The classic compute
-// core is imported first because Calendar/setup placement delegates to the
+// core is loaded first (below) because Calendar/setup placement delegates to the
 // ambient NimbusComputeCore object in every browser realm.
-// @ts-ignore The compute core is a browser-loaded classic script with no ESM declarations.
-import '../nimbus-compute-core.js';
 import { evaluateSchedule } from './engine.mjs';
 import type { CandidateResult } from './setup-scheduler.mjs';
 import { serializeOptimizerValidation } from './optimizer-worker-contract.mjs';
@@ -49,11 +47,25 @@ interface WorkerRealm {
   postMessage(message: OptimizerWorkerResponse): void;
 }
 
-const realm = globalThis as unknown as WorkerRealm;
+const realm = globalThis as unknown as WorkerRealm & {
+  NimbusComputeCore?: unknown;
+  location?: { search?: string };
+};
 // This module is loaded only by a Worker in production. The document guard
 // keeps an accidental main-thread import inert, and also makes the adapter
 // directly importable in Node tests without installing a fake worker global.
 if (typeof realm.postMessage === 'function' && typeof realm.document === 'undefined') {
+  // Load the classic compute core with the SAME `?v=<build id>` the client stamped on this worker's URL, so a
+  // proxy-cached core can never sit behind a fresh worker (mirrors nimbus-worker.ts). The UMD factory sets
+  // `self.NimbusComputeCore`. Skipped when a core is already present (Node tests install one). onmessage is
+  // assigned only after the load, so no request can run against a missing core; the `compute-core-stale` guard in
+  // the engine/client stays as the second line of defence.
+  if (!realm.NimbusComputeCore) {
+    const version = new URLSearchParams(realm.location?.search ?? '').get('v');
+    const coreUrl = new URL('../nimbus-compute-core.js', import.meta.url);
+    if (version) coreUrl.search = `?v=${encodeURIComponent(version)}`;
+    await import(coreUrl.href);
+  }
   realm.onmessage = ({ data }): void => {
     try {
       realm.postMessage(buildOptimizerWorkerResponse(data));
