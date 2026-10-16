@@ -135,6 +135,7 @@ export const EditCalendar = (() => {
       existing ? existing.validTo : defaults.validTo,
     );
     _clearPeriodErrors();
+    _refreshPeriodWarning();
     const el = document.getElementById('modal-edit-calendar');
     if (!el) return;
     _setPeriodMode(true);
@@ -224,7 +225,7 @@ export const EditCalendar = (() => {
         enableTime: true, noCalendar: true,
         dateFormat: 'H:i', altInput: true, altFormat: 'h:i K',
         minuteIncrement: 30,
-        onChange: () => _refreshBadge(d),
+        onChange: () => { _refreshBadge(d); _onPeriodFieldChange(); },
       });
       _fp.push(
         flatpickr(`#cal-edit-start-${d}`, mkCfg()),
@@ -270,6 +271,7 @@ export const EditCalendar = (() => {
       if (!_fp[d * 2 + 1]?.element?.value) _fp[d * 2 + 1]?.setDate('17:00', false);
     }
     _refreshBadge(d);
+    _onPeriodFieldChange();
   }
 
   function applyPreset(preset: string) {
@@ -293,6 +295,7 @@ export const EditCalendar = (() => {
       _setRowEnabled(d, enabled);
       _refreshBadge(d);
     }
+    _onPeriodFieldChange();
   }
 
   function copyFromPlant() {
@@ -453,24 +456,29 @@ export const EditCalendar = (() => {
 
   function _clearPeriodErrors() {
     (['name', 'from', 'to', 'overlap'] as PeriodField[]).forEach(f => setPeriodError(f, null));
+  }
+
+  /** Live, non-blocking advice (all days closed for a long or open-ended period). Independent of whether
+   *  Save was attempted: it is recomputed on every toggle, time, date and No-end change. */
+  function _refreshPeriodWarning() {
     const warn = document.getElementById('cal-period-closed-warn');
-    if (warn) { warn.textContent = ''; warn.hidden = true; }
+    if (!warn) return;
+    const show = _mode === 'period' && periodWarnings(_readPeriodDraft(_collectWorkHoursQuiet())).length > 0;
+    warn.textContent = show ? Util.t('warn.period_all_closed_long') : '';
+    warn.hidden = !show;
   }
 
   /** Validate the draft; shows every issue inline and returns true when it can be saved. */
-  function _validatePeriod(workHours: WorkHours): PeriodDraft | null {
+  function _validatePeriod(workHours: WorkHours, focusFirst = false): PeriodDraft | null {
     _clearPeriodErrors();
     const draft = _readPeriodDraft(workHours);
     const existing = Store.getPlantPeriods(_periodPlant!);
     const issues = validatePeriodDraft(draft, existing);
     const filtered = issues;
     for (const issue of filtered) setPeriodError(issue.field, _issueText(issue));
-    const warn = document.getElementById('cal-period-closed-warn');
-    if (warn && !filtered.length) {
-      const warnings = periodWarnings(draft);
-      if (warnings.length) { warn.textContent = Util.t('warn.period_all_closed_long'); warn.hidden = false; }
-    }
+    _refreshPeriodWarning();
     if (filtered.length) {
+      if (!focusFirst) return null;
       const first = filtered[0].field;
       const target = first === 'overlap' ? _visibleInput('cal-period-from') : _visibleInput(PERIOD_INPUT_IDS[first][0]);
       target?.focus?.();
@@ -480,13 +488,13 @@ export const EditCalendar = (() => {
   }
 
   function _onPeriodFieldChange() {
-    if (!_periodTried || _mode !== 'period') return;
-    const wh = _collectWorkHoursQuiet();
-    if (wh) _validatePeriod(wh);
+    if (_mode !== 'period') return;
+    _refreshPeriodWarning();
+    if (_periodTried) _validatePeriod(_collectWorkHoursQuiet());
   }
 
   /** Like _collectWorkHours but silent, for live re-validation while the user is still typing. */
-  function _collectWorkHoursQuiet(): WorkHours | null {
+  function _collectWorkHoursQuiet(): WorkHours {
     const out: WorkHours = {};
     for (let d = 0; d < 7; d++) {
       const tog = document.getElementById(`cal-edit-toggle-${d}`) as HTMLInputElement | null;
@@ -501,7 +509,7 @@ export const EditCalendar = (() => {
     _periodTried = true;
     const wh = _collectWorkHours();
     if (!wh) return;
-    const draft = _validatePeriod(wh);
+    const draft = _validatePeriod(wh, true);
     if (!draft) return;
     // Period mode deliberately skips _persistPlantHours / clampLinesToPlant / ProdLines.render:
     // a period never rewrites the plant default or any line calendar.

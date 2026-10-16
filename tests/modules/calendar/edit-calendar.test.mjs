@@ -20,8 +20,9 @@ globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../fronte
 // EditCalendar caches its Flatpickr instances for the life of the module, so one shared fake factory (selector -> instance)
 // serves every test in this file; instances are created by whichever test opens the editor first.
 const fakes = {};
-globalThis.flatpickr = (selector) => {
+globalThis.flatpickr = (selector, cfg) => {
   const inst = {
+    cfg,
     element: { value: '' },
     setDate(v) { this.element.value = v; },
     clear() { this.element.value = ''; this.cleared = true; },
@@ -301,4 +302,36 @@ test('EditCalendar open/openPlant after period mode hide the period block again'
   assert.equal(pEls['cal-edit-period-fields'].hidden, true);
   assert.equal(pEls['cal-edit-title'].textContent, 'modal.edit_calendar');
   assert.equal(pEls['cal-edit-save-label'].textContent, 'btn.save_changes');
+}));
+
+test('EditCalendar period mode: the all-closed warning is live (before any Save) and clears when a day is turned on', () => withPeriodEnv(() => {
+  EditCalendar.openPeriod('1006');
+  const warn = pEls['cal-period-closed-warn'];
+  assert.equal(warn.hidden, true, 'default week has open days: no warning');
+  pEls['cal-period-noend'].checked = true;
+  pEls['cal-period-noend'].listeners.change[0]({ target: pEls['cal-period-noend'] });
+  for (let d = 0; d < 7; d++) { toggles[d].checked = false; EditCalendar.onToggle(d, false); }
+  assert.equal(warn.hidden, false, 'open-ended and every day closed warns without a Save attempt');
+  assert.equal(warn.textContent, 'warn.period_all_closed_long');
+  toggles[2].checked = true; EditCalendar.onToggle(2, true);
+  assert.equal(warn.hidden, true, 'turning a day on hides it again');
+}));
+
+test('EditCalendar period mode: after a failed Save, toggles and time pickers re-validate live', () => withPeriodEnv(async () => {
+  Store.setPlantPeriods('1006', [{ id: 'x', name: 'Existing', validFrom: '2030-01-01', validTo: '2030-01-31', workHours: { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null } }], 'test');
+  EditCalendar.openPeriod('1006');
+  pEls['cal-period-name'].value = 'N';
+  fakes['#cal-period-from'].element.value = '2030-01-15';
+  fakes['#cal-period-to'].element.value = '2030-02-05';
+  EditCalendar.save();
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(pEls['cal-period-overlap-err'].hidden, false, 'overlap shown after the failed Save');
+  // The planner fixes the dates by picker; a toggle then re-runs validation and the stale error goes away.
+  fakes['#cal-period-from'].element.value = '2030-03-01';
+  toggles[3].checked = true; EditCalendar.onToggle(3, true);
+  assert.equal(pEls['cal-period-overlap-err'].hidden, true, 'onToggle re-validated');
+  // And a time-picker change does too.
+  fakes['#cal-period-from'].element.value = '2030-01-20';
+  fakes['#cal-edit-start-1'].cfg.onChange();
+  assert.equal(pEls['cal-period-overlap-err'].hidden, false, 'time-picker onChange re-validated');
 }));
