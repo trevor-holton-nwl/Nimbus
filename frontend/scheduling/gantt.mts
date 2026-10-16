@@ -34,6 +34,7 @@ import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
+import { buildNonWorkingSpans } from './nonworking-spans.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -153,6 +154,12 @@ export const Timeline = {
   _viewWindow: null as TimelineWindowMs | null,            // { start: ms, end: ms } — current viewport, kept in sync via rangechanged
   _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
   _alertHorizonIds: [] as string[],
+  // Non-working-time shading (W5): the ONE range the 'nonworking-*' background items currently cover.
+  // Set only by _syncNonWorking (and seeded by init/_rebuildPass when null); _rebuildPass reads it so its
+  // full diff never deletes items the pan path added. _nwIds tracks the ids we own for the pan re-diff.
+  _nwRange: null as { fromMs: number; toMs: number } | null,
+  _nwIds: new Set<string>(),
+  _nwTruncWarned: false,
   _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
   _rebuildNow: null as Date | null,         // the viewer's clock at the start of the last rebuild() pass (timeline min bound); firming/lock styling reads the plant clock via _nowFor
   _frozenBandIds: null as Set<string> | null, // P2: task ids currently inside the frozen horizon band, for live repaint diffing
@@ -305,11 +312,14 @@ export const Timeline = {
     // Prime the viewport window immediately so the DataView filter is ready.
     const _initW = Timeline._tl.getWindow();
     Timeline._viewWindow = { start: _initW.start.getTime(), end: _initW.end.getTime() };
+    Timeline._nwRange ??= Timeline._nwRangeAround(_initW.start.getTime(), _initW.end.getTime());
 
     // Refresh the DataView after the user finishes panning/zooming. Debounced so it
     // never fires per-frame during active drag — items already in the window stay
     // rendered; fringe items outside the buffer are evicted/loaded once pan settles.
-    const _refreshView = Util.debounce(() => Timeline._refreshViewNow(), 120);
+    // The non-working shading re-diffs first (hysteresis: usually a no-op) so the
+    // refresh below sees the final item set.
+    const _refreshView = Util.debounce(() => { Timeline._syncNonWorking(false); Timeline._refreshViewNow(); }, 120);
     Timeline._tl.on('rangechanged', _refreshView);
 
     // One-shot screen calibration: measure real row + axis after first render
@@ -1051,6 +1061,19 @@ export const Timeline = {
     // zone bands read the PLANT's clock instead (_nowFor / _plantNow: the one clock, OQ52).
     Timeline._rebuildNow = new Date();
     const desired = new Map<string, TimelineVisItem>();
+    // Non-working-time shading goes in FIRST: this pass's full diff must keep exactly what the pan path
+    // (_syncNonWorking) maintains, from the same single range state. Ungrouped background items.
+    {
+      const _pmT0nw = performance.now();
+      if (!Timeline._nwRange) {
+        const w = Timeline._tl ? Timeline._tl.getWindow() : null;
+        Timeline._nwRange = w
+          ? Timeline._nwRangeAround(w.start.getTime(), w.end.getTime())
+          : Timeline._nwRangeAround(Date.now() - 45 * Config.MS_DAY, Date.now() + 45 * Config.MS_DAY);
+      }
+      for (const item of Timeline._nonWorkingDesired(Timeline._nwRange)) desired.set(item.id, item);
+      PerfMonitor.record('Timeline.rebuild.nonworking', performance.now() - _pmT0nw);
+    }
     const itemIdsByTask: Record<string, string[]> = {};
     for (const t of scopedTasks) {
       const taskId = String(t.id);
@@ -1349,6 +1372,7 @@ export const Timeline = {
       Timeline._suppressEvents = false;
     }
     Timeline._itemIdsByTask = itemIdsByTask;
+    Timeline._nwIds = new Set([...desired.keys()].filter(id => id.startsWith('nonworking-')));
     PerfMonitor.record('Timeline.rebuild.dsFlush', performance.now() - _pmT0flush);
 
     // Re-sync selection with what still exists. Guard for pre-install rebuilds.
@@ -1519,6 +1543,81 @@ export const Timeline = {
       max: Store.visibilityHorizonEnd,
       min: computeTimelineMinBound({ dataMinMs, nowMs, maxMs }),
     });
+  },
+
+  // Non-working-time shading (W5). The visible range plus a margin of max(window, 7 days) each side.
+  _nwRangeAround(windowStartMs: number, windowEndMs: number): { fromMs: number; toMs: number } {
+    const margin = Math.max(windowEndMs - windowStartMs, 7 * Config.MS_DAY);
+    return { fromMs: windowStartMs - margin, toMs: windowEndMs + margin };
+  },
+
+  // PURE: the 'nonworking-*' items for a range, from the selected plant's PLANT pattern only (not the
+  // per-line hours). Ungrouped background items (vis's reserved BackgroundGroup spans every row and
+  // _healBackgroundBands skips ungrouped items, like day-gridline-*); kind:'zone' keeps the minimap's
+  // _items subscriber out. A span starting at local midnight is 'nonworking-<dayKey>'; the one that starts
+  // at an off-shift tail (window end) is 'nonworking-<dayKey>-t', so a day's head and tail never collide.
+  _nonWorkingDesired(range: { fromMs: number; toMs: number }): TimelineVisItem[] {
+    const plant = Store.selectedPlant;
+    if (!plant) return [];
+    Store.ensurePlant(plant);
+    const coarse = range.toMs - range.fromMs > 90 * Config.MS_DAY;
+    const { spans, truncated } = buildNonWorkingSpans(
+      range.fromMs, range.toMs,
+      (day: Date) => Calendar.plantWorkWindow(plant, day),
+      { closedDaysOnly: coarse, cap: 600 });
+    if (truncated) {
+      if (!Timeline._nwTruncWarned) {
+        Timeline._nwTruncWarned = true;
+        ErrorLog.warn('timeline', 'Non-working shading truncated at 600 spans; the far end of the range is not shaded');
+      }
+    } else Timeline._nwTruncWarned = false;
+    return spans.map(span => {
+      const s = span.start;
+      const atMidnight = s.getHours() === 0 && s.getMinutes() === 0 && s.getSeconds() === 0 && s.getMilliseconds() === 0;
+      return {
+        id:        `nonworking-${Util.dayKey(s)}${atMidnight ? '' : '-t'}`,
+        kind:      'zone' as const,
+        start:     span.start,
+        end:       span.end,
+        type:      'background' as const,
+        className: 'nonworking',
+        editable:  false,
+      };
+    });
+  },
+
+  // Pan path: re-diff only the 'nonworking-*' ids when the window nears the edge of the covered range
+  // (hysteresis: a window still inside [from + margin/2, to - margin/2] changes nothing). One batched
+  // remove/update/add inside _suppressEvents; only changed/new/stale ids are written.
+  _syncNonWorking(force = false): void {
+    if (!Timeline._tl || !Timeline._items) return;
+    const _pmT0 = performance.now();
+    const w = Timeline._tl.getWindow();
+    const ws = w.start.getTime(), we = w.end.getTime();
+    const margin = Math.max(we - ws, 7 * Config.MS_DAY);
+    const cur = Timeline._nwRange;
+    if (!force && cur && ws >= cur.fromMs + margin / 2 && we <= cur.toMs - margin / 2) return;
+    Timeline._nwRange = { fromMs: ws - margin, toMs: we + margin };
+    const desired = new Map<string, TimelineVisItem>();
+    for (const item of Timeline._nonWorkingDesired(Timeline._nwRange)) desired.set(item.id, item);
+    const toRemove: string[] = [], toUpdate: TimelineVisItem[] = [], toAdd: TimelineVisItem[] = [];
+    for (const id of Timeline._nwIds) if (!desired.has(id)) toRemove.push(id);
+    for (const [id, item] of desired) {
+      if (!Timeline._nwIds.has(id)) { toAdd.push(item); continue; }
+      const old = Timeline._items.get(id) as TimelineVisItem | null;
+      if (!old) toAdd.push(item);
+      else if (+old.start !== +item.start || +old.end !== +item.end) toUpdate.push(item);
+    }
+    Timeline._suppressEvents = true;
+    try {
+      if (toRemove.length) Timeline._items.remove(toRemove);
+      if (toUpdate.length) Timeline._items.update(toUpdate);
+      if (toAdd.length)    Timeline._items.add(toAdd);
+    } finally {
+      Timeline._suppressEvents = false;
+    }
+    Timeline._nwIds = new Set(desired.keys());
+    PerfMonitor.record('Timeline.nonworking.sync', performance.now() - _pmT0);
   },
 
   // Undebounced core of the rangechanged refresh: resync the DataView culling
@@ -2004,6 +2103,13 @@ export const TimelineNav = {
           return item != null && item.kind === 'zone';
         });
         if (allZone) return;
+      } else {
+        // A remove event's items are already gone from the set, so the lookup above cannot classify them;
+        // vis-data's remove payload carries the removed records as `oldData` (verified in the 7.7.3
+        // bundle). The non-working shading's pan re-diff removes zone-only batches — skip those; when
+        // oldData is absent, fall through to the repaint.
+        const old = (props as { oldData?: Array<TimelineVisItem | null | undefined> } | null)?.oldData;
+        if (Array.isArray(old) && old.length > 0 && old.every(item => item != null && item.kind === 'zone')) return;
       }
       TimelineNav._dirty = true;
       TimelineNav._scheduleFrame();

@@ -2319,3 +2319,148 @@ test('a drag asks the engine for the FINISH (third argument is the dropped right
     fx.restore(); restoreClock();
   }
 });
+
+/* ---- W5: non-working-time shading ---- */
+const NW_PLANT = 'NW-PLANT';
+function nwWithPlant(fn) {
+  const priorPlant = Store.selectedPlant;
+  Store.setSelectedPlant(NW_PLANT, 'unit-test');
+  Store.ensurePlant(NW_PLANT);
+  // Mon-Fri 06:00-18:00, weekend closed.
+  for (let d = 0; d < 7; d++) Store.setPlantWorkHours(NW_PLANT, d, (d === 0 || d === 6) ? null : [6, 18], 'unit-test');
+  const prior = { range: Timeline._nwRange, ids: Timeline._nwIds, items: Timeline._items, tl: Timeline._tl };
+  try { return fn(); } finally {
+    Timeline._nwRange = prior.range; Timeline._nwIds = prior.ids; Timeline._items = prior.items; Timeline._tl = prior.tl;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+}
+function nwFakeItems() {
+  const records = new Map();
+  const calls = { add: [], update: [], remove: [] };
+  return {
+    records, calls,
+    getIds: () => [...records.keys()],
+    get: id => records.get(String(id)) ?? null,
+    add: items => { calls.add.push(items.map(i => i.id)); for (const i of items) records.set(i.id, i); },
+    update: items => { calls.update.push(items.map(i => i.id)); for (const i of items) records.set(i.id, i); },
+    remove: ids => { calls.remove.push([...ids]); for (const id of ids) records.delete(String(id)); },
+  };
+}
+const NW_DAY = 24 * 3600 * 1000;
+
+test('Timeline._nonWorkingDesired: ungrouped zone background items, class nonworking, ids by local day key of the span start', () => nwWithPlant(() => {
+  const from = new Date(2026, 7, 3).getTime(); // Mon 2026-08-03
+  const items = Timeline._nonWorkingDesired({ fromMs: from, toMs: from + 8 * NW_DAY });
+  assert.ok(items.length > 0);
+  for (const it of items) {
+    assert.equal('group' in it, false, 'no group (ungrouped BackgroundGroup item)');
+    assert.equal(it.kind, 'zone');
+    assert.equal(it.type, 'background');
+    assert.equal(it.className, 'nonworking');
+    assert.equal(it.editable, false);
+    const midnight = it.start.getHours() === 0 && it.start.getMinutes() === 0;
+    assert.equal(it.id, `nonworking-${Util.dayKey(it.start)}${midnight ? '' : '-t'}`);
+  }
+  assert.equal(new Set(items.map(i => i.id)).size, items.length, 'ids are unique');
+  const weekend = items.find(i => i.start.getTime() === new Date(2026, 7, 7, 18).getTime());
+  assert.equal(weekend.id, 'nonworking-2026-08-07-t');
+  assert.equal(weekend.end.getTime(), new Date(2026, 7, 10, 6).getTime(), 'Fri evening merges through the weekend to Monday 06:00');
+}));
+
+test('Timeline._nonWorkingDesired: a range past 90 days is coarse (closed days only)', () => nwWithPlant(() => {
+  const from = new Date(2026, 7, 3).getTime();
+  const items = Timeline._nonWorkingDesired({ fromMs: from, toMs: from + 100 * NW_DAY });
+  assert.ok(items.length > 0);
+  for (const it of items) assert.equal(it.start.getHours(), 0, 'only whole-day spans in coarse mode');
+}));
+
+test('Timeline._syncNonWorking: a pan inside the hysteresis band makes no writes', () => nwWithPlant(() => {
+  const fake = nwFakeItems(); Timeline._items = fake;
+  const ws = new Date(2026, 7, 10).getTime();
+  let win = { start: new Date(ws), end: new Date(ws + 2 * NW_DAY) };
+  Timeline._tl = { getWindow: () => win };
+  Timeline._nwRange = null; Timeline._nwIds = new Set();
+  Timeline._syncNonWorking(true);
+  assert.ok(fake.records.size > 0);
+  const w0 = fake.calls.add.length + fake.calls.update.length + fake.calls.remove.length;
+  win = { start: new Date(ws + 1 * NW_DAY), end: new Date(ws + 3 * NW_DAY) }; // margin is 7d: well inside
+  Timeline._syncNonWorking(false);
+  assert.equal(fake.calls.add.length + fake.calls.update.length + fake.calls.remove.length, w0, 'no writes');
+}));
+
+test('Timeline._syncNonWorking: a pan past the band adds/removes edge items only and keeps interior ids', () => nwWithPlant(() => {
+  const fake = nwFakeItems(); Timeline._items = fake;
+  const ws = new Date(2026, 7, 10).getTime();
+  let win = { start: new Date(ws), end: new Date(ws + 2 * NW_DAY) };
+  Timeline._tl = { getWindow: () => win };
+  Timeline._nwRange = null; Timeline._nwIds = new Set();
+  Timeline._syncNonWorking(true);
+  const before = new Set(fake.records.keys());
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  win = { start: new Date(ws + 5 * NW_DAY), end: new Date(ws + 7 * NW_DAY) }; // outside the hysteresis band
+  Timeline._syncNonWorking(false);
+  const addedIds = fake.calls.add.flat(), removedIds = fake.calls.remove.flat();
+  assert.ok(addedIds.length > 0 && removedIds.length > 0, 'edges moved');
+  const interior = [...before].filter(id => !removedIds.includes(id));
+  assert.ok(interior.length > 0, 'interior ids survive');
+  for (const id of interior) assert.ok(fake.records.has(id));
+  assert.ok(fake.calls.update.flat().length <= 2, 'only the cover-edge spans are rewritten, not every interior item');
+  assert.deepEqual([...Timeline._nwIds].sort(), [...fake.records.keys()].sort(), '_nwIds tracks exactly the live nonworking items');
+}));
+
+test('Timeline._rebuildPass keeps the nonworking items _syncNonWorking added (no delete-then-re-add)', () => nwWithPlant(() => {
+  const fake = nwFakeItems(); Timeline._items = fake;
+  const groups = { ids: [], getIds() { return this.ids; }, add() {}, update() {}, remove() {} };
+  const priorGroups = Timeline._groups, priorRender = Timeline._renderEmptyOverlay, priorFit = Timeline._fitHeight, priorRefresh = Timeline._refreshViewNow;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const ws = new Date(2026, 7, 10).getTime();
+  const win = { start: new Date(ws), end: new Date(ws + 2 * NW_DAY) };
+  Timeline._tl = { getWindow: () => win, setSelection() {}, setWindow() {}, setOptions() {}, redraw() {}, addCustomTime() {}, removeCustomTime() {}, setCustomTime() {}, setCustomTimeMarker() {} };
+  Timeline._groups = groups; Timeline._renderEmptyOverlay = () => {}; Timeline._fitHeight = () => {}; Timeline._refreshViewNow = () => {};
+  Timeline._nwRange = null; Timeline._nwIds = new Set();
+  Store.setTasks([], 'unit-test');
+  const priorRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 0;
+  const priorNimbus = globalThis.NIMBUS;
+  globalThis.NIMBUS = priorNimbus ?? {};
+  try {
+    Timeline._syncNonWorking(true);
+    const nwBefore = [...fake.records.keys()].filter(id => id.startsWith('nonworking-'));
+    assert.ok(nwBefore.length > 0);
+    fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+    Timeline._rebuildPass();
+    const removed = fake.calls.remove.flat();
+    for (const id of nwBefore) assert.ok(!removed.includes(id), `${id} not removed by the rebuild diff`);
+    assert.deepEqual([...fake.records.keys()].filter(id => id.startsWith('nonworking-')).sort(), [...nwBefore].sort());
+    assert.deepEqual([...Timeline._nwIds].sort(), [...nwBefore].sort());
+  } finally {
+    globalThis.requestAnimationFrame = priorRaf;
+    if (priorNimbus === undefined) delete globalThis.NIMBUS;
+    Timeline._groups = priorGroups; Timeline._renderEmptyOverlay = priorRender; Timeline._fitHeight = priorFit; Timeline._refreshViewNow = priorRefresh;
+    Store.setTasks(priorTasks, 'unit-test');
+  }
+}));
+
+test('the DataView filter still passes background items (the type === background exemption is intact)', () => {
+  const src = readFileSync(new URL('../../../frontend/scheduling/gantt.mts', import.meta.url), 'utf8');
+  assert.match(src, /filter:\s*\(item: TimelineVisItem\) => \{\s*if \(item\.type === 'background'\) return true;/);
+});
+
+test('TimelineNav items subscription: a remove event whose oldData is all zone items does not repaint; a non-zone remove does', () => {
+  const priorItems = Timeline._items, priorAttached = TimelineNav._itemsSubAttached, priorSched = TimelineNav._scheduleFrame, priorDirty = TimelineNav._dirty;
+  let cb = null, frames = 0;
+  Timeline._items = { on: (_ev, fn) => { cb = fn; }, get: () => null };
+  TimelineNav._itemsSubAttached = false;
+  TimelineNav._scheduleFrame = () => { frames++; };
+  try {
+    TimelineNav._wireItemsSubscription();
+    cb('remove', { items: ['nonworking-2026-08-08'], oldData: [{ id: 'nonworking-2026-08-08', kind: 'zone' }] });
+    assert.equal(frames, 0, 'zone-only remove skipped');
+    cb('remove', { items: ['a', 'b'], oldData: [{ id: 'a', kind: 'zone' }, { id: 'b', kind: 'order' }] });
+    assert.equal(frames, 1, 'a mixed remove repaints');
+    cb('remove', { items: ['c'] });
+    assert.equal(frames, 2, 'no oldData falls back to repainting');
+  } finally {
+    Timeline._items = priorItems; TimelineNav._itemsSubAttached = priorAttached; TimelineNav._scheduleFrame = priorSched; TimelineNav._dirty = priorDirty;
+  }
+});
