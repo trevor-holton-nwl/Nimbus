@@ -1682,6 +1682,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <nav class="admin-subtabs plant-inner-tabs" role="tablist">
         <button class="sub-subtab active" data-plant-tab="general" role="tab"
                 data-i18n="tab.general">General</button>
+        <button class="sub-subtab" data-plant-tab="calendar" role="tab"
+                data-i18n="tab.calendar">Calendar</button>
         <button class="sub-subtab" data-plant-tab="optimization" role="tab"
                 data-i18n="tab.optimization">Optimization</button>
         <button class="sub-subtab" data-plant-tab="settings" role="tab"
@@ -1691,23 +1693,14 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <!-- Inner pane: General -->
       <div id="plant-tab-general" class="cal-scroll" style="flex:1;overflow-y:auto;">
         <div class="cal-container">
-          <div class="plant-two-col">
-            <div class="panel" id="plant-hours-panel">
-              <header class="panel-head">
-                <h3 data-i18n="ui.plant_working_hours">Plant Working Hours</h3>
-                <button id="plant-edit-calendar-btn" class="btn btn-ghost sm" data-i18n="btn.edit_calendar">Edit Calendar</button>
-              </header>
-              <div class="panel-body panel-body-hours" id="plant-hours-body"></div>
-            </div>
-            <div class="panel" id="plant-blackouts-panel">
-              <header class="panel-head">
-                <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
-                <button id="plant-add-block-btn" class="btn btn-ghost sm" data-i18n="btn.add_block">+ Add</button>
-              </header>
-              <div class="panel-body panel-body-flush">
-                <div id="plant-blocks-stats"></div>
-                <div id="plant-blocks-list" class="blocks-list"></div>
-              </div>
+          <div class="panel" id="plant-blackouts-panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
+              <button id="plant-add-block-btn" class="btn btn-ghost sm" data-i18n="btn.add_block">+ Add</button>
+            </header>
+            <div class="panel-body panel-body-flush">
+              <div id="plant-blocks-stats"></div>
+              <div id="plant-blocks-list" class="blocks-list"></div>
             </div>
           </div>
           <div class="panel">
@@ -1724,8 +1717,39 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         </div>
       </div>
 
+      <!-- Inner pane: Calendar (default week + dated periods) -->
+      <div id="plant-tab-calendar" class="cal-scroll" hidden style="flex:1;overflow-y:auto;">
+        <div class="cal-container">
+          <div class="plant-cal-grid">
+            <div class="panel" id="plant-hours-panel">
+              <header class="panel-head">
+                <h3 data-i18n="ui.default_week">Default week</h3>
+                <button id="plant-edit-calendar-btn" class="btn btn-ghost sm" data-i18n="btn.edit_calendar">Edit Calendar</button>
+              </header>
+              <div class="panel-body panel-body-hours" id="plant-hours-body"></div>
+            </div>
+            <div class="panel" id="plant-periods-timeline-panel">
+              <header class="panel-head">
+                <h3 data-i18n="ui.period_timeline">Period timeline</h3>
+                <span class="panel-hint" data-i18n="ui.period_timeline_hint">Dated overrides of the default week</span>
+              </header>
+              <div class="panel-body" id="plant-periods-timeline"></div>
+            </div>
+          </div>
+          <div class="panel" id="plant-periods-panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.calendar_periods">Calendar periods</h3>
+              <span class="panel-hint" id="plant-periods-count"></span>
+              <button id="plant-add-period-btn" class="btn btn-ghost sm" data-i18n="btn.add_period">+ Add period</button>
+            </header>
+            <div class="panel-body panel-body-flush" id="plant-periods-list"></div>
+          </div>
+          <p class="panel-hint" data-i18n="ui.period_blackout_pointer">Holidays and one-off shutdowns are blackouts. Manage them under Plant Blackouts on the General tab.</p>
+        </div>
+      </div>
+
       <!-- Inner pane: Optimization -->
-      <div id="plant-tab-optimization" class="cal-scroll" hidden style="flex:1;overflow-y:auto;">
+      <div id="plant-tab-optimization"class="cal-scroll" hidden style="flex:1;overflow-y:auto;">
         <div class="cal-container">
           <div class="panel" id="plant-opt-panel">
             <header class="panel-head">
@@ -2837,37 +2861,67 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <div class="opt-header">
       <div class="opt-header-icon">🗓️</div>
       <div class="opt-header-text">
-        <div class="opt-header-title">Edit Calendar</div>
+        <div class="opt-header-title" id="cal-edit-title" data-i18n="modal.edit_calendar">Edit Calendar</div>
         <div class="opt-header-sub">
           <span id="cal-edit-line-name">—</span>
           <span class="cal-edit-plant-tag" id="cal-edit-plant-name"></span>
         </div>
       </div>
-      <button class="opt-close" onclick="NIMBUS.EditCalendar.close()" aria-label="Close">✕</button>
+      <button class="opt-close" onclick="NIMBUS.EditCalendar.close()" aria-label="Close" id="cal-edit-close-btn">✕</button>
     </div>
 
     <div class="cal-edit-body">
 
+      <!-- Period fields (period mode only) -->
+      <div class="cal-edit-section" id="cal-edit-period-fields" hidden>
+        <div class="form-row">
+          <label for="cal-period-name" data-i18n="ui.period_name">Name</label>
+          <input type="text" id="cal-period-name" class="input" maxlength="60" autocomplete="off"
+                 data-autofocus placeholder="Peak season, summer shutdown…" data-i18n-placeholder="ph.period_name">
+          <div class="field-error" id="cal-period-name-err" hidden></div>
+        </div>
+        <div class="form-row form-row-2">
+          <div>
+            <label for="cal-period-from" data-i18n="ui.valid_from">Valid from</label>
+            <input type="text" id="cal-period-from" class="input" readonly>
+            <div class="field-error" id="cal-period-from-err" hidden></div>
+          </div>
+          <div>
+            <label for="cal-period-to" data-i18n="ui.valid_to">Valid to</label>
+            <input type="text" id="cal-period-to" class="input" readonly>
+            <div class="field-error" id="cal-period-to-err" hidden></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="chk-inline">
+            <input type="checkbox" id="cal-period-noend">
+            <span data-i18n="ui.no_end_date">No end date</span>
+          </label>
+        </div>
+        <div class="field-error" id="cal-period-overlap-err" role="alert" hidden></div>
+        <div class="field-warn" id="cal-period-closed-warn" role="status" hidden></div>
+      </div>
+
       <!-- Quick Presets -->
       <div class="cal-edit-section">
-        <div class="opt-section-label">Quick Presets</div>
+        <div class="opt-section-label" data-i18n="ui.quick_presets">Quick Presets</div>
         <div class="opt-presets">
           <button class="opt-preset-chip cal-preset-chip" data-preset="mf"
-                  onclick="NIMBUS.EditCalendar.applyPreset('mf')">Weekdays (M–F)</button>
+                  onclick="NIMBUS.EditCalendar.applyPreset('mf')" data-i18n="btn.preset_weekdays">Weekdays (M–F)</button>
           <button class="opt-preset-chip cal-preset-chip" data-preset="ms"
-                  onclick="NIMBUS.EditCalendar.applyPreset('ms')">Mon–Sat</button>
+                  onclick="NIMBUS.EditCalendar.applyPreset('ms')" data-i18n="btn.preset_mon_sat">Mon–Sat</button>
           <button class="opt-preset-chip cal-preset-chip" data-preset="all"
-                  onclick="NIMBUS.EditCalendar.applyPreset('all')">All 7 Days</button>
+                  onclick="NIMBUS.EditCalendar.applyPreset('all')" data-i18n="btn.preset_all_days">All 7 Days</button>
         </div>
       </div>
 
       <!-- Weekly Schedule -->
       <div class="cal-edit-section">
-        <div class="opt-section-label">Weekly Schedule</div>
+        <div class="opt-section-label" data-i18n="ui.weekly_schedule">Weekly Schedule</div>
         <div class="cal-day-rows">
 
           <div class="cal-day-row" id="cal-edit-row-0">
-            <span class="cal-day-label">Sun</span>
+            <span class="cal-day-label" data-i18n="day.sun">Sun</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-0"
                      onchange="NIMBUS.EditCalendar.onToggle(0,this.checked)">
@@ -2883,7 +2937,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
           <div class="cal-day-row" id="cal-edit-row-1">
-            <span class="cal-day-label">Mon</span>
+            <span class="cal-day-label" data-i18n="day.mon">Mon</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-1"
                      onchange="NIMBUS.EditCalendar.onToggle(1,this.checked)">
@@ -2899,7 +2953,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
           <div class="cal-day-row" id="cal-edit-row-2">
-            <span class="cal-day-label">Tue</span>
+            <span class="cal-day-label" data-i18n="day.tue">Tue</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-2"
                      onchange="NIMBUS.EditCalendar.onToggle(2,this.checked)">
@@ -2915,7 +2969,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
           <div class="cal-day-row" id="cal-edit-row-3">
-            <span class="cal-day-label">Wed</span>
+            <span class="cal-day-label" data-i18n="day.wed">Wed</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-3"
                      onchange="NIMBUS.EditCalendar.onToggle(3,this.checked)">
@@ -2931,7 +2985,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
           <div class="cal-day-row" id="cal-edit-row-4">
-            <span class="cal-day-label">Thu</span>
+            <span class="cal-day-label" data-i18n="day.thu">Thu</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-4"
                      onchange="NIMBUS.EditCalendar.onToggle(4,this.checked)">
@@ -2947,7 +3001,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
           <div class="cal-day-row" id="cal-edit-row-5">
-            <span class="cal-day-label">Fri</span>
+            <span class="cal-day-label" data-i18n="day.fri">Fri</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-5"
                      onchange="NIMBUS.EditCalendar.onToggle(5,this.checked)">
@@ -2963,7 +3017,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
           <div class="cal-day-row" id="cal-edit-row-6">
-            <span class="cal-day-label">Sat</span>
+            <span class="cal-day-label" data-i18n="day.sat">Sat</span>
             <label class="cal-day-toggle-wrap">
               <input type="checkbox" id="cal-edit-toggle-6"
                      onchange="NIMBUS.EditCalendar.onToggle(6,this.checked)">
@@ -2979,17 +3033,18 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
 
         </div>
+        <p class="panel-hint cal-midnight-hint" data-i18n="ui.cal_midnight_hint">An end time of 00:00 means midnight (24:00), the end of that day.</p>
         <button class="cal-copy-plant-btn" onclick="NIMBUS.EditCalendar.copyFromPlant()">
-          ↩ Copy from Plant schedule
+          <span aria-hidden="true">↩</span> <span data-i18n="btn.copy_from_plant">Copy from Plant schedule</span>
         </button>
       </div>
 
     </div><!-- /cal-edit-body -->
 
     <div class="opt-footer">
-      <button class="btn btn-ghost" onclick="NIMBUS.EditCalendar.close()">Cancel</button>
-      <button class="btn opt-run-btn" onclick="NIMBUS.EditCalendar.save()">
-        <span class="opt-run-icon">🗓️</span>Save Changes
+      <button class="btn btn-ghost" onclick="NIMBUS.EditCalendar.close()" data-i18n="btn.cancel">Cancel</button>
+      <button class="btn opt-run-btn" id="cal-edit-save-btn" onclick="NIMBUS.EditCalendar.save()">
+        <span class="opt-run-icon">🗓️</span><span id="cal-edit-save-label" data-i18n="btn.save_changes">Save Changes</span>
       </button>
     </div>
 

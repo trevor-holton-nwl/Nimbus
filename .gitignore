@@ -26,6 +26,7 @@ frontend/scheduling/persistence.mjs
 frontend/calendar/calendar-sync.mjs
 frontend/security/session.mjs
 frontend/scheduling/gantt.mjs
+frontend/scheduling/nonworking-spans.mjs
 frontend/scheduling/orders.mjs
 frontend/optimization/optimize-ui.mjs
 frontend/optimization/optimizer-worker-client.mjs
@@ -47,6 +48,8 @@ frontend/master-data/admin-tables.mjs
 frontend/shell/tab-resolvers.mjs
 frontend/setup/setup-admin.mjs
 frontend/calendar/calendar-admin.mjs
+frontend/calendar/calendar-periods.mjs
+frontend/calendar/calendar-periods-ui.mjs
 frontend/master-data/admin-ui.mjs
 frontend/priority-lists/mapping.mjs
 frontend/labor/labor-planning.mjs

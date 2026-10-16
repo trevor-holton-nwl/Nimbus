@@ -28,6 +28,7 @@ import { SetupAdmin } from '../setup/setup-admin.mjs';
 //     ProdLines (line-scoped blackout blocks).
 import { CalendarUI } from '../calendar/calendar-admin.mjs';
 import { EditCalendar } from '../calendar/edit-calendar.mjs';
+import { CalendarPeriodsUI } from '../calendar/calendar-periods-ui.mjs';
 //   - `PriorityListMapping` is used only by Plant's priority-list upload flow.
 import { PriorityListMapping } from '../priority-lists/mapping.mjs';
 //   - the injected "am I the visible tab?" getter seam Plant needs (see
@@ -245,6 +246,8 @@ export const Plant = {
       if (Store.selectedPlant) EditCalendar.openPlant(Store.selectedPlant);
     });
     document.getElementById('plant-roster-toggle')?.addEventListener('click', () => Plant.toggleRosterList());
+    // The Calendar inner tab's periods list, timeline strip and "+ Add period" button.
+    CalendarPeriodsUI.init();
     document.getElementById('modal-block-save-btn')?.addEventListener('click', () => CalendarUI.saveBlockFromModal());
     document.getElementById('modal-plant-block-save-btn')?.addEventListener('click', () => Plant.savePlantBlockFromModal());
     document.getElementById('modal-lines-block-save-btn')?.addEventListener('click', () => ProdLines.saveBlockFromModal());
@@ -288,6 +291,7 @@ export const Plant = {
     Plant.gotoTab(Plant._currentPlantTab || 'general');
     Plant._renderHours();
     Plant._renderBlocks();
+    CalendarPeriodsUI.render();
     Plant._renderRoster();
   },
 
@@ -355,17 +359,18 @@ export const Plant = {
   },
 
   gotoTab(tab: string | undefined): void {
-    if (!['general', 'optimization', 'settings'].includes(tab!)) return;
+    if (!['general', 'calendar', 'optimization', 'settings'].includes(tab!)) return;
     const t = tab!;
     Plant._currentPlantTab = t;
     document.querySelectorAll<HTMLElement>('.plant-inner-tabs .sub-subtab').forEach(b => {
       b.classList.toggle('active', b.dataset.plantTab === t);
     });
-    ['general', 'optimization', 'settings'].forEach(tt => {
+    ['general', 'calendar', 'optimization', 'settings'].forEach(tt => {
       const el = document.getElementById(`plant-tab-${tt}`);
       if (el) el.hidden = (tt !== t);
     });
-    if (t === 'settings') Plant._renderSettingsPane();
+    if (t === 'calendar') CalendarPeriodsUI.render();
+    else if (t === 'settings') Plant._renderSettingsPane();
     else if (t === 'optimization') Plant._fetchAndRenderOptimization(Store.selectedPlant);
   },
 

@@ -1288,6 +1288,19 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   border-left-color: var(--line-strong) !important;
 }
 
+/* Non-working-time shading — ungrouped full-height background items
+   ('nonworking-<dayKey>' from Timeline._nonWorkingDesired): closed days and
+   off-shift hours of the plant pattern. Far quieter than .past-zone
+   (rgba(150,150,160,.42)). No position/top/height: vis owns the geometry. */
+.vis-item.nonworking {
+  background: rgba(93, 113, 134, 0.10) !important;
+  border: none !important;
+  pointer-events: none !important;
+}
+body.dark .vis-item.nonworking {
+  background: rgba(144, 162, 184, 0.08) !important;
+}
+
 /* Plant visibility-horizon marker (C1, 2026-08-21) — a thin labeled vertical
    line at the exact instant orders stop appearing (Store.visibilityHorizonEnd
    / Timeline.rebuild), deliberately quieter than the frozen-/alert-horizon
@@ -4882,6 +4895,161 @@ body.dark .cw-active-card {
 .settings-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }
 .settings-content-scroll { flex: 1; min-height: 0; overflow: auto; }
 .settings-content-container { padding-top: 16px; }
+
+/* =============================================================================
+   PLANT > CALENDAR TAB — default week, period timeline strip, periods list,
+   and the period fields inside the Edit Calendar modal. Tokens only: dark mode
+   follows the body.dark token overrides, no per-rule dark variants except the
+   one contrast pairing noted on .period-seg-active.
+   ============================================================================= */
+/* Panels are direct children of .cal-container on the General and Calendar tabs
+   (the General tab's old two-column wrapper, which carried the gap, is gone). */
+#plant-tab-general .cal-container > .panel,
+#plant-tab-calendar .cal-container > .panel { margin-bottom: 18px; }
+.plant-cal-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) 1fr;
+  gap: 18px;
+  margin-bottom: 18px;
+  align-items: start;
+}
+.plant-cal-grid > .panel { min-width: 0; }
+@media (max-width: 780px) {
+  .plant-cal-grid { grid-template-columns: 1fr; }
+}
+/* The default-week pills share a 300-380px column here, so let a long
+   "6am–2pm" range wrap at the dash instead of overflowing its cell. */
+#plant-tab-calendar #plant-hours-body .lhp-time {
+  white-space: normal; text-align: center; font-size: 11px; line-height: 1.25;
+}
+#plant-tab-calendar .plant-no-sel { padding: 16px 18px; margin: 0; font-size: 12.5px; color: var(--fg-faint); }
+#plant-tab-calendar > .cal-container > p.panel-hint { margin: 0; }
+
+/* Status badge for an in-force period / a finished one (info reuses .badge-info). */
+.badge-ok { background: var(--ok-soft); color: var(--ok); }
+.badge-muted { background: var(--bg-strong); color: var(--fg-mute); }
+
+/* Periods list. Not .block-row: its .reason is flex-shrink:0 and would spill. */
+.period-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.2fr) auto minmax(210px, 1fr) minmax(0, 2fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  transition: background var(--t-fast);
+}
+.period-row:last-child { border-bottom: none; }
+.period-row:hover { background: var(--bg-subtle); }
+.period-row-past { opacity: 0.62; }
+.period-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.period-range,
+.period-summary {
+  font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.period-row .line-badge { justify-self: start; }
+@media (max-width: 780px) {
+  /* Two lines: name · badge · actions, then the range and the weekly summary. */
+  .period-row {
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    row-gap: 4px;
+  }
+  .period-name { grid-column: 1 / 3; grid-row: 1; }
+  .period-row .line-badge { grid-column: 3; grid-row: 1; }
+  .period-edit { grid-column: 4; grid-row: 1; }
+  .period-del { grid-column: 5; grid-row: 1; }
+  .period-range { grid-column: 1; grid-row: 2; }
+  .period-summary { grid-column: 2 / -1; grid-row: 2; }
+}
+@media (max-width: 560px) {
+  /* Phones: three lines (name + actions, badge + range, weekly summary). */
+  .period-name { grid-column: 1 / 4; }
+  .period-row .line-badge { grid-column: 1; grid-row: 2; }
+  .period-range { grid-column: 2 / -1; grid-row: 2; }
+  .period-summary { grid-column: 1 / -1; grid-row: 3; }
+}
+
+/* Period timeline strip. Container queries (not media queries): the strip sits in
+   a column whose width depends on the Calendar tab's own two-column grid. */
+.period-strip { container-type: inline-size; }
+.period-ticks {
+  position: relative; height: 16px; overflow: hidden;
+  font-family: var(--font-mono); font-size: 10px; line-height: 16px; color: var(--fg-faint);
+}
+.period-tick {
+  position: absolute; top: 0; padding-left: 3px;
+  border-left: 1px solid var(--line); white-space: nowrap;
+}
+@container (max-width: 599px) {
+  .period-tick:nth-child(even) { display: none; }
+}
+@container (max-width: 420px) {
+  .period-tick:not(:nth-child(3n + 1)) { display: none; }
+}
+.period-track {
+  position: relative; height: 34px; overflow: hidden;
+  background: var(--bg-subtle);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.period-seg {
+  position: absolute; top: 4px; bottom: 4px; min-width: 6px;
+  display: flex; align-items: center;
+  padding: 0 6px;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  font: inherit; font-size: 11px; font-weight: 600; text-align: left;
+  cursor: pointer; overflow: hidden; z-index: 1;
+}
+.period-seg-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.period-seg:hover { border-color: var(--accent-hot); }
+.period-seg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.period-seg-active { background: var(--accent); border-color: var(--accent); color: var(--primary-fg); }
+.period-seg-upcoming { background: var(--info-soft); border-color: var(--info); color: var(--fg); }
+.period-seg-past { background: var(--bg-strong); border-color: var(--line); color: var(--fg-faint); }
+/* The dark accent is a light blue: white text on it is too faint, so use the page navy. */
+body.dark .period-seg-active { color: var(--bg); }
+/* Open-ended: runs to the right edge with a trailing fade and an arrow. */
+.period-seg-open {
+  padding-right: 20px;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), rgba(0, 0, 0, 0.4));
+  mask-image: linear-gradient(to right, #000 calc(100% - 40px), rgba(0, 0, 0, 0.4));
+}
+.period-seg-open::after { content: '→'; position: absolute; right: 6px; font-weight: 700; }
+.period-today {
+  position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+  background: var(--accent); pointer-events: none; z-index: 2;
+}
+.period-today-row {
+  position: relative; height: 18px; margin-top: 4px;
+  font-family: var(--font-mono); font-size: 10px; line-height: 18px; color: var(--fg-mute);
+}
+.period-today-tag { position: absolute; top: 0; transform: translateX(-50%); color: var(--accent); font-weight: 700; white-space: nowrap; }
+.period-track-cap { position: absolute; right: 0; top: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Inline field validation (period editor). */
+.field-error { color: var(--err); font-size: 11px; margin-top: 4px; }
+.field-warn { color: var(--warn); font-size: 11px; margin-top: 4px; }
+.input.is-invalid { border-color: var(--err); }
+.input.is-invalid:focus { box-shadow: 0 0 0 3px var(--err-soft); }
+.chk-inline {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 500; color: var(--fg); cursor: pointer;
+  text-transform: none; letter-spacing: normal;
+}
+.form-row label.chk-inline { display: inline-flex; margin-bottom: 0; text-transform: none; letter-spacing: normal; font-size: 12px; font-weight: 500; color: var(--fg); }
+#cal-edit-period-fields .form-row { margin-bottom: 0; }
+#cal-edit-period-fields .form-row-2 > div { min-width: 0; }
+#cal-edit-period-fields .form-row-2 label { display: block; font-size: 11px; font-weight: 600; color: var(--fg-mute); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+#cal-edit-period-fields .form-row-2 input { width: 100%; }
+#cal-edit-period-fields[hidden] { display: none; }
+.cal-midnight-hint { margin: 0; }
+/* "18h · to midnight" needs more than the old 52px badge column; it wraps rather than clipping. */
+.cal-day-row { grid-template-columns: 44px 36px minmax(0, 1fr) 84px; }
+.cal-day-badge-hrs { white-space: normal; line-height: 1.25; overflow-wrap: anywhere; }
+@container (max-width: 460px) {
+  .cal-day-row { grid-template-columns: 44px 36px minmax(0, 1fr); }
+}
 
 /* =============================================================================
    MASTER DATA > MATERIAL / MATERIAL PLANT — plant-scoped AG Grid sub-tabs

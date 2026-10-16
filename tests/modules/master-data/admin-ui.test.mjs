@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { Plant, ProdLines, MasterData, WorkCenters } from '../../../frontend/master-data/admin-ui.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
+import { CalendarPeriodsUI } from '../../../frontend/calendar/calendar-periods-ui.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Modal, Toast, Util } from '../../../frontend/platform/foundation.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
@@ -1399,4 +1400,64 @@ test('WorkCenters.refresh keeps an edit typed while the list fetch is pending an
     assert.ok(puts.every((p) => p.description === 'typed during fetch'), `no stale value is ever PUT: ${JSON.stringify(puts)}`);
     assert.deepEqual(WorkCenters._rows.map((r) => r.sap_workcenter), ['WC-1', 'WC-2'], 'the list itself still refreshed');
   });
+});
+
+test('Plant.gotoTab("calendar") shows only the Calendar pane and renders the periods; an unknown tab is ignored', () => {
+  const priorDocument = globalThis.document;
+  const priorTab = Plant._currentPlantTab;
+  const priorRender = CalendarPeriodsUI.render;
+  const panes = {};
+  for (const t of ['general', 'calendar', 'optimization', 'settings']) panes[`plant-tab-${t}`] = { hidden: t !== 'general' };
+  const tabBtn = (t) => ({ dataset: { plantTab: t }, active: false, classList: { toggle(_c, on) { this.owner.active = on; } } });
+  const btns = ['general', 'calendar', 'optimization', 'settings'].map(tabBtn);
+  btns.forEach(b => { b.classList.owner = b; });
+  let rendered = 0;
+  CalendarPeriodsUI.render = () => { rendered += 1; };
+  globalThis.document = {
+    getElementById: id => panes[id] ?? null,
+    querySelector: () => null,
+    querySelectorAll: sel => (sel === '.plant-inner-tabs .sub-subtab' ? btns : []),
+  };
+  try {
+    Plant.gotoTab('calendar');
+    assert.equal(Plant._currentPlantTab, 'calendar');
+    assert.deepEqual(Object.fromEntries(Object.entries(panes).map(([k, v]) => [k, v.hidden])), {
+      'plant-tab-general': true, 'plant-tab-calendar': false, 'plant-tab-optimization': true, 'plant-tab-settings': true,
+    });
+    assert.deepEqual(btns.map(b => b.active), [false, true, false, false]);
+    assert.equal(rendered, 1, 'the Calendar tab renders its periods when opened');
+    Plant.gotoTab('nonsense');
+    assert.equal(Plant._currentPlantTab, 'calendar');
+    assert.equal(panes['plant-tab-calendar'].hidden, false);
+  } finally {
+    CalendarPeriodsUI.render = priorRender;
+    Plant._currentPlantTab = priorTab;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+  }
+});
+
+test('Plant.render() also renders the Calendar periods, and static wiring initialises them once', () => {
+  const priorDocument = globalThis.document;
+  const priorPlant = Store.selectedPlant;
+  const originalGoto = Plant.gotoTab;
+  const priorRender = CalendarPeriodsUI.render;
+  const priorInit = CalendarPeriodsUI.init;
+  const log = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Plant.gotoTab = () => {};
+  CalendarPeriodsUI.render = () => log.push('render');
+  CalendarPeriodsUI.init = () => log.push('init');
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    Plant.render();
+    assert.deepEqual(log, ['render']);
+    Plant._wireStaticHandlers();
+    assert.deepEqual(log, ['render', 'init']);
+  } finally {
+    CalendarPeriodsUI.render = priorRender;
+    CalendarPeriodsUI.init = priorInit;
+    Plant.gotoTab = originalGoto;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
 });
