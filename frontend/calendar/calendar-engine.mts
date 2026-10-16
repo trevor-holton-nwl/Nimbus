@@ -382,6 +382,7 @@ export const Calendar = {
       const periods = sourcePlantPeriods(plantForProbe);
       if (periods.length) {
         const core = globalThis.NimbusComputeCore!;
+        if (typeof core.periodBoundaryKeys !== 'function') throw new Error('compute-core-stale');
         const keys = core.periodBoundaryKeys(periods as any, core.dayKey(cur), core.dayKey(new Date(limitMs)));
         for (const key of keys) {
           const [y, m, d] = key.split('-').map(Number);

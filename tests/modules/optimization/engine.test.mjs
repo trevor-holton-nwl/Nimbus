@@ -5477,3 +5477,28 @@ describe('calendar periods: engine plant-hours readers', () => {
     assert.deepEqual(run(PERIODS), [120], 'the period that covers Thursday opens 08:00: two free hours');
   });
 });
+
+test('stale compute core: no periods never calls the core helper; periods without it throw compute-core-stale', async () => {
+  const { sourcePlantWorkHours, sourcePlantPeriods } = await import('../../../frontend/optimization/engine.mjs');
+  const core = globalThis.NimbusComputeCore;
+  const weekdays = Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, d >= 1 && d <= 5 ? [6, 18] : null]));
+  Store.ensurePlant('STALE-P');
+  for (let d = 0; d < 7; d++) Store.setPlantWorkHours('STALE-P', d, weekdays[d], 'unit-test');
+  Store.setLineSetting('STALE-L', { plant: 'STALE-P' }, 'unit-test');
+  Store.setCalendar('STALE-L', Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, [0, 24]])), 'unit-test');
+  try {
+    globalThis.NimbusComputeCore = { ...core, plantWorkHoursOn: undefined, periodBoundaryKeys: undefined };
+    const day = new Date('2026-10-22T12:00:00');
+    assert.equal(sourcePlantWorkHours('STALE-P', day), Store.plants['STALE-P'].workHours, 'default by reference, no core call');
+    assert.ok(Calendar.workWindow('STALE-L', day), 'workWindow still works with no periods');
+    assert.equal(sourcePlantPeriods('STALE-P'), sourcePlantPeriods('STALE-NONE'), 'one shared empty array');
+    assert.ok(Object.isFrozen(sourcePlantPeriods('STALE-P')));
+    Store.setPlantPeriods('STALE-P', [{ id: 'p', name: 'p', validFrom: '2026-10-22', validTo: null, workHours: weekdays }], 'unit-test');
+    assert.throws(() => sourcePlantWorkHours('STALE-P', day), /compute-core-stale/);
+    assert.throws(() => Calendar.workWindow('STALE-L', day), /compute-core-stale/);
+    assert.throws(() => Calendar.nextAvailable('STALE-L', day, 3600000), /compute-core-stale/);
+  } finally {
+    globalThis.NimbusComputeCore = core;
+    Store.setPlantPeriods('STALE-P', [], 'unit-test');
+  }
+});

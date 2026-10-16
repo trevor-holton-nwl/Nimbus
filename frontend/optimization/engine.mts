@@ -406,7 +406,7 @@ function setupAvailabilityMinutes(
   const windowOf = (day: Date): readonly [Date, Date] | null => {
     const lineWindow = globalThis.NimbusComputeCore!._dayWindow(lineHours, day);
     if (!lineWindow) return null;
-    const plantHours = plantEntry ? globalThis.NimbusComputeCore!.plantWorkHoursOn(plantEntry, day)! : setupDefaultWorkHours();
+    const plantHours = resolvePlantHoursOn(plantEntry, day) ?? setupDefaultWorkHours();
     const plantWindow = globalThis.NimbusComputeCore!._dayWindow(plantHours, day);
     if (!plantWindow) return null;
     const both = [
@@ -887,17 +887,31 @@ export function sourcePlantWorkHours(plant: string, date?: Date): WorkHours {
   if (!_candidateSnapshot) {
     Store.ensurePlant(plant);
     const entry = Store.plants[plant];
-    return date ? globalThis.NimbusComputeCore!.plantWorkHoursOn(entry, date)! : entry.workHours;
+    return date ? (resolvePlantHoursOn(entry, date) ?? entry.workHours) : entry.workHours;
   }
   const entry = _candidateSnapshot.plants[plant];
   if (!entry) return candidateDefaultWorkHours();
-  return date ? globalThis.NimbusComputeCore!.plantWorkHoursOn(entry, date)! : entry.workHours;
+  return date ? (resolvePlantHoursOn(entry, date) ?? candidateDefaultWorkHours()) : entry.workHours;
 }
+
+/** The plant's weekly hours on `date`. No periods: `entry.workHours` by reference with no compute-core call
+ *  (so a stale core cannot affect plants without periods). With periods the core's `plantWorkHoursOn` is
+ *  required; a missing one throws `compute-core-stale` (the optimizer worker client falls back to the main
+ *  thread) rather than silently using the default pattern. */
+export function resolvePlantHoursOn(entry: PlantCalendarEntry | undefined, date: Date): WorkHours | undefined {
+  if (!entry) return undefined;
+  if (!entry.periods?.length) return entry.workHours;
+  const core = globalThis.NimbusComputeCore;
+  if (!core || typeof core.plantWorkHoursOn !== 'function') throw new Error('compute-core-stale');
+  return core.plantWorkHoursOn(entry, date);
+}
+
+const NO_PERIODS: ReadonlyArray<PlantPeriod> = Object.freeze([]);
 
 /** The plant's dated calendar periods (live Store entry, or the detached candidate snapshot's); `[]` when none. */
 export function sourcePlantPeriods(plant: string): ReadonlyArray<PlantPeriod> {
   const entry = _candidateSnapshot ? _candidateSnapshot.plants[plant] : Store.plants[plant];
-  return entry?.periods ?? [];
+  return entry?.periods ?? NO_PERIODS;
 }
 
 function detachedCandidateResult(
