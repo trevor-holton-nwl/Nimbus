@@ -1401,7 +1401,7 @@ test('SandboxAdapter.init wires real buttons and promotes every affected plant',
     assert.deepEqual(flushCalls.map(call => call.plant).sort(), ['P1', 'P2'],
       'promote flushes every plant changed during the sandbox, even after selection switches');
     const p1Flush = flushCalls.find(call => call.plant === 'P1');
-    assert.deepEqual(p1Flush.removed, { line: ['old-line-p1'], plant: ['old-plant-p1'] },
+    assert.deepEqual(p1Flush.removed, { line: ['old-line-p1'], plant: ['old-plant-p1'], periods: [] },
       'promote flushes the exact line and plant blackout IDs deleted in the sandbox');
     assert.ok(!Store.blocks.some(block => block.id === 'old-line-p1'),
       'a promoted line blackout deletion must not be recreated locally');
@@ -1618,7 +1618,7 @@ test('#27 undo of an APPLIED What-If restores calendar slices and re-syncs the b
     assert.deepEqual(Store.calendars.UL.workHours[0], [8, 16], 'undo restores the pre-What-If line hours');
     assert.equal(flushCalls.length, 1, 'the promoted calendar state had been POSTed, so undo re-syncs the plant');
     assert.equal(flushCalls[0].plant, 'UP');
-    assert.deepEqual(flushCalls[0].removed, { line: ['ub-new'], plant: [] },
+    assert.deepEqual(flushCalls[0].removed, { line: ['ub-new'], plant: [], periods: [] },
       'blackouts that exist only in the promoted state are explicitly deleted server-side');
   } finally {
     if (Sandbox.active) Sandbox.exit(false, 'unit-test');

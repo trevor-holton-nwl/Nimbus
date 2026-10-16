@@ -340,6 +340,81 @@
     return [start, end];
   }
 
+  // ---- Effective-dated plant calendar periods (twin of the Python helper; pinned by
+  // tests/fixtures/plant_period_vectors.json). A period overrides the plant's default weekly hours for an
+  // inclusive date range; validTo == null is open-ended. YYYY-MM-DD keys compare lexicographically.
+  function activeWorkHours(defaultWorkHours, periods, dateKey) {
+    if (!periods || !periods.length) return defaultWorkHours;   // same reference: the no-periods path is unchanged
+    let best = null;
+    for (const p of periods) {
+      if (p.validFrom <= dateKey && (p.validTo == null || dateKey <= p.validTo) && (!best || p.validFrom < best.validFrom)) best = p;
+    }
+    return best ? best.workHours : defaultWorkHours;
+  }
+
+  function plantWorkHoursOn(plantEntry, date) {
+    if (!plantEntry) return undefined;
+    if (!plantEntry.periods || !plantEntry.periods.length) return plantEntry.workHours;
+    return activeWorkHours(plantEntry.workHours, plantEntry.periods, dayKey(date));
+  }
+
+  // Day keys D with fromKey < D <= toKey on which the active pattern can change: each validFrom and the day
+  // after each non-null validTo. Calendar-day increment (never +86_400_000).
+  function periodBoundaryKeys(periods, fromKey, toKey) {
+    const out = new Set();
+    for (const p of periods || []) {
+      const cands = [p.validFrom];
+      if (p.validTo != null) {
+        const [y, m, d] = p.validTo.split('-').map(Number);
+        cands.push(dayKey(new Date(y, m - 1, d + 1)));
+      }
+      for (const k of cands) if (k > fromKey && k <= toKey) out.add(k);
+    }
+    return [...out].sort();
+  }
+
+  // Server rule: inclusive overlap (a shared day overlaps, adjacent is fine), null validTo = +infinity.
+  function validatePlantPeriods(periods) {
+    const list = periods || [];
+    const invalidIds = [];
+    const seen = new Set();
+    for (const p of list) {
+      if (!p || !p.id || seen.has(p.id)) { invalidIds.push(p && p.id ? p.id : ''); continue; }
+      seen.add(p.id);
+    }
+    if (invalidIds.length) return { ok: false, code: 'period_invalid', ids: invalidIds };
+    const badDates = list.filter(p => !p.validFrom || (p.validTo != null && p.validTo < p.validFrom)).map(p => p.id);
+    if (badDates.length) return { ok: false, code: 'period_dates_invalid', ids: badDates };
+    const sorted = [...list].sort((a, b) => (a.validFrom < b.validFrom ? -1 : a.validFrom > b.validFrom ? 1 : 0));
+    const overlapIds = new Set();
+    for (let i = 0; i < sorted.length; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        // sorted by validFrom, so j starts no earlier than i: they overlap iff i is open-ended or reaches j's start
+        if (sorted[i].validTo == null || sorted[j].validFrom <= sorted[i].validTo) {
+          overlapIds.add(sorted[i].id); overlapIds.add(sorted[j].id);
+        } else break;
+      }
+    }
+    if (overlapIds.size) return { ok: false, code: 'period_overlap', ids: [...overlapIds] };
+    return { ok: true };
+  }
+
+  function unionWeeklyHours(defaultWorkHours, periods) {
+    const out = {};
+    const patterns = [defaultWorkHours, ...(periods || []).map(p => p.workHours)];
+    for (let d = 0; d < 7; d++) {
+      let lo = null, hi = null;
+      for (const wh of patterns) {
+        const r = wh && wh[d];
+        if (!r) continue;
+        if (lo === null || r[0] < lo) lo = r[0];
+        if (hi === null || r[1] > hi) hi = r[1];
+      }
+      out[d] = lo === null ? null : [lo, hi];
+    }
+    return out;
+  }
+
   // Per-compute-call workWindow memoization cache (set before each top-level call).
   let _wwCache = null;
 
@@ -362,7 +437,7 @@
     let result;
     if (plant) {
       ensurePlant(plant, plants);
-      const plantWin = _dayWindow(plants[plant].workHours, date);
+      const plantWin = _dayWindow(plantWorkHoursOn(plants[plant], date), date);
       if (!plantWin) {
         if (_wwCache) _wwCache.set(key, null);
         return null;
@@ -1329,6 +1404,7 @@
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // calendar engine
+    activeWorkHours, plantWorkHoursOn, periodBoundaryKeys, validatePlantPeriods, unionWeeklyHours,
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute

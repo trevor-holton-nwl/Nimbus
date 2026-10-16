@@ -3044,9 +3044,12 @@ export const SandboxAdapter = {
         // for this task (see the file header comment above OptimizeDialog).
         const curLine  = new Set(Store._state.blocks.filter((b) => b.plant === plant).map((b) => b.id));
         const curPlant = new Set(Store._state.plantBlocks.filter((b) => b.plant === plant).map((b) => b.id));
+        const curPeriods = new Set(Store.getPlantPeriods(plant).map((p) => p.id));
         const removed = {
           line:  (snap?.blocks || []).filter((b) => b.plant === plant && !curLine.has(b.id)).map((b) => b.id),
           plant: (snap?.plantBlocks || []).filter((b) => b.plant === plant && !curPlant.has(b.id)).map((b) => b.id),
+          // Dated periods deleted in-session (same reason as blackouts: a promote must not resurrect them).
+          periods: (snap?.plants?.[plant]?.periods || []).filter((p) => !curPeriods.has(p.id)).map((p) => p.id),
         };
         CalendarSync.flushPlant(plant, removed, capturedLinePlants || undefined);
       }
@@ -3088,9 +3091,11 @@ export const SandboxAdapter = {
       for (const plant of SandboxAdapter._collectAffectedPlants(promoted)) {
         const curLine  = new Set(Store.blocks.filter((b) => b.plant === plant).map((b) => b.id));
         const curPlant = new Set(Store.plantBlocks.filter((b) => b.plant === plant).map((b) => b.id));
+        const curPeriods = new Set(Store.getPlantPeriods(plant).map((p) => p.id));
         CalendarSync.flushPlant(plant, {
           line:  promoted.blocks.filter((b) => b.plant === plant && !curLine.has(b.id)).map((b) => b.id),
           plant: promoted.plantBlocks.filter((b) => b.plant === plant && !curPlant.has(b.id)).map((b) => b.id),
+          periods: (promoted.plants?.[plant]?.periods || []).filter((p) => !curPeriods.has(p.id)).map((p) => p.id),
         });
       }
     }

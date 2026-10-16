@@ -103,6 +103,23 @@ declare global {
     workHours: NimbusWorkHours;
   }
 
+  /** Effective-dated override of a plant's default weekly hours (inclusive range, validTo null = open-ended). */
+  interface NimbusPlantPeriod {
+    id: string;
+    name: string;
+    validFrom: string;
+    validTo: string | null;
+    workHours: NimbusWorkHours;
+  }
+
+  interface NimbusPlantCalendarEntry extends NimbusCalendarEntry {
+    periods?: NimbusPlantPeriod[];
+  }
+
+  type NimbusPeriodValidation =
+    | { ok: true }
+    | { ok: false; code: 'period_dates_invalid' | 'period_overlap' | 'period_invalid'; ids: string[] };
+
   interface NimbusLineSetting {
     plant?: string;
     bufferUnit?: 'pct' | 'hours';
@@ -178,7 +195,7 @@ declare global {
     blocks: NimbusBlock[];
     plantBlocks: NimbusPlantBlock[];
     calendars: Record<string, NimbusCalendarEntry>;
-    plants: Record<string, NimbusCalendarEntry>;
+    plants: Record<string, NimbusPlantCalendarEntry>;
     lineSettings: Record<string, NimbusLineSetting>;
     masterData: NimbusMasterData;
     dismissed: string[];
@@ -196,7 +213,7 @@ declare global {
     tasks: NimbusTask[];
     lineSettings: Record<string, NimbusLineSetting>;
     calendars: Record<string, NimbusCalendarEntry>;
-    plants: Record<string, NimbusCalendarEntry>;
+    plants: Record<string, NimbusPlantCalendarEntry>;
     blocks: NimbusBlock[];
     plantBlocks: NimbusPlantBlock[];
     masterData: NimbusMasterData;
@@ -232,7 +249,17 @@ declare global {
     // calendar engine
     getPlantForLine(line: string, lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData): string | null;
     ensureCalendar(line: string, calendars: Record<string, NimbusCalendarEntry>): void;
-    ensurePlant(name: string | null, plants: Record<string, NimbusCalendarEntry>): void;
+    ensurePlant(name: string | null, plants: Record<string, NimbusPlantCalendarEntry>): void;
+    /** Weekly hours in force on a date key ('YYYY-MM-DD'): the earliest-starting period covering it, else the default (same reference). */
+    activeWorkHours(defaultWorkHours: NimbusWorkHours, periods: NimbusPlantPeriod[] | undefined | null, dateKey: string): NimbusWorkHours;
+    /** The plant's weekly hours on a calendar date (period-aware); an undefined entry gives undefined. */
+    plantWorkHoursOn(plantEntry: NimbusPlantCalendarEntry | undefined, date: unknown): NimbusWorkHours | undefined;
+    /** Sorted day keys D with fromKey < D <= toKey where the active pattern can change. */
+    periodBoundaryKeys(periods: NimbusPlantPeriod[] | undefined | null, fromKey: string, toKey: string): string[];
+    /** Server-rule validation: inclusive overlap, null validTo open-ended, duplicate/missing id invalid. */
+    validatePlantPeriods(periods: NimbusPlantPeriod[] | undefined | null): NimbusPeriodValidation;
+    /** Per weekday: null only if the default and every period are closed; else [min start, max end]. */
+    unionWeeklyHours(defaultWorkHours: NimbusWorkHours, periods: NimbusPlantPeriod[] | undefined | null): NimbusWorkHours;
     _dayWindow(workHours: NimbusWorkHours, date: unknown): [Date, Date] | null;
     _nextCalendarDay(d: Date): Date;
     /** Previous local calendar midnight (calendar-date arithmetic, never minus 24 h): the backward twin of `_nextCalendarDay`. */
@@ -246,7 +273,7 @@ declare global {
     plantInstantFromWallClock(timezone: string | null | undefined, wall: Date): Date | null;
     workWindow(
       line: string, date: unknown,
-      calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusCalendarEntry>,
+      calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusPlantCalendarEntry>,
       lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData
     ): [Date, Date] | null;
     /** A date-only SAP finish arrives as an exact-midnight Date; read it as the end of that date's
@@ -261,7 +288,7 @@ declare global {
     _indexCapacityBlocks(blocks: NimbusBlock[], plantBlocks: NimbusPlantBlock[]): unknown;
     dailyCapacityHours(
       line: string, date: unknown,
-      calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusCalendarEntry>,
+      calendars: Record<string, NimbusCalendarEntry>, plants: Record<string, NimbusPlantCalendarEntry>,
       lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData,
       blocks: NimbusBlock[], plantBlocks: NimbusPlantBlock[], idx?: unknown
     ): number;

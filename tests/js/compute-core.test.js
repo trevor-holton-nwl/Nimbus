@@ -1114,3 +1114,102 @@ test('VM12: a finish-only row contributes its hours to computeUtilization', () =
   const row = Object.values(matrix.L)[0];
   assert.equal(row.scheduled * 60, 240);
 });
+
+// ---- Effective-dated plant calendar periods ----------------------------------------------------------------------
+const periodVectors = require('../fixtures/plant_period_vectors.json');
+const toPeriod = (p) => ({ id: p.id, name: p.name || p.id, validFrom: p.valid_from, validTo: p.valid_to, workHours: { ...p.work_hours } });
+
+for (const v of periodVectors.active) {
+  test(`activeWorkHours vector: ${v.name}`, () => {
+    const periods = v.periods.map(toPeriod);
+    const def = { ...v.default };
+    const got = Core.activeWorkHours(def, periods, v.day);
+    if (v.expected === 'default') assert.equal(got, def);
+    else assert.equal(got, periods.find(p => p.id === v.expected).workHours);
+  });
+}
+
+for (const v of periodVectors.validate) {
+  test(`validatePlantPeriods vector: ${v.name}`, () => {
+    const r = Core.validatePlantPeriods(v.periods.map(toPeriod));
+    if (v.expected === 'ok') assert.deepEqual(r, { ok: true });
+    else {
+      assert.equal(r.ok, false);
+      assert.equal(r.code, v.expected);
+      assert.deepEqual([...r.ids].sort(), [...v.ids].sort());
+    }
+  });
+}
+
+test('activeWorkHours: undefined/empty periods return the default by identity', () => {
+  const def = allDays([8, 16]);
+  assert.equal(Core.activeWorkHours(def, undefined, '2026-10-21'), def);
+  assert.equal(Core.activeWorkHours(def, [], '2026-10-21'), def);
+});
+
+test('activeWorkHours: a closed period day beats the default open day', () => {
+  const def = allDays([8, 16]);
+  const closed = allDays(null);
+  const got = Core.activeWorkHours(def, [{ id: 'p', name: 'p', validFrom: '2026-10-01', validTo: null, workHours: closed }], '2026-10-05');
+  assert.equal(got, closed);
+});
+
+test('activeWorkHours: overlapping periods tie-break to the earliest validFrom', () => {
+  const a = allDays([6, 14]), b = allDays([7, 15]);
+  const got = Core.activeWorkHours(allDays([8, 16]), [
+    { id: 'b', name: 'b', validFrom: '2026-10-10', validTo: null, workHours: b },
+    { id: 'a', name: 'a', validFrom: '2026-10-01', validTo: null, workHours: a },
+  ], '2026-10-12');
+  assert.equal(got, a);
+});
+
+test('plantWorkHoursOn reads the local calendar date', () => {
+  const def = allDays([8, 16]), per = allDays([6, 14]);
+  const entry = { workHours: def, periods: [{ id: 'p', name: 'p', validFrom: '2026-10-20', validTo: null, workHours: per }] };
+  assert.equal(Core.plantWorkHoursOn(entry, new Date(2026, 9, 19, 23, 59)), def);
+  assert.equal(Core.plantWorkHoursOn(entry, new Date(2026, 9, 20, 0, 0)), per);
+  assert.equal(Core.plantWorkHoursOn({ workHours: def }, new Date(2026, 9, 20)), def);
+  assert.equal(Core.plantWorkHoursOn(undefined, new Date(2026, 9, 20)), undefined);
+});
+
+test('periodBoundaryKeys lists each validFrom and the day after each validTo, within (from, to]', () => {
+  const periods = [
+    { id: 'a', name: 'a', validFrom: '2026-10-20', validTo: '2026-10-31', workHours: {} },
+    { id: 'b', name: 'b', validFrom: '2026-12-01', validTo: '2026-12-31', workHours: {} },
+    { id: 'c', name: 'c', validFrom: '2027-03-01', validTo: null, workHours: {} },
+  ];
+  assert.deepEqual(Core.periodBoundaryKeys(periods, '2026-10-01', '2027-12-31'),
+    ['2026-10-20', '2026-11-01', '2026-12-01', '2027-01-01', '2027-03-01']);
+  assert.deepEqual(Core.periodBoundaryKeys(periods, '2026-10-20', '2026-11-01'), ['2026-11-01']);  // from exclusive, to inclusive
+  assert.deepEqual(Core.periodBoundaryKeys(undefined, '2026-01-01', '2026-12-31'), []);
+  const leap = [{ id: 'l', name: 'l', validFrom: '2028-01-01', validTo: '2028-02-28', workHours: {} }];
+  assert.deepEqual(Core.periodBoundaryKeys(leap, '2028-02-01', '2028-03-31'), ['2028-02-29']);
+});
+
+test('unionWeeklyHours: per weekday min start / max end; null only when every pattern is closed', () => {
+  const def = { 0: null, 1: [8, 16], 2: null, 3: [8, 16], 4: null, 5: null, 6: null };
+  const per = { 0: null, 1: [6, 12], 2: null, 3: null, 4: null, 5: null, 6: [8, 12] };
+  const u = Core.unionWeeklyHours(def, [{ id: 'p', name: 'p', validFrom: '2026-10-01', validTo: null, workHours: per }]);
+  assert.deepEqual(u[1], [6, 16]);
+  assert.deepEqual(u[3], [8, 16]);
+  assert.deepEqual(u[6], [8, 12]);
+  assert.equal(u[0], null);
+  assert.equal(u[2], null);
+  assert.deepEqual(Core.unionWeeklyHours(def, undefined)[1], [8, 16]);
+});
+
+test('Core.workWindow returns different plant windows either side of a period boundary', () => {
+  const plants = { P: { workHours: allDays([8, 16]), periods: [{ id: 'p', name: 'p', validFrom: '2026-10-20', validTo: null, workHours: allDays([6, 14]) }] } };
+  const calendars = { L: { workHours: allDays([0, 24]) } };
+  const ls = { L: { plant: 'P' } };
+  const before = Core.workWindow('L', new Date(2026, 9, 19, 12), calendars, plants, ls, {});
+  const after = Core.workWindow('L', new Date(2026, 9, 20, 12), calendars, plants, ls, {});
+  assert.deepEqual([before[0].getHours(), before[1].getHours()], [8, 16]);
+  assert.deepEqual([after[0].getHours(), after[1].getHours()], [6, 14]);
+});
+
+test('validatePlantPeriods: missing or duplicate id is period_invalid', () => {
+  const p = { name: 'x', validFrom: '2026-10-01', validTo: null, workHours: {} };
+  assert.equal(Core.validatePlantPeriods([{ ...p, id: '' }]).code, 'period_invalid');
+  assert.equal(Core.validatePlantPeriods([{ ...p, id: 'a' }, { ...p, id: 'a', validFrom: '2027-01-01' }]).code, 'period_invalid');
+});

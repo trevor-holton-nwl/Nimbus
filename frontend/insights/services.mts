@@ -50,7 +50,7 @@ import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import type { SetupObservation } from '../optimization/engine.mjs';
 import type { ScheduleSnapshot } from '../optimization/setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, PlantCalendarEntry } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 interface CalendarEntry {
@@ -63,7 +63,7 @@ interface WorkerSnapshotBase {
   blocks: NimbusBlock[];
   plantBlocks: NimbusPlantBlock[];
   calendars: Record<string, CalendarEntry>;
-  plants: Record<string, CalendarEntry>;
+  plants: Record<string, PlantCalendarEntry>;
   lineSettings: Record<string, NimbusLineSetting>;
   masterData: NimbusMasterData | null;
   setup: SetupObservation;

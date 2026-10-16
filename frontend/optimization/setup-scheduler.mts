@@ -28,6 +28,7 @@ import type {
   SplitOrderPolicy,
   UnknownSetupPolicy,
   WorkHours,
+  PlantCalendarEntry,
 } from '../platform/types.mjs';
 
 export interface SchedulePatch {
@@ -384,7 +385,7 @@ export interface ScheduleSnapshot {
   blocks: ReadonlyArray<NimbusBlock>;
   plantBlocks: ReadonlyArray<NimbusPlantBlock>;
   calendars: Readonly<Record<string, { workHours: WorkHours }>>;
-  plants: Readonly<Record<string, { workHours: WorkHours }>>;
+  plants: Readonly<Record<string, PlantCalendarEntry>>;
   lineSettings: Readonly<Record<string, NimbusLineSetting>>;
   masterData: NimbusMasterData | null;
   priorityRankMaps: PriorityRankMaps;

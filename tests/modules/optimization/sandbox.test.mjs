@@ -6,7 +6,68 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
-import { Modal } from '../../../frontend/platform/foundation.mjs';
+import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
+import { SandboxAdapter } from '../../../frontend/optimization/optimize-ui.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Alerts } from '../../../frontend/insights/services.mjs';
+
+const _per = (id) => ({ id, name: id, validFrom: '2026-10-01', validTo: null, workHours: { 1: [6, 14] } });
+
+test('Sandbox discard restores plant periods added during What-If', () => {
+  const prior = structuredClone(Store.plants);
+  try {
+    Store.replacePlants({ SBP: { workHours: { 1: [8, 16] }, periods: [_per('keep')] } }, 'unit-test');
+    Sandbox.enter('unit-test');
+    Store.setPlantPeriods('SBP', [_per('keep'), _per('added')], 'plant-periods');
+    assert.equal(Store.getPlantPeriods('SBP').length, 2);
+    Sandbox.exit(false, 'unit-test');
+    assert.deepEqual(Store.getPlantPeriods('SBP').map(p => p.id), ['keep']);
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    Store.replacePlants(prior, 'unit-test');
+  }
+});
+
+test('_collectAffectedPlants flags a plant whose only change is its periods', () => {
+  const prior = structuredClone(Store.plants);
+  try {
+    Store.replacePlants({ SBP: { workHours: { 1: [8, 16] } }, OTHER: { workHours: { 1: [8, 16] } } }, 'unit-test');
+    Sandbox.enter('unit-test');
+    Store.setPlantPeriods('SBP', [_per('added')], 'plant-periods');
+    const snap = Sandbox._snapshot;
+    assert.deepEqual([...SandboxAdapter._collectAffectedPlants(snap)], ['SBP']);
+    Sandbox.exit(false, 'unit-test');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    Store.replacePlants(prior, 'unit-test');
+  }
+});
+
+test('undoing a promoted scenario re-syncs periods that exist only in the promoted state (removed.periods)', () => {
+  const prior = structuredClone(Store.plants);
+  const priorFlush = CalendarSync.flushPlant, priorToast = Toast.show, priorSchedule = Alerts.scheduleRecompute;
+  const priorNimbus = globalThis.NIMBUS;
+  const calls = [];
+  CalendarSync.flushPlant = (plant, removed) => calls.push({ plant, removed });
+  Toast.show = () => {};
+  Alerts.scheduleRecompute = () => {};
+  globalThis.NIMBUS = {};
+  const hadWindow = 'window' in globalThis;
+  if (!hadWindow) globalThis.window = {};
+  try {
+    Store.replacePlants({ SBP: { workHours: { 1: [8, 16] } } }, 'unit-test');   // restored (pre-promote) state: no periods
+    const promoted = { tasks: [], blocks: [], plantBlocks: [], calendars: {}, firmedIds: [],
+      plants: { SBP: { workHours: { 1: [8, 16] }, periods: [_per('p-new')] } } };
+    SandboxAdapter._onReverted({ type: 'sandbox:reverted', promoted });
+    assert.deepEqual(calls.map(c => c.plant), ['SBP']);
+    assert.deepEqual(calls[0].removed, { line: [], plant: [], periods: ['p-new'] });
+  } finally {
+    CalendarSync.flushPlant = priorFlush; Toast.show = priorToast; Alerts.scheduleRecompute = priorSchedule;
+    if (priorNimbus === undefined) delete globalThis.NIMBUS; else globalThis.NIMBUS = priorNimbus;
+    if (!hadWindow) delete globalThis.window;
+    Store.replacePlants(prior, 'unit-test');
+  }
+});
 
 test('Sandbox.enter snapshots current state and flips active/mode', () => {
   Store.setTasks([{ id: 'sb1', RUN_TIME: '1' }], 'unit-test');

@@ -20,7 +20,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './foundation.mjs';
 import { Selection } from '../scheduling/selection.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, StoreMode, OrderScheduleSegment } from './types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, StoreMode, OrderScheduleSegment, PlantCalendarEntry, PlantPeriod } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
 type AllowedPlantsResolver = () => string[] | null;
@@ -56,7 +56,7 @@ interface StoreState {
   alerts: NimbusAlert[];
   firmedIds: Set<string>;
   meta: { lastOptimize: Date | null };
-  plants: Record<string, CalendarEntry>;
+  plants: Record<string, PlantCalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;
   selectedPlant: string | null;
@@ -197,7 +197,7 @@ export const Store = {
   get calendars(): Record<string, CalendarEntry> { return this._state.calendars; },
   get firmedIds(): Set<string> { return this._state.firmedIds; },
   get tasksArr(): NimbusTask[]      { return Object.values(this._state.tasks); },
-  get plants(): Record<string, CalendarEntry>        { return this._state.plants; },
+  get plants(): Record<string, PlantCalendarEntry>        { return this._state.plants; },
   get plantBlocks(): NimbusPlantBlock[]   { return this._state.plantBlocks; },
   get lineSettings(): Record<string, NimbusLineSetting>  { return this._state.lineSettings; },
   get selectedPlant(): string | null { return this._state.selectedPlant; },
@@ -579,8 +579,27 @@ export const Store = {
     this._state.plants[plant].workHours[dow] = range;
     this.emit({ type: 'calendar:change', source });
   },
+  /** Dated plant periods, ascending by validFrom; `[]` when the plant has none. */
+  getPlantPeriods(plant: string): PlantPeriod[] {
+    return this._state.plants[plant]?.periods ?? [];
+  },
+  /** Replace a plant's period list (acknowledged by the server, or local-only in What-If). An empty list
+   *  deletes the key so JSON diffs of `plants` stay stable. Always emits `calendar:change` so the
+   *  rev-keyed caches (Utilization, Dashboard) invalidate. `source` must not be 'calendar-sync'. */
+  setPlantPeriods(plant: string, periods: PlantPeriod[], source?: string): void {
+    this.ensurePlant(plant);
+    const entry = this._state.plants[plant];
+    if (periods.length) entry.periods = [...periods].sort((a, b) => (a.validFrom < b.validFrom ? -1 : a.validFrom > b.validFrom ? 1 : 0));
+    else delete entry.periods;
+    this.emit({ type: 'calendar:change', source, plant });
+  },
   clampLinesToPlant(plant: string, dow: number): string[] {
-    const plantHours = this._state.plants[plant]?.workHours[dow];
+    // D5: the bound is the UNION of the default and every period's hours for this weekday, so a line keeps
+    // hours a dated period opens. Period saves never call this.
+    const plantEntry = this._state.plants[plant];
+    const plantHours = plantEntry
+      ? globalThis.NimbusComputeCore!.unionWeeklyHours(plantEntry.workHours, plantEntry.periods)[dow]
+      : undefined;
     const changed = [];  // line codes whose hours this call actually rewrote (F9)
     const plantLineSet = new Set(Store._linesByPlant[plant] || []);
     for (const line of Object.keys(this._state.calendars)) {
@@ -750,7 +769,7 @@ export const Store = {
     this.emit({ type: 'calendar:replace', source });
     this.emit({ type: 'calendar:change', source });
   },
-  replacePlants(plants: Record<string, CalendarEntry>, source?: string): void {
+  replacePlants(plants: Record<string, PlantCalendarEntry>, source?: string): void {
     this._state.plants = plants;
     this.emit({ type: 'plants:replace', source });
     // Plant hours use the established calendar:change channel, as does

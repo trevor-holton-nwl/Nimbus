@@ -12,6 +12,10 @@ import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { Toast } from '../../../frontend/platform/foundation.mjs';
+import { createRequire } from 'node:module';
+
+// clampLinesToPlant reads the compute core from the global, exactly as the browser (classic script) provides it.
+globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 
 test('EditCalendar exposes the documented public API', () => {
   assert.equal(typeof EditCalendar.open, 'function');

@@ -4,6 +4,7 @@
 // scheduling/selection.mjs, optimization/sandbox.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 
@@ -288,4 +289,66 @@ test('VI8: a time-machine write never marks a row as placed', () => {
   Store.updateMany([{ id: 'vi8', changes: { start_date: new Date('2026-09-01T06:00:00'), end_date: new Date('2026-09-01T10:00:00') } }], 'time-machine');
   assert.equal(Store.tasks.vi8.user_scheduled, false);
   Store.setTasks([], 'unit-test');
+});
+
+// ---- Effective-dated plant calendar periods ----------------------------------------------------------------------
+globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+
+const _per = (id, validFrom, validTo, workHours = {}) => ({ id, name: id, validFrom, validTo, workHours });
+
+test('Store.getPlantPeriods defaults to []', () => {
+  Store.replacePlants({ PP1: { workHours: {} } }, 'unit-test');
+  assert.deepEqual(Store.getPlantPeriods('PP1'), []);
+  assert.deepEqual(Store.getPlantPeriods('NOPE'), []);
+});
+
+test('Store.setPlantPeriods sorts by validFrom, deletes the key when empty and emits calendar:change with the source', () => {
+  Store.replacePlants({ PP1: { workHours: {} } }, 'unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => events.push(evt));
+  const input = [_per('b', '2027-01-01', null), _per('a', '2026-10-01', '2026-12-31')];
+  Store.setPlantPeriods('PP1', input, 'plant-periods');
+  assert.deepEqual(Store.getPlantPeriods('PP1').map(p => p.id), ['a', 'b']);
+  assert.deepEqual(input.map(p => p.id), ['b', 'a'], "the caller's array is not mutated");
+  const ev = events.find(e => e.type === 'calendar:change');
+  assert.equal(ev.source, 'plant-periods');
+  assert.equal(ev.plant, 'PP1');
+  Store.setPlantPeriods('PP1', [], 'plant-periods');
+  off();
+  assert.equal('periods' in Store.plants.PP1, false);
+  assert.deepEqual(Store.getPlantPeriods('PP1'), []);
+});
+
+test('Store.setPlantPeriods seeds a default plant entry when the plant is unknown', () => {
+  Store.replacePlants({}, 'unit-test');
+  Store.setPlantPeriods('NEWP', [_per('a', '2026-10-01', null)], 'plant-periods');
+  assert.ok(Store.plants.NEWP.workHours);
+  assert.equal(Store.getPlantPeriods('NEWP').length, 1);
+});
+
+test('Store.clampLinesToPlant clamps to the union of the default and every period', () => {
+  const sat = 6;
+  const priorLinesByPlant = Store._linesByPlant;
+  const priorCalendars = Store.calendars;
+  try {
+    Store._linesByPlant = { PP2: ['LX'] };
+    Store.replacePlants({ PP2: { workHours: { 6: null, 1: [8, 16] } } }, 'unit-test');
+    Store.replaceCalendars({ LX: { workHours: { 6: [6, 18], 1: [6, 18] } } }, 'unit-test');
+    // No period: Saturday is closed at plant level, so the line loses Saturday.
+    assert.deepEqual(Store.clampLinesToPlant('PP2', sat), ['LX']);
+    assert.equal(Store.calendars.LX.workHours[6], null);
+    // A period that opens Saturday keeps it (trimmed to the period's hours); Monday is bounded by the union.
+    Store.replaceCalendars({ LX: { workHours: { 6: [6, 18], 1: [6, 18] } } }, 'unit-test');
+    Store.setPlantPeriods('PP2', [_per('p', '2026-10-01', null, { 6: [8, 12], 1: [7, 17] })], 'plant-periods');
+    assert.deepEqual(Store.clampLinesToPlant('PP2', sat), ['LX']);
+    assert.deepEqual(Store.calendars.LX.workHours[6], [8, 12]);
+    assert.deepEqual(Store.clampLinesToPlant('PP2', 1), ['LX']);
+    assert.deepEqual(Store.calendars.LX.workHours[1], [7, 17]);   // union [min(8,7), max(16,17)]
+    // Already inside the union: nothing is rewritten or reported.
+    assert.deepEqual(Store.clampLinesToPlant('PP2', 1), []);
+  } finally {
+    Store._linesByPlant = priorLinesByPlant;
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.replacePlants({}, 'unit-test');
+  }
 });

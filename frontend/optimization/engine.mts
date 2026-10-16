@@ -94,7 +94,7 @@ import type {
   ScheduleSnapshot,
   EvaluationRequest,
 } from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey, PlantCalendarEntry } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
@@ -326,7 +326,7 @@ export interface SetupObservation {
 
 interface SetupAvailabilityContext {
   calendars: Record<string, CalendarEntry>;
-  plants: Record<string, CalendarEntry>;
+  plants: Record<string, PlantCalendarEntry>;
   lineSettings: Record<string, NimbusLineSetting>;
   masterData: NimbusMasterData | null;
   blocks: ReadonlyArray<NimbusBlock>;

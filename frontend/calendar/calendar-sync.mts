@@ -21,10 +21,18 @@ import { Config, Util, ErrorLog, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
-import type { NimbusBlock, NimbusPlantBlock, WorkHours, IsoUtcTs } from '../platform/types.mjs';
+import type { NimbusBlock, NimbusPlantBlock, WorkHours, IsoUtcTs, PlantPeriod } from '../platform/types.mjs';
+
+/** Wire shape of one dated plant period (snake_case); the Store shape is `PlantPeriod`. */
+interface PlantPeriodWire { id: string; name: string; valid_from: string; valid_to: string | null; work_hours: WorkHours }
+
+/** Reserved `_hoursEdits` key for the plant's period list; it cannot collide with a machine code. */
+const PERIODS_KEY = '#periods';
+const PERIODS_PATH = '/plant-calendar/plant-periods';
 
 /** GET /plant-calendar (brain.py) response envelope. */
 interface PlantCalendarConfig {
+  plant_periods?: PlantPeriodWire[];
   plant_work_hours?: WorkHours;
   line_work_hours?: Record<string, WorkHours>;
   machine_blackouts?: Array<{ id: string; machine: string | null; start: IsoUtcTs; end: IsoUtcTs; reason: string }>;
@@ -45,6 +53,10 @@ interface CalendarSyncResult {
   status?: number;
   error?: string;
   skipped?: boolean;
+  /** Structured server refusal (plant-periods writes): `detail.code`, e.g. `period_overlap`. */
+  code?: string;
+  ids?: string[];
+  message?: string;
 }
 
 /* Blackout deletes that the server never confirmed, per plant. A delete is idempotent, so
@@ -288,6 +300,15 @@ export const CalendarSync = {
             start: Util.parseDate(b.start), end: Util.parseDate(b.end), reason: b.reason || '' } as NimbusPlantBlock);
         }
       }
+      // Dated periods: `undefined` (an older backend) leaves local periods alone; `[]` clears them. Applied before
+      // the emits so a subscriber sees them; a period write still in flight (or newer than this read) is protected.
+      if (cfg.plant_periods !== undefined && !this._protectHours(plant, PERIODS_KEY, hoursRead)) {
+        Store.ensurePlant(plant);
+        const periods = cfg.plant_periods.map(w => this._periodFromWire(w))
+          .sort((a, b) => (a.validFrom < b.validFrom ? -1 : a.validFrom > b.validFrom ? 1 : 0));
+        if (periods.length) Store.plants[plant].periods = periods;
+        else delete Store.plants[plant].periods;
+      }
       // The server's calendar is now in Store: mark it before the emits below, because the backward-scheduling
       // reconcile subscribes to `calendar:change` and asks `calendarState` synchronously.
       this._setHydration(plant, 'hydrated', Object.keys(cfg.line_work_hours || {}));
@@ -406,6 +427,49 @@ export const CalendarSync = {
     return this._post('/plant-calendar/plant-hours', { plant, work_hours: workHours }, 'plant-hours');
   },
 
+  /** Replace a plant's dated period list. Pessimistic: Store changes only after the server acknowledges
+   *  (What-If and hydration are local-only, promoted later by `flushPlant`). A local validation failure or a
+   *  server refusal returns `{ ok: false, code, ids }` with Store untouched; the caller renders the message. */
+  async savePlantPeriods(plant: string | null, next: PlantPeriod[]): Promise<CalendarSyncResult> {
+    if (!plant) return { ok: false };
+    const verdict = globalThis.NimbusComputeCore!.validatePlantPeriods(next);
+    if (!verdict.ok) return { ok: false, code: verdict.code, ids: verdict.ids };
+    const current = new Map(Store.getPlantPeriods(plant).map(p => [p.id, p] as const));
+    const nextIds = new Set(next.map(p => p.id));
+    const upserts = next.filter(p => { const c = current.get(p.id); return !c || !this._samePeriod(c, p); }).map(p => this._periodPayload(p));
+    const deletes = [...current.keys()].filter(id => !nextIds.has(id));
+    if (!upserts.length && !deletes.length) return { ok: true };
+    if (this._hydrating || Sandbox.active) {
+      Store.setPlantPeriods(plant, next, 'plant-periods');
+      return { ok: true, skipped: true };
+    }
+    const res = await this._post(PERIODS_PATH, { plant, upserts, deletes }, 'plant-periods');
+    if (res.ok) {
+      Store.setPlantPeriods(plant, next, 'plant-periods');
+      return res;
+    }
+    // A structured refusal (res.code) is shown by the caller next to the offending rows; anything else is a
+    // transport/server failure. No Retry action: a retry would rebuild from a Store that was never updated.
+    if (!res.code) Toast.show(Util.t('toast.calendar_save_failed'), 'warn', 10000);
+    return res;
+  },
+
+  _periodFromWire(w: PlantPeriodWire): PlantPeriod {
+    return { id: w.id, name: w.name, validFrom: w.valid_from, validTo: w.valid_to ?? null, workHours: w.work_hours };
+  },
+  _periodPayload(p: PlantPeriod): PlantPeriodWire {
+    return { id: p.id, name: p.name, valid_from: p.validFrom, valid_to: p.validTo, work_hours: p.workHours };
+  },
+  _samePeriod(a: PlantPeriod, b: PlantPeriod): boolean {
+    if (a.name !== b.name || a.validFrom !== b.validFrom || a.validTo !== b.validTo) return false;
+    for (let d = 0; d < 7; d++) {
+      const x = a.workHours[d] ?? null, y = b.workHours[d] ?? null;
+      if (!x || !y) { if (x !== y) return false; continue; }
+      if (x[0] !== y[0] || x[1] !== y[1]) return false;
+    }
+    return true;
+  },
+
   // Enqueue one line's hours; a per-plant debounce coalesces the ~70-line clamp
   // fan-out from a single plant-hours edit into ONE /line-hours request.
   saveLineHours(plant: string | null, line: string, workHours: WorkHours): void {
@@ -477,7 +541,7 @@ export const CalendarSync = {
    *  hydration. (F3) */
   flushPlant(
     plant: string,
-    removed?: { line: string[]; plant: string[] },
+    removed?: { line: string[]; plant: string[]; periods?: string[] },
     capturedLinePlants?: ReadonlyMap<string, string | null>,
   ): void {
     if (!plant || this._hydrating || Sandbox.active) return;
@@ -504,6 +568,14 @@ export const CalendarSync = {
       this._trackPendingDeletes(plant, 'plant', plantBk.map(b => b.id), false);
       this._trackedDelete(plant, 'plant', plantDeletes, '/plant-calendar/plant-blackouts',
         { plant, upserts: plantBk.map(b => this._blockPayload(b, false)), deletes: plantDeletes }, 'promote-plant-blackouts');
+    }
+    const periods = Store.getPlantPeriods(plant);
+    const periodDeletes = removed.periods || [];
+    if (periods.length || periodDeletes.length) {
+      void this._post(PERIODS_PATH, { plant, upserts: periods.map(p => this._periodPayload(p)), deletes: periodDeletes },
+        'promote-plant-periods').then(r => {
+        if (!r.ok) Toast.show(Util.t('toast.calendar_save_failed'), 'warn', 10000);
+      });
     }
   },
 
@@ -537,7 +609,9 @@ export const CalendarSync = {
       return Promise.resolve({ ok: true, skipped: true });
     }
     const plant = String(body.plant ?? '');
+    const isPeriods = path === PERIODS_PATH;
     const hoursEdits = path === '/plant-calendar/plant-hours' ? [this._markHoursEdit(plant, '')]
+      : isPeriods ? [this._markHoursEdit(plant, PERIODS_KEY)]
       : path === '/plant-calendar/line-hours'
         ? ((body.lines as Array<{ machine: string }> | undefined) || []).map(line => this._markHoursEdit(plant, line.machine)) : [];
     return Util.fetchTraced(`${Config.API_BASE}${path}`, {
@@ -545,7 +619,20 @@ export const CalendarSync = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(8000),
-    }).then(r => {
+    }).then(async r => {
+      if (!r.ok && isPeriods) {
+        // Period writes are pessimistic: the caller owns the message, so no blanket toast and no Retry
+        // (a retry would rebuild from a Store that was never updated). A stuck pending flag would block
+        // hydration of the plant's periods forever, so it is cleared on every failure.
+        for (const edit of hoursEdits) edit.pending = false;
+        const payload = await Promise.resolve().then(() => r.json()).catch(() => null) as { detail?: unknown } | null;
+        const detail = payload?.detail;
+        const d = detail && typeof detail === 'object' ? detail as { code?: string; ids?: string[]; message?: string } : null;
+        const code = d?.code;
+        if (code === 'plant_not_mastered') Toast.show(Util.t('toast.plant_not_mastered'), 'error', 6000);
+        ErrorLog.warn('calendar-sync', `${label} failed: HTTP ${r.status}${code ? ` (${code})` : ''}`);
+        return { ok: false, status: r.status, code, ids: d?.ids, message: d?.message ?? (typeof detail === 'string' ? detail : undefined) };
+      }
       if (!r.ok) {
         if (r.status === 400 || r.status === 409) Toast.show(Util.t('toast.plant_not_mastered'), 'error', 6000);
         else this._notifyUnsynced(path, body, label);
@@ -558,6 +645,10 @@ export const CalendarSync = {
     }).catch(e => {
       // The edit is already in Store + localStorage; only backend sync is deferred.
       ErrorLog.warn('calendar-sync', `${label} error: ${e.message}`);
+      if (isPeriods) {
+        for (const edit of hoursEdits) edit.pending = false;
+        return { ok: false, error: e.message };
+      }
       this._notifyUnsynced(path, body, label);
       return { ok: false, error: e.message };
     });
@@ -581,6 +672,7 @@ export const CalendarSync = {
   /** Re-derive a failed write's body from the live Store; null when nothing is left to send. */
   _freshBody(path: string, body: Record<string, unknown>): Record<string, unknown> | null {
     const plant = String(body.plant ?? '');
+    if (path === PERIODS_PATH) return null;   // pessimistic writes: nothing to rebuild from (Store was never updated)
     if (path === '/plant-calendar/plant-hours') {
       return { plant, work_hours: Store.plants[plant]?.workHours };
     }

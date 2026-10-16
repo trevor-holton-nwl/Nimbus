@@ -137,6 +137,23 @@ export interface NimbusPlantBlock {
 /** Day-of-week (0=Sun..6=Sat) -> [startHour, endHour] fractional-hour tuple, or null if closed. */
 export type WorkHours = Record<number, [number, number] | null>;
 
+/** Effective-dated override of a plant's default weekly hours (inclusive range; validTo null = open-ended).
+ *  Store shape (camelCase); the wire shape is {id, name, valid_from, valid_to, work_hours}. */
+export interface PlantPeriod {
+  id: string;
+  name: string;
+  validFrom: string;
+  validTo: string | null;
+  workHours: WorkHours;
+}
+
+/** A plants-slice entry: the always-applying default weekly hours plus optional dated periods
+ *  (absent key = no periods; an empty list is never stored). */
+export interface PlantCalendarEntry {
+  workHours: WorkHours;
+  periods?: PlantPeriod[];
+}
+
 export interface NimbusLineSetting {
   plant: string | null;
   /** Wire/DB alias: buffer_type ('%'|'hrs'). */
@@ -547,7 +564,7 @@ export interface LiveState {
   tasks: NimbusTask[];
   blocks: NimbusBlock[];
   calendars: Record<string, { workHours: WorkHours }>;
-  plants: Record<string, { workHours: WorkHours }>;
+  plants: Record<string, PlantCalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;
   firmedIds: Set<string>;
@@ -577,7 +594,7 @@ export interface StoredState {
   /** Legacy: never written and ignored on read. Manual firm is server state (`task.firmed`);
    *  firms found in an old cache are dropped ("start fresh"). */
   firmedIds?: string[];
-  plants: Record<string, { workHours: WorkHours }>;
+  plants: Record<string, PlantCalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;
   selectedPlant: string | null;

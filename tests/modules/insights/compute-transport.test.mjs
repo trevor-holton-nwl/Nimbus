@@ -160,7 +160,8 @@ test('selected plant scopes tasks, calendars, line settings and blackouts togeth
   Store.replaceCalendars({ L1: { workHours: {} }, L2: { workHours: {} } }, 'test');
   Store.setLineSetting('L1', { color: 'red' }, 'test');
   Store.setLineSetting('L2', { color: 'blue' }, 'test');
-  Store.replacePlants({ P1: { workHours: {} }, P2: { workHours: {} } }, 'test');
+  const periodP1 = { id: 'per1', name: 'Winter', validFrom: '2026-10-20', validTo: null, workHours: { 1: [6, 14] } };
+  Store.replacePlants({ P1: { workHours: {}, periods: [periodP1] }, P2: { workHours: {}, periods: [{ ...periodP1, id: 'per2' }] } }, 'test');
   Store.replaceBlocks([
     { id: 'local', plant: 'P1', line: 'L1' }, { id: 'other', plant: 'P2', line: 'L2' },
     { id: 'plant-wide', plant: 'P1', line: null },
@@ -173,6 +174,8 @@ test('selected plant scopes tasks, calendars, line settings and blackouts togeth
   assert.deepEqual(Object.keys(payload.calendars), ['L1']);
   assert.deepEqual(Object.keys(payload.lineSettings), ['L1']);
   assert.deepEqual(Object.keys(payload.plants), ['P1']);
+  assert.deepEqual(payload.plants.P1.periods, [periodP1], 'dated periods ride along with the selected plant only');
+  assert.equal(JSON.stringify(payload).includes('per2'), false, 'another plant\'s periods stay out of the worker payload');
   assert.deepEqual(payload.blocks.map(block => block.id), ['local', 'plant-wide']);
   assert.deepEqual(payload.plantBlocks.map(block => block.id), ['p1']);
   assert.equal(payload.tasks[0].PRT_01, 'TOOL');

@@ -16,13 +16,13 @@
 import { Store, UndoStack } from '../platform/store.mjs';
 import type { CalendarEntry } from '../platform/store.mjs';
 import { Util, Modal } from '../platform/foundation.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, PlantCalendarEntry } from '../platform/types.mjs';
 
 interface SandboxSnapshot {
   tasks: NimbusTask[];
   blocks: NimbusBlock[];
   calendars: Record<string, CalendarEntry>;
-  plants: Record<string, CalendarEntry>;
+  plants: Record<string, PlantCalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
   firmedIds: Set<string>;
 }
