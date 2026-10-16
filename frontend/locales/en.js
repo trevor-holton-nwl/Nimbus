@@ -1,6 +1,35 @@
 window.__NIMBUS_LOCALES = window.__NIMBUS_LOCALES || {};
 window.__NIMBUS_LOCALES.en = {
 
+  /* Diagnostics overview */
+  'diag.refresh': "Refresh diagnostics",
+  'diag.data': "Data & pipeline",
+  'diag.database': "Database",
+  'diag.database_hint': "Global database health and maintenance",
+  'diag.browser': "Browser & session",
+  'diag.browser_hint': "This browser’s local state and runtime",
+  'diag.checked': "Checked {{time}}",
+  'diag.loading': "Refreshing…",
+  'diag.failed': "Refresh failed — retry with Refresh diagnostics",
+  'diag.unavailable': "Unavailable",
+  'diag.orders_global': "{{count}} orders · global",
+  'diag.overrides_global': "{{count}} overrides · global",
+  'diag.color_unknown': "Color matching unavailable for this plant",
+  'diag.cache_loaded': "Priority cache refreshed {{time}}",
+  'diag.pipeline_scope': "Pipeline: {{plant}} · database total includes all plants",
+  'diag.status_ok': "Healthy",
+  'diag.status_warn': "Review",
+  'diag.status_err': "Unavailable / issue",
+  'diag.connectivity': "Connectivity",
+  'diag.performance': "Performance",
+  'diag.storage_maintenance': "Storage & maintenance",
+  'diag.server': "Server",
+  'diag.storage': "Local storage",
+  'diag.session': "Session",
+  'diag.runtime': "Runtime",
+  'diag.recovery': "Recovery",
+  'diag.warning_count': "{{count}} warnings",
+
   /* ── Calendar sync ── */
   'toast.calendar_saved_locally':      'Saved locally — will sync when the server is reachable',
   'toast.calendar_offline_cache':      'Showing cached calendars — server unreachable',

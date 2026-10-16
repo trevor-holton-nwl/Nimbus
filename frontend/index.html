@@ -1817,7 +1817,28 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <!-- OVERVIEW PANE -->
         <div id="admin-overview-pane">
 
-          <!-- HEALTH STATUS BAR — always visible above sub-subtabs -->
+          <!-- OVERVIEW SUB-SUBTAB STRIP -->
+          <nav class="admin-subtabs admin-ov-tabs" role="tablist">
+            <button class="sub-subtab active" data-ov-tab="diagnostics" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('diagnostics')" data-i18n="tab.diagnostics">Diagnostics</button>
+            <button class="sub-subtab" data-ov-tab="data-ops" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('data-ops')" data-i18n="tab.data_operations">Data Operations</button>
+            <button class="sub-subtab" data-ov-tab="logs" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('logs')" data-i18n="tab.logs_audit">Logs &amp; Audit</button>
+            <button class="sub-subtab" data-ov-tab="thread" role="tab"
+                    onclick="NIMBUS.AdminCockpit.gotoOvTab('thread')">Thread</button>
+          </nav>
+
+          <!-- PANE: DIAGNOSTICS -->
+          <div id="admin-ov-diagnostics">
+            <div class="diag-toolbar">
+              <div><h3 data-i18n="tab.diagnostics">Diagnostics</h3><span id="diag-health-state" class="diag-freshness" role="status"></span></div>
+              <div class="diag-actions">
+                <button class="btn sm" id="admin-diagnostics-refresh" data-i18n="diag.refresh">Refresh diagnostics</button>
+                <button class="btn btn-ghost sm" id="admin-diag-export" data-i18n="btn.export_bundle">Export bundle</button>
+              </div>
+            </div>
+          <!-- HEALTH STATUS — scoped to Diagnostics -->
           <div class="admin-health-bar" id="admin-health-bar">
             <div class="admin-health-chip" id="admin-health-db">
               <span class="admin-health-dot"></span>
@@ -1845,69 +1866,36 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <span class="admin-health-dot"></span>
               <span class="admin-health-label" data-i18n="ui.health_pool">Pool —</span>
             </div>
-            <div class="spacer"></div>
-            <button class="btn btn-ghost sm" id="admin-health-refresh" data-i18n="btn.health_refresh" data-i18n-title="tip.health_refresh" title="Refresh health">↻ Health</button>
           </div>
 
-          <!-- OVERVIEW SUB-SUBTAB STRIP -->
-          <nav class="admin-subtabs admin-ov-tabs" role="tablist">
-            <button class="sub-subtab active" data-ov-tab="diagnostics" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('diagnostics')" data-i18n="tab.diagnostics">Diagnostics</button>
-            <button class="sub-subtab" data-ov-tab="data-ops" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('data-ops')" data-i18n="tab.data_operations">Data Operations</button>
-            <button class="sub-subtab" data-ov-tab="logs" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('logs')" data-i18n="tab.logs_audit">Logs &amp; Audit</button>
-            <button class="sub-subtab" data-ov-tab="thread" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('thread')">Thread</button>
-          </nav>
+            <section class="diag-section" id="admin-pipeline-card" aria-labelledby="diag-data-title">
+              <header class="diag-section-head">
+                <div><h3 id="diag-data-title" data-i18n="diag.data">Data &amp; pipeline</h3><p id="diag-data-scope" class="diag-context"></p></div>
+                <span id="diag-pipeline-state" class="diag-freshness" role="status"></span>
+              </header>
+              <div id="admin-pipeline" class="admin-pipeline"></div>
+              <div id="admin-pipeline-detail" class="admin-pipeline-detail" tabindex="-1"></div>
+              <details class="diag-disclosure" data-diag-key="backend-warnings" id="diag-backend-warnings">
+                <summary><span data-i18n="ui.backend_warnings">Backend warnings</span><span id="admin-bwarn-count"></span></summary>
+                <div id="admin-backend-warnings" class="admin-bwarn-list"></div>
+              </details>
+            </section>
 
-          <!-- PANE: DIAGNOSTICS -->
-          <div id="admin-ov-diagnostics">
+            <section class="diag-section" id="admin-db-deep-card" aria-labelledby="diag-db-title">
+              <header class="diag-section-head">
+                <div><h3 id="diag-db-title" data-i18n="diag.database">Database</h3><p class="diag-context" data-i18n="diag.database_hint">Global database health and maintenance</p></div>
+                <span id="diag-database-state" class="diag-freshness" role="status"></span>
+              </header>
+              <div id="admin-db-deep" class="admin-db-deep"></div>
+            </section>
 
-            <!-- CLIENT DIAGNOSTICS -->
-            <div id="admin-diagnostics-pane" class="admin-section"></div>
-
-            <div class="admin-grid">
-
-              <!-- DATA PIPELINE -->
-              <div class="panel admin-card admin-card-wide" id="admin-pipeline-card">
-                <header class="panel-head">
-                  <h3><span data-i18n="ui.data_pipeline">Data pipeline</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.pipeline_help">End-to-end path from database load to rendered Gantt tasks. Click any step to expand details. High drop counts between stages indicate data quality issues; color misses mean SKUs not mapped in the color wheel. If drops grow after a reload, investigate the source data.</span></span></h3>
-                  <span class="panel-hint" data-i18n="ui.pipeline_hint">Click any step for details</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-pipeline-refresh" data-i18n="btn.refresh">↻ Refresh</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-pipeline" class="admin-pipeline"></div>
-                  <div id="admin-pipeline-detail" class="admin-pipeline-detail"></div>
-                </div>
-              </div>
-
-              <!-- BACKEND WARNINGS -->
-              <div class="panel admin-card admin-card-wide" id="admin-bwarn-card">
-                <header class="panel-head">
-                  <h3><span data-i18n="ui.backend_warnings">Backend warnings</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.backend_warn_help">Non-fatal messages logged by the backend during the last data load — e.g. missing fields or unparseable dates. A growing list signals worsening upstream data quality. Forward recurring warnings to the data team, then use POST /reload after fixing the source file to clear them.</span></span></h3>
-                  <span class="panel-hint" id="admin-bwarn-count" data-i18n="ui.bwarn_hint">from last data load</span>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-backend-warnings" class="admin-bwarn-list"></div>
-                </div>
-              </div>
-
-              <!-- DB DEEP DIVE -->
-              <div class="panel admin-card admin-card-wide" id="admin-db-deep-card">
-                <header class="panel-head">
-                  <h3><span data-i18n="ui.db_deep_dive">Database deep dive</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.db_deep_help">Live introspection of the Postgres database. Requires a healthy DB connection. Expand any section to drill into pool health, query performance, lock contention, index efficiency, and sequence capacity.</span></span></h3>
-                  <span class="panel-hint" data-i18n="ui.db_deep_hint">Pool · Server · Table health · Connections · Lock waits · Indexes · Slow queries · Sequences</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-db-deep-refresh" data-i18n="btn.refresh">↻ Refresh</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-db-deep" class="admin-db-deep"></div>
-                </div>
-              </div>
-
-            </div><!-- /admin-grid diagnostics -->
+            <section class="diag-section" aria-labelledby="diag-browser-title">
+              <header class="diag-section-head">
+                <div><h3 id="diag-browser-title" data-i18n="diag.browser">Browser &amp; session</h3><p class="diag-context" data-i18n="diag.browser_hint">This browser's local state and runtime</p></div>
+                <span id="diag-browser-state" class="diag-freshness" role="status"></span>
+              </header>
+              <div id="admin-diagnostics-pane"></div>
+            </section>
           </div><!-- /admin-ov-diagnostics -->
 
           <!-- PANE: DATA OPERATIONS -->

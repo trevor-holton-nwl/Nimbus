@@ -1,6 +1,35 @@
 window.__NIMBUS_LOCALES = window.__NIMBUS_LOCALES || {};
 window.__NIMBUS_LOCALES.pt = {
 
+  /* Diagnostics overview */
+  'diag.refresh': "Atualizar diagnóstico",
+  'diag.data': "Dados e pipeline",
+  'diag.database': "Banco de dados",
+  'diag.database_hint': "Estado global e manutenção do banco de dados",
+  'diag.browser': "Navegador e sessão",
+  'diag.browser_hint': "Estado local e execução deste navegador",
+  'diag.checked': "Verificado {{time}}",
+  'diag.loading': "Atualizando…",
+  'diag.failed': "Falha — tente Atualizar diagnóstico novamente",
+  'diag.unavailable': "Indisponível",
+  'diag.orders_global': "{{count}} ordens · global",
+  'diag.overrides_global': "{{count}} ajustes · global",
+  'diag.color_unknown': "Correspondência de cores indisponível para esta planta",
+  'diag.cache_loaded': "Cache de prioridades atualizado {{time}}",
+  'diag.pipeline_scope': "Pipeline: {{plant}} · total inclui todas as plantas",
+  'diag.status_ok': "Normal",
+  'diag.status_warn': "Revisar",
+  'diag.status_err': "Indisponível / problema",
+  'diag.connectivity': "Conectividade",
+  'diag.performance': "Desempenho",
+  'diag.storage_maintenance': "Armazenamento e manutenção",
+  'diag.server': "Servidor",
+  'diag.storage': "Armazenamento local",
+  'diag.session': "Sessão",
+  'diag.runtime': "Execução",
+  'diag.recovery': "Recuperação",
+  'diag.warning_count': "{{count}} avisos",
+
   /* ── Calendar sync ── */
   'toast.calendar_saved_locally':      'Salvo localmente — será sincronizado quando o servidor estiver acessível',
   'toast.calendar_offline_cache':      'Exibindo calendários em cache — servidor inacessível',
