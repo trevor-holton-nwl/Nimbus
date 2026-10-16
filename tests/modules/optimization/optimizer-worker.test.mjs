@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { runOptimizerPreview } from '../../../frontend/optimization/optimizer-worker-client.mjs';
 import {
   buildOptimizerWorkerResponse,
+  installOptimizerWorkerHandler,
   evaluateOptimizerWorkerRequest,
   localizeOptimizerDeadline,
 } from '../../../frontend/optimization/optimizer-worker.mjs';
@@ -36,6 +37,30 @@ const validation = {
   horizonEnd: '2035-08-07T08:00:00.000Z', lines: ['L1'], respectCalendar: false,
   notBeforeById: {}, notAfterById: {}, effectiveFirmedIds: [],
 };
+
+test('a message posted before the compute core load resolves is held, then handled; a failed load answers with an error', async () => {
+  const req = (runId) => ({ runId, mode: 'spt', snapshot, request: { mode: 'spt', respectCalendar: false } });
+  const settle = () => new Promise(r => setImmediate(r));
+  let release;
+  const sent = [];
+  const realm = { postMessage: (m) => sent.push(m), onmessage: null };
+  installOptimizerWorkerHandler(realm, new Promise(r => { release = r; }));
+  assert.equal(typeof realm.onmessage, 'function', 'onmessage is assigned synchronously');
+  const pending = realm.onmessage({ data: req('early') });
+  await settle();
+  assert.equal(sent.length, 0, 'nothing is evaluated before the core is ready');
+  release();
+  await pending;
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].runId, 'early', 'the early message is answered once the core resolves');
+
+  const failing = { postMessage: (m) => sent.push(m), onmessage: null };
+  installOptimizerWorkerHandler(failing, Promise.reject(new Error('core boom')));
+  await failing.onmessage({ data: req('doomed') });
+  const err = sent[sent.length - 1];
+  assert.equal(err.runId, 'doomed');
+  assert.match(err.error, /core boom/);
+});
 
 test('the default worker URL carries the build id so the worker can cache-bust the compute core', () => {
   let seen;

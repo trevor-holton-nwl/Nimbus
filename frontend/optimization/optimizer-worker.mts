@@ -41,6 +41,23 @@ export function buildOptimizerWorkerResponse(
   return { runId: request.runId, candidate, validation };
 }
 
+/** Install the request handler on a worker realm. Every request waits for `corePromise` (the compute core load)
+ * before evaluating; a rejected load answers with the `{ runId, error }` shape the client already rejects on. */
+export function installOptimizerWorkerHandler(
+  target: WorkerRealm,
+  corePromise: Promise<unknown>,
+): void {
+  target.onmessage = async ({ data }): Promise<void> => {
+    try {
+      await corePromise;
+      target.postMessage(buildOptimizerWorkerResponse(data));
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      target.postMessage({ runId: data.runId, error: failure.message, stack: failure.stack });
+    }
+  };
+}
+
 interface WorkerRealm {
   document?: unknown;
   onmessage: ((event: MessageEvent<OptimizerWorkerRequest>) => void) | null;
@@ -57,21 +74,16 @@ const realm = globalThis as unknown as WorkerRealm & {
 if (typeof realm.postMessage === 'function' && typeof realm.document === 'undefined') {
   // Load the classic compute core with the SAME `?v=<build id>` the client stamped on this worker's URL, so a
   // proxy-cached core can never sit behind a fresh worker (mirrors nimbus-worker.ts). The UMD factory sets
-  // `self.NimbusComputeCore`. Skipped when a core is already present (Node tests install one). onmessage is
-  // assigned only after the load, so no request can run against a missing core; the `compute-core-stale` guard in
-  // the engine/client stays as the second line of defence.
+  // `self.NimbusComputeCore`. Skipped when a core is already present (Node tests install one). `onmessage` is
+  // assigned synchronously (no top-level await), because the client posts its first message right after
+  // `new Worker(...)`; the handler waits for the core instead, and a failed load surfaces as an error response.
+  // The `compute-core-stale` guard in the engine/client stays as the second line of defence.
+  let corePromise: Promise<unknown> = Promise.resolve();
   if (!realm.NimbusComputeCore) {
     const version = new URLSearchParams(realm.location?.search ?? '').get('v');
     const coreUrl = new URL('../nimbus-compute-core.js', import.meta.url);
     if (version) coreUrl.search = `?v=${encodeURIComponent(version)}`;
-    await import(coreUrl.href);
+    corePromise = import(coreUrl.href);
   }
-  realm.onmessage = ({ data }): void => {
-    try {
-      realm.postMessage(buildOptimizerWorkerResponse(data));
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      realm.postMessage({ runId: data.runId, error: failure.message, stack: failure.stack });
-    }
-  };
+  installOptimizerWorkerHandler(realm, corePromise);
 }
