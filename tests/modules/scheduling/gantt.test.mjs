@@ -2464,3 +2464,18 @@ test('TimelineNav items subscription: a remove event whose oldData is all zone i
     Timeline._items = priorItems; TimelineNav._itemsSubAttached = priorAttached; TimelineNav._scheduleFrame = priorSched; TimelineNav._dirty = priorDirty;
   }
 });
+
+test('Timeline._syncNonWorking: zooming in from a coarse (>90d) range rebuilds fine shading even inside the position band', () => nwWithPlant(() => {
+  const fake = nwFakeItems(); Timeline._items = fake;
+  const ws = new Date(2026, 7, 3).getTime();
+  let win = { start: new Date(ws), end: new Date(ws + 60 * NW_DAY) }; // 60d window -> 180d range: coarse
+  Timeline._tl = { getWindow: () => win };
+  Timeline._nwRange = null; Timeline._nwIds = new Set();
+  Timeline._syncNonWorking(true);
+  const partial = () => [...fake.records.values()].filter(i => i.start.getHours() !== 0);
+  assert.equal(partial().length, 0, 'coarse: whole-day spans only');
+  win = { start: new Date(ws + 40 * NW_DAY), end: new Date(ws + 42 * NW_DAY) }; // inside the band, now fine
+  Timeline._syncNonWorking(false);
+  assert.ok(partial().length > 0, 'off-shift hours appear after the zoom-in');
+  assert.ok(Timeline._nwRange.toMs - Timeline._nwRange.fromMs <= 90 * NW_DAY);
+}));

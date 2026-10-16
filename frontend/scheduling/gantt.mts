@@ -1596,7 +1596,10 @@ export const Timeline = {
     const ws = w.start.getTime(), we = w.end.getTime();
     const margin = Math.max(we - ws, 7 * Config.MS_DAY);
     const cur = Timeline._nwRange;
-    if (!force && cur && ws >= cur.fromMs + margin / 2 && we <= cur.toMs - margin / 2) return;
+    // Granularity of the built range vs the one this window would produce (same >90-day rule as
+    // _nonWorkingDesired): a zoom across the threshold must rebuild even while the window sits inside the band.
+    const granularityFlipped = !!cur && ((cur.toMs - cur.fromMs) > 90 * Config.MS_DAY) !== ((we - ws + 2 * margin) > 90 * Config.MS_DAY);
+    if (!force && cur && !granularityFlipped && ws >= cur.fromMs + margin / 2 && we <= cur.toMs - margin / 2) return;
     Timeline._nwRange = { fromMs: ws - margin, toMs: we + margin };
     const desired = new Map<string, TimelineVisItem>();
     for (const item of Timeline._nonWorkingDesired(Timeline._nwRange)) desired.set(item.id, item);
