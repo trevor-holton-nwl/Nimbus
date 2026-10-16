@@ -19,6 +19,7 @@
 - **`selection.mts`** (138 lines) — `Selection`, the multi-select store (which task ids are selected, anchor tracking for Shift-range-select, listener fanout). Independent of vis-timeline internals; every UI (Timeline, Table, Inspector, ContextMenu) subscribes to it. Never persisted, never autosaved.
 - **`persistence.mts`** (1,769 lines) — `Persistence`: backend fetch (`load`/`loadForPlant`/`reload`), the localStorage cache (`_saveCache`, key `nimbus.state.v3`), dirty-id tracking, and the explicit `saveAll()` backend-save path.
 - **`order-field-catalog.mjs`** (124 lines, + `order-field-catalog.d.mts` ambient types) — `ORDER_FIELD_CATALOG`, the single source of truth for which optional Orders fields exist and their default show/hide state in the AG Grid columns and Inspector panel. Deliberately a zero-dependency leaf module (no imports) so both this domain and the admin System Configuration UI can depend on it without adding a cross-domain edge.
+- **`nonworking-spans.mts`** — `buildNonWorkingSpans(fromMs, toMs, windowFor, {closedDaysOnly?, cap?}) -> {spans, truncated}`, the pure merged-span algorithm behind the Gantt's non-working-time shading (no imports, no Store, no DOM). `windowFor` is `Calendar.plantWorkWindow(plant, day)`.
 
 ## Counterpart
 
@@ -49,6 +50,13 @@ This domain's frontend files do not call `db.py`/`master_data.py` directly — t
 - **Task IDs are MD5 hashes** of `f"{PRODUCTION_ORDER}|{MATERIAL_NUMBER}"` (`make_id()` in root `db.py`, currently line 123). The hash excludes time, so ids are stable across reloads/reschedules — `Selection`, `Table`'s row keying, and drag/edit operations across this whole domain rely on that stability.
 - **`gantt.mts` ↔ `orders.mts` form a two-way in-domain module dependency**: `gantt.mts` imports `Table`/`Inspector`/`ContextMenu`/`notifyResidualFirming` from `orders.mjs`, and `orders.mts` imports `Timeline`/`TimelineNav`/`setupDiagnosticLabel`/`setupSourceLabel` back from `gantt.mjs`. This is intentional (both are the same domain) — don't "fix" it by trying to break the cycle across a domain boundary.
 - **This `CLAUDE.md` (and every other `frontend/<domain>/CLAUDE.md`) is blocked from public static serving** by `brain.py`'s `block_markdown_mw` (any request path ending `.md` gets a 404), regardless of the `StaticFiles` mount at `/`. Not a scheduling-specific concern, but worth knowing if you're verifying this file isn't web-reachable.
+- **Non-working-time shading (2026-10-16; design `docs/CALENDAR_PERIODS_DESIGN.md` section 5).** The Gantt greys the plant's closed days and off-shift hours (plant pattern only, never per line, so the line filter changes nothing). Rules that keep it from fighting the rest of the timeline:
+  - Items are **ungrouped** vis background items `{kind:'zone', type:'background', className:'nonworking', editable:false}` with no `group`, ids `nonworking-<dayKey(start)>` (suffix `-t` when the span starts at an off-shift tail instead of local midnight). Ungrouped means they live in the library's BackgroundGroup and `_healBackgroundBands` skips them; `kind:'zone'` makes `TimelineNav` ignore them. Hard cap 600 spans.
+  - **Single owner.** `Timeline._nonWorkingDesired(range)` is the one pure builder; `Timeline._nwRange` is the one range, set only by `_syncNonWorking` (and seeded on `init`/rebuild). `_rebuildPass` places the same function's output as the first block of `desired`, so its full diff never removes what the pan path added. There is no separate coarse flag: granularity (closed-days-only when the range is wider than 90 days) is derived from the stored range's span.
+  - **Hysteresis.** `_syncNonWorking` runs from the debounced `rangechanged` handler and returns while the window stays inside the covered range's inner band, unless a zoom flips the coarse/fine granularity. No new timer; the ticker is untouched.
+  - **Never** set `position`, `top` or `height` on `.vis-item` CSS for these items, **never** remove the DataView `type === 'background'` exemption in `init()`, and never group them or make them per-line.
+  - `TimelineNav._wireItemsSubscription` reads `props.oldData` on `remove` and skips the repaint when every removed item is `kind:'zone'`; without that every pan re-diff would repaint the minimap. Absent `oldData` falls back to repainting.
+  - Browser check owed (paint order against grouped bands, live `oldData` shape, pan smoothness); see the design doc's section 7.
 
 ## Integration points
 
@@ -69,6 +77,7 @@ This domain's frontend files do not call `db.py`/`master_data.py` directly — t
 ## Tests
 
 - `tests/modules/scheduling/gantt.test.mjs`
+- `tests/modules/scheduling/nonworking-spans.test.mjs`
 - `tests/modules/scheduling/orders.test.mjs`
 - `tests/modules/scheduling/selection.test.mjs`
 - `tests/modules/scheduling/persistence.test.mjs`

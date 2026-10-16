@@ -106,6 +106,10 @@ The pilot Postgres endpoint is public with an allow-all-Azure rule (`AllowAzure`
 
 The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps each row's xmin (the optimistic-concurrency `base_version`). Apply it at deploy time, never mid-shift. Planners must save before the run (an unsaved edit goes stale on its next save) and reload afterwards. The `2026-10-15-1` file also reads `order_sap_sent`, so `2026-10-08-sap-staging-tables.sql` must already be in the ledger.
 
+## Calendar periods migration (2026-10-16)
+
+`migrations/2026-10-16-3-plant-calendar-periods.sql` is additive (one table, `plant_calendar_period`, and one index; nothing is altered or dropped), but its foreign-key cascade clause matches the destructive-word filter in `apply-migrations.ps1`, so the runner blocks it. After reading the file and confirming it creates one table and one index and nothing else, promote with `-Only 2026-10-16-3 -AllowDestructive`. Apply the migration first, then roll the image: the new code tolerates a missing table (a missing table loads as no periods) but the pilot should not run the new image ahead of its table. The lifespan step `ensure_plant_calendar_periods()` (`brain.py`) also creates the table and index at boot if they are missing, so the migration and the boot step converge on the same shape. Design and decisions: `docs/CALENDAR_PERIODS_DESIGN.md`. Not yet deployed as of this note; the DB-backed pytest run and the browser checklist in that doc are owed first.
+
 ## Backward-scheduling cutover
 
 > **This runbook was written, not executed.** The 2026-10 backward-scheduling work was built and reviewed without touching the pilot (owner decision "deploy nothing", 2026-10-13): no `az` command, no `psql` against Azure and no `/promote-azure` run was made while writing it. Every command below is a plan for the operator, to be rehearsed on a copy first (step 3). Where a platform fact could not be checked from the repository it is marked **[unverified]**. The design evidence and every decision behind it are in `BACKWARD_SCHEDULING_MIGRATION.md` (section 8.13 is the long form of this runbook; section 8.8 is the rollback matrix).
